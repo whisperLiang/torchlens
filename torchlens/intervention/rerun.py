@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import time
 import warnings
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
 
+from .._chunking import iter_chunked_inputs, normalize_chunk_paths, plan_chunks
 from .._deprecations import MISSING, MissingType
 from .._errors import InvalidArgumentError
-from .._chunking import iter_chunked_inputs, normalize_chunk_paths, plan_chunks
 from .._input_coerce import _coerce_input_args
 from .._trace_state import TraceState
 from ..options import ReplayOptions, merge_replay_options
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 
 
 def run(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any = None,
     *,
@@ -44,7 +45,7 @@ def run(
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
     output_transform: Any | None = None,
-) -> "Trace":
+) -> Trace:
     """Full-forward run with the active intervention spec from ``log``.
 
     Re-executes ``model`` through TorchLens decorated wrappers with the current
@@ -173,7 +174,7 @@ def run(
 
 
 def _chunked_rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
@@ -181,7 +182,7 @@ def _chunked_rerun(
     chunk_paths: Any | None,
     strict: bool,
     output_transform: Any | None,
-) -> "Trace":
+) -> Trace:
     """Rerun a trace by splitting one model-ready input tree into chunks.
 
     Parameters
@@ -272,12 +273,12 @@ def _unwrap_model_for_chunk_plan(model: nn.Module) -> nn.Module:
 
 
 def _append_rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
     strict: bool,
-) -> "Trace":
+) -> Trace:
     """Append a compatible fresh rerun chunk into ``log``.
 
     Parameters
@@ -365,7 +366,7 @@ def _append_rerun(
     return log
 
 
-def _is_streaming_append_active(log: "Trace") -> bool:
+def _is_streaming_append_active(log: Trace) -> bool:
     """Return whether append would need to update active streaming state.
 
     Parameters
@@ -384,7 +385,7 @@ def _is_streaming_append_active(log: "Trace") -> bool:
     )
 
 
-def _streaming_append_error_message(log: "Trace") -> str:
+def _streaming_append_error_message(log: Trace) -> str:
     """Build a descriptive streaming append rejection message.
 
     Parameters
@@ -411,7 +412,7 @@ def _streaming_append_error_message(log: "Trace") -> str:
     )
 
 
-def _preflight_append(log: "Trace", model: nn.Module) -> None:
+def _preflight_append(log: Trace, model: nn.Module) -> None:
     """Validate append preconditions that do not require a fresh capture.
 
     Parameters
@@ -461,8 +462,8 @@ def _warn_if_batch_sensitive_train_modules(model: nn.Module) -> None:
 
 
 def _validate_append_hook_plan(
-    log: "Trace",
-    hook_plan: list["NormalizedHookEntry"],
+    log: Trace,
+    hook_plan: list[NormalizedHookEntry],
 ) -> None:
     """Reject append when active helpers are not explicitly batch-independent.
 
@@ -500,7 +501,7 @@ def _validate_append_hook_plan(
             )
 
 
-def _warn_unknown_append_helper_once(log: "Trace", helper_name: str) -> None:
+def _warn_unknown_append_helper_once(log: Trace, helper_name: str) -> None:
     """Emit a one-time warning for helpers without append-safety metadata.
 
     Parameters
@@ -525,10 +526,10 @@ def _warn_unknown_append_helper_once(log: "Trace", helper_name: str) -> None:
 
 
 def _validate_append_candidate(
-    old_log: "Trace",
-    new_log: "Trace",
+    old_log: Trace,
+    new_log: Trace,
     *,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
 ) -> None:
     """Validate a freshly captured append candidate against an existing log.
 
@@ -692,7 +693,7 @@ def _validate_append_grad_pair(
         _validate_append_tensor_pair(old_layer, new_layer, field_name)
 
 
-def _hook_plan_supports_append_grads(hook_plan: list["NormalizedHookEntry"]) -> bool:
+def _hook_plan_supports_append_grads(hook_plan: list[NormalizedHookEntry]) -> bool:
     """Return whether all active helpers opted into grad append.
 
     Parameters
@@ -744,7 +745,7 @@ def _batch_size_from_input(x: Any) -> int | None:
     return None
 
 
-def _first_saved_batch_size(log: "Trace") -> int | None:
+def _first_saved_batch_size(log: Trace) -> int | None:
     """Return the first saved out's leading dimension.
 
     Parameters
@@ -765,7 +766,7 @@ def _first_saved_batch_size(log: "Trace") -> int | None:
     return None
 
 
-def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
+def _warn_if_direct_writes_will_be_overlaid(log: Trace) -> None:
     """Warn once that rerun propagation overlays direct writes.
 
     Parameters
@@ -787,7 +788,7 @@ def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
     setattr(log, "_warned_direct_write_propagation", True)
 
 
-def _preflight(log: "Trace", model: nn.Module, x: Any) -> None:
+def _preflight(log: Trace, model: nn.Module, x: Any) -> None:
     """Validate rerun preconditions before any fresh capture starts.
 
     Parameters
@@ -837,14 +838,14 @@ def _unwrap_compiled_model(model: nn.Module) -> nn.Module:
 
 
 def _capture_with_active_spec(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
     intervention_spec: Any | None,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
     output_transform: Any | None,
-) -> "Trace":
+) -> Trace:
     """Build a fresh rerun ``Trace`` with active hooks installed.
 
     Parameters
@@ -922,7 +923,7 @@ def _capture_with_active_spec(
     )
 
 
-def _validate_rerun_result(new_log: "Trace", old_log: "Trace", *, strict: bool) -> int:
+def _validate_rerun_result(new_log: Trace, old_log: Trace, *, strict: bool) -> int:
     """Validate a fresh rerun log before atomic state replacement.
 
     Parameters
@@ -961,7 +962,7 @@ def _validate_rerun_result(new_log: "Trace", old_log: "Trace", *, strict: bool) 
     return 1
 
 
-def _rerun_save_scope(log: "Trace") -> tuple[str | list[int | str] | None, Any | None, int, str]:
+def _rerun_save_scope(log: Trace) -> tuple[str | list[int | str] | None, Any | None, int, str]:
     """Return capture save settings that mirror the original trace scope.
 
     Parameters
@@ -1021,14 +1022,14 @@ def _make_raw_index_save_predicate(selected_indices: set[int]) -> Callable[[Any]
 
 
 def _build_ledger_record(
-    log: "Trace",
+    log: Trace,
     *,
     started_at: float,
     old_hash: str | None,
     new_hash: str | None,
     old_raw_hash: str | None,
     new_raw_hash: str | None,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
     strict: bool,
     divergence_count: int,
     fast_refresh: bool,
@@ -1081,7 +1082,7 @@ def _build_ledger_record(
 
 
 def rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any = None,
     *,
@@ -1091,7 +1092,7 @@ def rerun(
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
     output_transform: Any | None = None,
-) -> "Trace":
+) -> Trace:
     """Deprecated alias for :func:`run`.
 
     Parameters

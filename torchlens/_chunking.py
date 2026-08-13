@@ -11,7 +11,6 @@ import torch
 
 from .intervention.errors import BatchChunkInputAmbiguityError, ChunkedForwardConfigError
 
-
 ChunkPath = tuple[Any, ...]
 
 

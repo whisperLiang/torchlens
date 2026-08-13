@@ -19,19 +19,20 @@ only DEMOTE a verdict, never rescue or repair one.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, cast
+from typing import Any, cast
 
 from ..distributed._audit import MembershipLineageVerdict, audit_membership_lineages
 from ..distributed._ledger import InstallEpoch
 from ._enums import (
+    WITNESS_IDENTITY_KINDS,
+    WITNESS_NOT_APPLICABLE_KINDS,
+    WITNESS_VERDICT_BACKENDS,
     BoundaryConsistency,
     MergeAlignment,
     MergedErrorCode,
     MergeValueStatus,
-    WITNESS_IDENTITY_KINDS,
-    WITNESS_NOT_APPLICABLE_KINDS,
-    WITNESS_VERDICT_BACKENDS,
 )
 from ._errors import MergedFinding, MergeInputError
 from ._evidence import P2P_KINDS, RankEvidence
@@ -168,9 +169,7 @@ class MergeDerivation:
 
         return {
             "ranks": list(self.ranks),
-            "expected_ranks": (
-                None if self.expected_ranks is None else list(self.expected_ranks)
-            ),
+            "expected_ranks": (None if self.expected_ranks is None else list(self.expected_ranks)),
             "joins": [join.to_payload() for join in self.joins],
             "findings": [finding.to_payload() for finding in self.findings],
             "audit": {
@@ -248,6 +247,8 @@ def _relation_findings(
     ranks = tuple(sorted(entries))
 
     def violation(detail: str) -> None:
+        """Append one ``relation_violation`` finding for this key."""
+
         findings.append(
             MergedFinding(
                 kind="relation_violation",
@@ -268,13 +269,18 @@ def _relation_findings(
         violation(f"ranks disagree on the reduce op: {sorted(map(str, reduce_ops))}")
 
     def shapes(entry: dict[str, Any], names: Iterable[str]) -> tuple[tuple[int, ...], ...]:
+        """Collect the shapes of ``entry``'s roles matching any of ``names``, in order."""
+
         return tuple(tuple(role["shape"]) for role in _roles_of(entry, names))
 
     group_size = len(membership)
     contribution_roles = ("contribution", "contribution_destination")
     destination_roles = ("destination", "contribution_destination")
     if kind in ("all_reduce", "all_to_all_single", "all_gather_into_tensor", "broadcast"):
-        shape_sets = {shapes(entry, contribution_roles) or shapes(entry, destination_roles) for entry in entries.values()}
+        shape_sets = {
+            shapes(entry, contribution_roles) or shapes(entry, destination_roles)
+            for entry in entries.values()
+        }
         if len(shape_sets) > 1:
             violation(f"tensor shapes disagree across ranks: {sorted(shape_sets)}")
     if kind == "all_gather":
@@ -422,6 +428,8 @@ def _check_order(
     parent: dict[Any, Any] = {}
 
     def find(node: Any) -> Any:
+        """Union-find representative of ``node``, with path compression."""
+
         root = node
         while parent.get(root, root) != root:
             root = parent[root]
@@ -430,6 +438,8 @@ def _check_order(
         return root
 
     def union(a: Any, b: Any) -> None:
+        """Merge the classes of ``a`` and ``b``."""
+
         parent[find(a)] = find(b)
 
     for (rank, index), key in joined_nodes.items():
@@ -503,7 +513,7 @@ def derive_merge(
 
     _guard_scope(evidence)
     input_ranks = tuple(sorted(evidence))
-    declared = None if expected_ranks is None else tuple(sorted(set(int(r) for r in expected_ranks)))
+    declared = None if expected_ranks is None else tuple(sorted({int(r) for r in expected_ranks}))
     findings: list[MergedFinding] = []
 
     # 1. PRE-JOIN membership-lineage audit, before ANY joining or gaps (1.3).
@@ -511,9 +521,7 @@ def derive_merge(
         "Mapping[int, InstallEpoch]",
         {rank: ev.install_epoch for rank, ev in evidence.items()},
     )
-    audit = audit_membership_lineages(
-        {rank: ev.ledger for rank, ev in evidence.items()}, epochs
-    )
+    audit = audit_membership_lineages({rank: ev.ledger for rank, ev in evidence.items()}, epochs)
     conflicted_memberships = tuple(
         sorted(digest for digest, verdict in audit.items() if verdict.is_conflict)
     )
@@ -585,8 +593,7 @@ def derive_merge(
             entries_at = deltas[delta]
             key: JoinKey = (digest, ordinal, channel, delta)
             entries = {
-                rank: evidence[rank].boundaries[index]
-                for rank, (_seq, index) in entries_at.items()
+                rank: evidence[rank].boundaries[index] for rank, (_seq, index) in entries_at.items()
             }
             per_rank: dict[int, PerRankRef] = {}
             for rank, (seq_abs, index) in sorted(entries_at.items()):
@@ -611,10 +618,10 @@ def derive_merge(
                 )
                 joined_nodes[(rank, index)] = key
             presence = tuple(sorted(per_rank))
-            missing = tuple(
-                sorted(set(membership) - set(presence))
+            missing = tuple(sorted(set(membership) - set(presence)))
+            findings.extend(
+                _relation_findings(key, entries[presence[0]]["kind"], membership, entries)
             )
-            findings.extend(_relation_findings(key, entries[presence[0]]["kind"], membership, entries))
 
             # Redundant c10d group-seq cross-check, as deltas from the first
             # joined key (1.6): a disagreement means c10d itself orders these
@@ -658,7 +665,11 @@ def derive_merge(
                 )
             kind = entries[presence[0]]["kind"]
             reduce_ops = sorted(
-                {str(entry.get("reduce_op")) for entry in entries.values() if entry.get("reduce_op") is not None}
+                {
+                    str(entry.get("reduce_op"))
+                    for entry in entries.values()
+                    if entry.get("reduce_op") is not None
+                }
             )
             consistency = _witness_consistency(kind, backend, membership, presence, per_rank)
             if consistency is BoundaryConsistency.MISMATCHED:
@@ -696,10 +707,7 @@ def derive_merge(
             findings.append(
                 MergedFinding(
                     kind="presence_gap",
-                    detail=(
-                        f"declared expected rank(s) {list(absent)} presented no "
-                        "rank core."
-                    ),
+                    detail=(f"declared expected rank(s) {list(absent)} presented no rank core."),
                     ranks=absent,
                 )
             )

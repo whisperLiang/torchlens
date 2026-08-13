@@ -21,13 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.perf_models import available_devices  # noqa: E402
 from benchmarks.perf_gate import (  # noqa: E402
     compare_gate_payloads,
     load_gate_json,
     normalize_gate_payload,
     write_comparison,
 )
+from benchmarks.perf_models import available_devices  # noqa: E402
 
 RESULT_JSON = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.json"
 RESULT_MD = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.md"

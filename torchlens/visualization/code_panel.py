@@ -77,7 +77,7 @@ class SourceText(str):
         *,
         file_path: str | None = None,
         line_number: int | None = None,
-    ) -> "SourceText":
+    ) -> SourceText:
         """Create a source string carrying optional file-line metadata.
 
         Parameters
@@ -198,8 +198,7 @@ def resolve_code_panel_source(
         model = model_ref() if model_ref is not None else None
         if model is None:
             raise RecordBindingError(
-                "Callable code_panel options require the original model object to "
-                "still be alive",
+                "Callable code_panel options require the original model object to still be alive",
                 code="code_panel_model_collected",
                 remedy="use a built-in code_panel mode for saved Trace rendering",
             )

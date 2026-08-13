@@ -23,7 +23,6 @@ from torchlens.data_classes.op import Op
 from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
 
-
 pytestmark = pytest.mark.backend_parity
 
 _GOLDEN_DIR = Path(__file__).with_name("goldens")

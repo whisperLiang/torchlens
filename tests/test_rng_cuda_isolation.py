@@ -28,8 +28,7 @@ import textwrap
 import pytest
 import torch
 
-from torchlens.utils import rng as tl_rng
-from torchlens.utils import tensor_utils
+from torchlens.utils import rng as tl_rng, tensor_utils
 
 # Markers are additive: a file-level smoke pytestmark would keep the heavy tests
 # in the `-m smoke` tier, so tier marks are applied per test instead.

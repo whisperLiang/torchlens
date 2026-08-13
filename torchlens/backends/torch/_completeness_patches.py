@@ -1,21 +1,31 @@
 """Scoped tensor and metadata observer patches."""
 
 from __future__ import annotations
+
 import inspect
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
+from ... import _state
 from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER
 from ...utils._torch_symbols import torch_attr
-from ... import _state
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .completeness_witness import (
+        _HOST_ESCAPE_OBSERVER_FAILED,
+        _INPUT_METADATA_INT_PROPERTY_NAMES,
+        _INPUT_METADATA_PRESENCE_PROPERTY_NAMES,
+        _MODULE_ESCAPE_TARGETS,
+        _STATE_METADATA_DIRECT_ONLY_NAMES,
+        _STATE_METADATA_PLACEMENT_OBSERVED_NAMES,
+        _STATE_ROUTE_READ_KIND,
+        _STORAGE_RAW_POINTER_TARGETS,
+        _STORAGE_WRAPPED_DISPOSITIONS,
         HOST_VALUE_ESCAPE_METHODS,
         HOST_VALUE_ESCAPE_MODULE_FUNCS,
         INPUT_METADATA_BOOL_METHODS,
@@ -26,17 +36,6 @@ if TYPE_CHECKING:
         STATE_METADATA_MIRROR,
         STORAGE_BRIDGE_ESCAPE_FUNCS,
         STORAGE_METADATA_ACCESSOR_DISPOSITIONS,
-        _HOST_ESCAPE_OBSERVER_FAILED,
-        _INPUT_METADATA_INT_PROPERTY_NAMES,
-        _INPUT_METADATA_PRESENCE_PROPERTY_NAMES,
-        _MODULE_ESCAPE_TARGETS,
-        _STATE_METADATA_DIRECT_ONLY_NAMES,
-        _STATE_METADATA_PLACEMENT_OBSERVED_NAMES,
-        _STATE_ROUTE_READ_KIND,
-        _STORAGE_RAW_POINTER_TARGETS,
-        _STORAGE_WRAPPED_DISPOSITIONS,
-        _StorageOriginRegistry,
-        _WitnessState,
         _check_writeback_watch,
         _discharge_placement_dispatch,
         _internal_read_active,
@@ -58,7 +57,9 @@ if TYPE_CHECKING:
         _observe_state_property_read,
         _placement_read_witnessed,
         _private_c_module_callables,
+        _StorageOriginRegistry,
         _torch_ops_call_classes,
+        _WitnessState,
     )
 
 __all__ = (

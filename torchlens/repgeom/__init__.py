@@ -6,16 +6,16 @@ helpers are for visualization-oriented representation geometry, not inference.
 
 from __future__ import annotations
 
+import tempfile
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
-import tempfile
 from typing import Any, Literal, TypeAlias, TypedDict
-import warnings
 
 import numpy as np
-from PIL import Image, ImageDraw
 import torch
+from PIL import Image, ImageDraw
 
 from ..intervention.errors import MultiMatchWarning
 from ..viz.node_plots import render_heatmap, render_image_scatter, render_lineplot
@@ -668,7 +668,7 @@ def mds_evolution(
     selected = _selected_mds_sites(trace, save)
     coords_by_key: MDSEvolution = OrderedDict()
     previous_coords: np.ndarray | None = None
-    for key, site, activations in selected:
+    for key, _site, activations in selected:
         distances = activation_distance_matrix(activations, metric=metric)
         coords, _info = classical_mds(
             distances, n_components=2, min_n=min_n, input_kind="distances"

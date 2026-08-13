@@ -38,7 +38,7 @@ import json
 import random
 import re
 import string
-from typing import Any, List
+from typing import Any
 
 _BARCODE_ALPHABET = string.ascii_letters + string.digits
 
@@ -81,7 +81,7 @@ def make_random_barcode(barcode_len: int = 8) -> str:
     return "".join(_BARCODE_RNG.choices(_BARCODE_ALPHABET, k=barcode_len))
 
 
-def make_short_barcode_from_input(things_to_hash: List[Any], barcode_len: int = 16) -> str:
+def make_short_barcode_from_input(things_to_hash: list[Any], barcode_len: int = 16) -> str:
     """Produce a deterministic short hash from a list of values.
 
     Used to create content-based barcodes for parameters and buffers so

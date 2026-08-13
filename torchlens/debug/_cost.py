@@ -10,11 +10,10 @@ import torch
 if TYPE_CHECKING:
     import pandas as pd
 
-    from torchlens.data_classes.trace import Trace
     from torchlens.data_classes.op import Op
+    from torchlens.data_classes.trace import Trace
 
 from ..quantities import Bytes
-
 from ._common import _ordered_ops, _require_pandas, _source_line
 
 CostMetric = Literal["flops", "memory", "duration"]
@@ -48,7 +47,7 @@ _NO_COPY_OPS = frozenset(
 )
 
 
-def _normalized_op_name(op: "Op") -> str:
+def _normalized_op_name(op: Op) -> str:
     """Return a normalized operation name for cost policy dispatch.
 
     Parameters
@@ -93,7 +92,7 @@ def _metadata_bytes(shape: Any, dtype: Any) -> Bytes | None:
     return Bytes(math.prod(dimensions) * element_size)
 
 
-def _input_bytes(op: "Op") -> Bytes | None:
+def _input_bytes(op: Op) -> Bytes | None:
     """Return ideal read-once bytes for distinct graph-parent tensors.
 
     Parameters
@@ -123,7 +122,7 @@ def _input_bytes(op: "Op") -> Bytes | None:
     return Bytes(total)
 
 
-def _parameter_bytes(op: "Op") -> Bytes | None:
+def _parameter_bytes(op: Op) -> Bytes | None:
     """Return ideal read-once bytes for parameters consumed by an operation.
 
     Parameters
@@ -153,7 +152,7 @@ def _parameter_bytes(op: "Op") -> Bytes | None:
     return Bytes(total)
 
 
-def theoretical_op_bytes(op: "Op") -> tuple[Bytes | None, Bytes | None]:
+def theoretical_op_bytes(op: Op) -> tuple[Bytes | None, Bytes | None]:
     """Return theoretical ideal read-once/write-once traffic for an operation.
 
     View and alias operations return zero read and write traffic: this model
@@ -211,7 +210,7 @@ def _metric_field(by: CostMetric) -> str:
     return fields[by]
 
 
-def hot_path(trace: Trace, by: CostMetric = "flops") -> "pd.DataFrame":
+def hot_path(trace: Trace, by: CostMetric = "flops") -> pd.DataFrame:
     """Rank source lines by aggregate forward cost.
 
     Parameters

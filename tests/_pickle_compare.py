@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import fields, is_dataclass
 from typing import Any
-import weakref
 
 import numpy as np
 import torch
-
 from _pickle_compare_allowlist import allowed_pickle_diff_fields
+
 from torchlens.data_classes._state_adapter import state_items
 
 

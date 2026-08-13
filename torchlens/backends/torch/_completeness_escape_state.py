@@ -1,19 +1,20 @@
 """Host-escape state and caller authorization."""
 
 from __future__ import annotations
+
 import sys
 import types
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from .escape_detection import (
     expected_original_call,
     mark_expected_original_accounted,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .completeness_witness import (
@@ -33,12 +34,12 @@ if TYPE_CHECKING:
         _HOST_ESCAPE_UNATTRIBUTABLE_BOOL,
         _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
         _INPUT_METADATA_VIEW_READ,
+        _ORIG_TENSORBASE_UNTYPED_STORAGE,
+        _ORIG_UNTYPED_STORAGE_DATA_PTR,
         _ORIGIN_LABEL_PREFIX,
         _ORIGIN_RNG,
         _ORIGIN_STATE_PREFIX,
         _ORIGIN_UNKNOWN,
-        _ORIG_TENSORBASE_UNTYPED_STORAGE,
-        _ORIG_UNTYPED_STORAGE_DATA_PTR,
         _PRUNED_ALIAS_MUTATION_LABELS,
         _PRUNED_RNG_CONTROL_LABELS,
         _operand_leaf_origins,

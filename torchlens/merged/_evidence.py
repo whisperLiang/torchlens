@@ -10,9 +10,10 @@ closed vocabularies at parse time; a malformed core refuses typed
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from ..distributed._ledger import GroupLifecycleLedger
 from ._enums import MergedErrorCode
@@ -130,16 +131,10 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
     if not isinstance(group.get("my_global_rank"), int):
         raise _refuse(f"{where} has no my_global_rank", source=source)
     events = entry.get("events")
-    if (
-        not isinstance(events, dict)
-        or events.get("completion_binding") not in _COMPLETION_BINDINGS
-    ):
+    if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)
     witness = entry.get("witness")
-    if (
-        not isinstance(witness, dict)
-        or witness.get("policy_resolved") not in _WITNESS_POLICIES
-    ):
+    if not isinstance(witness, dict) or witness.get("policy_resolved") not in _WITNESS_POLICIES:
         raise _refuse(
             f"{where} has witness policy {witness.get('policy_resolved') if isinstance(witness, dict) else witness!r} "
             "outside the closed vocabulary",

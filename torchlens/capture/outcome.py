@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import traceback
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ..errors import CaptureError, TorchLensError
 
@@ -295,7 +296,7 @@ _REFUSAL_HINTS: dict[str, str] = {
 }
 
 
-def outcome_for(trace: object) -> "CaptureOutcome | None":
+def outcome_for(trace: object) -> CaptureOutcome | None:
     """Return the settled outcome sidecar attached to ``trace``, if any."""
 
     outcome = getattr(trace, "__dict__", {}).get("_capture_outcome")
@@ -395,6 +396,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     data = dict(payload)
 
     def _enum_or_none(key: str, enum_cls: type[Enum]) -> Any:
+        """Read one closed-vocabulary enum field, or ``None`` when absent.
+
+        Raises
+        ------
+        ValueError
+            If the value is not a string or is outside ``enum_cls``.
+        """
+
         value = data.get(key)
         if value is None:
             return None
@@ -414,6 +423,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     origin = _enum_or_none("origin", FailureOrigin)
 
     def _str_or_none(key: str) -> str | None:
+        """Read one optional string field.
+
+        Raises
+        ------
+        ValueError
+            If the value is present and not a string.
+        """
+
         value = data.get(key)
         if value is not None and not isinstance(value, str):
             raise ValueError(f"capture outcome field {key!r} must be a string or None")
@@ -431,6 +448,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
         raise ValueError("capture outcome field 'n_ops_committed' must be an int or None")
 
     def _bool(key: str, default: bool = False) -> bool:
+        """Read one strictly-boolean field, falling back to ``default`` when absent.
+
+        Raises
+        ------
+        ValueError
+            If the value is present and not a ``bool``.
+        """
+
         value = data.get(key, default)
         if not isinstance(value, bool):
             raise ValueError(f"capture outcome field {key!r} must be a bool")
@@ -541,11 +566,7 @@ def resolve_loaded_outcome(state: Mapping[str, Any]) -> CaptureOutcome:
     try:
         # In-process restores may hand back an already-typed record; it still
         # passes through the same coherence matrix below.
-        outcome = (
-            payload
-            if isinstance(payload, CaptureOutcome)
-            else parse_outcome_payload(payload)
-        )
+        outcome = payload if isinstance(payload, CaptureOutcome) else parse_outcome_payload(payload)
     except ValueError as exc:
         warnings.warn(
             f"TorchLens could not parse this artifact's capture-outcome attestation ({exc}); "
@@ -842,9 +863,7 @@ def settle_failed(
                 settlement_note=settlement_note,
             ),
         )
-    origin = (
-        FailureOrigin.INTERRUPT if interrupted else classify_failure_origin(exc)
-    )
+    origin = FailureOrigin.INTERRUPT if interrupted else classify_failure_origin(exc)
     return _stamp(
         trace,
         session,

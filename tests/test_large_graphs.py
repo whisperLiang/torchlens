@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import RandomGraphModel
 from torch import nn
 
 from torchlens import trace as trace_fn
@@ -25,8 +26,6 @@ from torchlens.visualization._rank_layout_internal.layout import (
     estimate_rank_layout_cost,
     get_node_placement_engine,
 )
-
-from example_models import RandomGraphModel
 
 VIS_OUTPUT_DIR = os.path.join(
     os.path.dirname(__file__),

@@ -7,8 +7,8 @@ import pytest
 import torch
 from torch import nn
 
-from torchlens import _state
 import torchlens.backends.torch.wrappers as torch_wrappers
+from torchlens import _state
 
 
 class _AttentionStyleModule(nn.Module):

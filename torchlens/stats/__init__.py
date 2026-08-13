@@ -6,10 +6,10 @@ import gc
 import heapq
 import math
 import random
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-import warnings
 
 import torch
 from torch import nn
@@ -193,7 +193,7 @@ class Quantile:
         """
 
         if not self._reservoir:
-            return {q: math.nan for q in self.quantiles}
+            return dict.fromkeys(self.quantiles, math.nan)
         tensor = torch.tensor(self._reservoir, dtype=torch.float64)
         return {q: float(torch.quantile(tensor, q).item()) for q in self.quantiles}
 
@@ -891,6 +891,12 @@ def _make_plan_predicate(
     """Build the record predicate that fingerprints the stream and saves sites."""
 
     def _predicate(ctx: Any) -> bool:
+        """Fingerprint the record stream and decide whether this site is wanted.
+
+        Stateful in ``cursor``: a repeat call for the same event index under an
+        alias label replays the previous decision instead of advancing the stream.
+        """
+
         try:
             if ctx.kind != "op":
                 return False

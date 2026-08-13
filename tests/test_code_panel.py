@@ -19,8 +19,8 @@ import torchlens as tl
 from torchlens.visualization import code_panel
 from torchlens.visualization.code_panel import (
     MAX_CODE_PANEL_LINE_CHARS,
-    capture_model_source_code,
     _wrap_source_line,
+    capture_model_source_code,
     render_code_panel_svg,
 )
 

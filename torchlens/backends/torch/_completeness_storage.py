@@ -1,6 +1,7 @@
 """Storage observation and scalar-escape helpers."""
 
 from __future__ import annotations
+
 import functools
 import inspect
 import threading
@@ -8,22 +9,19 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from ...errors import ScalarEscapeWarning
 from ._tl import (
     get_tensor_label,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        HOST_VALUE_ESCAPE_METHODS,
-        STATE_METADATA_MIRROR,
-        _CompletenessDispatchMode,
         _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS,
         _HOST_ESCAPE_BOOL_SOURCE_LABELS,
         _HOST_ESCAPE_CROSS_THREAD_CAPTURED,
@@ -33,7 +31,6 @@ if TYPE_CHECKING:
         _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
         _INPUT_METADATA_VIEW_READ,
         _ORIG_UNTYPED_STORAGE_DATA_PTR,
-        _PlainScalarEscapeState,
         _STORAGE_ACCESSOR_FAIL_CLOSED,
         _STORAGE_ACCESSOR_MUTATOR,
         _STORAGE_ACCESSOR_NBYTES,
@@ -42,12 +39,15 @@ if TYPE_CHECKING:
         _STORAGE_ACCESSOR_RAW_POINTER,
         _STORAGE_ACCESSOR_VALUE_READ,
         _TORCHLENS_ROOT,
-        _WitnessState,
+        HOST_VALUE_ESCAPE_METHODS,
+        STATE_METADATA_MIRROR,
+        _CompletenessDispatchMode,
         _expand_state_alias_addresses,
         _internal_read_active,
         _nonowner_escape_observe,
         _nonowner_ptr_is_captured,
         _observe_state_metadata_read,
+        _PlainScalarEscapeState,
         _record_escape_source_tensor,
         _record_input_metadata_read_at_site,
         _record_input_storage_nbytes,
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         _record_state_metadata_read,
         _register_storage_handle_origin,
         _resolve_storage_origin,
+        _WitnessState,
         internal_scalar_read,
     )
 
@@ -78,7 +79,7 @@ __all__ = (
 )
 
 
-def _nonowner_storage_observe(state: "_WitnessState", storage: Any) -> None:
+def _nonowner_storage_observe(state: _WitnessState, storage: Any) -> None:
     """Ceiling the capture when a NON-owner thread touches a CAPTURED storage handle (r67)."""
 
     try:
@@ -94,7 +95,7 @@ def _nonowner_storage_observe(state: "_WitnessState", storage: Any) -> None:
         _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
 
 
-def _record_state_value_escape(trace: Any, addresses: "set[str]") -> None:
+def _record_state_value_escape(trace: Any, addresses: set[str]) -> None:
     """Join a storage-spelling VALUE read into the state digest witness (r67 C3)."""
 
     addresses = _expand_state_alias_addresses(trace, addresses)
@@ -106,10 +107,10 @@ def _record_state_value_escape(trace: Any, addresses: "set[str]") -> None:
 
 
 def _attribute_storage_placement(
-    state: "_WitnessState",
+    state: _WitnessState,
     storage: Any,
     name: str,
-    observed: "bool | None",
+    observed: bool | None,
     had_args: bool,
 ) -> None:
     """Attribute one storage-handle placement accessor call, tensor-spelling-identically."""
@@ -133,7 +134,7 @@ def _attribute_storage_placement(
 
 
 def _make_storage_metadata_wrapper(
-    original: Any, state: "_WitnessState", name: str, disposition: str
+    original: Any, state: _WitnessState, name: str, disposition: str
 ) -> Any:
     """Wrap one storage-class accessor: call through ONCE, then record the real result."""
 
@@ -217,7 +218,7 @@ def _make_storage_metadata_wrapper(
 
 
 def _make_storage_property_wrapper(
-    descriptor: Any, state: "_WitnessState", name: str, disposition: str
+    descriptor: Any, state: _WitnessState, name: str, disposition: str
 ) -> property:
     """Wrap a storage-class PROPERTY row (``filename`` / ``_cdata``) read-through."""
 

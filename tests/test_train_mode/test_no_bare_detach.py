@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNED_PATHS = (
     REPO_ROOT / "torchlens" / "capture",
@@ -19,7 +18,7 @@ ALLOWLIST = {
     "Op.log_tensor_grad",
     "log_tensor_grad",
 }
-MAX_NOQA_DETACH_EXEMPTIONS = 5
+MAX_DETACH_OK_EXEMPTIONS = 5
 
 
 def _python_files(path: Path) -> list[Path]:
@@ -60,8 +59,15 @@ def _qualified_name(stack: list[str], node: ast.FunctionDef | ast.AsyncFunctionD
     return ".".join([*stack, node.name])
 
 
-def _has_noqa_detach(source_lines: list[str], node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Return whether a function body contains a ``# noqa: detach`` exemption.
+def _has_detach_ok(source_lines: list[str], node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return whether a function body carries an explicit ``# detach-ok:`` exemption.
+
+    The marker used to be spelled ``# noqa: detach``, which was a mistake: ruff
+    parses ``# noqa:`` and rejected ``detach`` as a rule code, so it warned on
+    every run and suppressed nothing, while THIS scanner silently treated the
+    same comment as a valid exemption. One comment, two tools, two verdicts
+    (grind r3, SF-24). ``# detach-ok:`` is unambiguous -- ruff never reads it,
+    and it is the only spelling this scanner accepts.
 
     Parameters
     ----------
@@ -78,7 +84,7 @@ def _has_noqa_detach(source_lines: list[str], node: ast.FunctionDef | ast.AsyncF
 
     end_lineno = node.end_lineno or node.lineno
     body_lines = source_lines[node.lineno - 1 : end_lineno]
-    return any("# noqa: detach" in line for line in body_lines)
+    return any("# detach-ok:" in line for line in body_lines)
 
 
 class _DetachCallVisitor(ast.NodeVisitor):
@@ -96,7 +102,7 @@ class _DetachCallVisitor(ast.NodeVisitor):
         self.source_lines = source_lines
         self.name_stack: list[str] = []
         self.violations: list[tuple[int, str]] = []
-        self.noqa_exemptions = 0
+        self.detach_ok_exemptions = 0
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Visit a class definition while tracking qualified names."""
@@ -119,9 +125,9 @@ class _DetachCallVisitor(ast.NodeVisitor):
         """Inspect a function body unless it is explicitly exempt."""
 
         qualified_name = _qualified_name(self.name_stack, node)
-        if qualified_name in ALLOWLIST or _has_noqa_detach(self.source_lines, node):
-            if _has_noqa_detach(self.source_lines, node):
-                self.noqa_exemptions += 1
+        if qualified_name in ALLOWLIST or _has_detach_ok(self.source_lines, node):
+            if _has_detach_ok(self.source_lines, node):
+                self.detach_ok_exemptions += 1
             return
 
         self.name_stack.append(node.name)
@@ -141,18 +147,18 @@ def test_no_bare_detach_outside_training_guardrail_allowlist() -> None:
     """Scanned training hot paths route detach behavior through chokepoints."""
 
     failures: list[str] = []
-    noqa_exemptions = 0
+    detach_ok_exemptions = 0
     for scanned_path in SCANNED_PATHS:
         for path in _python_files(scanned_path):
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
             visitor = _DetachCallVisitor(source.splitlines())
             visitor.visit(tree)
-            noqa_exemptions += visitor.noqa_exemptions
+            detach_ok_exemptions += visitor.detach_ok_exemptions
             rel_path = path.relative_to(REPO_ROOT)
             failures.extend(
                 f"{rel_path}:{line_no}: {message}" for line_no, message in visitor.violations
             )
 
-    assert noqa_exemptions <= MAX_NOQA_DETACH_EXEMPTIONS
+    assert detach_ok_exemptions <= MAX_DETACH_OK_EXEMPTIONS
     assert failures == []

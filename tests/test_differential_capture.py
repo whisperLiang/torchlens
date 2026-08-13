@@ -28,9 +28,7 @@ def _mode_events(names: list[str | None]) -> dict[str, object]:
     return {
         "side": "mode",
         "model": "unit",
-        "events": [
-            {"name": n, "unmapped_repr": None if n else "<raw>"} for n in names
-        ],
+        "events": [{"name": n, "unmapped_repr": None if n else "<raw>"} for n in names],
     }
 
 
@@ -65,9 +63,7 @@ class TestAlignerRules:
         assert len(structural) == 3
 
     def test_not_logged_drop_uses_torchlens_table(self) -> None:
-        report = align_streams(
-            _mode_events(["dim", "relu"]), _wrapper_stream(["relu"])
-        )
+        report = align_streams(_mode_events(["dim", "relu"]), _wrapper_stream(["relu"]))
         assert report["matched"]
         assert report["ledger"][0] == {"rule": "NOT_LOGGED", "mode_index": 0, "name": "dim"}
 
@@ -137,5 +133,9 @@ def test_differential_capture_corpus(model_name: str) -> None:
     report = json.loads(proc.stdout)
     assert report["matched"], json.dumps(report["mismatches"], indent=2)
     # A vacuous alignment (nothing compared) must never count as a pass.
-    compared = [r for r in report["ledger"] if r["rule"] in ("EXACT", "DUNDER_RESPELL", "COMPOSITE_EXPANSION")]
+    compared = [
+        r
+        for r in report["ledger"]
+        if r["rule"] in ("EXACT", "DUNDER_RESPELL", "COMPOSITE_EXPANSION")
+    ]
     assert compared, "alignment ledger is empty; harness compared nothing"

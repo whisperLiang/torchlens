@@ -1,36 +1,37 @@
 """Witness finalization and capture scope."""
 
 from __future__ import annotations
+
 import threading
 import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
-from ...utils._torch_symbols import torch_attr
+
 from ... import _state
 from ..._errors import TorchLensCaptureGapWarning
+from ...utils._torch_symbols import torch_attr
 from .escape_detection import (
     ExpectedOriginalToken,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        CompletenessWitnessMode,
         _ACTIVE_WITNESS_STATE,
+        _HOST_ESCAPE_MUTABLE_WRITEBACK,
+        CompletenessWitnessMode,
         _CompletenessDispatchMode,
         _DispatchCallsite,
-        _HOST_ESCAPE_MUTABLE_WRITEBACK,
-        _WitnessState,
         _event_is_capture_accounted,
         _finalize_runnable_ledger,
         _is_expected_opaque_dispatch,
         _observe_invisible_host_escapes,
         _register_authorized_caller_namespace,
         _whole_storage_uint8,
+        _WitnessState,
     )
 
 __all__ = (

@@ -10,10 +10,9 @@ break IDE field preview fails here first.
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
-
-import pytest
 
 import torchlens as tl
 from torchlens import constants as tl_constants
@@ -152,9 +151,7 @@ def test_all_declared_fields_have_inspectable_descriptors(
 
     instance = _get_instance(dx_trace, kind)
     uninspectable = {
-        name
-        for name in field_order
-        if not _has_inspectable_descriptor(instance, name)
+        name for name in field_order if not _has_inspectable_descriptor(instance, name)
     }
     assert uninspectable == _EXPECTED_ABSENT[kind], (
         f"{cls.__name__} fields without slot/property/dict backing changed: "

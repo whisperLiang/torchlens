@@ -7,10 +7,11 @@ stages will consume the plan directly from the capture kernel.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 
 class EnrichmentLevel(str, Enum):
@@ -177,7 +178,7 @@ class CapturePlan:
         stop_policy: Any = None,
         backend_name: str = "torch",
         retention_profile: RetentionProfile | None = None,
-    ) -> "CapturePlan":
+    ) -> CapturePlan:
         """Compile immutable capture intent.
 
         Parameters

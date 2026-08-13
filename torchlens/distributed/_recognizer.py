@@ -244,10 +244,7 @@ def _layer2_offenders() -> list[str]:
         namespace = schema.name.partition("::")[0]
         if namespace in COLLECTIVE_NAMESPACES:
             continue
-        rendered = " ".join(
-            str(argument.type)
-            for argument in (*schema.arguments, *schema.returns)
-        )
+        rendered = " ".join(str(argument.type) for argument in (*schema.arguments, *schema.returns))
         if any(marker in rendered for marker in _LAYER2_TYPE_MARKERS):
             offenders.append(schema.name)
     return sorted(set(offenders))

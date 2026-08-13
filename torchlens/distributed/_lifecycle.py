@@ -29,10 +29,10 @@ WITNESS in the merge-time pre-join lineage audit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import threading
-from typing import Any
 import warnings
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -246,9 +246,7 @@ def _record_destroyed_group(state: _ArmedState, group: Any) -> None:
                 return
             identity = GroupIdentity(
                 membership_digest=membership_digest_for_ranks(ranks),
-                lifetime_ordinal=state.ledger.next_ordinal(
-                    membership_digest_for_ranks(ranks)
-                ),
+                lifetime_ordinal=state.ledger.next_ordinal(membership_digest_for_ranks(ranks)),
                 ordinal_source="wrapped",
                 global_ranks=ranks,
                 backend=None,
@@ -293,7 +291,16 @@ def _install_lifecycle_wraps(state: _ArmedState) -> None:
     """Install creation/destroy wraps on every module holding a reference."""
 
     def make_create_wrap(original: Any, returns_group: bool) -> Any:
+        """Build the group-creation wrap for one c10d entry point.
+
+        ``returns_group`` distinguishes ``new_group``-style factories, which return
+        the group, from ``init_process_group``, which returns ``None`` and leaves
+        the world group as the default.
+        """
+
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            """Create the group, then record its identity in the live armed state."""
+
             result = original(*args, **kwargs)
             group = result if returns_group else None
             if not returns_group:
@@ -313,7 +320,11 @@ def _install_lifecycle_wraps(state: _ArmedState) -> None:
         return wrapped
 
     def make_destroy_wrap(original: Any) -> Any:
+        """Build the group-destruction wrap for one c10d entry point."""
+
         def wrapped(group: Any = None, *args: Any, **kwargs: Any) -> Any:
+            """Record the destruction before delegating, resolving a non-member group to ``None``."""
+
             with _LOCK:
                 if _STATE is state:
                     resolved = group
@@ -363,15 +374,20 @@ def arm() -> ArmingRecord:
 
 
 def _arm(source: str) -> ArmingRecord:
+    """Arm collective capture once per process and return the install-epoch record.
+
+    Shared by the public :func:`arm` and by lazy arming at capture entry;
+    ``source`` records which of the two installed. Idempotent: an already-armed
+    process returns its original ``ArmingRecord`` untouched.
+    """
+
     global _STATE
     with _LOCK:
         if _STATE is not None:
             return _STATE.arming
         _dist()
         recognizer = derive_collective_recognizer()
-        epoch: InstallEpoch = (
-            "seeded" if _any_group_history() else "armed_before_any_group"
-        )
+        epoch: InstallEpoch = "seeded" if _any_group_history() else "armed_before_any_group"
         arming = ArmingRecord(
             install_epoch=epoch,
             recognizer_snapshot=recognizer.snapshot_name,
@@ -472,9 +488,7 @@ def resolve_group_identity(group: Any) -> GroupIdentity:
 
     state = _STATE
     if state is None:
-        raise RuntimeError(
-            "resolve_group_identity() requires torchlens.distributed to be armed"
-        )
+        raise RuntimeError("resolve_group_identity() requires torchlens.distributed to be armed")
     dist = torch.distributed
     if group is None:
         group = dist.group.WORLD
@@ -511,6 +525,8 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
     digest = membership_digest_for_ranks(global_ranks)
 
     def refuse(reason: str) -> AmbiguousGroupLifetimeError:
+        """Build the typed refusal for a pre-arming group whose lifetime is unprovable."""
+
         return AmbiguousGroupLifetimeError(
             "torchlens cannot assign a provable lifetime ordinal to a process "
             f"group created before arming: {reason}. Call "
@@ -521,11 +537,7 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
             reason=reason,
         )
 
-    churn = [
-        event
-        for event in state.ledger.events
-        if event.membership_digest == digest
-    ]
+    churn = [event for event in state.ledger.events if event.membership_digest == digest]
     if churn:
         raise refuse(
             "lifecycle churn of this membership was already observed "

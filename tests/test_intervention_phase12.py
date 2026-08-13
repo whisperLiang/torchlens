@@ -9,12 +9,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.io import TraceState
 from torchlens.intervention.errors import (
     AppendBatchDependenceError,
     AppendMismatchError,
     BatchNormTrainModeWarning,
 )
+from torchlens.io import TraceState
 from torchlens.options import CaptureOptions
 
 

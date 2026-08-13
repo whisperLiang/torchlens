@@ -1,16 +1,14 @@
 """Backend-neutral edges and payload metadata invariants."""
 
 from __future__ import annotations
+
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _dtype_values_match,
         _resolve_trace_label,
         op_has_genuine_replacement_evidence,
@@ -29,7 +27,7 @@ __all__ = (
 )
 
 
-def _check_backend_neutral_graph_topology(ml: "Trace") -> None:
+def _check_backend_neutral_graph_topology(ml: Trace) -> None:
     """Check parent/child symmetry for non-torch traces where fields exist.
 
     Parameters
@@ -87,7 +85,7 @@ def _check_backend_neutral_graph_topology(ml: "Trace") -> None:
                 )
 
 
-def _check_edge_use_parent_arg_invariants(ml: "Trace") -> None:
+def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     """Check existing edge-use records and parent-arg references.
 
     Precondition contract: edge-use metadata is optional on torch graph edges.
@@ -172,7 +170,7 @@ def _check_edge_use_parent_arg_invariants(ml: "Trace") -> None:
                     )
 
 
-def _check_op_log_fields(ml: "Trace") -> None:
+def _check_op_log_fields(ml: Trace) -> None:
     """Check D: per-layer field consistency (shape, dtype, pass numbering, func, nesting).
 
     Validates:
@@ -286,7 +284,7 @@ def _check_op_log_fields(ml: "Trace") -> None:
             )
 
 
-def _check_payload_metadata_invariants(ml: "Trace") -> None:
+def _check_payload_metadata_invariants(ml: Trace) -> None:
     """Check saved and transformed live payload metadata.
 
     Precondition contract: tensor payload fields may be legitimately absent

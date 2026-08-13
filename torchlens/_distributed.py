@@ -33,9 +33,9 @@ parallel hooks/styles, and pipeline-stage fragments refuse.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-import sys
 from typing import Any
 
 import torch
@@ -60,9 +60,7 @@ __all__ = [
 MAX_REPORTED_SITES = 5
 """Number of named sites listed in a finding before eliding the remainder."""
 
-REFUSING_KINDS: frozenset[str] = frozenset(
-    {"dtensor", "tensor_parallel", "pipeline_parallel"}
-)
+REFUSING_KINDS: frozenset[str] = frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"})
 """Finding kinds that make a capture provably wrong and therefore refuse it.
 
 ``device_mesh`` alone is informational. Active tensor-parallel styles refuse even
@@ -361,10 +359,7 @@ def _dtensor_is_sharded(value: Any) -> bool:
     placements = getattr(value, "placements", None)
     if not placements:
         return False
-    for placement in placements:
-        if type(placement).__name__ != "Replicate":
-            return True
-    return False
+    return any(type(placement).__name__ != "Replicate" for placement in placements)
 
 
 def _describe_mesh(mesh: Any) -> str:
@@ -537,30 +532,22 @@ def _walk_tensors(
         return
     if isinstance(payload, (list, tuple)):
         for index, item in enumerate(payload):
-            yield from _walk_tensors(
-                item, f"{path}[{index}]", seen, depth=depth + 1, nodes=nodes
-            )
+            yield from _walk_tensors(item, f"{path}[{index}]", seen, depth=depth + 1, nodes=nodes)
         return
     if isinstance(payload, (set, frozenset)):
         for index, item in enumerate(payload):
-            yield from _walk_tensors(
-                item, f"{path}{{{index}}}", seen, depth=depth + 1, nodes=nodes
-            )
+            yield from _walk_tensors(item, f"{path}{{{index}}}", seen, depth=depth + 1, nodes=nodes)
         return
     if isinstance(payload, dict):
         for key, item in payload.items():
-            yield from _walk_tensors(
-                item, f"{path}[{key!r}]", seen, depth=depth + 1, nodes=nodes
-            )
+            yield from _walk_tensors(item, f"{path}[{key!r}]", seen, depth=depth + 1, nodes=nodes)
         return
     try:
         attributes = vars(payload)
     except (TypeError, AttributeError):
         return
     for attr_name, item in attributes.items():
-        yield from _walk_tensors(
-            item, f"{path}.{attr_name}", seen, depth=depth + 1, nodes=nodes
-        )
+        yield from _walk_tensors(item, f"{path}.{attr_name}", seen, depth=depth + 1, nodes=nodes)
 
 
 def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
@@ -939,9 +926,7 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
             variants.append("DTensor")
         if evidence.shard_sites:
             variants.append("ShardedTensor")
-        geometry = tuple(
-            evidence.dtensor_geometry.get(site) for site in sharded_tensor_sites
-        )
+        geometry = tuple(evidence.dtensor_geometry.get(site) for site in sharded_tensor_sites)
         identity_summary = ""
         logical_total = sum(
             record["logical_numel"]

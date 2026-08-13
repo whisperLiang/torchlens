@@ -4,35 +4,37 @@ import warnings
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ..._state import pause_logging
-from ...utils.display import _timed_phase
-from ...utils.tensor_utils import (
-    fp8_widen_for_numeric_ops,
-    safe_copy,
+from ...capture.predicates import (
+    _evaluate_keep_op,
 )
+from ...capture.projections import (
+    commit_op,
+)
+from ...capture.session import capture_session_for
+from ...capture.stop import stop_directive_for_trace
 from ...data_classes.op import (
     _recursive_safe_copy,
+)
+from ...fastlog.types import (
+    CaptureSpec,
+    RecordContext,
+)
+from ...intervention.selectors import (
+    BaseSelector,
 )
 from ...ir.events import (
     FunctionCallRef,
     ModuleFrame,
 )
 from ...ir.predicate import RetroactiveCaptureDecision
-from ...intervention.selectors import (
-    BaseSelector,
-)
-from ...capture.session import capture_session_for
-from ...capture.predicates import (
-    _evaluate_keep_op,
-)
-from ...capture.stop import stop_directive_for_trace
-from ...capture.projections import (
-    commit_op,
-)
-from ...fastlog.types import (
-    CaptureSpec,
-    RecordContext,
+from ...utils.display import _timed_phase
+from ...utils.tensor_utils import (
+    fp8_widen_for_numeric_ops,
+    safe_copy,
 )
 
 if TYPE_CHECKING:

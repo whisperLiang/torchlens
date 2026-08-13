@@ -1,11 +1,14 @@
 """Audited wrapper boundaries and input sites."""
 
 from __future__ import annotations
+
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from ._tl import (
     get_tensor_label,
@@ -14,11 +17,8 @@ from .escape_detection import (
     ExpectedOriginalToken,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        AUDITED_COMPLETENESS_BOUNDARIES,
         _ALIAS_DERIVED_VIEW,
         _ALIAS_EQUIVALENT,
         _EXPECTED_OPAQUE_WRAPPERS,
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         _REPLACEMENT_HOOK_FILE,
         _REPLACEMENT_HOOK_FUNC,
         _RUNNABLE_INPUT_STORAGE_SITES,
+        AUDITED_COMPLETENESS_BOUNDARIES,
         _observe_input_derived_layout_read,
         internal_scalar_read,
     )
@@ -123,7 +124,7 @@ def completeness_scope_for_wrapper(
 
 
 def record_runnable_input_storage_sites(
-    trace: Any, tensor_leaves: "list[tuple[torch.Tensor, Any]]"
+    trace: Any, tensor_leaves: list[tuple[torch.Tensor, Any]]
 ) -> None:
     """Index model-input TENSOR leaves by BASE-storage identity for alias-read witnessing (r31).
 
@@ -183,7 +184,7 @@ def record_runnable_input_storage_sites(
 
 def _classify_input_storage_alias(
     trace: Any, source: torch.Tensor
-) -> "tuple[str | None, Any, tuple[bool, bool] | None]":
+) -> tuple[str | None, Any, tuple[bool, bool] | None]:
     """Classify ``source`` against the input-leaf storage map (r31, holes A/C).
 
     Returns ``(_ALIAS_EQUIVALENT, site, leaf_conj_neg)`` when ``source`` shares an input leaf's
@@ -224,7 +225,7 @@ def _classify_input_storage_alias(
     return (_ALIAS_DERIVED_VIEW, candidates[0][0], None)
 
 
-def _input_base_tensor(source: torch.Tensor) -> "torch.Tensor | None":
+def _input_base_tensor(source: torch.Tensor) -> torch.Tensor | None:
     """Return ``source._base`` read under the internal marker (r31).
 
     ``_base`` is a witnessed getset PROPERTY replaced by a recording descriptor during a

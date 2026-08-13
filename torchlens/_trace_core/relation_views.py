@@ -31,8 +31,9 @@ returned stats so gates can assert it stays at zero for the oracle axes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .groups import GroupRef, MembershipGroups
 from .op_store import _CSR, _MISSING
@@ -190,8 +191,8 @@ def convert_row_cells(
 
 
 def freeze_op_relation_views(
-    core: "TraceCore",
-    store: "OpRowStore",
+    core: TraceCore,
+    store: OpRowStore,
     resolve_row: Callable[[str], int | None],
     pool: dict[Any, Any] | None = None,
 ) -> RelationFreezeStats:
@@ -275,9 +276,7 @@ def freeze_op_relation_views(
                 if not isinstance(domain_map, dict):
                     continue
                 for position, parent_label in domain_map.items():
-                    positions_by_parent.setdefault(parent_label, []).append(
-                        (domain, position)
-                    )
+                    positions_by_parent.setdefault(parent_label, []).append((domain, position))
         for parent_label in parents:
             source = row_of_label.get(parent_label)
             if source is None:
@@ -379,8 +378,8 @@ def convert_record_dict_views(
 
 
 def convert_group_cells(
-    core: "TraceCore",
-    store: "OpRowStore",
+    core: TraceCore,
+    store: OpRowStore,
     pool: dict[Any, Any],
     refs_by_identity: dict[int, GroupRef],
     keepalive: list[Any],

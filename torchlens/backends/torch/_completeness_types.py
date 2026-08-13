@@ -1,11 +1,14 @@
 """State and value types shared by completeness-witness slices."""
 
 from __future__ import annotations
+
 import weakref
 from dataclasses import dataclass, field
 from typing import Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from .escape_detection import (
     ExpectedOriginalToken,
 )
@@ -99,10 +102,10 @@ class _WitnessState:
     # actual reads. Uses weak keys when torch retains safe untyped-storage wrappers and
     # identity-keyed strong entries on older torch whose ephemeral storage weakrefs can dangle.
     # ``None`` until the wrappers arm.
-    storage_origins: "_StorageOriginRegistry | None" = None
+    storage_origins: _StorageOriginRegistry | None = None
     # r67 C3: lazy ptr -> full state-name-set index (params + buffers, alias groups merged)
     # backing the origin resolver's pointer fallback. Built once per forward on first use.
-    storage_state_ptr_names: "dict[int, frozenset[str]] | None" = None
+    storage_state_ptr_names: dict[int, frozenset[str]] | None = None
 
 
 class _StorageOriginRegistry:
@@ -125,12 +128,12 @@ class _StorageOriginRegistry:
             Whether storage handles are safe to hold through weak references.
         """
 
-        self._weak: "weakref.WeakKeyDictionary[Any, tuple[str, Any]] | None" = (
+        self._weak: weakref.WeakKeyDictionary[Any, tuple[str, Any]] | None = (
             weakref.WeakKeyDictionary() if weak_keys else None
         )
-        self._strong: "dict[int, tuple[Any, tuple[str, Any]]]" = {}
+        self._strong: dict[int, tuple[Any, tuple[str, Any]]] = {}
 
-    def get(self, handle: Any) -> "tuple[str, Any] | None":
+    def get(self, handle: Any) -> tuple[str, Any] | None:
         """Return the origin registered for ``handle`` by object identity.
 
         Parameters
@@ -151,7 +154,7 @@ class _StorageOriginRegistry:
             return None
         return entry[1]
 
-    def register(self, handle: Any, origin: "tuple[str, Any]") -> None:
+    def register(self, handle: Any, origin: tuple[str, Any]) -> None:
         """Register ``handle`` once without weakening identity guarantees.
 
         Parameters

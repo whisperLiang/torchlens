@@ -19,15 +19,15 @@ import os
 import threading
 import warnings
 import weakref
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from math import prod
-from typing import Any, Callable, Iterable, Iterator, Literal, Optional, cast
+from typing import Any, Literal, cast
 
 import torch
 
-from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
-
 from ..backends.torch._tl import get_tensor_label, set_tensor_label
+from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
 
 SaveMode = Literal["copy", "reference", "view", "cpu_async"]
 
@@ -52,7 +52,7 @@ _DTYPE_FLOAT_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
 # Cached result of torch.cuda.is_available().  Evaluated once per process
 # because CUDA availability cannot change at runtime.  Avoids repeated
 # calls into the CUDA runtime (which involve driver queries).
-_cuda_available: Optional[bool] = None
+_cuda_available: bool | None = None
 
 _TensorSizeMethod = Callable[[torch.Tensor], int]
 
@@ -217,10 +217,11 @@ def fp8_widen_for_numeric_ops(tensor: torch.Tensor) -> torch.Tensor:
 
 def tensor_all_nan(tensor: torch.Tensor) -> bool:
     """Return True if every element in the tensor is NaN."""
-    if torch.isnan(tensor).int().sum() == tensor.numel():
-        return True
-    else:
-        return False
+    # bool(): the comparison yields a 0-d TENSOR, and this function is declared
+    # (and consumed) as a plain bool. SIM103 collapsed the original
+    # if/True/else/False into a bare return, which silently changed the return
+    # TYPE; the explicit cast keeps the collapse and the contract.
+    return bool(torch.isnan(tensor).int().sum() == tensor.numel())
 
 
 def _quantized_tensor_equal(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> bool:
@@ -675,7 +676,7 @@ _DEFER_PENDING: dict[tuple[int, int, str], list["_PendingPayloadAlias"]] = {}
 # call for eligible captures. Single-threaded by design, like all capture
 # state; the arming side stores the excluded state-storage pointers.
 _DEFER_WINDOW_DEPTH: int = 0
-_DEFER_STATE_PTRS: Optional[frozenset[int]] = None
+_DEFER_STATE_PTRS: frozenset[int] | None = None
 _DEFER_BUSY: bool = False
 
 
@@ -705,7 +706,7 @@ def _paused_internal_reads() -> Iterator[None]:
         yield
 
 
-def _deferred_storage_key(x: torch.Tensor) -> Optional[tuple[int, int, str]]:
+def _deferred_storage_key(x: torch.Tensor) -> tuple[int, int, str] | None:
     """Return the pending-registry key for ``x``'s storage, or ``None``.
 
     Callers must hold ``_paused_internal_reads()``. Any failure (exotic layout,
@@ -738,12 +739,21 @@ class _DeferredPayloadCloneFn(torch.autograd.Function):
     def forward(  # type: ignore[override]
         ctx: Any, source: torch.Tensor, holder: list[torch.Tensor]
     ) -> torch.Tensor:
+        """Return the aliased tensor held in ``holder``, unchanged.
+
+        The alias arrives inside ``holder`` rather than as a tensor argument so the
+        output is not one of autograd's inputs; otherwise autograd would return a
+        differentiable view instead of a plain tensor.
+        """
+
         return holder[0]
 
     @staticmethod
     def backward(  # type: ignore[override]
         ctx: Any, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None]:
+        """Pass the gradient straight through: ``clone`` and ``alias`` are identities."""
+
         return grad_output, None
 
 
@@ -761,7 +771,7 @@ def _mint_graph_connected_alias(x: torch.Tensor) -> torch.Tensor:
 
 def _try_defer_payload_alias(
     x: torch.Tensor, *, graph_connected: bool = False
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     """Return a registered clone-on-write alias for ``x``, or ``None``.
 
     Only called from ``_clone_tensor_payload`` (already under
@@ -1271,7 +1281,7 @@ class TensorByteFootprint:
 
     def __init__(
         self,
-        device_key: tuple[str, Optional[int]],
+        device_key: tuple[str, int | None],
         start_byte: int,
         end_byte: int,
         origin_byte: int,
@@ -1290,7 +1300,7 @@ class TensorByteFootprint:
         self.numel = numel
 
 
-def tensor_byte_footprint(value: torch.Tensor) -> Optional[TensorByteFootprint]:
+def tensor_byte_footprint(value: torch.Tensor) -> TensorByteFootprint | None:
     """Compute a tensor's absolute byte footprint, or ``None`` when unprovable.
 
     ``None`` (the caller must treat the relation as ``unknown``) covers exotic

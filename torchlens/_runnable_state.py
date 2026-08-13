@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
+import math
+import sys
+import warnings
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
-import math
-import sys
 from types import MappingProxyType
 from typing import Any
-import warnings
 
 import torch
 
 from . import _state
 from .errors import RunCapabilityUnavailableError, RunPreconditionError, StateBindingError
-from .utils._torch_compat import tensor_has_named_dims
-from .utils._torch_symbols import torch_attr
 from .runnable import (
     CANONICAL_INITIALIZER_BY_ROLE,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
@@ -33,6 +31,8 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
+from .utils._torch_compat import tensor_has_named_dims
+from .utils._torch_symbols import torch_attr
 
 
 @dataclass(frozen=True, slots=True)
@@ -1093,6 +1093,8 @@ def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunn
     nonpersistent_buffers = _prepared_nonpersistent_buffers(trace, descriptor)
 
     def _staged(prepared: PreparedRunnableState) -> PreparedRunnableState:
+        """Move one prepared state bundle to its recorded per-slot devices."""
+
         staged = replace(
             prepared,
             slot_values=stage_state_to_slot_devices(descriptor, prepared.slot_values),
@@ -2071,6 +2073,8 @@ def _preflight_retention_floor(descriptor: SparseRunDescriptor) -> None:
     devices: dict[str, torch.device] = {}
 
     def _charge(slot: TensorSlotDescriptor) -> None:
+        """Add one slot's guaranteed-retained clone bytes to its device's floor."""
+
         device = _slot_device(slot)
         key = str(device)
         devices[key] = device
@@ -2563,7 +2567,7 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
     with _state.pause_logging():
         cpu_value = value.detach().cpu().contiguous()
         payload = cpu_value.reshape(-1).view(torch.uint8).numpy().tobytes()
-        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode("utf-8")
+        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode()
     return sha256(logical_prefix + payload).hexdigest()
 
 

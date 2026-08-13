@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 # Traces whose Op metadata has already been pooled by ``compact_op_metadata``.
 # Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
 # pickle state, or a portable artifact.
-_COMPACTED_TRACES: "weakref.WeakSet[Trace]" = weakref.WeakSet()
+_COMPACTED_TRACES: weakref.WeakSet[Trace] = weakref.WeakSet()
 
 
-def compact_op_metadata(trace: "Trace") -> None:
+def compact_op_metadata(trace: Trace) -> None:
     """Collapse repeated immutable Op metadata onto shared instances.
 
     A finished graph stores the same dtype name, module address, ancestor

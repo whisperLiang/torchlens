@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal
 
 from .request import RenderContext
 
@@ -13,10 +14,10 @@ if TYPE_CHECKING:
 
     from ..data_classes.module import Module
     from ..data_classes.trace import Trace
-    from .auto_collapse import ModuleRepeatFold
-    from ._render_edges import _SegmentLookup
-    from .node_universe import NodeUnit
     from ._render_common import RenderedNodeEmission
+    from ._render_edges import _SegmentLookup
+    from .auto_collapse import ModuleRepeatFold
+    from .node_universe import NodeUnit
     from .renderers.base import RendererCapabilities
 
 
@@ -165,7 +166,7 @@ class RenderIRDotStatement:
     kind: Literal["node", "edge", "attr", "subgraph", "raw"]
     args: tuple[Any, ...] = ()
     attrs: tuple[tuple[str, Any], ...] = ()
-    children: tuple["RenderIRDotStatement", ...] = ()
+    children: tuple[RenderIRDotStatement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,7 +194,7 @@ class RenderIR:
     ordering_constraints: tuple[RenderIROrderingConstraint, ...] = ()
     dot_statements: tuple[RenderIRDotStatement, ...] = ()
 
-    def required_capabilities(self) -> "RendererCapabilities":
+    def required_capabilities(self) -> RendererCapabilities:
         """Return backend features required to render this IR exactly.
 
         Returns
@@ -257,14 +258,14 @@ def projected_antiparallel_endpoint_pairs(render_ir: RenderIR) -> frozenset[tupl
 
 
 def build_render_ir(
-    trace: "Trace",
+    trace: Trace,
     *,
-    collapse_fn: "Callable[[Module], bool] | None",
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext | None = None,
     universe: Any | None = None,
-    segments: "Mapping[str, Any] | None" = None,
-    segment_lookup: "_SegmentLookup | None" = None,
+    segments: Mapping[str, Any] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
 ) -> RenderIR:
     """Build the first render-IR slice from current renderer-faithful emissions.
 
@@ -323,7 +324,7 @@ def build_render_ir(
 
 
 def build_backward_render_ir(
-    trace: "Trace",
+    trace: Trace,
     *,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
@@ -361,7 +362,7 @@ def build_backward_render_ir(
 
 
 def build_combined_render_ir(
-    trace: "Trace",
+    trace: Trace,
     forward_ir: RenderIR,
     *,
     pass_filter: set[int] | None,
@@ -415,7 +416,7 @@ def build_combined_render_ir(
 
 
 def _normalize_backward_nodes(
-    trace: "Trace",
+    trace: Trace,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
 ) -> tuple[tuple[RenderIRNode, ...], dict[int, list[tuple[Any, Any]]]]:
@@ -463,7 +464,7 @@ def _normalize_backward_nodes(
 
 
 def _normalize_backward_edges(
-    trace: "Trace",
+    trace: Trace,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
     visible_by_pass: dict[int, list[tuple[Any, Any]]],
@@ -549,7 +550,7 @@ def _normalized_grad_edge(
 
 
 def _normalize_correspondence_edges(
-    trace: "Trace", pass_filter: set[int] | None
+    trace: Trace, pass_filter: set[int] | None
 ) -> tuple[RenderIREdge, ...]:
     """Normalize visible forward-to-grad-function correspondence edges."""
 
@@ -642,13 +643,13 @@ def _build_forward_edges_from_universe(universe: Any) -> tuple[RenderIREdge, ...
 
 
 def _node_from_unit(
-    trace: "Trace",
-    unit: "NodeUnit",
+    trace: Trace,
+    unit: NodeUnit,
     context: RenderContext,
     universe: Any,
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segment_lookup: "_SegmentLookup",
-    sibling_counts: "Mapping[str, int] | None" = None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    segment_lookup: _SegmentLookup,
+    sibling_counts: Mapping[str, int] | None = None,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
 
@@ -707,13 +708,13 @@ def _node_from_unit(
 
 
 def _resolve_node_decision(
-    trace: "Trace",
-    emission: "RenderedNodeEmission",
+    trace: Trace,
+    emission: RenderedNodeEmission,
     context: RenderContext,
     universe: Any,
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segment_lookup: "_SegmentLookup",
-    sibling_counts: "Mapping[str, int] | None" = None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    segment_lookup: _SegmentLookup,
+    sibling_counts: Mapping[str, int] | None = None,
 ) -> tuple[
     tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
 ]:
@@ -852,7 +853,7 @@ def _projection_reason(
 
 
 def _build_regions(
-    trace: "Trace",
+    trace: Trace,
     nodes: tuple[RenderIRNode, ...],
     edges: tuple[RenderIREdge, ...],
 ) -> tuple[RenderIRRegion, ...]:
@@ -929,7 +930,7 @@ def _region_parent_key(key: str, keys: set[str]) -> str | None:
 
 def finalize_forward_regions(
     render_ir: RenderIR,
-    trace: "Trace",
+    trace: Trace,
     *,
     vis_mode: str,
     module_payloads: dict[str, Any],
@@ -963,8 +964,8 @@ def finalize_forward_regions(
     """
 
     from ._render_flow import _get_max_call_depth
-    from ._render_utils import compute_module_penwidth, make_module_cluster_attrs
     from ._render_leaf import _collapsed_module_rolling_suffix
+    from ._render_utils import compute_module_penwidth, make_module_cluster_attrs
 
     captured_by_occurrence = {edge.occurrence_key: edge for edge in captured_edges}
     edges = tuple(
@@ -1093,7 +1094,7 @@ def _module_depth(key: str) -> int:
 
 
 def _region_module_hierarchy(
-    trace: "Trace", vis_mode: str
+    trace: Trace, vis_mode: str
 ) -> tuple[defaultdict[str, list[str]], list[str]]:
     """Return the module hierarchy used by legacy DOT subgraph emission.
 

@@ -1,16 +1,18 @@
 """Input alias topology and non-tensor tree contracts."""
 
 from __future__ import annotations
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from . import _state
 from ._runnable_state import (
     RunResourceCeiling,
     _guarded_defensive_materialize,
     runnable_tensor_byte_digest,
 )
-from .utils.tensor_utils import touched_bytes_relation
 from .runnable import (
     ContractCheck,
     InputAttestationFingerprint,
@@ -19,8 +21,7 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
+from .utils.tensor_utils import touched_bytes_relation
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

@@ -1,18 +1,18 @@
 """Shared lookup-key validation helpers for ``Trace`` access paths."""
 
 import random
-from typing import TYPE_CHECKING, Union, cast
+from typing import TYPE_CHECKING, cast
 
 from .._errors import InvalidArgumentError
 
 if TYPE_CHECKING:
-    from .trace import Trace
     from .module import Module
+    from .trace import Trace
 
 
 def _give_user_feedback_about_lookup_key(
     self: "Trace",
-    key: Union[int, str],
+    key: int | str,
     mode: str,
 ) -> None:
     """Raise a contextual error for an invalid user lookup key.
@@ -34,8 +34,7 @@ def _give_user_feedback_about_lookup_key(
             f"-{len(self.layer_list)} - {len(self.layer_list) - 1}",
             code="op_lookup_index_out_of_range",
             remedy=(
-                f"pass an index in the range -{len(self.layer_list)} - "
-                f"{len(self.layer_list) - 1}"
+                f"pass an index in the range -{len(self.layer_list)} - {len(self.layer_list) - 1}"
             ),
             key=key,
         )
@@ -93,7 +92,7 @@ def _give_user_feedback_about_lookup_key(
     )
 
 
-def _get_lookup_help_str(self: "Trace", layer_label: Union[int, str], mode: str) -> str:
+def _get_lookup_help_str(self: "Trace", layer_label: int | str, mode: str) -> str:
     """Build the standard help text for failed Trace lookups.
 
     Parameters

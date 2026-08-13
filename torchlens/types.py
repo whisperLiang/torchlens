@@ -5,13 +5,13 @@ from collections.abc import Callable
 import torch
 
 from .capture.outcome import CaptureOutcome, CapturePhase, CaptureStatus, FailureOrigin
-from .data_classes.buffer import Buffer
 from .data_classes.backward_pass import BackwardPass
+from .data_classes.buffer import Buffer
 from .data_classes.func_call_location import FuncCallLocation
 from .data_classes.grad_fn import GradFn
 from .data_classes.grad_fn_call import GradFnCall
-from .data_classes.op import TensorLog
 from .data_classes.module import Module, ModuleCall
+from .data_classes.op import TensorLog
 from .data_classes.param import Param
 from .data_classes.prehook import ModuleInputSnapshot, PreHookEffect, TensorInputObservation
 from .intervention import SaveLevel, SiteTable, SpecCompat, TargetManifestDiff, TensorSliceSpec

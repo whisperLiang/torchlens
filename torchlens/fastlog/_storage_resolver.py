@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
 from .._errors import TorchLensPostfuncError
 from .._state import pause_logging
 from .._training_validation import TrainingModeConfigError
-from ..utils.tensor_utils import safe_copy
-from ..utils.tensor_utils import SaveMode
+from ..utils.tensor_utils import SaveMode, safe_copy
 from .exceptions import InvalidStorageError, PredicateError
 from .types import CaptureSpec, RecordContext, StorageIntent
 
@@ -69,7 +69,7 @@ def _resolve_storage(
     spec: CaptureSpec,
     intent: StorageIntent,
     *,
-    activation_transform: "ActivationPostfunc | None" = None,
+    activation_transform: ActivationPostfunc | None = None,
     save_raw_activations: bool = True,
     ctx: Any | None = None,
     kind: Literal["activation", "grad"] = "activation",

@@ -8,28 +8,35 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from ..._trace_core.relation_views import freeze_trace_relation_views
-from ...capture.outcome import stamp_backend_finalized
 from ... import _state
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.param import ParamAccessor
 from ...data_classes.trace import Trace
+from ...intervention.selectors import BaseSelector
 from ...ir.capture_events import CaptureEvents
 from ...ir.op_record import amend_preview_output_parent_mark
-from ...intervention.selectors import BaseSelector
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
-from .._finalize import attach_function_root_module, attach_object_module_logs
-from .._finalize import finalize_single_pass_trace
+from .._finalize import (
+    attach_function_root_module,
+    attach_object_module_logs,
+    finalize_single_pass_trace,
+)
+from .._options import (
+    TF_EXTRA_KWARG_POLICY,
+    TF_PREVIEW_TRACE_OPTION_POLICY,
+    default_if_missing,
+    is_missing,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
 from .._selective_save import reject_selector_outside_kinds
-from .._options import TF_EXTRA_KWARG_POLICY, TF_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing, is_missing, reject_extra_trace_kwargs
-from .._options import reject_unsupported_trace_options
 from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
 from .modules import TFModuleTree, discover_tf_module_tree, tf_param_logs
 from .op_callback_capture import TFEagerCaptureSession, warm_up_tf_callable
-
 
 TFExecutionMode = Literal["eager", "graph_only"]
 _TF_STATIC_SAVE_SELECTOR_KINDS = frozenset(
@@ -805,7 +812,7 @@ class TFBackend:
             return "graph_only", "loaded SavedModel signatures require FuncGraph capture"
         if self._is_tf_function(callable_obj, tf):
             return "graph_only", "callable is a tf.function or ConcreteFunction"
-        call_dunder = getattr(model, "__call__", None)
+        call_dunder = getattr(model, "__call__", None)  # noqa: B004 - fetches the bound __call__ to inspect IT
         if call_dunder is not None and self._is_tf_function(call_dunder, tf):
             return "graph_only", "__call__ is a tf.function or ConcreteFunction"
         call_attr = getattr(model, "call", None)

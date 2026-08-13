@@ -1,12 +1,15 @@
 """Tensor-origin classification and propagation."""
 
 from __future__ import annotations
+
 import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from ._completeness_types import _WitnessState
 from ._tl import (
@@ -14,11 +17,8 @@ from ._tl import (
 )
 from .buffer_writes import session_validated_buffer_address
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        HOST_ESCAPE_OPERATORS,
         _CAPTURED_STORAGE_PTRS,
         _DISPATCH_TENSOR_ORIGINS,
         _ORIGIN_FLATTEN_DEPTH_LIMIT,
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
         _ORIGIN_UNINIT,
         _ORIGIN_UNKNOWN,
         _STORAGE_REBIND_BARRIER_LABELS,
-        _TensorOriginRegistry,
+        HOST_ESCAPE_OPERATORS,
         _as_strided_result_contained,
         _internal_read_active,
         _internal_read_state,
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         _operator_base_name,
         _raw_storage_ptr_no_observe,
         _record_escape_source_tensor,
+        _TensorOriginRegistry,
     )
 
 __all__ = (
@@ -442,7 +443,7 @@ def _live_deterministic_fill_governs() -> bool:
 
 
 def _register_dispatch_result_origins(
-    state: "_WitnessState",
+    state: _WitnessState,
     func: Any,
     args: tuple[Any, ...],
     kwargs: dict[str, Any] | None,

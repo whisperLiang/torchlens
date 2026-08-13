@@ -419,7 +419,7 @@ def _module_source_metadata(module: object) -> dict[str, Any]:
 
     cls = type(module)
     init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)
+    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
     return {
         "class_source_file": _safe_source_file(cls),
         "class_source_line": _source_line(cls),

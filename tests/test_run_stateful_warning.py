@@ -32,12 +32,14 @@ def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
     captured = tl.trace(model, torch.randn(4, 3))
     before = model.running_mean.detach().clone()
 
-    with pytest.warns(
-        UserWarning,
-        match=r"run\(\) detected training-mode BatchNorm running-stat buffers.*clone the model",
-    ) as observed:
-        with pytest.raises(ValueError, match="fast=True"):
-            captured.run(inputs=torch.randn(4, 3))
+    with (
+        pytest.warns(
+            UserWarning,
+            match=r"run\(\) detected training-mode BatchNorm running-stat buffers.*clone the model",
+        ) as observed,
+        pytest.raises(ValueError, match="fast=True"),
+    ):
+        captured.run(inputs=torch.randn(4, 3))
 
     assert "running_mean, running_var, num_batches_tracked on module '<root>'" in str(
         observed[0].message

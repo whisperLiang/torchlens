@@ -1,17 +1,15 @@
 """Parameter indexes and buffer ownership invariants."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, cast
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _module_claim_address,
         _module_claims,
     )
@@ -63,7 +61,7 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
     )
 
 
-def _param_address_index(ml: "Trace") -> dict[object, object]:
+def _param_address_index(ml: Trace) -> dict[object, object]:
     """Build a one-pass primary/alias address -> Param index.
 
     Replaces a per-lookup linear scan over ``ml.param_logs``. Co-parent
@@ -114,7 +112,7 @@ def _param_address_index(ml: "Trace") -> dict[object, object]:
     return index
 
 
-def _check_buffer_xrefs(ml: "Trace") -> None:
+def _check_buffer_xrefs(ml: Trace) -> None:
     """Check K: buffer layer and Buffer cross-references.
 
     Precondition contract: torch registered buffers are represented by
@@ -154,7 +152,7 @@ def _check_buffer_xrefs(ml: "Trace") -> None:
             _check_buffer_replay_validated_versions(ml, buf, name)
 
 
-def _check_buffer_static_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_static_versions(ml: Trace, buf: object, name: str) -> None:
     """Check static Buffer entity/version structure.
 
     Parameters
@@ -212,7 +210,7 @@ def _check_buffer_static_versions(ml: "Trace", buf: object, name: str) -> None:
         )
 
 
-def _buffer_address_has_module_ancestor(ml: "Trace", address: str) -> bool:
+def _buffer_address_has_module_ancestor(ml: Trace, address: str) -> bool:
     """Return whether ``address`` or an ancestor is in the module accessor.
 
     Parameters
@@ -236,7 +234,7 @@ def _buffer_address_has_module_ancestor(ml: "Trace", address: str) -> bool:
     return found_ancestor or "" in ml.modules
 
 
-def _check_buffer_semantic_ownership(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_semantic_ownership(ml: Trace, buf: object, name: str) -> None:
     """Check buffer source versions are owned by their module or a consumer.
 
     Parameters
@@ -316,7 +314,7 @@ def _module_addresses_for_buffer_version(version: object) -> set[str]:
     return claims
 
 
-def _active_buffer_consumer_module_addresses(ml: "Trace", version: object) -> set[str]:
+def _active_buffer_consumer_module_addresses(ml: Trace, version: object) -> set[str]:
     """Return module addresses for real active consumers of a buffer version.
 
     Parameters
@@ -348,7 +346,7 @@ def _active_buffer_consumer_module_addresses(ml: "Trace", version: object) -> se
     return addresses
 
 
-def _check_buffer_write_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_write_versions(ml: Trace, buf: object, name: str) -> None:
     """Check write-version buffer metadata domains and resolvable populated fields.
 
     Parameters
@@ -413,7 +411,7 @@ def _check_buffer_write_versions(ml: "Trace", buf: object, name: str) -> None:
         )
 
 
-def _resolve_trace_label(ml: "Trace", label: str) -> str | None:
+def _resolve_trace_label(ml: Trace, label: str) -> str | None:
     """Resolve a final or raw layer label to a known trace label.
 
     Parameters
@@ -456,7 +454,7 @@ def _resolve_trace_label(ml: "Trace", label: str) -> str | None:
     return None
 
 
-def _check_buffer_replay_validated_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -> None:
     """Check explicit successful buffer replay claims have identity-replay evidence.
 
     Parameters

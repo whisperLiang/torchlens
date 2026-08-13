@@ -10,7 +10,8 @@ draw, and the opt-in escape-detector diagnostic also triggers the rescue.
 from __future__ import annotations
 
 import types
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 import torch

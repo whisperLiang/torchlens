@@ -24,10 +24,10 @@ are ordinary Python objects that the real classifier inspects.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import os
 import sys
 import types
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -468,7 +468,7 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
 def test_refusing_kinds_is_the_single_source_of_truth() -> None:
     """Every active distributed execution mode that omits work refuses."""
 
-    assert REFUSING_KINDS == frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"})
+    assert frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"}) == REFUSING_KINDS
 
 
 def test_site_list_is_bounded_with_explicit_remainder() -> None:

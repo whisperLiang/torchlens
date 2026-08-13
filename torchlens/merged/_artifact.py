@@ -19,11 +19,11 @@ descriptor input list (which can only widen them).
 
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import json
-from pathlib import Path
 import shutil
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .._io import _json
@@ -85,10 +85,14 @@ def tree_hash(root: Path) -> str:
 
 
 def _member_dirname(rank: int) -> str:
+    """Canonical per-member directory name for one rank."""
+
     return f"rank_{rank:04d}.tlspec"
 
 
 def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
+    """Build the typed tamper refusal (integrity failure, never a presence gap)."""
+
     return MergedArtifactError(
         f"Merged artifact integrity failure: {detail}",
         code=MergedErrorCode.MERGED_DESCRIPTOR_TAMPER,
@@ -97,6 +101,8 @@ def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
 
 
 def _schema_refusal(detail: str, **payload: Any) -> MergedArtifactError:
+    """Build the typed merged-artifact schema refusal."""
+
     return MergedArtifactError(
         f"Merged artifact schema refusal: {detail}",
         code=MergedErrorCode.MERGED_SCHEMA_INVALID,
@@ -183,9 +189,7 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
         "tlspec_version": MERGED_TLSPEC_VERSION,
         "bundle_format": MERGED_BUNDLE_FORMAT,
         "descriptor_sha256": hashlib.sha256(descriptor_bytes).hexdigest(),
-        "members": {
-            str(entry["rank"]): entry["tree_sha256"] for entry in members_payload
-        },
+        "members": {str(entry["rank"]): entry["tree_sha256"] for entry in members_payload},
         "torchlens_version": str(torchlens_version),
         "torch_version": str(torch.__version__),
         "python_version": platform_module.python_version(),
@@ -249,8 +253,7 @@ def load_merged(path: str | Path) -> MergedTrace:
         raise _schema_refusal("root manifest is not a JSON object")
     if manifest.get("bundle_format") != MERGED_BUNDLE_FORMAT:
         raise _schema_refusal(
-            f"bundle_format {manifest.get('bundle_format')!r} is not "
-            f"{MERGED_BUNDLE_FORMAT!r}"
+            f"bundle_format {manifest.get('bundle_format')!r} is not {MERGED_BUNDLE_FORMAT!r}"
         )
     if manifest.get("tlspec_version") != MERGED_TLSPEC_VERSION:
         raise _schema_refusal(
@@ -299,9 +302,7 @@ def load_merged(path: str | Path) -> MergedTrace:
         recorded = str(entry["tree_sha256"])
         manifest_recorded = manifest_members.get(str(rank))
         if manifest_recorded != recorded:
-            raise _tamper(
-                f"rank {rank} tree hash disagrees between descriptor and manifest"
-            )
+            raise _tamper(f"rank {rank} tree hash disagrees between descriptor and manifest")
         actual = tree_hash(member_path)
         if actual != recorded:
             raise _tamper(f"rank {rank} core bytes do not match the recorded tree hash")
@@ -318,9 +319,7 @@ def load_merged(path: str | Path) -> MergedTrace:
             trace = load_bundle(member_path)
             evidence[rank] = extract_rank_evidence(trace, str(member_path))
         except Exception as exc:
-            load_degradations.append(
-                f"rank {rank} core no longer parses on this runtime: {exc}"
-            )
+            load_degradations.append(f"rank {rank} core no longer parses on this runtime: {exc}")
             continue
         handles[rank] = _RankHandle(rank, trace=trace, path=str(member_path))
 

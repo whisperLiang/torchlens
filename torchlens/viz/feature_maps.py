@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import tempfile
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
-import tempfile
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from .node_plots import _apply_colormap, _normalize_finite
 from ..visualization.node_spec import NodeSpec, NodeSpecFn
+from .node_plots import _apply_colormap, _normalize_finite
 
 FeatureMapEvolution: TypeAlias = "OrderedDict[str, torch.Tensor]"
 FeatureMapChannels: TypeAlias = Sequence[int] | Literal["top"] | None

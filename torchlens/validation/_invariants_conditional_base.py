@@ -1,17 +1,15 @@
 """Recurrence and foundational conditional invariants."""
 
 from __future__ import annotations
+
 from collections import defaultdict
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _check_conditional_arm_child_pass_union,
         _check_conditional_arm_edges_match_graph,
         _check_conditional_bool_classification,
@@ -69,7 +67,7 @@ def _dtype_values_match(left: object, right: object) -> bool:
     return left_str == right_str
 
 
-def _check_recurrence_invariants(ml: "Trace") -> None:
+def _check_recurrence_invariants(ml: Trace) -> None:
     """Check E: recurrence / loop invariants.
 
     Validates:
@@ -125,7 +123,7 @@ def _check_recurrence_invariants(ml: "Trace") -> None:
             )
 
 
-def _check_branching_invariants(ml: "Trace") -> None:
+def _check_branching_invariants(ml: Trace) -> None:
     """Check F: is_branching matches whether any layer has >1 child."""
     name = "branching_invariants"
     any_branching = any(len(lpl.children) > 1 for lpl in ml.layer_list)
@@ -288,7 +286,7 @@ def _expected_layer_log_child_views(
 
 
 def _expected_layer_log_child_union(
-    layer_log: "Layer",
+    layer_log: Layer,
 ) -> dict[int, dict[str, list[str]]]:
     """Build the expected aggregate ``conditional_arm_children`` for a ``Layer``.
 
@@ -314,7 +312,7 @@ def _expected_layer_log_child_union(
     return expected_children_by_cond
 
 
-def _valid_conditional_child_labels(ml: "Trace") -> set[str]:
+def _valid_conditional_child_labels(ml: Trace) -> set[str]:
     """Return the set of valid labels for conditional child references.
 
     Parameters
@@ -331,7 +329,7 @@ def _valid_conditional_child_labels(ml: "Trace") -> set[str]:
     return set(ml.layer_labels) | set(ml.layer_logs)
 
 
-def _check_conditional_invariants(ml: "Trace") -> None:
+def _check_conditional_invariants(ml: Trace) -> None:
     """Check F2 conditional metadata invariants.
 
     Parameters
@@ -371,7 +369,7 @@ def _check_conditional_invariants(ml: "Trace") -> None:
 
 
 def _check_conditional_arm_entry_child_symmetry(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:
@@ -425,7 +423,7 @@ def _check_conditional_arm_entry_child_symmetry(
 
 
 def _check_conditional_derived_child_views(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check derived conditional child views match primary structures.

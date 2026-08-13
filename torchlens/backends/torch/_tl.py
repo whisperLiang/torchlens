@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass, replace as dataclass_replace
-from typing import Any, Iterable, List, Optional, cast
+from typing import Any, cast
 
 from torch import Tensor, nn
 from torch.utils.weak import WeakIdKeyDictionary
@@ -70,13 +71,13 @@ class TorchLensMeta:
 class TensorMeta(TorchLensMeta):
     """Metadata attached to non-Parameter tensors during a capture session."""
 
-    label_raw: Optional[str] = None
-    address: Optional[str] = None
-    buffer_source: Optional[str] = None
+    label_raw: str | None = None
+    address: str | None = None
+    buffer_source: str | None = None
     # r83 C1: monotonic token of the capture session that issued ``label_raw``
     # (and, after promotion, ``buffer_source``). The per-object anchor that
     # makes label provenance current-session; see the label-session block below.
-    label_session: Optional[int] = None
+    label_session: int | None = None
     # r85: STRONG reference to the ``UntypedStorage`` the object held when its
     # label was last stamped by ``set_tensor_label`` -- the label rung's
     # storage-integrity pin, the activation/label twin of r81's buffer-address
@@ -92,7 +93,7 @@ class TensorMeta(TorchLensMeta):
     # genuinely rebound (adversarial) object leaves its superseded storage pinned
     # for the object's lifetime, which is what makes the ``data_ptr`` comparison a
     # true identity proof rather than a recyclable-pointer heuristic (r81 S2).
-    label_storage: Optional[Any] = None
+    label_storage: Any | None = None
     # Capture-local provenance for tensors returned by ``Tensor.data`` and
     # storage-sharing aliases/views derived from them. The getter is represented
     # as a canonical detach op, but a later write through this alias family must
@@ -104,18 +105,18 @@ class TensorMeta(TorchLensMeta):
 class ParamMeta(TorchLensMeta):
     """Metadata attached to parameters during a capture session."""
 
-    param_barcode: Optional[str] = None
-    param_address: Optional[str] = None
+    param_barcode: str | None = None
+    param_address: str | None = None
     call_index: int = 0
-    requires_grad_before_capture: Optional[bool] = None
+    requires_grad_before_capture: bool | None = None
 
 
 @dataclass
 class ModuleMeta(TorchLensMeta):
     """Permanent metadata attached to modules after model preparation."""
 
-    address: Optional[str] = None
-    module_type: Optional[str] = None
+    address: str | None = None
+    module_type: str | None = None
 
 
 @dataclass
@@ -153,15 +154,15 @@ class TorchLensTLCollisionError(AttributeError):
 # --------------------------------------------------------------------------- #
 # Values are ModuleMeta / ParamMeta respectively (WeakIdKeyDictionary is not
 # typing-subscriptable, so the value type is documented rather than annotated).
-_MODULE_REGISTRY: "WeakIdKeyDictionary" = WeakIdKeyDictionary()
-_PARAM_REGISTRY: "WeakIdKeyDictionary" = WeakIdKeyDictionary()
+_MODULE_REGISTRY: WeakIdKeyDictionary = WeakIdKeyDictionary()
+_PARAM_REGISTRY: WeakIdKeyDictionary = WeakIdKeyDictionary()
 
 
 # Retained activations are TorchLens-owned tensors, but this diagnostic state stays in an
 # identity-keyed weak registry instead of their ``TensorMeta``. Capture labels are session-scoped
 # and retired between traces; the guidance must remain available for exactly as long as the
 # retained payload itself remains alive.
-_DETACHED_SAVED_ACTIVATIONS: "WeakIdKeyDictionary" = WeakIdKeyDictionary()
+_DETACHED_SAVED_ACTIVATIONS: WeakIdKeyDictionary = WeakIdKeyDictionary()
 
 # This is intentionally a small allowlist. Each operation preserves an autograd path from a
 # floating/complex tensor input to its tensor output when that input requires grad. A false
@@ -340,7 +341,7 @@ def detached_saved_activation_label(tensor: Tensor) -> str | None:
         Retained activation label for an identity match, otherwise ``None``.
     """
 
-    return cast(Optional[str], _DETACHED_SAVED_ACTIVATIONS.get(tensor))
+    return cast(str | None, _DETACHED_SAVED_ACTIVATIONS.get(tensor))
 
 
 # --------------------------------------------------------------------------- #
@@ -408,18 +409,18 @@ class _LabelSession:
         # Weak inventory of every object stamped this session, for the
         # inventory-driven cleanup (r83 C1 root A). One entry per OBJECT, not
         # per stamp: relabeling an in-place receiver does not re-register.
-        self.stamped: "WeakIdKeyDictionary" = WeakIdKeyDictionary()
+        self.stamped: WeakIdKeyDictionary = WeakIdKeyDictionary()
         # Weak per-storage-base-address index of the stamped inventory, so an
         # in-place op can resolve OTHER live labeled tensors sharing its
         # target's storage (view-mediated mutation provenance -- W3 F1) in
         # O(aliases) instead of scanning every stamped object. Keyed by the
         # stamp-time ``UntypedStorage.data_ptr()``; consumers re-validate the
         # LIVE storage before acting, so a stale (rebound/dead) entry is inert.
-        self.by_storage_ptr: dict[int, "WeakIdKeyDictionary"] = {}
+        self.by_storage_ptr: dict[int, WeakIdKeyDictionary] = {}
 
 
-_ACTIVE_LABEL_SESSION: Optional[_LabelSession] = None
-_RETIRED_LABEL_SESSION: Optional[_LabelSession] = None
+_ACTIVE_LABEL_SESSION: _LabelSession | None = None
+_RETIRED_LABEL_SESSION: _LabelSession | None = None
 
 
 def begin_label_session() -> int:
@@ -499,7 +500,7 @@ def sweep_retired_label_stamps() -> int:
     return cleared
 
 
-def active_label_session_token() -> Optional[int]:
+def active_label_session_token() -> int | None:
     """Return the active label session token, if a capture is in progress.
 
     Returns
@@ -512,7 +513,7 @@ def active_label_session_token() -> Optional[int]:
     return None if session is None else session.token
 
 
-def session_labeled_tensors() -> List[Any]:
+def session_labeled_tensors() -> list[Any]:
     """Return every still-live tensor stamped with a label this session.
 
     The registration-driven inventory that :func:`sweep_retired_label_stamps`
@@ -532,7 +533,7 @@ def session_labeled_tensors() -> List[Any]:
     return list(session.stamped.keys())
 
 
-def session_storage_alias_candidates(storage_ptr: int) -> List[Any]:
+def session_storage_alias_candidates(storage_ptr: int) -> list[Any]:
     """Return live tensors this session stamped whose stamp-time storage base matches.
 
     Parameters
@@ -581,7 +582,7 @@ def _session_gate_blocks(meta: TensorMeta) -> bool:
     return session is not None and meta.label_session != session.token
 
 
-def session_meta_is_anchored(meta: Optional[TensorMeta]) -> bool:
+def session_meta_is_anchored(meta: TensorMeta | None) -> bool:
     """Return whether a tensor's label metadata was issued by the ACTIVE session.
 
     The belt, in its cheapest form: the anchor is an integer stamped onto the
@@ -609,7 +610,7 @@ def session_meta_is_anchored(meta: Optional[TensorMeta]) -> bool:
     return meta.label_session == session.token
 
 
-def _pinned_storage(t: Any) -> Optional[Any]:
+def _pinned_storage(t: Any) -> Any | None:
     """Return ``t``'s ``UntypedStorage`` for pinning/validation, else ``None``.
 
     Read under ``pause_logging`` because ``untyped_storage`` is a WITNESSED
@@ -627,7 +628,7 @@ def _pinned_storage(t: Any) -> Optional[Any]:
         return None
 
 
-def session_label_storage_intact(meta: Optional[TensorMeta], tensor: Any) -> bool:
+def session_label_storage_intact(meta: TensorMeta | None, tensor: Any) -> bool:
     """Return whether a labeled object's LIVE storage is still its stamp-time storage.
 
     The STORAGE-INTEGRITY axis of label/activation provenance (r85), the twin of
@@ -717,7 +718,7 @@ def _session_storage_gate_blocks(meta: TensorMeta, t: Any) -> bool:
     return not session_label_storage_intact(meta, t)
 
 
-def get(obj: Any) -> Optional[TorchLensMeta]:
+def get(obj: Any) -> TorchLensMeta | None:
     """Return TorchLens metadata attached to an object.
 
     Parameters
@@ -796,7 +797,7 @@ def clear_meta(obj: Any) -> None:
         _PARAM_REGISTRY.pop(obj, None)
 
 
-def get_tensor_meta(t: Any) -> Optional[TensorMeta]:
+def get_tensor_meta(t: Any) -> TensorMeta | None:
     """Return tensor metadata, raising on foreign or wrong-kind metadata.
 
     Parameters
@@ -908,7 +909,7 @@ def set_tensor_label(t: Any, label: str) -> None:
                 pass
 
 
-def get_tensor_label(t: Any) -> Optional[str]:
+def get_tensor_label(t: Any) -> str | None:
     """Return a tensor's raw capture label.
 
     Parameters
@@ -980,7 +981,7 @@ def is_tensor_data_alias(t: Any) -> bool:
     return bool(meta is not None and meta.data_alias and get_tensor_label(t) is not None)
 
 
-def raw_tensor_label(t: Any) -> Optional[str]:
+def raw_tensor_label(t: Any) -> str | None:
     """Return a tensor's raw capture label WITHOUT the session-anchor gate.
 
     For the few callers that must observe a stamp irrespective of which
@@ -1001,7 +1002,7 @@ def raw_tensor_label(t: Any) -> Optional[str]:
     return None if meta is None else meta.label_raw
 
 
-def get_live_tensor_label(t: Any, live_labels: Iterable[str]) -> Optional[str]:
+def get_live_tensor_label(t: Any, live_labels: Iterable[str]) -> str | None:
     """Return a tensor label only when it belongs to the active trace.
 
     Parameters
@@ -1035,7 +1036,7 @@ def get_live_tensor_label(t: Any, live_labels: Iterable[str]) -> Optional[str]:
     return None
 
 
-def get_live_label_list(tensor_list: Iterable[Any], live_labels: Iterable[str]) -> List[str]:
+def get_live_label_list(tensor_list: Iterable[Any], live_labels: Iterable[str]) -> list[str]:
     """Return active-trace labels for tensors, clearing stale labels.
 
     Parameters
@@ -1051,7 +1052,7 @@ def get_live_label_list(tensor_list: Iterable[Any], live_labels: Iterable[str]) 
         Labels that resolve in the active trace live index.
     """
 
-    labels: List[str] = []
+    labels: list[str] = []
     for tensor in tensor_list:
         label = get_live_tensor_label(tensor, live_labels)
         if label is not None:
@@ -1101,7 +1102,7 @@ def set_buffer_address(t: Any, address: str) -> None:
     _ensure_tensor_meta(t).address = address
 
 
-def get_buffer_address(t: Any) -> Optional[str]:
+def get_buffer_address(t: Any) -> str | None:
     """Return a tensor's buffer address.
 
     Parameters
@@ -1118,7 +1119,7 @@ def get_buffer_address(t: Any) -> Optional[str]:
     return None if meta is None else meta.address
 
 
-def get_label_list(tensors: Iterable[Any]) -> List[str]:
+def get_label_list(tensors: Iterable[Any]) -> list[str]:
     """Return sparse raw labels from a tensor iterable.
 
     Parameters
@@ -1143,7 +1144,7 @@ def get_label_list(tensors: Iterable[Any]) -> List[str]:
     a foreign tensor holding a colliding label from an earlier capture must not
     become a parent on this path either.
     """
-    out: List[str] = []
+    out: list[str] = []
     for t in tensors:
         meta = getattr(t, "_tl", None)
         if meta is None:
@@ -1160,7 +1161,7 @@ def get_label_list(tensors: Iterable[Any]) -> List[str]:
     return out
 
 
-def get_param_meta(p: Any) -> Optional[ParamMeta]:
+def get_param_meta(p: Any) -> ParamMeta | None:
     """Return parameter metadata, raising on foreign or wrong-kind metadata.
 
     Parameters
@@ -1248,7 +1249,7 @@ def restore_param_requires_grad(p: Any) -> None:
         p.requires_grad = meta.requires_grad_before_capture
 
 
-def get_module_meta(m: Any) -> Optional[ModuleMeta]:
+def get_module_meta(m: Any) -> ModuleMeta | None:
     """Return module metadata, raising on foreign or wrong-kind metadata.
 
     Parameters
@@ -1326,7 +1327,7 @@ def _ensure_decoration_tag(fn: Any) -> DecorationTag:
     return meta
 
 
-def _get_decoration_tag(fn: Any) -> Optional[DecorationTag]:
+def _get_decoration_tag(fn: Any) -> DecorationTag | None:
     """Return callable decoration metadata if present.
 
     Parameters

@@ -48,7 +48,7 @@ from torchlens.runnable import (
 )
 from torchlens.utils import rng as rng_utils
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _capture(model: nn.Module, x: Any, *, seed: int = 1) -> tl.Trace:

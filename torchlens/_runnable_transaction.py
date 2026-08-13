@@ -1,10 +1,13 @@
 """Loaded-sparse transaction execution and allocation checks."""
 
 from __future__ import annotations
+
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from . import _state
 from ._runnable_state import (
     PreparedRunnableState,
@@ -16,29 +19,27 @@ from .errors import (
     RuntimeSignatureDriftError,
 )
 from .intervention.replay import _CallConeNode, _walk_call_cone
-from .utils.rng import (
-    restore_host_rng,
-    snapshot_host_rng,
-)
 from .runnable import (
     ActivationPayloadLayerDescriptor,
     ContractCheck,
-    InputAttestationFingerprint,
     DivergencePolicy,
+    InputAttestationFingerprint,
     NumericAttestationStatus,
     PathFaithfulness,
     ReadinessReport,
     ReadinessStatus,
-    RunProvider,
-    RunResult,
     RunnableCallDescriptor,
     RunnableErrorCode,
+    RunProvider,
+    RunResult,
     SparseRunDescriptor,
     StateSource,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
+from .utils.rng import (
+    restore_host_rng,
+    snapshot_host_rng,
+)
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

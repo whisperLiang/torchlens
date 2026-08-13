@@ -16,29 +16,21 @@ import time
 import warnings
 import weakref
 from collections import OrderedDict, deque
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Iterator, Literal, cast
+from typing import Any, Literal, cast
 
 import torch
 
 from ... import _state
-from ...utils._torch_compat import (
-    HAS_SAVED_TENSORS_HOOKS_PATCHABLE,
-    get_accumulate_grad_class,
-)
-from ...utils._torch_symbols import torch_attr
-
 from ..._deprecations import MISSING, MissingType
-from ...quantities import Bytes, Duration
 from ..._state import pause_logging
+from ...data_classes.backward_pass import BackwardPass
 from ...data_classes.func_call_location import FuncCallLocation
-from ...data_classes.op import _dtype_or_none, _memory_or_none, _shape_or_none
 from ...data_classes.grad_fn import GradFn
 from ...data_classes.grad_fn_call import GradFnCall
-from ...data_classes.backward_pass import BackwardPass
+from ...data_classes.op import _dtype_or_none, _memory_or_none, _shape_or_none
 from ...errors import ConfigurationError
-from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ...ir.events import (
     BackwardCoverageGap,
     BackwardPassEnd,
@@ -48,12 +40,19 @@ from ...ir.events import (
     OpGradObserved,
     ParamGradObserved,
 )
+from ...quantities import Bytes, Duration
+from ...utils._torch_compat import (
+    HAS_SAVED_TENSORS_HOOKS_PATCHABLE,
+    get_accumulate_grad_class,
+)
+from ...utils._torch_symbols import torch_attr
+from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ._tl import detached_saved_activation_label, get_tensor_label
+from .escape_detection import expected_original_call
 from .tensor_tracking import (
     _ensure_backward_event_stream,
     _forward_op_count_at_backward_trigger,
 )
-from .escape_detection import expected_original_call
 
 _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
 _ORIGINAL_AUTOGRAD_BACKWARD: Callable[..., Any] | None = None
@@ -1133,7 +1132,7 @@ class _BackwardFoldState:
     in O(tail) instead of re-reading every backward event ever emitted.
     """
 
-    discovered: "OrderedDict[int, GradFnDiscovered]" = field(default_factory=OrderedDict)
+    discovered: OrderedDict[int, GradFnDiscovered] = field(default_factory=OrderedDict)
     latest_topology: dict[int, tuple[int, ...]] = field(default_factory=dict)
     starts: dict[int, BackwardPassStart] = field(default_factory=dict)
     ends: dict[int, BackwardPassEnd] = field(default_factory=dict)
@@ -1261,9 +1260,7 @@ def _materialize_backward_projections(trace: Any) -> None:
         trace.__dict__.pop("_tl_materializing_backward_projection", None)
 
 
-def _bind_backward_epoch(
-    trace: Any, *, full_rebuild: bool, revision: Any, watermark: Any
-) -> None:
+def _bind_backward_epoch(trace: Any, *, full_rebuild: bool, revision: Any, watermark: Any) -> None:
     """Bind the projected backward records to the core's backward epoch (M9).
 
     Runs AFTER a successful projection and BEFORE the trace-side stamp
@@ -1321,12 +1318,8 @@ def _materialize_backward_projections_impl(
     pass_index_base = int(getattr(stream, "pass_index_base", 0) or 0)
     state = _BackwardFoldState()
     if pass_index_base:
-        state.total_gradient_memory = int(
-            getattr(stream, "base_total_gradient_memory", 0) or 0
-        )
-        state.total_backward_memory = int(
-            getattr(stream, "base_total_backward_memory", 0) or 0
-        )
+        state.total_gradient_memory = int(getattr(stream, "base_total_gradient_memory", 0) or 0)
+        state.total_backward_memory = int(getattr(stream, "base_total_backward_memory", 0) or 0)
         state.saved_grad_labels = set(getattr(stream, "base_saved_grad_labels", ()) or ())
         # Pre-base passes are already materialized; marking them built keeps
         # ``num_backward_passes`` honest and stops any later fold from ever
@@ -1375,7 +1368,7 @@ def _materialize_backward_projections_impl(
     # object id IS rediscovered here rebuilds fresh from the stream. Label and
     # ordinal counters continue after the preserved records so merged labels
     # stay unique.
-    preserved_grad_fn_logs: "OrderedDict[int, GradFn]" = OrderedDict()
+    preserved_grad_fn_logs: OrderedDict[int, GradFn] = OrderedDict()
     prior_grad_fn_logs: dict[int, GradFn] = {}
     if pass_index_base:
         prior_grad_fn_logs = dict(getattr(trace, "grad_fn_logs", {}) or {})
@@ -1476,7 +1469,7 @@ def _materialize_backward_projections_impl(
             grad_fn_record.differentiates = object_to_label.get(grad_fn_record.creator_object_id)
 
     if preserved_grad_fn_logs:
-        merged_grad_fn_logs: "OrderedDict[int, GradFn]" = OrderedDict(preserved_grad_fn_logs)
+        merged_grad_fn_logs: OrderedDict[int, GradFn] = OrderedDict(preserved_grad_fn_logs)
         merged_grad_fn_logs.update(grad_fn_logs)
         grad_fn_logs = merged_grad_fn_logs
     trace.grad_fn_logs = grad_fn_logs
@@ -1496,11 +1489,7 @@ def _materialize_backward_projections_impl(
             op_records = op._slot("_grad_records") or []
             op._internal_set(
                 "_grad_records",
-                [
-                    record
-                    for record in op_records
-                    if record.backward_pass_index <= pass_index_base
-                ],
+                [record for record in op_records if record.backward_pass_index <= pass_index_base],
             )
         else:
             op._clear_gradient_records()
@@ -1549,9 +1538,7 @@ def _materialize_backward_projections_impl(
     trace._backward_projection_fold_state = state
 
 
-def _fold_backward_projection_tail(
-    trace: Any, state: _BackwardFoldState, tail: list[Any]
-) -> None:
+def _fold_backward_projection_tail(trace: Any, state: _BackwardFoldState, tail: list[Any]) -> None:
     """Fold a clean appended event tail into the existing projections.
 
     Only called after ``_backward_tail_is_foldable`` proved the tail contains
@@ -1599,7 +1586,7 @@ def _fold_backward_projection_tail(
 def _fold_fired_events(
     trace: Any,
     state: _BackwardFoldState,
-    fired_events: list["GradFnFired"],
+    fired_events: list[GradFnFired],
     pass_to_calls: dict[int, list[GradFnCall]],
 ) -> None:
     """Fold grad-fn fire events into ``GradFn.calls`` and per-pass call lists."""
@@ -1630,7 +1617,7 @@ def _fold_fired_events(
 def _fold_op_grad_events(
     trace: Any,
     state: _BackwardFoldState,
-    op_grad_events: list["OpGradObserved"],
+    op_grad_events: list[OpGradObserved],
 ) -> None:
     """Fold op-gradient events into Op records and cumulative totals."""
 
@@ -1685,7 +1672,7 @@ def _fold_op_grad_events(
 
 def _fold_param_grad_events(
     trace: Any,
-    param_grad_events: list["ParamGradObserved"],
+    param_grad_events: list[ParamGradObserved],
 ) -> None:
     """Fold parameter-gradient events into per-Param accumulating records.
 
@@ -1719,7 +1706,7 @@ def _build_backward_pass_records(
     state: _BackwardFoldState,
     pass_indices: list[int],
     pass_to_calls: dict[int, list[GradFnCall]],
-    backward_pass_logs: "OrderedDict[int, BackwardPass]",
+    backward_pass_logs: OrderedDict[int, BackwardPass],
 ) -> None:
     """Build BackwardPass records for ``pass_indices`` into ``backward_pass_logs``."""
 
@@ -1782,8 +1769,7 @@ def _refresh_backward_pass_counters(trace: Any, state: _BackwardFoldState) -> No
     # ``_backward_roots_by_pass`` is session-only; a detached stream carries
     # the pre-detach root ids so preserved passes keep their roots listed.
     base_root_ids = tuple(
-        getattr(getattr(trace, "_capture_events", None), "base_root_grad_fn_object_ids", ())
-        or ()
+        getattr(getattr(trace, "_capture_events", None), "base_root_grad_fn_object_ids", ()) or ()
     )
     trace.backward_root_grad_fn_object_ids = [
         *base_root_ids,
@@ -2672,8 +2658,8 @@ def log_recording_backward(
 ) -> Any:
     """Run backward while capturing gradients for a fastlog ``Recording``."""
 
-    from ...fastlog.exceptions import InvalidStorageError, RecorderStateError
     from ...capture.projections import sync_recording_grad_records_from_sidecar
+    from ...fastlog.exceptions import InvalidStorageError, RecorderStateError
 
     recording_state = getattr(recording, "_recording_state", None)
     if recording_state is None:
@@ -3281,8 +3267,8 @@ def _finalize_grad_streaming(trace: Any) -> None:
         return
 
     from ...postprocess.finalization import (
-        _evict_streamed_outs,
         _evict_streamed_grads,
+        _evict_streamed_outs,
         _finalize_streamed_bundle,
     )
 
@@ -3364,7 +3350,7 @@ class RecordingBackward:
         self._wrapped_backward: Callable[..., Any] | None = None
         self._warned_unmatched_backward = False
 
-    def __enter__(self) -> "RecordingBackward":
+    def __enter__(self) -> RecordingBackward:
         """Patch ``torch.Tensor.backward`` and return this context object."""
         _ensure_layer_grad_hooks(self.trace)
         self._original_backward = torch.Tensor.backward

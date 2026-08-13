@@ -32,7 +32,8 @@ replacement, and a first question asked after the write are all seen normally.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Callable, Iterator, NamedTuple
+from collections.abc import Callable, Iterator
+from typing import Any, NamedTuple
 
 import torch
 
@@ -52,7 +53,7 @@ class _ScanMemo(NamedTuple):
 
 # Keyed by log object so a memo never keeps a Trace alive, and holding only
 # weakrefs to the examined tensors so it never keeps an activation alive either.
-_MEMOS: "weakref.WeakKeyDictionary[Any, dict[str, _ScanMemo]]" = weakref.WeakKeyDictionary()
+_MEMOS: weakref.WeakKeyDictionary[Any, dict[str, _ScanMemo]] = weakref.WeakKeyDictionary()
 
 
 def _trace_out(layer: Any) -> Any:
@@ -457,9 +458,7 @@ def coverage_gap_note(log: Any, *, kind: str = "saved") -> str:
     if not uncheckable:
         gaps = []
     if disk_backed:
-        gaps.append(
-            f"{disk_backed} disk-backed payload(s) were not materialized by reporting"
-        )
+        gaps.append(f"{disk_backed} disk-backed payload(s) were not materialized by reporting")
     if unsaved:
         gaps.insert(0, f"{unsaved} op(s) retained no payload")
     return f" ({'; '.join(gaps)}, so they could not be examined)"

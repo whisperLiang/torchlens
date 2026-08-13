@@ -1,32 +1,33 @@
 """Path-faithfulness and state comparison helpers."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
+
 from ._runnable_state import (
     PreparedRunnableState,
     runnable_tensor_byte_digest,
 )
 from .runnable import (
+    NONDETERMINISTIC_SOURCE_VOCABULARY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     ContractCheck,
     InputAttestationFingerprint,
-    NONDETERMINISTIC_SOURCE_VOCABULARY,
     NumericAttestationStatus,
     PathFaithfulness,
     ReadinessReport,
-    RunReport,
     RunnableDiagnostic,
     RunnableErrorCode,
+    RunReport,
     SparseRunDescriptor,
     StateSource,
     WitnessCompleteness,
     derived_witness_completeness,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

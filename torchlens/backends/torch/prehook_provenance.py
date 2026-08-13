@@ -7,11 +7,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from torch import nn
 import torch.nn.modules.module as torch_module
+from torch import nn
 
 from ... import _state
 from ...data_classes.func_call_location import FuncCallLocation
@@ -100,7 +100,7 @@ class _InstanceAttributeReplacement:
 class PreHookProvenanceLedger:
     """Strong session-only ledger for all reversible interposition."""
 
-    trace: "Trace"
+    trace: Trace
     model: nn.Module
     modules: tuple[nn.Module, ...]
     prepared_ids: frozenset[int]
@@ -124,7 +124,7 @@ class PreHookProvenanceLedger:
 
 
 def install_prehook_provenance(
-    trace: "Trace",
+    trace: Trace,
     model: nn.Module,
     *,
     forward_hook_wrapper_factory: Callable[[nn.Module, Callable[..., Any]], Callable[..., Any]]
@@ -182,7 +182,7 @@ def install_prehook_provenance(
     return ledger
 
 
-def rollback_prehook_provenance(trace: "Trace") -> None:
+def rollback_prehook_provenance(trace: Trace) -> None:
     """Roll back all TorchLens pre-hook interposition by identity three-way merge.
 
     Parameters
@@ -399,7 +399,7 @@ def _refresh_observers(ledger: PreHookProvenanceLedger) -> None:
             _ensure_observer(ledger, module)
 
 
-def refresh_registration_bypasses(trace: "Trace", module: nn.Module | None = None) -> None:
+def refresh_registration_bypasses(trace: Trace, module: nn.Module | None = None) -> None:
     """Scan for private/pre-bound registration bypasses and downgrade attribution.
 
     Parameters
@@ -535,7 +535,7 @@ def _ensure_root_forward_binder(ledger: PreHookProvenanceLedger) -> None:
 
 
 def bind_invocation(
-    trace: "Trace",
+    trace: Trace,
     module: nn.Module,
     address: str,
     call_index: int,
@@ -905,7 +905,7 @@ def _snapshot_state(
     kwargs: dict[str, Any],
     observation: _StateObservation,
     *,
-    trace: "Trace | None" = None,
+    trace: Trace | None = None,
     reuse_source_payload: bool = False,
 ) -> ModuleInputSnapshot:
     """Create one truthful detached snapshot, deduplicating tensor aliases."""
@@ -931,7 +931,7 @@ def _snapshot_state(
                     payload_origins[tensor_id] = "immutable_producer_snapshot"
                     return payload
             try:
-                copied = value.detach().clone()  # noqa: detach - provenance snapshot copy
+                copied = value.detach().clone()  # detach-ok: provenance snapshot copy
             except Exception:
                 copied = None
                 copy_failures.add(tensor_id)

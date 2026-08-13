@@ -2,8 +2,11 @@
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ... import _state as _st
+from ...data_classes.internal_types import FuncExecutionContext
 from ._tl import (
     get_tensor_label,
     get_tensor_meta,
@@ -11,7 +14,6 @@ from ._tl import (
     session_label_storage_intact,
     session_meta_is_anchored,
 )
-from ...data_classes.internal_types import FuncExecutionContext
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -22,8 +24,8 @@ from .ops import (
 
 if TYPE_CHECKING:
     from .ops import (
-        CaptureProducerMode,
         _SETTER_MUTATION_FUNC_NAMES,
+        CaptureProducerMode,
         _apply_live_hooks_to_outputs_legacy,
         _is_inplace_augmented_assignment_dunder,
         _session_validated_parameter,

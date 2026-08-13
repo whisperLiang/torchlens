@@ -5,19 +5,34 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 import math
+import struct
 import sys
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from itertools import count
-import struct
 from typing import Any, cast
 
 import numpy as np
 import torch
 
-from . import _state
+from . import (
+    _runnable_attestation as _runnable_attestation,
+    _runnable_call_arguments as _runnable_call_arguments,
+    _runnable_call_outputs as _runnable_call_outputs,
+    _runnable_input_aliases as _runnable_input_aliases,
+    _runnable_input_metadata as _runnable_input_metadata,
+    _runnable_input_sites as _runnable_input_sites,
+    _runnable_output_contracts as _runnable_output_contracts,
+    _runnable_path_faithfulness as _runnable_path_faithfulness,
+    _runnable_providers as _runnable_providers,
+    _runnable_state_context as _runnable_state_context,
+    _runnable_transaction as _runnable_transaction,
+    _runnable_verification as _runnable_verification,
+    _runnable_witness_contracts as _runnable_witness_contracts,
+    _state,
+)
 from ._io._torch_symbols import torch_attr
 from ._runnable_state import (
     _OUTPUT_COUNT_FLOOR,
@@ -29,6 +44,11 @@ from ._runnable_state import (
     runnable_tensor_byte_digest,
     state_metadata_full_violations,
     validate_run_seed,
+)
+from ._split_rebind import (
+    rebind_contextmanager as _rebind_contextmanager,
+    rebind_function as _rebind_function,
+    rebind_lru_cache as _rebind_lru_cache,
 )
 from .errors import (
     NumericAttestationError,
@@ -49,28 +69,16 @@ from .ir.container import (
     reconstruction_is_lossy_by_type,
     resolve_container_type,
 )
-from .utils.rng import (
-    aten_qualname_is_seeded_rng,
-    deterministic_fill_governs,
-    qualname_is_uninit_growth_resize,
-    qualname_is_uninit_size_gated_alloc,
-    qualname_is_uninit_total_writer,
-    qualname_is_uninitialized_alloc,
-    restore_host_rng,
-    snapshot_host_rng,
-    uninit_new_call_is_size_form,
-)
-from .utils._torch_compat import tensor_has_named_dims, tensor_version_or_none
-from .utils.tensor_utils import touched_bytes_relation
 from .runnable import (
+    NONDETERMINISTIC_SOURCE_VOCABULARY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     CallableRegistryEntry,
     ContractCheck,
-    InputAttestationFingerprint,
     ControlWitness,
     ControlWitnessKind,
     DivergencePolicy,
+    InputAttestationFingerprint,
     LiteralAtom,
     LiteralAtomKind,
     LiteralMapping,
@@ -79,18 +87,17 @@ from .runnable import (
     LiteralSlice,
     LiteralTorchSymbol,
     LiteralTupleKey,
-    NONDETERMINISTIC_SOURCE_VOCABULARY,
     NonTensorLiteral,
     NumericAttestationStatus,
     PathFaithfulness,
     ReadinessReport,
     ReadinessStatus,
-    RunProvider,
-    RunReport,
-    RunResult,
     RunnableCallDescriptor,
     RunnableDiagnostic,
     RunnableErrorCode,
+    RunProvider,
+    RunReport,
+    RunResult,
     SparseRunDescriptor,
     StateSlotRole,
     StateSource,
@@ -102,24 +109,19 @@ from .runnable import (
     is_mode_sensitive_qualname,
     mark_trace_path_status,
 )
-from ._split_rebind import (
-    rebind_contextmanager as _rebind_contextmanager,
-    rebind_function as _rebind_function,
-    rebind_lru_cache as _rebind_lru_cache,
+from .utils._torch_compat import tensor_has_named_dims, tensor_version_or_none
+from .utils.rng import (
+    aten_qualname_is_seeded_rng,
+    deterministic_fill_governs,
+    qualname_is_uninit_growth_resize,
+    qualname_is_uninit_size_gated_alloc,
+    qualname_is_uninit_total_writer,
+    qualname_is_uninitialized_alloc,
+    restore_host_rng,
+    snapshot_host_rng,
+    uninit_new_call_is_size_form,
 )
-from . import _runnable_providers as _runnable_providers
-from . import _runnable_transaction as _runnable_transaction
-from . import _runnable_input_sites as _runnable_input_sites
-from . import _runnable_input_metadata as _runnable_input_metadata
-from . import _runnable_input_aliases as _runnable_input_aliases
-from . import _runnable_state_context as _runnable_state_context
-from . import _runnable_call_arguments as _runnable_call_arguments
-from . import _runnable_call_outputs as _runnable_call_outputs
-from . import _runnable_output_contracts as _runnable_output_contracts
-from . import _runnable_witness_contracts as _runnable_witness_contracts
-from . import _runnable_path_faithfulness as _runnable_path_faithfulness
-from . import _runnable_attestation as _runnable_attestation
-from . import _runnable_verification as _runnable_verification
+from .utils.tensor_utils import touched_bytes_relation
 
 _RUN_FORK_COUNTER = count(1)
 

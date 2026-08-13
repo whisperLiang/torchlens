@@ -30,7 +30,6 @@ from torchlens.postprocess.loop_grouping_adapter import (
 )
 from torchlens.validation.invariants import check_metadata_invariants
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -38,7 +37,7 @@ from torchlens.validation.invariants import check_metadata_invariants
 
 def _layer_passes(traced) -> "OrderedDict[str, int]":
     """Return ordered mapping of layer_label -> number of grouped passes."""
-    layers: "OrderedDict[str, list]" = OrderedDict()
+    layers: OrderedDict[str, list] = OrderedDict()
     for op in traced:
         layers.setdefault(op.layer_label, []).append(op)
     return OrderedDict((label, len(ops)) for label, ops in layers.items())
@@ -96,15 +95,15 @@ class _GraphBuilder:
         slot: "int | None" = None,
     ) -> str:
         self.order += 1
-        self.node_specs[label] = dict(
-            raw_order=self.order,
-            eqkey=eqkey,
-            parents=tuple(parents),
-            uses_params=uses_params,
-            params=tuple(params),
-            anchored=anchored,
-            slot=slot,
-        )
+        self.node_specs[label] = {
+            "raw_order": self.order,
+            "eqkey": eqkey,
+            "parents": tuple(parents),
+            "uses_params": uses_params,
+            "params": tuple(params),
+            "anchored": anchored,
+            "slot": slot,
+        }
         self.raw.append(label)
         if source:
             self.sources.append(label)
@@ -417,7 +416,7 @@ def test_fused_multi_output_modules_per_slot(kind, used_state: bool) -> None:
     for ops in slot_ops.values():
         for op in ops:
             call_signature[frozenset(op.parents)].add(op.pass_index)
-    for parents, pass_indices in call_signature.items():
+    for _parents, pass_indices in call_signature.items():
         assert len(pass_indices) == 1, (
             f"co-outputs of one call carry different pass numbers: {pass_indices}"
         )

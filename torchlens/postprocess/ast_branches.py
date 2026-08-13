@@ -43,19 +43,20 @@ import ast
 import os
 import tokenize
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, NamedTuple, Optional, Sequence, Tuple, TypeAlias, cast
+from typing import Literal, NamedTuple, TypeAlias, cast
 
 from torchlens.data_classes.func_call_location import FuncCallLocation
 
-ConditionalKey: TypeAlias = Tuple[str, int, int, int]
-SourceRange: TypeAlias = Tuple[int, int, int, int]
-LineSpan: TypeAlias = Tuple[int, int]
+ConditionalKey: TypeAlias = tuple[str, int, int, int]
+SourceRange: TypeAlias = tuple[int, int, int, int]
+LineSpan: TypeAlias = tuple[int, int]
 FunctionNode: TypeAlias = ast.FunctionDef | ast.AsyncFunctionDef
 
 _BRANCH_CONSUMER_KINDS = {"if_test", "elif_test", "ifexp"}
 _FILE_CACHE_MAX_SIZE = 256
-_file_cache: OrderedDict[str, "FileIndex"] = OrderedDict()
+_file_cache: OrderedDict[str, FileIndex] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +80,9 @@ class BoolClassification:
     """
 
     kind: str
-    wrapper_kind: Optional[str]
-    conditional_key: Optional[ConditionalKey]
-    branch_test_kind: Optional[str]
+    wrapper_kind: str | None
+    conditional_key: ConditionalKey | None
+    branch_test_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,12 +130,12 @@ class ConditionalRecord:
     function_span: LineSpan
     if_stmt_span: LineSpan
     test_span: SourceRange
-    branch_ranges: Dict[str, SourceRange]
-    branch_test_spans: Dict[str, SourceRange]
-    branch_test_structures: Dict[str, str]
+    branch_ranges: dict[str, SourceRange]
+    branch_test_spans: dict[str, SourceRange]
+    branch_test_structures: dict[str, str]
     call_depth: int
-    parent_conditional_key: Optional[ConditionalKey]
-    parent_branch_kind: Optional[str]
+    parent_conditional_key: ConditionalKey | None
+    parent_branch_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,8 +160,8 @@ class BoolConsumer:
     kind: str
     span: SourceRange
     depth: int
-    conditional_key: Optional[ConditionalKey]
-    branch_test_kind: Optional[str]
+    conditional_key: ConditionalKey | None
+    branch_test_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,14 +226,12 @@ class ScopeEntry:
     qualname: str
     index: int
     span: LineSpan
-    decorated_firstlineno: Optional[int] = None
-    conditionals: List[ConditionalRecord] = field(default_factory=list)
-    branch_intervals: List[BranchInterval] = field(default_factory=list)
-    test_spans_by_key: Dict[ConditionalKey, List[SourceRange]] = field(default_factory=dict)
+    decorated_firstlineno: int | None = None
+    conditionals: list[ConditionalRecord] = field(default_factory=list)
+    branch_intervals: list[BranchInterval] = field(default_factory=list)
+    test_spans_by_key: dict[ConditionalKey, list[SourceRange]] = field(default_factory=dict)
 
-    def query_intervals(
-        self, line: int, col: Optional[int]
-    ) -> List[Tuple[ConditionalKey, str, int]]:
+    def query_intervals(self, line: int, col: int | None) -> list[tuple[ConditionalKey, str, int]]:
         """Return all branch arms containing a point in this scope.
 
         Parameters
@@ -251,7 +250,7 @@ class ScopeEntry:
             single conditional are dropped in degraded mode.
         """
 
-        matches: List[BranchInterval] = []
+        matches: list[BranchInterval] = []
         for interval in self.branch_intervals:
             if col is None:
                 if _range_contains_line(interval.span, line):
@@ -260,11 +259,11 @@ class ScopeEntry:
                 matches.append(interval)
 
         if col is None:
-            grouped: Dict[ConditionalKey, List[BranchInterval]] = {}
+            grouped: dict[ConditionalKey, list[BranchInterval]] = {}
             for interval in matches:
                 grouped.setdefault(interval.conditional_key, []).append(interval)
 
-            filtered: List[BranchInterval] = []
+            filtered: list[BranchInterval] = []
             for intervals in grouped.values():
                 if len(intervals) != 1:
                     continue
@@ -304,7 +303,7 @@ class _ArgSpec(NamedTuple):
         Source range of the argument's value expression.
     """
 
-    keyword: Optional[str]
+    keyword: str | None
     star: bool
     span: SourceRange
 
@@ -335,9 +334,9 @@ class _ScopeCall(NamedTuple):
     """
 
     span: SourceRange
-    visible_name: Optional[str]
-    assignment_targets: Tuple[str, ...]
-    arg_specs: Optional[Tuple[_ArgSpec, ...]]
+    visible_name: str | None
+    assignment_targets: tuple[str, ...]
+    arg_specs: tuple[_ArgSpec, ...] | None
 
 
 class _HeavyAst(NamedTuple):
@@ -357,8 +356,8 @@ class _HeavyAst(NamedTuple):
     """
 
     module: ast.Module
-    parent_map: Dict[ast.AST, ast.AST]
-    scope_nodes: List[FunctionNode]
+    parent_map: dict[ast.AST, ast.AST]
+    scope_nodes: list[FunctionNode]
 
 
 @dataclass(slots=True)
@@ -385,16 +384,16 @@ class FileIndex:
     filename: str
     mtime_ns: int
     source: str
-    scopes: List[ScopeEntry]
-    conditionals: List[ConditionalRecord]
-    bool_consumers: List[BoolConsumer]
-    _heavy: Optional[_HeavyAst] = field(default=None, repr=False, compare=False)
-    _source_lines: Optional[List[str]] = field(default=None, repr=False, compare=False)
-    _scope_calls: Optional[Dict[int, List[_ScopeCall]]] = field(
+    scopes: list[ScopeEntry]
+    conditionals: list[ConditionalRecord]
+    bool_consumers: list[BoolConsumer]
+    _heavy: _HeavyAst | None = field(default=None, repr=False, compare=False)
+    _source_lines: list[str] | None = field(default=None, repr=False, compare=False)
+    _scope_calls: dict[int, list[_ScopeCall]] | None = field(
         default=None, repr=False, compare=False
     )
 
-    def scope_calls(self, scope: ScopeEntry) -> List[_ScopeCall]:
+    def scope_calls(self, scope: ScopeEntry) -> list[_ScopeCall]:
         """Return every call under ``scope``, projected once per scope.
 
         Parameters
@@ -437,7 +436,7 @@ class FileIndex:
             cache[scope.index] = entries
         return entries
 
-    def _ensure_heavy(self) -> Optional[_HeavyAst]:
+    def _ensure_heavy(self) -> _HeavyAst | None:
         """Return the hot AST tier, re-parsing the retained source if released.
 
         Returns
@@ -482,7 +481,7 @@ class FileIndex:
         self._heavy = None
         self._source_lines = None
 
-    def source_lines(self) -> List[str]:
+    def source_lines(self) -> list[str]:
         """Return ``source`` split into parser-style lines, computed once.
 
         Returns
@@ -498,8 +497,8 @@ class FileIndex:
         return self._source_lines
 
     def resolve_scope(
-        self, code_firstlineno: int, func_name: str, func_qualname: Optional[str]
-    ) -> Optional[ScopeEntry]:
+        self, code_firstlineno: int, func_name: str, func_qualname: str | None
+    ) -> ScopeEntry | None:
         """Resolve a runtime frame to a single indexed function scope.
 
         Parameters
@@ -571,7 +570,7 @@ def _scope_accepts_firstlineno(scope: ScopeEntry, code_firstlineno: int) -> bool
     )
 
 
-def get_file_index(filename: str) -> Optional[FileIndex]:
+def get_file_index(filename: str) -> FileIndex | None:
     """Return a cached AST index for ``filename``.
 
     Parameters
@@ -606,8 +605,8 @@ def get_file_index(filename: str) -> Optional[FileIndex]:
 
     parent_map = _build_parent_map(module)
     scopes, scope_nodes = _collect_scopes(module)
-    conditionals: List[ConditionalRecord] = []
-    bool_consumers: List[BoolConsumer] = []
+    conditionals: list[ConditionalRecord] = []
+    bool_consumers: list[BoolConsumer] = []
 
     for scope, scope_node in zip(scopes, scope_nodes, strict=True):
         indexer = _ScopeIndexer(
@@ -633,7 +632,7 @@ def get_file_index(filename: str) -> Optional[FileIndex]:
     return file_index
 
 
-def _get_cached_file_index(filename: str) -> Optional[FileIndex]:
+def _get_cached_file_index(filename: str) -> FileIndex | None:
     """Return a cached file index and mark it as recently used.
 
     Parameters
@@ -675,7 +674,7 @@ def _set_cached_file_index(filename: str, file_index: FileIndex) -> None:
         _file_cache.popitem(last=False)
 
 
-def classify_bool(filename: str, line: int, col: Optional[int] = None) -> BoolClassification:
+def classify_bool(filename: str, line: int, col: int | None = None) -> BoolClassification:
     """Classify a scalar-bool operation by its enclosing AST consumer.
 
     Parameters
@@ -698,7 +697,7 @@ def classify_bool(filename: str, line: int, col: Optional[int] = None) -> BoolCl
     if file_index is None:
         return BoolClassification("unknown", None, None, None)
 
-    consumers: List[BoolConsumer] = []
+    consumers: list[BoolConsumer] = []
     for consumer in file_index.bool_consumers:
         if col is None:
             if _range_contains_line(consumer.span, line):
@@ -745,7 +744,7 @@ def classify_bool(filename: str, line: int, col: Optional[int] = None) -> BoolCl
     return BoolClassification("unknown", None, None, None)
 
 
-def attribute_op(code_context: List[FuncCallLocation]) -> List[Tuple[ConditionalKey, str]]:
+def attribute_op(code_context: list[FuncCallLocation]) -> list[tuple[ConditionalKey, str]]:
     """Attribute an operation to enclosing conditional branch arms.
 
     Parameters
@@ -760,7 +759,7 @@ def attribute_op(code_context: List[FuncCallLocation]) -> List[Tuple[Conditional
         removed. Each tuple is ``(conditional_key, branch_kind)``.
     """
 
-    branch_stack: List[Tuple[ConditionalKey, str]] = []
+    branch_stack: list[tuple[ConditionalKey, str]] = []
     for frame in code_context:
         file_index = get_file_index(frame.file)
         if file_index is None:
@@ -784,7 +783,7 @@ def attribute_op(code_context: List[FuncCallLocation]) -> List[Tuple[Conditional
     return branch_stack
 
 
-def resolve_var_names(code_context: List[FuncCallLocation], func_name: Optional[str]) -> list[str]:
+def resolve_var_names(code_context: list[FuncCallLocation], func_name: str | None) -> list[str]:
     """Resolve assignment target names for the captured operation call site.
 
     Parameters
@@ -810,7 +809,7 @@ def resolve_var_names(code_context: List[FuncCallLocation], func_name: Optional[
 
 
 def resolve_arg_expressions(
-    code_context: List[FuncCallLocation], func_name: Optional[str]
+    code_context: list[FuncCallLocation], func_name: str | None
 ) -> list[str]:
     """Resolve source expressions for a captured operation's call arguments.
 
@@ -837,7 +836,7 @@ def resolve_arg_expressions(
     return []
 
 
-def invalidate_cache(filename: Optional[str] = None) -> None:
+def invalidate_cache(filename: str | None = None) -> None:
     """Invalidate cached AST indexes.
 
     Parameters
@@ -867,7 +866,7 @@ def release_parsed_asts() -> None:
         file_index.release_heavy()
 
 
-def _resolve_frame_var_names(frame: FuncCallLocation, func_name: Optional[str]) -> list[str]:
+def _resolve_frame_var_names(frame: FuncCallLocation, func_name: str | None) -> list[str]:
     """Resolve assignment target names for one captured frame.
 
     Parameters
@@ -909,7 +908,7 @@ def _resolve_frame_var_names(frame: FuncCallLocation, func_name: Optional[str]) 
     return []
 
 
-def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[str]) -> list[str]:
+def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: str | None) -> list[str]:
     """Resolve call argument expressions for one captured frame.
 
     Parameters
@@ -949,7 +948,7 @@ def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[
 
 
 def _call_arg_expressions(
-    arg_specs: Optional[Tuple[_ArgSpec, ...]], source_lines: List[str]
+    arg_specs: tuple[_ArgSpec, ...] | None, source_lines: list[str]
 ) -> list[str]:
     """Return source expressions for a matched call's projected arguments.
 
@@ -985,7 +984,7 @@ def _call_arg_expressions(
     return expressions
 
 
-def _split_source_lines(source: str) -> List[str]:
+def _split_source_lines(source: str) -> list[str]:
     """Split source into lines exactly as the CPython parser does.
 
     Parameters
@@ -1002,7 +1001,7 @@ def _split_source_lines(source: str) -> List[str]:
         ``ast._splitlines_no_ff`` so AST byte offsets index correctly.
     """
 
-    lines: List[str] = []
+    lines: list[str] = []
     pending = ""
     for part in source.splitlines(keepends=True):
         pending += part
@@ -1014,7 +1013,7 @@ def _split_source_lines(source: str) -> List[str]:
     return lines
 
 
-def _span_source_segment(source_lines: List[str], span: SourceRange) -> Optional[str]:
+def _span_source_segment(source_lines: list[str], span: SourceRange) -> str | None:
     """Return the source segment for a span from pre-split lines.
 
     Byte-identical replica of ``ast.get_source_segment(source, node)``
@@ -1059,8 +1058,8 @@ def _find_candidate_calls(
     file_index: FileIndex,
     scope: ScopeEntry,
     line: int,
-    col: Optional[int],
-    func_name: Optional[str],
+    col: int | None,
+    func_name: str | None,
 ) -> list[_ScopeCall]:
     """Find candidate calls matching a runtime source location.
 
@@ -1103,7 +1102,7 @@ def _find_candidate_calls(
     return matches
 
 
-def _call_visible_name(call_node: ast.Call) -> Optional[str]:
+def _call_visible_name(call_node: ast.Call) -> str | None:
     """Return the visible callee name for an AST call.
 
     Parameters
@@ -1125,7 +1124,7 @@ def _call_visible_name(call_node: ast.Call) -> Optional[str]:
     return None
 
 
-def _project_scope_call(call_node: ast.Call, parent_map: Dict[ast.AST, ast.AST]) -> _ScopeCall:
+def _project_scope_call(call_node: ast.Call, parent_map: dict[ast.AST, ast.AST]) -> _ScopeCall:
     """Project one call node into its node-free ``_ScopeCall`` form.
 
     Parameters
@@ -1149,7 +1148,7 @@ def _project_scope_call(call_node: ast.Call, parent_map: Dict[ast.AST, ast.AST])
     )
 
 
-def _project_arg_specs(call_node: ast.Call) -> Optional[Tuple[_ArgSpec, ...]]:
+def _project_arg_specs(call_node: ast.Call) -> tuple[_ArgSpec, ...] | None:
     """Project a call's arguments into span recipes.
 
     Parameters
@@ -1178,7 +1177,7 @@ def _project_arg_specs(call_node: ast.Call) -> Optional[Tuple[_ArgSpec, ...]]:
     return tuple(specs)
 
 
-def _maybe_node_span(node: ast.AST) -> Optional[SourceRange]:
+def _maybe_node_span(node: ast.AST) -> SourceRange | None:
     """Return a node's span, or ``None`` when any position is missing.
 
     Parameters
@@ -1219,7 +1218,7 @@ def _source_range_width(span: SourceRange) -> tuple[int, int]:
     return (span[2] - span[0], span[3] - span[1])
 
 
-def _assignment_target_names(call_node: ast.Call, parent_map: Dict[ast.AST, ast.AST]) -> list[str]:
+def _assignment_target_names(call_node: ast.Call, parent_map: dict[ast.AST, ast.AST]) -> list[str]:
     """Return assignment target names for a matched direct call expression.
 
     Parameters
@@ -1249,7 +1248,7 @@ def _assignment_target_names(call_node: ast.Call, parent_map: Dict[ast.AST, ast.
     return []
 
 
-def _has_disallowed_call_ancestor(call_node: ast.Call, parent_map: Dict[ast.AST, ast.AST]) -> bool:
+def _has_disallowed_call_ancestor(call_node: ast.Call, parent_map: dict[ast.AST, ast.AST]) -> bool:
     """Return whether a call sits inside a source form that must fail closed.
 
     Parameters
@@ -1332,7 +1331,7 @@ def _target_names(target: ast.expr) -> list[str]:
     return []
 
 
-def _read_source_file(filename: str) -> Optional[str]:
+def _read_source_file(filename: str) -> str | None:
     """Read a source file using its declared encoding.
 
     Parameters
@@ -1353,7 +1352,7 @@ def _read_source_file(filename: str) -> Optional[str]:
         return None
 
 
-def _build_parent_map(module: ast.Module) -> Dict[ast.AST, ast.AST]:
+def _build_parent_map(module: ast.Module) -> dict[ast.AST, ast.AST]:
     """Build a parent map for every AST node in a module.
 
     Parameters
@@ -1367,14 +1366,14 @@ def _build_parent_map(module: ast.Module) -> Dict[ast.AST, ast.AST]:
         Mapping from child node to direct parent node.
     """
 
-    parent_map: Dict[ast.AST, ast.AST] = {}
+    parent_map: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(module):
         for child in ast.iter_child_nodes(parent):
             parent_map[child] = parent
     return parent_map
 
 
-def _collect_scopes(module: ast.Module) -> Tuple[List[ScopeEntry], List[FunctionNode]]:
+def _collect_scopes(module: ast.Module) -> tuple[list[ScopeEntry], list[FunctionNode]]:
     """Collect all function scopes in a module with runtime-style qualnames.
 
     Parameters
@@ -1389,18 +1388,18 @@ def _collect_scopes(module: ast.Module) -> Tuple[List[ScopeEntry], List[Function
         aligned index-for-index (the nodes live only in the hot tier).
     """
 
-    scopes: List[ScopeEntry] = []
-    scope_nodes: List[FunctionNode] = []
+    scopes: list[ScopeEntry] = []
+    scope_nodes: list[FunctionNode] = []
     _collect_scopes_from_node(module, None, "module", scopes, scope_nodes)
     return scopes, scope_nodes
 
 
 def _collect_scopes_from_node(
     node: ast.AST,
-    qualname_prefix: Optional[str],
+    qualname_prefix: str | None,
     container_kind: Literal["module", "class", "function"],
-    scopes: List[ScopeEntry],
-    scope_nodes: List[FunctionNode],
+    scopes: list[ScopeEntry],
+    scope_nodes: list[FunctionNode],
 ) -> None:
     """Recursively collect function scopes from a node.
 
@@ -1454,7 +1453,7 @@ def _collect_scopes_from_node(
 
 
 def _compose_child_qualname(
-    qualname_prefix: Optional[str],
+    qualname_prefix: str | None,
     container_kind: Literal["module", "class", "function"],
     child_name: str,
 ) -> str:
@@ -1539,7 +1538,7 @@ def _node_span(node: ast.AST) -> SourceRange:
     return (_lineno(node), _col_offset(node), _end_lineno(node), _end_col_offset(node))
 
 
-def _statement_list_span(statements: List[ast.stmt]) -> SourceRange:
+def _statement_list_span(statements: list[ast.stmt]) -> SourceRange:
     """Return the bounding source range for a non-empty statement list.
 
     Parameters
@@ -1632,7 +1631,7 @@ def _end_col_offset(node: ast.AST) -> int:
     return cast(int, end_col_offset)
 
 
-def _ast_depth(node: ast.AST, parent_map: Dict[ast.AST, ast.AST]) -> int:
+def _ast_depth(node: ast.AST, parent_map: dict[ast.AST, ast.AST]) -> int:
     """Return AST ancestor depth for ordering nested consumers.
 
     Parameters
@@ -1733,9 +1732,9 @@ class _ScopeIndexer:
         filename: str,
         scope: ScopeEntry,
         scope_node: FunctionNode,
-        parent_map: Dict[ast.AST, ast.AST],
-        all_conditionals: List[ConditionalRecord],
-        all_bool_consumers: List[BoolConsumer],
+        parent_map: dict[ast.AST, ast.AST],
+        all_conditionals: list[ConditionalRecord],
+        all_bool_consumers: list[BoolConsumer],
     ) -> None:
         """Initialize the scope indexer.
 
@@ -1770,8 +1769,8 @@ class _ScopeIndexer:
     def _walk_nodes(
         self,
         nodes: Sequence[ast.AST],
-        parent_conditional_key: Optional[ConditionalKey],
-        parent_branch_kind: Optional[str],
+        parent_conditional_key: ConditionalKey | None,
+        parent_branch_kind: str | None,
         call_depth: int,
     ) -> None:
         """Walk a list of AST nodes under shared conditional context.
@@ -1794,8 +1793,8 @@ class _ScopeIndexer:
     def _walk_node(
         self,
         node: ast.AST,
-        parent_conditional_key: Optional[ConditionalKey],
-        parent_branch_kind: Optional[str],
+        parent_conditional_key: ConditionalKey | None,
+        parent_branch_kind: str | None,
         call_depth: int,
     ) -> None:
         """Walk one AST node under shared conditional context.
@@ -1847,8 +1846,8 @@ class _ScopeIndexer:
     def _handle_if(
         self,
         node: ast.If,
-        parent_conditional_key: Optional[ConditionalKey],
-        parent_branch_kind: Optional[str],
+        parent_conditional_key: ConditionalKey | None,
+        parent_branch_kind: str | None,
         call_depth: int,
     ) -> None:
         """Index a flattened ``if``/``elif``/``else`` chain.
@@ -1898,8 +1897,8 @@ class _ScopeIndexer:
     def _handle_ifexp(
         self,
         node: ast.IfExp,
-        parent_conditional_key: Optional[ConditionalKey],
-        parent_branch_kind: Optional[str],
+        parent_conditional_key: ConditionalKey | None,
+        parent_branch_kind: str | None,
         call_depth: int,
     ) -> None:
         """Index a ternary conditional expression.
@@ -1946,7 +1945,7 @@ class _ScopeIndexer:
         self._walk_node(node.body, key, "then", call_depth + 1)
         self._walk_node(node.orelse, key, "else", call_depth + 1)
 
-    def _flatten_elif_chain(self, node: ast.If) -> Tuple[List[ast.If], List[ast.stmt]]:
+    def _flatten_elif_chain(self, node: ast.If) -> tuple[list[ast.If], list[ast.stmt]]:
         """Flatten a synthetic ``elif`` chain rooted at ``node``.
 
         Parameters
@@ -1960,8 +1959,8 @@ class _ScopeIndexer:
             Flattened synthetic ``elif`` nodes and terminal ``else`` statements.
         """
 
-        flattened_elifs: List[ast.If] = []
-        terminal_else: List[ast.stmt] = []
+        flattened_elifs: list[ast.If] = []
+        terminal_else: list[ast.stmt] = []
         current = node
         while current.orelse:
             if (
@@ -1980,10 +1979,10 @@ class _ScopeIndexer:
     def _build_if_record(
         self,
         node: ast.If,
-        flattened_elifs: List[ast.If],
-        terminal_else: List[ast.stmt],
-        parent_conditional_key: Optional[ConditionalKey],
-        parent_branch_kind: Optional[str],
+        flattened_elifs: list[ast.If],
+        terminal_else: list[ast.stmt],
+        parent_conditional_key: ConditionalKey | None,
+        parent_branch_kind: str | None,
         call_depth: int,
     ) -> ConditionalRecord:
         """Build the conditional record for a flattened ``if`` chain.
@@ -2015,9 +2014,9 @@ class _ScopeIndexer:
             node.lineno,
             node.col_offset,
         )
-        branch_ranges: Dict[str, SourceRange] = {"then": _statement_list_span(node.body)}
-        branch_test_spans: Dict[str, SourceRange] = {"then": _node_span(node.test)}
-        branch_test_structures: Dict[str, str] = {"then": _test_value_structure(node.test)}
+        branch_ranges: dict[str, SourceRange] = {"then": _statement_list_span(node.body)}
+        branch_test_spans: dict[str, SourceRange] = {"then": _node_span(node.test)}
+        branch_test_structures: dict[str, str] = {"then": _test_value_structure(node.test)}
 
         for index, elif_node in enumerate(flattened_elifs, start=1):
             branch_kind = f"elif_{index}"
@@ -2073,8 +2072,8 @@ class _ScopeIndexer:
         self,
         kind: str,
         node: ast.AST,
-        conditional_key: Optional[ConditionalKey],
-        branch_test_kind: Optional[str],
+        conditional_key: ConditionalKey | None,
+        branch_test_kind: str | None,
     ) -> None:
         """Add a bool consumer record to the flattened file index.
 

@@ -257,7 +257,7 @@ class LiveIndex:
 
         return tuple(self.module_entries_by_label.get(label_raw, ()))
 
-    def copy(self) -> "LiveIndex":
+    def copy(self) -> LiveIndex:
         """Return a structural copy holding the same event references.
 
         All container fields are duplicated into fresh objects (nested lists

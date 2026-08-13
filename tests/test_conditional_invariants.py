@@ -5,18 +5,18 @@ Targeted corruption tests for Phase 6 conditional metadata invariants.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import pytest
 import torch
 import torch.nn as nn
 
 from torchlens import trace as trace_fn
-from torchlens.errors import MetadataInvariantError
-from torchlens.validation import check_metadata_invariants
 from torchlens.data_classes.layer import Layer
 from torchlens.data_classes.op import Op
 from torchlens.data_classes.trace import ConditionalEvent, Trace
+from torchlens.errors import MetadataInvariantError
+from torchlens.validation import check_metadata_invariants
 
 
 class SimpleIfElseModel(nn.Module):

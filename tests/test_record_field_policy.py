@@ -13,6 +13,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.constants import (
+    BACKWARD_PASS_FIELD_ORDER,
     BUFFER_LOG_FIELD_ORDER,
     GRAD_FN_LOG_FIELD_ORDER,
     GRAD_FN_PASS_LOG_FIELD_ORDER,
@@ -22,7 +23,6 @@ from torchlens.constants import (
     MODULE_LOG_FIELD_ORDER,
     MODULE_PASS_LOG_FIELD_ORDER,
     PARAM_LOG_FIELD_ORDER,
-    BACKWARD_PASS_FIELD_ORDER,
 )
 from torchlens.data_classes.backward_pass import BackwardPass
 from torchlens.data_classes.buffer import Buffer
@@ -196,7 +196,7 @@ def test_record_field_policy_is_field_order_source(case: RecordCase) -> None:
 
     policy = case.cls.FIELD_POLICY
     assert field_order_from_policy(policy) == case.field_order
-    assert list(name for name, item in policy.items() if item.user_facing) == case.field_order
+    assert [name for name, item in policy.items() if item.user_facing] == case.field_order
     assert len(case.field_order) == len(set(case.field_order))
 
 
@@ -204,14 +204,14 @@ def test_record_field_policy_is_field_order_source(case: RecordCase) -> None:
 def test_record_portable_spec_is_generated_from_policy(case: RecordCase) -> None:
     """Class portable specs are generated views over FIELD_POLICY."""
 
-    assert case.cls.PORTABLE_STATE_SPEC == portable_state_spec_from_policy(case.cls.FIELD_POLICY)
+    assert portable_state_spec_from_policy(case.cls.FIELD_POLICY) == case.cls.PORTABLE_STATE_SPEC
 
 
 def test_trace_and_op_generated_policy_views_match_old_names() -> None:
     """Trace/Op fork-policy views are generated from their field policy tables."""
 
-    assert Trace.FIELD_FORK_POLICY == fork_policy_from_policy(Trace.FIELD_POLICY)
-    assert Op.FIELD_FORK_POLICY == fork_policy_from_policy(Op.FIELD_POLICY)
+    assert fork_policy_from_policy(Trace.FIELD_POLICY) == Trace.FIELD_FORK_POLICY
+    assert fork_policy_from_policy(Op.FIELD_POLICY) == Op.FIELD_FORK_POLICY
 
 
 @pytest.mark.parametrize("case", RECORD_CASES, ids=lambda case: case.cls.__name__)

@@ -10,7 +10,6 @@ import torch
 
 from torchlens.data_classes.trace import ResolvedPreprocessing, Trace
 
-
 _MODALITY_KEYS = frozenset({"text", "image", "images", "audio", "videos"})
 
 
@@ -343,8 +342,9 @@ def trace_multimodal(model: Any, input_dict: dict[str, Any], **kwargs: Any) -> T
         TorchLens trace with ``input_preprocessor`` populated.
     """
 
-    import torchlens as tl
     from transformers import AutoProcessor
+
+    import torchlens as tl
 
     name_or_path = _model_name_or_path(model)
     if name_or_path is None:

@@ -30,37 +30,39 @@ and raises ``MetadataInvariantError`` on the first failure.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
-from ..errors._base import ValidationError
-from .status import has_importer_region_provenance, is_region_replay_annotation
 from .._split_rebind import rebind_function as _rebind_function
-from . import _invariants_entry as _invariants_entry
-from . import _invariants_backward_graph as _invariants_backward_graph
-from . import _invariants_backward_domain as _invariants_backward_domain
-from . import _invariants_backward_flow as _invariants_backward_flow
-from . import _invariants_topology as _invariants_topology
-from . import _invariants_payloads as _invariants_payloads
-from . import _invariants_conditional_base as _invariants_conditional_base
-from . import _invariants_conditionals as _invariants_conditionals
-from . import _invariants_conditional_modules as _invariants_conditional_modules
-from . import _invariants_modules_params as _invariants_modules_params
-from . import _invariants_buffers as _invariants_buffers
-from . import _invariants_equivalence as _invariants_equivalence
-from . import _invariants_connectivity as _invariants_connectivity
+from ..errors._base import ValidationError
+from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from . import (
+    _invariants_backward_domain as _invariants_backward_domain,
+    _invariants_backward_flow as _invariants_backward_flow,
+    _invariants_backward_graph as _invariants_backward_graph,
+    _invariants_buffers as _invariants_buffers,
+    _invariants_conditional_base as _invariants_conditional_base,
+    _invariants_conditional_modules as _invariants_conditional_modules,
+    _invariants_conditionals as _invariants_conditionals,
+    _invariants_connectivity as _invariants_connectivity,
+    _invariants_entry as _invariants_entry,
+    _invariants_equivalence as _invariants_equivalence,
+    _invariants_modules_params as _invariants_modules_params,
+    _invariants_payloads as _invariants_payloads,
+    _invariants_topology as _invariants_topology,
+)
+from .status import has_importer_region_provenance, is_region_replay_annotation
 
 # ruff: noqa: F401
 
 if TYPE_CHECKING:
-    from ..data_classes.layer import Layer
     from ..backends import BackendSpec
+    from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
-    from ..data_classes.module import Module
 
 InvariantApplicability = Literal["torch", "non_torch", "all"]
 MetadataInvariantFunc = Callable[["Trace"], object]

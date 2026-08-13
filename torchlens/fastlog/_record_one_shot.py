@@ -6,10 +6,10 @@ from typing import Any
 
 from torch import nn
 
+from .._capture_state_helpers import unwrap_compiled_model
 from .._deprecations import MISSING, MissingType
 from .._errors import ArgumentConflictError
 from .._input_coerce import _coerce_input_args
-from .._capture_state_helpers import unwrap_compiled_model
 from .._robustness import check_model_and_input_variants
 from ..backends import (
     BackendName,
@@ -23,11 +23,11 @@ from ..types import ActivationPostfunc, GradientPostfunc
 from ._recorder import Recorder
 from ._validation import validate_postprocess
 from .options import (
+    ForwardErrorMode,
     GradPredicateFn,
     HaltPredicateFn,
     LookbackPayloadPolicy,
     PredicateErrorMode,
-    ForwardErrorMode,
     PredicateFn,
 )
 from .types import CaptureSpec, Recording

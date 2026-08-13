@@ -21,8 +21,9 @@ never be vacuous about which criteria actually ran.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -118,13 +119,10 @@ def run_census_criterion_1(
     captured_tensors = [op.out for op in log.output_ops]
     if len(bare_tensors) != len(captured_tensors):
         failures.append(
-            f"output arity differs: bare {len(bare_tensors)} vs captured "
-            f"{len(captured_tensors)}"
+            f"output arity differs: bare {len(bare_tensors)} vs captured {len(captured_tensors)}"
         )
     else:
-        for index, (bare_tensor, captured_tensor) in enumerate(
-            zip(bare_tensors, captured_tensors)
-        ):
+        for index, (bare_tensor, captured_tensor) in enumerate(zip(bare_tensors, captured_tensors)):
             if not torch.equal(bare_tensor, captured_tensor):
                 failures.append(f"output {index} not bit-identical")
     return CensusResult(

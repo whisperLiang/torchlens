@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
 import warnings
+from pathlib import Path
 
 import torch
 from torch import nn

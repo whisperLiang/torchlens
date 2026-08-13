@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -15,7 +15,6 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldStatus,
     ReceptiveFieldValidationStatus,
 )
-
 
 _rf_package = importlib.import_module("torchlens.receptive_field")
 _rules = importlib.import_module("torchlens.receptive_field._rules")

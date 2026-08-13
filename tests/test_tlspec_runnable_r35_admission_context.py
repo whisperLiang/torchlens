@@ -191,26 +191,29 @@ def test_r35_matmul_carveout_unchanged_no_conv_sdpa_extension() -> None:
 
     from torchlens._runnable_execution import _LAYOUT_SENSITIVE_BLAS_QUALNAMES
 
-    assert _LAYOUT_SENSITIVE_BLAS_QUALNAMES == frozenset(
-        {
-            "linear",
-            "matmul",
-            "mm",
-            "bmm",
-            "mv",
-            "dot",
-            "vdot",
-            "inner",
-            "outer",
-            "ger",
-            "addmm",
-            "addbmm",
-            "baddbmm",
-            "addmv",
-            "addr",
-            "einsum",
-            "tensordot",
-        }
+    assert (
+        frozenset(
+            {
+                "linear",
+                "matmul",
+                "mm",
+                "bmm",
+                "mv",
+                "dot",
+                "vdot",
+                "inner",
+                "outer",
+                "ger",
+                "addmm",
+                "addbmm",
+                "baddbmm",
+                "addmv",
+                "addr",
+                "einsum",
+                "tensordot",
+            }
+        )
+        == _LAYOUT_SENSITIVE_BLAS_QUALNAMES
     )
     assert not any(
         "conv" in name or "attention" in name for name in _LAYOUT_SENSITIVE_BLAS_QUALNAMES

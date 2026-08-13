@@ -45,7 +45,10 @@ __all__ = [
     "_memoized_deep_copy",
 ]
 
+
 class TraceInterventionMixin(_TraceMixinBase):
+    """``Trace`` intervention surface: spec save/load, fork, replay, and rerun."""
+
     def save_intervention(
         self: "Trace",
         path: str | Path,

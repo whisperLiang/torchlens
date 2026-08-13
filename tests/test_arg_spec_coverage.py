@@ -14,7 +14,6 @@ from torchlens.capture.arg_positions import (
 )
 from torchlens.constants import get_orig_torch_funcs
 
-
 _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
     {
         "adaptivemaxpool1dwithindices",
@@ -389,8 +388,8 @@ def test_high_confidence_static_fills_remain_covered() -> None:
 
     decorated_names = _decorated_normalized_names()
 
-    assert _HIGH_CONFIDENCE_STATIC_NAMES <= decorated_names
-    assert _HIGH_CONFIDENCE_STATIC_NAMES <= set(FUNC_ARG_SPECS)
+    assert decorated_names >= _HIGH_CONFIDENCE_STATIC_NAMES
+    assert set(FUNC_ARG_SPECS) >= _HIGH_CONFIDENCE_STATIC_NAMES
     assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
 
 

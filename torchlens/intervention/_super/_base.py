@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any, Callable, Generic, Literal, TypeVar, cast
+from collections.abc import Callable, Iterator
+from typing import Any, Generic, Literal, TypeVar, cast
 
 import torch
 

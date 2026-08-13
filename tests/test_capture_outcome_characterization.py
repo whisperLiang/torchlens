@@ -267,10 +267,7 @@ def test_halted_trace_runnable_save_refuses_typed() -> None:
     trace = tl.trace(model, x, halt=halt_on_relu)
     with pytest.raises(RunnablePreflightError) as exc_info:
         tl.save(trace, "/tmp/tl_p0_halted_runnable.tlspec", level="runnable", overwrite=True)
-    assert (
-        exc_info.value.fields.get("code")
-        == RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value
-    )
+    assert exc_info.value.fields.get("code") == RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +323,8 @@ def test_recorder_keyboard_interrupt_leaves_no_product() -> None:
     from torchlens.fastlog.exceptions import RecorderStateError
 
     recorder = Recorder(FailingForwardModel(KeyboardInterrupt()), save=lambda ctx: True)
-    with pytest.raises(KeyboardInterrupt):
-        with recorder as active:
-            active.log(torch.ones(1, 3))
+    with pytest.raises(KeyboardInterrupt), recorder as active:
+        active.log(torch.ones(1, 3))
     with pytest.raises(RecorderStateError):
         _ = recorder.recording
 
@@ -374,12 +370,11 @@ def test_recorder_mixed_multipass_halt_pins() -> None:
 def test_failed_partial_pickle_loads_coreless() -> None:
     """A pickled falsy-finished partial loads coreless (staging surface)."""
 
-    with pytest.raises(RuntimeError, match="user forward boom"):
-        with torch.no_grad():
-            tl.trace(
-                FailingForwardModel(RuntimeError("user forward boom")),
-                torch.ones(1, 3),
-            )
+    with pytest.raises(RuntimeError, match="user forward boom"), torch.no_grad():
+        tl.trace(
+            FailingForwardModel(RuntimeError("user forward boom")),
+            torch.ones(1, 3),
+        )
     # from_failed_capture needs the live exception object.
     try:
         with torch.no_grad():

@@ -53,9 +53,10 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Model corpus
@@ -209,9 +210,7 @@ def run_mode_side(model_name: str) -> dict[str, Any]:
     from torchlens import _state
 
     if _state._is_decorated:
-        raise RuntimeError(
-            "mode side requires pristine torch; this process has wrapped torch"
-        )
+        raise RuntimeError("mode side requires pristine torch; this process has wrapped torch")
 
     table = _build_mode_name_table()
     spec = MODEL_SPECS[model_name]
@@ -274,9 +273,7 @@ def run_wrapper_side(model_name: str) -> dict[str, Any]:
 
         probe_trace = tl.trace(_Probe(), spec.make_input())
         expansions[comp_name] = [
-            op.func_name
-            for op in probe_trace.ops
-            if op.func_name not in STRUCTURAL_ROWS
+            op.func_name for op in probe_trace.ops if op.func_name not in STRUCTURAL_ROWS
         ]
 
     return {
@@ -417,9 +414,7 @@ def _spawn_side(side: str, model_name: str) -> dict[str, Any]:
     """Run one side in a fresh subprocess and parse its JSON stdout."""
     repo_root = str(Path(__file__).resolve().parent.parent)
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (repo_root, env.get("PYTHONPATH")) if p
-    )
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (repo_root, env.get("PYTHONPATH")) if p)
     proc = subprocess.run(
         [sys.executable, __file__, "--side", side, "--model", model_name],
         capture_output=True,

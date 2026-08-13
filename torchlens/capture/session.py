@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import tempfile
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-import tempfile
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping
-import warnings
+from typing import Any, Literal
 from weakref import ref
 
 from .. import _state
@@ -550,9 +551,7 @@ class CaptureSession:
                 "forward_memory_backend": getattr(trace, "forward_memory_backend", None),
                 "random_seed": getattr(trace, "random_seed", None),
                 "source_model_ref": getattr(trace, "_source_model_ref", None),
-                "layer_counter": getattr(
-                    getattr(trace, "_raw_graph_ws", None), "layer_counter", 0
-                ),
+                "layer_counter": getattr(getattr(trace, "_raw_graph_ws", None), "layer_counter", 0),
             }
         )
 

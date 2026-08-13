@@ -662,9 +662,7 @@ def test_live_fast_run_refreshes_every_multipass_activation(plan_kind: str) -> N
         save = tl.module("shared")
     captured = tl.trace(model, torch.tensor([-5.0, 1.0]), save=save)
     selected = [
-        op
-        for op in captured.layer_list
-        if op.has_saved_activation and op.func_name == "relu"
+        op for op in captured.layer_list if op.has_saved_activation and op.func_name == "relu"
     ]
     captured_first = selected[0].out.clone()
 
@@ -677,9 +675,7 @@ def test_live_fast_run_refreshes_every_multipass_activation(plan_kind: str) -> N
 
     result = captured.run(inputs=runtime_input, fast=True)
     refreshed = [
-        op
-        for op in result.trace.layer_list
-        if op.has_saved_activation and op.func_name == "relu"
+        op for op in result.trace.layer_list if op.has_saved_activation and op.func_name == "relu"
     ]
 
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED

@@ -36,8 +36,9 @@ import sys
 import tempfile
 import types
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -89,6 +90,12 @@ class _ProbeSubTensor(torch.Tensor):
 
 
 def _from_file_args() -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Build args/kwargs for the ``torch.from_file`` probe, backed by a temp file.
+
+    The temp file is deliberately left on disk: the probe's tensor may share its
+    storage, so unlinking it here would invalidate the probe.
+    """
+
     array = np.array([0.25, 0.5], dtype=np.float32)
     fd, path = tempfile.mkstemp()
     os.write(fd, array.tobytes())
@@ -148,6 +155,8 @@ def _touches_tensor(result: Any, func: Callable[..., Any]) -> bool:
 
 
 def _resolve_namespace(namespace_name: str) -> Any | None:
+    """Resolve a dotted ``torch.*`` namespace name, or ``None`` if any part is absent."""
+
     obj: Any = torch
     for part in namespace_name.replace("torch.", "").split("."):
         if part:
@@ -230,6 +239,8 @@ def belt_report() -> BeltReport | None:
 
 
 def _weak_module_ref(module: types.ModuleType) -> Callable[[], Any | None]:
+    """Weak reference to ``module``, degrading to a strong closure when unsupported."""
+
     try:
         return weakref.ref(module)
     except TypeError:

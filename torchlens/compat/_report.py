@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 import inspect
 import itertools
 import multiprocessing
 import textwrap
 import threading
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch

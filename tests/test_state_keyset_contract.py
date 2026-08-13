@@ -20,15 +20,15 @@ from typing import Any
 
 import pytest
 import torch
+from godobject_oracle.test_aliases import _SEED, _AliasCNN, _RecurrentCell
 
 import torchlens as tl
 from torchlens.data_classes._state_adapter import state_items
-from torchlens.data_classes.op import _OP_SLOT_NAMES
-from torchlens.data_classes.op import Op
+from torchlens.data_classes.op import _OP_SLOT_NAMES, Op
 
-from godobject_oracle.test_aliases import _SEED, _AliasCNN, _RecurrentCell
-
-_GOLDEN_PATH = Path(__file__).resolve().parent / "godobject_oracle" / "goldens" / "state_keysets.json"
+_GOLDEN_PATH = (
+    Path(__file__).resolve().parent / "godobject_oracle" / "goldens" / "state_keysets.json"
+)
 _UPDATE_ENV = "TORCHLENS_UPDATE_SURFACE_ORACLE"
 
 
@@ -36,13 +36,9 @@ def _capture_stage_records() -> dict[str, dict[str, list[str]]]:
     """Build the stage -> class -> sorted state-key-set mapping."""
 
     torch.manual_seed(_SEED)
-    trace = tl.trace(
-        _AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4)
-    )
+    trace = tl.trace(_AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
     torch.manual_seed(_SEED)
-    recurrent = tl.trace(
-        _RecurrentCell(), torch.linspace(-1.0, 1.0, 4).reshape(1, 4)
-    )
+    recurrent = tl.trace(_RecurrentCell(), torch.linspace(-1.0, 1.0, 4).reshape(1, 4))
     stages: dict[str, Any] = {
         "live": trace,
         "pickle": pickle.loads(pickle.dumps(trace)),
@@ -69,9 +65,7 @@ def _capture_stage_records() -> dict[str, dict[str, list[str]]]:
                 # the pre-columnar baseline); freeze it as data.
                 per_class[class_key] = ["<no records at this stage>"]
         for class_key, record in records.items():
-            per_class[class_key] = sorted(
-                {name for name, _ in state_items(record)}
-            )
+            per_class[class_key] = sorted({name for name, _ in state_items(record)})
         result[stage_name] = per_class
     return result
 
@@ -83,9 +77,7 @@ def test_state_keysets_match_golden() -> None:
     actual = json.dumps(_capture_stage_records(), indent=1, sort_keys=True)
     from _oracle_env import resolve_env_golden
 
-    golden_path, record_on_missing = resolve_env_golden(
-        _GOLDEN_PATH.parent, _GOLDEN_PATH.name
-    )
+    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name)
     if os.environ.get(_UPDATE_ENV) == "1":
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
@@ -93,12 +85,8 @@ def test_state_keysets_match_golden() -> None:
     if record_on_missing and not golden_path.exists():
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip(
-            f"recorded first-run state-keyset golden for this environment: {golden_path}"
-        )
-    assert golden_path.exists(), (
-        f"missing state-keyset golden; generate with {_UPDATE_ENV}=1"
-    )
+        pytest.skip(f"recorded first-run state-keyset golden for this environment: {golden_path}")
+    assert golden_path.exists(), f"missing state-keyset golden; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(
@@ -124,15 +112,11 @@ def test_declared_fields_dominate_op_state() -> None:
     """
 
     torch.manual_seed(_SEED)
-    trace = tl.trace(
-        _AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4)
-    )
+    trace = tl.trace(_AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
     declared = set(Op.FIELD_POLICY)
     for op in trace.ops.values():
         undeclared = {name for name, _ in state_items(op)} - declared
-        assert not undeclared, (
-            f"live Op carries undeclared state: {sorted(undeclared)}"
-        )
+        assert not undeclared, f"live Op carries undeclared state: {sorted(undeclared)}"
 
 
 @pytest.mark.smoke

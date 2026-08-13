@@ -111,9 +111,7 @@ def public_surface_names(cls: type) -> tuple[str, ...]:
             name
             for mro_cls in cls.__mro__
             for name, value in vars(mro_cls).items()
-            if isinstance(value, property)
-            and not name.startswith("_")
-            and name not in seen
+            if isinstance(value, property) and not name.startswith("_") and name not in seen
         }
     )
     return field_order + tuple(extra_properties)
@@ -229,10 +227,7 @@ def canonicalize(value: Any, depth: int = 0) -> Any:
                 canonical_mapping[canon_key] = canonicalize(entry, depth + 1)
         return canonical_mapping
     if isinstance(value, (set, frozenset)):
-        members = [
-            json.dumps(canonicalize(member, depth + 1), sort_keys=True)
-            for member in value
-        ]
+        members = [json.dumps(canonicalize(member, depth + 1), sort_keys=True) for member in value]
         return {"__set__": sorted(members)}
     if isinstance(value, (list, tuple)):
         return [canonicalize(member, depth + 1) for member in value]
@@ -252,9 +247,7 @@ def _normalize_counters_deep(canonical: Any) -> Any:
     if isinstance(canonical, list):
         return [_normalize_counters_deep(member) for member in canonical]
     if isinstance(canonical, dict):
-        return {
-            key: _normalize_counters_deep(entry) for key, entry in canonical.items()
-        }
+        return {key: _normalize_counters_deep(entry) for key, entry in canonical.items()}
     return canonical
 
 

@@ -16,9 +16,9 @@ recorded that the forward consumed host RNG.
 
 from __future__ import annotations
 
-from pathlib import Path
 import random
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest

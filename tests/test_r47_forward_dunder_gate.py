@@ -45,8 +45,9 @@ loads / runs VERIFIED end-to-end (behavioral zero-forward-regression proof).
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch

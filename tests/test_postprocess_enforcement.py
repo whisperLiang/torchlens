@@ -16,10 +16,10 @@ enforcement runs are sub-second and live in the fast tier.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
-
 from support.postprocess_axes import iter_axes
 
 _AXES = iter_axes()
@@ -180,8 +180,9 @@ def test_buffer_duplicate_axis_actually_merges(
     the scalar ``buffer_source`` repoint with it.
     """
 
-    import torchlens.postprocess.control_flow as cf
     from support.postprocess_axes import _axis_buffer_duplicate
+
+    import torchlens.postprocess.control_flow as cf
 
     merges: list[tuple[str, str]] = []
     real_merge = cf._merge_buffer_entries
@@ -220,8 +221,9 @@ def test_buffer_from_input_axis_makes_ancestry_writes_effective(
     pins the trigger.
     """
 
-    import torchlens.postprocess as pp
     from support.postprocess_axes import _axis_buffer_from_input
+
+    import torchlens.postprocess as pp
 
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")
@@ -266,8 +268,9 @@ def test_reads_before_release_mark_still_record(
     reads.
     """
 
-    import torchlens.postprocess as pp
     from support.postprocess_axes import _axis_orphan_remove
+
+    import torchlens.postprocess as pp
 
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")

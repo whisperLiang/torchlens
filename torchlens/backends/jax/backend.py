@@ -15,22 +15,23 @@ from operator import mul
 from typing import Any, Final, cast
 
 from ..._deprecations import MISSING, MissingType
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes._compaction import compact_op_metadata
-from ...data_classes.layer import Layer
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
     IntermediateDerivedGradAccessor,
     IntermediateDerivedGradRecord,
 )
+from ...data_classes.layer import Layer
 from ...data_classes.module import ModuleAccessor
 from ...data_classes.param import Param, ParamAccessor
-from ...data_classes.trace import Trace
-from ...data_classes.trace import _init_module_hierarchy_data
+from ...data_classes.trace import Trace, _init_module_hierarchy_data
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
-from ...ir.op_record import amend_preview_output_parent_rebind
+from ...ir.container import ContainerSpec, DictKey, OutputPathComponent, TupleIndex
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -38,15 +39,14 @@ from ...ir.events import (
     OpEvent,
     OutputRef,
     ParentEdge,
+    is_control_edge_use,
 )
-from ...ir.events import is_control_edge_use
-from ...ir.container import ContainerSpec, DictKey, OutputPathComponent, TupleIndex
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
-from ...postprocess.finalization import _build_root_module_log
-from ...postprocess.finalization import _build_module_logs
+from ...postprocess.finalization import _build_module_logs, _build_root_module_log
 from ...postprocess.loop_grouping_adapter import (
     RecurrenceAssignment,
     RecurrenceGroupingGraph,
@@ -63,14 +63,15 @@ from ...validation.status import (
     ValidationReplayStatus,
     count_importer_region_annotations,
 )
-from .._options import JAX_EXTRA_KWARG_POLICY, JAX_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing as _default_if_missing
-from .._options import is_missing as _is_missing
-from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
-from ..._trace_core.relation_views import freeze_trace_relation_views
-from ...capture.outcome import stamp_backend_finalized
-from .._selective_save import apply_static_label_save_policy
-from .._selective_save import pop_static_label_save_predicate
+from .._options import (
+    JAX_EXTRA_KWARG_POLICY,
+    JAX_PREVIEW_TRACE_OPTION_POLICY,
+    default_if_missing as _default_if_missing,
+    is_missing as _is_missing,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
+from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
     JaxCaptureResult,
@@ -81,8 +82,8 @@ from .jaxpr import (
     flatten_dynamic_args,
     interpret_closed_jaxpr_with_inlining,
     jax_equivalence_key,
-    reject_undeclared_consts,
     reject_attributed_module_strict_control_flow,
+    reject_undeclared_consts,
     replay_equation,
 )
 from .modules import (
@@ -2866,7 +2867,7 @@ def _jax_event_module_call_stack(
         Module calls aligned with ``module_addresses``.
     """
 
-    call_by_address = {address: call_index for address, call_index in module_call_stack}
+    call_by_address = dict(module_call_stack)
     return tuple((address, call_by_address.get(address, 1)) for address in module_addresses)
 
 
@@ -3054,8 +3055,8 @@ def _reject_closed_over_host_state(fn: Callable[..., Any]) -> None:
         Returns when no referenced host scalar/array globals are found.
     """
 
-    import numpy as np
     import jax
+    import numpy as np
 
     closure = inspect.getclosurevars(fn)
     candidates = {**closure.nonlocals, **closure.globals}

@@ -133,9 +133,7 @@ def test_compiled_attribute_interior_is_logged_with_full_verified_semantics() ->
 
     with torch.no_grad():
         expected = torch.relu(torch.sin(model.fc(x))) + 1
-    recorded = next(
-        trace[label].out for label in labels if "add" in label
-    )
+    recorded = next(trace[label].out for label in labels if "add" in label)
     assert torch.equal(recorded, expected), "captured values must be eager-path values"
 
 
@@ -175,9 +173,7 @@ def test_forced_eager_disclosure_note_fires_once_per_process() -> None:
     assert not [w for w in second if "force_eager" in str(w.message)]
 
 
-_compiled_free_fn = torch.compile(
-    lambda t: torch.tanh(t) + torch.sigmoid(t), fullgraph=True
-)
+_compiled_free_fn = torch.compile(lambda t: torch.tanh(t) + torch.sigmoid(t), fullgraph=True)
 
 
 class _UsesCompiledFreeFunction(nn.Module):
@@ -326,9 +322,7 @@ def test_interior_intervention_in_formerly_opaque_region() -> None:
             intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
         )
 
-    ablated_out = next(
-        ablated[label].out for label in ablated.layer_labels if "add" in label
-    )
+    ablated_out = next(ablated[label].out for label in ablated.layer_labels if "add" in label)
     clean_out = next(clean[label].out for label in clean.layer_labels if "add" in label)
     assert torch.equal(ablated_out, torch.ones_like(ablated_out)), (
         "zero-ablating the interior relu must zero its output (leaving the +1)"
@@ -452,10 +446,9 @@ def test_count_compiles_verifies_the_coexistence_contract() -> None:
     x = torch.randn(2, 4)
     model(x)  # warm
 
-    with tl.debug.count_compiles() as during:
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            tl.trace(model, x)
+    with tl.debug.count_compiles() as during, warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        tl.trace(model, x)
     assert during.frames_compiled == 0
 
     with tl.debug.count_compiles() as after:

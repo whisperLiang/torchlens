@@ -20,7 +20,7 @@ from typing import Any, NamedTuple
 
 import torch
 
-from ..errors._base import CompatibilityError
+from ..errors._base import CompatibilityError, TorchLensWarning
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
 # v7 adds the persisted capture outcome (`_capture_outcome`, string-only payload).
@@ -46,6 +46,20 @@ class ArtifactVersionBelowFloorError(TorchLensIOError):
     (``tlspec_version >= 6``). Older artifacts refuse with this error rather
     than being partially reconstructed; re-save them with a torchlens release
     in the ``2.33``-to-``2.34`` range that can still read them.
+    """
+
+
+class ArtifactSchemaAgeWarning(TorchLensWarning):
+    """Warning emitted when a loaded artifact predates the runtime schema.
+
+    The artifact is between the rehydration floor and the current
+    ``tlspec_version``: it loads at its own recorded schema, and fields
+    introduced by later schema versions are absent rather than default-filled.
+
+    This is deliberately a ``UserWarning`` subclass, not a
+    ``DeprecationWarning``. It deprecates no API -- it reports the AGE of one
+    artifact -- and ``DeprecationWarning`` is hidden from end users by default,
+    which made the advisory effectively invisible at the one moment it matters.
     """
 
 

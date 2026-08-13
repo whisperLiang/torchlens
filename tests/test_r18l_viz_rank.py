@@ -222,7 +222,7 @@ def test_m4_within_rank_sort_is_total_order():
 
     labels = ["zeta", "alpha", "mu", "beta"]
     nd = {n: {"node_label": n, "attrs": {}} for n in labels}
-    sz = {n: (20.0, 10.0) for n in labels}
+    sz = dict.fromkeys(labels, (20.0, 10.0))
     pos, _, _ = _compute_topological_layout(nd, [], sz, {}, {})
     order = [n for n, _ in sorted(pos.items(), key=lambda kv: kv[1][0])]
     assert order == sorted(labels)

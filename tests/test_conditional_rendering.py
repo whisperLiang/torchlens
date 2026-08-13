@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Tuple
 
 import pytest
 import torch
-import torchlens as tl
 import torch.nn as nn
 
+import torchlens as tl
 from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
 from torchlens.utils._torch_compat import HAS_CODE_POSITIONS
@@ -165,7 +164,7 @@ def _render_dot_source(
     model: nn.Module,
     x: torch.Tensor,
     vis_mode: str = "unrolled",
-) -> Tuple[str, Trace]:
+) -> tuple[str, Trace]:
     """Render a model graph and return the DOT source plus model log.
 
     Parameters

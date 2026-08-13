@@ -9,7 +9,6 @@ classifier.
 
 from __future__ import annotations
 
-
 import pytest
 import torch
 from torch import nn
@@ -251,11 +250,7 @@ def test_capability_table_is_total() -> None:
     for capability, row in CAPTURE_OUTCOME_CAPABILITIES.items():
         assert set(row) == set(CaptureStatus), capability
         for cell in row.values():
-            assert (
-                cell == "allow"
-                or cell.startswith("allow_scoped:")
-                or cell.startswith("refuse:")
-            )
+            assert cell == "allow" or cell.startswith("allow_scoped:") or cell.startswith("refuse:")
 
 
 @pytest.mark.parametrize(
@@ -378,8 +373,7 @@ def test_origin_torchlens_frame_classifies_torchlens() -> None:
 
 
 def test_types_and_errors_exports() -> None:
-    from torchlens import errors as tl_errors
-    from torchlens import types as tl_types
+    from torchlens import errors as tl_errors, types as tl_types
 
     assert tl_types.CaptureOutcome is CaptureOutcome
     assert tl_types.CaptureStatus is CaptureStatus

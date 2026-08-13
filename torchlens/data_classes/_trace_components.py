@@ -16,16 +16,18 @@ workspaces).
 
 from __future__ import annotations
 
-TRACE_COMPONENT_VOCABULARY = frozenset({
-    "header",
-    "capture_config",
-    "graph",
-    "witness",
-    "source_metadata",
-    "totals",
-    "runnable",
-    "session",
-})
+TRACE_COMPONENT_VOCABULARY = frozenset(
+    {
+        "header",
+        "capture_config",
+        "graph",
+        "witness",
+        "source_metadata",
+        "totals",
+        "runnable",
+        "session",
+    }
+)
 
 TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "trace_label": "header",

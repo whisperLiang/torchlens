@@ -19,8 +19,9 @@ This module provides the helper stack behind Trace cleanup operations:
    single-entry and batch removal helpers.
 """
 
+from collections.abc import Iterable
 from dataclasses import fields, is_dataclass, replace
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Set, Tuple, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -168,9 +169,9 @@ def _label_for_reference_removal(log_entry: Op, pass_finished: bool) -> str:
 
 
 def _filter_conditional_arm_children(
-    conditional_arm_children: Dict[int, Dict[str, List[str]]],
-    labels_to_remove: Set[str],
-) -> Dict[int, Dict[str, List[str]]]:
+    conditional_arm_children: dict[int, dict[str, list[str]]],
+    labels_to_remove: set[str],
+) -> dict[int, dict[str, list[str]]]:
     """Drop removed labels from ``conditional_arm_children``.
 
     Args:
@@ -180,7 +181,7 @@ def _filter_conditional_arm_children(
     Returns:
         A new nested dict with removed labels and empty containers pruned.
     """
-    filtered_children_by_cond: Dict[int, Dict[str, List[str]]] = {}
+    filtered_children_by_cond: dict[int, dict[str, list[str]]] = {}
     for cond_id, branch_children in conditional_arm_children.items():
         filtered_branch_children = {
             branch_kind: [
@@ -199,9 +200,9 @@ def _filter_conditional_arm_children(
 
 
 def _filter_conditional_elif_children(
-    conditional_elif_children: Dict[int, List[str]],
-    labels_to_remove: Set[str],
-) -> Dict[int, List[str]]:
+    conditional_elif_children: dict[int, list[str]],
+    labels_to_remove: set[str],
+) -> dict[int, list[str]]:
     """Drop removed labels from ``conditional_elif_children``.
 
     Args:
@@ -221,9 +222,9 @@ def _filter_conditional_elif_children(
 
 
 def _filter_conditional_arm_entry_edges(
-    conditional_arm_entry_edges: Dict[Tuple[int, str], List[Tuple[str, str]]],
-    labels_to_remove: Set[str],
-) -> Dict[Tuple[int, str], List[Tuple[str, str]]]:
+    conditional_arm_entry_edges: dict[tuple[int, str], list[tuple[str, str]]],
+    labels_to_remove: set[str],
+) -> dict[tuple[int, str], list[tuple[str, str]]]:
     """Drop removed labels from ``conditional_arm_entry_edges``.
 
     Args:
@@ -233,7 +234,7 @@ def _filter_conditional_arm_entry_edges(
     Returns:
         A new dict with empty edge lists pruned.
     """
-    filtered_arm_edges: Dict[Tuple[int, str], List[Tuple[str, str]]] = {}
+    filtered_arm_edges: dict[tuple[int, str], list[tuple[str, str]]] = {}
     for key, edge_list in conditional_arm_entry_edges.items():
         filtered_edges = [
             (parent, child)
@@ -246,9 +247,9 @@ def _filter_conditional_arm_entry_edges(
 
 
 def _filter_conditional_edge_call_indices(
-    conditional_edge_call_indices: Dict[Tuple[str, str, int, str], List[int]],
-    labels_to_remove_no_pass: Set[str],
-) -> Dict[Tuple[str, str, int, str], List[int]]:
+    conditional_edge_call_indices: dict[tuple[str, str, int, str], list[int]],
+    labels_to_remove_no_pass: set[str],
+) -> dict[tuple[str, str, int, str], list[int]]:
     """Drop removed labels from ``conditional_edge_call_indices`` keys.
 
     Args:
@@ -266,8 +267,8 @@ def _filter_conditional_edge_call_indices(
 
 
 def _project_conditional_child_views(
-    conditional_arm_children: Dict[int, Dict[str, List[str]]],
-) -> Tuple[List[str], Dict[int, List[str]], List[str]]:
+    conditional_arm_children: dict[int, dict[str, list[str]]],
+) -> tuple[list[str], dict[int, list[str]], list[str]]:
     """Project pass-level child views from ``conditional_arm_children``.
 
     Parameters
@@ -290,7 +291,7 @@ def _project_conditional_child_views(
             for child_label in branch_children.get("then", [])
         }
     )
-    elif_children: Dict[int, List[str]] = {}
+    elif_children: dict[int, list[str]] = {}
     for branch_children in conditional_arm_children.values():
         for branch_kind, child_labels in branch_children.items():
             if not branch_kind.startswith("elif_"):
@@ -310,7 +311,7 @@ def _project_conditional_child_views(
     return then_children, elif_children, else_children
 
 
-def _append_unique_child_label(child_labels: List[str], child_label: str) -> None:
+def _append_unique_child_label(child_labels: list[str], child_label: str) -> None:
     """Append ``child_label`` to ``child_labels`` if it is not already present.
 
     Parameters
@@ -326,8 +327,8 @@ def _append_unique_child_label(child_labels: List[str], child_label: str) -> Non
 
 
 def _project_aggregate_conditional_child_views(
-    conditional_arm_children: Dict[int, Dict[str, List[str]]],
-) -> Tuple[List[str], Dict[int, List[str]], List[str]]:
+    conditional_arm_children: dict[int, dict[str, list[str]]],
+) -> tuple[list[str], dict[int, list[str]], list[str]]:
     """Project aggregate child views from ``conditional_arm_children``.
 
     Parameters
@@ -342,9 +343,9 @@ def _project_aggregate_conditional_child_views(
         THEN, ELIF, and ELSE child views preserving first-seen order.
     """
 
-    then_children: List[str] = []
-    elif_children: Dict[int, List[str]] = {}
-    else_children: List[str] = []
+    then_children: list[str] = []
+    elif_children: dict[int, list[str]] = {}
+    else_children: list[str] = []
     for branch_children in conditional_arm_children.values():
         for child_label in branch_children.get("then", []):
             _append_unique_child_label(then_children, child_label)
@@ -362,7 +363,7 @@ def _project_aggregate_conditional_child_views(
 
 def _scrub_layer_entry_conditional_fields(
     layer_entry: Op,
-    labels_to_remove: Set[str],
+    labels_to_remove: set[str],
 ) -> None:
     """Remove deleted labels from conditional fields on a surviving Op.
 
@@ -386,7 +387,7 @@ def _scrub_layer_entry_conditional_fields(
     ) = _project_conditional_child_views(layer_entry.conditional_arm_children)
 
 
-def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass: Set[str]) -> None:
+def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass: set[str]) -> None:
     """Remove deleted labels from aggregate Layer conditional fields.
 
     Args:
@@ -420,7 +421,7 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
 
 def _scrub_conditional_fields_after_removal(
     self: "Trace",
-    labels_to_remove: Set[str],
+    labels_to_remove: set[str],
     surviving_entries: Iterable[Op],
 ) -> None:
     """Scrub conditional references after one or more layer labels are removed.
@@ -458,7 +459,7 @@ def _scrub_conditional_fields_after_removal(
 
 def _scrub_intervention_fields_after_removal(
     self: Any,
-    labels_to_remove: Set[str],
+    labels_to_remove: set[str],
     surviving_entries: Iterable[Op],
 ) -> None:
     """Scrub replay/intervention metadata that carries layer labels.
@@ -500,7 +501,7 @@ def _scrub_intervention_fields_after_removal(
     _scrub_intervention_spec_after_removal(self, labels_to_remove)
 
 
-def _scrub_intervention_spec_after_removal(self: Any, labels_to_remove: Set[str]) -> None:
+def _scrub_intervention_spec_after_removal(self: Any, labels_to_remove: set[str]) -> None:
     """Remove deleted-label entries from mutable intervention-spec collections.
 
     Parameters
@@ -534,7 +535,7 @@ def _scrub_intervention_spec_after_removal(self: Any, labels_to_remove: Set[str]
         self._mark_intervention_spec_mutated()
 
 
-def _replace_removed_parent_refs(value: Any, labels_to_remove: Set[str]) -> Any:
+def _replace_removed_parent_refs(value: Any, labels_to_remove: set[str]) -> Any:
     """Replace template parent refs to removed labels with unsupported leaves.
 
     Args:
@@ -565,7 +566,7 @@ def _replace_removed_parent_refs(value: Any, labels_to_remove: Set[str]) -> Any:
     return value
 
 
-def _record_mentions_removed_label(record: Any, labels_to_remove: Set[str]) -> bool:
+def _record_mentions_removed_label(record: Any, labels_to_remove: set[str]) -> bool:
     """Return whether a record contains a removed label-bearing field.
 
     Args:
@@ -657,7 +658,7 @@ def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
     ]
     # Now any nested fields.
 
-    for param_group, tensor_labels in self.layers_with_params.items():
+    for _param_group, tensor_labels in self.layers_with_params.items():
         if layer_to_remove in tensor_labels:
             tensor_labels.remove(layer_to_remove)
     self.layers_with_params = {
@@ -666,7 +667,7 @@ def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
         if len(tensor_labels) > 0
     }
 
-    for equiv_group, equiv_tensor_labels in self.op_equivalence_classes.items():
+    for _equiv_group, equiv_tensor_labels in self.op_equivalence_classes.items():
         if layer_to_remove in equiv_tensor_labels:
             equiv_tensor_labels.remove(layer_to_remove)
     self.op_equivalence_classes = {
@@ -678,7 +679,7 @@ def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
     _scrub_per_op_equivalence_lists(self, {layer_to_remove})
 
 
-def _scrub_per_op_equivalence_lists(ops: Iterable["Op"], labels_to_remove: Set[str]) -> None:
+def _scrub_per_op_equivalence_lists(ops: Iterable["Op"], labels_to_remove: set[str]) -> None:
     """Remove dead labels from per-op graph-reference fields.
 
     ``equivalent_ops`` and other raw-label fields are stored per op
@@ -697,7 +698,7 @@ def _scrub_per_op_equivalence_lists(ops: Iterable["Op"], labels_to_remove: Set[s
         _scrub_conditional_child_maps(op, labels_to_remove)
 
 
-def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
+def _scrub_op_label_collections(op: "Op", labels_to_remove: set[str]) -> None:
     """Remove dead labels from direct list/set fields on one op.
 
     Parameters
@@ -750,7 +751,7 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
                 setattr(op, field_name, value - labels_to_remove)
 
 
-def _scrub_parent_arg_positions(op: "Op", labels_to_remove: Set[str]) -> None:
+def _scrub_parent_arg_positions(op: "Op", labels_to_remove: set[str]) -> None:
     """Remove parent-argument references to deleted raw labels.
 
     Parameters
@@ -771,7 +772,7 @@ def _scrub_parent_arg_positions(op: "Op", labels_to_remove: Set[str]) -> None:
                 del positions[key]
 
 
-def _scrub_out_versions_by_child(op: "Op", labels_to_remove: Set[str]) -> None:
+def _scrub_out_versions_by_child(op: "Op", labels_to_remove: set[str]) -> None:
     """Remove output-version records keyed by deleted child raw labels.
 
     Parameters
@@ -792,7 +793,7 @@ def _scrub_out_versions_by_child(op: "Op", labels_to_remove: Set[str]) -> None:
     }
 
 
-def _scrub_conditional_child_maps(op: "Op", labels_to_remove: Set[str]) -> None:
+def _scrub_conditional_child_maps(op: "Op", labels_to_remove: set[str]) -> None:
     """Remove deleted raw labels from nested conditional child maps.
 
     Parameters

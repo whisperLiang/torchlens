@@ -15,7 +15,6 @@ from torchlens.receptive_field import _engine, _query, _rules
 from torchlens.receptive_field._engine_forward import solve_projective
 from torchlens.receptive_field._types import ReceptiveFieldStatus
 
-
 _PACK: dict[str, object] | None = None
 
 

@@ -9,13 +9,11 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens import _state
-from torchlens import Recording, Trace
+from torchlens import Recording, Trace, _state
+from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.io import load_intervention_spec
 from torchlens.options import CaptureOptions
 from torchlens.validation import validate_forward_pass
-from torchlens.backends.torch.wrappers import wrap_torch
-
 
 _HAS_TORCH_FUNC = hasattr(torch, "func")
 
@@ -814,7 +812,7 @@ def test_arg_spec_table_cannot_silently_cost_a_parent_edge() -> None:
     pinned by the genuine route in the test below instead.
     """
 
-    from torchlens.capture.arg_positions import ArgSpec, FUNC_ARG_SPECS
+    from torchlens.capture.arg_positions import FUNC_ARG_SPECS, ArgSpec
 
     class _PolygammaModel(nn.Module):
         """Exercise a schema-known tensor operand at a non-zero argument position."""

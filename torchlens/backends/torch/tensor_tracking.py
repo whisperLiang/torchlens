@@ -12,17 +12,16 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from ._tl import get_param_meta, get_tensor_label, increment_param_call_index, set_param_meta
-from ...ir.events import BackwardPassStart, OpGradObserved
-from ...data_classes.op import Op
 from ... import _state
 from ..._state import pause_logging
+from ...data_classes.op import Op
+from ...fastlog.types import CaptureSpec
 from ...intervention.selectors import BaseSelector
+from ...ir.events import BackwardPassStart, OpGradObserved
 from ...utils.display import _record_phase_timing
 from ...utils.hashing import make_random_barcode, make_short_barcode_from_input
-from ...utils.tensor_utils import safe_copy
-from ...utils.tensor_utils import SaveMode
-from ...fastlog.types import CaptureSpec
+from ...utils.tensor_utils import SaveMode, safe_copy
+from ._tl import get_param_meta, get_tensor_label, increment_param_call_index, set_param_meta
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace

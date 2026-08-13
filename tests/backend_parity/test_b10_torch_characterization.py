@@ -15,7 +15,6 @@ import torchlens._state as torchlens_state
 from torchlens.data_classes.trace import Trace
 from torchlens.intervention.types import DictKey, TupleIndex
 
-
 pytestmark = pytest.mark.backend_parity
 
 

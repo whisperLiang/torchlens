@@ -1,17 +1,15 @@
 """Backward event flow and intervention evidence."""
 
 from __future__ import annotations
+
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _resolve_op_grad_event_label,
     )
 
@@ -24,7 +22,7 @@ __all__ = (
 )
 
 
-def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
+def _check_backward_event_flow_invariants(trace: Trace, name: str) -> None:
     """Check runtime backward event stream consistency against projections.
 
     Parameters
@@ -325,7 +323,7 @@ def _intervention_spec_is_armed(spec: object | None) -> bool:
     )
 
 
-def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = None) -> bool:
+def op_has_genuine_replacement_evidence(layer: Op, trace: Trace | None = None) -> bool:
     """Return whether trace-level evidence corroborates a replacement stamp.
 
     Every ``intervention_replacement`` exemption used to trust per-op
@@ -439,7 +437,7 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     return False
 
 
-def _is_func_call_id_exempt(layer: "Op") -> bool:
+def _is_func_call_id_exempt(layer: Op) -> bool:
     """Return whether a layer is exempt from Invariant S.
 
     Parameters
@@ -482,7 +480,7 @@ def _is_func_call_id_exempt(layer: "Op") -> bool:
     }
 
 
-def _plain_func_call_group_signature(layer: "Op") -> tuple[object, ...]:
+def _plain_func_call_group_signature(layer: Op) -> tuple[object, ...]:
     """Return plain-capture-stable same-call metadata.
 
     Parameters

@@ -97,19 +97,18 @@ from torchlens.constants import (  # noqa: E402
     MODULE_LOG_FIELD_ORDER,
 )
 from torchlens.data_classes.backward_pass import (  # noqa: E402
-    BackwardPass,
     _TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS,
+    BackwardPass,
 )
 from torchlens.data_classes.buffer import (  # noqa: E402
-    Buffer,
     _TO_PANDAS_EXCLUDED_BUFFER_FIELDS,
+    Buffer,
 )
 from torchlens.data_classes.layer import Layer  # noqa: E402
-from torchlens.data_classes.module import Module, _TO_PANDAS_EXCLUDED_MODULE_FIELDS  # noqa: E402
+from torchlens.data_classes.module import _TO_PANDAS_EXCLUDED_MODULE_FIELDS, Module  # noqa: E402
 from torchlens.data_classes.op import Op  # noqa: E402
 from torchlens.data_classes.trace import Trace  # noqa: E402
 from torchlens.options import CaptureOptions  # noqa: E402
-
 
 # Per-class documented exclusions for `test_field_order_has_no_keep_field_desync`.
 #
@@ -295,7 +294,7 @@ def test_buffer_to_pandas_covers_field_order(coverage_trace: Any) -> None:
     assert unaccounted == []
     assert not (_TO_PANDAS_EXCLUDED_BUFFER_FIELDS & set(columns))
     # Excluded fields are real Buffer fields (no stale exclusion entries).
-    assert _TO_PANDAS_EXCLUDED_BUFFER_FIELDS <= set(BUFFER_LOG_FIELD_ORDER)
+    assert set(BUFFER_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
 
     # initial_value is a real, non-None value -- not just a present-but-empty
     # column (the field the old hand-rolled/desynced FIELD_ORDER dropped).
@@ -373,7 +372,7 @@ def test_module_accessor_to_pandas_covers_field_order(coverage_trace: Any) -> No
     assert unaccounted == []
     assert not (_TO_PANDAS_EXCLUDED_MODULE_FIELDS & set(columns))
     # Excluded fields are real Module fields (no stale exclusion entries).
-    assert _TO_PANDAS_EXCLUDED_MODULE_FIELDS <= set(MODULE_LOG_FIELD_ORDER)
+    assert set(MODULE_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_MODULE_FIELDS
     assert len(df) == len(coverage_trace.modules)
 
 
@@ -398,7 +397,7 @@ def test_backward_pass_to_pandas_covers_field_order(coverage_trace: Any) -> None
     ]
     assert unaccounted == []
     assert not (_TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS & set(columns))
-    assert _TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS <= set(BACKWARD_PASS_FIELD_ORDER)
+    assert set(BACKWARD_PASS_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS
 
     # Fields the old hand-rolled subset silently dropped are now real, present,
     # non-default values -- not just present-but-empty columns.

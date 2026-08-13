@@ -38,7 +38,7 @@ class _TinyBundleModel(nn.Module):
         return self.lin(x)
 
 
-def _build_bundle(seed: int) -> "tl.Bundle":
+def _build_bundle(seed: int) -> tl.Bundle:
     """Build a one-member bundle whose member name encodes ``seed``.
 
     Parameters

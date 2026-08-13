@@ -166,7 +166,7 @@ def test_r45_every_tensor_getset_descriptor_is_classified() -> None:
         assert reasons[name] in _KNOWN_REASONS, (name, reasons[name])
 
     # Explicit intent pins (documented behavior; independent of the oracle above).
-    assert _EXPECTED_ADMITTED <= shipped_admitted, _EXPECTED_ADMITTED - shipped_admitted
+    assert shipped_admitted >= _EXPECTED_ADMITTED, _EXPECTED_ADMITTED - shipped_admitted
     assert shipped_admitted == _EXPECTED_ADMITTED, shipped_admitted ^ _EXPECTED_ADMITTED
     assert {"H", "mH"} <= shipped_admitted
     assert "data" in denied

@@ -17,8 +17,8 @@ diagnostics only and never participate in identity.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Literal
 
 __all__ = [
@@ -123,7 +123,7 @@ class GroupLifecycleEvent:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "GroupLifecycleEvent":
+    def from_payload(cls, payload: dict[str, Any]) -> GroupLifecycleEvent:
         """Rebuild an event from :meth:`to_payload` output."""
 
         return cls(
@@ -288,7 +288,7 @@ class GroupLifecycleLedger:
         return [event.to_payload() for event in self._events]
 
     @classmethod
-    def from_payload(cls, payload: list[dict[str, Any]]) -> "GroupLifecycleLedger":
+    def from_payload(cls, payload: list[dict[str, Any]]) -> GroupLifecycleLedger:
         """Rebuild a ledger from :meth:`to_payload` output."""
 
         return cls([GroupLifecycleEvent.from_payload(entry) for entry in payload])

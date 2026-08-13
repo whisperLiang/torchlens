@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from io import BytesIO
 import subprocess
 import sys
+from io import BytesIO
 
 import numpy as np
 import pytest
@@ -12,13 +12,13 @@ import torch
 from PIL import Image, ImageDraw
 
 from torchlens.viz import render_heatmap, render_image_scatter, render_lineplot
+from torchlens.viz._tensor_display import show_tensor
 from torchlens.viz.node_plots import (
     _coords_to_pixel_centers,
     _measure_text,
     _select_heatmap_axis_indices,
+    _spread_close_centers,
 )
-from torchlens.viz.node_plots import _spread_close_centers
-from torchlens.viz._tensor_display import show_tensor
 
 
 def _png_bytes(image: Image.Image) -> bytes:

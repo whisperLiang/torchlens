@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Literal
 
 import torch
 
@@ -48,7 +48,7 @@ class TapRecord:
     grad_kind: Literal["grad_input", "grad_output"] | None = None
     backward_call_index: int | None = None
     _raw_site_label: str | None = None
-    _trace_ref: "Callable[[], Any] | None" = field(default=None, compare=False, repr=False)
+    _trace_ref: Callable[[], Any] | None = field(default=None, compare=False, repr=False)
 
     @property
     def site_label(self) -> str | None:

@@ -95,12 +95,8 @@ def _capture(model_key: str) -> tl.Trace:
 
     torch.manual_seed(_SEED)
     if model_key == "viz_cnn":
-        return tl.trace(
-            VizCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4)
-        )
-    return tl.trace(
-        VizRecurrent(), torch.linspace(-1.0, 1.0, 4).reshape(1, 4)
-    )
+        return tl.trace(VizCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
+    return tl.trace(VizRecurrent(), torch.linspace(-1.0, 1.0, 4).reshape(1, 4))
 
 
 def _dot(trace: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
@@ -128,12 +124,8 @@ def _assert_matches_golden(actual: str, golden_name: str) -> None:
     if record_on_missing and not golden_path.exists():
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip(
-            f"recorded first-run viz golden for this environment: {golden_path}"
-        )
-    assert golden_path.exists(), (
-        f"missing golden {golden_name}; generate with {_UPDATE_ENV}=1"
-    )
+        pytest.skip(f"recorded first-run viz golden for this environment: {golden_path}")
+    assert golden_path.exists(), f"missing golden {golden_name}; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(
@@ -153,9 +145,7 @@ def _assert_matches_golden(actual: str, golden_name: str) -> None:
 @pytest.mark.smoke
 @pytest.mark.parametrize("model_key", ("viz_cnn", "viz_recurrent"))
 @pytest.mark.parametrize("vis_mode", ("unrolled", "rolled"))
-def test_forward_dot_matches_golden(
-    model_key: str, vis_mode: str, tmp_path: Path
-) -> None:
+def test_forward_dot_matches_golden(model_key: str, vis_mode: str, tmp_path: Path) -> None:
     """Forward/rolled DOT source is byte-identical to the frozen golden."""
 
     trace = _capture(model_key)
@@ -220,11 +210,8 @@ def test_backward_dot_in_process_stable(tmp_path: Path) -> None:
     )
     assert first == second
 
-    node_count = sum(
-        1 for line in first.splitlines() if " [" in line and "->" not in line
-    )
+    node_count = sum(1 for line in first.splitlines() if " [" in line and "->" not in line)
     edge_count = sum(1 for line in first.splitlines() if "->" in line)
     assert (node_count, edge_count) == (16, 12), (
-        f"backward graph structure changed: {node_count} nodes, "
-        f"{edge_count} edges"
+        f"backward graph structure changed: {node_count} nodes, {edge_count} edges"
     )

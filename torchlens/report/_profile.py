@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..utils._multipass_access import is_multipass_layer
 
-
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -40,12 +39,12 @@ class TraceProfile:
     active. Use them to identify relative hotspots, not as clean benchmarks.
     """
 
-    frame: "pd.DataFrame"
+    frame: pd.DataFrame
     level: ProfileLevel
-    _honesty_frame: "pd.DataFrame | None" = None
+    _honesty_frame: pd.DataFrame | None = None
     _tree_text: str = ""
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying profile dataframe.
 
         Returns
@@ -69,7 +68,7 @@ class TraceProfile:
         display_frame["time"] = display_frame["time"].map(_format_duration)
         return display_frame.to_string(index=False)
 
-    def honesty(self) -> "pd.DataFrame":
+    def honesty(self) -> pd.DataFrame:
         """Return index-aligned evidence labels for resource quantities.
 
         Returns
@@ -124,7 +123,7 @@ def _require_pandas() -> Any:
     return pd
 
 
-def _ops_for_labels(trace: "Trace", labels: list[str]) -> list[Any]:
+def _ops_for_labels(trace: Trace, labels: list[str]) -> list[Any]:
     """Resolve pass-qualified labels to operation records.
 
     Parameters
@@ -307,7 +306,7 @@ def _honesty_row(row: Mapping[Hashable, Any]) -> dict[str, str]:
     }
 
 
-def _build_call_tree(trace: "Trace") -> str:
+def _build_call_tree(trace: Trace) -> str:
     """Render module calls from recorded call-parent relationships.
 
     Parameters
@@ -362,7 +361,7 @@ def _build_call_tree(trace: "Trace") -> str:
 
 
 def build_profile(
-    trace: "Trace",
+    trace: Trace,
     *,
     level: ProfileLevel = "op",
     sort_by: ProfileSort = "time",

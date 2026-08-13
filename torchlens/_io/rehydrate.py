@@ -8,34 +8,35 @@ used by ``torchlens.load(..., materialize_nested=False)``.
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
 import dataclasses
 import types
+from collections import OrderedDict, defaultdict
+from collections.abc import Mapping
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file
 
+from ..backends import BackendRuntimeCompatibilityError
+from ..data_classes._state_adapter import state_items
+from ..data_classes.trace import Trace
+from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
 from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError
 from ._torch_symbols import torch_attr
 from .accessor_rebuild import rebuild_trace_accessors
 from .lazy import LazyActivationRef
 from .manifest import Manifest, TensorEntry, sha256_of_file
-from .payload_codec import materialize_transport_tensor
 from .paths import resolve_bundle_blob_path, resolve_bundle_blobs_dir
-from .state_keys import invalidate_static_class_attr_cache, static_class_attr
+from .payload_codec import materialize_transport_tensor
 from .scrub import (
     _RAW_IMAGE_SENTINEL,
     _RAW_INPUT_IMAGE_BYTES_LIMIT,
     _RAW_INPUT_IMAGE_MAX_EDGE,
 )
-from ..backends import BackendRuntimeCompatibilityError
-from ..data_classes._state_adapter import state_items
-from ..data_classes.trace import Trace
-from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
+from .state_keys import invalidate_static_class_attr_cache, static_class_attr
 
 _LEGACY_CAPTURE_TRACE_KEYS = {
     *LEGACY_TRACE_BUILD_STATE_KEYS,

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from pathlib import Path
 import struct
+from pathlib import Path
 
 import pytest
 import torch

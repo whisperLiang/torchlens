@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import random
-from collections import OrderedDict
-from typing import Any, Callable, cast
 import warnings
+from collections import OrderedDict
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 from torch import nn
 
 from .._capture_state_helpers import unwrap_compiled_model
 from .._input_coerce import _coerce_input_args
-from ..options import CaptureOptions
 from .._robustness import check_model_and_input_variants
 from ..intervention.errors import AppendStateValidationWarning
+from ..options import CaptureOptions
 from ..utils.arg_handling import normalize_input_args
 from ..utils.display import warn_parallel
 from ..utils.rng import set_random_seed
@@ -460,9 +461,7 @@ def validate_backward_pass(
             )
             for name in expected_param_grads
         )
-        if not params_passed:
-            return False
-        return True
+        return params_passed
     finally:
         model.load_state_dict(state_dict)
         _restore_training_mode(model, original_training)

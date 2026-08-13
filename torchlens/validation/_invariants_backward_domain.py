@@ -1,6 +1,7 @@
 """Backward pass domains and journal sequencing."""
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ __all__ = (
 
 
 def _check_backward_pass_domain_invariants(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -133,7 +134,7 @@ def _check_backward_pass_domain_invariants(
         )
 
 
-def _layer_postdates_all_backward_triggers(trace: "Trace", layer: "Layer | Op") -> bool:
+def _layer_postdates_all_backward_triggers(trace: Trace, layer: Layer | Op) -> bool:
     """Return whether a layer was created after every recorded backward trigger.
 
     Parameters
@@ -157,7 +158,7 @@ def _layer_postdates_all_backward_triggers(trace: "Trace", layer: "Layer | Op") 
     return bool(trigger_positions) and layer_step_index > max(trigger_positions)
 
 
-def _backward_trigger_forward_positions(trace: "Trace") -> list[int]:
+def _backward_trigger_forward_positions(trace: Trace) -> list[int]:
     """Return strict forward boundaries for recorded backward triggers.
 
     Parameters
@@ -198,7 +199,7 @@ def _backward_trigger_forward_positions(trace: "Trace") -> list[int]:
     return positions
 
 
-def _backward_pass_root_forward_position(trace: "Trace", pass_index: int) -> int | None:
+def _backward_pass_root_forward_position(trace: Trace, pass_index: int) -> int | None:
     """Return the highest paired forward position among a backward pass's roots.
 
     Parameters
@@ -234,7 +235,7 @@ def _backward_pass_root_forward_position(trace: "Trace", pass_index: int) -> int
     return max(root_steps) if root_steps else None
 
 
-def _backward_pass_observed_forward_position(trace: "Trace", pass_index: int) -> int | None:
+def _backward_pass_observed_forward_position(trace: Trace, pass_index: int) -> int | None:
     """Return the highest forward position with an observed gradient in a pass.
 
     Parameters
@@ -265,7 +266,7 @@ def _backward_pass_observed_forward_position(trace: "Trace", pass_index: int) ->
     return max(observed_steps) if observed_steps else None
 
 
-def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
+def _resolve_op_grad_event_label(trace: Trace, op_label: str) -> str:
     """Return the final lookup label for an ``OpGradObserved`` label.
 
     Delegates to the single implementation next to the event emitter so the
@@ -277,7 +278,7 @@ def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
     return _impl(trace, op_label)
 
 
-def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
+def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
     """Check one-journal sequencing across every retained event lane.
 
     The event writer stamps ONE run-monotonic ``seq`` on every event of every

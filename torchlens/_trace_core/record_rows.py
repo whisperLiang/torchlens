@@ -24,7 +24,8 @@ every reader), and deletes release the cell.
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from .op_store import _MISSING, DetachedOpStore, OpRowStore, OpStoreLayout, PooledCell
 

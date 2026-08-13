@@ -368,8 +368,8 @@ def test_public_side_effecting_first_party_callables_denied() -> None:
 def test_vetted_inert_helper_set_admitted() -> None:
     """Every frozen vetted-inert helper factory + identity still admits + resolves."""
 
-    from torchlens.utils.display import identity
     from torchlens.utils._callable_safety import _VETTED_INERT_FIRST_PARTY
+    from torchlens.utils.display import identity
 
     # identity resolves through the door.
     assert _load_ref("torchlens.utils.display", "identity") is identity

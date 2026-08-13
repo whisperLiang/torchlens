@@ -4,12 +4,15 @@ import copy
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
+
 import torch
-from ...utils._torch_compat import (
-    torch_structseq_field_names,
-)
-from ...utils.introspection import (
-    get_vars_of_type_from_obj,
+
+from ...ir.container import (
+    ContainerSpec,
+    DictKey,
+    NamedField,
+    OutputPathComponent,
+    TupleIndex,
 )
 from ...ir.events import (
     ArgTemplateRef,
@@ -17,12 +20,11 @@ from ...ir.events import (
     ModuleFrame,
 )
 from ...ir.intervention import FireResult
-from ...ir.container import (
-    ContainerSpec,
-    DictKey,
-    NamedField,
-    OutputPathComponent,
-    TupleIndex,
+from ...utils._torch_compat import (
+    torch_structseq_field_names,
+)
+from ...utils.introspection import (
+    get_vars_of_type_from_obj,
 )
 
 if TYPE_CHECKING:

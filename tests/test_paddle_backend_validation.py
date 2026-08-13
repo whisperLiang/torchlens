@@ -10,8 +10,10 @@ paddle = pytest.importorskip("paddle")
 
 import torchlens as tl  # noqa: E402
 from torchlens.backends import BackendUnsupportedError  # noqa: E402
-from torchlens.backends.paddle import PaddleBackend  # noqa: E402
-from torchlens.backends.paddle import wrappers as paddle_wrappers  # noqa: E402
+from torchlens.backends.paddle import (  # noqa: E402
+    PaddleBackend,
+    wrappers as paddle_wrappers,
+)
 from torchlens.validation.invariants import check_metadata_invariants  # noqa: E402
 from torchlens.validation.status import ValidationReplayStatus  # noqa: E402
 

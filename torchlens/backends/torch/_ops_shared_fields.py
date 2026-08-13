@@ -2,19 +2,22 @@
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ... import _state as _st
-from ._tl import (
-    get_live_label_list,
-    get_tensor_label,
-    set_tensor_label,
+from ...capture.arg_positions import (
+    _normalize_func_name,
 )
-from .completeness_witness import internal_scalar_read
-from .aliasing import (
-    get_parent_contents_for_contract_position,
-    parent_label_has_alias_contract,
+from ...capture.projections import LiveOpView
+from ...capture.salient_args import extract_salient_args
+from ...data_classes.internal_types import FuncExecutionContext
+from ...data_classes.op import (
+    Op,
 )
-from .buffer_writes import resolve_registered_buffer_address, session_validated_buffer_address
+from ...ir.events import (
+    OutputVersionEvent,
+)
 from ...utils.introspection import (
     _get_code_context,
     get_arg_tensors_for_resolution,
@@ -22,22 +25,21 @@ from ...utils.introspection import (
 from ...utils.tensor_utils import (
     tensor_nanequal,
 )
-from ...capture.projections import LiveOpView
-from ...data_classes.op import (
-    Op,
+from ._tl import (
+    get_live_label_list,
+    get_tensor_label,
+    set_tensor_label,
 )
+from .aliasing import (
+    get_parent_contents_for_contract_position,
+    parent_label_has_alias_contract,
+)
+from .buffer_writes import resolve_registered_buffer_address, session_validated_buffer_address
+from .completeness_witness import internal_scalar_read
 from .sources import log_source_tensor
-from ...ir.events import (
-    OutputVersionEvent,
-)
-from ...capture.arg_positions import (
-    _normalize_func_name,
-)
 from .tensor_tracking import (
     _add_tensor_backward_hook,
 )
-from ...data_classes.internal_types import FuncExecutionContext
-from ...capture.salient_args import extract_salient_args
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace

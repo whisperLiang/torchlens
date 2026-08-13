@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-
 from conftest import tensorflow_backend_modules
 
 pytest.importorskip("safetensors")

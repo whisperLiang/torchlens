@@ -15,12 +15,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import chain
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 
-from ..data_classes.op import Op
 from .._state import pause_logging
+from ..data_classes.op import Op
 from ..utils.display import identity
 from ..utils.tensor_utils import safe_copy
 from . import ast_branches
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 _BRANCH_CONTEXT_KINDS = frozenset({"if_test", "elif_test", "ifexp"})
 
 
-def _mark_conditional_branches(self: "Trace") -> None:
+def _mark_conditional_branches(self: Trace) -> None:
     """Step 5: Classify bools, materialize events, and attribute conditional edges.
 
     The public Step 5 entry point delegates to six internal phases:
@@ -88,7 +88,7 @@ def _mark_conditional_branches(self: "Trace") -> None:
     _materialize_derived_views(self)
 
 
-def _seed_proven_bool_consumers(self: "Trace") -> None:
+def _seed_proven_bool_consumers(self: Trace) -> None:
     """Add captured tensor-to-host bool consumers to Step 5's candidate list.
 
     Parameters
@@ -126,7 +126,7 @@ def _seed_proven_bool_consumers(self: "Trace") -> None:
         layer.is_terminal_bool = True
 
 
-def _can_fast_skip_step5(self: "Trace") -> bool:
+def _can_fast_skip_step5(self: Trace) -> bool:
     """Return True when Step 5 has no work to do.
 
     The slow path's only branch-attributing inputs are the Trace's
@@ -153,14 +153,12 @@ def _can_fast_skip_step5(self: "Trace") -> bool:
         return False
     if self.conditional_arm_entry_edges:
         return False
-    if self.conditional_edge_call_indices:
-        return False
-    return True
+    return not self.conditional_edge_call_indices
 
 
 def _build_file_indexes(
-    self: "Trace",
-) -> Dict[str, Optional[ast_branches.FileIndex]]:
+    self: Trace,
+) -> dict[str, ast_branches.FileIndex | None]:
     """Phase 5a: Build cached AST indexes for files touched by terminal bools.
 
     Parameters
@@ -177,7 +175,7 @@ def _build_file_indexes(
 
     from ..backends.torch.completeness_witness import host_escape_bool_consumer_locations
 
-    file_indexes: Dict[str, Optional[ast_branches.FileIndex]] = {}
+    file_indexes: dict[str, ast_branches.FileIndex | None] = {}
     consumer_locations = host_escape_bool_consumer_locations(self)
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         bool_layer = self[bool_label]
@@ -192,8 +190,8 @@ def _build_file_indexes(
 
 
 def _classify_bool_layers(
-    self: "Trace",
-) -> Tuple[List[ast_branches.ConditionalKey], Dict[str, List[ast_branches.BoolClassification]]]:
+    self: Trace,
+) -> tuple[list[ast_branches.ConditionalKey], dict[str, list[ast_branches.BoolClassification]]]:
     """Phase 5b: Classify terminal scalar bools and collect observed conditionals.
 
     Every witnessed consumer location of a bool is classified — not just the
@@ -219,13 +217,13 @@ def _classify_bool_layers(
 
     from ..backends.torch.completeness_witness import host_escape_bool_consumer_locations
 
-    bool_classifications: Dict[str, List[ast_branches.BoolClassification]] = {}
-    ordered_conditional_keys: Dict[ast_branches.ConditionalKey, None] = {}
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]] = {}
+    ordered_conditional_keys: dict[ast_branches.ConditionalKey, None] = {}
     consumer_locations = host_escape_bool_consumer_locations(self)
 
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         bool_layer = self[bool_label]
-        observed: List[ast_branches.BoolClassification] = []
+        observed: list[ast_branches.BoolClassification] = []
         for filename, line_number in consumer_locations.get(bool_label, ()):
             location_classification = ast_branches.classify_bool(filename, line_number, None)
             if location_classification.kind != "unknown":
@@ -233,7 +231,7 @@ def _classify_bool_layers(
 
         branch_classifications = _dedup_branch_classifications(observed)
 
-        frame_classification: Optional[ast_branches.BoolClassification] = None
+        frame_classification: ast_branches.BoolClassification | None = None
         for frame in reversed(bool_layer.code_context):
             frame_candidate = ast_branches.classify_bool(
                 frame.file,
@@ -289,8 +287,8 @@ def _classify_bool_layers(
 
 
 def _dedup_branch_classifications(
-    classifications: List[ast_branches.BoolClassification],
-) -> List[ast_branches.BoolClassification]:
+    classifications: list[ast_branches.BoolClassification],
+) -> list[ast_branches.BoolClassification]:
     """Return the branch-participating classifications, deduplicated in order.
 
     Parameters
@@ -306,8 +304,8 @@ def _dedup_branch_classifications(
         ``(conditional_key, branch_test_kind)`` preserving first-seen order.
     """
 
-    deduplicated: List[ast_branches.BoolClassification] = []
-    seen: Set[Tuple[ast_branches.ConditionalKey, Optional[str]]] = set()
+    deduplicated: list[ast_branches.BoolClassification] = []
+    seen: set[tuple[ast_branches.ConditionalKey, str | None]] = set()
     for classification in classifications:
         if (
             classification.kind not in _BRANCH_CONTEXT_KINDS
@@ -323,11 +321,11 @@ def _dedup_branch_classifications(
 
 
 def _materialize_conditional_records(
-    self: "Trace",
-    file_indexes: Dict[str, Optional[ast_branches.FileIndex]],
-    conditional_keys: List[ast_branches.ConditionalKey],
-    bool_classifications: Dict[str, List[ast_branches.BoolClassification]],
-) -> Dict[ast_branches.ConditionalKey, "ConditionalEvent"]:
+    self: Trace,
+    file_indexes: dict[str, ast_branches.FileIndex | None],
+    conditional_keys: list[ast_branches.ConditionalKey],
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]],
+) -> dict[ast_branches.ConditionalKey, ConditionalEvent]:
     """Phase 5c: Materialize dense conditional events and translate bool keys.
 
     One bool may gate several conditionals (predicate reuse), so every
@@ -366,7 +364,7 @@ def _materialize_conditional_records(
     record_lookup = _build_conditional_record_lookup(file_indexes)
     self.conditional_records = []
 
-    events_by_key: Dict[ast_branches.ConditionalKey, ConditionalEvent] = {}
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent] = {}
     for conditional_id, conditional_key in enumerate(conditional_keys):
         if conditional_key not in record_lookup:
             raise ValueError(
@@ -414,7 +412,7 @@ def _materialize_conditional_records(
         bool_layer = self[bool_label]
         bool_layer.terminal_conditional_id = None
         for classification in classifications:
-            bool_conditional_key: Optional[ast_branches.ConditionalKey] = (
+            bool_conditional_key: ast_branches.ConditionalKey | None = (
                 classification.conditional_key
             )
             if bool_conditional_key is None or bool_conditional_key not in events_by_key:
@@ -427,7 +425,7 @@ def _materialize_conditional_records(
                 getattr(event, "_bool_layers_raw").append(bool_label)
             bool_index = event.bool_layers.index(bool_label)
             arm_kind = classification.branch_test_kind or "then"
-            arm_bool_indices: Dict[str, List[int]] = getattr(event, "_arm_bool_indices")
+            arm_bool_indices: dict[str, list[int]] = getattr(event, "_arm_bool_indices")
             arm_indices = arm_bool_indices.setdefault(arm_kind, [])
             if bool_index not in arm_indices:
                 arm_indices.append(bool_index)
@@ -439,8 +437,8 @@ def _materialize_conditional_records(
 
 
 def _mark_conditional_branches_if_backward_flood(
-    self: "Trace",
-    bool_classifications: Dict[str, List[ast_branches.BoolClassification]],
+    self: Trace,
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]],
 ) -> None:
     """Phase 5d: Backward-flood IF edges from branch-participating bools only.
 
@@ -465,7 +463,7 @@ def _mark_conditional_branches_if_backward_flood(
         if bool_classifications[bool_label] and self[bool_label].is_terminal_conditional_bool
     ]
 
-    nodes_seen: Set[str] = set()
+    nodes_seen: set[str] = set()
     node_stack = branch_bool_labels.copy()
     while node_stack:
         node_label = node_stack.pop()
@@ -489,8 +487,8 @@ def _mark_conditional_branches_if_backward_flood(
 
 
 def _attribute_branches_forward(
-    self: "Trace",
-    events_by_key: Dict[ast_branches.ConditionalKey, "ConditionalEvent"],
+    self: Trace,
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent],
 ) -> None:
     """Phase 5e: Attribute executed ops and forward edges to conditional arms.
 
@@ -502,8 +500,8 @@ def _attribute_branches_forward(
         Structural-to-dense conditional event lookup created in phase 5c.
     """
 
-    conditional_arm_entry_edges: Dict[Tuple[int, str], List[Tuple[str, str]]] = defaultdict(list)
-    conditional_edge_call_indices: Dict[Tuple[str, str, int, str], List[int]] = defaultdict(list)
+    conditional_arm_entry_edges: dict[tuple[int, str], list[tuple[str, str]]] = defaultdict(list)
+    conditional_edge_call_indices: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
 
     for layer_label in self._raw_graph_ws.raw_layer_labels_list:
         layer = self[layer_label]
@@ -548,7 +546,7 @@ def _attribute_branches_forward(
     self.conditional_edge_call_indices = dict(conditional_edge_call_indices)
 
 
-def _materialize_derived_views(self: "Trace") -> None:
+def _materialize_derived_views(self: Trace) -> None:
     """Phase 5f: Rebuild compatibility views derived from primary conditional data.
 
     Parameters
@@ -575,7 +573,7 @@ def _materialize_derived_views(self: "Trace") -> None:
             )
         )
 
-        elif_children: Dict[int, Set[str]] = defaultdict(set)
+        elif_children: dict[int, set[str]] = defaultdict(set)
         for branch_children in layer.conditional_arm_children.values():
             for branch_kind, child_labels in branch_children.items():
                 if not branch_kind.startswith("elif_"):
@@ -597,7 +595,7 @@ def _materialize_derived_views(self: "Trace") -> None:
         )
 
 
-def _iter_terminal_scalar_bool_labels(self: "Trace") -> List[str]:
+def _iter_terminal_scalar_bool_labels(self: Trace) -> list[str]:
     """Return terminal scalar bool labels in deterministic execution order.
 
     Parameters
@@ -623,8 +621,8 @@ def _iter_terminal_scalar_bool_labels(self: "Trace") -> List[str]:
 
 
 def _build_conditional_record_lookup(
-    file_indexes: Dict[str, Optional[ast_branches.FileIndex]],
-) -> Dict[ast_branches.ConditionalKey, Tuple[ast_branches.ConditionalRecord, str]]:
+    file_indexes: dict[str, ast_branches.FileIndex | None],
+) -> dict[ast_branches.ConditionalKey, tuple[ast_branches.ConditionalRecord, str]]:
     """Build a structural-key lookup for materializing dense conditional events.
 
     Parameters
@@ -639,8 +637,8 @@ def _build_conditional_record_lookup(
         function qualname.
     """
 
-    record_lookup: Dict[
-        ast_branches.ConditionalKey, Tuple[ast_branches.ConditionalRecord, str]
+    record_lookup: dict[
+        ast_branches.ConditionalKey, tuple[ast_branches.ConditionalRecord, str]
     ] = {}
     for file_index in file_indexes.values():
         if file_index is None:
@@ -652,9 +650,9 @@ def _build_conditional_record_lookup(
 
 
 def _translate_conditional_stack(
-    code_context: List["FuncCallLocation"],
-    events_by_key: Dict[ast_branches.ConditionalKey, "ConditionalEvent"],
-) -> List[Tuple[int, str]]:
+    code_context: list[FuncCallLocation],
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent],
+) -> list[tuple[int, str]]:
     """Translate a structural AST branch stack into dense conditional IDs.
 
     Parameters
@@ -671,7 +669,7 @@ def _translate_conditional_stack(
         Structural keys that were never materialized are dropped.
     """
 
-    translated_stack: List[Tuple[int, str]] = []
+    translated_stack: list[tuple[int, str]] = []
     for conditional_key, branch_kind in _attribute_op_with_scope_fallback(code_context):
         if conditional_key not in events_by_key:
             continue
@@ -680,8 +678,8 @@ def _translate_conditional_stack(
 
 
 def _attribute_op_with_scope_fallback(
-    code_context: List["FuncCallLocation"],
-) -> List[Tuple[ast_branches.ConditionalKey, str]]:
+    code_context: list[FuncCallLocation],
+) -> list[tuple[ast_branches.ConditionalKey, str]]:
     """Attribute an op, retrying decorated-function scope resolution when needed.
 
     Parameters
@@ -700,7 +698,7 @@ def _attribute_op_with_scope_fallback(
     if branch_stack:
         return branch_stack
 
-    fallback_branch_stack: List[Tuple[ast_branches.ConditionalKey, str]] = []
+    fallback_branch_stack: list[tuple[ast_branches.ConditionalKey, str]] = []
     for frame in code_context:
         file_index = ast_branches.get_file_index(frame.file)
         if file_index is None:
@@ -723,8 +721,8 @@ def _attribute_op_with_scope_fallback(
 
 def _resolve_scope_with_decorator_fallback(
     file_index: ast_branches.FileIndex,
-    frame: "FuncCallLocation",
-) -> Optional[ast_branches.ScopeEntry]:
+    frame: FuncCallLocation,
+) -> ast_branches.ScopeEntry | None:
     """Resolve a frame, tolerating decorator-line ``co_firstlineno`` offsets.
 
     Parameters
@@ -771,9 +769,9 @@ def _resolve_scope_with_decorator_fallback(
 
 
 def _get_gained_branch_entries(
-    parent_stack: List[Tuple[int, str]],
-    child_stack: List[Tuple[int, str]],
-) -> List[Tuple[int, str]]:
+    parent_stack: list[tuple[int, str]],
+    child_stack: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
     """Return child stack entries gained across one forward edge.
 
     Parameters
@@ -799,7 +797,7 @@ def _get_gained_branch_entries(
     return child_stack[shared_prefix_len:]
 
 
-def _fix_buffer_layers(self: "Trace") -> None:
+def _fix_buffer_layers(self: Trace) -> None:
     """Step 6: Connect buffer sources, merge duplicates, and assign pass numbers.
 
     Buffer tensors (nn.Module registered buffers) are logged as source tensors
@@ -814,8 +812,8 @@ def _fix_buffer_layers(self: "Trace") -> None:
 
     Note: Buffer deduplication is scoped by containing module, source, address, and value.
     """
-    buffer_counter: Dict[str, int] = defaultdict(lambda: 1)
-    buffer_hash_groups: Dict[str, List[str]] = defaultdict(list)
+    buffer_counter: dict[str, int] = defaultdict(lambda: 1)
+    buffer_hash_groups: dict[str, list[str]] = defaultdict(list)
 
     for layer_label in self.buffer_layers:
         layer = self[layer_label]
@@ -858,7 +856,7 @@ def _fix_buffer_layers(self: "Trace") -> None:
     for _, buffers_orig in buffer_hash_groups.items():
         buffers = buffers_orig[1:]
         unique_buffers = buffers_orig[:1]
-        for b, buffer_label in enumerate(buffers):
+        for _b, buffer_label in enumerate(buffers):
             buffer = self[buffer_label]
             for unique_buffer_label in unique_buffers:
                 unique_buffer = self[unique_buffer_label]
@@ -898,7 +896,7 @@ def _buffer_source_value_matches(source: Op, buffer_layer: Op) -> bool:
             return False
 
 
-def _merge_buffer_entries(self: "Trace", source_buffer: Op, buffer_to_remove: Op) -> None:
+def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) -> None:
     """Merge a duplicate buffer into a source buffer, rewiring all edges.
 
     Transfers all child and parent connections from ``buffer_to_remove`` to

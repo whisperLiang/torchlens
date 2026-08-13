@@ -258,6 +258,8 @@ EXTRA_KEY_CHANNELS: frozenset[str] = frozenset(
 
 
 def _facet(record: OpRecord, name: str) -> Any:
+    """Return one facet of ``record``, materializing its checked-in default if absent."""
+
     from .op_record import _FACET_ATTRIBUTES
 
     value = getattr(record, _FACET_ATTRIBUTES[name])
@@ -364,9 +366,7 @@ def scatter_record_to_cells(record: OpRecord, extras: IngestExtras, owning_trace
         "input_memory": None,
         "num_inputs": None,
         "transformed_out_shape": None if transformed is None else transformed.shape,
-        "transformed_out_dtype": None
-        if transformed is None
-        else _resolve_dtype(transformed.dtype),
+        "transformed_out_dtype": None if transformed is None else _resolve_dtype(transformed.dtype),
         "transformed_activation_memory": None if transformed is None else transformed.memory,
         "visualizer_path": output.visualizer_path,
         "bytes_delta_at_call": None if semantics is None else semantics.bytes_delta_at_call,

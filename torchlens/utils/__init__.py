@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import inspect
 import importlib
 import importlib.metadata
+import inspect
 import re
 import subprocess
 from collections import Counter

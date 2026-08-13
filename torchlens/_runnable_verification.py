@@ -1,10 +1,13 @@
 """Seed, RNG, attestation, and fork utilities."""
 
 from __future__ import annotations
+
 import dataclasses
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
+
 from . import _state
 from ._io._torch_symbols import torch_attr
 from ._runnable_state import (
@@ -16,14 +19,11 @@ from .errors import (
     PathDivergenceError,
     RunPreconditionError,
 )
-from .utils.rng import (
-    aten_qualname_is_seeded_rng,
-)
 from .runnable import (
     CallableRegistryEntry,
     ContractCheck,
-    InputAttestationFingerprint,
     DivergencePolicy,
+    InputAttestationFingerprint,
     LiteralAtom,
     LiteralAtomKind,
     LiteralMapping,
@@ -43,8 +43,9 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
+from .utils.rng import (
+    aten_qualname_is_seeded_rng,
+)
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
@@ -154,9 +155,9 @@ def _dropout_call_draws_rng(call: RunnableCallDescriptor) -> bool:
     p_value = named.get("p")
     if training is False:
         return False
-    if isinstance(p_value, (int, float)) and not isinstance(p_value, bool) and p_value == 0:
-        return False
-    return True
+    return not (
+        isinstance(p_value, (int, float)) and not isinstance(p_value, bool) and p_value == 0
+    )
 
 
 def _named_literal_values(call: RunnableCallDescriptor) -> dict[str, Any]:

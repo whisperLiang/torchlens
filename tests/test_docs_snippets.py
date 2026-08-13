@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-
 DOC_FILES = (
     "performance.md",
     "for-ai-agents.md",

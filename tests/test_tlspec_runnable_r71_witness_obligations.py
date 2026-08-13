@@ -26,8 +26,9 @@ import inspect
 import json as _json
 import shutil as _shutil
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch
@@ -298,7 +299,7 @@ def test_r71_registry_closure_meta() -> None:
         "a direct ControlWitnessKind has no registry-v2 row -- register it with an "
         "independent anchor before shipping"
     )
-    assert VERDICT_STEERING_WITNESS_FAMILIES == direct_kinds | shape_families
+    assert direct_kinds | shape_families == VERDICT_STEERING_WITNESS_FAMILIES
     assert claim_families == {"inert_sink", "unbound_state_inert"}
     assert set(WITNESS_FAMILY_REGISTRY) == direct_kinds | shape_families | claim_families
     for family, spec in WITNESS_FAMILY_REGISTRY.items():

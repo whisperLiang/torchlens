@@ -242,9 +242,8 @@ def test_direct_unpickler_denies_os_system(tmp_path: Path) -> None:
     with blob.open("wb") as handle:
         pickle.dump(_OsSystemGadget(marker), handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    with blob.open("rb") as handle:
-        with pytest.raises(pickle.UnpicklingError):
-            SafeBundleUnpickler(handle).load()
+    with blob.open("rb") as handle, pytest.raises(pickle.UnpicklingError):
+        SafeBundleUnpickler(handle).load()
     assert not marker.exists()
 
 

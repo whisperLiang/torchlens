@@ -273,7 +273,7 @@ def _parent_perturbations_change_output(
             args, kwargs = _replace_template_paths(
                 tuple(getattr(capture, "args_template", ())),
                 dict(getattr(capture, "kwargs_template", {})),
-                {path: candidate for path in paths},
+                dict.fromkeys(paths, candidate),
                 rebuilt,
             )
             try:

@@ -21,9 +21,9 @@ from torchlens.postprocess import (
     PINNED_ORDER_PAIRS,
     POSTPROCESS_STEP_CONTRACTS,
     REGISTRY_ORDER,
+    _executor,
     execution_order,
 )
-from torchlens.postprocess import _executor
 from torchlens.postprocess._contracts import (
     CAPTURE_BASELINE_COLUMNS,
     iter_corpus_violations,
@@ -536,8 +536,8 @@ def test_guard2_ledger_static_mirror() -> None:
         assert not undeclared, (
             f"guard-2 ledger names step-{step} writes no longer declared: {sorted(undeclared)}"
         )
-    assert EXPECTED_PHANTOM_WRITES == set(PHANTOM_WRITE_EXEMPTIONS)
-    assert EXPECTED_PHANTOM_READS == set(PHANTOM_READ_EXEMPTIONS)
+    assert set(PHANTOM_WRITE_EXEMPTIONS) == EXPECTED_PHANTOM_WRITES
+    assert set(PHANTOM_READ_EXEMPTIONS) == EXPECTED_PHANTOM_READS
     for step, column in EXPECTED_PHANTOM_WRITES:
         assert column not in PINNED_NOOP_WRITERS.get(step, frozenset()), (
             step,
@@ -561,8 +561,9 @@ def test_guard2_ledger_holds_on_default_capture(
     goes red per-step without paying the full matrix.
     """
 
-    import torchlens.postprocess as pp
     from test_postprocess_enforcement import PINNED_NOOP_WRITERS
+
+    import torchlens.postprocess as pp
 
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")

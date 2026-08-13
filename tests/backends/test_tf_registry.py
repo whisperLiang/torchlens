@@ -8,17 +8,16 @@ from typing import Any
 
 import pytest
 import torch
+from conftest import tensorflow_backend_modules
 
 import torchlens as tl
-from conftest import tensorflow_backend_modules
 from torchlens.backends import (
     BackendMismatchError,
     get_backend_spec,
     resolve_backend_spec,
 )
 from torchlens.backends.default_specs import _tf_can_handle
-from torchlens.backends.tf import capabilities as tf_capabilities
-from torchlens.backends.tf import TFBackend
+from torchlens.backends.tf import TFBackend, capabilities as tf_capabilities
 
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()
 

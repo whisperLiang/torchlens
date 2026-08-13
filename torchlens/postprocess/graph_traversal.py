@@ -15,8 +15,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from ..data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
+from ..ir.op_record import amend_late_buffer_output_parent
 from ..quantities import Bytes, Duration
 from ..utils.display import identity
+from ..utils.introspection import _get_code_context
 from ..utils.rng import log_current_rng_states
 from ..utils.tensor_utils import (
     get_memory_amount_from_metadata,
@@ -24,9 +27,6 @@ from ..utils.tensor_utils import (
     safe_to,
     tensor_nanequal,
 )
-from ..utils.introspection import _get_code_context
-from ..data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
-from ..ir.op_record import amend_late_buffer_output_parent
 from ._materialize import _recorded_buffer_address
 
 if TYPE_CHECKING:
@@ -289,7 +289,7 @@ def _add_output_layers(
         new_output_node.func_rng_states = (
             log_current_rng_states(torch_only=True) if self.save_rng_states else {}
         )
-        new_output_node.arg_names = tuple([])
+        new_output_node.arg_names = ()
         new_output_node.num_args_total = 0
         new_output_node.num_pos_args = 0
         new_output_node.num_kwargs = 0
@@ -311,7 +311,7 @@ def _add_output_layers(
         new_output_node.parent_param_ops = {}
         new_output_node._param_logs = []
         new_output_node.param_shapes = []
-        new_output_node.num_params = int(0)
+        new_output_node.num_params = 0
         new_output_node.num_params_trainable = 0
         new_output_node.num_params_frozen = 0
         new_output_node.param_memory = Bytes(0)
@@ -649,6 +649,8 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
         return False
 
     def _numel(shape: Any) -> int | None:
+        """Element count for a fully-static integer shape tuple, else ``None``."""
+
         if not isinstance(shape, tuple):
             return None
         numel = 1

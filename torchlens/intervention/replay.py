@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import torch
 
 from .._deprecations import MISSING, MissingType
+from .._trace_state import TraceState
 from ..ir import CaptureEvents
 from ..ir.container import (
     DataclassField,
@@ -20,7 +21,6 @@ from ..ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
-from .._trace_state import TraceState
 from ..options import ReplayOptions, merge_replay_options
 from ..quantities import Bytes
 from ..utils.display import progress_bar
@@ -122,12 +122,12 @@ def _walk_call_cone(
 
 
 def push(
-    log: "Trace",
+    log: Trace,
     *,
     strict: bool | MissingType = MISSING,
     hooks: dict[Any, Any] | None | MissingType = MISSING,
     replay: ReplayOptions | None = None,
-) -> "Trace":
+) -> Trace:
     """Push the edit downstream through the recorded graph (DAG replay).
 
     Parameters
@@ -170,12 +170,12 @@ def push(
 
 
 def replay(
-    log: "Trace",
+    log: Trace,
     *,
     strict: bool | MissingType = MISSING,
     hooks: dict[Any, Any] | None | MissingType = MISSING,
     replay: ReplayOptions | None = None,
-) -> "Trace":
+) -> Trace:
     """Deprecated alias for :func:`push`.
 
     Parameters
@@ -196,12 +196,12 @@ def replay(
 
 
 def push_from(
-    log: "Trace",
-    site: "SelectorLike | str | Op",
+    log: Trace,
+    site: SelectorLike | str | Op,
     *,
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
-) -> "Trace":
+) -> Trace:
     """Push downstream from a pre-mutated site.
 
     Parameters
@@ -232,12 +232,12 @@ def push_from(
 
 
 def replay_from(
-    log: "Trace",
-    site: "SelectorLike | str | Op",
+    log: Trace,
+    site: SelectorLike | str | Op,
     *,
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
-) -> "Trace":
+) -> Trace:
     """Deprecated alias for :func:`push_from`.
 
     Parameters
@@ -258,13 +258,13 @@ def replay_from(
 
 
 def _run_differentiable_replay(
-    log: "Trace",
-    origins: Sequence["Op"],
+    log: Trace,
+    origins: Sequence[Op],
     *,
     hook_entries: Sequence[NormalizedHookEntry],
     strict: bool,
     preserve_origins: bool,
-) -> "Trace":
+) -> Trace:
     """Execute replay on a fork whose outputs remain differentiable.
 
     Parameters
@@ -321,7 +321,7 @@ def _run_differentiable_replay(
     return replay_log
 
 
-def _differentiable_replay_name(log: "Trace") -> str:
+def _differentiable_replay_name(log: Trace) -> str:
     """Return a deterministic label for a differentiable replay fork.
 
     Parameters
@@ -339,7 +339,7 @@ def _differentiable_replay_name(log: "Trace") -> str:
     return f"{base_name}_replay"
 
 
-def _reset_backward_projection(log: "Trace") -> None:
+def _reset_backward_projection(log: Trace) -> None:
     """Clear inherited backward runtime and projection state from a replay fork.
 
     Parameters
@@ -384,7 +384,7 @@ def _reset_backward_projection(log: "Trace") -> None:
         _clear_param_gradient_projection(param_log)
 
 
-def _clear_op_gradient_projection(site: "Op") -> None:
+def _clear_op_gradient_projection(site: Op) -> None:
     """Clear inherited gradient fields from one replay-fork op.
 
     Parameters
@@ -424,7 +424,7 @@ def _clear_param_gradient_projection(param_log: Any) -> None:
     param_log._grad_memory = Bytes(0)
 
 
-def cone_of_effect(trace: "Trace", origins: Iterable["Op"]) -> list["Op"]:
+def cone_of_effect(trace: Trace, origins: Iterable[Op]) -> list[Op]:
     """Return downstream cone in topological order.
 
     Parameters
@@ -477,14 +477,14 @@ def cone_of_effect(trace: "Trace", origins: Iterable["Op"]) -> list["Op"]:
 
 
 def _run_replay(
-    log: "Trace",
-    origins: Sequence["Op"],
+    log: Trace,
+    origins: Sequence[Op],
     *,
     hook_entries: Sequence[NormalizedHookEntry],
     strict: bool,
     preserve_origins: bool,
     differentiable_frontier: dict[str, torch.Tensor] | None = None,
-) -> "Trace":
+) -> Trace:
     """Execute saved-DAG replay and mutate affected sites.
 
     Parameters
@@ -601,7 +601,7 @@ def _run_replay(
     return log
 
 
-def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
+def _warn_if_direct_writes_will_be_overlaid(log: Trace) -> None:
     """Warn once that replay/rerun propagation overlays direct writes.
 
     Parameters
@@ -625,8 +625,8 @@ def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
 
 def _reconstruct_args_from_template(
     template: CapturedArgTemplate,
-    pass_log: "Op",
-    trace: "Trace",
+    pass_log: Op,
+    trace: Trace,
     overlay: dict[str, torch.Tensor],
     *,
     strict: bool = False,
@@ -708,8 +708,8 @@ def _slice_output_by_path(output: Any, path: tuple[OutputPathComponent, ...]) ->
 
 def _resolve_arg_component(
     component: Any,
-    pass_log: "Op",
-    trace: "Trace",
+    pass_log: Op,
+    trace: Trace,
     overlay: dict[str, torch.Tensor],
     *,
     strict: bool,
@@ -828,7 +828,7 @@ def _frontier_leaf(
     return frontier[label]
 
 
-def _install_replay_tensor_hook(log: "Trace", site: "Op", tensor: torch.Tensor) -> None:
+def _install_replay_tensor_hook(log: Trace, site: Op, tensor: torch.Tensor) -> None:
     """Install backward capture on one differentiable replay output tensor.
 
     Parameters
@@ -851,7 +851,7 @@ def _install_replay_tensor_hook(log: "Trace", site: "Op", tensor: torch.Tensor) 
 
 
 def _execute_replay_func_strict(
-    site: "Op",
+    site: Op,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> Any:
@@ -886,7 +886,7 @@ def _execute_replay_func_strict(
 def _apply_replay_hooks(
     out: torch.Tensor,
     *,
-    site: "Op",
+    site: Op,
     hook_entries: Sequence[NormalizedHookEntry],
     run_ctx: dict[str, Any],
 ) -> tuple[torch.Tensor, list[FireRecord]]:
@@ -933,7 +933,7 @@ def _apply_replay_hooks(
 
 
 def _commit_replay_updates(
-    log: "Trace",
+    log: Trace,
     pending_updates: Mapping[str, torch.Tensor],
     pending_records: Mapping[str, Sequence[FireRecord]],
 ) -> None:
@@ -983,7 +983,7 @@ def _commit_replay_updates(
         raise
 
 
-def _apply_out_update(site: "Op", tensor: torch.Tensor) -> None:
+def _apply_out_update(site: Op, tensor: torch.Tensor) -> None:
     """Replace a site out and refresh saved tensor metadata.
 
     Parameters
@@ -1001,7 +1001,7 @@ def _apply_out_update(site: "Op", tensor: torch.Tensor) -> None:
     _set_saved_out_metadata(site, tensor)
 
 
-def _preflight_log(log: "Trace") -> None:
+def _preflight_log(log: Trace) -> None:
     """Validate model-log-level replay preconditions.
 
     Parameters
@@ -1019,7 +1019,7 @@ def _preflight_log(log: "Trace") -> None:
         raise ReplayPreconditionError("replay requires intervention_ready=True capture metadata")
 
 
-def _preflight_group(group: Sequence["Op"]) -> None:
+def _preflight_group(group: Sequence[Op]) -> None:
     """Validate replay preconditions for one function-call group.
 
     Parameters
@@ -1036,7 +1036,7 @@ def _preflight_group(group: Sequence["Op"]) -> None:
         _template_for_site(site)
 
 
-def _template_for_site(site: "Op") -> CapturedArgTemplate:
+def _template_for_site(site: Op) -> CapturedArgTemplate:
     """Return a site's captured argument template or raise.
 
     Parameters
@@ -1057,7 +1057,7 @@ def _template_for_site(site: "Op") -> CapturedArgTemplate:
     return template
 
 
-def _raise_on_unsupported_template(site: "Op", template: CapturedArgTemplate) -> None:
+def _raise_on_unsupported_template(site: Op, template: CapturedArgTemplate) -> None:
     """Reject unsupported leaves in a captured template.
 
     Parameters
@@ -1103,7 +1103,7 @@ def _first_unsupported(component: Any) -> Unsupported | None:
 
 
 def _normalize_replay_hooks(
-    log: "Trace",
+    log: Trace,
     hooks: dict[Any, Any] | None,
 ) -> list[NormalizedHookEntry]:
     """Normalize explicit replay hook input.
@@ -1127,11 +1127,11 @@ def _normalize_replay_hooks(
 
 
 def _origin_sites_for_hooks(
-    log: "Trace",
+    log: Trace,
     hook_entries: Sequence[NormalizedHookEntry],
     *,
     strict: bool,
-) -> list["Op"]:
+) -> list[Op]:
     """Resolve origin sites for replay hooks.
 
     Parameters
@@ -1159,7 +1159,7 @@ def _origin_sites_for_hooks(
 
 
 def _hook_targets_by_label(
-    log: "Trace",
+    log: Trace,
     hook_entries: Sequence[NormalizedHookEntry],
     *,
     strict: bool,
@@ -1191,11 +1191,11 @@ def _hook_targets_by_label(
 
 
 def _resolve_single_origin(
-    log: "Trace",
+    log: Trace,
     site: Any,
     *,
     strict: bool,
-) -> "Op":
+) -> Op:
     """Resolve one replay_from origin.
 
     Parameters
@@ -1218,7 +1218,7 @@ def _resolve_single_origin(
     return cast("Op", log.resolve_sites(site, strict=strict, max_fanout=1).first())
 
 
-def _func_call_groups(log: "Trace") -> dict[int | None, tuple["Op", ...]]:
+def _func_call_groups(log: Trace) -> dict[int | None, tuple[Op, ...]]:
     """Return function-call groups in topological order.
 
     Parameters
@@ -1232,17 +1232,17 @@ def _func_call_groups(log: "Trace") -> dict[int | None, tuple["Op", ...]]:
         Sites grouped by ``func_call_id``.
     """
 
-    groups: dict[int | None, list["Op"]] = {}
+    groups: dict[int | None, list[Op]] = {}
     for layer in log.layer_list:
         groups.setdefault(layer.func_call_id, []).append(layer)
     return {call_id: tuple(layers) for call_id, layers in groups.items()}
 
 
 def _group_for_site(
-    site: "Op",
-    call_groups: Mapping[int | None, Sequence["Op"]],
-    cone: Sequence["Op"],
-) -> tuple["Op", ...]:
+    site: Op,
+    call_groups: Mapping[int | None, Sequence[Op]],
+    cone: Sequence[Op],
+) -> tuple[Op, ...]:
     """Return same-call group members for a site.
 
     Parameters
@@ -1270,7 +1270,7 @@ def _group_for_site(
     )
 
 
-def _child_labels(site: "Op") -> tuple[str, ...]:
+def _child_labels(site: Op) -> tuple[str, ...]:
     """Return child labels from edge and tensor-version metadata.
 
     Parameters
@@ -1341,7 +1341,7 @@ def _looks_like_template_dict(component: tuple[Any, ...]) -> bool:
     return all(isinstance(item, tuple) and len(item) == 2 for item in component)
 
 
-def _final_label_for_ref(log: "Trace", label: str) -> str:
+def _final_label_for_ref(log: Trace, label: str) -> str:
     """Resolve raw or final parent-ref label to a current lookup label.
 
     Parameters
@@ -1363,7 +1363,7 @@ def _final_label_for_ref(log: "Trace", label: str) -> str:
 
 
 def _warn_if_unexpected_parent(
-    pass_log: "Op",
+    pass_log: Op,
     parent_label: str,
     *,
     strict: bool,
@@ -1391,7 +1391,7 @@ def _warn_if_unexpected_parent(
     warnings.warn(message, ControlFlowDivergenceWarning, stacklevel=3)
 
 
-def _check_edge_expectations(site: "Op", *, strict: bool) -> None:
+def _check_edge_expectations(site: Op, *, strict: bool) -> None:
     """Check lightweight saved edge consistency after replaying a site.
 
     Parameters
@@ -1410,7 +1410,7 @@ def _check_edge_expectations(site: "Op", *, strict: bool) -> None:
         warnings.warn(message, ControlFlowDivergenceWarning, stacklevel=3)
 
 
-def _is_inplace_none_return(site: "Op") -> bool:
+def _is_inplace_none_return(site: Op) -> bool:
     """Return whether a None return should be treated as mutated arg zero.
 
     Parameters
@@ -1428,7 +1428,7 @@ def _is_inplace_none_return(site: "Op") -> bool:
     return bool(site.is_inplace) or func_name in {"__setitem__", "zero_", "__delitem__"}
 
 
-def _ensure_replay_run_ctx(log: "Trace") -> dict[str, Any]:
+def _ensure_replay_run_ctx(log: Trace) -> dict[str, Any]:
     """Return a mutable replay run context on ``log``.
 
     Parameters
@@ -1466,7 +1466,7 @@ def _hook_name(entry: NormalizedHookEntry) -> str:
     return getattr(entry.normalized_callable, "__qualname__", "user_hook")
 
 
-def _replay_fire_record(entry: NormalizedHookEntry, site: "Op", *, replaced: bool) -> FireRecord:
+def _replay_fire_record(entry: NormalizedHookEntry, site: Op, *, replaced: bool) -> FireRecord:
     """Build a replay fire record.
 
     Parameters

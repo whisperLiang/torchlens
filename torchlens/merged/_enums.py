@@ -136,9 +136,7 @@ WITNESS_IDENTITY_KINDS: Final[frozenset[str]] = frozenset(
 )
 """Kinds whose destination bytes are identical on every member rank."""
 
-WITNESS_SLICE_KINDS: Final[frozenset[str]] = frozenset(
-    {"gather", "scatter", "all_to_all"}
-)
+WITNESS_SLICE_KINDS: Final[frozenset[str]] = frozenset({"gather", "scatter", "all_to_all"})
 """Kinds witnessed per slice via group-rank-indexed digest lists."""
 
 WITNESS_NOT_APPLICABLE_KINDS: Final[frozenset[str]] = frozenset(

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -19,12 +18,12 @@ from ._common import (
     _compute_ops,
     _op_from_label,
     _op_label,
+    _require_pandas,
     _resolve_op,
     _safe_out,
     _shape_dtype,
     _source_line,
     _tensor_unavailable_reason,
-    _require_pandas,
 )
 
 LineageDirection = Literal["ancestors", "descendants", "both"]
@@ -169,7 +168,7 @@ def compare(
     *,
     rtol: float = 1e-5,
     atol: float = 1e-8,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Compare saved dense floating activations across two traces.
 
     Parameters
@@ -288,7 +287,7 @@ def compare(
     return frame
 
 
-def dead_neurons(trace: Trace, *, dim: int = 1, threshold: float = 0.0) -> "pd.DataFrame":
+def dead_neurons(trace: Trace, *, dim: int = 1, threshold: float = 0.0) -> pd.DataFrame:
     """Find units that are inactive or zero-variance in one completed trace.
 
     A single trace is a single example; zero-variance here is an insufficient-sample

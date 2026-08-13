@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field, replace
 import itertools
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Iterable
+from typing import Any
 
 from .events import (
     BackwardCoverageGap,
@@ -19,10 +20,10 @@ from .events import (
     ModuleEnterEvent,
     ModuleExitEvent,
     ModulePrepEvent,
-    OpGradObserved,
-    ParamGradObserved,
     OpEvent,
+    OpGradObserved,
     OutputVersionEvent,
+    ParamGradObserved,
     PreHookProvenanceEvent,
 )
 from .live_index import LiveIndex
@@ -73,9 +74,7 @@ LANE_MERGE_POLICIES: dict[str, str] = {
 # genuinely-bound record follows its target into the combined journal (DoR
 # 4.6). Any new target-carrying lane MUST register here or its references
 # dangle silently after a merge.
-REBINDABLE_TARGET_LANES: frozenset[str] = frozenset(
-    {"intervention_events", "op_amendments"}
-)
+REBINDABLE_TARGET_LANES: frozenset[str] = frozenset({"intervention_events", "op_amendments"})
 
 _LANE_APPENDERS: dict[str, str] = {
     "op_events": "append",
@@ -287,7 +286,7 @@ class CaptureEvents:
     base_root_grad_fn_object_ids: tuple[int, ...] = ()
 
     @classmethod
-    def detached_from(cls, trace: Any) -> "CaptureEvents":
+    def detached_from(cls, trace: Any) -> CaptureEvents:
         """Return a fresh stream extending ``trace``'s materialized projection.
 
         Used when a trace keeps its portable backward projection but must
@@ -349,7 +348,7 @@ class CaptureEvents:
         self,
         *,
         projected_op_events: Iterable[OpEvent] | None = None,
-    ) -> "CaptureEvents":
+    ) -> CaptureEvents:
         """Return a structural working projection for postprocess mutation.
 
         Later postprocess steps replace entries in ``op_events`` and
@@ -408,9 +407,7 @@ class CaptureEvents:
                 replay_amendments = list(self.op_amendments)
             else:
                 replay_amendments = [
-                    amendment
-                    for amendment in self.op_amendments
-                    if amendment.seq > watermark
+                    amendment for amendment in self.op_amendments if amendment.seq > watermark
                 ]
             seed_seqs = [int(getattr(event, "seq", 0) or 0) for event in replay_op_events]
             replay_single_domain = all(
@@ -645,9 +642,7 @@ class CaptureEvents:
         }
         position_by_seq: dict[int, int] | None = None
         if self.single_seq_domain:
-            position_by_seq = {
-                event.seq: index for index, event in enumerate(self.op_events)
-            }
+            position_by_seq = {event.seq: index for index, event in enumerate(self.op_events)}
         folded_list: list[JournalOp] = list(self.op_events)
         for amendment in self.op_amendments:
             validate_amendment(amendment)
@@ -655,27 +650,18 @@ class CaptureEvents:
             position = last_position.get(label_raw)
             if position is None:
                 raise AmendmentTargetError(
-                    f"amendment target {label_raw!r} names no committed op in "
-                    "this journal"
+                    f"amendment target {label_raw!r} names no committed op in this journal"
                 )
-            if (
-                position_by_seq is not None
-                and folded_list[position].seq != amendment.target_seq
-            ):
+            if position_by_seq is not None and folded_list[position].seq != amendment.target_seq:
                 seq_position = position_by_seq.get(amendment.target_seq)
-                if (
-                    seq_position is None
-                    or folded_list[seq_position].label_raw != label_raw
-                ):
+                if seq_position is None or folded_list[seq_position].label_raw != label_raw:
                     raise AmendmentTargetError(
                         f"amendment {amendment.family!r} target_seq "
                         f"{amendment.target_seq} names no committed occurrence "
                         f"of {label_raw!r} (single-seq-domain cross-check)"
                     )
                 position = seq_position
-            folded_list[position] = apply_patch_items(
-                folded_list[position], amendment.patch
-            )
+            folded_list[position] = apply_patch_items(folded_list[position], amendment.patch)
         folded_by_label = {event.label_raw: event for event in folded_list}
         self._amended_fold_cache = (key, folded_list, folded_by_label)
         return folded_list, folded_by_label
@@ -707,8 +693,7 @@ class CaptureEvents:
         live_target = self.live_index.by_raw_label.get(amendment.target_label_raw)
         if live_target is None:
             raise AmendmentTargetError(
-                f"amendment {amendment.family!r} targets unknown op "
-                f"{amendment.target_label_raw!r}"
+                f"amendment {amendment.family!r} targets unknown op {amendment.target_label_raw!r}"
             )
         target = live_target
         update_live_index = True
@@ -802,7 +787,7 @@ class CaptureEvents:
         object.__setattr__(event, "seq", self.next_seq())
         self.intervention_events.append(event)
 
-    def concat(self, other: "CaptureEvents", *, lanes: Iterable[str] | None = None) -> None:
+    def concat(self, other: CaptureEvents, *, lanes: Iterable[str] | None = None) -> None:
         """Merge another stream's lanes into this journal under the merge law.
 
         This is the ONLY sanctioned way to combine two capture streams. Each
@@ -958,10 +943,7 @@ class CaptureEvents:
         # refuses fail-closed). ``target_seq`` rebinds through the merge seq
         # map into this journal's event domain; the appender re-stamps the
         # lane-local seq and run nonce and re-folds the live index.
-        if (
-            "op_amendments" in lane_names
-            and LANE_MERGE_POLICIES["op_amendments"] != "run_local"
-        ):
+        if "op_amendments" in lane_names and LANE_MERGE_POLICIES["op_amendments"] != "run_local":
             for amendment in other.op_amendments:
                 clone = replace(amendment)
                 object.__setattr__(

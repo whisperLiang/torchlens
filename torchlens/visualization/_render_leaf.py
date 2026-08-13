@@ -1397,6 +1397,8 @@ def _with_per_draw_collapse_cache(render_fn: Any) -> Any:
 
     @functools.wraps(render_fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Install the per-draw collapse cache, always tearing it down afterwards."""
+
         token = _PER_DRAW_COLLAPSE_CACHE.set(_PerDrawCollapseCache())
         try:
             return render_fn(*args, **kwargs)
@@ -1452,14 +1454,13 @@ def _call_groups_for_layer_uncached(layer_log: "Layer") -> tuple[tuple[int, ...]
     common_calls = _common_module_call_indices(layer_log)
     if len(common_calls) != 1:
         return ()
-    pass_to_call_index = {
-        pass_index: call_index
-        for pass_index, call_index in zip(
+    pass_to_call_index = dict(
+        zip(
             layer_log.ops,
             next(iter(common_calls.values())),
             strict=True,
         )
-    }
+    )
     components = _same_layer_dependency_components(layer_log)
     if len(components) <= 1:
         return ()

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from pathlib import Path
-import warnings
 
 import pytest
 import torch
@@ -13,11 +13,11 @@ from torch import nn
 import torchlens as tl
 from torchlens._trace_selector_helpers import _make_layers_to_save_predicate
 from torchlens.backends.default_specs import _tf_runtime_supported
-from torchlens.fastlog.exceptions import PredicateError
-from torchlens.fastlog import RecordContext
-from torchlens.intervention.errors import SelectorCompositionError
 from torchlens.capture.plan import CapturePlan, RetentionKind, RetentionProfile
 from torchlens.capture.session import CaptureSession
+from torchlens.fastlog import RecordContext
+from torchlens.fastlog.exceptions import PredicateError
+from torchlens.intervention.errors import SelectorCompositionError
 from torchlens.validation.invariants import _check_backend_neutral_graph_topology
 
 

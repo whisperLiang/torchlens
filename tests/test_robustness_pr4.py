@@ -11,9 +11,9 @@ Covers:
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Generator
 from pathlib import Path
-import warnings
 
 import pytest
 import torch

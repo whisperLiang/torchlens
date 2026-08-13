@@ -33,7 +33,6 @@ import torchlens
 from torchlens.postprocess import control_flow
 from torchlens.utils import introspection
 
-
 # ---------------------------------------------------------------------------
 # Test models
 # ---------------------------------------------------------------------------

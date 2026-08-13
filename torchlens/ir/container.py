@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
-from collections.abc import Callable
 import dataclasses
-from dataclasses import dataclass
 import inspect
 import sys
 import types
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, TypeAlias, cast
 
 from .._io import FieldPolicy
@@ -115,7 +115,7 @@ class ContainerSpec:
     fields: tuple[str, ...] = ()
     type_module: str | None = None
     type_qualname: str | None = None
-    child_specs: tuple[tuple[OutputPathComponent, "ContainerSpec"], ...] = ()
+    child_specs: tuple[tuple[OutputPathComponent, ContainerSpec], ...] = ()
     literal_value: Any = None
     aux_data: Any = None
     lossy_reconstruction: bool = False
@@ -697,6 +697,8 @@ def _generated_dataclass_init_marker() -> str | None:
 
     @dataclasses.dataclass
     class _Probe:
+        """Throwaway dataclass whose generated ``__init__`` supplies the marker."""
+
         _x: int
 
     for klass in _Probe.__mro__:
@@ -774,7 +776,7 @@ _TRUSTED_MODEL_OUTPUT_INIT_BASES: tuple[type[Any], ...] = (object, dict, Ordered
 
 
 def _is_trusted_transformers_output_type(
-    container_type: type[Any], spec: "ContainerSpec | None"
+    container_type: type[Any], spec: ContainerSpec | None
 ) -> bool:
     """Return whether ``container_type`` is a genuine ``transformers`` output by resolution authority.
 
@@ -808,7 +810,7 @@ def _is_trusted_transformers_output_type(
 
 
 def _model_output_has_foreign_init(
-    container_type: type[Any], spec: "ContainerSpec | None" = None
+    container_type: type[Any], spec: ContainerSpec | None = None
 ) -> bool:
     """Return whether an ``hf_model_output`` type's own ``__init__`` is an untrusted constructor.
 
@@ -861,7 +863,7 @@ def _reconstruction_would_substitute_plain(
     container_type: type[Any],
     kind: str,
     names: tuple[Any, ...],
-    spec: "ContainerSpec | None",
+    spec: ContainerSpec | None,
 ) -> bool:
     """Return whether ``_rebuild_container_from_spec`` would substitute a PLAIN container (r49 secB_1).
 
@@ -903,7 +905,7 @@ def reconstruction_is_lossy_by_type(
     container_type: type[Any],
     captured_names: tuple[Any, ...],
     kind: str,
-    spec: "ContainerSpec | None" = None,
+    spec: ContainerSpec | None = None,
 ) -> bool:
     """Recompute reconstruction lossiness from the RESOLVED type at LOAD time.
 
@@ -988,9 +990,7 @@ def reconstruction_is_lossy_by_type(
     # ``__new__`` is not an inert allocator, or its fields are not inertly settable), the
     # recorded type and any ``__new__``-computed state are dropped -- treat it as lossy,
     # mirroring reconstruction exactly through the shared predicate.
-    if _reconstruction_would_substitute_plain(container_type, kind, captured_names, spec):
-        return True
-    return False
+    return bool(_reconstruction_would_substitute_plain(container_type, kind, captured_names, spec))
 
 
 def _construct_dataclass_without_init(

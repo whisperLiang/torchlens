@@ -49,7 +49,7 @@ from torchlens.backends.torch.completeness_witness import (
 from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _gate_pos() -> torch.Tensor:
@@ -117,8 +117,8 @@ class _PreexistingWorker:
     def __init__(self) -> None:
         import queue
 
-        self._jobs: "queue.Queue[Any]" = queue.Queue()
-        self._results: "queue.Queue[Any]" = queue.Queue()
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._results: queue.Queue[Any] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 

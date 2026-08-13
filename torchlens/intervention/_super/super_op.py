@@ -19,7 +19,7 @@ class SuperOp(Super["Op"], _TensorBearing):
     def __init__(
         self,
         label: str,
-        node: "SupergraphNode | None" = None,
+        node: SupergraphNode | None = None,
         bundle_trace_names: list[str] | None = None,
         *,
         members: dict[str, Any] | None = None,

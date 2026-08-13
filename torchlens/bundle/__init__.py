@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
-import re
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -102,8 +102,8 @@ class _BundleAccessorProperty:
 
     def __get__(
         self,
-        instance: "Bundle | None",
-        owner: type["Bundle"] | None = None,
+        instance: Bundle | None,
+        owner: type[Bundle] | None = None,
     ) -> Any:
         """Return a class view or an accessor on instances.
 
@@ -128,7 +128,7 @@ class _BundleAccessorProperty:
 class _BundleStructuralProperty:
     """Descriptor exposing Bundle predicates without counting as a method."""
 
-    def __init__(self, getter: Callable[["Bundle"], Any]) -> None:
+    def __init__(self, getter: Callable[[Bundle], Any]) -> None:
         """Initialize the descriptor.
 
         Parameters
@@ -140,7 +140,7 @@ class _BundleStructuralProperty:
         self._getter = getter
         self.__doc__ = getter.__doc__
 
-    def __get__(self, instance: "Bundle | None", owner: type["Bundle"]) -> Any:
+    def __get__(self, instance: Bundle | None, owner: type[Bundle]) -> Any:
         """Return the descriptor on classes or computed value on instances.
 
         Parameters
@@ -177,10 +177,10 @@ class Bundle:
 
     def __init__(
         self,
-        members: Mapping[str, "Trace"] | Sequence["Trace"] | Sequence[tuple[str, "Trace"]],
+        members: Mapping[str, Trace] | Sequence[Trace] | Sequence[tuple[str, Trace]],
         *,
         names: Sequence[str] | None = None,
-        baseline: str | "Trace" | None = None,
+        baseline: str | Trace | None = None,
     ) -> None:
         """Initialize a flat bundle without eagerly building a supergraph."""
 
@@ -201,7 +201,7 @@ class Bundle:
 
         return len(self._members)
 
-    def __iter__(self) -> Iterator["Trace"]:
+    def __iter__(self) -> Iterator[Trace]:
         """Iterate member logs in insertion order.
 
         Returns
@@ -237,7 +237,7 @@ class Bundle:
             f"baseline={baseline!r}, structurally_consistent={self.is_structurally_consistent})"
         )
 
-    def __getitem__(self, name: str) -> "Trace":
+    def __getitem__(self, name: str) -> Trace:
         """Return a member by name.
 
         Parameters
@@ -329,7 +329,7 @@ class Bundle:
         return list(self._members)
 
     @property
-    def members(self) -> dict[str, "Trace"]:
+    def members(self) -> dict[str, Trace]:
         """Return a shallow copy of the member mapping.
 
         Returns
@@ -892,9 +892,9 @@ class Bundle:
 
     def add(
         self,
-        log_or_logs: "Trace | Sequence[Trace]",
+        log_or_logs: Trace | Sequence[Trace],
         names: str | Sequence[str] | None = None,
-    ) -> "Bundle":
+    ) -> Bundle:
         """Add one or more member logs and invalidate the cached supergraph.
 
         Parameters
@@ -925,9 +925,7 @@ class Bundle:
         self._enforce_capacity()
         return self
 
-    def remove(
-        self, name_or_names: str | "Trace" | Sequence[str | "Trace"]
-    ) -> "Trace | list[Trace]":
+    def remove(self, name_or_names: str | Trace | Sequence[str | Trace]) -> Trace | list[Trace]:
         """Remove and return one or more members by name or Trace object.
 
         Parameters
@@ -952,7 +950,7 @@ class Bundle:
         self._supergraph = None
         return removed if is_many else removed[0]
 
-    def remove_except(self, keep: str | "Trace" | Sequence[str | "Trace"]) -> None:
+    def remove_except(self, keep: str | Trace | Sequence[str | Trace]) -> None:
         """Remove every member whose name is not listed in ``keep``.
 
         Parameters
@@ -1007,7 +1005,7 @@ class Bundle:
         self._capacity = n
         self._enforce_capacity()
 
-    def set_capacity(self, n: int | None) -> "Bundle":
+    def set_capacity(self, n: int | None) -> Bundle:
         """Set member capacity and return this bundle.
 
         Parameters
@@ -1041,7 +1039,7 @@ class Bundle:
             self._baseline_name = None
         self._supergraph = None
 
-    def do(self, *args: Any, **kwargs: Any) -> "Bundle":
+    def do(self, *args: Any, **kwargs: Any) -> Bundle:
         """Apply ``Trace.do`` to every member.
 
         Returns
@@ -1054,7 +1052,7 @@ class Bundle:
             member.do(*args, **kwargs)
         return self
 
-    def fork(self, name: str | None = None) -> "Bundle":
+    def fork(self, name: str | None = None) -> Bundle:
         """Fork all member logs into a new bundle.
 
         Parameters
@@ -1074,7 +1072,7 @@ class Bundle:
             forked[member_name] = member.fork(name=fork_name)
         return Bundle(forked, baseline=self._baseline_name)
 
-    def attach_hooks(self, *args: Any, **kwargs: Any) -> "Bundle":
+    def attach_hooks(self, *args: Any, **kwargs: Any) -> Bundle:
         """Apply ``Trace.attach_hooks`` to every member.
 
         Returns
@@ -1087,7 +1085,7 @@ class Bundle:
             member.attach_hooks(*args, **kwargs)
         return self
 
-    def push(self, **kwargs: Any) -> "Bundle":
+    def push(self, **kwargs: Any) -> Bundle:
         """Push the edit downstream through all member logs.
 
         Returns
@@ -1100,7 +1098,7 @@ class Bundle:
             member.push(**kwargs)
         return self
 
-    def replay(self, **kwargs: Any) -> "Bundle":
+    def replay(self, **kwargs: Any) -> Bundle:
         """Deprecated alias for :meth:`push`.
 
         Returns
@@ -1114,7 +1112,7 @@ class Bundle:
         warn_deprecated_alias("Bundle.replay", "Bundle.push")
         return self.push(**kwargs)
 
-    def run(self, model: "nn.Module", x: Any = None, **kwargs: Any) -> "Bundle":
+    def run(self, model: nn.Module, x: Any = None, **kwargs: Any) -> Bundle:
         """Run all member logs with a supplied model and input.
 
         Parameters
@@ -1134,7 +1132,7 @@ class Bundle:
             member.run(model, x, **kwargs)
         return self
 
-    def rerun(self, model: "nn.Module", x: Any = None, **kwargs: Any) -> "Bundle":
+    def rerun(self, model: nn.Module, x: Any = None, **kwargs: Any) -> Bundle:
         """Deprecated alias for :meth:`run`.
 
         Parameters
@@ -1155,7 +1153,7 @@ class Bundle:
         warn_deprecated_alias("Bundle.rerun", "Bundle.run")
         return self.run(model, x, **kwargs)
 
-    def apply(self, fn: Callable[["Trace"], Any]) -> dict[str, Any]:
+    def apply(self, fn: Callable[[Trace], Any]) -> dict[str, Any]:
         """Apply a function independently to each member.
 
         Parameters
@@ -1171,7 +1169,7 @@ class Bundle:
 
         return {name: fn(member) for name, member in self._members.items()}
 
-    def joint_metric(self, fn: Callable[["Bundle"], Any]) -> Any:
+    def joint_metric(self, fn: Callable[[Bundle], Any]) -> Any:
         """Apply a function to the bundle as a whole.
 
         Parameters
@@ -1208,7 +1206,7 @@ class Bundle:
         """
 
         if kwargs.get("vis_opt") == "none" or kwargs.get("vis_mode") == "none":
-            return {name: None for name in self._members}
+            return dict.fromkeys(self._members)
 
         base_outpath = kwargs.get("vis_outpath")
         results: dict[str, str | None] = {}
@@ -1243,7 +1241,7 @@ class Bundle:
 
     def most_changed(
         self,
-        baseline: str | "Trace" | None = None,
+        baseline: str | Trace | None = None,
         *,
         top_k: int = 10,
         metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "cosine",
@@ -1441,10 +1439,10 @@ class Bundle:
     @classmethod
     def _parse_members(
         cls,
-        members: Mapping[str, "Trace"] | Sequence["Trace"] | Sequence[tuple[str, "Trace"]],
+        members: Mapping[str, Trace] | Sequence[Trace] | Sequence[tuple[str, Trace]],
         *,
         names: Sequence[str] | None,
-    ) -> list[tuple[str, "Trace"]]:
+    ) -> list[tuple[str, Trace]]:
         """Normalize supported construction shapes.
 
         Returns
@@ -1502,9 +1500,7 @@ class Bundle:
         return isinstance(value, Sequence) and not isinstance(value, str)
 
     @classmethod
-    def _coerce_trace_list(
-        cls, value: "Trace | Sequence[Trace]", *, arg_name: str
-    ) -> list["Trace"]:
+    def _coerce_trace_list(cls, value: Trace | Sequence[Trace], *, arg_name: str) -> list[Trace]:
         """Normalize a Trace-or-list input to a list.
 
         Parameters
@@ -1561,7 +1557,7 @@ class Bundle:
 
     def _coerce_member_name_list(
         self,
-        value: str | "Trace" | Sequence[str | "Trace"],
+        value: str | Trace | Sequence[str | Trace],
     ) -> list[str]:
         """Normalize Bundle member references to member names.
 
@@ -1581,7 +1577,7 @@ class Bundle:
         # but mypy can't follow that helper, so assert the element type the narrowing guarantees.
         return [self._coerce_member_name(cast("str | Trace", item)) for item in values]
 
-    def _coerce_member_name(self, value: str | "Trace") -> str:
+    def _coerce_member_name(self, value: str | Trace) -> str:
         """Resolve one Bundle member reference to a member name.
 
         Parameters
@@ -1603,7 +1599,7 @@ class Bundle:
         raise KeyError("Trace is not a member of this Bundle.")
 
     @staticmethod
-    def _dedupe_default_names(pairs: list[tuple[str, "Trace"]]) -> list[tuple[str, "Trace"]]:
+    def _dedupe_default_names(pairs: list[tuple[str, Trace]]) -> list[tuple[str, Trace]]:
         """Disambiguate automatically derived member names.
 
         Parameters
@@ -1641,7 +1637,7 @@ class Bundle:
         return isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str)
 
     @staticmethod
-    def _derive_name(log: "Trace", *, name: str | None, index: int) -> str:
+    def _derive_name(log: Trace, *, name: str | None, index: int) -> str:
         """Derive a member name from an explicit value or log metadata.
 
         Returns
@@ -1657,7 +1653,7 @@ class Bundle:
             return str(log_name)
         return f"member_{index}"
 
-    def _resolve_baseline_name(self, baseline: str | "Trace" | None) -> str | None:
+    def _resolve_baseline_name(self, baseline: str | Trace | None) -> str | None:
         """Resolve a baseline constructor argument to a member name.
 
         Returns
@@ -1694,7 +1690,7 @@ class Bundle:
         ]
         return candidates[0] if len(candidates) == 1 else None
 
-    def _baseline_or_raise(self, baseline: str | "Trace" | None) -> str:
+    def _baseline_or_raise(self, baseline: str | Trace | None) -> str:
         """Return a baseline name or raise for ambiguity.
 
         Returns
@@ -1730,7 +1726,7 @@ class Bundle:
             self._supergraph = build_supergraph(list(self._members.values()), list(self._members))
         return self._supergraph
 
-    def _shared(self, key_fn: Callable[["Trace"], Sequence[Any]]) -> list[str]:
+    def _shared(self, key_fn: Callable[[Trace], Sequence[Any]]) -> list[str]:
         """Return keys common to every member, ordered by the first member.
 
         Parameters
@@ -1749,7 +1745,7 @@ class Bundle:
         shared = set.intersection(*key_sets)
         return [key for key in member_keys[0] if key in shared]
 
-    def _divergent(self, key_fn: Callable[["Trace"], Sequence[Any]]) -> list[str]:
+    def _divergent(self, key_fn: Callable[[Trace], Sequence[Any]]) -> list[str]:
         """Return keys present in some members but not every member.
 
         Parameters
@@ -1777,7 +1773,7 @@ class Bundle:
                     seen.add(key)
         return ordered
 
-    def _member_key_lists(self, key_fn: Callable[["Trace"], Sequence[Any]]) -> list[list[str]]:
+    def _member_key_lists(self, key_fn: Callable[[Trace], Sequence[Any]]) -> list[list[str]]:
         """Return normalized per-member key lists with duplicates removed.
 
         Parameters
@@ -1885,7 +1881,7 @@ class Bundle:
         return _RELATIONSHIP_RANK[actual] >= _RELATIONSHIP_RANK[required]
 
     @classmethod
-    def _relationship_between(cls, left: "Trace", right: "Trace") -> Relationship:
+    def _relationship_between(cls, left: Trace, right: Trace) -> Relationship:
         """Derive relationship evidence for two model logs.
 
         Returns
@@ -1941,7 +1937,7 @@ class Bundle:
         return Relationship.UNKNOWN
 
     @staticmethod
-    def _weight_fingerprint(log: "Trace") -> str | None:
+    def _weight_fingerprint(log: Trace) -> str | None:
         """Return the strongest available weight fingerprint.
 
         Returns
@@ -1957,7 +1953,7 @@ class Bundle:
         )
 
     @staticmethod
-    def _weak_model(log: "Trace") -> Any | None:
+    def _weak_model(log: Trace) -> Any | None:
         """Resolve a captured weak model reference.
 
         Returns
@@ -2043,7 +2039,7 @@ def _distance_value(
     return float(value.detach().item())
 
 
-def _resolve_member_name(bundle: Bundle, member: str | "Trace" | None) -> str:
+def _resolve_member_name(bundle: Bundle, member: str | Trace | None) -> str:
     """Resolve a member name or Trace reference within a bundle.
 
     Parameters
@@ -2075,7 +2071,7 @@ def _bundle_delta_map(
     self: Bundle,
     metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
     *,
-    baseline: str | "Trace" | None = None,
+    baseline: str | Trace | None = None,
     on: Literal["out", "grad"] = "out",
 ) -> dict[str, dict[str, float]]:
     """Return per-node tensor deltas from a baseline trace.
@@ -2135,7 +2131,7 @@ def _bundle_delta_map(
 def _bundle_norm_delta(
     self: Bundle,
     *,
-    baseline: str | "Trace" | None = None,
+    baseline: str | Trace | None = None,
     on: Literal["out", "grad"] = "out",
 ) -> dict[str, dict[str, float]]:
     """Return relative L2 deltas for every comparable bundle node.
@@ -2157,8 +2153,8 @@ def _bundle_norm_delta(
 
 
 def _output_layer_pairs(
-    target_log: "Trace",
-    candidate_log: "Trace",
+    target_log: Trace,
+    candidate_log: Trace,
 ) -> list[tuple[Any, Any]]:
     """Return paired output layers by output index.
 
@@ -2192,7 +2188,7 @@ def _output_layer_pairs(
 
 def _bundle_output_delta(
     self: Bundle,
-    target: str | "Trace",
+    target: str | Trace,
     *,
     metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
     on: Literal["out", "grad"] = "out",
@@ -2262,7 +2258,7 @@ def _bundle_compare(
     self: Bundle,
     metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
     *,
-    baseline: str | "Trace" | None = None,
+    baseline: str | Trace | None = None,
     on: Literal["out", "grad"] = "out",
 ) -> dict[str, Any]:
     """Return a unified bundle comparison payload.
@@ -2332,8 +2328,8 @@ def _alignment_score(left: Any, right: Any, left_index: int, right_index: int) -
 
 def _bundle_aligned_pairs(
     self: Bundle,
-    left: str | "Trace" | None = None,
-    right: str | "Trace" | None = None,
+    left: str | Trace | None = None,
+    right: str | Trace | None = None,
     *,
     min_score: float = 0.45,
 ) -> list[tuple[Any, Any]]:

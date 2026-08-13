@@ -27,24 +27,19 @@ Key design patterns:
 """
 
 import copy
+import difflib
 import inspect
 import json
-from collections import OrderedDict, defaultdict
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
-import difflib
-from pathlib import Path
 import weakref
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import (
-    Any,
-    Callable,
-    ClassVar,
-    Dict,
-    List,
-    Literal,
-    Optional,
     TYPE_CHECKING,
-    Tuple,
+    Any,
+    ClassVar,
+    Literal,
     cast,
 )
 
@@ -52,8 +47,8 @@ import torch
 from torch import nn
 
 if TYPE_CHECKING:
-    from ..debug._audit import TraceAudit
     from .._io.streaming import BundleStreamWriter
+    from ..debug._audit import TraceAudit
     from ..runnable import (
         ArchivedActivation,
         ReadinessReport,
@@ -63,44 +58,42 @@ if TYPE_CHECKING:
 
 from .. import _state
 from .._errors import InvalidArgumentError
-from ..backends import BackendName
-from .._trace_state import TraceState
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
 )
-from .._save_budget import SaveBudget, SaveBudgetOption
 from .._runnable_seam import (
     RunnableTraceState,
     normalize_runnable_trace_state,
     runnable_trace_state,
 )
-from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
+from .._save_budget import SaveBudget, SaveBudgetOption
+from .._trace_state import TraceState
+from ..backends import BackendName
 from ..captured_run import CapturedRun
+from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
+from ..intervention.types import (
+    MODEL_LOG_FIELD_FORK_POLICY,
+    InterventionSpec,
+    Relationship,
+)
 from ..ir.workspaces import (
     LEGACY_TRACE_BUILD_STATE_KEYS,
     ModuleCaptureWorkspace,
     RawGraphWorkspace,
     WrapperRuntimeWorkspace,
 )
-from ..intervention.types import (
-    MODEL_LOG_FIELD_FORK_POLICY,
-    InterventionSpec,
-    Relationship,
-)
+from ..quantities import Bytes, Duration
 from ..types import ActivationPostfunc, GradientPostfunc
 from ..utils.tensor_utils import SaveMode
-from ..quantities import Bytes, Duration
-from .module import ModuleAccessor
-from .param import ParamAccessor
-from .interface import (
-    _getitem_after_pass,
-    _getitem_during_pass,
-    _str_after_pass,
-    _str_during_pass,
+from ._state_adapter import state_items, state_restore
+from ._trace_accessors import (
+    _TRACE_LAYER_ACCESSOR_CACHE,
+    _TRACE_OP_ACCESSOR_CACHE,
+    _invalidate_trace_module_call_accessor_cache,
 )
 from .backward_pass import BackwardPass
 from .derived_grad import DerivedGradAccessor
@@ -111,14 +104,16 @@ from .field_policy import (
     portable_state_spec_from_policy,
 )
 from .grad_fn import GradFn
-from .layer import Layer
-from .op import Op
-from ._state_adapter import state_items, state_restore
-from ._trace_accessors import (
-    _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_OP_ACCESSOR_CACHE,
-    _invalidate_trace_module_call_accessor_cache,
+from .interface import (
+    _getitem_after_pass,
+    _getitem_during_pass,
+    _str_after_pass,
+    _str_during_pass,
 )
+from .layer import Layer
+from .module import ModuleAccessor
+from .op import Op
+from .param import ParamAccessor
 
 if TYPE_CHECKING:
 
@@ -341,7 +336,7 @@ _MODEL_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "backward_durations": [],
 }
 _MODEL_LOG_DEFAULT_FILL = {
-    **{field_name: None for field_name in MODEL_LOG_FIELD_ORDER},
+    **dict.fromkeys(MODEL_LOG_FIELD_ORDER),
     **_MODEL_LOG_CONTAINER_DEFAULTS,
     **_MODEL_LOG_DEFAULT_FILL,
 }
@@ -509,15 +504,15 @@ class ConditionalEvent:
     kind: Literal["if_chain", "ifexp"]
     source_file: str
     function_qualname: str
-    function_span: Tuple[int, int]
-    if_stmt_span: Tuple[int, int]
-    test_span: Tuple[int, int, int, int]
-    branch_ranges: Dict[str, Tuple[int, int, int, int]]
-    branch_test_spans: Dict[str, Tuple[int, int, int, int]]
+    function_span: tuple[int, int]
+    if_stmt_span: tuple[int, int]
+    test_span: tuple[int, int, int, int]
+    branch_ranges: dict[str, tuple[int, int, int, int]]
+    branch_test_spans: dict[str, tuple[int, int, int, int]]
     call_depth: int
-    parent_conditional_id: Optional[int]
-    parent_branch_kind: Optional[str]
-    bool_layers: List[str] = field(default_factory=list)
+    parent_conditional_id: int | None
+    parent_branch_kind: str | None
+    bool_layers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1023,7 +1018,7 @@ class Trace(
     param_source: Literal["native-module", "pytree-derived", "none"]
     state: TraceState
     tlspec_version: int
-    annotations: Dict[str, Any]
+    annotations: dict[str, Any]
     input_preprocessor: ResolvedPreprocessing | None
     output_postprocessor: ResolvedPostprocessing | None
     output_id2label: dict[int, str] | None
@@ -1038,7 +1033,7 @@ class Trace(
     chunked_forward: bool
     profile_enabled: bool
     save_arg_templates: bool
-    op_equivalence_classes: Dict[str, set[str]]
+    op_equivalence_classes: dict[str, set[str]]
     last_run: Any | None
     capture_start_time: float
     capture_end_time: float
@@ -1048,7 +1043,7 @@ class Trace(
     _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
     backward_root_grad_fn_object_ids: list[int]
-    backward_pass_logs: Dict[int, BackwardPass]
+    backward_pass_logs: dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
     jax_closed_jaxpr: Any
     jax_equation_captures: tuple[Any, ...]
@@ -1435,8 +1430,8 @@ class Trace(
         self,
         model_class_name: str,
         output_device: str = "same",
-        activation_transform: Optional[ActivationPostfunc] = None,
-        grad_transform: Optional[GradientPostfunc] = None,
+        activation_transform: ActivationPostfunc | None = None,
+        grad_transform: GradientPostfunc | None = None,
         save_raw_activations: bool = True,
         save_raw_gradients: bool = True,
         save_mode: SaveMode = "copy",
@@ -1592,14 +1587,14 @@ class Trace(
             repr(activation_transform) if activation_transform is not None else None
         )
         self.save_raw_activations = save_raw_activations
-        self.input_annotations: Dict[str, Any] = {}
+        self.input_annotations: dict[str, Any] = {}
         self.grad_transform = grad_transform
         self.grad_transform_repr = repr(grad_transform) if grad_transform is not None else None
         self.save_raw_gradients = save_raw_gradients
         self.save_mode = save_mode
         self._source_code_blob: dict[str, str] = {}
         self._source_model_ref: weakref.ReferenceType[nn.Module] | None = None
-        self.parent_run: weakref.ReferenceType["Trace"] | None = None
+        self.parent_run: weakref.ReferenceType[Trace] | None = None
         self.model_object_id: int | None = None
         self.model_class_qualname: str | None = None
         self.param_hash_quick: str | None = None
@@ -1622,9 +1617,9 @@ class Trace(
         self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
-        self.annotations: Dict[str, Any] = {}
-        self.code_context: list["FuncCallLocation"] = []
-        self.manual_tensor_connections: List[Tuple[str, str]] = []
+        self.annotations: dict[str, Any] = {}
+        self.code_context: list[FuncCallLocation] = []
+        self.manual_tensor_connections: list[tuple[str, str]] = []
         self.forward_source_file: str | None = None
         self.forward_source_line: int | None = None
         self.class_source_file: str | None = None
@@ -1641,8 +1636,8 @@ class Trace(
         self.capture_cache_path: str | None = None
         self.recording_kept: bool = True
         self._out_dedup_mode: Literal["identity", "content", "none"] = "identity"
-        self._out_identity_cache: Dict[int, Tuple[torch.Tensor, str, torch.Tensor, int | None]] = {}
-        self._out_hash_cache: Dict[str, Tuple[str, torch.Tensor]] = {}
+        self._out_identity_cache: dict[int, tuple[torch.Tensor, str, torch.Tensor, int | None]] = {}
+        self._out_hash_cache: dict[str, tuple[str, torch.Tensor]] = {}
         self._code_context_cache: dict[Any, tuple[Any, ...]] = {}
         self._halt_returns_partial_trace = False
         self._replay_arg_version_data_complete = True
@@ -1682,61 +1677,61 @@ class Trace(
         }
         self.replay_frontier: dict[str, torch.Tensor] = {}
         self._output_container_specs_by_raw_label: dict[str, Any] = {}
-        self._out_writer: Optional["BundleStreamWriter"] = None
+        self._out_writer: BundleStreamWriter | None = None
         self._keep_outs_in_memory: bool = True
         self._defer_streaming_bundle_finalization: bool = False
-        self._out_sink: Optional[Callable[[str, torch.Tensor], None]] = None
+        self._out_sink: Callable[[str, torch.Tensor], None] | None = None
         # Model structure info (computed @properties: is_recurrent,
         # max_layer_op_count, is_branching, has_conditional_branching)
 
         # Tensor Tracking - post-processed (populated after _tracing_finished=True):
-        self.layer_list: List[Op] = []  # ordered list of all layer ops
-        self.layer_dict_main_keys: Dict[str, Op] = OrderedDict()  # primary label -> entry
-        self.layer_dict_all_keys: Dict[str, Op] = OrderedDict()  # all lookup keys -> entry
-        self.layer_logs: Dict[str, Layer] = OrderedDict()  # no-pass label -> aggregate Layer
-        self.op_labels: List[str] = []  # pass-qualified labels (e.g. "conv2d_1_1:1")
-        self.layer_labels: List[str] = []  # pass-stripped labels (e.g. "conv2d_1_1")
-        self.layer_num_calls: Dict[str, int] = OrderedDict()  # no-pass label -> pass count
+        self.layer_list: list[Op] = []  # ordered list of all layer ops
+        self.layer_dict_main_keys: dict[str, Op] = OrderedDict()  # primary label -> entry
+        self.layer_dict_all_keys: dict[str, Op] = OrderedDict()  # all lookup keys -> entry
+        self.layer_logs: dict[str, Layer] = OrderedDict()  # no-pass label -> aggregate Layer
+        self.op_labels: list[str] = []  # pass-qualified labels (e.g. "conv2d_1_1:1")
+        self.layer_labels: list[str] = []  # pass-stripped labels (e.g. "conv2d_1_1")
+        self.layer_num_calls: dict[str, int] = OrderedDict()  # no-pass label -> pass count
         self.by_pass: dict[int, list[int]] = {}
-        self._layer_nums_to_save: List[int] = []  # ordinal positions of layers to save
-        self._grad_op_nums_to_save: List[int] | str = []
+        self._layer_nums_to_save: list[int] = []  # ordinal positions of layers to save
+        self._grad_op_nums_to_save: list[int] | str = []
         self.num_ops: int = 0  # total operations after postprocessing
 
         # Mapping between raw barcodes and final human-readable labels
         # (populated during postprocessing's label-assignment step):
-        self._raw_to_final_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_parent_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_op_labels: Dict[str, str] = {}
-        self._final_to_raw_layer_labels: Dict[str, str] = {}
-        self._lookup_keys_to_layer_num_dict: Dict[str, int] = {}
-        self._layer_num_to_lookup_keys_dict: Dict[int, List[str]] = defaultdict(list)
-        self._ambiguous_lookup_keys: Dict[str, List[int]] = {}
+        self._raw_to_final_layer_labels: dict[str, str] = {}
+        self._raw_to_final_parent_layer_labels: dict[str, str] = {}
+        self._raw_to_final_op_labels: dict[str, str] = {}
+        self._final_to_raw_layer_labels: dict[str, str] = {}
+        self._lookup_keys_to_layer_num_dict: dict[str, int] = {}
+        self._layer_num_to_lookup_keys_dict: dict[int, list[str]] = defaultdict(list)
+        self._ambiguous_lookup_keys: dict[str, list[int]] = {}
 
         # Special Layers:
-        self.input_layers: List[str] = []
-        self.output_layers: List[str] = []
+        self.input_layers: list[str] = []
+        self.output_layers: list[str] = []
         self._annotation_blobs: dict[str, Any] | None = None
-        self.buffer_layers: List[str] = []
-        self.buffer_num_calls: Dict[str, int] = {}
+        self.buffer_layers: list[str] = []
+        self.buffer_num_calls: dict[str, int] = {}
         self._buffer_accessor = None
         self._buffer_write_tracker: Any | None = None
-        self._buffer_initial_values: Dict[str, Any] = {}
-        self.internal_source_ops: List[str] = []
-        self.internal_sink_ops: List[str] = []
-        self.internally_terminated_bool_ops: List[str] = []
-        self.conditional_branch_edges: List[Tuple[str, str]] = []
-        self.conditional_records: List[ConditionalEvent] = []
-        self.conditional_arm_entry_edges: Dict[Tuple[int, str], List[Tuple[str, str]]] = {}
-        self.conditional_edge_call_indices: Dict[Tuple[str, str, int, str], List[int]] = {}
+        self._buffer_initial_values: dict[str, Any] = {}
+        self.internal_source_ops: list[str] = []
+        self.internal_sink_ops: list[str] = []
+        self.internally_terminated_bool_ops: list[str] = []
+        self.conditional_branch_edges: list[tuple[str, str]] = []
+        self.conditional_records: list[ConditionalEvent] = []
+        self.conditional_arm_entry_edges: dict[tuple[int, str], list[tuple[str, str]]] = {}
+        self.conditional_edge_call_indices: dict[tuple[str, str, int, str], list[int]] = {}
         self.conditionals = ConditionalAccessor()
-        self._orphan_labels: List[str] = []
+        self._orphan_labels: list[str] = []
         self._orphan_logs: tuple[Op, ...] = ()
         self.orphan_records: list[dict[str, Any]] = []
         self._saved_grad_labels: set[str] = set()
-        self.layers_with_params: Dict[str, List[Any]] = defaultdict(list)
+        self.layers_with_params: dict[str, list[Any]] = defaultdict(list)
         # Maps equivalence_class -> set of layer labels that share
         # that equivalence type (populated by loop_detection.py).
-        self.op_equivalence_classes: Dict[str, set[str]] = defaultdict(set)
+        self.op_equivalence_classes: dict[str, set[str]] = defaultdict(set)
 
         # Aggregate tensor statistics (computed during postprocessing):
         self.total_activation_memory: Bytes = Bytes(0)
@@ -1752,7 +1747,7 @@ class Trace(
         self.num_saved_grad_fn_calls: int = 0
 
         # Param info:
-        self.param_logs: "ParamAccessor" = ParamAccessor({})
+        self.param_logs: ParamAccessor = ParamAccessor({})
         self.num_param_tensors: int = 0
         self.num_layers_with_params: int = 0
         self.num_params: int = 0
@@ -1775,9 +1770,9 @@ class Trace(
         self.cleanup_duration: Duration = Duration(0)
         self.func_calls_duration: Duration = Duration(0)
         self.has_backward_pass: bool = False
-        self.grad_fn_logs: Dict[int, GradFn] = OrderedDict()
-        self.grad_fn_order: List[int] = []
-        self.backward_pass_logs: Dict[int, BackwardPass] = OrderedDict()
+        self.grad_fn_logs: dict[int, GradFn] = OrderedDict()
+        self.grad_fn_order: list[int] = []
+        self.backward_pass_logs: dict[int, BackwardPass] = OrderedDict()
         self._grad_fn_param_refs: dict[str, str] = {}
         self._param_log_by_pid: dict[int, str] = {}
         # r79 session-leak fix: the RECORDED prep inventories of stamped
@@ -2169,7 +2164,7 @@ class Trace(
 
         self.__dict__.pop("_last_sibling_ordering_decision", None)
 
-    def find_layers(self, query: str, *, limit: int = 10) -> List[str]:
+    def find_layers(self, query: str, *, limit: int = 10) -> list[str]:
         """Return layer labels matching a fuzzy query.
 
         Parameters
@@ -2583,7 +2578,7 @@ class Trace(
 
         return reconstruct_container(self, site=site, role=role, values=values)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with non-picklable weakref-backed accessors stripped."""
         state = self.__dict__.copy()
         # Event streams never serialize (FieldPolicy.DROP): strip the stream
@@ -2629,14 +2624,12 @@ class Trace(
         # persists None and loads derive from the structural lattice.
         outcome = state.get("_capture_outcome")
         state["_capture_outcome"] = (
-            outcome.to_payload()
-            if outcome is not None and hasattr(outcome, "to_payload")
-            else None
+            outcome.to_payload() if outcome is not None and hasattr(outcome, "to_payload") else None
         )
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
         for field_name in (
             *LEGACY_TRACE_BUILD_STATE_KEYS,

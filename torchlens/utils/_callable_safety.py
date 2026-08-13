@@ -136,9 +136,10 @@ from __future__ import annotations
 import inspect
 import sys
 import warnings
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import torch
 
@@ -667,9 +668,7 @@ def _is_global_state_mutator_name(name: str) -> bool:
         return True
     if "clear" in low and "cache" in low:
         return True
-    if "set_plan_cache" in low:
-        return True
-    return False
+    return "set_plan_cache" in low
 
 
 # STRUCTURAL close of the arbitrary-callable-INVOKE class by SIGNATURE (r41,

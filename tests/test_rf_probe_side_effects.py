@@ -97,7 +97,7 @@ def test_probe_does_not_mutate_the_class_level_field_policy_tables() -> None:
 
     assert dict(Trace.PORTABLE_STATE_SPEC) == before_spec
     assert dict(Trace.FIELD_POLICY) == before_policy
-    assert Trace.PORTABLE_STATE_SPEC == portable_state_spec_from_policy(Trace.FIELD_POLICY)
+    assert portable_state_spec_from_policy(Trace.FIELD_POLICY) == Trace.PORTABLE_STATE_SPEC
 
 
 def test_suppression_restores_exact_flag_state_when_probe_raises() -> None:
@@ -107,10 +107,9 @@ def test_suppression_restores_exact_flag_state_when_probe_raises() -> None:
     trace._tl_backward_triggers_disarmed = True
     trace._tl_rf_probe_active = "prior-sentinel"
 
-    with pytest.raises(RuntimeError, match="probe failed"):
-        with _probe_suppressed(trace):
-            assert trace._tl_rf_probe_active is True
-            raise RuntimeError("probe failed")
+    with pytest.raises(RuntimeError, match="probe failed"), _probe_suppressed(trace):
+        assert trace._tl_rf_probe_active is True
+        raise RuntimeError("probe failed")
 
     assert trace._tl_rf_probe_active == "prior-sentinel"
     assert trace._tl_backward_triggers_disarmed is True

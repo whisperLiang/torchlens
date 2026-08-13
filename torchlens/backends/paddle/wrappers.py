@@ -239,7 +239,7 @@ class _PaddleWrapperRegistry:
         paddle, functional, tensor_cls = _import_paddle()
         wrapped: set[str] = set()
         denied: set[str] = set()
-        for owner, owner_name, name, original, action in _iter_inventory_candidates(
+        for owner, owner_name, name, _original, action in _iter_inventory_candidates(
             paddle, functional, tensor_cls
         ):
             op_name = _op_name(owner_name, name)

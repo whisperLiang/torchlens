@@ -1,10 +1,13 @@
 """Control, shape, and host-escape witness checks."""
 
 from __future__ import annotations
+
 import dataclasses
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
+
 from ._runnable_state import (
     runnable_tensor_byte_digest,
 )
@@ -17,8 +20,6 @@ from .runnable import (
     RunnableCallDescriptor,
     SparseRunDescriptor,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

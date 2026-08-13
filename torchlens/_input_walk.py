@@ -59,9 +59,9 @@ only here:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 __all__ = [
     "COMPOSITE_LITERAL_COMPONENT_POLICY",
@@ -288,7 +288,7 @@ it can never collide with a sentinel interpreted before mapping lookup.
 """
 
 
-def reserved_input_path_components() -> "frozenset[str]":
+def reserved_input_path_components() -> frozenset[str]:
     """The closed registry of reserved input-path SENTINELS (r71 D).
 
     Every string sentinel any runtime consumer interprets POSITIONALLY before a mapping
@@ -302,7 +302,7 @@ def reserved_input_path_components() -> "frozenset[str]":
     return frozenset({EMPTY_CONTAINER_PATH_MARKER, BOOL_KEY_PATH_TAG, _KEY_CODEC_TAG})
 
 
-def _stock_numpy_scalar_types() -> "frozenset[type]":
+def _stock_numpy_scalar_types() -> frozenset[type]:
     """Every CONCRETE stock NumPy scalar class, enumerated programmatically (r69 B).
 
     Identity-based membership from ``np.typecodes['All']`` -- never a name/module
@@ -333,7 +333,7 @@ def _stock_numpy_scalar_types() -> "frozenset[type]":
     return _STOCK_NP_SCALAR_CACHE[0]
 
 
-def _stock_numpy_transparent_scalar_types() -> "frozenset[type]":
+def _stock_numpy_transparent_scalar_types() -> frozenset[type]:
     """Exact stock NumPy numeric/bool wrapper classes admitted as VALUE-transparent."""
 
     _stock_numpy_scalar_types()
@@ -341,10 +341,10 @@ def _stock_numpy_transparent_scalar_types() -> "frozenset[type]":
     return _STOCK_NP_SCALAR_CACHE[1]
 
 
-_STOCK_NP_SCALAR_CACHE: "tuple[frozenset[type], frozenset[type]] | None" = None
+_STOCK_NP_SCALAR_CACHE: tuple[frozenset[type], frozenset[type]] | None = None
 
 
-def classify_scalar(value: Any) -> "tuple[str, Any]":
+def classify_scalar(value: Any) -> tuple[str, Any]:
     """THE closed input-boundary scalar type-class lattice (r69 B/D).
 
     Every scalar type dispatch on the model-input boundary -- snapshot leaf
@@ -406,7 +406,7 @@ def classify_scalar(value: Any) -> "tuple[str, Any]":
     return ("opaque", None)
 
 
-COMPOSITE_LITERAL_COMPONENT_POLICY: "Mapping[str, tuple[str, ...]]" = {
+COMPOSITE_LITERAL_COMPONENT_POLICY: Mapping[str, tuple[str, ...]] = {
     # r71 B: the ONE shared composite-literal component policy table. Each recursive
     # ``NonTensorLiteral`` composite node kind lists the classifier-backed lane every
     # sub-component MUST route through, so a semantic-typed scalar can never launder
@@ -444,7 +444,7 @@ def slice_semantic_component(value: slice) -> str | None:
     return None
 
 
-def encode_mapping_key(key: Any) -> "str | int":
+def encode_mapping_key(key: Any) -> str | int:
     """Encode one grammar mapping key into the canonical type-strict component (r69 D).
 
     THE sole mapping-key identity authority: snapshot ordered-key facts, literal
@@ -511,7 +511,7 @@ def encode_mapping_key(key: Any) -> "str | int":
     raise ValueError(f"Mapping key {key!r} is outside the input-boundary key grammar.")
 
 
-def decode_mapping_key(component: "str | int") -> Any:
+def decode_mapping_key(component: str | int) -> Any:
     """Decode one canonical component back to its mapping key (mapping nodes only).
 
     Retained for legitimate output-dict reconstruction and diagnostics; RUNTIME
@@ -694,10 +694,7 @@ def _declared_schema_uninspectable(value: Any) -> bool:
         return True
     # ``object`` / ``tuple`` declare NO ``__getattr__``, so any MRO ``__getattr__`` is
     # a user-added hook that can compute or hide declared-field values.
-    for cls in type(value).__mro__:
-        if "__getattr__" in cls.__dict__:
-            return True
-    return False
+    return any("__getattr__" in cls.__dict__ for cls in type(value).__mro__)
 
 
 def undeclared_instance_state(value: Any, kind: str) -> bool:
@@ -790,10 +787,22 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
     refusals: list[dict[str, Any]] = []
 
     def _type_ref(item: Any) -> list[str]:
+        """Exact ``(module, qualname)`` witness for one container's class."""
+
         cls = type(item)
         return [str(cls.__module__), str(cls.__qualname__)]
 
     def _descend(item: Any, path: tuple[Any, ...]) -> None:
+        """Walk one input node, appending its structural node and any type refusals.
+
+        Only CONTAINER nodes carry the exact-class witness: a tensor leaf belongs to
+        the admission gate and a scalar leaf to the literal-witness VALUE contract,
+        so an exact-type fact on leaves would diverge value-equal inputs the value
+        contract admits. A semantic scalar -- including one appearing as a ``slice``
+        component -- emits a ``semantic_scalar_type`` refusal here and in the
+        symmetric runtime snapshot.
+        """
+
         kind = classify_input_container(item)
         # r67 heavy-gate fix: only CONTAINER nodes carry the exact-class witness. A
         # tensor leaf's identity is the admission gate's domain, and a scalar LEAF
@@ -929,6 +938,15 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         nodes.append(node)
 
     def _safe_aux(aux: Any) -> Any:
+        """Return JSON-safe registered-container aux data, refusing anything else.
+
+        Raises
+        ------
+        ValueError
+            If the aux tree holds a value outside ``None``/bool/int/float/str and
+            nested lists or tuples of those.
+        """
+
         if aux is None or isinstance(aux, (bool, int, float, str)):
             return aux
         if isinstance(aux, (list, tuple)):

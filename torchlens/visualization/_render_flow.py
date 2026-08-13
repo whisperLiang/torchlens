@@ -4,8 +4,8 @@
 
 from .._errors import InvalidArgumentError
 from ._render_common import *
-from ._render_leaf import *
 from ._render_edges import *
+from ._render_leaf import *
 from ._render_nodes import *
 
 

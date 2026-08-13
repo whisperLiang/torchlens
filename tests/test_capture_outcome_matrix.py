@@ -195,9 +195,7 @@ def test_gated_entries_consult_the_chokepoint() -> None:
     validation_source = (TORCHLENS_DIR / "data_classes" / "_trace_validation.py").read_text(
         encoding="utf-8"
     )
-    gate_calls = re.findall(
-        r'require_capture_capability\(self, "([a-z_]+)"\)', validation_source
-    )
+    gate_calls = re.findall(r'require_capture_capability\(self, "([a-z_]+)"\)', validation_source)
     # save_new_outs, push, push_from, run (loaded-sparse + unified-live +
     # legacy-live), log_backward, recording_backward, validate_forward_pass,
     # check_metadata_invariants.

@@ -61,7 +61,7 @@ from torchlens.capture.trace import (
     _record_runnable_input_literal_leaves,
     _record_runnable_input_tensor_sites,
 )
-from torchlens.errors import RunnablePreflightError, PathDivergenceError
+from torchlens.errors import PathDivergenceError, RunnablePreflightError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import (
     DivergencePolicy,

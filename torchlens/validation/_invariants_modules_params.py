@@ -1,16 +1,15 @@
 """Module-call and parameter cross-reference invariants."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 
+from typing import TYPE_CHECKING
+
+from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _param_address_index,
         _param_log_list_contains_param,
         _resolve_trace_label,
@@ -32,7 +31,7 @@ __all__ = (
 
 
 def _check_module_call_boundary_and_tree(
-    ml: "Trace",
+    ml: Trace,
     module_call: object,
     name: str,
 ) -> None:
@@ -93,7 +92,7 @@ def _check_module_call_boundary_and_tree(
     _check_module_call_output_structure_paths(ml, module_call, name)
 
 
-def _check_module_call_tree_links(ml: "Trace", module_call: object, name: str) -> None:
+def _check_module_call_tree_links(ml: Trace, module_call: object, name: str) -> None:
     """Check ModuleCall parent/child links and stack prefixes.
 
     Parameters
@@ -156,7 +155,7 @@ def _check_module_call_tree_links(ml: "Trace", module_call: object, name: str) -
 
 
 def _check_module_call_output_structure_paths(
-    ml: "Trace",
+    ml: Trace,
     module_call: object,
     name: str,
 ) -> None:
@@ -278,7 +277,7 @@ def _container_tensor_components(spec: object) -> tuple[object, ...]:
     return ()
 
 
-def _check_param_xrefs(ml: "Trace") -> None:
+def _check_param_xrefs(ml: Trace) -> None:
     """Check J: Param <-> Layer <-> Module cross-references.
 
     Precondition contract: this torch-native check asserts deep reciprocal
@@ -377,7 +376,7 @@ def _check_param_xrefs(ml: "Trace") -> None:
     _check_layer_param_aggregate_dedup(ml, name)
 
 
-def _check_param_usage_reciprocal_links(ml: "Trace", param: object, name: str) -> None:
+def _check_param_usage_reciprocal_links(ml: Trace, param: object, name: str) -> None:
     """Check Param usage lists have reciprocal Op and Layer references.
 
     Parameters
@@ -450,7 +449,7 @@ def _check_param_co_parent_links(
             )
 
 
-def _check_layers_with_params_matches_param_usage(ml: "Trace", name: str) -> None:
+def _check_layers_with_params_matches_param_usage(ml: Trace, name: str) -> None:
     """Check ``layers_with_params`` matches Param usage at the layer boundary.
 
     Parameters
@@ -490,7 +489,7 @@ def _check_layers_with_params_matches_param_usage(ml: "Trace", name: str) -> Non
         )
 
 
-def _check_layer_param_aggregate_dedup(ml: "Trace", name: str) -> None:
+def _check_layer_param_aggregate_dedup(ml: Trace, name: str) -> None:
     """Check trace param aggregate counts with layer-label deduplication.
 
     Parameters

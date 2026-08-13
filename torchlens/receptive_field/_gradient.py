@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import importlib
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-import importlib
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
-import warnings
 
 import torch
 
 from ..backends import BackendUnsupportedError, get_backend_spec
-from . import _engine
-from . import _rules
+from . import _engine, _rules
 from ._errors import ReceptiveFieldError, ReceptiveFieldUnavailableError
 from ._path import require_path, resolve_graph_point
 from ._types import GradientReceptiveField, GridLayout, ReceptiveFieldDirection
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op

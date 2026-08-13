@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-
-from ...utils._torch_compat import tensor_version_or_none
 from torch import nn
 
 from ... import _state
 from ...ir import BufferWriteEvent
+from ...utils._torch_compat import tensor_version_or_none
 from ...utils.tensor_utils import safe_copy
 from ._tl import (
     clear_tensor_label,
@@ -88,7 +87,7 @@ class _SessionBufferStamp:
     storage: Any | None
 
 
-def register_session_buffer_stamp(trace: "Trace", value: torch.Tensor, address: str) -> None:
+def register_session_buffer_stamp(trace: Trace, value: torch.Tensor, address: str) -> None:
     """Stamp a buffer address and record CURRENT-SESSION identity for it (r81).
 
     Every path that writes a session-scoped buffer provenance stamp MUST route
@@ -135,7 +134,7 @@ def register_session_buffer_stamp(trace: "Trace", value: torch.Tensor, address: 
     registry[id(value)] = _SessionBufferStamp(tensor=value, address=address, storage=storage)
 
 
-def session_validated_buffer_address(trace: "Trace", value: torch.Tensor) -> str | None:
+def session_validated_buffer_address(trace: Trace, value: torch.Tensor) -> str | None:
     """Return a buffer stamp ONLY when it is current-session with live storage identity.
 
     The buffer/tensor-meta provenance belt (r81, r80 F1+F2 shared root): a
@@ -198,7 +197,7 @@ def session_validated_buffer_address(trace: "Trace", value: torch.Tensor) -> str
     return address if same else None
 
 
-_PARAM_BYTE_WITNESS_NOT_ARMED: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_PARAM_BYTE_WITNESS_NOT_ARMED: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces whose param/state byte-witness was deliberately NOT armed (W6 witness gating).
 
 The whole-storage param snapshot/reconcile tripwire (r18/r19-A) exists solely to feed the
@@ -241,13 +240,20 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
 
     __slots__ = ("_trace",)
 
-    def __init__(self, trace: "Trace") -> None:
+    def __init__(self, trace: Trace) -> None:
         super().__init__()
         self._trace = trace
 
     def _resolve(
         self, address: str, entry: tuple[torch.Tensor | None, int | None]
     ) -> tuple[torch.Tensor | None, int | None]:
+        """Materialize the whole-storage baseline for one address, memoizing the result.
+
+        When the capture-state clone cannot be read as bytes the trace is marked in
+        ``_HOST_ESCAPE_MUTABLE_WRITEBACK`` and the unresolved entry is returned, so
+        the verdict degrades instead of comparing against a guessed baseline.
+        """
+
         capture_state = self._trace._runnable.capture_state
         clone = capture_state.get(address) if isinstance(capture_state, Mapping) else None
         before: torch.Tensor | None = None
@@ -267,6 +273,8 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
         return resolved
 
     def get(self, address: Any, default: Any = None) -> Any:
+        """Like ``dict.get``, but resolves a not-yet-materialized baseline on the way out."""
+
         entry = dict.get(self, address)
         if entry is None:
             return default
@@ -295,7 +303,7 @@ class BufferWriteTracker:
 
     _patched_classes: ClassVar[dict[type[nn.Module], _PatchedClass]] = {}
 
-    def __init__(self, trace: "Trace", model: nn.Module) -> None:
+    def __init__(self, trace: Trace, model: nn.Module) -> None:
         """Initialize capture state for one trace/model session.
 
         Parameters
@@ -981,7 +989,7 @@ class BufferWriteTracker:
             self.storage_key_to_addresses.setdefault(new_key, {})[address] = None
 
 
-def install_buffer_write_tracker(trace: "Trace", model: nn.Module) -> BufferWriteTracker:
+def install_buffer_write_tracker(trace: Trace, model: nn.Module) -> BufferWriteTracker:
     """Create and install the session buffer-write tracker."""
 
     tracker = BufferWriteTracker(trace, model)
@@ -990,7 +998,7 @@ def install_buffer_write_tracker(trace: "Trace", model: nn.Module) -> BufferWrit
     return tracker
 
 
-def reconcile_buffer_writes(trace: "Trace", trace_state: "RawGraphWorkspace") -> None:
+def reconcile_buffer_writes(trace: Trace, trace_state: RawGraphWorkspace) -> None:
     """Run end-of-capture registered-buffer reconciliation.
 
     Parameters
@@ -1014,7 +1022,7 @@ def reconcile_buffer_writes(trace: "Trace", trace_state: "RawGraphWorkspace") ->
         tracker.reconcile()
 
 
-def uninstall_buffer_write_tracker(trace: "Trace | None") -> None:
+def uninstall_buffer_write_tracker(trace: Trace | None) -> None:
     """Uninstall a trace's session buffer-write tracker if present."""
 
     if trace is None:
@@ -1026,7 +1034,7 @@ def uninstall_buffer_write_tracker(trace: "Trace | None") -> None:
 
 
 def snapshot_buffer_args(
-    trace: "Trace",
+    trace: Trace,
     func_name: str,
     tensors: list[torch.Tensor],
     kwargs: dict[str, Any],
@@ -1044,7 +1052,7 @@ def snapshot_buffer_args(
 
 
 def record_op_buffer_writes(
-    trace: "Trace",
+    trace: Trace,
     func_name: str,
     snapshots: list[BufferSnapshot],
     producer_label_raw: str | None,
@@ -1056,7 +1064,7 @@ def record_op_buffer_writes(
         tracker.record_op_writes(func_name, snapshots, producer_label_raw)
 
 
-def resolve_registered_buffer_address(trace: "Trace", tensor: torch.Tensor) -> str | None:
+def resolve_registered_buffer_address(trace: Trace, tensor: torch.Tensor) -> str | None:
     """Resolve an actual tensor argument to a registered-buffer address.
 
     Parameters

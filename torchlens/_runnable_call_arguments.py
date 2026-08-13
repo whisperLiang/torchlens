@@ -1,10 +1,13 @@
 """Sparse-call argument decoding and binding."""
 
 from __future__ import annotations
-from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
+
 import math
-from typing import Any, cast
+from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ._runnable_state import (
     _OUTPUT_COUNT_FLOOR,
     RunResourceCeiling,
@@ -23,17 +26,15 @@ from .runnable import (
     TensorSlotRole,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from ._runnable_execution import (
         _MAX_DECODE_NESTING_DEPTH,
-        _ProjectionCountExceeded,
         _count_bounded_fake_tensor_mode_class,
         _decode_literal,
         _is_allocator_death,
         _mutation_target_slot_id,
         _op_for_slot,
+        _ProjectionCountExceeded,
     )
 
 __all__ = (

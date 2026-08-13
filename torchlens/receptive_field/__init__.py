@@ -10,13 +10,19 @@ import torch
 from ._errors import (
     AmbiguousCallError,
     AmbiguousInputError,
-    AmbiguousTargetError,
     AmbiguousPassError,
+    AmbiguousTargetError,
     BackendUnsupportedError,
-    ReceptiveFieldError,
     NoInfluencePathError,
+    ReceptiveFieldError,
     ReceptiveFieldUnavailableError,
     ReceptiveFieldValidationError,
+)
+from ._rules import (
+    ReceptiveFieldRule,
+    ReceptiveFieldRuleContext,
+    register_rf_rule,
+    rules as _registered_rules,
 )
 from ._types import (
     GradientReceptiveField,
@@ -33,20 +39,13 @@ from ._types import (
     ReceptiveFieldValidationStatus,
     ReceptiveFieldViolation,
 )
-from ._rules import (
-    ReceptiveFieldRule,
-    ReceptiveFieldRuleContext,
-    register_rf_rule,
-    rules as _registered_rules,
-)
-
-# Importing the package executes built-in rule decorators once, before any public
-# descriptor, projective, or validation path can reach the geometry engines.
-from .rules import __all__ as _builtin_rule_modules  # noqa: F401
 from ._validation import cross_validate
 from ._view import ReceptiveFieldView
 from ._viz import node_spec
 
+# Importing the package executes built-in rule decorators once, before any public
+# descriptor, projective, or validation path can reach the geometry engines.
+from .rules import __all__ as _builtin_rule_modules  # noqa: F401
 
 rules = _registered_rules
 

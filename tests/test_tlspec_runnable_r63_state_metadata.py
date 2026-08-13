@@ -203,10 +203,9 @@ def test_r63_read_noncanonical_capture_refuses_at_save(
     """
 
     trace = _trace(model_cls(), x)
-    with pytest.raises(RunnablePreflightError) as excinfo:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            trace.save(tmp_path / "read.tlspec", level="runnable", include_weights=True)
+    with pytest.raises(RunnablePreflightError) as excinfo, warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace.save(tmp_path / "read.tlspec", level="runnable", include_weights=True)
     diagnostics = str(excinfo.value.fields.get("diagnostics"))
     assert "state_metadata_mismatch" in diagnostics
     assert "producer_state_metadata" in diagnostics

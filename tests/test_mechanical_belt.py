@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 import torch

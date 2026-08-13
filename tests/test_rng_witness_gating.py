@@ -36,9 +36,12 @@ class _ProfileProbeModel(nn.Module):
         return self.lin(x)
 
 
-_RUNNABLE_CAP = dict(
-    intervention_ready=True, capture_container_structure=True, cache=False, random_seed=7
-)
+_RUNNABLE_CAP = {
+    "intervention_ready": True,
+    "capture_container_structure": True,
+    "cache": False,
+    "random_seed": 7,
+}
 
 
 @pytest.mark.smoke

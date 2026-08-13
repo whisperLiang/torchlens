@@ -27,9 +27,12 @@ from torchlens.backends.torch.completeness_witness import host_escape_has_mutabl
 from torchlens.options import CaptureOptions
 from torchlens.runnable import WitnessCompleteness, WitnessGapKind
 
-_RUNNABLE_CAP = dict(
-    intervention_ready=True, capture_container_structure=True, cache=False, random_seed=7
-)
+_RUNNABLE_CAP = {
+    "intervention_ready": True,
+    "capture_container_structure": True,
+    "cache": False,
+    "random_seed": 7,
+}
 
 
 class _PlainModel(nn.Module):

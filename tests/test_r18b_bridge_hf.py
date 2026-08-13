@@ -19,7 +19,6 @@ from torch import nn
 import torchlens as tl
 import torchlens.bridge.hf as hf
 
-
 # ---------------------------------------------------------------------------
 # A3-06 -- predicate misclassification
 # ---------------------------------------------------------------------------

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterator
 from fractions import Fraction
-import importlib
 from pathlib import Path
 from unittest import mock
 
@@ -24,7 +24,6 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldValidationStatus,
 )
 from torchlens.receptive_field._validation import check_geometric_metadata_invariants
-
 
 _PACK: dict[str, object] | None = None
 

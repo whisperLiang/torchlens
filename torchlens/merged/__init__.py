@@ -23,8 +23,7 @@ in ``docs/reference/merged_trace_contract.md`` under the ordered-list-equality
 doc-vs-enum gate.
 """
 
-from ._artifact import load_merged as load
-from ._artifact import save_merged, tree_hash
+from ._artifact import load_merged as load, save_merged, tree_hash
 from ._engine import JoinRecord, MergeDerivation, PerRankRef, derive_merge
 from ._enums import (
     MERGE_FINDING_KINDS,

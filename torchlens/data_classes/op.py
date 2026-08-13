@@ -35,36 +35,21 @@ Field categories (matching the LAYER_PASS_LOG_FIELD_ORDER in constants.py):
 
 import copy
 import hashlib
-import weakref
 import warnings
+import weakref
 from collections import defaultdict
+from collections.abc import Callable
 from typing import (
-    Any,
-    Callable,
-    ClassVar,
-    Dict,
-    List,
-    Optional,
     TYPE_CHECKING,
-    Tuple,
-    Union,
-    cast,
+    Any,
+    ClassVar,
     Literal,
+    cast,
 )
 
 import torch
 
-from ..utils._torch_compat import tensor_version_or_none
-
 from .._deprecations import MISSING
-from .._io import (
-    FieldPolicy,
-    TLSPEC_VERSION,
-    TorchLensIOError,
-    coerce_container_typed_state,
-    default_fill_state,
-    read_tlspec_version,
-)
 from .._errors import (
     ArgumentTypeError,
     InvalidArgumentError,
@@ -72,31 +57,18 @@ from .._errors import (
     PayloadUnavailableError,
     TorchLensPostfuncError,
 )
+from .._io import (
+    TLSPEC_VERSION,
+    FieldPolicy,
+    TorchLensIOError,
+    coerce_container_typed_state,
+    default_fill_state,
+    read_tlspec_version,
+)
 from .._save_budget import SaveBudgetExceededError
-from .._trace_state import TraceState
-from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
-from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
-from ._backend_capability_guards import raise_if_no_backward_capture
-from ..intervention.types import (
-    EdgeUseRecord,
-    FunctionRegistryKey,
-    LAYER_PASS_LOG_FIELD_FORK_POLICY,
-)
-from ..ir.refs import DeviceRef, DtypeRef
-from ..intervention.errors import DirectActivationWriteWarning
-from ..quantities import (
-    Bytes,
-    Duration,
-    Flops,
-    Macs,
-    as_bytes,
-    as_duration,
-    as_flops,
-    as_macs,
-)
 from .._state import pause_logging
-from .._trace_core.groups import GroupRef
 from .._trace_core.fact_blocks import OP_FACT_FIELDS
+from .._trace_core.groups import GroupRef
 from .._trace_core.op_store import (
     _CSR,
     _FACT,
@@ -113,16 +85,30 @@ from .._trace_core.relation_views import (
     OP_TUPLE_VIEW_FIELDS,
     materialize_dataflow_view,
 )
+from .._trace_state import TraceState
+from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
 from ..backends.torch._tl import mark_detached_saved_activation
-from ._accessor_base import Accessor
-from .field_policy import (
-    build_record_field_policy_table,
-    default_fill_state_from_policy,
-    fork_policy_from_policy,
-    portable_state_spec_from_policy,
+from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
+from ..intervention.errors import DirectActivationWriteWarning
+from ..intervention.types import (
+    LAYER_PASS_LOG_FIELD_FORK_POLICY,
+    EdgeUseRecord,
+    FunctionRegistryKey,
 )
-from ._repr import format_config_items, format_shape_list
-from ._state_adapter import state_items, state_restore
+from ..ir.refs import DeviceRef, DtypeRef
+from ..quantities import (
+    Bytes,
+    Duration,
+    Flops,
+    Macs,
+    as_bytes,
+    as_duration,
+    as_flops,
+    as_macs,
+)
+from ..utils._torch_compat import tensor_version_or_none
+from ..utils.arg_handling import copy_arg_tree
+from ..utils.display import tensor_stats_summary
 from ..utils.tensor_utils import (
     SaveMode,
     concatenate_batch_tensors,
@@ -134,8 +120,16 @@ from ..utils.tensor_utils import (
     safe_copy,
     safe_to,
 )
-from ..utils.arg_handling import copy_arg_tree
-from ..utils.display import tensor_stats_summary
+from ._accessor_base import Accessor
+from ._backend_capability_guards import raise_if_no_backward_capture
+from ._repr import format_config_items, format_shape_list
+from ._state_adapter import state_items, state_restore
+from .field_policy import (
+    build_record_field_policy_table,
+    default_fill_state_from_policy,
+    fork_policy_from_policy,
+    portable_state_spec_from_policy,
+)
 
 _LAYER_PASS_LOG_FIELD_ORDER_SET = frozenset(LAYER_PASS_LOG_FIELD_ORDER)
 _DIRECT_WRITE_GUARDED_FIELDS = frozenset(
@@ -267,7 +261,7 @@ _LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "func_config": {},
 }
 _LAYER_PASS_LOG_DEFAULT_FILL = {
-    **{field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER},
+    **dict.fromkeys(LAYER_PASS_LOG_FIELD_ORDER),
     **_LAYER_PASS_LOG_CONTAINER_DEFAULTS,
     **_LAYER_PASS_LOG_DEFAULT_FILL,
 }
@@ -484,7 +478,7 @@ _POOLABLE_DEFAULT_FACTORIES = frozenset({list, set, dict, int, tuple})
 _CONTAINER_KEY_MAX_DEPTH = 4
 
 
-def _container_pool_key(value: Any, depth: int, visited_ids: List[int]) -> Any:
+def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
     """Return an injective hashable content key for one mutable container.
 
     ``None`` means "do not pool": unknown member types, subclassed
@@ -532,7 +526,7 @@ def _container_pool_key(value: Any, depth: int, visited_ids: List[int]) -> Any:
     return None
 
 
-def _dict_member_keys(value: Any, depth: int, visited_ids: List[int]) -> Any:
+def _dict_member_keys(value: Any, depth: int, visited_ids: list[int]) -> Any:
     """Key the items of one dict-shaped container, or ``None`` to refuse."""
 
     items = []
@@ -547,7 +541,7 @@ def _dict_member_keys(value: Any, depth: int, visited_ids: List[int]) -> Any:
     return tuple(items)
 
 
-def _container_member_key(member: Any, depth: int, visited_ids: List[int]) -> Any:
+def _container_member_key(member: Any, depth: int, visited_ids: list[int]) -> Any:
     """Key one container member: immutable leaf or nested exact container."""
 
     immutable_key = _pool_key(member)
@@ -559,7 +553,7 @@ def _container_member_key(member: Any, depth: int, visited_ids: List[int]) -> An
     return None
 
 
-def _count_container_ids(value: Any, id_counts: Dict[int, int], depth: int) -> None:
+def _count_container_ids(value: Any, id_counts: dict[int, int], depth: int) -> None:
     """Count every exact builtin MUTABLE container id reachable from one cell.
 
     The alias census behind the pooling guard: a container whose id is seen
@@ -596,7 +590,7 @@ def _count_container_ids(value: Any, id_counts: Dict[int, int], depth: int) -> N
 
 
 def _pool_container_cells(
-    stores: List[Tuple[Any, Any]], container_pool: Dict[Any, PooledCell]
+    stores: list[tuple[Any, Any]], container_pool: dict[Any, PooledCell]
 ) -> None:
     """Pool duplicate/empty immutable-content container cells across stores.
 
@@ -612,8 +606,8 @@ def _pool_container_cells(
         so equal content pools trace-wide.
     """
 
-    swept: List[Tuple[Any, Any, Any]] = []
-    id_counts: Dict[int, int] = {}
+    swept: list[tuple[Any, Any, Any]] = []
+    id_counts: dict[int, int] = {}
     for store, fids in stores:
         rows = store.rows_building()
         if rows is None:
@@ -624,8 +618,8 @@ def _pool_container_cells(
                 _count_container_ids(value, id_counts, 0)
     if not swept:
         return
-    candidates: List[Tuple[Any, int, Any, Any]] = []
-    key_counts: Dict[Any, int] = {}
+    candidates: list[tuple[Any, int, Any, Any]] = []
+    key_counts: dict[Any, int] = {}
     for store, rows, fids in swept:
         fid_list = tuple(range(store.layout.n_fields)) if fids is None else tuple(fids)
         for row_cells in rows:
@@ -634,7 +628,7 @@ def _pool_container_cells(
                 cls = value.__class__
                 if not (cls is dict or cls is list or cls is set or cls is defaultdict):
                     continue
-                visited_ids: List[int] = []
+                visited_ids: list[int] = []
                 key = _container_pool_key(value, 0, visited_ids)
                 if key is None:
                     continue
@@ -718,7 +712,7 @@ def _pool_key(value: Any) -> Any:
     return None
 
 
-def _pool_value(value: Any, pool: Dict[Any, Any]) -> Any:
+def _pool_value(value: Any, pool: dict[Any, Any]) -> Any:
     """Return the pooled twin of an immutable ``value``, or ``value`` itself.
 
     Parameters
@@ -755,7 +749,7 @@ def _pool_value(value: Any, pool: Dict[Any, Any]) -> Any:
     return value
 
 
-def _pool_container_members(container: Any, pool: Dict[Any, Any], depth: int) -> None:
+def _pool_container_members(container: Any, pool: dict[Any, Any], depth: int) -> None:
     """Swap poolable members of a mutable container for their pooled twins.
 
     The container object itself is never replaced, so its identity, class,
@@ -1482,8 +1476,7 @@ if TYPE_CHECKING:
     from .._io.lazy import LazyActivationRef
     from ..receptive_field._view import ReceptiveFieldView
     from .func_call_location import FuncCallLocation
-    from .layer import Layer
-    from .layer import OpAccessor
+    from .layer import Layer, OpAccessor
     from .module import Module
     from .param import Param
     from .trace import Trace
@@ -1520,7 +1513,7 @@ class Op:
         # explicitly typed names carry the annotations the former inline
         # `self.x: T = ...` assignments declared; every other stored field
         # was already inferred as Any from the untyped fields_dict.
-        annotations: Dict[str, Any]
+        annotations: dict[str, Any]
         dtype_ref: DtypeRef | None
         device_ref: DeviceRef | None
         backend_address: str | None
@@ -1529,29 +1522,29 @@ class Op:
         transformed_activation_memory: Bytes | None
         visualizer_path: str | None
         autograd_memory: Bytes | None
-        num_autograd_tensors: Optional[int]
+        num_autograd_tensors: int | None
         bytes_delta_at_call: Bytes | None
         bytes_peak_at_call: Bytes | None
         gradient_memory: Bytes | None
         transformed_gradient_memory: Bytes | None
         func_id: FunctionRegistryKey | None
-        code_context: List["FuncCallLocation"]
+        code_context: list["FuncCallLocation"]
         var_names: list[str]
         func_duration: Duration | None
         flops_forward: Flops | None
         flops_backward: Flops | None
         _param_barcodes: list[Any]
-        _param_logs: List["Param"]
+        _param_logs: list["Param"]
         param_memory: Bytes
         is_orphan: bool
-        fx_qualpath: Optional[str]
+        fx_qualpath: str | None
         fx_call_index: int
-        out_ref: Optional["LazyActivationRef"]
-        grad_ref: Optional["LazyActivationRef"]
-        _pending_blob_id: Optional[str]
-        _pending_transformed_out_blob_id: Optional[str]
-        _pending_grad_blob_id: Optional[str]
-        _pending_transformed_grad_blob_id: Optional[str]
+        out_ref: "LazyActivationRef" | None
+        grad_ref: "LazyActivationRef" | None
+        _pending_blob_id: str | None
+        _pending_transformed_out_blob_id: str | None
+        _pending_grad_blob_id: str | None
+        _pending_transformed_grad_blob_id: str | None
         _grad_records: list[GradientRecord]
 
         _label_raw: Any
@@ -2052,7 +2045,7 @@ class Op:
 
         _object_setattr(self, attr, value)
 
-    def _compact_metadata(self, pool: Dict[Any, Any]) -> None:
+    def _compact_metadata(self, pool: dict[Any, Any]) -> None:
         """Replace repeated immutable metadata with pooled shared instances.
 
         Called once per Op by :func:`~torchlens.data_classes._compaction.compact_op_metadata`
@@ -2112,7 +2105,7 @@ class Op:
         if isinstance(current_value, torch.Tensor) and isinstance(other_value, torch.Tensor):
             self._internal_set(field_name, concatenate_batch_tensors(current_value, other_value))
 
-    def __init__(self, fields_dict: Dict[str, Any], *, _store: Any = None) -> None:
+    def __init__(self, fields_dict: dict[str, Any], *, _store: Any = None) -> None:
         """Initialise from a complete fields dictionary.
 
         Args:
@@ -2222,12 +2215,12 @@ class Op:
         self.type = value
 
     @property
-    def macs_forward(self) -> Optional[Macs]:
+    def macs_forward(self) -> Macs | None:
         """Forward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_forward // 2 if self.flops_forward is not None else None)
 
     @property
-    def macs_backward(self) -> Optional[Macs]:
+    def macs_backward(self) -> Macs | None:
         """Backward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_backward // 2 if self.flops_backward is not None else None)
 
@@ -2535,7 +2528,7 @@ class Op:
         grad_fn = self.grad_fn
         if grad_fn is None:
             return None
-        return cast("Optional[str]", getattr(grad_fn, "label", None))
+        return cast("str | None", getattr(grad_fn, "label", None))
 
     @property
     def layer(self) -> "Layer":
@@ -2690,7 +2683,7 @@ class Op:
         the ModuleCall record.
         """
 
-        return cast("Optional[str]", self.atomic_module_call)
+        return cast("str | None", self.atomic_module_call)
 
     @property
     def atomic_module_address(self) -> str | None:
@@ -3085,7 +3078,7 @@ class Op:
         trace = self.source_trace
         if trace is None:
             return None
-        return cast("Optional[Callable[..., Any]]", getattr(trace, "grad_transform", None))
+        return cast("Callable[..., Any] | None", getattr(trace, "grad_transform", None))
 
     @property
     def is_buffer_source(self) -> bool:
@@ -3414,7 +3407,7 @@ class Op:
             except AttributeError:
                 continue
 
-    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
         """Install ``mapping`` onto this op through the descriptor protocol.
 
         Binds a detached single-row store when this op is a bare shell
@@ -3428,7 +3421,7 @@ class Op:
         for field_name, field_value in mapping.items():
             _object_setattr(self, field_name, field_value)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
         state = dict(state_items(self))
         state["_source_trace_ref"] = None
@@ -3440,7 +3433,7 @@ class Op:
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
         _ensure_detached_store(self)
         read_tlspec_version(state, cls_name=type(self).__name__)
@@ -3725,10 +3718,10 @@ class Op:
     def save_activation(
         self,
         t: torch.Tensor,
-        t_args: Union[List[Any], Tuple[Any, ...]],
-        t_kwargs: Dict[str, Any],
+        t_args: list[Any] | tuple[Any, ...],
+        t_kwargs: dict[str, Any],
         save_arg_values: bool,
-        activation_transform: Optional[Callable[..., Any]] = None,
+        activation_transform: Callable[..., Any] | None = None,
     ) -> None:
         """Save the output tensor (and optionally args) for this operation.
 
@@ -4651,7 +4644,7 @@ def _install_op_field_descriptors() -> None:
 _install_op_field_descriptors()
 
 
-def _compact_store_rows(store: Any, pool: Dict[Any, Any]) -> None:
+def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
     """Pool repeated immutable metadata across a whole building-phase store.
 
     Column-major equivalent of ``Op._compact_metadata`` (same class ladder,

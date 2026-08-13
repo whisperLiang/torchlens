@@ -54,8 +54,9 @@ import importlib
 import sys
 import threading
 import types
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -65,7 +66,6 @@ from torch import nn
 import torchlens as tl
 from torchlens.backends.torch._tl import is_decorated_function
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-
 
 # ---------------------------------------------------------------------------
 # Environment: pristine originals, holder construction, rewrap
@@ -364,9 +364,7 @@ def _import_temp_module(tmp_path: Path, mod_name: str, source: str) -> types.Mod
         sys.path.remove(str(tmp_path))
 
 
-def test_torch_free_source_class_attr_is_rescued(
-    corpus_env: _CorpusEnv, tmp_path: Path
-) -> None:
+def test_torch_free_source_class_attr_is_rescued(corpus_env: _CorpusEnv, tmp_path: Path) -> None:
     """Torch-free FILE-BACKED source: the source gate skips the deep scan."""
     mod = _import_temp_module(tmp_path, "_tl_outcome_torch_free_mid", "class Holder:\n    pass\n")
     corpus_env.temp_modules.append(mod.__name__)

@@ -1,24 +1,25 @@
 """Cross-thread and scalar escape observation."""
 
 from __future__ import annotations
+
 import functools
 import threading
 import types
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch._ops as _torch_ops  # r47 hon2_1: enumerate the ``torch.ops.*`` __call__ classes
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
-from ...utils._callable_safety import private_c_forward_op_module_names
+
 from ... import _state
+from ...utils._callable_safety import private_c_forward_op_module_names
 from ._completeness_types import _WitnessState
 from ._tl import (
     get_buffer_address,
     get_tensor_meta,
     session_meta_is_anchored,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .completeness_witness import (
@@ -53,7 +54,7 @@ __all__ = (
 )
 
 
-def _nonowner_ptr_is_captured(state: "_WitnessState", ptr: int) -> bool:
+def _nonowner_ptr_is_captured(state: _WitnessState, ptr: int) -> bool:
     """Return whether a storage pointer belongs to a captured input / param / activation (r43)."""
 
     trace = state.trace
@@ -76,7 +77,7 @@ def _nonowner_ptr_is_captured(state: "_WitnessState", ptr: int) -> bool:
     return False
 
 
-def _nonowner_touch_is_captured(state: "_WitnessState", tensor: Any) -> bool:
+def _nonowner_touch_is_captured(state: _WitnessState, tensor: Any) -> bool:
     """Return whether a non-owner thread's touched tensor is a CAPTURED tensor (r43).
 
     Captured membership (all reads GIL-atomic; NO torch op, NO ``pause_logging``, NO observer
@@ -107,12 +108,10 @@ def _nonowner_touch_is_captured(state: "_WitnessState", tensor: Any) -> bool:
     if registry is not None and registry.get(tensor) is not None:
         return True
     ptr = _raw_storage_ptr_no_observe(tensor)
-    if ptr is not None and _nonowner_ptr_is_captured(state, ptr):
-        return True
-    return False
+    return bool(ptr is not None and _nonowner_ptr_is_captured(state, ptr))
 
 
-def _nonowner_escape_observe(state: "_WitnessState", tensor: Any) -> None:
+def _nonowner_escape_observe(state: _WitnessState, tensor: Any) -> None:
     """Ceiling the capture if a non-owner thread touched a captured tensor (r43).
 
     The ONE non-owner belt action: NO origin resolution, NO ``pause_logging``, NO precise

@@ -14,9 +14,9 @@ import importlib as _importlib
 import inspect as _inspect
 import sys as _sys
 import types as _types
+import warnings as _warnings
 from collections.abc import Callable as _Callable, Iterable as _Iterable, Mapping as _Mapping
 from pathlib import Path as _Path
-import warnings as _warnings
 from typing import TYPE_CHECKING, Any
 
 import torch as _torch
@@ -24,14 +24,13 @@ from torch import nn as _nn
 
 __version__ = "2.34.1"
 
-from .captured_run import ActivationLookup, CapturedRun
+from . import options
 from ._errors import AmbiguousOpLookupError
 from ._state import ReentrantTraceError
+from .captured_run import ActivationLookup, CapturedRun
 from .ir.container import register_container
 from .observers import record_span, span, tap
-from . import options
-from .options import CaptureOptions as _CaptureOptions
-from .options import to_disk
+from .options import CaptureOptions as _CaptureOptions, to_disk
 from .quantities import Bytes, Duration, Flops, Macs, Quantity
 
 if TYPE_CHECKING:

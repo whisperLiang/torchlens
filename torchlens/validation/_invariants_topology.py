@@ -1,16 +1,14 @@
 """Trace consistency and graph topology invariants."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
 
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
-        MetadataInvariantError,
-    )
-    from .invariants import (
         _SPECIAL_LIST_FLAG_PAIRS,
+        MetadataInvariantError,
     )
 
 __all__ = (
@@ -24,7 +22,7 @@ __all__ = (
 )
 
 
-def _check_trace_self_consistency(ml: "Trace") -> None:
+def _check_trace_self_consistency(ml: Trace) -> None:
     """Check A: Trace aggregate counts and metadata are internally consistent.
 
     Validates:
@@ -116,7 +114,7 @@ def _check_trace_self_consistency(ml: "Trace") -> None:
         )
 
 
-def _retained_orphan_computational_count(ml: "Trace", name: str) -> int:
+def _retained_orphan_computational_count(ml: Trace, name: str) -> int:
     """Return retained orphan ops after proving their narrow island contract.
 
     Parameters
@@ -178,7 +176,7 @@ def _retained_orphan_computational_count(ml: "Trace", name: str) -> int:
     )
 
 
-def _retained_orphan_op_labels(ml: "Trace") -> set[str]:
+def _retained_orphan_op_labels(ml: Trace) -> set[str]:
     """Return final labels belonging to explicitly retained orphan operations.
 
     Parameters
@@ -199,7 +197,7 @@ def _retained_orphan_op_labels(ml: "Trace") -> set[str]:
     }
 
 
-def _retained_orphan_layer_labels(ml: "Trace") -> set[str]:
+def _retained_orphan_layer_labels(ml: Trace) -> set[str]:
     """Return no-pass labels belonging to explicitly retained orphan operations.
 
     Parameters
@@ -220,7 +218,7 @@ def _retained_orphan_layer_labels(ml: "Trace") -> set[str]:
     }
 
 
-def _check_special_layer_lists(ml: "Trace") -> None:
+def _check_special_layer_lists(ml: Trace) -> None:
     """Check B: special layer lists (input, output, buffer, etc.) match per-layer boolean flags.
 
     For each (list_attr, flag_attr) pair, verifies bidirectional consistency:
@@ -275,7 +273,7 @@ def _check_special_layer_lists(ml: "Trace") -> None:
                 )
 
 
-def _check_capture_edge_survival(trace: "Trace") -> None:
+def _check_capture_edge_survival(trace: Trace) -> None:
     """Reconcile the final graph against the sealed capture-time edge truth (r29 F3b).
 
     The per-op identity witness (``dropped_edge_tensor_args``) is stamped at
@@ -375,7 +373,7 @@ def _check_capture_edge_survival(trace: "Trace") -> None:
             )
 
 
-def _check_graph_topology(ml: "Trace") -> None:
+def _check_graph_topology(ml: Trace) -> None:
     """Check C: parent-child edge bidirectionality and stored-flag consistency.
 
     Validates:

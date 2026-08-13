@@ -48,8 +48,6 @@ from .lazy import LazyActivationRef
 from .manifest import Manifest, Provenance, TensorEntry, enforce_version_policy, sha256_of_file
 from .paths import (
     reject_symlink_path as _reject_symlink_path,
-)
-from .paths import (
     resolve_bundle_blob_path,
     resolve_bundle_blobs_dir,
 )
@@ -918,8 +916,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a ``.tlspec`` object with eager tensor materialization.
 
     Parameters
@@ -953,8 +951,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a ``.tlspec`` object while leaving direct tensors lazy.
 
     Parameters
@@ -987,8 +985,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a TorchLens ``.tlspec`` object polymorphically.
 
     Parameters
@@ -1127,7 +1125,7 @@ def _load_trace_payload(
     sparse_run: Mapping[str, Any] | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-) -> "Trace | Bundle | InterventionSpec":
+) -> Trace | Bundle | InterventionSpec:
     """Load a portable Trace payload after manifest dispatch.
 
     Parameters
@@ -1189,7 +1187,7 @@ def _load_trace_payload(
         raise TorchLensIOError(
             f"Failed to load bundle metadata from {metadata_path}.{hint}"
         ) from exc
-    except (OSError, AttributeError, EOFError, ImportError, TypeError, ValueError) as exc:
+    except (OSError, AttributeError, ImportError, TypeError, ValueError) as exc:
         raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc
 
     trace = rehydrate_trace(
@@ -1628,8 +1626,8 @@ def _load_unified_tlspec(
     payload_hints: PayloadLoadHints | None,
     trust_custom_callables: bool,
     allowed_custom_callable_modules: Collection[str] | None,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a unified ``.tlspec`` bundle by manifest kind.
 
     Parameters
@@ -2084,8 +2082,8 @@ def _manifest_for_unified_trace_load(manifest: dict[str, Any]) -> Manifest:
 def _load_unified_bundle(
     bundle_path: Path,
     *,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Bundle":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Bundle:
     """Load a unified ``Bundle`` payload.
 
     Parameters
@@ -2201,8 +2199,8 @@ def _load_unified_bundle_directory(
     bundle_path: Path,
     metadata_path: Path,
     *,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Bundle":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Bundle:
     """Load a unified bundle container from nested member specs.
 
     Parameters
@@ -3359,10 +3357,7 @@ def _contains_nested_blob_refs(
                 return True
         return False
     if kind == _NESTED_BLOB_SEQUENCE:
-        for item in value:
-            if _contains_nested_blob_refs(item, seen, allowed_blob_ids):
-                return True
-        return False
+        return any(_contains_nested_blob_refs(item, seen, allowed_blob_ids) for item in value)
 
     spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
@@ -3403,15 +3398,9 @@ def _container_contains_blob_ref(value: Any, allowed_blob_ids: set[str]) -> bool
     if isinstance(value, BlobRef):
         return value.blob_id not in allowed_blob_ids
     if isinstance(value, dict):  # covers OrderedDict / defaultdict
-        for item in value.values():
-            if _container_contains_blob_ref(item, allowed_blob_ids):
-                return True
-        return False
+        return any(_container_contains_blob_ref(item, allowed_blob_ids) for item in value.values())
     if isinstance(value, (list, tuple, set)):
-        for item in value:
-            if _container_contains_blob_ref(item, allowed_blob_ids):
-                return True
-        return False
+        return any(_container_contains_blob_ref(item, allowed_blob_ids) for item in value)
     return False
 
 

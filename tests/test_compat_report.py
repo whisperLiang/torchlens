@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import warnings
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -11,13 +11,11 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
-from torchlens.compat import _report as compat_report_module
-from torchlens.compat import CompatReport, report
+from torchlens.compat import CompatReport, _report as compat_report_module, report
 from torchlens.options import CaptureOptions
 from torchlens.utils._torch_compat import get_torch_capability_snapshot
 from torchlens.utils.rng import log_current_rng_states, set_rng_from_saved_states
 from torchlens.utils.tensor_utils import tensor_nanequal
-
 
 EXPECTED_COMPAT_ROW_KEYS = {
     "accelerate_cpu_disk_offload",

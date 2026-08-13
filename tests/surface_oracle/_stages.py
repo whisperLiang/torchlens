@@ -5,14 +5,15 @@ from __future__ import annotations
 import pickle
 import random
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import torch
+from capture_oracle._models import build_model_case
 
 import torchlens as tl
-from capture_oracle._models import build_model_case
 
 from ._snapshot import snapshot_trace_surface
 

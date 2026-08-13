@@ -2,23 +2,10 @@
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
 import torch
+
 from ..._state import pause_logging
-from ._tl import (
-    get_live_tensor_label,
-    get_param_meta,
-    get_tensor_label,
-    get_tensor_meta,
-    session_label_storage_intact,
-    session_meta_is_anchored,
-)
-from .buffer_writes import session_validated_buffer_address
-from ...utils.tensor_utils import (
-    safe_copy,
-)
-from ...ir.container import (
-    OutputPathComponent,
-)
 from ...intervention.types import (
     ArgComponent,
     CapturedArgTemplate,
@@ -29,6 +16,21 @@ from ...intervention.types import (
     ParentRef,
     Unsupported,
 )
+from ...ir.container import (
+    OutputPathComponent,
+)
+from ...utils.tensor_utils import (
+    safe_copy,
+)
+from ._tl import (
+    get_live_tensor_label,
+    get_param_meta,
+    get_tensor_label,
+    get_tensor_meta,
+    session_label_storage_intact,
+    session_meta_is_anchored,
+)
+from .buffer_writes import session_validated_buffer_address
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -391,10 +393,8 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
         return True
     if meta.address is not None and session_validated_buffer_address(trace, value) is not None:
         return True
-    if (
+    return bool(
         label_storage_intact
         and meta.buffer_source is not None
         and meta.buffer_source in live_labels
-    ):
-        return True
-    return False
+    )

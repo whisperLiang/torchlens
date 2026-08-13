@@ -2,24 +2,13 @@
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
 import torch
-from ._tl import (
-    get_tensor_label,
-    mark_detached_saved_activation,
-)
-from .completeness_witness import internal_scalar_read, record_alias_mutation_candidate
-from ...utils._torch_compat import (
-    tensor_version_or_none,
-)
-from ...utils.tensor_utils import (
-    get_memory_amount_from_metadata,
-    safe_copy,
-    safe_to,
-)
+
 from ...capture.flops import compute_backward_flops, compute_forward_flops
 from ...data_classes.op import (
-    _dtype_or_none,
     _dedup_saved_activation_out,
+    _dtype_or_none,
     _effective_activation_save_mode,
     _memory_or_none,
     _recursive_safe_copy,
@@ -29,6 +18,19 @@ from ...data_classes.op import (
     validate_streaming_transform_output,
     validate_train_mode_transform_output,
 )
+from ...utils._torch_compat import (
+    tensor_version_or_none,
+)
+from ...utils.tensor_utils import (
+    get_memory_amount_from_metadata,
+    safe_copy,
+    safe_to,
+)
+from ._tl import (
+    get_tensor_label,
+    mark_detached_saved_activation,
+)
+from .completeness_witness import internal_scalar_read, record_alias_mutation_candidate
 from .tensor_tracking import (
     _append_module_suffix_to_equivalence_class,
     _get_equivalence_class,

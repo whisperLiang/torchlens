@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import importlib
+from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
 import torch
 
 import torchlens as tl
-from torchlens.io import TraceState
 from torchlens.intervention.errors import (
     ControlFlowDivergenceWarning,
     MultiMatchWarning,
     ReplayPreconditionError,
 )
 from torchlens.intervention.replay import cone_of_effect
+from torchlens.io import TraceState
 
 replay_mod = importlib.import_module("torchlens.intervention.replay")
 

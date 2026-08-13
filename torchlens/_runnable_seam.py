@@ -103,7 +103,7 @@ class RunnableTraceState:
     input_label_layouts: Mapping[str, Any] | None = None
     module_training_modes: Mapping[str, bool] | None = None
 
-    def pickle_safe_copy(self) -> "RunnableTraceState":
+    def pickle_safe_copy(self) -> RunnableTraceState:
         """Return a shallow copy with mapping-proxy bindings made picklable.
 
         Returns
@@ -118,9 +118,7 @@ class RunnableTraceState:
             staged_user_state=_plain_mapping(self.staged_user_state),
             embedded_state=_plain_mapping(self.embedded_state),
             capture_state=_plain_mapping(self.capture_state),
-            embedded_nonpersistent_buffers=_plain_mapping(
-                self.embedded_nonpersistent_buffers
-            ),
+            embedded_nonpersistent_buffers=_plain_mapping(self.embedded_nonpersistent_buffers),
         )
 
 

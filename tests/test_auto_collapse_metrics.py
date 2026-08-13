@@ -16,6 +16,8 @@ import torch
 import torchlens as tl
 import torchlens.visualization.auto_collapse as auto_collapse
 import torchlens.visualization.collapse_optimizer as collapse_optimizer
+from torchlens.visualization._render_common import format_collapsed_module_contents
+from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
 from torchlens.visualization.auto_collapse import (
     _assert_plan_count,
     _child_condensed_flow_graphs,
@@ -36,8 +38,6 @@ from torchlens.visualization.collapse_plan import (
     collapse_plan_for_trace,
     count,
 )
-from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
-from torchlens.visualization._render_common import format_collapsed_module_contents
 
 tvm = pytest.importorskip("torchvision.models")
 tvs = pytest.importorskip("torchvision.models.segmentation")
@@ -2988,7 +2988,9 @@ def test_v2_max_op_segment_renders_dashed_box_and_contracts_edges(
         # r21: descriptor ops are concrete pass-qualified labels (exact keys).
         first_segment_members = [trace.ops[label] for label in first_segment.ops]
         assert first_segment.owner is None
-        assert any(op.is_atomic_module and op.modules == ("stem:1",) for op in first_segment_members)
+        assert any(
+            op.is_atomic_module and op.modules == ("stem:1",) for op in first_segment_members
+        )
         assert any(
             op.modules and op.modules[0].startswith("blocks:") for op in first_segment_members
         )

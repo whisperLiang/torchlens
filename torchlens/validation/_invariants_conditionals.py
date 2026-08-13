@@ -1,9 +1,9 @@
 """Conditional labels, events, and branch-edge invariants."""
 
 from __future__ import annotations
+
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -30,7 +30,7 @@ __all__ = (
 
 
 def _check_conditional_child_labels_resolve(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     valid_child_labels: set[str],
 ) -> None:
@@ -113,7 +113,7 @@ def _check_conditional_child_labels_resolve(
 
 
 def _check_conditional_bool_classification(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     branch_context_kinds: set[str],
     wrapped_context_kinds: set[str],
@@ -164,7 +164,7 @@ def _check_conditional_bool_classification(
 
 
 def _check_conditional_event_references(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     event_id_set: set[int],
 ) -> None:
@@ -209,7 +209,7 @@ def _check_conditional_event_references(
 
 
 def _check_conditional_branch_stack_monotonicity(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check parent-child conditional stacks are monotone by prefix.
@@ -248,7 +248,7 @@ def _check_conditional_branch_stack_monotonicity(
 
 
 def _check_conditional_elif_key_contiguity(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check elif branch keys are contiguous on conditional events.
@@ -280,7 +280,7 @@ def _check_conditional_elif_key_contiguity(
 
 
 def _check_conditional_bool_event_backrefs(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:
@@ -330,7 +330,7 @@ def _check_conditional_bool_event_backrefs(
 
 
 def _check_conditional_layer_aggregate_views(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check layer conditional aggregate views match pass-level data.
@@ -372,7 +372,7 @@ def _check_conditional_layer_aggregate_views(
 
 
 def _check_conditional_rolled_edge_call_indices(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check rolled conditional edge call indices.
@@ -443,7 +443,7 @@ def _check_conditional_rolled_edge_call_indices(
 
 
 def _check_conditional_transient_bool_keys_removed(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check transient bool conditional keys were removed.
@@ -467,7 +467,7 @@ def _check_conditional_transient_bool_keys_removed(
 
 
 def _check_conditional_arm_child_pass_union(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check layer conditional arm children are exact pass unions.
@@ -494,7 +494,7 @@ def _check_conditional_arm_child_pass_union(
 
 
 def _check_conditional_branch_entry_edges(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:

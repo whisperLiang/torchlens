@@ -492,12 +492,12 @@ def test_paddle_wrapper_inventory_load_bearing_membership() -> None:
         denied = set(inventory.denied)
 
     assert {"std", "var", "tensor.std", "tensor.var"} <= wrapped
-    assert ALIAS_NO_OP_APIS <= wrapped
-    assert MUTATOR_APIS <= denied
-    assert RNG_APIS <= denied
-    assert TENSOR_ESCAPE_APIS <= denied
-    assert COARSE_COMPOSITE_APIS <= wrapped
-    assert STOCHASTIC_COMPOSITE_DENY_APIS <= wrapped
+    assert wrapped >= ALIAS_NO_OP_APIS
+    assert denied >= MUTATOR_APIS
+    assert denied >= RNG_APIS
+    assert denied >= TENSOR_ESCAPE_APIS
+    assert wrapped >= COARSE_COMPOSITE_APIS
+    assert wrapped >= STOCHASTIC_COMPOSITE_DENY_APIS
     for op_name in (
         "functional.dropout",
         "functional.identity",

@@ -10,25 +10,24 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import _engine
 from ._engine_forward import _ProjectiveFieldSolution
-from ._engine_geometry import _Affine, _Mapped, _as_tuple, _select_full_axes, _transpose_mapped
+from ._engine_geometry import _Affine, _as_tuple, _Mapped, _select_full_axes, _transpose_mapped
 from ._errors import AmbiguousTargetError, ReceptiveFieldError
 from ._path import forward_index_image
 from ._query import (
     _AxisSets,
-    _IndexSet,
-    _TerminalState,
     _build_box,
-    _distinct_terminals,
     _call_index_callback,
     _call_interval_callback,
+    _distinct_terminals,
+    _IndexSet,
     _initial_axis_sets,
     _normalize_unit,
+    _TerminalState,
     _validate_descriptor_for_query,
     map_transposed_convolution_index_set,
 )
 from ._rules import _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldBox, ReceptiveFieldDirection
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op

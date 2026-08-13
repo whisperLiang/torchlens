@@ -16,7 +16,8 @@ scripts (edge drop / wrong-parent swap inside
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 import torch

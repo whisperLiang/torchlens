@@ -1,9 +1,9 @@
 """Trace accessor helpers."""
 
+import weakref
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any
-import weakref
 
 from .._errors import AmbiguousOpLookupError
 from ._accessor_base import Accessor

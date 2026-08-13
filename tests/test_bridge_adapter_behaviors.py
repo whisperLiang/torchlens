@@ -106,7 +106,7 @@ def test_gradcam_cam_runs_context_manager_runner_with_resolved_inputs(
             calls["model"] = model
             calls["target_layers"] = target_layers
 
-        def __enter__(self) -> "_StubCam":
+        def __enter__(self) -> _StubCam:
             calls["entered"] = True
             return self
 

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 import torchlens as tl
 from torchlens.capture.arg_positions import FUNC_ARG_SPECS, extract_tensors_and_params

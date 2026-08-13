@@ -9,7 +9,6 @@ from .._query import _IndexSet, map_interpolation_index_set
 from .._rules import ReceptiveFieldRuleContext, _RuleResult, register_rf_rule
 from ._utils import number_tuple
 
-
 _ANTIALIAS_INTERP_SIZE = {"bilinear": 2, "bicubic": 4}
 _CUBIC_A = Fraction(-3, 4)
 # Rational quantities this close to a filter zero or an integer window bound can

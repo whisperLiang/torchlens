@@ -62,7 +62,7 @@ class MergedFinding:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "MergedFinding":
+    def from_payload(cls, payload: dict[str, Any]) -> MergedFinding:
         """Rebuild a finding from :meth:`to_payload` output."""
 
         raw_key = payload.get("key")

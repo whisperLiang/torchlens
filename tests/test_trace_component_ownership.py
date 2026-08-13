@@ -64,8 +64,6 @@ def test_every_field_order_entry_is_owned() -> None:
     """All 220 public FIELD_ORDER names are covered (subset of policy)."""
 
     unowned = [
-        name
-        for name in tl_constants.MODEL_LOG_FIELD_ORDER
-        if name not in TRACE_FIELD_OWNERSHIP
+        name for name in tl_constants.MODEL_LOG_FIELD_ORDER if name not in TRACE_FIELD_OWNERSHIP
     ]
     assert not unowned, unowned

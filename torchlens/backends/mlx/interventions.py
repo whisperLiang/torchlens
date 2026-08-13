@@ -291,6 +291,8 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
         value = spec.args[0]
 
         def _replace(out: Any) -> Any:
+            """Return the replacement value, resolving a zero-arg callable at apply time."""
+
             del out
             return value() if callable(value) else value
 
@@ -322,6 +324,8 @@ def _resolve_callable_applier(hook: Callable[..., Any]) -> MLXHookApplier:
     identity = f"callable:{getattr(hook, '__qualname__', type(hook).__name__)}"
 
     def _apply(out: Any) -> Any:
+        """Invoke the user hook with a minimal post-forward hook context."""
+
         context = make_hook_context(
             name=identity,
             timing="post",

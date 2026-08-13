@@ -11,18 +11,48 @@ import math
 import sys
 import time
 import weakref
-from collections.abc import Callable, Iterable
 from collections import defaultdict, deque
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from functools import wraps
 from types import ModuleType
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
 
 from ... import _state
+from ...constants import LAYER_PASS_LOG_FIELD_ORDER
+from ...data_classes._module_role_hints import multi_output_role_from_path, role_hints_for_module
+from ...data_classes.func_call_location import FuncCallLocation
+from ...data_classes.module import HookInfo
+from ...data_classes.param import Param, ParamAccessor
 from ...fastlog._halt import HaltSignal
+from ...ir import (
+    CaptureEvents,
+    ModuleEnterEvent,
+    ModuleExitEvent,
+    ModuleFrame,
+    ModulePrepEvent,
+)
+from ...ir.container_registry import ModuleSite, Phase, Role, walk_container
+from ...ir.op_record import (
+    amend_module_boundary_retention,
+    amend_module_exit_intervention,
+    amend_raw_hook_intervention,
+)
+from ...utils.hashing import make_random_barcode
+from ...utils.introspection import (
+    _get_code_context,
+    get_arg_tensors_for_resolution,
+    get_vars_of_type_from_obj,
+)
+from ...utils.tensor_utils import (
+    get_memory_amount,
+    get_memory_amount_from_metadata,
+    is_functorch_wrapped_tensor,
+)
+from . import module_stack as _mstack
 from ._tl import (
     begin_label_session,
     clear_meta,
@@ -40,42 +70,12 @@ from ._tl import (
     set_param_meta,
     set_tensor_label,
 )
-from ...data_classes.param import ParamAccessor, Param
-from ...data_classes.func_call_location import FuncCallLocation
-from ...data_classes.module import HookInfo
-from ...data_classes._module_role_hints import multi_output_role_from_path, role_hints_for_module
-from ...ir import (
-    CaptureEvents,
-    ModuleEnterEvent,
-    ModuleExitEvent,
-    ModuleFrame,
-    ModulePrepEvent,
-)
-from ...ir.op_record import (
-    amend_module_boundary_retention,
-    amend_module_exit_intervention,
-    amend_raw_hook_intervention,
-)
-from ...ir.container_registry import ModuleSite, Phase, Role, walk_container
-from ...utils.tensor_utils import (
-    get_memory_amount,
-    get_memory_amount_from_metadata,
-    is_functorch_wrapped_tensor,
-)
-from ...utils.introspection import (
-    _get_code_context,
-    get_arg_tensors_for_resolution,
-    get_vars_of_type_from_obj,
-)
-from ...utils.hashing import make_random_barcode
-from .tensor_tracking import _append_module_suffix_to_equivalence_class
-from .sources import log_source_tensor
-from ...constants import LAYER_PASS_LOG_FIELD_ORDER
-from . import module_stack as _mstack
 from .escape_detection import (
     expected_original_call,
     mark_expected_original_accounted,
 )
+from .sources import log_source_tensor
+from .tensor_tracking import _append_module_suffix_to_equivalence_class
 
 # Cache class-level module metadata (inspect.getsourcelines, inspect.signature, etc.)
 # shared across instances of the same class type. Cleared at the start of each
@@ -608,7 +608,9 @@ def _prepare_model_session(
                 )
             )
         if not is_root:
-            trace._module_capture_ws.module_build_data["module_types"][address] = _module_type(module)
+            trace._module_capture_ws.module_build_data["module_types"][address] = _module_type(
+                module
+            )
             # Session-scoped tracking in Trace dicts (keyed by id(module)).
             mod_id = id(module)
             trace._module_capture_ws.mod_call_index[mod_id] = 0
@@ -1098,7 +1100,9 @@ def _record_module_entry_metadata(
 
     module_address = _module_address(module)
     mod_id = id(module)
-    trace._module_capture_ws.module_build_data["module_training_modes"][module_address] = module.training
+    trace._module_capture_ws.module_build_data["module_training_modes"][module_address] = (
+        module.training
+    )
     module_call_index = trace._module_capture_ws.mod_call_index[mod_id]
     assert module_call_index > 0, "_module_stack.push_frame must increment before entry"
     module_call_label = (module_address, module_call_index)
@@ -1106,7 +1110,10 @@ def _record_module_entry_metadata(
     trace._module_capture_ws.mod_call_labels[mod_id].append(module_call_label)
 
     # Stash forward args for later use by _build_module_logs.
-    trace._module_capture_ws.module_forward_args[(module_address, module_call_index)] = (args, kwargs)
+    trace._module_capture_ws.module_forward_args[(module_address, module_call_index)] = (
+        args,
+        kwargs,
+    )
     module_call_label_str = f"{module_address}:{module_call_index}"
     _register_module_input_container_snapshots(
         trace,
@@ -1132,9 +1139,9 @@ def _record_module_entry_metadata(
             forward_kwargs_template,
         )
     forward_start_time = time.time()
-    trace._module_capture_ws.module_build_data.setdefault("module_forward_start_times", {})[module_call_label_str] = (
-        forward_start_time
-    )
+    trace._module_capture_ws.module_build_data.setdefault("module_forward_start_times", {})[
+        module_call_label_str
+    ] = forward_start_time
     code_context_cache = getattr(trace, "_code_context_cache", None)
     if code_context_cache is None:
         code_context_cache = {}
@@ -1144,15 +1151,16 @@ def _record_module_entry_metadata(
         source_loading_enabled=trace.save_code_context,
         context_cache=code_context_cache,
     )
-    trace._module_capture_ws.module_build_data.setdefault("module_code_contexts", {})[module_call_label_str] = (
-        code_context
-    )
+    trace._module_capture_ws.module_build_data.setdefault("module_code_contexts", {})[
+        module_call_label_str
+    ] = code_context
     call_stack = [
-        f"{frame.address}:{frame.pass_index}" for frame in trace._module_capture_ws.exhaustive_module_stack[:-1]
+        f"{frame.address}:{frame.pass_index}"
+        for frame in trace._module_capture_ws.exhaustive_module_stack[:-1]
     ]
-    trace._module_capture_ws.module_build_data.setdefault("module_call_stacks", {})[module_call_label_str] = (
-        call_stack
-    )
+    trace._module_capture_ws.module_build_data.setdefault("module_call_stacks", {})[
+        module_call_label_str
+    ] = call_stack
 
     # Find all tensor arguments (excluding Parameters, which are source tensors).
     input_tensors = get_arg_tensors_for_resolution(args, kwargs)
@@ -1212,7 +1220,9 @@ def _record_module_entry_metadata(
             forward_args_template=forward_args_template,
             forward_kwargs_template=forward_kwargs_template,
             layer_argnames=tuple(
-                trace._module_capture_ws.module_build_data["module_layer_argnames"][module_call_label_str]
+                trace._module_capture_ws.module_build_data["module_layer_argnames"][
+                    module_call_label_str
+                ]
             ),
             input_labels=tuple(input_tensor_labels_at_entry),
         )
@@ -1828,9 +1838,7 @@ def _make_user_forward_hook_wrapper(
                 replacement, trace.capture_events.live_index.by_raw_label
             )
             if replacement_label is not None:
-                replaced_event = trace.capture_events.op_event_by_label_raw.get(
-                    replacement_label
-                )
+                replaced_event = trace.capture_events.op_event_by_label_raw.get(replacement_label)
                 if replaced_event is not None:
                     trace.capture_events.append_amendment(
                         amend_raw_hook_intervention(
@@ -1893,19 +1901,21 @@ def _record_module_exit_metadata(
         output_entries = [(tensor, (), None) for tensor in output_tensors]
     role_hints = role_hints_for_module(module)
     module_call_label = f"{address}:{module_call_index}"
-    start_times = trace._module_capture_ws.module_build_data.setdefault("module_forward_start_times", {})
+    start_times = trace._module_capture_ws.module_build_data.setdefault(
+        "module_forward_start_times", {}
+    )
     forward_duration = 0.0
     if module_call_label in start_times:
         forward_duration = time.time() - start_times[module_call_label]
-        trace._module_capture_ws.module_build_data.setdefault("module_forward_durations", {})[module_call_label] = (
-            forward_duration
-        )
+        trace._module_capture_ws.module_build_data.setdefault("module_forward_durations", {})[
+            module_call_label
+        ] = forward_duration
     output_structure = None
     if output_entries:
         output_structure = output_entries[0][2]
-        trace._module_capture_ws.module_build_data.setdefault("module_output_structures", {})[module_call_label] = (
-            output_structure
-        )
+        trace._module_capture_ws.module_build_data.setdefault("module_output_structures", {})[
+            module_call_label
+        ] = output_structure
     _register_module_output_container_snapshot(
         trace,
         out,
@@ -2055,8 +2065,8 @@ def _record_predicate_module_boundary_outputs(
     from ...capture.projections import _record_from_record_context
     from ...fastlog.types import ActivationRecord
     from ...intervention.selectors import BaseSelector
-    from ...ir.selector_eval import selector_contains_kind
     from ...ir.predicate import RetroactiveCaptureDecision
+    from ...ir.selector_eval import selector_contains_kind
     from .ops import _walk_output_tensors_with_paths
 
     predicate = state.options.keep_op

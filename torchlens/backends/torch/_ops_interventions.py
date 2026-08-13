@@ -1,32 +1,15 @@
 """Legacy and predicate-mode live interventions."""
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Iterator
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
+
 import torch
+
 from ... import _state as _st
 from ..._state import pause_logging
-from ._tl import (
-    get_label_list,
-)
-from ...ir.intervention import FireResult
-from ...ir.container import (
-    ContainerSpec,
-    OutputPathComponent,
-    TupleIndex,
-)
-from ...intervention.selectors import (
-    label as make_label_selector,
-)
-from ...intervention.types import (
-    InterventionDecision,
-    TargetSpec,
-)
-from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
-from ...intervention.runtime import active_intervention_context
 from ...capture.arg_positions import (
     _normalize_func_name,
 )
-from ...data_classes.internal_types import FuncExecutionContext
 from ...capture.predicates import (
     _evaluate_intervene_op,
     build_op_record_context,
@@ -34,8 +17,27 @@ from ...capture.predicates import (
 from ...capture.projections import (
     get_active_recording_state,
 )
+from ...data_classes.internal_types import FuncExecutionContext
 from ...fastlog.types import (
     RecordContext,
+)
+from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
+from ...intervention.runtime import active_intervention_context
+from ...intervention.selectors import (
+    label as make_label_selector,
+)
+from ...intervention.types import (
+    InterventionDecision,
+    TargetSpec,
+)
+from ...ir.container import (
+    ContainerSpec,
+    OutputPathComponent,
+    TupleIndex,
+)
+from ...ir.intervention import FireResult
+from ._tl import (
+    get_label_list,
 )
 
 if TYPE_CHECKING:
@@ -43,8 +45,8 @@ if TYPE_CHECKING:
 
 if TYPE_CHECKING:
     from .ops import (
-        TRANSFORM_FUNC_NAMES,
         _LIVE_FIRE_RESULTS_ATTR,
+        TRANSFORM_FUNC_NAMES,
         _build_shared_fields_dict,
         _build_trace_predicate_context,
         _cache_trace_predicate_context,

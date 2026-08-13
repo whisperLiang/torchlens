@@ -104,8 +104,9 @@ def test_paddle_depth_parity() -> None:
 @pytest.mark.backend_tinygrad
 def test_tinygrad_depth_parity() -> None:
     pytest.importorskip("tinygrad")
-    import torchlens as tl
     from tinygrad import Tensor
+
+    import torchlens as tl
 
     def model(x):
         return ((x + 1.0).relu() * 2.0).sum()

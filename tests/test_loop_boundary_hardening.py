@@ -48,7 +48,6 @@ import torch.nn.functional as F
 from torchlens import trace as trace_fn
 from torchlens.validation.invariants import check_metadata_invariants
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,7 +55,7 @@ from torchlens.validation.invariants import check_metadata_invariants
 
 def _layer_passes(traced) -> "OrderedDict[str, int]":
     """Return ordered mapping of layer_label -> number of grouped passes."""
-    layers: "OrderedDict[str, list]" = OrderedDict()
+    layers: OrderedDict[str, list] = OrderedDict()
     for op in traced:
         layers.setdefault(op.layer_label, []).append(op)
     return OrderedDict((label, len(ops)) for label, ops in layers.items())

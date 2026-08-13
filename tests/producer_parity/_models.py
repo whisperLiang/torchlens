@@ -8,8 +8,9 @@ harness proofs; the P5 campaign widens the model set.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from torch import nn
@@ -91,6 +92,7 @@ class Scenario:
 def _plain_trace(model: nn.Module, x: Any) -> Any:
     return tl.trace(model, x)
 
+
 def _reference_trace(model: nn.Module, x: Any) -> Any:
     # reference-mode save: journal payloads are the live output tensors
     return tl.trace(model, x, save_mode="reference")
@@ -170,9 +172,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario("cnn_intervene", lambda: (SmallCNN(), _cnn_input()), _intervene_trace),
     Scenario("cnn_backward", lambda: (SmallCNN(), _cnn_input()), _backward_trace),
     Scenario("recurrent_exhaustive", lambda: (TinyRecurrent(), _vec_input()), _plain_trace),
-    Scenario(
-        "cnn_record", lambda: (SmallCNN(), _cnn_input()), _record_capture, kind="record"
-    ),
+    Scenario("cnn_record", lambda: (SmallCNN(), _cnn_input()), _record_capture, kind="record"),
     Scenario(
         "buffer_output_exhaustive",
         lambda: (BufferOutputModel(), _small_vec_input()),

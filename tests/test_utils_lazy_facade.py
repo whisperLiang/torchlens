@@ -11,7 +11,6 @@ import pytest
 
 import torchlens.utils as utils
 
-
 _EXPECTED_EXPORTS = (
     "AutocastRestore",
     "DoctorCheck",
@@ -81,18 +80,15 @@ _REEXPORTED_OBJECTS = {
 def test_utils_facade_defers_reexport_modules() -> None:
     """Importing TorchLens leaves utility re-export modules unloaded."""
 
-    code = """
+    code = f"""
 import sys
 import torchlens
 
-assert torchlens.__file__.startswith({worktree!r})
-deferred = {deferred!r}
+assert torchlens.__file__.startswith({str(Path(__file__).resolve().parents[1])!r})
+deferred = {sorted({module_name for module_name, _ in _REEXPORTED_OBJECTS.values()})!r}
 loaded = sorted(name for name in deferred if name in sys.modules)
 assert not loaded, loaded
-""".format(
-        worktree=str(Path(__file__).resolve().parents[1]),
-        deferred=sorted({module_name for module_name, _ in _REEXPORTED_OBJECTS.values()}),
-    )
+"""
     subprocess.run([sys.executable, "-c", code], check=True)
 
 

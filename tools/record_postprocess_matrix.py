@@ -59,9 +59,7 @@ def main() -> None:
             ("effective_writes", pp.RECORDED_STEP_EFFECTIVE_WRITES),
         ):
             for step, columns in sink.items():
-                axis_record.setdefault(step, {}).setdefault(channel, []).extend(
-                    sorted(columns)
-                )
+                axis_record.setdefault(step, {}).setdefault(channel, []).extend(sorted(columns))
                 union.setdefault(step, {}).setdefault(channel, set()).update(columns)
         per_axis[axis_name] = axis_record
         if trace is not None:

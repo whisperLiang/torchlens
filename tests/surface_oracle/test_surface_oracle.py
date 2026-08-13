@@ -53,9 +53,7 @@ def test_public_surface_matches_golden(model_axis: str) -> None:
     actual = canonical_dump(snapshots)
     from _oracle_env import resolve_env_golden
 
-    golden_path, record_on_missing = resolve_env_golden(
-        _GOLDEN_DIR, f"{model_axis}.json"
-    )
+    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_DIR, f"{model_axis}.json")
     if os.environ.get(_UPDATE_ENV) == "1":
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
@@ -63,12 +61,8 @@ def test_public_surface_matches_golden(model_axis: str) -> None:
     if record_on_missing and not golden_path.exists():
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip(
-            f"recorded first-run surface golden for this environment: {golden_path}"
-        )
-    assert golden_path.exists(), (
-        f"missing golden {golden_path}; generate with {_UPDATE_ENV}=1"
-    )
+        pytest.skip(f"recorded first-run surface golden for this environment: {golden_path}")
+    assert golden_path.exists(), f"missing golden {golden_path}; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         raise AssertionError(

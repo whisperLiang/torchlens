@@ -13,10 +13,8 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens.backends.torch import completeness_witness, rescue
-from torchlens.backends.torch import _tl as torch_tl
+from torchlens.backends.torch import _tl as torch_tl, completeness_witness, rescue
 from torchlens.capture import projections, trace as capture_trace
-
 
 _SCOPED_CAPTURE_STATE = frozenset(
     {

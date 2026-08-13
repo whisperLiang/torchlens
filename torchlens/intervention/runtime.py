@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import inspect
 import time
 import warnings
 from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -83,7 +83,7 @@ class _HookReentrancyGuard:
 
         return self.depth > 0
 
-    def __enter__(self) -> "_HookReentrancyGuard":
+    def __enter__(self) -> _HookReentrancyGuard:
         """Enter hook execution.
 
         Returns
@@ -158,9 +158,8 @@ def _execute_hook(
             f"hook {hook_context.name!r} could not be called at "
             f"{_site_name(hook_context)} with signature (out, *, hook)"
         ) from exc
-    with HOOK_REENTRANCY_GUARD:
-        with pause_logging():
-            result = hook_callable(out, hook=hook_context)
+    with HOOK_REENTRANCY_GUARD, pause_logging():
+        result = hook_callable(out, hook=hook_context)
     return validate_hook_output(
         result,
         out,
@@ -493,8 +492,8 @@ def _apply_module_boundary_live_hooks(
     predicate_intervene = getattr(predicate_options, "intervene", None)
     predicate_selector = getattr(predicate_intervene, "selector", None)
     if predicate_selector is not None:
-        from .selectors import BaseSelector
         from ..ir.selector_eval import selector_contains_kind
+        from .selectors import BaseSelector
 
         if not isinstance(predicate_selector, BaseSelector) or not selector_contains_kind(
             predicate_selector, "module"
@@ -532,8 +531,8 @@ def _apply_module_boundary_live_hooks(
         )
         all_fire_results = list(fire_results)
         if predicate_intervene is not None and trace is not None:
-            from ..capture.predicates import _evaluate_intervene_op
             from ..backends.torch.ops import _record_predicate_intervention_spec
+            from ..capture.predicates import _evaluate_intervene_op
             from .hooks import normalize_hook_plan
 
             assert predicate_options is not None
@@ -1153,15 +1152,14 @@ def _apply_live_backward_hooks(
         ):
             continue
         previous = current
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = normalized_entry.normalized_callable(
-                    current,
-                    grad_output=grad_output,
-                    grad_fn_handle=grad_fn_handle,
-                    call_index=call_index,
-                    run_ctx=_live_run_ctx(),
-                )
+        with HOOK_REENTRANCY_GUARD, pause_logging():
+            result = normalized_entry.normalized_callable(
+                current,
+                grad_output=grad_output,
+                grad_fn_handle=grad_fn_handle,
+                call_index=call_index,
+                run_ctx=_live_run_ctx(),
+            )
         if result is not None:
             current = _validate_grad_tuple(result, current, grad_fn_handle=grad_fn_handle)
             mutated = True
@@ -1223,15 +1221,14 @@ def _apply_live_backward_prehooks(
         ):
             continue
         previous = current
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = normalized_entry.normalized_callable(
-                    current,
-                    grad_output=None,
-                    grad_fn_handle=grad_fn_handle,
-                    call_index=call_index,
-                    run_ctx=_live_run_ctx(),
-                )
+        with HOOK_REENTRANCY_GUARD, pause_logging():
+            result = normalized_entry.normalized_callable(
+                current,
+                grad_output=None,
+                grad_fn_handle=grad_fn_handle,
+                call_index=call_index,
+                run_ctx=_live_run_ctx(),
+            )
         if result is not None:
             current = _validate_grad_tuple(result, current, grad_fn_handle=grad_fn_handle)
             mutated = True

@@ -2,16 +2,10 @@
 
 import dataclasses
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
-from ._tl import (
-    active_label_session_token,
-    get_param_meta,
-)
-from .completeness_witness import internal_scalar_read
-from . import module_stack as _mstack
-from ...utils._torch_compat import (
-    tensor_version_or_none,
-)
+
+from ..._io import BlobRef
 from ...data_classes.op import (
     Op,
 )
@@ -23,7 +17,15 @@ from ...ir.events import (
 )
 from ...ir.refs import ParamRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ..._io import BlobRef
+from ...utils._torch_compat import (
+    tensor_version_or_none,
+)
+from . import module_stack as _mstack
+from ._tl import (
+    active_label_session_token,
+    get_param_meta,
+)
+from .completeness_witness import internal_scalar_read
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -37,12 +39,12 @@ if TYPE_CHECKING:
     from .ops import (
         _ANCESTOR_FIELD_NAMES,
         _ANCESTOR_SLOT_DESCRIPTORS,
-        _AncestorBitset,
         _CAPTURE_PRODUCER_POLICIES,
         _EMIT_BY_MODE,
         _FUNCTION_REF_PER_OUTPUT_FIELDS,
         _INPLACE_AUGMENTED_ASSIGNMENT_DUNDER_EXCLUSIONS,
         _LABEL_VERSION_SNAPSHOT,
+        _AncestorBitset,
     )
 
 __all__ = (

@@ -2,12 +2,11 @@
 
 import dataclasses
 import warnings
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Iterator
+from collections.abc import Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
 import torch
-from ...utils.introspection import (
-    get_vars_of_type_from_obj,
-)
+
 from ...ir.container import (
     ContainerSpec,
     DataclassField,
@@ -21,6 +20,9 @@ from ...ir.container import (
     namedtuple_extra_instance_state,
     namedtuple_type_can_carry_instance_state,
     reconstruction_is_lossy,
+)
+from ...utils.introspection import (
+    get_vars_of_type_from_obj,
 )
 
 if TYPE_CHECKING:

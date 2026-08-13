@@ -11,7 +11,7 @@ import sys
 import warnings
 from collections.abc import Callable, Iterator
 from types import CodeType, FrameType
-from typing import Any, Dict, List, Optional, TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -45,7 +45,7 @@ _ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H", "grad", "_grad", "gr
 # trusting the offset map. Retaining that strong reference also makes the size
 # cap meaningful because a live entry cannot be silently re-used for a
 # different code object that happens to land at the same address.
-_COL_OFFSET_CACHE: Dict[int, tuple[CodeType, Dict[int, Optional[int]]]] = {}
+_COL_OFFSET_CACHE: dict[int, tuple[CodeType, dict[int, int | None]]] = {}
 _COL_OFFSET_CACHE_SIZE_CAP = 100_000
 _col_offset_cache_warned = False
 _AddressPath = list[tuple[str, Any]]
@@ -79,7 +79,7 @@ _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FUNC_CALL_LOCATION: Any = None
 
 
-def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+def _build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     """Return ``instruction_offset -> column_offset`` for every instruction.
 
     The map covers all bytecode instructions in ``code``, INCLUDING each
@@ -100,7 +100,7 @@ def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
     """
     if not HAS_CODE_POSITIONS:
         return {}
-    offset_map: Dict[int, Optional[int]] = {}
+    offset_map: dict[int, int | None] = {}
     try:
         instructions = list(dis.get_instructions(code))
         code_end = len(code.co_code)
@@ -119,7 +119,7 @@ def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
     return offset_map
 
 
-def _get_or_build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+def _get_or_build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     """Return the cached column-offset map for ``code`` (build on miss).
 
     The cache is keyed by ``id(code)`` and stores the code object itself in the
@@ -162,7 +162,7 @@ def _clear_col_offset_cache() -> None:
     _col_offset_cache_warned = False
 
 
-def _get_code_qualname(frame: FrameType) -> Optional[str]:
+def _get_code_qualname(frame: FrameType) -> str | None:
     """Return ``co_qualname`` when available on this Python version.
 
     Args:
@@ -176,7 +176,7 @@ def _get_code_qualname(frame: FrameType) -> Optional[str]:
     return getattr(frame.f_code, "co_qualname", None)
 
 
-def _get_col_offset(frame: FrameType) -> Optional[int]:
+def _get_col_offset(frame: FrameType) -> int | None:
     """Return the current instruction's column offset when available.
 
     Args:
@@ -691,7 +691,7 @@ def _extend_search_stack_from_item(
             )
 
 
-def get_attr_values_from_tensor_list(tensor_list: List[torch.Tensor], field_name: str) -> List[Any]:
+def get_attr_values_from_tensor_list(tensor_list: list[torch.Tensor], field_name: str) -> list[Any]:
     """Collect a named attribute from each tensor that has it.
 
     Used for generic tensor attribute scans where tensors may or may not carry
@@ -730,7 +730,7 @@ def nested_getattr(obj: Any, attr: str) -> Any:
         return obj
 
     attributes = attr.split(".")
-    for i, a in enumerate(attributes):
+    for _i, a in enumerate(attributes):
         # Certain tensor properties emit DeprecationWarnings on access
         # (e.g. .T on >2D tensors, .volatile). Suppress to avoid noise.
         if a in [
@@ -780,7 +780,7 @@ def nested_assign(obj: Any, addr: list[tuple[Any, Any]], val: Any) -> None:
 
 
 def iter_accessible_attributes(
-    obj: Any, *, short_circuit: Optional[Callable[[Any, str], bool]] = None
+    obj: Any, *, short_circuit: Callable[[Any, str], bool] | None = None
 ) -> Iterator[tuple[str, Any]]:
     """Yield ``(attr_name, attr_value)`` for every accessible attribute of ``obj``.
 

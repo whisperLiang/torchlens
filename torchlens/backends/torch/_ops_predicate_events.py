@@ -4,61 +4,63 @@ from collections import defaultdict
 from collections.abc import Callable
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ... import _state as _st
+from ..._errors import TorchLensPostfuncError
 from ..._state import pause_logging
+from ..._training_validation import TrainingModeConfigError
+from ...capture.arg_positions import (
+    DYNAMIC_SPEC_UNCACHEABLE,
+    FUNC_ARG_SPECS,
+    VARIADIC_TENSOR_ARG_FUNCS,
+    ArgSpec,
+    _cache_dynamic_spec,
+    _normalize_func_name,
+    dynamic_spec_covers_call,
+    extract_tensors_and_params,
+)
+from ...capture.plan import EnrichmentLevel
+from ...capture.predicates import (
+    _evaluate_keep_op,
+    _is_halt_only_capture,
+    build_op_record_context,
+)
+from ...capture.projections import (
+    LiveOpView,
+    append_projected_event,
+    get_active_recording_state,
+)
+from ...capture.session import capture_session_for
+from ...capture.stop import evaluate_halt_stop
+from ...data_classes.internal_types import FuncExecutionContext
+from ...data_classes.op import (
+    Op,
+)
+from ...fastlog._halt import HaltSignal
+from ...fastlog.exceptions import PredicateError
+from ...fastlog.types import (
+    CaptureSpec,
+)
+from ...ir.events import (
+    FunctionCallRef,
+)
+from ...ir.predicate import RetroactiveCaptureDecision
+from ...utils.display import _timed_phase
+from ...utils.introspection import (
+    _get_tensors_and_params_from_obj,
+)
 from ._tl import (
     get_label_list,
     get_live_tensor_label,
     get_param_meta,
     set_tensor_label,
 )
-from ...fastlog._halt import HaltSignal
-from ...utils.introspection import (
-    _get_tensors_and_params_from_obj,
-)
-from ...utils.display import _timed_phase
-from ...capture.projections import LiveOpView
-from ...data_classes.op import (
-    Op,
-)
-from ...ir.events import (
-    FunctionCallRef,
-)
-from ...ir.predicate import RetroactiveCaptureDecision
-from ...capture.arg_positions import (
-    DYNAMIC_SPEC_UNCACHEABLE,
-    FUNC_ARG_SPECS,
-    VARIADIC_TENSOR_ARG_FUNCS,
-    ArgSpec,
-    dynamic_spec_covers_call,
-    extract_tensors_and_params,
-    _cache_dynamic_spec,
-    _normalize_func_name,
-)
-from ...capture.session import capture_session_for
 from .tensor_tracking import (
     _get_ancestors_from_parents,
     _locate_parent_tensors_in_args,
     _process_parent_param_ops,
-)
-from ..._errors import TorchLensPostfuncError
-from ..._training_validation import TrainingModeConfigError
-from ...data_classes.internal_types import FuncExecutionContext
-from ...capture.predicates import (
-    _evaluate_keep_op,
-    _is_halt_only_capture,
-    build_op_record_context,
-)
-from ...capture.plan import EnrichmentLevel
-from ...capture.stop import evaluate_halt_stop
-from ...capture.projections import (
-    append_projected_event,
-    get_active_recording_state,
-)
-from ...fastlog.exceptions import PredicateError
-from ...fastlog.types import (
-    CaptureSpec,
 )
 
 if TYPE_CHECKING:

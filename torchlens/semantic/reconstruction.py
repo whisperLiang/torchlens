@@ -262,7 +262,7 @@ def _sdpa_record(op: Any) -> SDPAReconstruction | MissingFacet:
     attn_mask = kwargs.get("attn_mask", _positional_or_default(args, 3, None))
     dropout_p = float(kwargs.get("dropout_p", _positional_or_default(args, 4, 0.0)) or 0.0)
     is_causal = bool(kwargs.get("is_causal", _positional_or_default(args, 5, False)))
-    scale = kwargs.get("scale", None)
+    scale = kwargs.get("scale")
     enable_gqa = bool(kwargs.get("enable_gqa", False))
     if scale is not None:
         scale = float(scale)

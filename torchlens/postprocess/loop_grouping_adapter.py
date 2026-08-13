@@ -9,9 +9,8 @@ import heapq
 import itertools as it
 from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Dict, Mapping, Optional, Set, Tuple
-
 
 FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
 
@@ -37,7 +36,7 @@ _DENSE_SOURCE_DISTINCT_QUERIES = 2
 # non-eligible parents). Colors deliberately carry NO pass index: repeated passes of
 # one site contribute one color, which is what lets lockstep loop iterations produce
 # EQUAL signatures.
-_SlotColor = Tuple[str, object]
+_SlotColor = tuple[str, object]
 
 
 @dataclass(frozen=True)
@@ -88,7 +87,7 @@ class RecurrenceNode:
     param_barcodes: tuple[str, ...]
     retain: bool = True
     pruned: bool = False
-    output_slot: Optional[int] = None
+    output_slot: int | None = None
     """Zero-based output slot for multi-output operations, ``None`` for single-output.
 
     Co-outputs of ONE call (``h, c = lstm_cell(...)``) occupy distinct output slots.
@@ -96,7 +95,7 @@ class RecurrenceNode:
     each other: an N-step ``nn.LSTMCell`` loop is one N-pass h-layer plus one N-pass
     c-layer, mirroring how ``torch.max`` values/indices already split. Same-function,
     same-parameter merging must therefore never fuse nodes across output slots."""
-    module_site: Optional[tuple[str, ...]] = None
+    module_site: tuple[str, ...] | None = None
     """Module ADDRESS stack (addresses only, no pass numbers), or ``None`` if unknown.
 
     Exact parameter identity must never override module identity: two DISTINCT modules
@@ -105,7 +104,7 @@ class RecurrenceNode:
     module (ALBERT-style, one ``nn.Module`` called N times) keeps ONE address across
     calls and still groups. ``None`` (backends that do not supply the field) preserves
     the historical parameter-only behavior."""
-    arg_signature: Optional[str] = None
+    arg_signature: str | None = None
     """Structural fingerprint of the call's NON-TENSOR arguments, or ``None`` if unknown.
 
     Same-parameter identity must not override call semantics: two ``F.conv2d`` calls
@@ -173,12 +172,12 @@ class RecurrenceAssignment:
     equivalence_key: str
 
 
-_ParamCallIdentity = Tuple[
+_ParamCallIdentity = tuple[
     str,
-    Tuple[str, ...],
-    Optional[int],
-    Optional[Tuple[str, ...]],
-    Optional[str],
+    tuple[str, ...],
+    int | None,
+    tuple[str, ...] | None,
+    str | None,
 ]
 
 
@@ -197,10 +196,10 @@ class _MutableRecurrenceNode:
     uses_params: bool
     func_name: str
     param_barcodes: tuple[str, ...]
-    output_slot: Optional[int] = None
+    output_slot: int | None = None
     recurrence_anchored: bool = False
-    module_site: Optional[tuple[str, ...]] = None
-    arg_signature: Optional[str] = None
+    module_site: tuple[str, ...] | None = None
+    arg_signature: str | None = None
 
 
 @dataclass
@@ -218,8 +217,8 @@ class SubgraphInfo:
     """
 
     starting_node: str
-    param_nodes: Set[str] = field(default_factory=set)
-    node_set: Set[str] = field(default_factory=set)
+    param_nodes: set[str] = field(default_factory=set)
+    node_set: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         """Register the starting node in this subgraph."""
@@ -232,9 +231,9 @@ class IsomorphicExpansionState:
 
     iso_node_groups: OrderedDict[str, list[str]]
     node_to_iso_leader: OrderedDict[str, str]
-    subgraph_info: Dict[str, SubgraphInfo]
-    node_to_subgraph: Dict[str, SubgraphInfo]
-    adjacent_subgraphs: Dict[str, set[str]]
+    subgraph_info: dict[str, SubgraphInfo]
+    node_to_subgraph: dict[str, SubgraphInfo]
+    adjacent_subgraphs: dict[str, set[str]]
     node_stack: deque[list[str]]
 
 
@@ -471,10 +470,9 @@ def _expand_isomorphic_subgraphs(workspace: _GroupingWorkspace, node_label: str)
             {equivalent_operation_starting_labels[0]: equivalent_operation_starting_labels}
         ),
         node_to_iso_leader=OrderedDict(
-            {
-                label: equivalent_operation_starting_labels[0]
-                for label in equivalent_operation_starting_labels
-            }
+            dict.fromkeys(
+                equivalent_operation_starting_labels, equivalent_operation_starting_labels[0]
+            )
         ),
         subgraph_info=sg_info,
         node_to_subgraph=OrderedDict(
@@ -843,7 +841,7 @@ def _record_frontier_adjacency(
 
 def _pop_frontier_node(
     frontier_nodes: FrontierNodes,
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None, str | None]:
     """Pop the next frontier candidate for isomorphic matching.
 
     Parameters
@@ -1067,15 +1065,13 @@ def _finalize_layer_assignments(
     )
 
     for layer_label, layer_nodes_set in merged_layer_groups.items():
-        layer_nodes = sorted(
-            list(layer_nodes_set), key=lambda layer: workspace.nodes[layer].raw_order
-        )
+        layer_nodes = sorted(layer_nodes_set, key=lambda layer: workspace.nodes[layer].raw_order)
         if len(layer_nodes) < max(
             [len(workspace.nodes[layer].recurrent_labels) for layer in layer_nodes]
         ):
             continue
         canonical_equiv_type = workspace.nodes[layer_nodes[0]].equivalence_key
-        for pass_index, grouped_node_label in enumerate(layer_nodes):
+        for _pass_index, grouped_node_label in enumerate(layer_nodes):
             node = workspace.nodes[grouped_node_label]
             node.layer_label = layer_label
             node.recurrent_labels = layer_nodes
@@ -1134,7 +1130,7 @@ class _ReachabilityCache:
 
     def __init__(self, workspace: _GroupingWorkspace) -> None:
         self._workspace = workspace
-        self._order_monotone: Optional[bool] = None
+        self._order_monotone: bool | None = None
         self._bit_index: dict[str, int] = {}
         self._descendant_bits: dict[str, int] = {}
         self._pair_memo: dict[tuple[str, str], bool] = {}
@@ -1917,13 +1913,10 @@ def _pf_partition_class(
                 and consumers1.keys() != consumers2.keys()
             ):
                 continue
-            if _reaches_forward(workspace, member1, member2, reach_memo):
-                union(member1, member2)
-                distinct_roots -= 1
-                if distinct_roots == 1:
-                    break
-            elif invariant_fed and _pf_child_route_allows(
-                workspace, member1, member2, class_of, reach_memo
+            if (
+                _reaches_forward(workspace, member1, member2, reach_memo)
+                or invariant_fed
+                and _pf_child_route_allows(workspace, member1, member2, class_of, reach_memo)
             ):
                 union(member1, member2)
                 distinct_roots -= 1
@@ -2052,7 +2045,7 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         Mutates each bare op's ``layer_label``.
     """
     anchor_ancestry = _topology_anchor_ancestry(workspace)
-    universe: dict[tuple[str, Optional[int]], list[str]] = OrderedDict()
+    universe: dict[tuple[str, int | None], list[str]] = OrderedDict()
     for label in workspace.raw_labels:
         node = workspace.nodes[label]
         if node.uses_params and node.param_barcodes:
@@ -2077,9 +2070,7 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         for labels in universe.values()
         for label in labels
     }
-    complete_consumer_sites_by_key: dict[tuple[str, Optional[int]], set[_SlotColor]] = defaultdict(
-        set
-    )
+    complete_consumer_sites_by_key: dict[tuple[str, int | None], set[_SlotColor]] = defaultdict(set)
     for key, labels in universe.items():
         observed_passes: dict[_SlotColor, set[int]] = defaultdict(set)
         for label in labels:
@@ -2092,8 +2083,8 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         }
     reach_memo = _ReachabilityCache(workspace)
 
-    classes: "OrderedDict[str, list[str]]" = OrderedDict()
-    class_key: dict[str, tuple[str, Optional[int]]] = {}
+    classes: OrderedDict[str, list[str]] = OrderedDict()
+    class_key: dict[str, tuple[str, int | None]] = {}
     fixed_class_of = {
         label: workspace.nodes[label].layer_label
         for label in workspace.raw_labels
@@ -2124,8 +2115,8 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
                 signatures[member] = signature
 
         changed = False
-        new_classes: "OrderedDict[str, list[str]]" = OrderedDict()
-        new_class_key: dict[str, tuple[str, Optional[int]]] = {}
+        new_classes: OrderedDict[str, list[str]] = OrderedDict()
+        new_class_key: dict[str, tuple[str, int | None]] = {}
         for leader, members in classes.items():
             if len(members) < 2:
                 new_classes[leader] = members
@@ -2183,10 +2174,10 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
 
 def _merge_iso_groups_to_layers(
     workspace: _GroupingWorkspace,
-    iso_node_groups: Dict[str, list[str]],
-    node_to_subgraph: Dict[str, SubgraphInfo],
-    adjacent_subgraphs: Dict[str, set[str]],
-) -> Dict[str, Set[str]]:
+    iso_node_groups: dict[str, list[str]],
+    node_to_subgraph: dict[str, SubgraphInfo],
+    adjacent_subgraphs: dict[str, set[str]],
+) -> dict[str, set[str]]:
     """Merge iso groups into same-layer groups using union-find.
 
     Parameters
@@ -2205,7 +2196,7 @@ def _merge_iso_groups_to_layers(
     dict[str, set[str]]
         Merged layer groups with at least two members.
     """
-    uf_parent: Dict[str, str] = {}
+    uf_parent: dict[str, str] = {}
 
     def find(x: str) -> str:
         """Return the union-find root for a node label."""
@@ -2241,7 +2232,7 @@ def _merge_iso_groups_to_layers(
     reach_memo = _ReachabilityCache(workspace)
     anchor_ancestry = _topology_anchor_ancestry(workspace)
 
-    for iso_group_label, iso_nodes_orig in iso_node_groups.items():
+    for _iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(
             iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
         )
@@ -2387,7 +2378,7 @@ def _merge_iso_groups_to_layers(
             for other in nodes_with_same_params[1:]:
                 union(first, other)
 
-    merged_layer_groups: Dict[str, Set[str]] = defaultdict(set)
+    merged_layer_groups: dict[str, set[str]] = defaultdict(set)
     for node_label in all_iso_nodes:
         root = find(node_label)
         merged_layer_groups[root].add(node_label)

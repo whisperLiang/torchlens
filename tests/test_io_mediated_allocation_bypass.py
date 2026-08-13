@@ -682,36 +682,39 @@ def test_safe_explicit_globals_surface_is_pinned() -> None:
     exactly how SEC1 shipped, so widening the set must break this test on purpose.
     """
 
-    assert _SAFE_EXPLICIT_GLOBALS == frozenset(
-        {
-            ("collections", "OrderedDict"),
-            ("collections", "defaultdict"),
-            ("collections", "Counter"),
-            ("builtins", "object"),
-            ("builtins", "list"),
-            ("builtins", "set"),
-            ("builtins", "frozenset"),
-            ("builtins", "dict"),
-            ("builtins", "tuple"),
-            ("builtins", "bytearray"),
-            ("builtins", "bytes"),
-            ("builtins", "complex"),
-            ("builtins", "int"),
-            ("builtins", "float"),
-            ("builtins", "str"),
-            ("builtins", "bool"),
-            ("builtins", "slice"),
-            ("builtins", "Ellipsis"),
-            ("torch._C", "TensorBase"),
-            ("torch._C", "_TensorBase"),
-            ("torch._C", "_VariableFunctionsClass"),
-            ("numpy", "dtype"),
-            ("numpy", "ndarray"),
-            ("numpy.core.numeric", "_frombuffer"),
-            ("numpy._core.numeric", "_frombuffer"),
-            ("numpy.core.multiarray", "_reconstruct"),
-            ("numpy._core.multiarray", "_reconstruct"),
-        }
+    assert (
+        frozenset(
+            {
+                ("collections", "OrderedDict"),
+                ("collections", "defaultdict"),
+                ("collections", "Counter"),
+                ("builtins", "object"),
+                ("builtins", "list"),
+                ("builtins", "set"),
+                ("builtins", "frozenset"),
+                ("builtins", "dict"),
+                ("builtins", "tuple"),
+                ("builtins", "bytearray"),
+                ("builtins", "bytes"),
+                ("builtins", "complex"),
+                ("builtins", "int"),
+                ("builtins", "float"),
+                ("builtins", "str"),
+                ("builtins", "bool"),
+                ("builtins", "slice"),
+                ("builtins", "Ellipsis"),
+                ("torch._C", "TensorBase"),
+                ("torch._C", "_TensorBase"),
+                ("torch._C", "_VariableFunctionsClass"),
+                ("numpy", "dtype"),
+                ("numpy", "ndarray"),
+                ("numpy.core.numeric", "_frombuffer"),
+                ("numpy._core.numeric", "_frombuffer"),
+                ("numpy.core.multiarray", "_reconstruct"),
+                ("numpy._core.multiarray", "_reconstruct"),
+            }
+        )
+        == _SAFE_EXPLICIT_GLOBALS
     )
 
 

@@ -22,9 +22,9 @@ import torch
 # file SKIPPED rather than ERROR.
 torchvision = pytest.importorskip("torchvision")
 
+import example_models  # noqa: E402
 from conftest import VIS_OUTPUT_DIR  # noqa: E402
 
-import example_models  # noqa: E402
 from torchlens.validation import validate_forward_pass  # noqa: E402
 from torchlens.visualization import show_model_graph  # noqa: E402
 
@@ -3536,8 +3536,8 @@ def test_audio_speecht5():
         num_mel_bins=20,
     )
     from transformers.models.speecht5.modeling_speecht5 import (
-        SpeechT5EncoderWithTextPrenet,
         SpeechT5DecoderWithSpeechPrenet,
+        SpeechT5EncoderWithTextPrenet,
     )
 
     encoder = SpeechT5EncoderWithTextPrenet(config)

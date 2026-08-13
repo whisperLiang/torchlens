@@ -11,8 +11,9 @@ from typing import Any
 
 import pytest
 import torch
-import torchlens as tl
 from torch import nn
+
+import torchlens as tl
 
 pytest.importorskip("safetensors")
 

@@ -105,25 +105,20 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     # ---- step-0 trace-read recorder (feeds the IngestInputs v1 freeze) -----
     from ._models import scenario_by_name
 
-    with step0_trace_read_recorder() as observed:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_scenario(
-                scenario_by_name("cnn_exhaustive"),
-                Path(tmp),
-                with_artifact=False,
-            )
+    with step0_trace_read_recorder() as observed, tempfile.TemporaryDirectory() as tmp:
+        run_scenario(
+            scenario_by_name("cnn_exhaustive"),
+            Path(tmp),
+            with_artifact=False,
+        )
     assert observed, "step-0 recorder observed nothing (hook broken)"
-    (_LEDGER_DIR / "step0_trace_reads.json").write_text(
-        json.dumps(sorted(observed), indent=0)
-    )
+    (_LEDGER_DIR / "step0_trace_reads.json").write_text(json.dumps(sorted(observed), indent=0))
 
     # ---- source 4: mutator inventory (exact) --------------------------------
     mutators = mutator_inventory(_PACKAGE_ROOT)
     (_LEDGER_DIR / "mutators.json").write_text(json.dumps(mutators, indent=1, sort_keys=True))
 
-    amendment_files = {
-        site.rsplit(":", 1)[0] for site in mutators["append_amendment_callers"]
-    }
+    amendment_files = {site.rsplit(":", 1)[0] for site in mutators["append_amendment_callers"]}
     assert amendment_files == EXPECTED_APPEND_AMENDMENT_CALLER_FILES, (
         "append_amendment caller set drifted — a new post-commit mutation "
         "channel needs a registry family: "
@@ -132,9 +127,7 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     # Legacy channels stay dead: no replace_op_event callers outside its
     # definition module, no in-place op_events[i] list writes anywhere.
     legacy_callers = {
-        site
-        for site in mutators["replace_op_event_callers"]
-        if "ir/capture_events.py" not in site
+        site for site in mutators["replace_op_event_callers"] if "ir/capture_events.py" not in site
     }
     assert not legacy_callers, (
         f"replace_op_event callers resurfaced after the P4 migration: {legacy_callers}"
@@ -145,8 +138,7 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
         if "ir/capture_events.py" not in site  # replace_op_event's own body, deleted in P4
     }
     assert not inplace_writes, (
-        "in-place op_events[i] writes resurfaced after the P4 migration: "
-        f"{inplace_writes}"
+        f"in-place op_events[i] writes resurfaced after the P4 migration: {inplace_writes}"
     )
 
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import chain
-from typing import Dict, List, Tuple
 
 import pytest
 import torch
@@ -189,7 +188,7 @@ def _get_only_event(trace: Trace) -> ConditionalEvent:
     return trace.conditional_records[0]
 
 
-def _get_terminal_bool_layers(trace: Trace) -> List[Op]:
+def _get_terminal_bool_layers(trace: Trace) -> list[Op]:
     """Return terminal scalar bool layers from a model log.
 
     Parameters
@@ -281,8 +280,8 @@ def _assert_derived_views_consistent(trace: Trace) -> None:
                 )
             )
         )
-        expected_elif_children: Dict[int, List[str]] = {}
-        grouped_elif_children: Dict[int, set[str]] = defaultdict(set)
+        expected_elif_children: dict[int, list[str]] = {}
+        grouped_elif_children: dict[int, set[str]] = defaultdict(set)
         for branch_children in layer.conditional_arm_children.values():
             for branch_kind, child_labels in branch_children.items():
                 if not branch_kind.startswith("elif_"):
@@ -443,7 +442,7 @@ def test_conditional_evaluation_entry_edges_are_distinct_upstream_layers(
 def test_elif_ladder_model_step5_pipeline() -> None:
     """Elif ladder materializes one event with all four arm ranges."""
 
-    branch_cases: List[Tuple[torch.Tensor, str, str]] = [
+    branch_cases: list[tuple[torch.Tensor, str, str]] = [
         (torch.full((2, 2), -1.0), "relu", "then"),
         (torch.full((2, 2), -0.25), "sigmoid", "elif_1"),
         (torch.full((2, 2), 0.25), "tanh", "elif_2"),

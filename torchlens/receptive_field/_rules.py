@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from ..capture.arg_positions import _normalize_func_name
 
-
 if TYPE_CHECKING:
     from ..data_classes.op import Op
 

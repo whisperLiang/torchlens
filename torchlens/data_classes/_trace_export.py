@@ -194,7 +194,6 @@ _TO_PANDAS_EXCLUDED_OP_FIELDS: frozenset[str] = frozenset(
         "annotations",
         # Live-trace-derived views (raise on detached/rehydrated logs; the
         # ``parents`` column plus parent rows carry the same information):
-        "input_ops",
         "input_shapes",
         "input_dtypes",
         "input_memory",
@@ -207,6 +206,8 @@ _TO_PANDAS_EXCLUDED_OP_FIELDS: frozenset[str] = frozenset(
 
 
 class TraceExportMixin(_TraceMixinBase):
+    """``Trace`` export surface: dataframe, dict, and tabular projections."""
+
     def to_pandas(self: "Trace", include_decoded_output_summary: bool = False) -> "pd.DataFrame":
         """Return a dataframe containing one row per layer pass.
 
@@ -452,8 +453,7 @@ class TraceExportMixin(_TraceMixinBase):
                 "decoded output is not a batch top-k classification table",
                 code="decoded_output_not_classification",
                 remedy=(
-                    "capture with output_style='classification' to produce a batch "
-                    "top-k table"
+                    "capture with output_style='classification' to produce a batch top-k table"
                 ),
             )
         selected_items = _normalize_batch_items(batch_items, rows)

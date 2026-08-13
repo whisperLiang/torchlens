@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Final, Literal, Mapping
+from typing import Any, Final, Literal
 
 from .._deprecations import MISSING, MissingType
 from .._errors import InvalidArgumentError
-from ..ir.predicate import RetroactiveCaptureDecision
 from ..intervention.predicates import InterventionPredicate
+from ..ir.predicate import RetroactiveCaptureDecision
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
 from .types import CaptureSpec, GradRecordContext, RecordContext
@@ -195,10 +196,10 @@ class RecordingOptions:
 
     @classmethod
     def from_values(
-        cls: type["RecordingOptions"],
+        cls: type[RecordingOptions],
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "RecordingOptions":
+    ) -> RecordingOptions:
         """Build an instance from already-resolved field values."""
 
         _validate_recording_values(values)

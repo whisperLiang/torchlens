@@ -35,8 +35,8 @@ from torchlens._save_budget import (
     format_bytes,
     resolve_save_budget,
 )
-from torchlens.fastlog import _storage_resolver
 from torchlens.data_classes.trace import Trace
+from torchlens.fastlog import _storage_resolver
 from torchlens.options import CaptureOptions
 
 

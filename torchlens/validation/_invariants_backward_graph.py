@@ -1,17 +1,15 @@
 """Backward graph and grad-function invariants."""
 
 from __future__ import annotations
+
 import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _check_backward_event_flow_invariants,
         _check_backward_pass_domain_invariants,
         _check_journal_seq_invariants,
@@ -31,7 +29,7 @@ __all__ = (
 )
 
 
-def _check_backward_graph_invariants(trace: "Trace") -> None:
+def _check_backward_graph_invariants(trace: Trace) -> None:
     """Check T: backward grad-fn metadata consistency.
 
     A forward layer with a recorded ``grad_fn_object_id`` must retain a
@@ -74,7 +72,7 @@ def _check_backward_graph_invariants(trace: "Trace") -> None:
     _check_backward_pass_record_consistency(trace, name, valid_pass_indices)
 
 
-def _check_backward_grad_fn_registry(trace: "Trace", name: str) -> set[int]:
+def _check_backward_grad_fn_registry(trace: Trace, name: str) -> set[int]:
     """Check backward GradFn registry and root references.
 
     Parameters
@@ -118,7 +116,7 @@ def _check_backward_grad_fn_registry(trace: "Trace", name: str) -> set[int]:
 
 
 def _check_backward_grad_fn_handle_records(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -234,7 +232,7 @@ def _check_backward_grad_fn_handle_records(
                 )
 
 
-def _check_backward_layer_backpointers(trace: "Trace", name: str) -> None:
+def _check_backward_layer_backpointers(trace: Trace, name: str) -> None:
     """Check forward-layer backpointers into backward GradFn handles.
 
     Parameters
@@ -270,7 +268,7 @@ def _check_backward_layer_backpointers(trace: "Trace", name: str) -> None:
             )
 
 
-def _check_backward_saved_grad_records(trace: "Trace", name: str) -> None:
+def _check_backward_saved_grad_records(trace: Trace, name: str) -> None:
     """Check saved gradient-op records match layers that have gradients.
 
     Parameters
@@ -296,7 +294,7 @@ def _check_backward_saved_grad_records(trace: "Trace", name: str) -> None:
 
 
 def _check_backward_pass_record_consistency(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -340,7 +338,7 @@ def _check_backward_pass_record_consistency(
                 )
 
 
-def _check_backward_pass_index_density(trace: "Trace", name: str) -> None:
+def _check_backward_pass_index_density(trace: Trace, name: str) -> None:
     """Check backward pass log keys are dense.
 
     Parameters
@@ -366,7 +364,7 @@ def _check_backward_pass_index_density(trace: "Trace", name: str) -> None:
         )
 
 
-def _check_grad_fn_topology_invariants(trace: "Trace", name: str) -> None:
+def _check_grad_fn_topology_invariants(trace: Trace, name: str) -> None:
     """Check backward GradFn relation lists for reciprocal, resolvable links.
 
     The precondition contract is backward-capture only: callers invoke this

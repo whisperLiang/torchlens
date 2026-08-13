@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import fields
 from fractions import Fraction
-import pickle
 
 from torchlens.receptive_field import (
     GradientReceptiveField,

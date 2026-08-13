@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from fractions import Fraction
 import importlib
 import subprocess
 import sys
+from collections.abc import Iterator
+from fractions import Fraction
 from typing import Any
 
 import pytest
@@ -16,7 +16,6 @@ from torch import nn
 import torchlens as tl
 from torchlens.receptive_field import _rules
 from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
-
 
 _BUILTIN_RULE_MODULES = (
     "attention",

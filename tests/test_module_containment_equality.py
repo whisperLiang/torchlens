@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 import torch.nn.functional
-import torchlens as tl
-
 from _module_containment_snapshot import build_snapshot
-from torchlens.backends.torch._tl import get_module_meta
 from fixtures.module_containment_models import ALL_FIXTURES, FixtureBuilder
+
+import torchlens as tl
+from torchlens.backends.torch._tl import get_module_meta
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "module_containment"
 # Synthetic hook replacement is intentionally snapshotted with hook-stack semantics:
@@ -57,15 +57,11 @@ def _torch_fuses_mha_output_reshape() -> bool:
             "cannot read torch.nn.functional.multi_head_attention_forward source, so the "
             "multihead_attention_demo golden variant cannot be selected; re-audit the fixture"
         ) from exc
-    transpose_prefix = (
-        r"attn_output\s*=\s*attn_output\.transpose\(\s*0\s*,\s*1\s*\)"
-    )
+    transpose_prefix = r"attn_output\s*=\s*attn_output\.transpose\(\s*0\s*,\s*1\s*\)"
     output_extent = r"\(\s*tgt_len\s*\*\s*bsz\s*,\s*embed_dim\s*\)"
     if re.search(rf"{transpose_prefix}\.reshape{output_extent}", source):
         return True
-    if re.search(
-        rf"{transpose_prefix}\.contiguous\(\s*\)\.view{output_extent}", source
-    ):
+    if re.search(rf"{transpose_prefix}\.contiguous\(\s*\)\.view{output_extent}", source):
         return False
     raise AssertionError(
         "torch.nn.functional.multi_head_attention_forward spells its output reshape in a "

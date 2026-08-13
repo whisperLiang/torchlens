@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
@@ -27,8 +27,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from ..capture.session import CapturedRunCore
     from ..capture.projections import RecordingState
+    from ..capture.session import CapturedRunCore
     from ..data_classes.trace import Trace
 
 
@@ -277,7 +277,7 @@ class RecordingTrace:
     def repredicate(
         self,
         other_keep_op: Callable[[RecordContext], PredicateDecision] | None = None,
-    ) -> "RecordingTrace":
+    ) -> RecordingTrace:
         """Return a new trace with decisions from a new op predicate.
 
         Parameters
@@ -296,9 +296,7 @@ class RecordingTrace:
 
         decisions: list[bool] = []
         for ctx in self.contexts:
-            predicate = (
-                None if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
-            )
+            predicate = None if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
             result = predicate(ctx) if predicate is not None else False
             spec = _normalize_capture_decision(result, ctx, False)
             if not isinstance(spec, CaptureSpec):
@@ -369,9 +367,7 @@ class Recording(CapturedRun):
     _records_built: bool = field(default=True, repr=False, compare=False)
     _recording_trace: RecordingTrace | None = field(default=None, repr=False, compare=False)
     _recording_state: Any | None = field(default=None, repr=False, compare=False)
-    _captured_run_cores: tuple["CapturedRunCore", ...] = field(
-        default=(), repr=False, compare=False
-    )
+    _captured_run_cores: tuple[CapturedRunCore, ...] = field(default=(), repr=False, compare=False)
     # Settled capture outcome stamped by the recorder settlement adapter
     # (torchlens/capture/outcome.py); ``outcome`` below derives conservatively
     # for unstamped legacy/recovered recordings.
@@ -443,7 +439,7 @@ class Recording(CapturedRun):
         return object.__getattribute__(self, name)
 
     @classmethod
-    def from_capture_events(cls: type["Recording"], session: Any) -> "Recording":
+    def from_capture_events(cls: type[Recording], session: Any) -> Recording:
         """Build a lazy Recording projection from a predicate capture session.
 
         Parameters
@@ -599,7 +595,7 @@ class Recording(CapturedRun):
         default_grad: bool | CaptureSpec | None = None,
         retain_graph: bool | None = None,
         create_graph: bool = False,
-    ) -> "Recording":
+    ) -> Recording:
         """Run ``loss.backward`` while capturing selected fastlog gradients.
 
         Parameters
@@ -716,7 +712,7 @@ class Recording(CapturedRun):
             f"n_grad_records={len(self.grad_records)})"
         )
 
-    def enrich(self, steps: list[str] | str) -> "Recording":
+    def enrich(self, steps: list[str] | str) -> Recording:
         """Return a new recording with requested incremental enrichments.
 
         Parameters
@@ -735,7 +731,7 @@ class Recording(CapturedRun):
 
         return enrich_recording(self, steps)
 
-    def to_trace(self) -> "Trace":
+    def to_trace(self) -> Trace:
         """Cook this recording's event stream into a full ``Trace``.
 
         Returns
@@ -804,8 +800,8 @@ class Recording(CapturedRun):
                 code="recording_multipass_not_convertible",
                 remedy="record one pass per Recording before converting",
             )
-        from ..data_classes.trace import Trace
         from ..capture.projectors import RecordingProjector
+        from ..data_classes.trace import Trace
         from .options import RecordingOptions
 
         projection = RecordingProjector().project(self._captured_run_cores)
@@ -884,7 +880,7 @@ class Recording(CapturedRun):
         )
         return trace
 
-    def _recover_halt_frontier(self) -> "tuple[str, torch.Tensor]":
+    def _recover_halt_frontier(self) -> tuple[str, torch.Tensor]:
         """Recover the frontier (output-parent label, tensor) for a halted recording.
 
         Mirrors ``_finalize_halted_trace``'s frontier recovery
@@ -922,9 +918,7 @@ class Recording(CapturedRun):
             return halt_label, payload_by_label_raw[halt_label]
 
         # Fallback: last captured op with a retained raw activation.
-        core_events = tuple(
-            event for core in self._captured_run_cores for event in core.events
-        )
+        core_events = tuple(event for core in self._captured_run_cores for event in core.events)
         for event in reversed(core_events):
             payload = payload_by_label_raw.get(event.label_raw)
             if payload is not None:
@@ -965,7 +959,7 @@ def _mark_recording_halted(recording: Recording, pass_index: int, reason: str) -
 
 
 def build_grad_record_context(
-    recording_state: "RecordingState",
+    recording_state: RecordingState,
     grad_fn_handle: Any,
     grad: torch.Tensor | None,
     *,

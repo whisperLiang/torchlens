@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import math
+import platform
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 from hashlib import sha256
-import json
-import math
-import platform
 from typing import Any, cast
 
 import numpy as np
 import torch
 
 from .. import __version__ as TORCHLENS_VERSION
-from . import TorchLensIOError
-from ..backends.registry import BackendRegistryError, get_backend_spec
 from .._runnable_state import runnable_tensor_byte_digest
-from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
+from ..backends.registry import BackendRegistryError, get_backend_spec
 from ..data_classes._state_adapter import state_items
 from ..errors import RunnablePreflightError
 from ..intervention.types import (
@@ -34,30 +32,27 @@ from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleInde
 from ..ir.container_registry import ModelSite, Role
 from ..runnable import (
     RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
-    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_CALL_RECIPE_VERSION,
+    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
     RUNNABLE_TLSPEC_SCHEMA_VERSION,
+    WITNESS_FAMILY_REGISTRY,
+    WITNESS_FAMILY_REGISTRY_VERSION,
+    WITNESS_GAP_REGISTRY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     AmbientExecutionContext,
     AutocastDeviceContext,
+    CallableRegistryEntry,
     CallControlObligation,
     CallExecutionContext,
-    CallableRegistryEntry,
     ControlDependencyEdge,
+    ControlWitness,
+    ControlWitnessKind,
     InputAttestationFingerprint,
     InputBoundarySite,
     InputBoundaryTensorSite,
-    ControlWitness,
-    ControlWitnessKind,
     InputSlotBinding,
-    WITNESS_GAP_REGISTRY,
-    WitnessCoverageGap,
-    WitnessGapKind,
-    control_dependency_site_label,
-    decode_input_site_position,
-    derived_witness_completeness,
     LiteralArgumentRef,
     LiteralAtom,
     LiteralAtomKind,
@@ -79,11 +74,8 @@ from ..runnable import (
     RunnableDiagnostic,
     RunnableErrorCode,
     RunnableRngProfile,
-    SparseRunDescriptor,
-    WITNESS_FAMILY_REGISTRY,
-    WITNESS_FAMILY_REGISTRY_VERSION,
-    encode_input_site_position,
     SlotByteDigest,
+    SparseRunDescriptor,
     StateByteDigest,
     StateSlotBinding,
     StateSlotRole,
@@ -91,7 +83,15 @@ from ..runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
     TensorUseSite,
+    WitnessCoverageGap,
+    WitnessGapKind,
+    control_dependency_site_label,
+    decode_input_site_position,
+    derived_witness_completeness,
+    encode_input_site_position,
 )
+from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
+from . import TorchLensIOError
 
 
 @dataclass(slots=True)
@@ -271,10 +271,14 @@ def _ambient_execution_context(
         return None
 
     def _optional_bool(name: str) -> bool | None:
+        """Read one optional boolean field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else bool(value)
 
     def _optional_str(name: str) -> str | None:
+        """Read one optional string field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else str(value)
 
@@ -1405,7 +1409,7 @@ def _add_persistent_buffer_slot_drafts(
             group = topology_groups.get(name)
             if isinstance(group, str):
                 names_by_group[group].append(name)
-        alias_by_name = {name: None for name in buffer_names}
+        alias_by_name = dict.fromkeys(buffer_names)
         for names in names_by_group.values():
             # Same convention as the live path: only groups with >=2 BUFFER members
             # (a param<->buffer identity pair is the alias-topology gates' domain).
@@ -2049,7 +2053,7 @@ def _match_parameter(
     path: tuple[str | int, ...],
     op: Any,
     candidates: Sequence[Any],
-    template_barcode: "str | None" = None,
+    template_barcode: str | None = None,
 ) -> Any | None:
     """Match a template tensor literal to one cooked named parameter.
 
@@ -2318,7 +2322,7 @@ def _build_control_witnesses(
     calls: Sequence[RunnableCallDescriptor],
     diagnostics: list[RunnableDiagnostic],
     *,
-    gap: "Callable[[WitnessGapKind, str], None]",
+    gap: Callable[[WitnessGapKind, str], None],
 ) -> tuple[
     list[ControlWitness],
     dict[str, list[CallControlObligation]],
@@ -2484,6 +2488,8 @@ def _collect_baked_literal_values(
     sequences: set[tuple[Any, ...]] = set()
 
     def visit(node: Any) -> None:
+        """Accumulate the literal footprints reachable from one literal-argument node."""
+
         if isinstance(node, LiteralAtom):
             if node.kind is LiteralAtomKind.INT and isinstance(node.value, int):
                 ints.add(int(node.value))
@@ -2912,7 +2918,7 @@ def _escape_witnesses(
     slot_drafts: Mapping[str, _SlotDraft],
     *,
     start_order: int,
-    gap: "Callable[[WitnessGapKind, str], None]",
+    gap: Callable[[WitnessGapKind, str], None],
 ) -> list[ControlWitness]:
     """Witness the SOURCE of every tensor->host escape in one exhaustive fail-closed pass.
 
@@ -3374,7 +3380,7 @@ def _input_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlW
     return witnesses
 
 
-def witness_family_of(site_label: str) -> "str | None":
+def witness_family_of(site_label: str) -> str | None:
     """Resolve one ``SHAPE_STRUCTURE_FACT`` site label to its registered family.
 
     Returns the ``WITNESS_FAMILY_REGISTRY`` family whose declared ``site_prefix``
@@ -3390,7 +3396,7 @@ def witness_family_of(site_label: str) -> "str | None":
     return None
 
 
-def witness_family_of_witness(witness: "ControlWitness") -> "str | None":
+def witness_family_of_witness(witness: ControlWitness) -> str | None:
     """Resolve ANY control witness to its registered family (r71 A).
 
     Direct-kind witnesses (scalar_bool / loop_predicate / conditional_arm_entry /
@@ -3404,8 +3410,8 @@ def witness_family_of_witness(witness: "ControlWitness") -> "str | None":
 
 
 def required_witness_family_members(
-    witnesses: "Sequence[ControlWitness]",
-) -> "dict[str, list[str]]":
+    witnesses: Sequence[ControlWitness],
+) -> dict[str, list[str]]:
     """Derive per-family member IDs from the emitted witness stream (r69 A).
 
     THE single member-ID authority: the producer builds the persisted
@@ -3485,7 +3491,7 @@ def required_witness_family_members(
 
 
 def _build_required_witness_inventory(
-    witnesses: "Sequence[ControlWitness]",
+    witnesses: Sequence[ControlWitness],
     slot_drafts: Mapping[str, _SlotDraft],
 ) -> RequiredWitnessInventory:
     """Author the redundant discharge MIRROR from the final witnesses + claims (r71 A).
@@ -3736,7 +3742,7 @@ explicit here."""
 
 def _input_metadata_witnesses(
     trace: Any,
-    input_boundary: "tuple[InputBoundarySite, ...]",
+    input_boundary: tuple[InputBoundarySite, ...],
     *,
     start_order: int,
 ) -> list[ControlWitness]:
@@ -4810,7 +4816,6 @@ from .runnable_load import (  # noqa: E402 - keep producer helpers grouped above
     parse_sparse_run_descriptor,
     preflight_sparse_run_descriptor,
 )
-
 
 __all__ = [
     "assert_sparse_core_has_no_tensor_payload",

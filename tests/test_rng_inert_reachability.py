@@ -50,8 +50,9 @@ import sys
 import threading
 import time
 import types
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -248,7 +249,7 @@ def test_generator_behind_inert_edge_is_swept_and_draw_flips_digest(kind: str) -
     snapshots = _sweep(model)
     holders = [holder for holder, _digest in snapshots]
     assert any(holder is gen for holder in holders), f"generator behind {kind} not swept"
-    before = dict((id(holder), digest) for holder, digest in snapshots)
+    before = {id(holder): digest for holder, digest in snapshots}
     # Draw on a plain non-hooked thread: no profile hook is installed here, so
     # only the digest can witness it -- exactly the pre-existing-thread axis.
     worker = threading.Thread(target=gen.random)
@@ -552,8 +553,8 @@ class _PreexistingWorker:
     """A worker thread started BEFORE the capture window (non-hooked)."""
 
     def __init__(self) -> None:
-        self._jobs: "queue.Queue[Any]" = queue.Queue()
-        self._results: "queue.Queue[Any]" = queue.Queue()
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._results: queue.Queue[Any] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -754,7 +755,7 @@ def test_sweep_independent_of_ambient_abc_cache_state(monkeypatch: Any) -> None:
     ambient_keep: list[Any] = []
     for i in range(400):
         attrs: dict[str, Any] = {
-            "payload": {"data": list(range(30)), "nested": {"x": [dict(a=1), {"y": (1, 2)}]}}
+            "payload": {"data": list(range(30)), "nested": {"x": [{"a": 1}, {"y": (1, 2)}]}}
         }
         if i % 40 == 0:
             ambient_gen = np.random.default_rng(9000 + i)
@@ -817,7 +818,7 @@ def test_ambient_graph_subclass_generator_draw_still_unverifiable(tmp_path: Path
         cls = type(
             f"_R56AmbientE2E{i}",
             (),
-            {"payload": {"data": list(range(20)), "nested": {"x": [dict(a=1)]}}},
+            {"payload": {"data": list(range(20)), "nested": {"x": [{"a": 1}]}}},
         )
         inst = cls()
         isinstance(inst, cabc.Mapping)
@@ -890,7 +891,7 @@ def test_wrapped_torch_op_model_attribute_bounded_under_large_ambient_graph(
         cls = type(
             f"_R57AmbientOp{i}",
             (),
-            {"payload": {"data": list(range(20)), "nested": {"x": [dict(a=1)]}}},
+            {"payload": {"data": list(range(20)), "nested": {"x": [{"a": 1}]}}},
         )
         inst = cls()
         isinstance(inst, cabc.Mapping)

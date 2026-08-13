@@ -17,10 +17,10 @@ from torchlens.runnable import (
     CallExecutionContext,
     InitializerPolicy,
     InputAttestationFingerprint,
-    RunReport,
     ReadinessReport,
     RunnableCallDescriptor,
     RunnableErrorCode,
+    RunReport,
     SparseRunDescriptor,
     StateSlotRole,
     WitnessCompleteness,
@@ -34,7 +34,7 @@ def test_frozen_runnable_schema_values() -> None:
     assert RUNNABLE_CALL_RECIPE_VERSION == "non_tensor_args_tensor_slots_context_and_obligations_v3"
     assert RUNNABLE_INITIALIZER_POLICY_VERSION == "torchlens_role_init_v2"
     assert RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION == "selected_activation_v2"
-    assert LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS == frozenset({"sparse_recorded_taken_path_v1"})
+    assert frozenset({"sparse_recorded_taken_path_v1"}) == LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS
     assert WitnessCompleteness.COMPLETE.value == "complete"
     assert RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY.value == "unsupported_backend_replay"
     assert RunnableErrorCode.NUMERIC_ATTESTATION_FAILED.value == "numeric_attestation_failed"

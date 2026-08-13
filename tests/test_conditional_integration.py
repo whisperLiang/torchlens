@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Sequence
 
 import pytest
 import torch
@@ -1335,8 +1335,12 @@ def test_nested_helper_same_name_model_distinguishes_helpers_by_scope() -> None:
 
     assert len(trace.conditional_records) == 2
     assert len({layer.terminal_conditional_id for layer in bool_layers}) == 2
-    assert list(relu_layer.conditional_branch_stack) == [(bool_layers[0].terminal_conditional_id, "then")]
-    assert list(tanh_layer.conditional_branch_stack) == [(bool_layers[1].terminal_conditional_id, "then")]
+    assert list(relu_layer.conditional_branch_stack) == [
+        (bool_layers[0].terminal_conditional_id, "then")
+    ]
+    assert list(tanh_layer.conditional_branch_stack) == [
+        (bool_layers[1].terminal_conditional_id, "then")
+    ]
 
 
 @pytest.mark.skipif(

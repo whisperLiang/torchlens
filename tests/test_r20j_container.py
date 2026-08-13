@@ -7,7 +7,6 @@ must reject malformed specs), N6 (most-derived registration dispatch), and N7
 
 from __future__ import annotations
 
-
 import pytest
 import torch
 
@@ -27,7 +26,6 @@ from torchlens.ir.container_registry import (
     Role,
     walk_container,
 )
-
 
 # ---------------------------------------------------------------------------
 # N4 -- tensor-key dict must NOT be blessed reconstructable (false-VERIFIED class)
@@ -249,13 +247,13 @@ def _register_same_body_at_two_sites() -> tuple[object, object, object]:
     spec = ContainerSpec(kind="dict", length=1, keys=("a",))
     site_early = FuncSite(func_call_id=1, position="out")
     site_late = FuncSite(func_call_id=2, position="out")
-    common = dict(
-        role=Role.CALL_OUTPUT,
-        phase=Phase.POST_CALL,
-        spec=spec,
-        leaf_occurrences=(),
-        reconstructable=True,
-    )
+    common = {
+        "role": Role.CALL_OUTPUT,
+        "phase": Phase.POST_CALL,
+        "spec": spec,
+        "leaf_occurrences": (),
+        "reconstructable": True,
+    }
     registry.register_snapshot(obj, site=site_early, observed_at_event_index=3, **common)
     record = registry.register_snapshot(obj, site=site_late, observed_at_event_index=99, **common)
     return record, site_early, site_late

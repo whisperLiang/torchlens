@@ -13,11 +13,9 @@ if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .invariants import (
+        METADATA_INVARIANT_CONTRACTS,
         MetadataInvariantContract,
         MetadataInvariantError,
-    )
-    from .invariants import (
-        METADATA_INVARIANT_CONTRACTS,
         _retained_orphan_layer_labels,
         _retained_orphan_op_labels,
     )
@@ -35,7 +33,7 @@ __all__ = (
 )
 
 
-def _check_distance_invariants(ml: "Trace") -> None:
+def _check_distance_invariants(ml: Trace) -> None:
     """Check O: distance and reachability invariants.
 
     Only runs when ``mark_layer_depths`` was enabled during logging.
@@ -132,7 +130,7 @@ def _check_distance_invariants(ml: "Trace") -> None:
             )
 
 
-def _op_follows_recorded_backward_trigger(ml: "Trace", layer: "Op") -> bool:
+def _op_follows_recorded_backward_trigger(ml: Trace, layer: Op) -> bool:
     """Return whether an op ran after a RECORDED mid-forward backward trigger.
 
     ``torch.autograd.grad`` / ``loss.backward()`` fired mid-forward produce
@@ -172,7 +170,7 @@ def _op_follows_recorded_backward_trigger(ml: "Trace", layer: "Op") -> bool:
     return step_index is not None and step_index > min(trigger_positions)
 
 
-def _consumed_unattributed_data_operand(layer: "Op") -> bool:
+def _consumed_unattributed_data_operand(layer: Op) -> bool:
     """Return whether the capture witness flagged a DATA-operand consumption.
 
     Parameters
@@ -193,7 +191,7 @@ def _consumed_unattributed_data_operand(layer: "Op") -> bool:
     return bool(tuple(getattr(layer, "unattributed_tensor_args", ()) or ()))
 
 
-def _check_graph_connectivity(ml: "Trace") -> None:
+def _check_graph_connectivity(ml: Trace) -> None:
     """Check P: graph connectivity invariants.
 
     Validates:
@@ -324,7 +322,7 @@ def _check_graph_connectivity(ml: "Trace") -> None:
         )
 
 
-def _check_module_containment_logic(ml: "Trace") -> None:
+def _check_module_containment_logic(ml: Trace) -> None:
     """Check Q: module containment logical consistency.
 
     Validates:
@@ -423,7 +421,7 @@ def _check_module_containment_logic(ml: "Trace") -> None:
             seen_addrs.add(addr)
 
 
-def _check_lookup_key_consistency(ml: "Trace") -> None:
+def _check_lookup_key_consistency(ml: Trace) -> None:
     """Check R: lookup key bidirectional consistency.
 
     Validates:
@@ -506,7 +504,7 @@ def _check_lookup_key_consistency(ml: "Trace") -> None:
 
 
 def _metadata_invariant_contracts_for_trace(
-    trace: "Trace",
+    trace: Trace,
 ) -> tuple[MetadataInvariantContract, ...]:
     """Return metadata invariant contracts applicable to ``trace``.
 
@@ -533,7 +531,7 @@ def _metadata_invariant_contracts_for_trace(
 def _metadata_invariant_contracts_for_backend(
     backend_family: Literal["torch", "non_torch"],
     *,
-    spec: "BackendSpec | None" = None,
+    spec: BackendSpec | None = None,
 ) -> tuple[MetadataInvariantContract, ...]:
     """Return ordered metadata invariant contracts for a backend family.
 
@@ -560,7 +558,7 @@ def _metadata_invariant_contracts_for_backend(
 def _metadata_invariant_applies(
     contract: MetadataInvariantContract,
     backend_family: Literal["torch", "non_torch"],
-    spec: "BackendSpec | None",
+    spec: BackendSpec | None,
 ) -> bool:
     """Return whether ``contract`` applies to a backend family and spec.
 

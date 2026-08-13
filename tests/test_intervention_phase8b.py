@@ -9,14 +9,13 @@ import pytest
 import torch
 
 import torchlens as tl
-from torchlens.io import suppress_mutate_warnings
-from torchlens.io import TraceState
 from torchlens.intervention.errors import (
     DirectActivationWriteWarning,
     EngineDispatchError,
     ModelMismatchError,
     MutateInPlaceWarning,
 )
+from torchlens.io import TraceState, suppress_mutate_warnings
 from torchlens.options import CaptureOptions, InterventionOptions
 
 
@@ -139,10 +138,9 @@ def test_mutate_warning_fires_once_and_can_be_suppressed() -> None:
     assert warnings_record == []
 
     session, _ = _capture()
-    with suppress_mutate_warnings():
-        with warnings.catch_warnings(record=True) as warnings_record:
-            warnings.simplefilter("always")
-            session.set(tl.func("relu"), torch.zeros(2, 3))
+    with suppress_mutate_warnings(), warnings.catch_warnings(record=True) as warnings_record:
+        warnings.simplefilter("always")
+        session.set(tl.func("relu"), torch.zeros(2, 3))
     assert warnings_record == []
 
     callable_session, _ = _capture()

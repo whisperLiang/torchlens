@@ -395,9 +395,7 @@ def test_preview_backends_stamp_at_return_boundary() -> None:
     """
 
     for backend in ("tf", "mlx", "tinygrad", "paddle", "jax"):
-        source = (TORCHLENS_DIR / "backends" / backend / "backend.py").read_text(
-            encoding="utf-8"
-        )
+        source = (TORCHLENS_DIR / "backends" / backend / "backend.py").read_text(encoding="utf-8")
         assert "stamp_backend_finalized(trace)" in source, backend
         for line in source.splitlines():
             if "stamp_backend_finalized(trace)" in line:

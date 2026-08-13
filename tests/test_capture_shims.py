@@ -45,5 +45,6 @@ def test_ir_event_shims_are_gone() -> None:
         ModuleEnterEvent,
         ModuleExitEvent,
     )
+
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("torchlens.ir._deprecated")

@@ -6,23 +6,22 @@ import random
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 import numpy as np
 
-from ..._trace_core.relation_views import freeze_trace_relation_views
-from ...capture.outcome import stamp_backend_finalized
 from ... import _state
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import (
     BackendName,
     BackendUnsupportedError,
     get_backend_spec,
     require_capability_implementation,
 )
-from ...fastlog._halt import HaltSignal
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -31,9 +30,9 @@ from ...data_classes.derived_grad import (
 )
 from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace
+from ...fastlog._halt import HaltSignal
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -43,18 +42,21 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
-from ...ir.predicate import RecordContext, _DEFERRED_VALUE
+from ...ir.op_record import amend_preview_output_parent_mark
+from ...ir.predicate import _DEFERRED_VALUE, RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...ir.workspaces import RawGraphWorkspace
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
-from .._finalize import attach_function_root_module, attach_object_module_logs
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus  # noqa: TC001
-from .._finalize import finalize_single_pass_trace
+from .._finalize import (
+    attach_function_root_module,
+    attach_object_module_logs,
+    finalize_single_pass_trace,
+)
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
-from .validation import MLXOpCapture, build_capture_template
 from .model_prep import (
     MLXModuleTree,
     cleanup_model_session,
@@ -63,6 +65,7 @@ from .model_prep import (
     prepare_model_session,
 )
 from .tensor_store import MLXTensorLabelStore
+from .validation import MLXOpCapture, build_capture_template
 from .wrappers import is_mlx_wrapped, mlx_tap_observer, unwrap_mlx, wrap_mlx
 
 
@@ -202,7 +205,7 @@ class _MLXIntermediateCandidate:
 class _MLXIntermediateTapObserver:
     """Observe wrapped MLX calls and inject custom-VJP identity taps."""
 
-    def __init__(self, backend: "MLXBackend", trace: Trace) -> None:
+    def __init__(self, backend: MLXBackend, trace: Trace) -> None:
         """Initialize a tap observer aligned to an existing MLX trace.
 
         Parameters
@@ -355,7 +358,7 @@ class _MLXBoundaryReplacementObserver:
 
     def __init__(
         self,
-        backend: "MLXBackend",
+        backend: MLXBackend,
         trace: Trace,
         target_signature: _MLXIntermediateSignature,
         replacement: Any,
@@ -578,6 +581,8 @@ def _find_mlx_compiled_attributes(
     seen: set[int] = set()
 
     def _scan_value(path: str, value: Any, depth: int) -> None:
+        """Record ``path`` when ``value`` (or a direct list/dict item) is the transform type."""
+
         if type(value) is transform_type:
             found.add(path)
             return
@@ -594,6 +599,13 @@ def _find_mlx_compiled_attributes(
                     found.add(f"{path}[{key!r}]")
 
     def _scan_module(prefix: str, module: object, depth: int) -> None:
+        """Recurse through one ``mlx.nn.Module``'s attribute and dict surfaces.
+
+        Both surfaces are scanned because ``mlx.nn.Module`` subclasses ``dict``:
+        children and arrays live in the dict items while plain Python attributes
+        land in ``__dict__``. Bounded by ``max_depth`` and an identity-seen set.
+        """
+
         if depth > max_depth or id(module) in seen:
             return
         seen.add(id(module))

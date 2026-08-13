@@ -13,10 +13,10 @@ from torch import nn
 
 pytest.importorskip("safetensors")
 
-from torchlens import load, trace as trace_fn, save
-from torchlens.io import rehydrate_nested
+from torchlens import load, save, trace as trace_fn
 from torchlens._io import BlobRef, TorchLensIOError
 from torchlens.data_classes.trace import Trace
+from torchlens.io import rehydrate_nested
 
 
 class _LazyIOModel(nn.Module):

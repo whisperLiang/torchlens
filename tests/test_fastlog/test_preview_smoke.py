@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import torch
 from pathlib import Path
+
+import torch
 from torch import nn
 
 import torchlens as tl

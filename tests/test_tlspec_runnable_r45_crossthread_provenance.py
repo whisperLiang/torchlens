@@ -42,7 +42,7 @@ from torchlens.backends.torch.completeness_witness import (
 from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _capture(model: nn.Module, x: Any, *, seed: int = 1) -> tl.Trace:
@@ -92,8 +92,8 @@ class _PreexistingWorker:
     def __init__(self) -> None:
         import queue
 
-        self.jobs: "queue.Queue[Any]" = queue.Queue()
-        self.results: "queue.Queue[Any]" = queue.Queue()
+        self.jobs: queue.Queue[Any] = queue.Queue()
+        self.results: queue.Queue[Any] = queue.Queue()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 

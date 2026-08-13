@@ -6,14 +6,11 @@ import warnings
 from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
 import torch
-from ._tl import (
-    mark_detached_saved_activation,
-)
-from ...utils.tensor_utils import (
-    get_memory_amount_from_metadata,
-    safe_copy,
-    safe_to,
+
+from ...capture.predicates import (
+    build_op_record_context,
 )
 from ...data_classes.op import (
     _dtype_or_none,
@@ -22,22 +19,27 @@ from ...data_classes.op import (
     apply_transform,
     validate_train_mode_transform_output,
 )
-from ...ir.op_record import amend_lookback_retention
-from ...ir.refs import TensorRef
-from ...ir.predicate import RetroactiveCaptureDecision
-from ...intervention.selectors import (
-    BaseSelector,
-)
 from ...fastlog._storage_resolver import _resolve_storage
-from ...capture.predicates import (
-    build_op_record_context,
-)
 from ...fastlog.exceptions import PredicateError
 from ...fastlog.types import (
     CaptureSpec,
     ModuleStackFrame,
     RecordContext,
     StorageIntent,
+)
+from ...intervention.selectors import (
+    BaseSelector,
+)
+from ...ir.op_record import amend_lookback_retention
+from ...ir.predicate import RetroactiveCaptureDecision
+from ...ir.refs import TensorRef
+from ...utils.tensor_utils import (
+    get_memory_amount_from_metadata,
+    safe_copy,
+    safe_to,
+)
+from ._tl import (
+    mark_detached_saved_activation,
 )
 
 if TYPE_CHECKING:

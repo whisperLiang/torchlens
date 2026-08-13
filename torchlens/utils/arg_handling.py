@@ -9,7 +9,7 @@ the ``list`` form expected by ``model(*input_args)``.
 import copy
 import inspect
 from collections import defaultdict
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -48,7 +48,7 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
-def copy_arg_tree(arg: Any, _in_progress: Optional[dict[int, Any]] = None) -> Any:
+def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
     Why not ``copy.deepcopy``?  Many third-party tensor wrappers hold
@@ -416,7 +416,7 @@ def safe_copy_input_tree(
     return copied_args, copied_kwargs, tuple(semantic_gaps)
 
 
-def _model_expects_single_arg(model: nn.Module) -> Optional[bool]:
+def _model_expects_single_arg(model: nn.Module) -> bool | None:
     """Check if the model's forward expects exactly 1 positional arg (excluding self).
 
     Used by :func:`normalize_input_args` to disambiguate whether a user-supplied

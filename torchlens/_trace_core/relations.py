@@ -10,7 +10,8 @@ occurrence metadata rides along every traversal.
 
 from __future__ import annotations
 
-from typing import Any, Iterator, NamedTuple
+from collections.abc import Iterator
+from typing import Any, NamedTuple
 
 import numpy as np
 

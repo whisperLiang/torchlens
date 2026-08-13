@@ -1,17 +1,11 @@
 """Autograd saved-tensor statistics and container snapshots."""
 
 from typing import TYPE_CHECKING, Any
+
 import torch
+
 from ... import _state as _st
 from ..._state import pause_logging
-from ._tl import (
-    get_tensor_label,
-)
-from .completeness_witness import internal_scalar_read
-from ...utils.tensor_utils import (
-    is_functorch_wrapped_tensor,
-)
-from ...utils.collections import ensure_iterable
 from ...ir.container import (
     ContainerSpec,
     OutputPathComponent,
@@ -23,6 +17,14 @@ from ...ir.container_registry import (
     Role,
     walk_container,
 )
+from ...utils.collections import ensure_iterable
+from ...utils.tensor_utils import (
+    is_functorch_wrapped_tensor,
+)
+from ._tl import (
+    get_tensor_label,
+)
+from .completeness_witness import internal_scalar_read
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace

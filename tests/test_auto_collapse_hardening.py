@@ -47,10 +47,15 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.visualization._render_edges import (
+    _collapsed_module_should_show_remainder,
+    _plan_separately_rendered_op_labels,
+    _run_fold_ellipsis_label,
+)
 from torchlens.visualization.auto_collapse import _make_run_fold, analyze_collapse
 from torchlens.visualization.collapse_optimizer import (
-    OptimizerWeights,
     _RESULT_CACHE,
+    OptimizerWeights,
     _child_segment_covered_ops,
     _child_segment_label,
     _condense_plan_with_child_segments,
@@ -72,11 +77,6 @@ from torchlens.visualization.collapse_plan import (
     RawOp,
     RenderContext,
     RepeatFold,
-)
-from torchlens.visualization._render_edges import (
-    _collapsed_module_should_show_remainder,
-    _plan_separately_rendered_op_labels,
-    _run_fold_ellipsis_label,
 )
 
 

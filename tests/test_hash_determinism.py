@@ -16,7 +16,6 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.utils.hashing import compute_graph_shape_hash
 
-
 HashPair = tuple[str, str]
 ModelCase = tuple[str, Callable[[], tuple[nn.Module, Any]]]
 

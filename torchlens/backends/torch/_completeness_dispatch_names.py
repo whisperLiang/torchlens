@@ -1,11 +1,14 @@
 """Dispatch operator naming and callsite helpers."""
 
 from __future__ import annotations
+
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from ._tl import (
     get_tensor_label,
@@ -17,13 +20,10 @@ from .escape_detection import (
     ExpectedOriginalToken,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
         _BUFFER_STATE_VIEW_OPERATORS,
         _DISPATCH_TENSOR_ORIGINS,
-        _DispatchCallsite,
         _FRAMEWORK_FILENAME_VERDICTS,
         _HOST_ESCAPE_BOOL_SOURCE_LABELS,
         _HOST_ESCAPE_SOURCE_LABELS,
@@ -36,8 +36,9 @@ if TYPE_CHECKING:
         _ORIGIN_STATE_PREFIX,
         _ORIGIN_UNINIT,
         _ORIGIN_UNKNOWN,
-        _TORCHLENS_ROOT,
         _TORCH_ROOT,
+        _TORCHLENS_ROOT,
+        _DispatchCallsite,
         _escape_source_is_torchlens_internal,
         _operand_origins,
         _param_derived_addresses,
@@ -374,7 +375,7 @@ def _is_mutating_operator(func: Any) -> bool:
 def _is_buffer_state_view_dispatch(
     trace: Any,
     func: Any,
-    owner: "ExpectedOriginalToken | None",
+    owner: ExpectedOriginalToken | None,
     mutates: bool,
     args: tuple[Any, ...],
 ) -> bool:

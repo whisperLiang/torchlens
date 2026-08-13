@@ -197,9 +197,7 @@ def test_every_parent_edge_contributes_to_hash_input() -> None:
         )
         original = tuple(layer.parents)
         try:
-            layer.parents = (
-                original[:position] + (replacement,) + original[position + 1 :]
-            )
+            layer.parents = original[:position] + (replacement,) + original[position + 1 :]
             assert compute_graph_shape_hash(trace) != baseline, (
                 f"rewiring parent edge {layer.label!r}[{position}] "
                 f"({parent!r} -> {replacement!r}) did not change the graph-shape hash"

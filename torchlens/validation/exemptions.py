@@ -29,9 +29,10 @@ casting, special-value args like all-zeros making perturbation irrelevant).
 # is proved from runtime evidence and a negative test shows it cannot mask the
 # unintended value-sensitive case.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any, Callable, Dict, List, Set, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
 # These funcs produce nondeterministic output (e.g. uninitialized memory),
 # so even forward replay would fail.
 # ---------------------------------------------------------------------------
-SKIP_VALIDATION_ENTIRELY: Dict[str, str] = {
+SKIP_VALIDATION_ENTIRELY: dict[str, str] = {
     "empty_like": "returns uninitialized memory by construction; saved bytes are not replayable",
     "new": "torch.Tensor.new() returns uninitialized memory by construction",
     "new_empty": "torch.Tensor.new_empty() returns uninitialized memory by construction",
@@ -74,7 +75,7 @@ SKIP_VALIDATION_ENTIRELY: Dict[str, str] = {
 # ``STRUCTURAL_ARG_POSITIONS`` so their genuine value edges stay
 # perturbation-tested.
 # ---------------------------------------------------------------------------
-SKIP_PERTURBATION_ENTIRELY: Dict[str, str] = {
+SKIP_PERTURBATION_ENTIRELY: dict[str, str] = {
     "new_zeros": "output is all zeros by construction; no parent value reaches it",
     "new_ones": "output is all ones by construction; no parent value reaches it",
     "zero_": "in-place zero fill; the destination's prior values are discarded",
@@ -109,7 +110,7 @@ SKIP_PERTURBATION_ENTIRELY: Dict[str, str] = {
 # Registry 3: Specific arg positions that are structural (not value-sensitive).
 # When the perturbed layer's tensor matches saved_args[pos], skip perturbation.
 # ---------------------------------------------------------------------------
-STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
+STRUCTURAL_ARG_POSITIONS: dict[str, set[int]] = {
     "copy_": {0},  # destination values are overwritten; source values determine output
     # Zipped foreach spelling of ``copy_`` (r29 F5): each destination member is
     # TOTALLY overwritten by its zipped source member, so the destination list
@@ -148,7 +149,7 @@ STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
 }
 
 
-STRUCTURAL_ARG_KWARG_ALIASES: Dict[str, Dict[int, Set[str]]] = {
+STRUCTURAL_ARG_KWARG_ALIASES: dict[str, dict[int, set[str]]] = {
     "_pack_padded_sequence": {1: {"lengths"}},
     "_pad_packed_sequence": {1: {"lengths"}},
     "type_as": {1: {"tensor", "other"}},
@@ -199,7 +200,7 @@ _INDEX_DOMAIN_INT_DTYPES = frozenset(
 )
 
 # func_name -> (positional index-arg slot, kwarg spellings of the index arg).
-_INDEX_DOMAIN_ARG_SPECS: Dict[str, tuple[int, frozenset[str]]] = {
+_INDEX_DOMAIN_ARG_SPECS: dict[str, tuple[int, frozenset[str]]] = {
     # aten spelling: embedding(weight, indices, ...) -- domain = weight rows.
     "embedding": (1, frozenset({"indices", "input"})),
     # gather/index_select/scatter*(input, dim, index, ...) -- domain =
@@ -359,7 +360,7 @@ def index_domain_rotation_values(
     return torch.where(in_domain, rotated, parent_values)
 
 
-def _check_index_domain_degenerate(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_index_domain_degenerate(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt an index parent ONLY when no in-domain perturbation exists.
 
     A domain of ``n <= 1`` valid values, or a saved index tensor with zero
@@ -411,7 +412,7 @@ def _check_index_domain_degenerate(self: "Trace", layer: Op, layers_to_perturb: 
 # ---------------------------------------------------------------------------
 
 
-def _check_getitem_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_getitem_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt ``__getitem__`` only when the perturbed parent is an index arg."""
 
     del self
@@ -424,7 +425,7 @@ def _check_getitem_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]
 # uninitialized buffer" idiom chains these into ``empty``/``empty_like``/
 # ``new_empty`` allocations. Every entry writes its destination at args[0]; the
 # canonicalized TorchLens spellings (no underscore) are included alongside.
-INPLACE_DESTINATION_WRITE_FUNCS: Set[str] = {
+INPLACE_DESTINATION_WRITE_FUNCS: set[str] = {
     "__setitem__",
     "index_copy_",
     "indexcopy_",
@@ -477,7 +478,7 @@ def _uninitialized_value_origin(op: Any, source_trace: Any, depth: int = 0) -> b
 
 def _perturbed_parent_is_uninitialized_setitem_dest(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Return whether a perturbed in-place-write parent is an uninitialized dest.
 
@@ -541,7 +542,7 @@ def _perturbed_parent_is_uninitialized_setitem_dest(
     return True
 
 
-def _check_setitem_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_setitem_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt ``__setitem__`` for structural masks or proven full overwrites."""
     perturbed_tensor = self[layers_to_perturb[0]].out
     args = layer.saved_args
@@ -567,12 +568,10 @@ def _check_setitem_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]
 
     # Case 3: perturbed layer is the destination, but the indexed destination
     # slice is fully overwritten by the replacement value.
-    if _perturbed_parent_is_arg_position(
-        layer, layers_to_perturb, 0
-    ) and _setitem_destination_slice_is_fully_overwritten(perturbed_tensor, args):
-        return True
-
-    return False
+    return bool(
+        _perturbed_parent_is_arg_position(layer, layers_to_perturb, 0)
+        and _setitem_destination_slice_is_fully_overwritten(perturbed_tensor, args)
+    )
 
 
 def _setitem_destination_slice_is_fully_overwritten(
@@ -708,7 +707,7 @@ def _tensor_is_integer_index(tensor: torch.Tensor) -> bool:
     return not tensor.dtype.is_floating_point and not tensor.dtype.is_complex
 
 
-def _check_index_put_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_index_put_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt ``index_put``/``index_put_`` when the destination is fully overwritten.
 
     The exact analogue of :func:`_check_setitem_exempt` Case 4 for the
@@ -735,7 +734,7 @@ def _check_index_put_exempt(self: "Trace", layer: Op, layers_to_perturb: List[st
 
 def _perturbed_parent_is_arg_position(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     position: int,
 ) -> bool:
     """Return whether the perturbed parent occupies positional arg ``position``.
@@ -751,7 +750,7 @@ def _perturbed_parent_is_arg_position(
     return arg_positions.get(position) == layers_to_perturb[0]
 
 
-def _perturbed_parent_arg_positions(layer: Op, layers_to_perturb: List[str]) -> set[int]:
+def _perturbed_parent_arg_positions(layer: Op, layers_to_perturb: list[str]) -> set[int]:
     """Return positional arg slots occupied by the perturbed parent.
 
     Parameters
@@ -877,7 +876,7 @@ def _index_put_indices_are_unique(index: tuple[Any, ...]) -> bool:
 
 def _perturbed_parent_occupies_arg_slot(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     slot: int,
 ) -> bool:
     """Return whether the perturbed parent sits anywhere inside positional ``slot``.
@@ -919,7 +918,7 @@ def _perturbed_parent_occupies_arg_slot(
     return False
 
 
-def _check_lstm_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_lstm_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt lstm when the perturbed layer is a hidden/cell state arg.
 
     Keyed on ARGUMENT POSITION, never on ``torch.equal`` against the hidden
@@ -930,7 +929,7 @@ def _check_lstm_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -
     return _perturbed_parent_occupies_arg_slot(layer, layers_to_perturb, 1)
 
 
-def _check_interpolate_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_interpolate_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt interpolate when the perturbed layer is the scale_factor arg.
 
     Keyed on ARGUMENT POSITION, never on ``torch.equal`` against the saved
@@ -1027,7 +1026,7 @@ def _scatter_index_fully_overwrites_dim(dest: torch.Tensor, dim: int, index: tor
     return True
 
 
-def _check_scatter_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_scatter_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt scatter destination perturbation when scatter fully overwrites it."""
 
     if not _perturbed_parent_is_arg_position(layer, layers_to_perturb, 0):
@@ -1082,12 +1081,10 @@ def _check_one_arg_where_index_exempt(layer: Op) -> bool:
     saved_kwargs = getattr(layer, "saved_kwargs", None) or {}
     if len(saved_args) == 1 and saved_kwargs == {}:
         return True
-    if len(saved_args) == 0 and set(saved_kwargs) == {"condition"}:
-        return True
-    return False
+    return bool(len(saved_args) == 0 and set(saved_kwargs) == {"condition"})
 
 
-def _check_where_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_where_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt ``where`` parents only when saved value semantics prove irrelevance.
 
     The condition parent is irrelevant when the saved true/false branches are
@@ -1266,7 +1263,7 @@ def _masked_fill_input_equals_value_everywhere(
         return False
 
 
-def _check_masked_fill_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_masked_fill_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt ``masked_fill`` parents only when saved values prove irrelevance.
 
     ``masked_fill(input, mask, value)`` is equivalent to
@@ -1309,7 +1306,7 @@ def _check_masked_fill_exempt(self: "Trace", layer: Op, layers_to_perturb: List[
     return False
 
 
-def _check_norm_running_stat_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+def _check_norm_running_stat_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]) -> bool:
     """Exempt normalization running-stat update parents in training mode.
 
     Parameters
@@ -1341,7 +1338,7 @@ def _check_norm_running_stat_exempt(self: "Trace", layer: Op, layers_to_perturb:
 def _check_scatter_or_index_domain_exempt(
     self: "Trace",
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Exempt scatter for a fully-overwritten destination or a degenerate index domain."""
 
@@ -1353,7 +1350,7 @@ def _check_scatter_or_index_domain_exempt(
 # ---------------------------------------------------------------------------
 # Registry 4: Custom exemption checks keyed by func name.
 # ---------------------------------------------------------------------------
-CUSTOM_EXEMPTION_CHECKS: Dict[str, Callable[["Trace", Op, List[str]], bool]] = {
+CUSTOM_EXEMPTION_CHECKS: dict[str, Callable[["Trace", Op, list[str]], bool]] = {
     "__getitem__": _check_getitem_exempt,
     "__setitem__": _check_setitem_exempt,
     "index_put": _check_index_put_exempt,
@@ -1386,8 +1383,8 @@ CUSTOM_EXEMPTION_CHECKS: Dict[str, Callable[["Trace", Op, List[str]], bool]] = {
 def perturbed_layer_at_structural_position(
     self: "Trace",
     layer: Op,
-    layers_to_perturb: List[str],
-    exempt_positions: Set[int],
+    layers_to_perturb: list[str],
+    exempt_positions: set[int],
 ) -> bool:
     """Check if the perturbed layer occupies a structural arg position.
 
@@ -1426,7 +1423,7 @@ def _binary_extrema_nonperturbed_arg_dominates(
     func_name: str,
     args: tuple[Any, ...],
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Return whether a binary extrema output ignores the perturbed operand.
 
@@ -1480,7 +1477,7 @@ def _binary_extrema_nonperturbed_arg_dominates(
 def posthoc_perturb_check(
     self: "Trace",
     layer_to_validate_parents_for: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     verbose: bool = False,
 ) -> PosthocPerturbDecision:
     """Post-hoc exemption check: called when perturbation did NOT change the output.
@@ -1551,7 +1548,7 @@ def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
 
 def _perturbed_parents_only_occupy_template_slot(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Return whether EVERY perturbed parent occupies only the template slot.
 
@@ -1599,7 +1596,7 @@ def _perturbed_parents_only_occupy_template_slot(
 def _posthoc_structural_output_decision(
     layer: Op,
     args: tuple[Any, ...],
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> PosthocPerturbDecision:
     """Return posthoc decisions for structural output-template operations.
 
@@ -1809,7 +1806,7 @@ def _integer_cast_quantization_applies(layer: Op, args: tuple[Any, ...]) -> bool
 
 def _posthoc_overwrite_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return posthoc decisions for overwrite-style destination parents.
@@ -1851,7 +1848,7 @@ def _posthoc_overwrite_decision(
 
 def _posthoc_value_proof_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return explicit value-proof decisions that are not generic probes.
@@ -1974,7 +1971,7 @@ def _tensor_constant_along_dim(tensor: torch.Tensor, dim: int) -> bool:
 
 def _index_domain_value_irrelevance_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for an index parent that provably cannot matter.
@@ -2107,7 +2104,7 @@ _MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES = frozenset(
 
 def _multiplicative_zero_annihilator_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for multiplication by a saved zero operand.
@@ -2151,7 +2148,7 @@ def _multiplicative_zero_annihilator_decision(
 
 def _locally_constant_nan_multiplication_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for multiplication by a saved NaN operand.
@@ -2199,7 +2196,7 @@ def _locally_constant_nan_multiplication_decision(
 
 def _matmul_zero_annihilator_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for matmul by a saved zero operand.
@@ -2244,7 +2241,7 @@ def _matmul_zero_annihilator_decision(
 
 def _linear_zero_weight_input_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for a linear input under all-zero weights.
@@ -2282,7 +2279,7 @@ def _linear_zero_weight_input_decision(
 
 def _conv_zero_weight_input_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for convolution input under all-zero kernels.
@@ -2320,7 +2317,7 @@ def _conv_zero_weight_input_decision(
 
 def _locally_constant_nonfinite_addition_decision(
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     args: tuple[Any, ...],
 ) -> PosthocPerturbDecision:
     """Return a proof decision for finite addends swamped by saved non-finites.

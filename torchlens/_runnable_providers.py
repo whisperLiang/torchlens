@@ -1,10 +1,13 @@
 """Public provider entry points and run finalization."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import torch
+
 from . import _state
 from ._runnable_state import (
     RunResourceCeiling,
@@ -21,16 +24,14 @@ from .runnable import (
     NumericAttestationStatus,
     PathFaithfulness,
     ReadinessReport,
-    RunResult,
     RunnableDiagnostic,
     RunnableErrorCode,
+    RunResult,
     SparseRunDescriptor,
     StateSource,
     derived_witness_completeness,
     mark_trace_path_status,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

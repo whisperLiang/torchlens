@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 from unittest import mock
 
 import pytest
@@ -23,7 +23,6 @@ from torchlens.validation.invariants import (
     METADATA_INVARIANT_CONTRACTS,
     check_metadata_invariants,
 )
-
 
 _PACK: dict[str, object] | None = None
 

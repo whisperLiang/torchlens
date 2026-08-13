@@ -1,9 +1,12 @@
 """Output reconstruction and post-execution contracts."""
 
 from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from .errors import (
     RunPreconditionError,
 )
@@ -17,8 +20,6 @@ from .runnable import (
     TensorSlotRole,
     WitnessGapKind,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
@@ -239,7 +240,7 @@ def _post_execution_contract_checks(
     # it at most once per transaction (at the FIRST input-structure witness, so the
     # inventory belt still raises at exactly the point the per-witness computation
     # did) instead of rescanning and re-decoding every witness per witness.
-    input_structure_positions: "set[Any] | None" = None
+    input_structure_positions: set[Any] | None = None
     for call in descriptor.calls:
         missing = tuple(slot_id for slot_id in call.output_slot_ids if slot_id not in slot_values)
         checks.append(
@@ -368,7 +369,7 @@ def _conditional_arm_check(witness: ControlWitness, fork: Any) -> ContractCheck:
     )
 
 
-def _input_structure_positions(descriptor: SparseRunDescriptor) -> "set[Any]":
+def _input_structure_positions(descriptor: SparseRunDescriptor) -> set[Any]:
     """Return the required input-site set for structure-check site selection (r69 A).
 
     Consumes the parse-validated descriptor-native inventory -- NEVER the surviving
@@ -401,7 +402,7 @@ def _input_structure_positions(descriptor: SparseRunDescriptor) -> "set[Any]":
 
 
 def _input_structure_witness_check(
-    witness: ControlWitness, *, inputs: Any, all_positions: "set[Any]"
+    witness: ControlWitness, *, inputs: Any, all_positions: set[Any]
 ) -> ContractCheck:
     """Compare one persisted input-boundary structure fact with the runtime site (r67 C2).
 

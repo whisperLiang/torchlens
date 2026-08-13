@@ -84,7 +84,7 @@ def _iter_op_cell_func_call_locations(store: Any, layout: Any) -> Any:
                     yield item
 
 
-def rehydrate_trace_core(trace: "Trace") -> bool:
+def rehydrate_trace_core(trace: Trace) -> bool:
     """Adopt a coreless trace's detached records into a fresh sealed core.
 
     Returns ``True`` when a core was built and sealed, ``False`` when the
@@ -151,9 +151,7 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
                 continue
             records_by_kind.setdefault(kind, {}).setdefault(id(record), record)
         for record in _iter_op_cell_func_call_locations(store, _OP_STORE_LAYOUT):
-            records_by_kind.setdefault("func_call_location", {}).setdefault(
-                id(record), record
-            )
+            records_by_kind.setdefault("func_call_location", {}).setdefault(id(record), record)
         for kind, records in records_by_kind.items():
             adopt_records(core, kind, records.values())
 
@@ -170,9 +168,7 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
         for records in records_by_kind.values():
             for record in records.values():
                 record_store = record.__dict__.get(CORE_KEY)
-                if record_store is not None and not isinstance(
-                    record_store, DetachedOpStore
-                ):
+                if record_store is not None and not isinstance(record_store, DetachedOpStore):
                     detach_record(record)
         trace.__dict__.pop("_trace_core", None)
         return False

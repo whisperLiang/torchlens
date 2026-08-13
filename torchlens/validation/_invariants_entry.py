@@ -1,11 +1,12 @@
 """Invariant dispatch and backend-neutral identity checks."""
 
 from __future__ import annotations
-from collections.abc import Mapping
-from collections import defaultdict
-from typing import TYPE_CHECKING
-from .status import has_importer_region_provenance, is_region_replay_annotation
 
+from collections import defaultdict
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
+
+from .status import has_importer_region_provenance, is_region_replay_annotation
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -13,8 +14,6 @@ if TYPE_CHECKING:
     from .invariants import (
         InvariantResult,
         MetadataInvariantError,
-    )
-    from .invariants import (
         _check_module_containment_logic,
         _check_module_hierarchy,
         _check_module_layer_containment,
@@ -42,7 +41,7 @@ __all__ = (
 )
 
 
-def check_metadata_invariants(trace: "Trace") -> bool:
+def check_metadata_invariants(trace: Trace) -> bool:
     """Run all metadata invariant checks on a completed ``Trace``.
 
     Checks run in dependency order: Phase 1 structural checks first, then
@@ -64,7 +63,7 @@ def check_metadata_invariants(trace: "Trace") -> bool:
     return True
 
 
-def _check_receptive_field_metadata_invariants(trace: "Trace") -> None:
+def _check_receptive_field_metadata_invariants(trace: Trace) -> None:
     """Check autograd-free receptive-field descriptor and box invariants.
 
     Parameters
@@ -87,7 +86,7 @@ def _check_receptive_field_metadata_invariants(trace: "Trace") -> None:
         raise MetadataInvariantError("receptive_field_metadata", str(exc)) from exc
 
 
-def _check_backend_neutral_module_mode_invariants(trace: "Trace") -> None:
+def _check_backend_neutral_module_mode_invariants(trace: Trace) -> None:
     """Run module invariants appropriate to the trace's module identity mode.
 
     Parameters
@@ -112,7 +111,7 @@ def _check_backend_neutral_module_mode_invariants(trace: "Trace") -> None:
     _check_module_containment_logic(trace)  # Q
 
 
-def _check_region_replay_provenance(trace: "Trace") -> None:
+def _check_region_replay_provenance(trace: Trace) -> None:
     """Check region replay annotations have importer-owned provenance.
 
     Parameters
@@ -146,7 +145,7 @@ def _check_region_replay_provenance(trace: "Trace") -> None:
         )
 
 
-def _check_function_root_module_invariants(trace: "Trace") -> None:
+def _check_function_root_module_invariants(trace: Trace) -> None:
     """Check minimal module metadata required for ``function_root`` traces.
 
     Parameters
@@ -214,7 +213,7 @@ def _check_function_root_module_invariants(trace: "Trace") -> None:
             )
 
 
-def _check_compute_op_module_attribution(trace: "Trace") -> None:
+def _check_compute_op_module_attribution(trace: Trace) -> None:
     """Check compute ops resolve to a containing module in non-root modes.
 
     Parameters
@@ -259,7 +258,7 @@ def _check_compute_op_module_attribution(trace: "Trace") -> None:
             )
 
 
-def _compute_ops(trace: "Trace") -> list["Op"]:
+def _compute_ops(trace: Trace) -> list[Op]:
     """Return non-bookkeeping compute ops from ``trace``.
 
     Parameters
@@ -280,7 +279,7 @@ def _compute_ops(trace: "Trace") -> list["Op"]:
     ]
 
 
-def _module_claims(layer: "Op") -> list[str]:
+def _module_claims(layer: Op) -> list[str]:
     """Return module/module-call attribution claims from an op.
 
     Parameters
@@ -333,7 +332,7 @@ def _module_claim_address(claim: str) -> str | None:
     return claim.rsplit(":", 1)[0]
 
 
-def _check_backend_identity_invariants(trace: "Trace") -> None:
+def _check_backend_identity_invariants(trace: Trace) -> None:
     """Check backend identity and declared mode fields.
 
     Precondition contract: every completed trace, including torch traces, must
@@ -384,7 +383,7 @@ def _check_backend_identity_invariants(trace: "Trace") -> None:
         )
 
 
-def _check_non_torch_backward_inert(trace: "Trace") -> None:
+def _check_non_torch_backward_inert(trace: Trace) -> None:
     """Check that non-torch traces do not fake true backward graph metadata.
 
     Parameters
@@ -416,7 +415,7 @@ def _check_non_torch_backward_inert(trace: "Trace") -> None:
         raise MetadataInvariantError(name, "non-torch traces must have num_backward_passes=0")
 
 
-def _check_backend_neutral_accessor_refs(trace: "Trace") -> None:
+def _check_backend_neutral_accessor_refs(trace: Trace) -> None:
     """Check structural backend-neutral dtype/device/address resolver fields.
 
     Precondition contract: Op, Layer, and Param records may carry neutral mirror
@@ -492,7 +491,7 @@ def _record_has_backend_neutral_accessor_metadata(record: object) -> bool:
     )
 
 
-def check_func_call_id_invariant(trace: "Trace") -> InvariantResult:
+def check_func_call_id_invariant(trace: Trace) -> InvariantResult:
     """Invariant S: func_call_id consistency.
 
     Precondition contract: torch exhaustive and predicate captures populate
@@ -518,7 +517,7 @@ def check_func_call_id_invariant(trace: "Trace") -> InvariantResult:
     """
 
     name = "func_call_id_consistency"
-    groups: dict[int, list["Op"]] = defaultdict(list)
+    groups: dict[int, list[Op]] = defaultdict(list)
     for layer in trace.layer_list:
         if _is_func_call_id_exempt(layer):
             continue

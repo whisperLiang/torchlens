@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import importlib
 import random
@@ -11,6 +9,8 @@ import statistics
 import tempfile
 import time
 import tracemalloc
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -389,9 +389,7 @@ def _snapshot_events(journal: Any) -> list[dict[str, Any]]:
 
     handles = getattr(journal, "grad_fn_handles_by_label_raw", {})
     return [
-        _project_event(
-            op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw))
-        )
+        _project_event(op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw)))
         for event in journal.op_events
         if event.kind == "op"
     ]

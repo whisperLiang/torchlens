@@ -13,19 +13,10 @@ import torch.nn as nn
 
 from torchlens import trace as trace_fn
 from torchlens.backends.torch._tl import get_tensor_label, set_tensor_label
-from torchlens.utils.tensor_utils import (
-    get_memory_amount,
-    get_memory_amount_from_metadata,
-    print_override,
-    safe_copy,
-    safe_to,
-)
-from torchlens.utils.arg_handling import _safe_copy_arg
 
 # ---------------------------------------------------------------------------
 # FIELD_ORDER sync tests
 # ---------------------------------------------------------------------------
-
 from torchlens.constants import (
     BUFFER_LOG_FIELD_ORDER,
     FUNC_CALL_LOCATION_FIELD_ORDER,
@@ -34,6 +25,14 @@ from torchlens.constants import (
     MODULE_LOG_FIELD_ORDER,
     MODULE_PASS_LOG_FIELD_ORDER,
     PARAM_LOG_FIELD_ORDER,
+)
+from torchlens.utils.arg_handling import _safe_copy_arg
+from torchlens.utils.tensor_utils import (
+    get_memory_amount,
+    get_memory_amount_from_metadata,
+    print_override,
+    safe_copy,
+    safe_to,
 )
 
 
@@ -121,10 +120,7 @@ class TestFieldOrderSync:
             "measure_python_peak_memory",
             "save_budget",
             "distributed_witness",
-        }, (
-            "Trace public fields classified as non-user-facing changed: "
-            f"{non_user_facing}"
-        )
+        }, f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall
@@ -167,7 +163,7 @@ class TestConstantsCrawl:
         assert len(OVERRIDABLE_FUNCS) > 100
 
     def test_orig_torch_funcs_includes_ignored(self):
-        from torchlens.constants import ORIG_TORCH_FUNCS, IGNORED_FUNCS
+        from torchlens.constants import IGNORED_FUNCS, ORIG_TORCH_FUNCS
 
         ignored_set = set(IGNORED_FUNCS)
         orig_set = set(ORIG_TORCH_FUNCS)

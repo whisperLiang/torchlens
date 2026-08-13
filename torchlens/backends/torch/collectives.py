@@ -31,13 +31,14 @@ the OUTER user-level call is the correlating boundary (design v5, 1.2).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import partial, wraps
 import hashlib
 import inspect
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial, wraps
+from typing import Any
 
 import torch
 
@@ -101,8 +102,8 @@ class CollectiveSite:
     attr: str
     kind: str
     func_name: str
-    inputs: Callable[[dict[str, Any], "_RankRole"], list[torch.Tensor]]
-    outputs: Callable[[dict[str, Any], "_RankRole"], list[torch.Tensor]]
+    inputs: Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]
+    outputs: Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]
     p2p: str | None = None
     has_reduce_op: bool = False
     tensorless: bool = False
@@ -117,9 +118,9 @@ class _RankRole:
 
     @property
     def is_root(self) -> bool:
-        return self.root_global_rank is not None and (
-            self.my_global_rank == self.root_global_rank
-        )
+        """Whether this rank is the collective's root (``False`` for rootless calls)."""
+
+        return self.root_global_rank is not None and (self.my_global_rank == self.root_global_rank)
 
 
 def _tensors(value: Any) -> list[torch.Tensor]:
@@ -133,31 +134,73 @@ def _tensors(value: Any) -> list[torch.Tensor]:
 
 
 def _arg(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on every rank."""
+
     return lambda bound, role: _tensors(bound.get(name))
 
 
 def _arg_if_root(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on the root rank only."""
+
     return lambda bound, role: _tensors(bound.get(name)) if role.is_root else []
 
 
 def _arg_if_not_root(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on non-root ranks only."""
+
     return lambda bound, role: [] if role.is_root else _tensors(bound.get(name))
 
 
 def _nothing(bound: dict[str, Any], role: _RankRole) -> list[torch.Tensor]:
+    """Role extractor for a slot that never carries tensors on any rank."""
+
     return []
 
 
 COLLECTIVE_SITES: tuple[CollectiveSite, ...] = (
-    CollectiveSite("all_reduce", "all_reduce", "allreduce", _arg("tensor"), _arg("tensor"), has_reduce_op=True),
+    CollectiveSite(
+        "all_reduce", "all_reduce", "allreduce", _arg("tensor"), _arg("tensor"), has_reduce_op=True
+    ),
     CollectiveSite("all_gather", "all_gather", "allgather", _arg("tensor"), _arg("tensor_list")),
-    CollectiveSite("all_gather_into_tensor", "all_gather_into_tensor", "allgatherintotensor", _arg("input_tensor"), _arg("output_tensor")),
-    CollectiveSite("reduce_scatter", "reduce_scatter", "reducescatter", _arg("input_list"), _arg("output"), has_reduce_op=True),
-    CollectiveSite("reduce_scatter_tensor", "reduce_scatter_tensor", "reducescattertensor", _arg("input"), _arg("output"), has_reduce_op=True),
-    CollectiveSite("broadcast", "broadcast", "broadcast", _arg("tensor"), _arg_if_not_root("tensor")),
-    CollectiveSite("reduce", "reduce", "reduce", _arg("tensor"), _arg_if_root("tensor"), has_reduce_op=True),
-    CollectiveSite("all_to_all", "all_to_all", "alltoall", _arg("input_tensor_list"), _arg("output_tensor_list")),
-    CollectiveSite("all_to_all_single", "all_to_all_single", "alltoallsingle", _arg("input"), _arg("output")),
+    CollectiveSite(
+        "all_gather_into_tensor",
+        "all_gather_into_tensor",
+        "allgatherintotensor",
+        _arg("input_tensor"),
+        _arg("output_tensor"),
+    ),
+    CollectiveSite(
+        "reduce_scatter",
+        "reduce_scatter",
+        "reducescatter",
+        _arg("input_list"),
+        _arg("output"),
+        has_reduce_op=True,
+    ),
+    CollectiveSite(
+        "reduce_scatter_tensor",
+        "reduce_scatter_tensor",
+        "reducescattertensor",
+        _arg("input"),
+        _arg("output"),
+        has_reduce_op=True,
+    ),
+    CollectiveSite(
+        "broadcast", "broadcast", "broadcast", _arg("tensor"), _arg_if_not_root("tensor")
+    ),
+    CollectiveSite(
+        "reduce", "reduce", "reduce", _arg("tensor"), _arg_if_root("tensor"), has_reduce_op=True
+    ),
+    CollectiveSite(
+        "all_to_all",
+        "all_to_all",
+        "alltoall",
+        _arg("input_tensor_list"),
+        _arg("output_tensor_list"),
+    ),
+    CollectiveSite(
+        "all_to_all_single", "all_to_all_single", "alltoallsingle", _arg("input"), _arg("output")
+    ),
     CollectiveSite("gather", "gather", "gather", _arg("tensor"), _arg_if_root("gather_list")),
     CollectiveSite("scatter", "scatter", "scatter", _arg_if_root("scatter_list"), _arg("tensor")),
     CollectiveSite("send", "send", "send", _arg("tensor"), _nothing, p2p="send"),
@@ -165,10 +208,33 @@ COLLECTIVE_SITES: tuple[CollectiveSite, ...] = (
     CollectiveSite("recv", "recv", "recv", _nothing, _arg("tensor"), p2p="recv"),
     CollectiveSite("irecv", "recv", "irecv", _nothing, _arg("tensor"), p2p="recv"),
     CollectiveSite("barrier", "barrier", "barrier", _nothing, _nothing, tensorless=True),
-    CollectiveSite("all_gather_object", "all_gather_object", "allgatherobject", _nothing, _nothing, tensorless=True),
-    CollectiveSite("broadcast_object_list", "broadcast_object_list", "broadcastobjectlist", _nothing, _nothing, tensorless=True),
-    CollectiveSite("gather_object", "gather_object", "gatherobject", _nothing, _nothing, tensorless=True),
-    CollectiveSite("scatter_object_list", "scatter_object_list", "scatterobjectlist", _nothing, _nothing, tensorless=True),
+    CollectiveSite(
+        "all_gather_object",
+        "all_gather_object",
+        "allgatherobject",
+        _nothing,
+        _nothing,
+        tensorless=True,
+    ),
+    CollectiveSite(
+        "broadcast_object_list",
+        "broadcast_object_list",
+        "broadcastobjectlist",
+        _nothing,
+        _nothing,
+        tensorless=True,
+    ),
+    CollectiveSite(
+        "gather_object", "gather_object", "gatherobject", _nothing, _nothing, tensorless=True
+    ),
+    CollectiveSite(
+        "scatter_object_list",
+        "scatter_object_list",
+        "scatterobjectlist",
+        _nothing,
+        _nothing,
+        tensorless=True,
+    ),
 )
 
 
@@ -176,6 +242,8 @@ _BOUNDARY_DEPTH = threading.local()
 
 
 def _inside_boundary() -> bool:
+    """Whether the calling thread is already inside a recorded collective boundary."""
+
     return getattr(_BOUNDARY_DEPTH, "depth", 0) > 0
 
 
@@ -282,7 +350,11 @@ def _build_payload(
     roles: list[dict[str, Any]] = []
     input_ids = {id(t) for t in inputs}
     for index, tensor in enumerate(inputs):
-        role = "contribution_destination" if any(id(o) == id(tensor) for o in outputs) else "contribution"
+        role = (
+            "contribution_destination"
+            if any(id(o) == id(tensor) for o in outputs)
+            else "contribution"
+        )
         roles.append(_role_entry(role, index, tensor))
     for index, tensor in enumerate(outputs):
         if id(tensor) in input_ids:
@@ -436,13 +508,31 @@ def _emit_boundary_op(
     if _state._completeness_witness_mode == "shadow":
         with _state.pause_logging():
             log_function_output_tensors(
-                trace, raw_replay, site.func_name, call_args, {},
-                call_args, {}, out_for_log, exec_ctx, True, func_call_id,
+                trace,
+                raw_replay,
+                site.func_name,
+                call_args,
+                {},
+                call_args,
+                {},
+                out_for_log,
+                exec_ctx,
+                True,
+                func_call_id,
             )
     else:
         log_function_output_tensors(
-            trace, raw_replay, site.func_name, call_args, {},
-            call_args, {}, out_for_log, exec_ctx, True, func_call_id,
+            trace,
+            raw_replay,
+            site.func_name,
+            call_args,
+            {},
+            call_args,
+            {},
+            out_for_log,
+            exec_ctx,
+            True,
+            func_call_id,
         )
 
     final_list = out_for_log if isinstance(out_for_log, list) else [out_for_log]
@@ -473,6 +563,14 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
 
     @wraps(original)
     def wrapped_collective(*args: Any, **kwargs: Any) -> Any:
+        """Record the boundary op around one public c10d call, then delegate.
+
+        Falls through to the original untouched -- under a reentrancy scope, so no
+        seq tick and no record -- when arming is inactive, when this is a nested
+        inner c10d call, or when argument binding fails (the call is about to raise
+        its own ``TypeError`` anyway).
+        """
+
         from torchlens.distributed._lifecycle import armed_state, next_seq, resolve_group_identity
 
         state = armed_state()
@@ -554,9 +652,9 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
                     "tag": tag,
                 },
                 "canonical": {"src": src, "dst": dst},
-                "provenance": "explicit_global" if bound.get(
-                    "dst" if site.p2p == "send" else "src"
-                ) is not None else "group_relative_resolved",
+                "provenance": "explicit_global"
+                if bound.get("dst" if site.p2p == "send" else "src") is not None
+                else "group_relative_resolved",
                 "tag_in_channel": tag_in_channel,
             }
         else:
@@ -588,14 +686,33 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
 
         outputs = site.outputs(bound, role)
         payload = _build_payload(
-            site, bound, identity, channel, seq, state.arming, peer_info,
-            inputs, outputs, async_op, witness_policy, group,
+            site,
+            bound,
+            identity,
+            channel,
+            seq,
+            state.arming,
+            peer_info,
+            inputs,
+            outputs,
+            async_op,
+            witness_policy,
+            group,
         )
         op_labels: list[str] = []
         if not site.tensorless:
             op_labels = _emit_boundary_op(
-                trace, site, original, args, kwargs, inputs, outputs,
-                payload, elapsed, rng_states, autocast_state,
+                trace,
+                site,
+                original,
+                args,
+                kwargs,
+                inputs,
+                outputs,
+                payload,
+                elapsed,
+                rng_states,
+                autocast_state,
             )
         _journal_boundary(trace, payload, op_labels)
         return result

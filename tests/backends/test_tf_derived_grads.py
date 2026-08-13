@@ -6,9 +6,9 @@ from typing import Any
 
 import numpy as np
 import pytest
+from conftest import tensorflow_backend_modules
 
 import torchlens as tl
-from conftest import tensorflow_backend_modules
 from torchlens.backends import BackendUnsupportedError
 from torchlens.backends.tf import GradOptions
 from torchlens.backends.tf.backend import TFBackend

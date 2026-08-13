@@ -62,6 +62,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import example_models
 import pytest
 import torch
 from torch import nn
@@ -70,8 +71,6 @@ import torchlens as tl
 from torchlens.experimental import dagua
 from torchlens.options import CaptureOptions
 from torchlens.semantic import FacetSpec
-
-import example_models
 
 _TORCHLENS_ROOT = Path(tl.__file__).resolve().parent
 

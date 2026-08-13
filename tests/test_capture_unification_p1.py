@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.validation import validate_forward_pass

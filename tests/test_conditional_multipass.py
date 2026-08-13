@@ -5,8 +5,6 @@ Coverage for Phase 5 multi-pass Layer conditional aggregation.
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-
 import torch
 import torch.nn as nn
 
@@ -220,7 +218,7 @@ def _find_multi_pass_linear_layer(trace: Trace) -> Layer:
 
 
 def _assert_sorted_unique_pass_lists(
-    pass_map: Dict[Tuple[str, str, int, str], List[int]],
+    pass_map: dict[tuple[str, str, int, str], list[int]],
 ) -> None:
     """Assert every ``conditional_edge_call_indices`` value is sorted and unique.
 

@@ -27,6 +27,7 @@ from torchlens.ir import (
     FunctionEventInput,
     InterventionState,
     InterventionTemplateRef,
+    ModuleCaptureWorkspace,
     ModuleEnterEvent,
     ModuleExitEvent,
     ModuleFrame,
@@ -36,11 +37,10 @@ from torchlens.ir import (
     ParamRef,
     ParentEdge,
     PreHookProvenanceEvent,
+    RawGraphWorkspace,
     RecordContext,
     ReservedLabel,
     TensorRef,
-    ModuleCaptureWorkspace,
-    RawGraphWorkspace,
     WrapperRuntimeWorkspace,
 )
 
@@ -563,9 +563,7 @@ def test_capture_events_concat_follows_declared_merge_law() -> None:
     # i.e. ``field(default_factory=list)``), not by name: the amendment lane
     # (``op_amendments``) is a journal lane whose rows are not events, and a
     # name-suffix heuristic would silently miss any such lane.
-    lane_fields = {
-        f.name for f in dataclass_fields(CaptureEvents) if f.default_factory is list
-    }
+    lane_fields = {f.name for f in dataclass_fields(CaptureEvents) if f.default_factory is list}
     assert lane_fields == set(LANE_MERGE_POLICIES)
 
     def _prep(address: str) -> ModulePrepEvent:
@@ -714,9 +712,7 @@ def test_lane_appenders_cover_every_merging_policy() -> None:
 
     from torchlens.ir.capture_events import _LANE_APPENDERS, LANE_MERGE_POLICIES, CaptureEvents
 
-    merging_lanes = {
-        lane for lane, policy in LANE_MERGE_POLICIES.items() if policy != "run_local"
-    }
+    merging_lanes = {lane for lane, policy in LANE_MERGE_POLICIES.items() if policy != "run_local"}
     assert merging_lanes <= set(_LANE_APPENDERS)
     for appender_name in _LANE_APPENDERS.values():
         assert callable(getattr(CaptureEvents(), appender_name))
@@ -758,22 +754,24 @@ def test_concat_preserves_source_chronology_across_lanes() -> None:
     def _flatten(events: CaptureEvents) -> list[tuple[int, str]]:
         rows = [(event.seq, f"prep:{event.address}") for event in events.module_prep_events]
         rows += [(event.seq, f"pre_hook:{event.address}") for event in events.pre_hook_events]
-        rows += [
-            (event.seq, f"edit:{event.label_raw}") for event in events.intervention_events
-        ]
+        rows += [(event.seq, f"edit:{event.label_raw}") for event in events.intervention_events]
         return sorted(rows)
 
     source_order = [identity for _seq, identity in _flatten(source)]
     target = CaptureEvents()
     target.concat(source)
     target_order = [identity for _seq, identity in _flatten(target)]
-    assert target_order == source_order == [
-        "prep:a",
-        "pre_hook:x",
-        "prep:b",
-        "edit:edit_raw",
-        "pre_hook:y",
-    ]
+    assert (
+        target_order
+        == source_order
+        == [
+            "prep:a",
+            "pre_hook:x",
+            "prep:b",
+            "edit:edit_raw",
+            "pre_hook:y",
+        ]
+    )
 
 
 @pytest.mark.smoke
@@ -798,10 +796,7 @@ def test_concat_clones_events_and_never_mutates_the_source_stream() -> None:
         merged_event is not source_event
         for merged_event, source_event in zip(merged, source_events)
     )
-    all_target_seqs = [
-        event.seq
-        for event in (*target.module_prep_events, *target.pre_hook_events)
-    ]
+    all_target_seqs = [event.seq for event in (*target.module_prep_events, *target.pre_hook_events)]
     assert len(all_target_seqs) == len(set(all_target_seqs))
 
 
@@ -829,9 +824,7 @@ def test_concat_rejects_invalid_source_sequencing() -> None:
         )
         source.append_pre_hook(_merge_pre_hook_event("mod"))
         # Simulate a producer/writer regression: cross-lane duplicate stamps.
-        object.__setattr__(
-            source.pre_hook_events[0], "seq", source.intervention_events[0].seq
-        )
+        object.__setattr__(source.pre_hook_events[0], "seq", source.intervention_events[0].seq)
         return source
 
     target = CaptureEvents()

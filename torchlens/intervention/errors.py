@@ -12,7 +12,6 @@ from ..errors._base import (
     ValidationError,
 )
 
-
 Severity = Literal["recoverable", "informational", "fatal"]
 """Public severity tag values for the intervention error catalog."""
 

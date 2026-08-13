@@ -19,7 +19,6 @@ from torchlens.receptive_field._errors import (
 )
 from torchlens.receptive_field._view import ReceptiveFieldView, _optional_callable
 
-
 # These tests read the process-global RF rule registry (builtins installed at
 # ``import torchlens``); they register nothing, so no registry isolation is
 # needed. Clearing the registry would strip the builtin geometric rules and

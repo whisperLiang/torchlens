@@ -7,12 +7,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.visualization.node_spec import NodeSpec
 from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
 from torchlens.visualization._render_leaf import (
     _module_key_for_grad_fn,
     _param_module_for_accumulate_grad,
 )
+from torchlens.visualization.node_spec import NodeSpec
 
 
 class _LinearReluModel(nn.Module):

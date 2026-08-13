@@ -165,7 +165,7 @@ class FailingCopyMapping:
 
         return self._payload[key]
 
-    def copy(self) -> "FailingCopyMapping":
+    def copy(self) -> FailingCopyMapping:
         """Return a same-type shallow copy.
 
         Returns

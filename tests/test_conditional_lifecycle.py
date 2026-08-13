@@ -1,7 +1,7 @@
 """Lifecycle coverage for conditional-label rename, cleanup, and export wiring."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import Dict, Iterator, List, Optional
 
 import pytest
 import torch
@@ -24,8 +24,8 @@ class _StubTrace:
 
     def __init__(
         self,
-        layer_list: Optional[List[SimpleNamespace]] = None,
-        layer_logs: Optional[Dict[str, SimpleNamespace]] = None,
+        layer_list: list[SimpleNamespace] | None = None,
+        layer_logs: dict[str, SimpleNamespace] | None = None,
     ) -> None:
         """Initialize the stub log.
 
@@ -40,18 +40,18 @@ class _StubTrace:
         self.layer_logs = layer_logs or {}
         self._tracing_finished = True
 
-        self.input_layers: List[str] = []
-        self.output_layers: List[str] = []
-        self.buffer_layers: List[str] = []
-        self.internal_source_ops: List[str] = []
-        self.internal_sink_ops: List[str] = []
-        self.internally_terminated_bool_ops: List[str] = []
-        self.saved_ops: List[str] = []
-        self.saved_grad_ops: List[str] = []
-        self._layers_where_internal_branches_merge_with_input: List[str] = []
+        self.input_layers: list[str] = []
+        self.output_layers: list[str] = []
+        self.buffer_layers: list[str] = []
+        self.internal_source_ops: list[str] = []
+        self.internal_sink_ops: list[str] = []
+        self.internally_terminated_bool_ops: list[str] = []
+        self.saved_ops: list[str] = []
+        self.saved_grad_ops: list[str] = []
+        self._layers_where_internal_branches_merge_with_input: list[str] = []
 
-        self.layers_with_params: Dict[str, List[str]] = {}
-        self.op_equivalence_classes: Dict[str, set] = {}
+        self.layers_with_params: dict[str, list[str]] = {}
+        self.op_equivalence_classes: dict[str, set] = {}
 
         self.conditional_branch_edges = []
         self.conditional_then_entry_edges = []
@@ -59,11 +59,11 @@ class _StubTrace:
         self.conditional_else_entry_edges = []
         self.conditional_arm_entry_edges = {}
         self.conditional_edge_call_indices = {}
-        self.conditional_records: List[ConditionalEvent] = []
+        self.conditional_records: list[ConditionalEvent] = []
 
-        self._raw_to_final_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_parent_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_op_labels: Dict[str, str] = {}
+        self._raw_to_final_layer_labels: dict[str, str] = {}
+        self._raw_to_final_parent_layer_labels: dict[str, str] = {}
+        self._raw_to_final_op_labels: dict[str, str] = {}
         from torchlens.ir.workspaces import (
             ModuleCaptureWorkspace,
             RawGraphWorkspace,
@@ -120,7 +120,7 @@ class _ReluThenAdd(nn.Module):
         return torch.relu(x) + 1
 
 
-def _make_conditional_event(bool_layers: List[str]) -> ConditionalEvent:
+def _make_conditional_event(bool_layers: list[str]) -> ConditionalEvent:
     """Build a small ``ConditionalEvent`` fixture.
 
     Parameters
@@ -150,7 +150,7 @@ def _make_conditional_event(bool_layers: List[str]) -> ConditionalEvent:
     )
 
 
-def _make_layer_stub(label: str, layer_label: Optional[str] = None) -> SimpleNamespace:
+def _make_layer_stub(label: str, layer_label: str | None = None) -> SimpleNamespace:
     """Create a minimal layer-like object for rename and cleanup tests.
 
     Parameters

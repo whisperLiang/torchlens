@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import pickle
+from pathlib import Path
 from typing import Any
 
 import pytest
-from safetensors.torch import load_file
 import torch
+from safetensors.torch import load_file
 from torch import nn
 
 import torchlens as tl

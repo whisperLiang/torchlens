@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING
-import warnings
 
 import torch
 
@@ -13,8 +13,8 @@ from ..backends import BackendUnsupportedError, get_backend_spec
 from ._engine_forward import solve_projective
 from ._errors import ReceptiveFieldUnavailableError
 from ._gradient import (
-    _GradientReceptiveFieldResult,
     _batch_semantics,
+    _GradientReceptiveFieldResult,
     _normalize_unit,
     _probe_suppressed,
     _saved_tensor,
@@ -23,7 +23,6 @@ from ._gradient import (
 )
 from ._path import descendant_labels, require_path, resolve_graph_point
 from ._types import GradientReceptiveField, ReceptiveFieldDirection
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op

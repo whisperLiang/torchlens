@@ -3,19 +3,16 @@
 import dataclasses
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
+
 import torch
-from .completeness_witness import internal_scalar_read
-from .aliasing import (
-    detect_torch_alias_contract,
-    detect_torch_output_alias_contract,
+
+from ...capture.projections import (
+    get_active_recording_state,
 )
-from ...utils.tensor_utils import (
-    safe_copy,
+from ...fastlog.types import (
+    ActivationRecord,
+    CaptureSpec,
 )
-from ...ir.events import (
-    FunctionCallRef,
-)
-from ...ir.intervention import FunctionEventInput
 from ...ir.container import (
     DataclassField,
     DictKey,
@@ -24,14 +21,19 @@ from ...ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
+from ...ir.events import (
+    FunctionCallRef,
+)
+from ...ir.intervention import FunctionEventInput
 from ...ir.semantics import BackendSemantics
-from ...capture.projections import (
-    get_active_recording_state,
+from ...utils.tensor_utils import (
+    safe_copy,
 )
-from ...fastlog.types import (
-    ActivationRecord,
-    CaptureSpec,
+from .aliasing import (
+    detect_torch_alias_contract,
+    detect_torch_output_alias_contract,
 )
+from .completeness_witness import internal_scalar_read
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace

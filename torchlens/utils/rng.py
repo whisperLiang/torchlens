@@ -23,6 +23,8 @@ Autocast state (``torch.amp.autocast``) is captured similarly so that
 mixed-precision ops can be replayed under the same dtype context.
 """
 
+import _random as _c_random_module
+import _thread as _c_thread_module
 import collections as _collections_module
 import contextvars as _contextvars_module
 import datetime as _datetime_module
@@ -36,8 +38,7 @@ import threading as _threading_module
 import time as _time_module
 import warnings as _warnings_module
 import weakref as _weakref_module
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from collections.abc import Set as AbstractSet
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence, Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import (
@@ -54,10 +55,7 @@ from types import (
     SimpleNamespace,
     TracebackType,
 )
-from typing import Any, Dict, List, TypeVar, cast
-
-import _random as _c_random_module
-import _thread as _c_thread_module
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import torch
@@ -498,8 +496,8 @@ def execute_with_restored_rng_autocast(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     *,
-    rng_states: Dict[str, Any] | None,
-    autocast_state: Dict[str, Any] | None,
+    rng_states: dict[str, Any] | None,
+    autocast_state: dict[str, Any] | None,
 ) -> _T:
     """Execute a callable with saved RNG and autocast state in a tight scope.
 
@@ -608,7 +606,7 @@ operation.
 """
 
 
-def _snapshot_cuda_rng_states() -> List[Any]:
+def _snapshot_cuda_rng_states() -> list[Any]:
     """Return per-device CUDA RNG states, or ``[]`` when no CUDA state is live.
 
     ``torch.cuda.get_rng_state_all()`` calls ``torch.cuda._lazy_init()`` and
@@ -661,7 +659,7 @@ def _snapshot_cuda_rng_states() -> List[Any]:
         return []
 
 
-def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
+def log_current_rng_states(torch_only: bool = False) -> dict[str, Any]:
     """Snapshot the current state of all RNG engines.
 
     The returned dict can be passed to :func:`set_rng_from_saved_states`
@@ -691,7 +689,7 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
     # ``get_rng_state`` family carries no registry row TODAY -- this bracket keeps the
     # invariant structural rather than dependent on that vocabulary staying read-free).
     with _suppress_active_monitor_marks():
-        rng_dict: Dict[str, Any] = {"torch": torch.random.get_rng_state()}
+        rng_dict: dict[str, Any] = {"torch": torch.random.get_rng_state()}
         if not torch_only:
             rng_dict["random"] = random.getstate()
             rng_dict["np"] = np.random.get_state()
@@ -702,7 +700,7 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
         return rng_dict
 
 
-def set_rng_from_saved_states(rng_states: Dict[str, Any]) -> None:
+def set_rng_from_saved_states(rng_states: dict[str, Any]) -> None:
     """Restore RNG engines to a previously captured state.
 
     Parameters
@@ -798,7 +796,7 @@ class AutocastRestore:
         """
 
         self._autocast_state = autocast_state
-        self._contexts: List[Any] = []
+        self._contexts: list[Any] = []
 
     def __enter__(self) -> "AutocastRestore":
         """Enter captured autocast contexts.
@@ -2026,7 +2024,7 @@ class host_nondeterminism_monitor:
         # an id collision after GC returned STALE ``co_names`` and snapshotted
         # the wrong RNG receivers -- an under-witness.
         self._numpy_global_name_cache: dict[
-            tuple[int, int], tuple[CodeType, Dict[str, Any], tuple[str, ...]]
+            tuple[int, int], tuple[CodeType, dict[str, Any], tuple[str, ...]]
         ] = {}
         # Code objects compare structurally and ignore ``co_filename``. Key by identity
         # and retain the code object strongly in the value so an id cannot be reused
@@ -2043,6 +2041,14 @@ class host_nondeterminism_monitor:
     # -- helpers -----------------------------------------------------------------
 
     def _mark(self, channel: str) -> None:
+        """Record a host nondeterminism channel touch, unless a monitor probe is active.
+
+        The single choke point for CEILING-class marks (see :meth:`_mark_replayable`
+        for the non-ceiling set). Marks made while ``_suppress_self_marks`` is raised
+        are the monitor reading through its OWN inventory probe, never a model host
+        read, and are dropped.
+        """
+
         if self._suppress_self_marks:
             return
         self.result.channels.add(channel)
@@ -2088,15 +2094,31 @@ class host_nondeterminism_monitor:
             self._suppress_self_marks -= 1
 
     def _flag_uncertain(self, reason: str) -> None:
+        """Downgrade monitor completeness, optionally recording one reason.
+
+        Uncertainty is never read as absence of consumption: install, chain,
+        restore, and inventory failures all land here so the verdict degrades
+        instead of silently blessing the capture.
+        """
+
         self.result.uncertain = True
         if reason:
             self.result.uncertain_detail = (*self.result.uncertain_detail, reason)
 
     def _patch_attr(self, holder: Any, name: str, wrapper: Any) -> None:
+        """Patch one module or class attribute and queue its exact restoration.
+
+        The queued restore flags uncertainty when the attribute no longer holds
+        this wrapper at teardown -- someone replaced the patch mid-window, so exact
+        restoration cannot be proven -- and restores the original regardless.
+        """
+
         original = getattr(holder, name)
         setattr(holder, name, wrapper)
 
         def _restore(holder: Any = holder, name: str = name, original: Any = original) -> None:
+            """Restore the captured original, flagging uncertainty if the patch was replaced."""
+
             if getattr(holder, name, None) is not wrapper:
                 # Someone replaced our patch mid-window: restoration cannot be
                 # proven exact -> uncertainty (fail closed), restore anyway.
@@ -2124,16 +2146,34 @@ class host_nondeterminism_monitor:
         self._held_ref_marks.setdefault(id(original), (channel, time_arg_index))
 
     def _entropy_wrapper(self, original: Any, channel: str) -> Any:
+        """Build a marking passthrough wrapper for one OS-entropy channel."""
+
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Mark the entropy channel, then delegate to the original."""
+
             self._mark(channel)
             return original(*args, **kwargs)
 
         return wrapper
 
     def _clock_wrapper(self, original: Any, channel: str, time_arg_index: int | None) -> Any:
+        """Build a marking passthrough wrapper for one clock channel.
+
+        ``time_arg_index`` names the positional argument that makes the call a pure
+        transform of a caller-supplied time (``localtime(ts)``); when it is
+        supplied and non-``None`` the call reads no clock and is not marked.
+        """
+
         tl_ids = self._tl_globals_ids
 
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Mark the clock channel for an implicit-now read from a non-TorchLens frame.
+
+            Frames owned by TorchLens module globals are exempt: the per-op capture
+            clock reads would otherwise self-ceiling every capture. An unreadable
+            caller frame is treated as foreign, which over-marks rather than under-marks.
+            """
+
             explicit_time = (
                 time_arg_index is not None
                 and len(args) > time_arg_index
@@ -2151,9 +2191,13 @@ class host_nondeterminism_monitor:
         return wrapper
 
     def _instance_method_wrapper(self, original: Any, channel: str) -> Any:
+        """Build a marking passthrough wrapper for one RNG-instance draw method."""
+
         exempt_ids = self._exempt_ids
 
         def wrapper(self_rng: Any, *args: Any, **kwargs: Any) -> Any:
+            """Mark the channel unless the receiver is an exempt (TorchLens-owned) instance."""
+
             if id(self_rng) not in exempt_ids:
                 self._mark(channel)
             return original(self_rng, *args, **kwargs)
@@ -2171,6 +2215,8 @@ class host_nondeterminism_monitor:
         """
 
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Mark the torch RNG channel at entry, then delegate to the original."""
+
             self._mark_disposition(channel, disposition)
             return original(*args, **kwargs)
 
@@ -2593,6 +2639,16 @@ class host_nondeterminism_monitor:
             self._deep_inventory_frame_reachable((returned,), caller.f_code)
 
     def _classify_c_call(self, frame: Any, arg: Any) -> None:
+        """Classify one ``c_call`` profile event against the held-builtin registry.
+
+        Held-reference identity is checked FIRST, so a pre-window
+        ``from time import time`` alias -- which bypasses the module-attr patch
+        by calling the original builtin -- is still marked. TorchLens's own
+        frames are exempt by exact module-globals ownership. For an
+        implicit-now converter the call-site argument count decides whether the
+        call reads a clock at all; an undecodable call site marks fail-closed.
+        """
+
         # r41 hon1_1: held-reference identity FIRST. A pre-window ``from time import
         # time`` alias calls the ORIGINAL builtin, bypassing the module-attr patch; the
         # original was identity-registered before patching. TorchLens's own frames are
@@ -2711,7 +2767,20 @@ class host_nondeterminism_monitor:
         return False
 
     def _make_profile_hook(self, predecessor: Any, *, records_thread_ident: bool = False) -> Any:
+        """Build the ``sys``/``threading`` profile hook, chained ahead of ``predecessor``.
+
+        The hook classifies ``c_call`` events against the held-builtin registry and
+        ``call`` events against the held torch-RNG code registry, and snapshots
+        numpy generator state per frame. ``records_thread_ident`` is set for the
+        ``threading`` copy so every hooked thread registers its ident during
+        bootstrap, before its first user statement, making the escape belt's
+        in-window classification race-free. Any classifier error degrades
+        completeness rather than propagating into the traced program.
+        """
+
         def hook(frame: Any, event: str, arg: Any) -> Any:
+            """Classify one profile event, then chain to the predecessor hook."""
+
             if records_thread_ident:
                 # r41 hon2_1: the threading hook registers every hooked thread's ident
                 # (idempotent set.add, GIL-atomic) during thread bootstrap -- BEFORE the
@@ -3492,6 +3561,15 @@ class host_nondeterminism_monitor:
 
     @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
+        """Return a comparable state digest for one RNG holder.
+
+        Covers numpy ``Generator``/``RandomState``/bare ``BitGenerator`` and
+        ``random.Random``. A stateless ``Random`` subclass whose ``getstate()``
+        raises ``NotImplementedError`` (``SystemRandom``) is classified
+        monitored-not-digestible rather than an inventory error: possessing an
+        undrawn stateless engine is not nondeterminism.
+        """
+
         if isinstance(holder, np.random.Generator):
             return repr(holder.bit_generator.state)
         if isinstance(holder, np.random.RandomState):
@@ -3522,7 +3600,7 @@ class host_nondeterminism_monitor:
         raise _NotADigestableRng
 
     @staticmethod
-    def _module_namespace_walk_eligible(module: Any) -> Dict[str, Any] | None:
+    def _module_namespace_walk_eligible(module: Any) -> dict[str, Any] | None:
         """Return a loaded module's raw namespace when the B4 deep inventory may walk it.
 
         Eligibility is decided from RAW reads only (the base ``ModuleType`` getset and
@@ -3925,7 +4003,7 @@ class host_nondeterminism_monitor:
             return True
         if value_type in (dict, list, tuple, set, frozenset):
             return True
-        if isinstance(
+        return not isinstance(
             value,
             (
                 type,
@@ -3939,9 +4017,7 @@ class host_nondeterminism_monitor:
                 property,
                 GetSetDescriptorType,
             ),
-        ):
-            return False
-        return True
+        )
 
     @staticmethod
     def _class_attr_surface(klass: type) -> tuple[Any, ...]:

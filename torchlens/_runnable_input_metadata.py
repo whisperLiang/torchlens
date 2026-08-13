@@ -1,9 +1,12 @@
 """Input structure, literal, and metadata witness helpers."""
 
 from __future__ import annotations
+
 import struct
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
+
 from . import _state
 from ._runnable_state import (
     RunResourceCeiling,
@@ -12,8 +15,6 @@ from ._runnable_state import (
 from .errors import (
     PathDivergenceError,
 )
-from .utils._torch_compat import tensor_has_named_dims
-from .utils.tensor_utils import touched_bytes_relation
 from .runnable import (
     ContractCheck,
     PathFaithfulness,
@@ -22,8 +23,8 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
+from .utils._torch_compat import tensor_has_named_dims
+from .utils.tensor_utils import touched_bytes_relation
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

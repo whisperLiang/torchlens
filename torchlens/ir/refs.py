@@ -30,7 +30,7 @@ class DtypeRef:
     name: str
 
     @classmethod
-    def from_value(cls: type["DtypeRef"], value: Any) -> "DtypeRef | None":
+    def from_value(cls: type[DtypeRef], value: Any) -> DtypeRef | None:
         """Create a dtype reference from a backend dtype-like value.
 
         Parameters
@@ -77,7 +77,7 @@ class DeviceRef:
     name: str
 
     @classmethod
-    def from_value(cls: type["DeviceRef"], value: Any) -> "DeviceRef | None":
+    def from_value(cls: type[DeviceRef], value: Any) -> DeviceRef | None:
         """Create a device reference from a backend device-like value.
 
         Parameters

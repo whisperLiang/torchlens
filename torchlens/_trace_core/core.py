@@ -143,7 +143,7 @@ class TraceCore:
         # containers (aliases-v1 row 1b), never by this cache. ``Op`` is
         # deliberately NOT weak-referenceable (aliases-v1 pins the refusal),
         # so non-weakref-able facades fall back to the strong side table.
-        self._facades: "weakref.WeakValueDictionary[tuple[str, int], Any]" = (
+        self._facades: weakref.WeakValueDictionary[tuple[str, int], Any] = (
             weakref.WeakValueDictionary()
         )
         self._strong_facades: dict[tuple[str, int], Any] = {}
@@ -258,9 +258,7 @@ class TraceCore:
             # whose refs bind the root tables); all translate to the clone.
             for source_table in clone._source_tables:
                 group_tables[id(source_table)] = clone
-        child.ops = (
-            OpStoreView(self.ops, group_tables) if self.ops is not None else None
-        )
+        child.ops = OpStoreView(self.ops, group_tables) if self.ops is not None else None
         # An unfrozen kind table (born after a rehydrated load's seal and not
         # yet sealed itself) cannot back a view; its records take the fork
         # builder's detached-duplication fallback instead.
@@ -338,6 +336,8 @@ class TraceCore:
                 )
 
         def _restore_epochs(snapshot: list) -> None:
+            """Restore the backward-epoch list in place from a transaction snapshot."""
+
             self.backward_epochs[:] = snapshot
 
         txn.stash("epochs", list(self.backward_epochs), _restore_epochs)

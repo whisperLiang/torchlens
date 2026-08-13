@@ -18,6 +18,8 @@ from .._io import TLSPEC_VERSION, TorchLensIOError
 from .._io._torch_symbols import torch_attr
 from .._io.manifest import Manifest, TensorEntry
 from .._io.streaming import BundleStreamWriter
+from ..ir.predicate import coerce_deferred_value
+from ..ir.refs import DeviceRef, DtypeRef
 from ._indexes import write_label_index, write_pass_index
 from ._storage_resolver import _resolve_storage
 from .exceptions import PredicateError, RecordingConfigError
@@ -32,8 +34,6 @@ from .types import (
     Recording,
     StorageIntent,
 )
-from ..ir.refs import DeviceRef, DtypeRef
-from ..ir.predicate import coerce_deferred_value
 
 _GRAD_DTYPES = {
     torch.float16,
@@ -128,7 +128,7 @@ class DiskStorageBackend:
         intent: StorageIntent,
         *,
         options: RecordingOptions,
-        ctx: "RecordContext | GradRecordContext | None" = None,
+        ctx: RecordContext | GradRecordContext | None = None,
         kind: str = "activation",
     ) -> tuple[
         torch.Tensor | None,

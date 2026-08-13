@@ -11,7 +11,6 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 
-
 TargetSpec: TypeAlias = int | Callable[[Any], Tensor]
 AttributionValueTree: TypeAlias = Tensor | tuple[Any, ...] | list[Any] | dict[str, Any]
 InputKwargs: TypeAlias = dict[str, Any] | None

@@ -15,16 +15,16 @@ from ..data_classes.buffer import Buffer, BufferAccessor
 from ..data_classes.module import ModuleAccessor
 
 if TYPE_CHECKING:
+    from ..data_classes.module import Module, ModuleCall
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
-    from ..data_classes.module import Module, ModuleCall
 
 
 def rebuild_trace_accessors(
-    trace: "Trace",
-    module_dict: dict[str, "Module"],
-    module_order: list["Module"],
-    pass_dict: dict[str, "ModuleCall"],
+    trace: Trace,
+    module_dict: dict[str, Module],
+    module_order: list[Module],
+    pass_dict: dict[str, ModuleCall],
 ) -> None:
     """Rebuild the user-facing module and buffer accessors on a ``Trace``.
 
@@ -75,7 +75,7 @@ def rebuild_trace_accessors(
             if kind_store is not None and not kind_store.frozen and _core.ops.frozen:
                 kind_store.freeze()
 
-    buffer_versions: dict[str, list["Op"]] = {}
+    buffer_versions: dict[str, list[Op]] = {}
     for entry in trace.layer_list:
         for grad_record in getattr(entry, "_grad_records", ()):
             grad_record.owner = entry

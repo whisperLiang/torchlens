@@ -13,9 +13,10 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -24,7 +25,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.perf_models import build_tiny_dummy, input_summary, load_model_and_input  # noqa: E402
+from benchmarks.perf_models import (  # noqa: E402
+    build_tiny_dummy,
+    input_summary,
+    load_model_and_input,
+)
 from benchmarks.perf_peers import (  # noqa: E402
     PeerSkip,
     run_baukit,

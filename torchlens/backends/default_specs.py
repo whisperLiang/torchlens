@@ -5,22 +5,22 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
 
-from packaging.version import InvalidVersion, Version
 import torch
+from packaging.version import InvalidVersion, Version
 from torch import nn
 
 from ._protocol import CaptureBackend
 from .registry import (
-    BackendCapabilities,
-    BackendMismatchError,
-    BackendSpec,
     JAX_TRACE_OPTIONS,
     MLX_TRACE_OPTIONS,
     PADDLE_TRACE_OPTIONS,
-    SerializationPolicy,
     TF_TRACE_OPTIONS,
     TINYGRAD_TRACE_OPTIONS,
     TORCH_TRACE_OPTIONS,
+    BackendCapabilities,
+    BackendMismatchError,
+    BackendSpec,
+    SerializationPolicy,
     register_backend_spec,
 )
 
@@ -371,7 +371,7 @@ def _contains_tf_tensor(input_args: object, input_kwargs: object, tf: object) ->
     tensor_type = getattr(tf, "Tensor")
     variable_type = getattr(tf, "Variable")
     return any(
-        isinstance(leaf, tensor_type) or isinstance(leaf, variable_type)
+        isinstance(leaf, (tensor_type, variable_type))
         for leaf in (*_simple_leaves(input_args), *_simple_leaves(input_kwargs))
     )
 
@@ -668,8 +668,8 @@ def _mlx_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
-    from ._options import resolve_public_depth_alias
     from ..user_funcs import _trace_mlx_model_from_public_kwargs
+    from ._options import resolve_public_depth_alias
 
     resolve_public_depth_alias(kwargs)
     return _trace_mlx_model_from_public_kwargs(*args, **kwargs)

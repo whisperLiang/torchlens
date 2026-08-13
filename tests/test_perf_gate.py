@@ -6,8 +6,9 @@ import argparse
 import copy
 import cProfile
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch

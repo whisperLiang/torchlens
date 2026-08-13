@@ -24,7 +24,7 @@ from __future__ import annotations
 import functools
 import sys
 import warnings
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -397,7 +397,7 @@ def _passthrough(func: Callable) -> Callable:
 
 
 def _configurable_passthrough(
-    label: Optional[str] = None,
+    label: str | None = None,
 ) -> Callable[[Callable], Callable]:
     """Return a decorator factory mimicking HF-style multi-line decorators."""
 

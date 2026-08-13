@@ -153,9 +153,8 @@ def test_m5_trainable_parameter_copy_stays_trainable():
 def test_h1_restore_disabled_state_shields_caller_autocast():
     saved = log_current_autocast_state()  # cpu autocast currently DISABLED
     # Replay caller has LIVE bf16 autocast; restore must force it back off.
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        with AutocastRestore(saved):
-            dt = (torch.randn(4, 4) @ torch.randn(4, 4)).dtype
+    with torch.autocast("cpu", dtype=torch.bfloat16), AutocastRestore(saved):
+        dt = (torch.randn(4, 4) @ torch.randn(4, 4)).dtype
     assert dt == torch.float32
 
 

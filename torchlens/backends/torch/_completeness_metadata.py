@@ -1,10 +1,13 @@
 """Input and state metadata witness bookkeeping."""
 
 from __future__ import annotations
+
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
+
 from ... import _state
 from ._completeness_types import _WitnessState
 from ._tl import (
@@ -12,12 +15,8 @@ from ._tl import (
 )
 from .buffer_writes import session_validated_buffer_address
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        INPUT_DERIVED_LAYOUT_FACT_NAME,
-        STATE_METADATA_MIRROR,
         _CAPTURED_STORAGE_PTRS,
         _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS,
         _HOST_ESCAPE_STATE_METADATA_READS,
@@ -26,17 +25,19 @@ if TYPE_CHECKING:
         _INPUT_METADATA_PRESENCE_PROPERTY_NAMES,
         _INPUT_METADATA_VIEW_READ,
         _LAYOUT_ANCESTRY_CLEAN,
+        _ORIG_UNTYPED_STORAGE_DATA_PTR,
+        _ORIG_UNTYPED_STORAGE_NBYTES,
         _ORIGIN_LABEL_PREFIX,
         _ORIGIN_RNG,
         _ORIGIN_UNINIT,
         _ORIGIN_UNKNOWN,
-        _ORIG_UNTYPED_STORAGE_DATA_PTR,
-        _ORIG_UNTYPED_STORAGE_NBYTES,
         _RUNNABLE_INPUT_STORAGE_SITES,
         _STATE_METADATA_FACTS,
         _STATE_ROUTE_DECLARED_FACT,
         _STATE_ROUTE_READ_KIND,
         _STORAGE_REBIND_BARRIER_LABELS,
+        INPUT_DERIVED_LAYOUT_FACT_NAME,
+        STATE_METADATA_MIRROR,
         _classify_input_storage_alias,
         _escape_storage_ptr,
         _input_base_tensor,
@@ -150,8 +151,8 @@ def _observe_input_derived_layout_read(trace: Any, source: torch.Tensor) -> None
 
 
 def _resolve_layout_rooting_labels(
-    trace: Any, by_raw_label: "Mapping[str, Any]", source: torch.Tensor
-) -> "set[str] | None":
+    trace: Any, by_raw_label: Mapping[str, Any], source: torch.Tensor
+) -> set[str] | None:
     """Resolve a layout-read receiver to the raw labels its VALUE roots through (r75 F1).
 
     Ladder, first positive resolution wins; ``None`` means the caller MUST fail closed:
@@ -208,7 +209,7 @@ def _resolve_layout_rooting_labels(
     return None
 
 
-def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> "set[str] | None":
+def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> set[str] | None:
     """Resolve an unlabeled receiver to live captured producers by STORAGE IDENTITY (r75 F1).
 
     Liveness-verified exactly like the r43 cross-thread belt: a pointer matches only while
@@ -261,7 +262,7 @@ def storage_rebind_barrier_labels(trace: Any) -> frozenset[str]:
     return frozenset(labels) if labels else frozenset()
 
 
-def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", label: str) -> bool:
+def _layout_ancestry_tainted(trace: Any, by_raw_label: Mapping[str, Any], label: str) -> bool:
     """Return whether a logged event's transitive traced ancestry is BROKEN (r75 F1).
 
     ``OpEvent.input_ancestors`` unions only LABELED parents, so an op that consumed an
@@ -373,7 +374,7 @@ def host_escape_state_metadata_reads(trace: Any) -> dict[str, frozenset[str]]:
     return {name: frozenset(kinds) for name, kinds in reads.items()}
 
 
-def _state_direct_address(trace: Any, source: torch.Tensor) -> "str | None":
+def _state_direct_address(trace: Any, source: torch.Tensor) -> str | None:
     """Resolve ``source`` to a state address ONLY when it IS the registered object (r65).
 
     The DIRECT-receiver discriminator for the autograd/structural family
@@ -421,7 +422,7 @@ def _observe_state_metadata_read_direct(trace: Any, source: torch.Tensor, read_k
     _record_state_metadata_read(trace, {address}, read_kind)
 
 
-def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str]":
+def _expand_state_alias_addresses(trace: Any, addresses: set[str]) -> set[str]:
     """Fan resolved state addresses out to their COMPLETE r37 alias groups (r67 C6).
 
     A direct read on ONE canonical name of a tied parameter / double-registered buffer is a
@@ -443,7 +444,7 @@ def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str
     return addresses | {str(name) for name, group_id in groups.items() if group_id in group_ids}
 
 
-def _record_state_metadata_read(trace: Any, addresses: "set[str]", read_kind: str) -> None:
+def _record_state_metadata_read(trace: Any, addresses: set[str], read_kind: str) -> None:
     """Join resolved state addresses into the escape-source + read-kind ledgers (r63/r65).
 
     r67 C6: fans out to the complete alias group -- a tied-parameter direct read marks
@@ -465,7 +466,7 @@ def _record_state_metadata_read(trace: Any, addresses: "set[str]", read_kind: st
 
 
 def _record_state_metadata_observation(
-    trace: Any, addresses: "set[str]", read_kind: str, observed: "bool | None"
+    trace: Any, addresses: set[str], read_kind: str, observed: bool | None
 ) -> None:
     """Record one placement accessor's ACTUAL return against its state alias group (r67 C3)."""
 
@@ -483,7 +484,7 @@ def _record_state_metadata_observation(
             slot[read_kind] = observed
 
 
-def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, "bool | None"]]:
+def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, bool | None]]:
     """Return the per-state-name OBSERVED placement accessor returns for one trace (r67 C3)."""
 
     observations = _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS.get(trace)
@@ -493,7 +494,7 @@ def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, "
 
 
 def _observe_state_placement_read(
-    trace: Any, source: torch.Tensor, name: str, observed: "bool | None"
+    trace: Any, source: torch.Tensor, name: str, observed: bool | None
 ) -> None:
     """Attribute one placement accessor's ACTUAL return on a state receiver (r67 C3).
 
@@ -531,7 +532,7 @@ def _placement_read_witnessed(trace: Any, source: torch.Tensor) -> bool:
     return kind is not None
 
 
-def _discharge_placement_dispatch(state: "_WitnessState", base_operator: str) -> None:
+def _discharge_placement_dispatch(state: _WitnessState, base_operator: str) -> None:
     """Mark the most recent matching host-return census event as metadata-witnessed."""
 
     for event in reversed(state.events):
@@ -604,7 +605,7 @@ def _observe_state_property_read(trace: Any, source: torch.Tensor, name: str, va
         _observe_state_metadata_read_direct(trace, source, detail)
 
 
-def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any]":
+def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> tuple[str, Any]:
     """Classify a storage-bridge RECEIVER tensor as input-site / state-group / other (r67 C3).
 
     Storage-level facts (byte count, sharing, pinning) are pure functions of the BASE storage,
@@ -630,7 +631,7 @@ def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any
 
 
 def _register_storage_handle_origin(
-    state: "_WitnessState", storage: Any, origin: "tuple[str, Any]"
+    state: _WitnessState, storage: Any, origin: tuple[str, Any]
 ) -> None:
     """Register one storage handle (and a typed handle's untyped backing) in the origin map."""
 
@@ -648,7 +649,7 @@ def _register_storage_handle_origin(
             continue
 
 
-def _register_storage_origin(state: "_WitnessState", source: torch.Tensor, storage: Any) -> None:
+def _register_storage_origin(state: _WitnessState, source: torch.Tensor, storage: Any) -> None:
     """Attribute one bridge-returned storage handle at ACQUISITION time (r67 C3/C6).
 
     Acquisition records ORIGIN (+ the caller's existing writeback watch) ONLY -- no read
@@ -663,7 +664,7 @@ def _register_storage_origin(state: "_WitnessState", source: torch.Tensor, stora
         )
 
 
-def _lazy_storage_state_ptr_names(state: "_WitnessState") -> "dict[int, frozenset[str]]":
+def _lazy_storage_state_ptr_names(state: _WitnessState) -> dict[int, frozenset[str]]:
     """Build (once per forward) the ptr -> full state-name-set fallback index (r67 C3).
 
     Covers handles acquired BEFORE the accessor wrappers armed (a pre-forward
@@ -693,7 +694,7 @@ def _lazy_storage_state_ptr_names(state: "_WitnessState") -> "dict[int, frozense
     return index
 
 
-def _resolve_storage_origin(state: "_WitnessState", storage: Any) -> "tuple[str, Any] | None":
+def _resolve_storage_origin(state: _WitnessState, storage: Any) -> tuple[str, Any] | None:
     """Resolve a storage RECEIVER to its origin, or ``None`` when unattributable (r67 C3).
 
     Ladder: the capture-scoped weak origin map (the handle itself, then a typed handle's

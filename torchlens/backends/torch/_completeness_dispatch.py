@@ -1,26 +1,22 @@
 """Dispatch census and runnable-ledger processing."""
 
 from __future__ import annotations
+
 import threading
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
-from ...utils._torch_compat import tensor_version_or_none
+
 from ... import _state
+from ...utils._torch_compat import tensor_version_or_none
 from .escape_detection import (
     ExpectedOriginalToken,
 )
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .completeness_witness import (
-        HOST_ESCAPE_OPERATORS,
-        MUTABLE_ALIAS_ESCAPE_FUNCS,
-        STATE_METADATA_MIRROR,
-        STORAGE_BRIDGE_ESCAPE_FUNCS,
-        _DispatchEvent,
         _HOST_ESCAPE_MUTABLE_WRITEBACK,
         _HOST_ESCAPE_RAW_POINTER,
         _ORIG_TENSORBASE_UNTYPED_STORAGE,
@@ -29,14 +25,19 @@ if TYPE_CHECKING:
         _PLAIN_TENSOR_CLS,
         _PURE_VIEW_DISPATCH_OPERATORS,
         _RUNNABLE_LEDGER_FACTS,
-        _WitnessState,
+        HOST_ESCAPE_OPERATORS,
+        MUTABLE_ALIAS_ESCAPE_FUNCS,
+        STATE_METADATA_MIRROR,
+        STORAGE_BRIDGE_ESCAPE_FUNCS,
         _dispatch_callsite,
+        _DispatchEvent,
         _internal_read_active,
         _is_expected_opaque_dispatch,
         _nonowner_escape_observe,
         _observe_state_metadata_read,
         _record_escape_source_tensor,
         _register_storage_origin,
+        _WitnessState,
         internal_scalar_read,
     )
 

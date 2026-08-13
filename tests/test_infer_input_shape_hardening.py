@@ -21,8 +21,8 @@ from collections.abc import Callable
 
 import pytest
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 import torchlens as tl
 from torchlens._errors import ShapeInferenceError

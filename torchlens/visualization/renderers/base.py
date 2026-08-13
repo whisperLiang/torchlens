@@ -23,7 +23,7 @@ class RendererCapabilities:
     html_labels: bool = False
     layout_execution: bool = False
 
-    def require(self, required: "RendererCapabilities", renderer_name: str) -> None:
+    def require(self, required: RendererCapabilities, renderer_name: str) -> None:
         """Validate that every requested renderer feature is supported.
 
         Parameters

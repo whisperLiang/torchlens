@@ -221,7 +221,7 @@ def _concrete_function_for_call(
     if call_attr is not None and hasattr(call_attr, "get_concrete_function"):
         concrete = call_attr.get_concrete_function(*args, **kwargs)
         return concrete, args, kwargs
-    call_dunder = getattr(model, "__call__", None)
+    call_dunder = getattr(model, "__call__", None)  # noqa: B004 - fetches the bound __call__ to inspect IT
     if call_dunder is not None and hasattr(call_dunder, "get_concrete_function"):
         concrete = call_dunder.get_concrete_function(*args, **kwargs)
         return concrete, args, kwargs

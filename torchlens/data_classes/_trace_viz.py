@@ -1,8 +1,8 @@
 """Trace visualization mixin."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from html import escape
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from ..experimental.dagua._bridge import TorchLensRenderAudit
@@ -54,6 +54,8 @@ def _flatten_backward_fire_ref(value: Any) -> tuple["FireRecord", ...]:
 
 
 class TraceVisualizationMixin(_TraceMixinBase):
+    """``Trace`` visualization surface: ``draw``, ``show``, and collapse diagnostics."""
+
     def show(self: "Trace", method: str = "graph", **kwargs: Any) -> str | None:
         """Render this trace using a lightweight notebook-friendly dispatcher.
 
@@ -96,19 +98,19 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_mode: VisModeLiteral = "unrolled",
         vis_call_depth: int = 1000,
         vis_outpath: str = "modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
         module: "Module | str | None" = None,
         node_mode: VisNodeModeLiteral = "default",
         vis_node_mode: VisNodeModeLiteral | MissingType = MISSING,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapsed_node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapse_fn: Optional[Callable[..., Any]] = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        collapsed_node_spec_fn: Callable[..., Any] | None = None,
+        collapse_fn: Callable[..., Any] | None = None,
         collapse: CollapseLiteral = "none",
         fold_repeats: FoldRepeatsLiteral = None,
-        skip_fn: Optional[Callable[..., Any]] = None,
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
-        vis_grad_edge_overrides: Optional[Dict[str, Any]] = None,
-        vis_module_overrides: Optional[Dict[str, Any]] = None,
+        skip_fn: Callable[..., Any] | None = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
+        vis_grad_edge_overrides: dict[str, Any] | None = None,
+        vis_module_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_buffers: BufferVisibilityLiteral | bool | MissingType = MISSING,
@@ -395,11 +397,11 @@ class TraceVisualizationMixin(_TraceMixinBase):
     def draw_backward(
         self: "Trace",
         vis_outpath: str = "backward_modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapsed_node_spec_fn: Optional[Callable[..., Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        collapsed_node_spec_fn: Callable[..., Any] | None = None,
         vis_node_mode: VisNodeModeLiteral = "default",
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_direction: VisDirectionLiteral = "topdown",
@@ -446,10 +448,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
     def draw_combined(
         self: "Trace",
         vis_outpath: str = "combined_modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        backward_node_spec_fn: Optional[Callable[..., Any]] = None,
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        backward_node_spec_fn: Callable[..., Any] | None = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_direction: VisDirectionLiteral = "leftright",
@@ -493,8 +495,8 @@ class TraceVisualizationMixin(_TraceMixinBase):
 
     def preview_fastlog(
         self: "Trace",
-        predicate: Optional[Callable[..., Any]] = None,
-        keep_op: Optional[Callable[..., Any]] = None,
+        predicate: Callable[..., Any] | None = None,
+        keep_op: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> str:
         """Render a fastlog predicate preview for this model graph.
@@ -560,25 +562,17 @@ class TraceVisualizationMixin(_TraceMixinBase):
             "overview", "graph", "memory", "control_flow", "compute", "cost", "waterfall", "output"
         ] = "overview",
         *,
-        fields: Optional[List[str]] = None,
+        fields: list[str] | None = None,
         mode: Literal["auto", "rolled", "unrolled"] = "auto",
         show_ops: bool = False,
-        preset: Optional[
-            Literal[
-                "overview",
-                "graph",
-                "memory",
-                "control_flow",
-                "compute",
-                "cost",
-                "waterfall",
-                "output",
-            ]
-        ] = None,
-        columns: Optional[List[str]] = None,
-        include_ops: Optional[bool] = None,
-        max_rows: Optional[int] = 200,
-        print_to: Optional[Callable[[str], None]] = None,
+        preset: Literal[
+            "overview", "graph", "memory", "control_flow", "compute", "cost", "waterfall", "output"
+        ]
+        | None = None,
+        columns: list[str] | None = None,
+        include_ops: bool | None = None,
+        max_rows: int | None = 200,
+        print_to: Callable[[str], None] | None = None,
         count_fma_as_two: bool = False,
         show_input_preprocessing_details: bool = False,
     ) -> str:
@@ -683,7 +677,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_call_depth: int = 1000,
         show_buffer_layers: bool = False,
         direction: str = "bottomup",
-        include_grad_edges: Optional[bool] = None,
+        include_grad_edges: bool | None = None,
     ) -> Any:
         """Translate this model log into an experimental Dagua graph.
 

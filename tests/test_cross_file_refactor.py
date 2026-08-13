@@ -6,7 +6,6 @@ from types import ModuleType
 
 import torchlens.data_classes.trace as trace_module
 
-
 EXPECTED_MODELLOG_METHODS = {
     "draw",
     "render_dagua_graph",

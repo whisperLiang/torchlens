@@ -1,7 +1,7 @@
 """Focused coverage for glossary-conformance phase B2c structural fields."""
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 import torch

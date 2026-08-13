@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import asdict, dataclass
-from enum import Enum
 import json
 import os
-from pathlib import Path
 import shutil
 import uuid
 import warnings
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
 from safetensors.torch import load_file, save_file
 
+from .._errors import InvalidArgumentError
 from .._io.manifest import TensorEntry, sha256_of_file
 from .._io.paths import reject_symlink_path
 from .._io.tensor_policy import Ok, is_supported_for_save
 from .._io.tlspec import _TlSpecWriter
 from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
-from .._errors import InvalidArgumentError
 from .errors import (
     DirectActivationWriteWarning,
     DirectWriteInExecutableSaveError,

@@ -32,11 +32,11 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.ir import container as _ir_container
 from torchlens.ir.container import (
     ContainerReconstructionError,
     resolve_container_type,
 )
-from torchlens.ir import container as _ir_container
 
 
 class _MaxModel(nn.Module):

@@ -34,7 +34,8 @@ instead of partway through an 18-step pipeline.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Iterator, List, Tuple
+from collections.abc import Iterator
+from typing import Any
 
 import torch
 from torch import nn
@@ -42,7 +43,6 @@ from torch import nn
 from ._distributed import check_distributed_capture
 from .errors._base import CompatibilityError
 from .utils._torch_compat import get_tracing_tensor_types
-
 
 # ---------------------------------------------------------------------------
 # Per-tensor detectors
@@ -137,7 +137,7 @@ def _has_symbolic_shape(t: torch.Tensor) -> bool:
 
 # Quantized module class names — string-match to avoid importing
 # ``torch.ao.quantization`` modules when the user doesn't have them compiled in.
-_QUANTIZED_MODULE_NAME_PREFIXES: Tuple[str, ...] = (
+_QUANTIZED_MODULE_NAME_PREFIXES: tuple[str, ...] = (
     "torch.ao.nn.quantized",
     "torch.nn.quantized",
     "torch.ao.nn.intrinsic.quantized",
@@ -154,10 +154,7 @@ def _is_quantized_module(module: nn.Module) -> bool:
 
 def _model_has_quantized_modules(model: nn.Module) -> bool:
     """True if any submodule is a quantized ``nn`` module."""
-    for sub in model.modules():
-        if _is_quantized_module(sub):
-            return True
-    return False
+    return any(_is_quantized_module(sub) for sub in model.modules())
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +283,7 @@ def check_model_and_input_variants(
 
     maybe_auto_arm()
 
-    offenses: List[Tuple[str, str]] = []
+    offenses: list[tuple[str, str]] = []
 
     # Treat a bare tensor and a container of tensors identically — ``_iter_tensors``
     # yields tensors directly for a tensor, or recurses into list/tuple/dict.
@@ -373,7 +370,7 @@ def check_model_and_input_variants(
     if offenses:
         # Dedupe while preserving order of first appearance.
         seen: set[str] = set()
-        unique: List[Tuple[str, str]] = []
+        unique: list[tuple[str, str]] = []
         for name, why in offenses:
             if name in seen:
                 continue

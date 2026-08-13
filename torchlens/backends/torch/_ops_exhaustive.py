@@ -2,25 +2,12 @@
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
+
 import torch
-from ._tl import (
-    get_tensor_label,
-    set_tensor_label,
-)
-from .completeness_witness import internal_scalar_read
-from .aliasing import (
-    detect_torch_alias_contract,
-    detect_torch_output_alias_contract,
-)
-from ...utils._torch_compat import (
-    saved_tensors_default_hooks_active,
-)
-from ...utils.display import _timed_phase
-from ...utils.tensor_utils import (
-    safe_copy,
-)
-from ...utils.collections import index_nested
+
 from ...capture.projections import LiveOpView
+from ...capture.stop import evaluate_halt_stop
+from ...data_classes.internal_types import FuncExecutionContext
 from ...data_classes.op import (
     Op,
 )
@@ -28,11 +15,26 @@ from ...ir.events import (
     FunctionCallRef,
 )
 from ...ir.intervention import FunctionEventInput
+from ...utils._torch_compat import (
+    saved_tensors_default_hooks_active,
+)
+from ...utils.collections import index_nested
+from ...utils.display import _timed_phase
+from ...utils.tensor_utils import (
+    safe_copy,
+)
+from ._tl import (
+    get_tensor_label,
+    set_tensor_label,
+)
+from .aliasing import (
+    detect_torch_alias_contract,
+    detect_torch_output_alias_contract,
+)
+from .completeness_witness import internal_scalar_read
 from .tensor_tracking import (
     _add_tensor_backward_hook,
 )
-from ...data_classes.internal_types import FuncExecutionContext
-from ...capture.stop import evaluate_halt_stop
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -40,7 +42,6 @@ if TYPE_CHECKING:
 if TYPE_CHECKING:
     from .ops import (
         _AUTOGRAD_SAVED_ATTR_PREFIX,
-        _OutputTensorEntry,
         _build_edge_use_records,
         _build_graph_relationship_fields,
         _build_shared_fields_dict,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
         _log_output_tensor_info,
         _make_layer_log_entry,
         _module_frames_from_fields,
+        _OutputTensorEntry,
         _partition_output_entries_with_autograd_stats,
         _pop_tensor_live_fire_results,
         _register_call_output_container_snapshot,
@@ -464,10 +466,7 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     if not isinstance(out, torch.Tensor) or isinstance(out, torch.nn.Parameter):
         return False
 
-    if (get_tensor_label(out) is None) or is_bottom_level_func:
-        return True
-    else:
-        return False
+    return bool(get_tensor_label(out) is None or is_bottom_level_func)
 
 
 def _check_if_tensor_arg(arg: Any) -> bool:
@@ -482,15 +481,9 @@ def _check_if_tensor_arg(arg: Any) -> bool:
     if issubclass(type(arg), torch.Tensor):
         return True
     elif type(arg) in [list, tuple]:
-        for elt in arg:
-            if issubclass(type(elt), torch.Tensor):
-                return True
-        return False
+        return any(issubclass(type(elt), torch.Tensor) for elt in arg)
     elif type(arg) is dict:
-        for val in arg.values():
-            if issubclass(type(val), torch.Tensor):
-                return True
-        return False
+        return any(issubclass(type(val), torch.Tensor) for val in arg.values())
     else:
         return False
 

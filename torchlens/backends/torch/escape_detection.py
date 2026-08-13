@@ -15,8 +15,7 @@ import traceback
 import types
 import warnings
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 

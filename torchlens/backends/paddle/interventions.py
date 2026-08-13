@@ -347,6 +347,8 @@ class PaddleInterventionRuntime:
                 self._reject_foreign_tensor(value, helper_name=name)
 
             def _replace(out: Any) -> Any:
+                """Return the replacement, refusing a foreign tensor and casting to ``out``'s dtype."""
+
                 replacement = value() if callable(value) else value
                 self._reject_foreign_tensor(replacement, helper_name=name)
                 if not self._backend.is_tensor(replacement):

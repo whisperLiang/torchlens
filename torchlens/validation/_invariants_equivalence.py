@@ -1,20 +1,18 @@
 """Equivalence, ordering, and loop-detection invariants."""
 
 from __future__ import annotations
+
 import re
 from collections import defaultdict
 from typing import TYPE_CHECKING, cast
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .invariants import (
-        MetadataInvariantError,
-    )
-    from .invariants import (
         _EQUIVALENT_OPS_UNAVAILABLE,
         _RAW_LABEL_PATTERN,
+        MetadataInvariantError,
         _retained_orphan_op_labels,
     )
 
@@ -26,7 +24,7 @@ __all__ = (
 )
 
 
-def _canonical_equivalent_ops(owner: "object") -> object:
+def _canonical_equivalent_ops(owner: object) -> object:
     """Return the shared ``equivalent_ops`` object, skipping the copy-on-read copy.
 
     ``Op.equivalent_ops`` (through ``Op.__getattribute__``) and
@@ -69,7 +67,7 @@ def _canonical_equivalent_ops(owner: "object") -> object:
     return _EQUIVALENT_OPS_UNAVAILABLE
 
 
-def _check_equivalence_symmetry(ml: "Trace") -> None:
+def _check_equivalence_symmetry(ml: Trace) -> None:
     """Check L: op_equivalence_classes groups reference valid Op labels.
 
     Validates:
@@ -204,7 +202,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             verified_keepalive.append((layer_canonical, pass_canonicals))
 
 
-def _check_graph_ordering(ml: "Trace") -> None:
+def _check_graph_ordering(ml: Trace) -> None:
     """Check M: graph ordering invariants.
 
     Validates:
@@ -272,7 +270,7 @@ def _check_graph_ordering(ml: "Trace") -> None:
             raise MetadataInvariantError(name, f"Raw label '{label}' survived postprocessing")
 
 
-def _check_loop_detection_invariants(ml: "Trace") -> None:
+def _check_loop_detection_invariants(ml: Trace) -> None:
     """Check N: loop detection / recurrent_ops invariants.
 
     Validates per-layer:
@@ -304,7 +302,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
     all_keys = ml.layer_dict_all_keys
     ambiguous_keys = getattr(ml, "_ambiguous_lookup_keys", {})
 
-    def _resolve(member_label: str) -> "Op":
+    def _resolve(member_label: str) -> Op:
         hit = layer_logs.get(member_label, _MISS)
         if hit is not _MISS:
             return cast("Op", hit)
@@ -381,7 +379,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
 
         # Symmetry: all members agree on the group
         slo_set = set(slo)
-        members: list[tuple[str, "Op"]] = []
+        members: list[tuple[str, Op]] = []
         for member_label in slo:
             member = _resolve(member_label)
             members.append((member_label, member))

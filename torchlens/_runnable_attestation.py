@@ -1,17 +1,12 @@
 """Numeric attestation and nondeterminism checks."""
 
 from __future__ import annotations
+
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 import torch
-from .utils.rng import (
-    deterministic_fill_governs,
-    qualname_is_uninit_growth_resize,
-    qualname_is_uninit_size_gated_alloc,
-    qualname_is_uninit_total_writer,
-    qualname_is_uninitialized_alloc,
-    uninit_new_call_is_size_form,
-)
+
 from .runnable import (
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
@@ -21,8 +16,14 @@ from .runnable import (
     TensorSlotRole,
     is_mode_sensitive_qualname,
 )
-
-from typing import TYPE_CHECKING
+from .utils.rng import (
+    deterministic_fill_governs,
+    qualname_is_uninit_growth_resize,
+    qualname_is_uninit_size_gated_alloc,
+    qualname_is_uninit_total_writer,
+    qualname_is_uninitialized_alloc,
+    uninit_new_call_is_size_form,
+)
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

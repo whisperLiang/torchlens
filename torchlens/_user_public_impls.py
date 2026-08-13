@@ -13,29 +13,30 @@ from torch import nn
 from tqdm import tqdm
 
 from . import user_funcs as _user_funcs
+from ._capture_state_helpers import (
+    _clone_state_dict_with_metadata,
+    _model_for_ground_truth_validation,
+    _model_for_validation_replay,
+    _ModuleTreePlainAttrSnapshot,
+    _move_tensors_to_device,
+    _reject_opaque_wrappers,
+    _unwrap_data_parallel,
+    unwrap_compiled_model,
+)
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ._input_coerce import _coerce_input_args
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
+    FoldRepeatsLiteral,
     VisDirectionLiteral,
     VisInterventionModeLiteral,
     VisModeLiteral,
     VisNodeModeLiteral,
     VisNodePlacementLiteral,
     VisRendererLiteral,
-    FoldRepeatsLiteral,
 )
-from ._capture_state_helpers import (
-    _ModuleTreePlainAttrSnapshot,
-    _clone_state_dict_with_metadata,
-    _model_for_ground_truth_validation,
-    _model_for_validation_replay,
-    _move_tensors_to_device,
-    _reject_opaque_wrappers,
-    _unwrap_data_parallel,
-    unwrap_compiled_model,
-)
+from ._robustness import check_model_and_input_variants
 from .backends import BackendName, resolve_backend_spec
 from .data_classes.trace import Trace
 from .errors import TraceNotReproducibleWarning
@@ -46,11 +47,10 @@ from .options import (
 )
 from .utils.arg_handling import normalize_input_args, safe_copy_input_tree
 from .utils.display import warn_parallel
+from .utils.hashing import compute_graph_shape_hash
 from .utils.introspection import get_vars_of_type_from_obj
 from .utils.rng import set_random_seed
-from .utils.hashing import compute_graph_shape_hash
 from .visualization.code_panel import CodePanelOption
-from ._robustness import check_model_and_input_variants
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -192,7 +192,7 @@ def show_model_graph(
     vis_call_depth: int | MissingType = MISSING,
     vis_outpath: str | MissingType = MISSING,
     vis_graph_overrides: dict[str, Any] | None | MissingType = MISSING,
-    module: "Module | str | None" = None,
+    module: Module | str | None = None,
     vis_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_module_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -1586,7 +1586,7 @@ def validate_batch_of_models_and_inputs(
     models_and_inputs_dict: dict[str, dict[str, Any]],
     out_path: str,
     redo_model_if_already_run: bool = True,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Batch-validate multiple models, writing incremental results to a CSV.
 
     For each model/input pair, calls ``validate_forward_pass`` and appends the

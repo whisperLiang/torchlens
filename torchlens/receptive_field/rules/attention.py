@@ -44,9 +44,13 @@ def scaled_dot_product_attention(context: ReceptiveFieldRuleContext) -> _RuleRes
                     query_extent = int(query_shape[axis])
                     parent_extent = int(shape[axis])
                     is_head_axis = axis == len(shape) - 3
-                    if parent_extent == 1 and query_extent != 1:
-                        widened.append(axis)
-                    elif enable_gqa and is_head_axis and parent_extent < query_extent:
+                    if (
+                        parent_extent == 1
+                        and query_extent != 1
+                        or enable_gqa
+                        and is_head_axis
+                        and parent_extent < query_extent
+                    ):
                         widened.append(axis)
             axes_by_parent[context.op.parents[parent_index]] = tuple(widened)
     return context.full(

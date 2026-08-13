@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 import gc
-from pathlib import Path
-import time
-from typing import Any, Iterator
-import weakref
 import gzip
+import time
+import weakref
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
+from _pickle_compare import _tensor_equal
+from _pickle_compare_allowlist import ALLOWED_PICKLE_DIFF_FIELDS
 from torch import nn
-import numpy as np
 
 import torchlens as tl
 from torchlens import errors
 from torchlens._capture_state_helpers import _detach_nested_for_cache
 from torchlens.data_classes._state_adapter import state_items
-
-from _pickle_compare import _tensor_equal
-from _pickle_compare_allowlist import ALLOWED_PICKLE_DIFF_FIELDS
 
 _GZIP_MAGIC = b"\x1f\x8b"
 _EXPECTED_ALLOWLIST = {
@@ -287,7 +287,7 @@ def _make_trace_pickleable(trace: Any) -> None:
             value = state[field_name]
             if isinstance(value, torch.Tensor):
                 state[field_name] = value.detach().cpu()
-            elif field_name in {"grad_fn_handle", "grad_fn_handle"}:
+            elif field_name in {"grad_fn_handle"}:
                 state[field_name] = None
     if hasattr(trace, "input_object_id"):
         trace.input_object_id = 0

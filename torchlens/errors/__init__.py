@@ -153,6 +153,7 @@ _LAZY_EXCEPTION_PATHS = {
     # Resolved lazily like the legacy names, but for the opposite reason: the
     # defining modules import ``errors._base``, so eagerly importing them here
     # would create a cycle.
+    "ArtifactSchemaAgeWarning": ("torchlens._io", "ArtifactSchemaAgeWarning"),
     "ArtifactVersionBelowFloorError": ("torchlens._io", "ArtifactVersionBelowFloorError"),
     "ArgumentConflictError": ("torchlens._errors", "ArgumentConflictError"),
     "ArgumentTypeError": ("torchlens._errors", "ArgumentTypeError"),

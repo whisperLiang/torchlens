@@ -1,12 +1,15 @@
 """State contracts and captured execution contexts."""
 
 from __future__ import annotations
-from collections.abc import Mapping
+
 import sys
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from ._io._torch_symbols import torch_attr
 from ._runnable_state import (
     _OUTPUT_COUNT_FLOOR,
@@ -15,7 +18,6 @@ from ._runnable_state import (
 from .errors import (
     RunPreconditionError,
 )
-from .utils._torch_compat import tensor_version_or_none
 from .runnable import (
     ContractCheck,
     RunnableCallDescriptor,
@@ -25,14 +27,13 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
+from .utils._torch_compat import tensor_version_or_none
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
         _ALLOCATOR_SIGNATURES,
-        _ProjectionCountExceeded,
         _contract_check,
+        _ProjectionCountExceeded,
     )
 
 __all__ = (

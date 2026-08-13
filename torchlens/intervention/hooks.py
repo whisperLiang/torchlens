@@ -5,12 +5,19 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from types import SimpleNamespace
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Literal, TypeAlias, cast
 
 import torch
 
+from ..ir.selector_eval import (
+    _UPFRONT_UNSUPPORTED_KINDS,
+    _capability_error,
+    evaluate,
+    live_label_error_message,
+    looks_like_finalized_label,
+    normalize_selector_like,
+)
 from .errors import (
     HelperMountError,
     HookSignatureError,
@@ -20,8 +27,8 @@ from .errors import (
     SiteResolutionError,
 )
 from .selectors import (
-    BaseSelector,
     BackwardPassSelector,
+    BaseSelector,
     CompositeSelector,
     FacetSelector,
     GradKindSelector,
@@ -29,14 +36,6 @@ from .selectors import (
     _classify_selector_direction,
 )
 from .types import HelperSpec, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec
-from ..ir.selector_eval import (
-    _UPFRONT_UNSUPPORTED_KINDS,
-    _capability_error,
-    evaluate,
-    live_label_error_message,
-    looks_like_finalized_label,
-    normalize_selector_like,
-)
 
 HookTiming: TypeAlias = Literal["pre", "post"]
 HookDirection: TypeAlias = Literal["forward", "backward"]
@@ -1118,8 +1117,7 @@ def _iter_facet_records(log: Any) -> Iterator[Any]:
         yield from modules
     except TypeError:
         pass
-    for op in getattr(log, "layer_list", ()):
-        yield op
+    yield from getattr(log, "layer_list", ())
 
 
 def _facet_home_label(spec: Any) -> str:
@@ -1543,7 +1541,7 @@ def _snapshot_layer_log(layer_log: Any | None) -> dict[str, Any]:
 
     snapshot: dict[str, Any] = {}
     if layer_log is None:
-        return {field_name: None for field_name in _LAYER_LOG_CONTEXT_FIELDS}
+        return dict.fromkeys(_LAYER_LOG_CONTEXT_FIELDS)
     for field_name in _LAYER_LOG_CONTEXT_FIELDS:
         if isinstance(layer_log, Mapping):
             value = layer_log.get(field_name)

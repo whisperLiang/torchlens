@@ -106,9 +106,7 @@ def _all_same(val: Any, scalar_default: Any) -> bool:
     """Check if val is a tuple of all the same scalar_default value, or equals scalar_default."""
     if val == scalar_default:
         return True
-    if isinstance(val, tuple) and all(v == scalar_default for v in val):
-        return True
-    return False
+    return bool(isinstance(val, tuple) and all(v == scalar_default for v in val))
 
 
 @_register("conv1d", "conv2d", "conv3d", "convolution")

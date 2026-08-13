@@ -12,8 +12,6 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         MetadataInvariantError,
-    )
-    from .invariants import (
         _check_module_call_boundary_and_tree,
         _fail_conditional_invariant,
         _strip_pass_suffix,
@@ -31,7 +29,7 @@ __all__ = (
 
 
 def _check_conditional_arm_edges_match_graph(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check conditional arm-entry edges correspond to graph edges.
@@ -70,7 +68,7 @@ def _check_conditional_arm_edges_match_graph(
 
 
 def _check_conditional_branch_membership_records(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check per-op conditional branch membership records agree.
@@ -159,7 +157,7 @@ def _check_conditional_branch_membership_records(
 
 
 def _check_conditional_public_accessor_summary(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check public conditional ids and fired-arm summaries are honest.
@@ -212,7 +210,7 @@ def _check_conditional_public_accessor_summary(
             )
 
 
-def _check_layer_pass_to_layer_log_xrefs(ml: "Trace") -> None:
+def _check_layer_pass_to_layer_log_xrefs(ml: Trace) -> None:
     """Check G: Op <-> Layer cross-references.
 
     Validates:
@@ -253,7 +251,7 @@ def _check_layer_pass_to_layer_log_xrefs(ml: "Trace") -> None:
                 )
 
 
-def _check_pass_count_consistency(ml: "Trace") -> None:
+def _check_pass_count_consistency(ml: Trace) -> None:
     """Check pass-count consistency across multi-pass layer records.
 
     Parameters
@@ -301,7 +299,7 @@ def _check_pass_count_consistency(ml: "Trace") -> None:
             )
 
 
-def _check_module_layer_containment(ml: "Trace") -> None:
+def _check_module_layer_containment(ml: Trace) -> None:
     """Check H: Module <-> Layer containment consistency.
 
     Validates forward and reverse directions:
@@ -392,7 +390,7 @@ def _check_module_layer_containment(ml: "Trace") -> None:
                 )
 
 
-def _check_module_hierarchy(ml: "Trace") -> None:
+def _check_module_hierarchy(ml: Trace) -> None:
     """Check I: module address tree consistency and pass structure.
 
     Precondition contract: rich ModuleCall checks run only for materialized

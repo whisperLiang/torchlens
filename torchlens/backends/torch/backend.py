@@ -2,26 +2,27 @@
 
 from __future__ import annotations
 
-import dataclasses
 import contextlib
+import dataclasses
 import inspect
 import warnings
+from collections.abc import Iterator
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Iterator, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from ... import _state
 from ..._errors import TorchLensCaptureGapWarning
-from ...data_classes.internal_types import FuncExecutionContext
 from ..._io import BlobRef as PortableBlobRef
 from ...capture.session import capture_session_for
+from ...data_classes.internal_types import FuncExecutionContext
 from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
-from ...ir.events import OpEvent, OutputRef
-from ...ir.op_record import amend_output_parent_promotion
-from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import ContainerSpec, OutputPathComponent
 from ...ir.container_registry import ContainerLeafOccurrence, ModelSite, Phase, Role
+from ...ir.events import OpEvent, OutputRef
+from ...ir.intervention import FireResult, FunctionEventInput
+from ...ir.op_record import amend_output_parent_promotion
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -36,8 +37,7 @@ from ...utils.introspection import (
     get_vars_of_type_from_obj,
     nested_assign,
 )
-from ...utils.rng import log_current_rng_states, set_random_seed
-from ...utils.rng import set_rng_from_saved_states
+from ...utils.rng import log_current_rng_states, set_random_seed, set_rng_from_saved_states
 from ...utils.tensor_utils import _is_cuda_available, safe_copy
 from . import _tl
 from .aliasing import detect_torch_alias_contract
@@ -158,7 +158,7 @@ def _tensor_memory_bytes(tensor: torch.Tensor) -> int:
 
 
 def _write_output_parent_blob(
-    trace: "Trace",
+    trace: Trace,
     label_raw: str,
     payload: torch.Tensor | None,
     kind: str,
@@ -192,7 +192,7 @@ def _write_output_parent_blob(
 
 
 def _promote_layers_to_save_output_parent(
-    trace: "Trace",
+    trace: Trace,
     event: OpEvent,
     tensor: torch.Tensor,
 ) -> tuple[OutputRef, CapturePolicy, bool, object]:
@@ -379,11 +379,10 @@ class TorchBackend:
             """Enter detector state before enabling wrapper logging."""
 
             trace = cast("Trace", session)
-            with capture_escape_guard(trace):
-                with capture_completeness_witness(trace):
-                    with capture_scalar_escape_warning(trace):
-                        with _state.active_logging(trace):
-                            yield
+            with capture_escape_guard(trace), capture_completeness_witness(trace):
+                with capture_scalar_escape_warning(trace):
+                    with _state.active_logging(trace):
+                        yield
 
         return guarded_logging()
 
@@ -569,7 +568,7 @@ class TorchBackend:
             if was_tuple and isinstance(input_args[arg_idx], list):
                 input_args[arg_idx] = tuple(input_args[arg_idx])
 
-        for kwarg_idx, (key, val) in enumerate(input_kwargs.items()):
+        for kwarg_idx, (key, _val) in enumerate(input_kwargs.items()):
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_kwarg_tensors[kwarg_idx]):
                 moved_tensor = moved_tensors_by_id.get(id(tensor))
                 if moved_tensor is None:
@@ -1171,7 +1170,7 @@ class TorchBackend:
 
 
 def _register_model_output_container_snapshot(
-    trace: "Trace",
+    trace: Trace,
     output: object,
     output_entries: list[
         tuple[torch.Tensor, tuple[OutputPathComponent, ...], ContainerSpec | None]
@@ -1231,7 +1230,7 @@ def _register_model_output_container_snapshot(
     )
 
 
-def _is_direct_registered_buffer_output(trace: "Trace", tensor: torch.Tensor) -> bool:
+def _is_direct_registered_buffer_output(trace: Trace, tensor: torch.Tensor) -> bool:
     """Return whether an unlabeled output is a registered source-model buffer.
 
     Parameters
@@ -1256,7 +1255,7 @@ def _is_direct_registered_buffer_output(trace: "Trace", tensor: torch.Tensor) ->
     return any(tensor is buffer for _address, buffer in model.named_buffers())
 
 
-def _model_input_output_label(trace: "Trace", tensor: torch.Tensor) -> str | None:
+def _model_input_output_label(trace: Trace, tensor: torch.Tensor) -> str | None:
     """Return the input-source label when an unlabeled output is a model input.
 
     Parameters

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace as dataclass_replace
 from html import escape
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ..utils._multipass_access import get_multipass_attr
 
@@ -73,7 +74,7 @@ class NodeSpec:
     image: str | None = None
     extra_attrs: dict[str, str] = field(default_factory=dict)
 
-    def replace(self, **kwargs: Any) -> "NodeSpec":
+    def replace(self, **kwargs: Any) -> NodeSpec:
         """Return a copy of this spec with selected fields replaced.
 
         Parameters
@@ -172,7 +173,7 @@ def graphviz_graph_overrides(graph_overrides: dict[str, Any] | None) -> dict[str
     }
 
 
-def intervention_sites_for_log(trace: "Trace") -> list["Op"]:
+def intervention_sites_for_log(trace: Trace) -> list[Op]:
     """Resolve intervention spec targets to layer-pass records.
 
     Parameters
@@ -230,7 +231,7 @@ def _site_sort_key(op: Any) -> str:
 
 
 def intervention_site_and_cone_labels(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_cone: bool,
 ) -> tuple[set[str], set[str]]:
@@ -262,7 +263,7 @@ def intervention_site_and_cone_labels(
 
 
 def make_intervention_node_spec_fn(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_cone: bool,
     graph_overrides: dict[str, Any] | None,
@@ -323,7 +324,7 @@ def make_intervention_node_spec_fn(
         intervention_graph_override(graph_overrides, "intervention_cone_penwidth", 1.75)
     )
 
-    def intervention_node_spec_fn(layer_log: "Layer", default_spec: NodeSpec) -> NodeSpec:
+    def intervention_node_spec_fn(layer_log: Layer, default_spec: NodeSpec) -> NodeSpec:
         """Apply intervention styling before any user node-spec callback."""
 
         # A per-pass Op resolves a pass-qualified ``label`` -> match the

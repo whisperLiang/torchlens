@@ -14,8 +14,9 @@ import argparse
 import html
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DIR = REPO_ROOT / "notebooks" / "audit"
@@ -44,9 +45,10 @@ sys.path.insert(0, str(AUDIT_DIR))
 sys.path.insert(0, str(VISUAL_DIR))
 
 import torch  # noqa: E402
-import torchlens as tl  # noqa: E402
 from _models import ZOO  # noqa: E402
 from _visual_models import VZOO  # noqa: E402
+
+import torchlens as tl  # noqa: E402
 
 
 def _verify_checkout() -> None:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -15,7 +15,6 @@ from torchlens.receptive_field import _rules
 from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
 from torchlens.receptive_field._types import ReceptiveFieldValidationStatus
 from torchlens.receptive_field._validation import cross_validate, validate_receptive_field_trace
-
 
 _PACK: dict[str, object] | None = None
 

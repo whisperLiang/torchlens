@@ -11,10 +11,16 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.semantic import FacetRecipe, FacetSpec, FacetView, MissingFacetError, MissingGradient
-from torchlens.semantic import facets as facets_mod
-from torchlens.semantic.recipes import BUILTIN_FACET_CAPABILITY_INVENTORY
 from torchlens.intervention.errors import SiteResolutionError
+from torchlens.semantic import (
+    FacetRecipe,
+    FacetSpec,
+    FacetView,
+    MissingFacetError,
+    MissingGradient,
+    facets as facets_mod,
+)
+from torchlens.semantic.recipes import BUILTIN_FACET_CAPABILITY_INVENTORY
 
 
 class _Record:

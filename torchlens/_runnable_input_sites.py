@@ -1,9 +1,12 @@
 """Live input sites and metadata contract checks."""
 
 from __future__ import annotations
+
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
 import torch
+
 from .errors import (
     ReattachError,
     RunCapabilityUnavailableError,
@@ -19,8 +22,6 @@ from .runnable import (
     SparseRunDescriptor,
     TensorSlotRole,
 )
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
@@ -293,7 +294,7 @@ def _runtime_input_metadata_value(value: torch.Tensor, name: str) -> Any:
     return None
 
 
-def _fact_path_tuple_or_none(fact: Mapping[str, Any]) -> "tuple[Any, ...] | None":
+def _fact_path_tuple_or_none(fact: Mapping[str, Any]) -> tuple[Any, ...] | None:
     """Belt twin of the parse-side path validator (r75 L1): ``None`` means fail closed.
 
     Parse refuses a non-sequence fact ``path`` as ``context_field_invalid`` before any

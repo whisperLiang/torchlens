@@ -8,9 +8,9 @@ import multiprocessing as mp
 import os
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator, List, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 
@@ -79,7 +79,7 @@ def identity(x: Any) -> Any:
     return x
 
 
-def int_list_to_compact_str(int_list: List[int]) -> str:
+def int_list_to_compact_str(int_list: list[int]) -> str:
     """Collapse a list of integers into a compact range string.
 
     Contiguous runs are collapsed into ``"start-end"`` ranges, separated

@@ -90,7 +90,7 @@ def _normalize_capture_decision(
 
 def _evaluate_keep_op(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> CaptureSpec | RetroactiveCaptureDecision:
     """Evaluate the operation/source predicate slot for one event."""
 
@@ -162,7 +162,7 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
 
 def _evaluate_intervene_op(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> InterventionDecision | None:
     """Evaluate the active operation intervention predicate slot.
 
@@ -194,7 +194,7 @@ def _evaluate_intervene_op(
 
 def _evaluate_halt(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
     frontier_output: Any | None = None,
 ) -> None:
     """Evaluate the halt predicate slot and raise when it matches.
@@ -222,7 +222,7 @@ def _evaluate_halt(
     StopDirective(halt_options=options).evaluate_halt(ctx, frontier_output=frontier_output)
 
 
-def _is_halt_only_capture(options: "RecordingOptions") -> bool:
+def _is_halt_only_capture(options: RecordingOptions) -> bool:
     """Return whether capture can evaluate only the halt predicate per event.
 
     The fast path is deliberately narrow: no save predicate, no default
@@ -244,7 +244,7 @@ def _is_halt_only_capture(options: "RecordingOptions") -> bool:
 
 def _evaluate_retroactive_followed_by(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> RetroactiveCaptureDecision | None:
     """Evaluate supported ``candidate & followed_by(successor)`` predicate sugar."""
 
@@ -351,7 +351,7 @@ def _matching_recent_parent_labels(
     return tuple(matches)
 
 
-def _module_capture_spec(options: "RecordingOptions") -> CaptureSpec:
+def _module_capture_spec(options: RecordingOptions) -> CaptureSpec:
     """Return the capture policy for one module boundary event.
 
     Module events have no predicate slot (predicate-gated module-event

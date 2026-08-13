@@ -21,8 +21,8 @@ from safetensors.torch import load, load_file
 
 from . import PayloadLoadHints, TorchLensIOError
 from .manifest import sha256_of_file
-from .payload_codec import materialize_transport_tensor
 from .paths import resolve_bundle_blob_path
+from .payload_codec import materialize_transport_tensor
 
 _INLINE_LOAD_MAX_BYTES = 500 * 1024 * 1024
 _TORCH_BACKEND_NAME = "torch"

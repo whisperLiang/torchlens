@@ -38,6 +38,7 @@ from ._capture_state_helpers import (
     _capture_cache_dir,
     _capture_cache_key,
     _capture_output_metadata_from_model_config,
+    _clone_state_dict_with_metadata as _clone_state_dict_with_metadata,
     _facet_recipe_cache_key,
     _fingerprint_model_weights,
     _hash_input_signatures,
@@ -47,13 +48,8 @@ from ._capture_state_helpers import (
     _qualname_for_model,
     _reject_opaque_wrappers,
     _unwrap_data_parallel,
-    unwrap_compiled_model,
-)
-from ._capture_state_helpers import (
-    _clone_state_dict_with_metadata as _clone_state_dict_with_metadata,
-)
-from ._capture_state_helpers import (
     decide_recording_of_batch as decide_recording_of_batch,
+    unwrap_compiled_model,
 )
 from ._chunked_capture_helpers import (
     _append_chunk_trace_state,

@@ -8,7 +8,6 @@ from functools import lru_cache
 from types import FunctionType
 from typing import Any, TypeVar, cast
 
-
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 

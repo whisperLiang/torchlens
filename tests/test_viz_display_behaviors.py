@@ -14,7 +14,6 @@ from torch import nn
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt  # noqa: E402
-
 from PIL import Image  # noqa: E402
 
 import torchlens as tl  # noqa: E402

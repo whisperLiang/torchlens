@@ -283,7 +283,7 @@ class _MutateWarningSuppression:
         # the in-block value. ``None`` means no call-form entry is pending.
         self._pending_prior: bool | None = None
 
-    def __call__(self, on: bool = True) -> "_MutateWarningSuppression":
+    def __call__(self, on: bool = True) -> _MutateWarningSuppression:
         """Set suppression state and return this context-capable object.
 
         Toggling immediately keeps the bare ``suppress_mutate_warnings(True)``
@@ -306,7 +306,7 @@ class _MutateWarningSuppression:
         self._suppress = bool(on)
         return self
 
-    def __enter__(self) -> "_MutateWarningSuppression":
+    def __enter__(self) -> _MutateWarningSuppression:
         """Temporarily suppress mutate-in-place warnings.
 
         Returns
@@ -1235,7 +1235,7 @@ class CaptureOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "CaptureOptions":
+    ) -> CaptureOptions:
         """Build an instance from already-resolved field values.
 
         Applies the same invariants as ``__init__`` (via
@@ -1336,7 +1336,7 @@ class SaveOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "SaveOptions":
+    ) -> SaveOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1434,12 +1434,12 @@ class VisualizationOptions:
     direction: VisDirectionLiteral = "bottomup"
     graph_overrides: dict[str, Any] | None = None
     node_style: VisNodeModeLiteral = "default"
-    node_spec_fn: Callable[["Layer", NodeSpec], NodeSpec | None] | None = None
-    collapsed_node_spec_fn: Callable[["Module", NodeSpec], NodeSpec | None] | None = None
-    collapse_fn: Callable[["Module"], bool] | None = None
+    node_spec_fn: Callable[[Layer, NodeSpec], NodeSpec | None] | None = None
+    collapsed_node_spec_fn: Callable[[Module, NodeSpec], NodeSpec | None] | None = None
+    collapse_fn: Callable[[Module], bool] | None = None
     collapse: CollapseLiteral = "none"
     fold_repeats: FoldRepeatsLiteral = None
-    skip_fn: Callable[["Layer"], bool] | None = None
+    skip_fn: Callable[[Layer], bool] | None = None
     edge_overrides: dict[str, Any] | None = None
     grad_edge_overrides: dict[str, Any] | None = None
     module_overrides: dict[str, Any] | None = None
@@ -1469,16 +1469,14 @@ class VisualizationOptions:
         direction: VisDirectionLiteral | MissingType = MISSING,
         graph_overrides: dict[str, Any] | None | MissingType = MISSING,
         node_style: VisNodeModeLiteral | MissingType = MISSING,
-        node_spec_fn: (
-            Callable[["Layer", NodeSpec], NodeSpec | None] | None | MissingType
-        ) = MISSING,
+        node_spec_fn: (Callable[[Layer, NodeSpec], NodeSpec | None] | None | MissingType) = MISSING,
         collapsed_node_spec_fn: (
-            Callable[["Module", NodeSpec], NodeSpec | None] | None | MissingType
+            Callable[[Module, NodeSpec], NodeSpec | None] | None | MissingType
         ) = MISSING,
-        collapse_fn: Callable[["Module"], bool] | None | MissingType = MISSING,
+        collapse_fn: Callable[[Module], bool] | None | MissingType = MISSING,
         collapse: CollapseLiteral | MissingType = MISSING,
         fold_repeats: FoldRepeatsLiteral | MissingType = MISSING,
-        skip_fn: Callable[["Layer"], bool] | None | MissingType = MISSING,
+        skip_fn: Callable[[Layer], bool] | None | MissingType = MISSING,
         edge_overrides: dict[str, Any] | None | MissingType = MISSING,
         grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
         module_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -1645,7 +1643,7 @@ class VisualizationOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "VisualizationOptions":
+    ) -> VisualizationOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1744,7 +1742,7 @@ class ReplayOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "ReplayOptions":
+    ) -> ReplayOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1843,7 +1841,7 @@ class InterventionOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "InterventionOptions":
+    ) -> InterventionOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1938,7 +1936,7 @@ class StreamingOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "StreamingOptions":
+    ) -> StreamingOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)

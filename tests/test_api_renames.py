@@ -16,7 +16,6 @@ from torchlens._deprecations import _WARNED_DEPRECATIONS
 from torchlens.options import CaptureOptions, SaveOptions, StreamingOptions, VisualizationOptions
 from torchlens.validation import core as validation_core
 
-
 _VISUALIZATION_CASES = [
     ("view", "vis_mode", "rolled", "vis_mode"),
     ("depth", "vis_call_depth", 5, "vis_call_depth"),

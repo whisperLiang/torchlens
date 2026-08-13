@@ -32,8 +32,9 @@ from __future__ import annotations
 import threading
 import warnings
 from collections import Counter
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from torch.overrides import TorchFunctionMode
 
@@ -97,6 +98,8 @@ def _record_emitted_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     forward = warnings.showwarning
 
     def recorder(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Record ``(category, message)`` in ``seen``, then forward to the real handler."""
+
         seen.add((category, str(message)))
         forward(message, category, *args, **kwargs)
 
@@ -114,6 +117,8 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     forward = warnings.showwarning
 
     def dedup(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Forward only warnings whose ``(category, message)`` is not already in ``seen``."""
+
         if (category, str(message)) in seen:
             return
         forward(message, category, *args, **kwargs)
@@ -125,7 +130,7 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
         warnings.showwarning = forward
 
 
-def _escape_signal(trace: "Trace") -> str | None:
+def _escape_signal(trace: Trace) -> str | None:
     """Return the escape-signal kind carried by a finished trace, if any.
 
     An authoritative POSITIVE verdict outranks the heuristic provenance
@@ -143,7 +148,7 @@ def _escape_signal(trace: "Trace") -> str | None:
     return None
 
 
-def _op_name_counts(trace: "Trace") -> Counter[str]:
+def _op_name_counts(trace: Trace) -> Counter[str]:
     """Multiset of canonicalized op func names for recovery comparison.
 
     Mode presence respells tensor dunders through the override protocol
@@ -183,7 +188,7 @@ def _disclosure(
     }
 
 
-def _mark(trace: "Trace", reason: str, info: dict[str, Any]) -> None:
+def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """Stamp the rescue disclosure onto a trace (session-time facts).
 
     An unrecovered escape must never SILENCE a more specific verdict: when
@@ -201,10 +206,10 @@ def _mark(trace: "Trace", reason: str, info: dict[str, Any]) -> None:
 
 
 def capture_with_rescue(
-    run_capture: Callable[[], "Trace"],
+    run_capture: Callable[[], Trace],
     *,
     eligible: bool = True,
-) -> "Trace":
+) -> Trace:
     """Run one capture; on an escape signal, re-run once with the net armed.
 
     Parameters
@@ -231,7 +236,7 @@ def capture_with_rescue(
         return run_capture()
 
     rng_snapshot = log_current_rng_states()
-    primary: "Trace | None" = None
+    primary: Trace | None = None
     primary_error: OutputAttributionError | None = None
     emitted_warnings: set[tuple[type, str]] = set()
     try:

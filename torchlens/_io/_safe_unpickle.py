@@ -123,9 +123,10 @@ import os
 import pickle
 import sys
 import warnings
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, BinaryIO, Collection, Mapping
+from typing import Any, BinaryIO
 
 import torch
 

@@ -11,16 +11,15 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-import pytest
+import example_models
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
 from torchlens import _state
 from torchlens._errors import TorchLensCaptureGapWarning
-from torchlens.options import CaptureOptions
-import example_models
 from torchlens.backends.torch.escape_detection import (
     AUDITED_ESCAPE_EXEMPTIONS,
     MAX_AUDITED_EXEMPTIONS,
@@ -32,6 +31,7 @@ from torchlens.backends.torch.wrappers import (
     unwrap_torch,
     wrap_torch,
 )
+from torchlens.options import CaptureOptions
 
 
 @pytest.fixture(autouse=True)
@@ -810,8 +810,8 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
     like the undisguised user call in the test above.
     """
 
-    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
     from torchlens.backends.torch import completeness_witness as witness_module
+    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
     from torchlens.options import CaptureOptions
 
     forged_globals = {
@@ -820,9 +820,7 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
         "torch": torch,
         "_raw_storage_ptr_no_observe": _raw_storage_ptr_no_observe,
     }
-    forged_filename = str(
-        Path(witness_module.__file__).resolve().parent / "user_supplied_model.py"
-    )
+    forged_filename = str(Path(witness_module.__file__).resolve().parent / "user_supplied_model.py")
     code = compile(
         "def forward(self, x):\n"
         "    ptr = _raw_storage_ptr_no_observe(x)\n"

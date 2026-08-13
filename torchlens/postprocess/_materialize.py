@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
+import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-import importlib
 from math import prod
-import time
 from typing import TYPE_CHECKING, Any, cast
 
-from torch import nn
 import torch
+from torch import nn
+
 from torchlens._io import BlobRef as PortableBlobRef
+from torchlens.intervention.types import EdgeUseRecord
 from torchlens.ir import CaptureEvents
 from torchlens.ir.events import (
     ModuleEnterEvent,
@@ -21,11 +23,9 @@ from torchlens.ir.events import (
     ModulePrepEvent,
     OpEvent,
 )
-from torchlens.intervention.types import EdgeUseRecord
 
 from ..backends.torch._tl import get_buffer_address, get_tensor_label, get_tensor_meta
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER
-from ._ingest_contract import IngestInputs, JournalView, Step0Result
 from ..data_classes._module_role_hints import (
     multi_output_role_from_path,
     role_hints_for_module_class,
@@ -34,10 +34,11 @@ from ..data_classes.trace import _init_module_hierarchy_data
 from ..utils import get_vars_of_type_from_obj, safe_copy
 from ..utils._torch_symbols import torch_attr
 from ..utils.display import _record_phase_timing
+from ._ingest_contract import IngestInputs, JournalView, Step0Result
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.trace import Trace
     from torchlens.data_classes.op import Op
+    from torchlens.data_classes.trace import Trace
 
 
 from torchlens.ir.op_record import IngestExtras as _IngestExtras
@@ -46,9 +47,7 @@ from torchlens.ir.op_record_scatter import CELL_SOURCES
 _EMPTY_INGEST_EXTRAS = _IngestExtras()
 
 
-def materialize_log_from_fields(
-    fields_dict: dict[str, object], store: object | None = None
-) -> "Op":
+def materialize_log_from_fields(fields_dict: dict[str, object], store: object | None = None) -> Op:
     """Construct the live log object for one captured operation.
 
     Parameters
@@ -117,7 +116,7 @@ def _pop_pending_blob_ids(fields_dict: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _journal_buffer_write_events(trace: "Trace") -> tuple[Any, ...]:
+def _journal_buffer_write_events(trace: Trace) -> tuple[Any, ...]:
     """Return the journal's buffer-write lane for one trace.
 
     Buffer writes live in the capture journal (``CaptureEvents.buffer_write_events``),
@@ -145,7 +144,7 @@ class _ModuleSideChannel:
     module_forward_args: dict[Any, Any]
 
 
-def build_ingest_inputs(trace: "Trace", events: CaptureEvents) -> IngestInputs:
+def build_ingest_inputs(trace: Trace, events: CaptureEvents) -> IngestInputs:
     """Orchestrator-side construction of the frozen step-0 input bundle.
 
     Owns the lazy ``TraceCore``/``OpRowStore`` creation (ppdag v3 section 9.1
@@ -163,6 +162,8 @@ def build_ingest_inputs(trace: "Trace", events: CaptureEvents) -> IngestInputs:
         trace._trace_core = core
 
     def timing_sink(bucket: str, elapsed: float) -> None:
+        """Record one ingest phase's elapsed time on the trace."""
+
         _record_phase_timing(trace, bucket, elapsed)
 
     return IngestInputs(
@@ -194,7 +195,7 @@ def build_ingest_inputs(trace: "Trace", events: CaptureEvents) -> IngestInputs:
     )
 
 
-def apply_step0_result(trace: "Trace", result: Step0Result) -> None:
+def apply_step0_result(trace: Trace, result: Step0Result) -> None:
     """Orchestrator-side application of ingest's restaged mutation payloads."""
 
     for label_raw, op_log in result.raw_log_registrations:
@@ -211,7 +212,7 @@ def apply_step0_result(trace: "Trace", result: Step0Result) -> None:
     trace._module_capture_ws.module_forward_args = side_channel.module_forward_args
 
 
-def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
+def materialize_from_events(trace: Trace, events: CaptureEvents) -> None:
     """Materialize capture events into raw build-state logs.
 
     Compatibility composition of the frozen step-0 seam: build the
@@ -318,9 +319,7 @@ def ingest_op_records(inputs: IngestInputs, manifest: Mapping[str, str]) -> Step
             record, extras = event, _EMPTY_INGEST_EXTRAS
         else:
             record, extras = op_record_from_event(event)
-        fields_dict: dict[str, object] = {
-            field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER
-        }
+        fields_dict: dict[str, object] = dict.fromkeys(LAYER_PASS_LOG_FIELD_ORDER)
         fields_dict.update(scatter_record_to_cells(record, extras, inputs.owning_trace))
         _apply_join_cells(
             fields_dict,
@@ -1529,7 +1528,7 @@ def _module_output_fields(
     exit_events: list[ModuleExitEvent],
     op_events_by_label: dict[str, OpEvent],
     role_hints_by_address: dict[str, object],
-    innermost_module_op_counts: "Counter[tuple[str, int]]",
+    innermost_module_op_counts: Counter[tuple[str, int]],
 ) -> dict[str, dict[str, object]]:
     """Fold module-exit events into per-op sibling fields.
 
