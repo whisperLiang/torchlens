@@ -559,3 +559,55 @@ def test_unwrap_torch_refuses_during_an_active_capture() -> None:
     # The wrappers survived the refusal: the next capture needs no re-wrap.
     recovered = tl.trace(nn.ReLU(), torch.ones(2))
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
+def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child-process guard raises a typed, actionable refusal.
+
+    It used to raise a bare ``RuntimeError`` whose message began with
+    "WARNING:" — unbranchable by callers and mislabelled as a warning while it
+    was in fact a hard refusal. Its docstring also implied it refused THREAD
+    concurrency, which it never did (that class is covered by atomic admission,
+    the non-owner pause no-op, and DataParallel unwrapping).
+    """
+
+    import multiprocessing as mp
+
+    from torchlens.utils.display import warn_parallel
+
+    class _FakeChild:
+        """Stand in for a non-rank, non-daemonic child process."""
+
+        name = "Process-1"
+        daemon = False
+
+    monkeypatch.setattr(mp, "current_process", lambda: _FakeChild())
+
+    with pytest.raises(tl.errors.CaptureContextError) as refusal:
+        warn_parallel()
+
+    assert refusal.value.fields["code"] == "child_process_capture_unsupported"
+    assert refusal.value.fields["process_name"] == "Process-1"
+    assert not str(refusal.value).startswith("WARNING:")
+
+
+def test_main_process_capture_is_never_refused() -> None:
+    """The guard is a no-op in the main process, including from a worker thread."""
+
+    from torchlens.utils.display import warn_parallel
+
+    warn_parallel()
+    errors: list[BaseException] = []
+
+    def call_from_thread() -> None:
+        """A capture on a worker thread is legitimate and must not be refused."""
+
+        try:
+            warn_parallel()
+        except BaseException as error:  # pragma: no cover - reported by the test
+            errors.append(error)
+
+    worker = threading.Thread(target=call_from_thread)
+    worker.start()
+    worker.join(timeout=5.0)
+    assert errors == [], f"a main-process worker thread was refused: {errors!r}"

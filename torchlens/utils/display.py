@@ -468,12 +468,26 @@ def user_stacklevel(extra: int = 0) -> int:
 
 
 def warn_parallel() -> None:
-    """Raise ``RuntimeError`` if called from a child process.
+    """Refuse capture from a non-rank CHILD PROCESS.
 
-    TorchLens is single-threaded by design — its global toggle state and
-    ordered tensor counter are not safe for concurrent access.  This guard
-    is called early in ``trace`` to fail fast rather than
-    produce silently corrupted logs.
+    TorchLens capture is single-owner by design — its global toggle state and
+    ordered tensor counter are not safe for concurrent access. This guard is
+    called early in ``trace`` to fail fast rather than produce silently
+    corrupted logs.
+
+    Scope, exactly (the name is historical and broader than the check):
+
+    * Refused HERE: capture in a child process, i.e. any process whose name is
+      not ``MainProcess`` and which is not a distributed rank.
+    * NOT refused here, and covered elsewhere: THREAD concurrency. A second
+      capture entering while one is active is refused atomically by
+      ``_state.active_logging`` (``ReentrantTraceError``); a non-owner thread's
+      ``pause_logging()`` is a no-op that cannot blind the owner's capture; a
+      non-owner thread's torch ops are skipped by the wrapper's owner-thread
+      fast path and disclosed by the thread-count witness. ``nn.DataParallel``
+      (which parallelizes over threads, not processes) is unwrapped to its
+      ``.module`` at capture entry and traced single-threaded, so it never
+      reaches a concurrent-capture path at all.
 
     A DISTRIBUTED RANK process is the deliberate exception: each rank is its
     own interpreter with its own torchlens state, capturing its own rank-local
@@ -482,6 +496,12 @@ def warn_parallel() -> None:
     ranks are recognized by having an initialized process group in a
     non-daemonic process. Daemonic children (DataLoader workers) stay refused
     even when a forked flag claims an initialized group.
+
+    Raises
+    ------
+    CaptureContextError
+        If called from a child process that is not a distributed rank
+        (code ``child_process_capture_unsupported``).
     """
     process = mp.current_process()
     if process.name == "MainProcess":
@@ -493,8 +513,18 @@ def warn_parallel() -> None:
     except Exception:
         is_rank_process = False
     if not is_rank_process:
-        raise RuntimeError(
-            "WARNING: It looks like you are using parallel execution; only run "
-            "torchlens in the main process, since certain operations "
-            "depend on execution order."
+        from .._errors import CaptureContextError
+
+        raise CaptureContextError(
+            "TorchLens capture was started in child process "
+            f"{process.name!r}, which is not a distributed rank; capture state "
+            "is per-interpreter and ordered, so a child-process capture "
+            "produces a silently corrupted Trace",
+            code="child_process_capture_unsupported",
+            remedy=(
+                "run the capture in the main process (a distributed rank with an "
+                "initialized, non-daemonic process group is the one exception)"
+            ),
+            process_name=process.name,
+            process_daemon=bool(process.daemon),
         )
