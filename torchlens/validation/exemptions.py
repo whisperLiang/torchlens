@@ -63,35 +63,46 @@ SKIP_VALIDATION_ENTIRELY: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Registry 2: Skip perturbation only (forward replay still runs).
 # Ops whose output values do not depend on any perturbable parent VALUE.
+# Each entry maps func name -> per-entry justification (r3 fix of finding
+# R19-F1: this was the only registry shaped as a bare set; every membership
+# now carries its own proof, matching ``SKIP_VALIDATION_ENTIRELY``). Contract
+# clause: C2 perturbation sensitivity (``validation/CLAUDE.md`` replay step 5)
+# -- an entry is admissible only when the parent VALUE provably cannot affect
+# the output, proved from the saved call, never assumed from the op's name.
 # Round-31 registry narrowing: ``fill_`` (tensor fill VALUE at arg 1) and
 # ``expand_as`` (arg 0 values flow into the output) moved to
 # ``STRUCTURAL_ARG_POSITIONS`` so their genuine value edges stay
-# perturbation-tested. ``meshgrid`` / ``broadcast_tensors`` outputs DO carry
-# input values, but their per-call parent fields are shared across zipped
-# outputs, so cross-member value perturbation is legitimately insensitive;
-# they stay whole-op-skipped until per-output parent projection covers them
-# (their value edges remain guarded by replay and the orphan/identity sweeps).
+# perturbation-tested.
 # ---------------------------------------------------------------------------
-SKIP_PERTURBATION_ENTIRELY: Set[str] = {
-    "new_zeros",
-    "new_ones",
-    "zero_",
-    "zeros_like",
-    "ones_like",
-    "rand_like",
-    "randn_like",
-    "meshgrid",
-    "broadcast_tensors",
+SKIP_PERTURBATION_ENTIRELY: Dict[str, str] = {
+    "new_zeros": "output is all zeros by construction; no parent value reaches it",
+    "new_ones": "output is all ones by construction; no parent value reaches it",
+    "zero_": "in-place zero fill; the destination's prior values are discarded",
+    "zeros_like": "shape/dtype/device template only; the output value is constant zero",
+    "ones_like": "shape/dtype/device template only; the output value is constant one",
+    "rand_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
+    "randn_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
+    # meshgrid/broadcast_tensors outputs DO carry input values, but their
+    # per-call parent fields are shared across zipped outputs; they stay
+    # whole-op-skipped until per-output parent projection covers them.
+    "meshgrid": (
+        "per-call parent fields are shared across the zipped outputs, so cross-member "
+        "value perturbation is legitimately insensitive; value edges stay guarded by "
+        "replay and the orphan/identity sweeps until per-output parent projection lands"
+    ),
+    "broadcast_tensors": (
+        "same shared-zipped-parent limitation as meshgrid; retained with the same "
+        "replay-side guard and the same pending narrowing"
+    ),
     # torchvision C++ ops (PyCapsule): perturbed coordinates can segfault
     # these native extensions since they bypass Python exception handling.
-    "nms",
-    "deform_conv2d",
-    "ps_roi_align",
-    "ps_roi_pool",
-    "roi_align",
-    "roi_pool",
-    # In-place RNG ops: output is determined by RNG state, not input values.
-    "exponential_",
+    "nms": "torchvision PyCapsule op; perturbed coordinates can segfault the native kernel",
+    "deform_conv2d": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    "ps_roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    "ps_roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    "roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    "roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    "exponential_": "in-place RNG draw; the output is determined by RNG state, not inputs",
 }
 
 # ---------------------------------------------------------------------------
