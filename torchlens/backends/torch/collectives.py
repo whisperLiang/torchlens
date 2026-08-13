@@ -240,7 +240,7 @@ def _resolve_root(bound: dict[str, Any], group: Any, src_or_dst: str) -> int | N
     if global_rank is not None:
         return int(global_rank)
     if group_relative is not None:
-        resolved_group = group if group is not None else dist.group.WORLD
+        resolved_group: Any = group if group is not None else dist.group.WORLD
         return int(dist.get_global_rank(resolved_group, int(group_relative)))
     return None
 
@@ -250,7 +250,7 @@ def _c10d_group_seq(group: Any) -> int | None:
 
     dist = torch.distributed
     try:
-        target = group if group is not None else dist.group.WORLD
+        target: Any = group if group is not None else dist.group.WORLD
         return int(target._get_sequence_number_for_group())
     except Exception:
         return None
@@ -275,8 +275,8 @@ def _build_payload(
     dist = torch.distributed
     my_global_rank = int(dist.get_rank())
     try:
-        resolved_group = group if group is not None else dist.group.WORLD
-        my_group_rank = int(dist.get_group_rank(resolved_group, my_global_rank))
+        payload_group: Any = group if group is not None else dist.group.WORLD
+        my_group_rank: int | None = int(dist.get_group_rank(payload_group, my_global_rank))
     except Exception:
         my_group_rank = None
     roles: list[dict[str, Any]] = []
