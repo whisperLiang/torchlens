@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import importlib.util
+import re
 import subprocess
 import sys
 from unittest.mock import patch
@@ -211,9 +212,56 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
 
     assert "ruff format --check torchlens tests scripts" in lint_text
     assert "ruff check torchlens tests scripts" in lint_text
-    assert "--exclude menagerie" in lint_text
-    assert "--exclude tests/crawler" in lint_text
-    assert "--exclude tests/test_menagerie_*.py" in lint_text
+
+    # The excluded set moved from lint.yml CLI flags into pyproject's
+    # `[tool.ruff] extend-exclude` so that pre-commit -- which passes explicit
+    # staged filenames and therefore ignores CLI --exclude -- reaches the same
+    # verdict as this gate. Assert the boundary at its single authority, and that
+    # it has NOT drifted back into duplicate CLI flags.
+    pyproject_text = project_root.joinpath("pyproject.toml").read_text()
+    extend_exclude = re.search(
+        r"^\s*extend-exclude\s*=\s*\[(.*?)\]", pyproject_text, re.DOTALL | re.MULTILINE
+    )
+    assert extend_exclude is not None, "pyproject [tool.ruff] must declare extend-exclude"
+    excluded = set(re.findall(r'"([^"]+)"', extend_exclude.group(1)))
+    assert excluded == {"menagerie", "tests/crawler", "tests/test_menagerie_*.py"}
+    assert "--exclude" not in lint_text
+
+
+def test_ruff_pin_is_identical_across_declaration_sites() -> None:
+    """The ruff that WRITES the code and the ruff that JUDGES it must be one version.
+
+    Three files independently name a ruff version: pyproject's dev extra, the Lint
+    workflow's install step, and the ruff-pre-commit ``rev``. When they drift, the
+    pre-commit formatter rewrites code to a style CI then rejects -- which is exactly
+    how the repo accumulated 147 format-stale files under a v0.9.7 hook while CI
+    judged with 0.15.4.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    pyproject_text = project_root.joinpath("pyproject.toml").read_text()
+    lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
+    precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
+
+    dev_pins = set(re.findall(r'"ruff==([0-9]+\.[0-9]+\.[0-9]+)"', pyproject_text))
+    ci_pins = set(re.findall(r"ruff==([0-9]+\.[0-9]+\.[0-9]+)", lint_text))
+    hook_revs = set(
+        re.findall(
+            r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit\s*\n"
+            r"(?:\s*#.*\n)*"
+            r"\s*rev:\s*v([0-9]+\.[0-9]+\.[0-9]+)",
+            precommit_text,
+        )
+    )
+
+    assert len(dev_pins) == 1, f"expected exactly one ruff dev pin, got {dev_pins}"
+    assert len(ci_pins) == 1, f"expected exactly one ruff CI pin, got {ci_pins}"
+    assert len(hook_revs) == 1, f"expected exactly one ruff-pre-commit rev, got {hook_revs}"
+    assert dev_pins == ci_pins == hook_revs, (
+        "ruff version drift: pyproject dev extra "
+        f"{dev_pins}, lint.yml {ci_pins}, .pre-commit-config.yaml {hook_revs}. "
+        "The formatter and the gate must be the same ruff."
+    )
 
 
 @pytest.mark.slow

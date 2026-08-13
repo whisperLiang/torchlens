@@ -21,22 +21,21 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
+      # PIN AUTHORITY: keep in lockstep with pyproject.toml's dev extra and the
+      # ruff-pre-commit `rev` in .pre-commit-config.yaml. See
+      # tests/test_lint_parity.py::test_ruff_pin_is_identical_across_declaration_sites.
       - run: uv pip install --system ruff==0.15.4
 
       # Check-only: Lint is a pure gate and must NOT push to main. It previously
       # ran `ruff format .` + `ruff check --fix .` then committed + pushed the
       # fixes, which raced with the Release workflow's push (both trigger on push
       # to main) and cascaded release runs. Format/lint locally before pushing.
+      # The excluded set lives in pyproject.toml's `[tool.ruff] extend-exclude`,
+      # NOT in CLI flags, so pre-commit (explicit staged filenames) and this gate
+      # judge the same files. Verdicts were proven identical to the previous
+      # CLI-flag form when the excludes moved.
       - name: Ruff format check
-        run: |
-          ruff format --check torchlens tests scripts \
-            --exclude menagerie \
-            --exclude tests/crawler \
-            --exclude tests/test_menagerie_*.py
+        run: ruff format --check torchlens tests scripts
 
       - name: Ruff check
-        run: |
-          ruff check torchlens tests scripts \
-            --exclude menagerie \
-            --exclude tests/crawler \
-            --exclude tests/test_menagerie_*.py
+        run: ruff check torchlens tests scripts

@@ -247,6 +247,20 @@ disallow_untyped_defs = false
 [tool.ruff]
 line-length = 100
 
+# EXCLUDE AUTHORITY: the judged file set lives here, not in CLI flags, so that
+# pre-commit (which passes explicit staged filenames) and CI (which passes
+# directories) reach the SAME verdict. `extend-exclude` participates in
+# --force-exclude, which the ruff-pre-commit hooks pass by default.
+#   menagerie/            - vendored/ported real model source + generated recipes
+#                           (see the per-file-ignores rationale below)
+#   tests/crawler/        - menagerie crawler harness, same provenance
+#   tests/test_menagerie_*- menagerie-only test surface
+extend-exclude = [
+    "menagerie",
+    "tests/crawler",
+    "tests/test_menagerie_*.py",
+]
+
 [tool.ruff.lint]
 ignore = []
 

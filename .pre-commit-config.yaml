@@ -20,7 +20,12 @@ repos:
         # belong in it. Excluded from scanning like the other data catalogs.
         exclude: ^menagerie/data/crawl_roster\.jsonl$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.7
+    # PIN AUTHORITY: this rev MUST equal the `ruff==` pin in pyproject.toml's dev
+    # extra and in .github/workflows/lint.yml. The formatter that WRITES the code
+    # and the gate that JUDGES it have to be the same ruff, or pre-commit happily
+    # formats to a style CI then rejects. Enforced by
+    # tests/test_lint_parity.py::test_ruff_pin_is_identical_across_declaration_sites.
+    rev: v0.15.4
     hooks:
       - id: ruff-format
       - id: ruff
