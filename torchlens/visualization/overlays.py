@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import torch
 
+from .._errors import InvalidArgumentError
 from ..utils._multipass_access import get_multipass_attr
 from ..utils.display import format_flops, human_readable_size
 
@@ -53,7 +54,12 @@ def normalize_overlay_name(name: str) -> str:
         overlay.replace("-", "_").replace(" ", "_") for overlay in SUPPORTED_OVERLAYS
     }:
         supported = ", ".join(sorted(SUPPORTED_OVERLAYS))
-        raise ValueError(f"Unsupported node overlay {name!r}; choose one of {supported}.")
+        raise InvalidArgumentError(
+            f"Unsupported node overlay {name!r}; choose one of {supported}",
+            code="node_overlay_invalid",
+            remedy=f"pass one of the supported overlays ({supported})",
+            argument="overlay",
+        )
     return normalized
 
 

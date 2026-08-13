@@ -210,6 +210,29 @@ def test_intervention_doors_carry_codes_and_remedies() -> None:
     _assert_contract(exc_info.value, "spec_format_version_unsupported", ValueError)
 
 
+def test_visualization_doors_carry_codes_and_remedies(small_trace: Any) -> None:
+    """Converted visualization option doors expose codes and remedies."""
+
+    from torchlens.visualization.overlays import normalize_overlay_name
+    from torchlens.visualization.themes import resolve_theme
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        resolve_theme("bogus_theme")
+    _assert_contract(exc_info.value, "visualization_theme_invalid", ValueError)
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        normalize_overlay_name("bogus_overlay")
+    _assert_contract(exc_info.value, "node_overlay_invalid", ValueError)
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        small_trace.summary(level="bogus_level")
+    _assert_contract(exc_info.value, "summary_level_invalid", ValueError)
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        small_trace.collapse_order(mode="bogus")
+    _assert_contract(exc_info.value, "collapse_mode_invalid", ValueError)
+
+
 def test_trace_stack_shape_mismatch_is_typed(small_trace: Any) -> None:
     """Stacking differently-shaped saved outs refuses with the stack code."""
 

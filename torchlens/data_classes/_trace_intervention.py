@@ -880,12 +880,16 @@ class TraceInterventionMixin(_TraceMixinBase):
             Raises when the site cannot resolve.
         """
 
+        from ..intervention.errors import SiteResolutionError
         from ..intervention.resolver import _selector_resolution_direction
 
+        # L1 narrowing (r3): only a typed direction-classification refusal may
+        # fall through to the strict forward resolution below (which raises its
+        # own typed refusal); any other exception is a bug and propagates.
         try:
             if _selector_resolution_direction(site) == "backward":
                 return
-        except Exception:
+        except SiteResolutionError:
             pass
         max_fanout = max(1, len(self.layer_list))
         self.resolve_sites(site, strict=strict, max_fanout=max_fanout)

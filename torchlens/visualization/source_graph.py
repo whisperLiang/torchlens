@@ -6,6 +6,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .._errors import InvalidArgumentError
 from .request import ResolvedRenderRequest
 
 if TYPE_CHECKING:
@@ -118,15 +119,35 @@ def _resolve_focus_module(trace: "Trace", module: Any) -> Any:
 
     if isinstance(module, str):
         if module not in trace.modules:
-            raise ValueError(f"Module address '{module}' was not found in this Trace.")
+            raise InvalidArgumentError(
+                f"Module address '{module}' was not found in this Trace",
+                code="module_focus_not_found",
+                remedy="pass a module address that exists in this Trace",
+                module=module,
+            )
         resolved = trace.modules[module]
         if not isinstance(resolved, Module):
-            raise ValueError(f"Module address '{module}' resolved to a module pass, not a Module.")
+            raise InvalidArgumentError(
+                f"Module address '{module}' resolved to a module pass, not a Module",
+                code="module_focus_invalid",
+                remedy="pass an unqualified module address, not a pass label",
+                module=module,
+            )
         return resolved
     if not isinstance(module, Module):
-        raise ValueError("module must be a Module, module address string, or None.")
+        raise InvalidArgumentError(
+            f"module must be a Module, module address string, or None; "
+            f"received {type(module).__name__}",
+            code="module_focus_invalid",
+            remedy="pass a Module, a module address string, or None",
+            argument="module",
+        )
     if module._source_trace is not trace:
-        raise ValueError("Module focus must belong to the Trace being rendered.")
+        raise InvalidArgumentError(
+            "Module focus must belong to the Trace being rendered",
+            code="module_focus_invalid",
+            remedy="pass a Module owned by the Trace being drawn",
+        )
     return module
 
 

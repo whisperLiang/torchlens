@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import graphviz
 
+from .._errors import InvalidArgumentError
+
 
 def _is_interactive_display_context() -> bool:
     """Return whether launching a GUI viewer is reasonable in this process.
@@ -151,8 +153,11 @@ def direction_to_rankdir(direction: str) -> str:
         return "LR"
     if direction == "topdown":
         return "TB"
-    raise ValueError(
-        f"direction must be one of 'bottomup', 'topdown', or 'leftright'; got {direction!r}"
+    raise InvalidArgumentError(
+        f"direction must be one of 'bottomup', 'topdown', or 'leftright'; got {direction!r}",
+        code="visualization_direction_invalid",
+        remedy="pass direction='bottomup', 'topdown', or 'leftright'",
+        argument="direction",
     )
 
 

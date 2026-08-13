@@ -9,7 +9,7 @@ import weakref
 
 import torch
 
-from .._errors import AmbiguousOpLookupError, InvalidArgumentError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError, RecordBindingError
 from .._io import (
     FieldPolicy,
     TLSPEC_VERSION,
@@ -478,9 +478,11 @@ class GradFn:
         if handle is not None:
             return handle
 
+        # L1 narrowing (r3): a lookup miss/ambiguity or a collected owner means
+        # "no live handle" (None); any other exception is a bug and propagates.
         try:
             op = self.op
-        except Exception:
+        except (AmbiguousOpLookupError, RecordBindingError, KeyError, ValueError):
             op = None
         if op is None:
             return None

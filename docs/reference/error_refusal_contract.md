@@ -32,7 +32,10 @@ add names to the top-level `torchlens` namespace:
 | `ambiguous_op_lookup` | Accessor key matches multiple pass-qualified objects | Use a full address, pass label, or call index |
 | `auto_environment_unsupported` | `TORCHLENS_AUTO=1` requested implicit capture | Unset it and call `auto_capture()` |
 | `backward_capture_conflict` | `save_grads` conflicts with `backward_ready=False` | Enable or omit `backward_ready` |
+| `backward_graph_unavailable` | Backward drawing without a captured backward graph | Call `log_backward(loss)` first |
+| `backward_pass_filter_invalid` | Backward pass filter is not a positive one-based int | Pass a positive pass number |
 | `batch_items_invalid` | Export batch-items count is negative | Pass a non-negative integer |
+| `batch_render_invalid` | Batch render policy is unknown or malformed | Choose a documented batch_render policy |
 | `backend_ambiguity` | Auto-resolution found multiple equal backend matches | Pass `backend=` explicitly |
 | `backend_capability_conformance` | Advertised backend capability has no implementation | Disable it or register its implementation |
 | `backend_error` | Generic backend registry request failed | Pass a compatible registered backend |
@@ -45,7 +48,13 @@ add names to the top-level `torchlens` namespace:
 | `bundle_member_unknown` | Bundle member name is not in the bundle | Pass a known member name |
 | `bundle_shape_mismatch` | Bundle members have incompatible shapes | Query members with matching shapes |
 | `bundle_stack_incomplete` | Not every bundle member retained a tensor | Stack where every member has a tensor |
+| `bundle_diff_layout_invalid` | Bundle diff layout is unsupported | Pass `layout='paired'` |
+| `bundle_diff_members_invalid` | Bundle diff sides are missing or identical | Name two distinct members |
 | `bundle_statistic_invalid` | Bundle statistic is unknown | Choose `mean`, `std`, `var`, or `norm` |
+| `code_panel_model_collected` | Callable code panel needs the live model | Use a built-in code_panel mode |
+| `code_panel_option_invalid` | Code panel option value or return type is invalid | Pass a documented mode or a string-returning callable |
+| `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
+| `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
 | `collapse_mode_invalid` | Collapse mode is unsupported | Choose `none`, `auto`, `max`, or a float |
@@ -67,7 +76,9 @@ add names to the top-level `torchlens` namespace:
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
 | `fsdp_capture_unsupported` | `record()` received an FSDP-wrapped model | Record the unsharded module |
 | `import_path_invalid` | Custom-callable import reference is malformed | Use the `module:qualname` form |
+| `intervening_cluster_invalid` | Intervening-cluster policy is unknown | Choose `upstream`, `outside`, `downstream`, or `own` |
 | `intervention_tensor_unsupported` | Intervention save tensor fails the codec | Use dense, codec-supported tensors |
+| `layers_not_logged` | Rendering requires a fully-logged trace | Capture with full layer logging |
 | `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
@@ -85,13 +96,19 @@ add names to the top-level `torchlens` namespace:
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
+| `max_pairs_invalid` | Bundle diff pair budget is below one | Pass `max_pairs >= 1` or None |
 | `max_predicate_failures_invalid` | Predicate failure budget is not a non-negative int | Pass a non-negative integer |
+| `module_focus_empty` | Focused module contains no rendered layers | Focus a module with layers |
+| `module_focus_invalid` | Module focus value has the wrong kind or owner | Pass an owned Module or address string |
+| `module_focus_not_found` | Module focus address is not in the trace | Pass an existing module address |
 | `metric_name_invalid` | Intervention metric name is unknown | Choose a registered metric or callable |
 | `metric_shape_mismatch` | Metric operands have different element counts | Pass equal-size operands |
 | `metric_tensor_type_invalid` | Metric operand is not a tensor | Pass tensor operands |
 | `metric_type_invalid` | Metric selector is neither a name nor callable | Pass a registered name or callable |
 | `module_call_ambiguous` | Single-call accessor on a multi-call module | Access one call via `module.calls[N]` |
 | `module_containment_engine_invalid` | Internal containment engine value is unknown | Choose a supported engine |
+| `node_label_field_invalid` | Node label field name is unknown | Pass documented label field names |
+| `node_overlay_invalid` | Node overlay name is unknown | Choose a supported overlay |
 | `op_lookup_index_out_of_range` | Integer layer index is out of range | Pass an in-range index |
 | `op_lookup_not_found` | Lookup key matches no layer, op, or module | Use a valid label, index, or address |
 | `op_lookup_pass_out_of_range` | Pass qualifier exceeds the recorded pass count | Specify a lower pass number |
@@ -119,7 +136,11 @@ add names to the top-level `torchlens` namespace:
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
+| `skip_fn_boundary_invalid` | `skip_fn` tried to skip an input or output layer | Return False for boundary layers |
 | `spec_format_version_unsupported` | Intervention `.tlspec` format version is unknown | Use a supported format version |
+| `summary_fields_invalid` | Summary field names are unknown | Pass documented summary fields |
+| `summary_level_invalid` | Summary level is unknown | Pass a documented summary level |
+| `summary_option_conflict` | Aliased summary options disagree | Pass one alias, or equal values |
 | `stack_ordinals_duplicate` | Stacked ops share an execution ordinal | Narrow the selector to distinct ops |
 | `stack_ordinals_unavailable` | Matched ops lack recorded execution ordinals | Select ops with recorded ordinals |
 | `stack_output_not_tensor` | Stacked op's saved primary out is not one tensor | Select single-tensor-output ops |
@@ -139,6 +160,9 @@ add names to the top-level `torchlens` namespace:
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |
 | `visualization_intervention_mode_invalid` | Intervention rendering mode is unknown | Choose `node_mark` or `as_node` |
 | `visualization_layout_invalid` | Visualization layout is unknown | Choose `auto`, `dot`, or `rank` |
+| `visualization_direction_invalid` | Render direction is unknown | Choose `bottomup`, `topdown`, or `leftright` |
+| `visualization_renderer_invalid` | Visualization renderer is unknown | Choose `graphviz` or `dagua` |
+| `visualization_theme_invalid` | Visualization theme is unknown | Choose a supported theme |
 | `visualization_mode_invalid` | Backend visualization mode is unsupported | Choose a backend-supported mode |
 | `visualization_node_style_invalid` | Node style is unknown | Choose a documented style |
 

@@ -2,6 +2,7 @@
 
 # ruff: noqa: F403, F405
 
+from .._errors import InvalidArgumentError
 from ._render_common import *
 from ._render_leaf import *
 from ._render_edges import *
@@ -285,8 +286,11 @@ def _build_skip_filtered_edge_map(
             if not skip_fn(layer_log):
                 continue
             if layer_log.is_input or layer_log.is_output:
-                raise ValueError(
-                    f"skip_fn cannot skip input or output layer '{layer_log.layer_label}'."
+                raise InvalidArgumentError(
+                    f"skip_fn cannot skip input or output layer '{layer_log.layer_label}'",
+                    code="skip_fn_boundary_invalid",
+                    remedy="return False from skip_fn for input and output layers",
+                    label=layer_log.layer_label,
                 )
             skipped_labels.add(_render_node_label(node, vis_mode))
 
@@ -1241,9 +1245,12 @@ def _build_module_focus_entries(
         if _node_is_inside_module(node, target_module.address)
     }
     if not focus_labels:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Module '{target_module.address}' has no layers to render. "
-            "Empty modules cannot be focused."
+            "Empty modules cannot be focused",
+            code="module_focus_empty",
+            remedy="focus a module that contains rendered layers",
+            module=target_module.address,
         )
 
     focused_entries: dict[str, GraphNode] = {

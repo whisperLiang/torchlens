@@ -14,6 +14,7 @@ import warnings
 from collections import defaultdict, deque
 from typing import Any
 
+from ..._errors import InvalidArgumentError
 from .._render_utils import _open_file_quietly
 from .._render_utils import compute_module_penwidth
 from ..code_panel import _code_panel_label
@@ -329,7 +330,13 @@ def get_node_placement_engine(vis_node_placement: str, layout_cost: int) -> str:
     if vis_node_placement in {"dot", "rank"}:
         return vis_node_placement
     if vis_node_placement != "auto":
-        raise ValueError("vis_node_placement must be one of 'auto', 'dot', or 'rank'.")
+        raise InvalidArgumentError(
+            "vis_node_placement must be one of 'auto', 'dot', or 'rank'; "
+            f"received {vis_node_placement!r}",
+            code="visualization_layout_invalid",
+            remedy="pass vis_node_placement='auto', 'dot', or 'rank'",
+            argument="vis_node_placement",
+        )
     if layout_cost > RANK_LAYOUT_COST_THRESHOLD:
         return "rank"
     return "dot"

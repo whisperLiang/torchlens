@@ -2,6 +2,7 @@
 
 # ruff: noqa: F403, F405
 
+from .._errors import InvalidArgumentError
 from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 from ._render_leaf import *
@@ -35,7 +36,13 @@ def _normalize_buffer_visibility(
         return "never"
     if show_buffer_layers in {"never", "meaningful", "always"}:
         return show_buffer_layers
-    raise ValueError("show_buffer_layers must be 'never', 'meaningful', 'always', or a bool.")
+    raise InvalidArgumentError(
+        "show_buffer_layers must be 'never', 'meaningful', 'always', or a bool; "
+        f"received {show_buffer_layers!r}",
+        code="buffer_visibility_invalid",
+        remedy="pass show_buffer_layers='never', 'meaningful', 'always', or a bool",
+        argument="show_buffer_layers",
+    )
 
 
 if TYPE_CHECKING:
@@ -825,11 +832,27 @@ def _batch_render_limit(batch_render: str) -> int:
         try:
             n_items = int(raw_n)
         except ValueError as exc:
-            raise ValueError("batch_render first_n value must be an integer.") from exc
+            raise InvalidArgumentError(
+                f"batch_render first_n value must be an integer; received {raw_n!r}",
+                code="batch_render_invalid",
+                remedy="pass batch_render='first_n:<N>' with an integer N",
+                argument="batch_render",
+            ) from exc
         if n_items < 1:
-            raise ValueError("batch_render first_n value must be at least 1.")
+            raise InvalidArgumentError(
+                f"batch_render first_n value must be at least 1; received {n_items}",
+                code="batch_render_invalid",
+                remedy="pass batch_render='first_n:<N>' with N >= 1",
+                argument="batch_render",
+            )
         return min(n_items, 16)
-    raise ValueError("batch_render must be 'auto', 'all', 'first', 'first_n:<N>', or 'shape_only'.")
+    raise InvalidArgumentError(
+        "batch_render must be 'auto', 'all', 'first', 'first_n:<N>', or 'shape_only'; "
+        f"received {batch_render!r}",
+        code="batch_render_invalid",
+        remedy="pass a documented batch_render policy",
+        argument="batch_render",
+    )
 
 
 def _raw_input_sequence(value: Any) -> Sequence[Any] | None:
@@ -1951,7 +1974,12 @@ def _compute_selected_node_lines(
                 duration = float(get_multipass_attr(layer_log, "func_duration", 0.0) or 0.0)
             rows.append(str(Duration(duration)))
         else:
-            raise ValueError(f"Unsupported node label field: {field_name!r}.")
+            raise InvalidArgumentError(
+                f"Unsupported node label field: {field_name!r}",
+                code="node_label_field_invalid",
+                remedy="pass documented node label field names",
+                field=str(field_name),
+            )
     return rows or compute_default_node_lines(layer_log, node_address, vis_mode)
 
 
