@@ -457,3 +457,14 @@ def test_bounded_json_ceiling_counts_utf8_bytes() -> None:
 
     with pytest.raises(json.JSONDecodeError, match="maximum size"):
         loads_bounded('"éé"', max_bytes=5)
+
+
+def test_tlspec_writer_refuses_nonstandard_nan_tokens(tmp_path: Path) -> None:
+    """Manifest writers fail before creating JSON containing NaN or Infinity."""
+
+    from torchlens._io.tlspec import _TlSpecWriter
+
+    path = tmp_path / "manifest.json"
+    with pytest.raises(ValueError, match="Out of range float values"):
+        _TlSpecWriter.write_json(path, {"bad": float("nan")})
+    assert not path.exists()

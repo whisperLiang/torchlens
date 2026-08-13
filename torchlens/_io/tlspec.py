@@ -410,9 +410,8 @@ class _TlSpecWriter:
             JSON object to write.
         """
 
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=False)
-            handle.write("\n")
+        text = json.dumps(data, indent=2, sort_keys=False, allow_nan=False)
+        path.write_text(text + "\n", encoding="utf-8")
 
     @staticmethod
     def _backend_runtime(source: Any, *, backend_name: str) -> dict[str, Any]:

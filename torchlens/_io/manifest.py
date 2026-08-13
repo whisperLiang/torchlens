@@ -511,10 +511,14 @@ class Manifest:
 
         manifest_path = Path(path)
         try:
-            with manifest_path.open("w", encoding="utf-8") as handle:
-                json.dump(self.to_dict(), handle, indent=2, sort_keys=False)
-                handle.write("\n")
-        except OSError as exc:
+            text = json.dumps(
+                self.to_dict(),
+                indent=2,
+                sort_keys=False,
+                allow_nan=False,
+            )
+            manifest_path.write_text(text + "\n", encoding="utf-8")
+        except (OSError, ValueError) as exc:
             raise TorchLensIOError(f"Failed to write manifest at {manifest_path}.") from exc
 
     def to_dict(self) -> dict[str, Any]:
