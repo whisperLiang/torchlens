@@ -556,6 +556,21 @@ def test_grad_fn_event_payloads_are_detached_snapshots() -> None:
     assert all(tensor.grad_fn is None for tensor in tensors)
 
 
+def test_per_call_grad_policy_does_not_mutate_trace_selection() -> None:
+    """A backward call keeps the capture-time gradient selection unchanged."""
+    _model, _x, trace = _logged_model(save_grads=None)
+    selection_before = trace._grad_op_nums_to_save
+
+    trace.log_backward(_output_loss(trace), save_grads=False)
+
+    assert trace._grad_op_nums_to_save == selection_before
+    assert all(
+        call.grad_inputs is None and call.grad_outputs is None
+        for grad_fn in trace.grad_fns
+        for call in grad_fn.calls.values()
+    )
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""

@@ -690,14 +690,7 @@ def _selected_for_grad_save(trace: Any, layer_label: str | None) -> bool:
     bool
         True if this layer is selected by the trace's gradient-retention policy.
     """
-    if layer_label is None:
-        return False
-    selection = getattr(trace, "_grad_op_nums_to_save", "all")
-    if selection == "all":
-        return True
-    if selection in [None, "none", []]:
-        return False
-    return trace.layer_dict_all_keys[layer_label].raw_index in selection
+    return layer_label is not None and _should_save_grad_payload(trace, layer_label)
 
 
 def _sync_grad_fn_graph_relations(trace: Any) -> None:
@@ -3330,18 +3323,6 @@ def uninstall_autograd_wrappers() -> None:
     _AUTOGRAD_WRAPPERS_INSTALLED = False
 
 
-def _ensure_layer_grad_hooks(trace: Any) -> None:
-    """Enable gradient retention when saved-out hook installation was deferred.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose saved outs should receive grad hooks.
-    """
-    if getattr(trace, "_grad_op_nums_to_save", None) in [None, [], "none"]:
-        trace._grad_op_nums_to_save = "all"
-
-
 def _finalize_grad_streaming(trace: Any) -> None:
     """Finalize a deferred grad-streaming bundle after backward capture."""
 
@@ -3398,7 +3379,6 @@ def log_backward(
     _ensure_not_inference_only_backward(self)
     _ensure_not_chunked_forward_backward(self)
     backward_call_context = _capture_backward_call_context(self)
-    _ensure_layer_grad_hooks(self)
 
     def run() -> Any:
         """Run the user's requested backward call."""
@@ -3435,7 +3415,6 @@ class RecordingBackward:
 
     def __enter__(self) -> RecordingBackward:
         """Patch ``torch.Tensor.backward`` and return this context object."""
-        _ensure_layer_grad_hooks(self.trace)
         self._original_backward = torch.Tensor.backward
         trace = self.trace
         original_backward = self._original_backward
