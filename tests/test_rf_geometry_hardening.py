@@ -235,7 +235,34 @@ def test_tensor_derived_shape_control_branch_preserves_exact_rf() -> None:
         result for result in verified.containment if result.op_label == verify_target.label
     ]
     assert target_results
-    assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in target_results)
+    # FINDING B1-19b: verify() emits one row per DIRECTION for the same
+    # (op, unit), and the two directions are not interchangeable here. The
+    # receptive direction is the property this test exists for and must PASS.
+    # The projective direction is structurally inapplicable: this op's only
+    # child is the structural OUTPUT MARKER, whose saved payload is an
+    # independent clone of the same captured value, so there is no autograd edge
+    # between the two saved tensors for a VJP to traverse. That stays
+    # INDETERMINATE -- fail-closed, never upgraded to a PASS it cannot prove --
+    # and its message must name the real cause instead of prescribing the
+    # save_mode the trace is ALREADY using (the SF-04 circular-remedy class).
+    receptive_results = [
+        result
+        for result in target_results
+        if str(getattr(result, "direction", "")).endswith("RECEPTIVE")
+    ]
+    projective_results = [
+        result
+        for result in target_results
+        if str(getattr(result, "direction", "")).endswith("PROJECTIVE")
+    ]
+    assert receptive_results
+    assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in receptive_results)
+    for result in projective_results:
+        assert result.status is ReceptiveFieldValidationStatus.INDETERMINATE
+        assert "structural output marker" in result.message
+        assert "save_mode" not in result.message, (
+            "an INDETERMINATE remedy must not prescribe the save mode already in force"
+        )
     assert verified.verdict is not ReceptiveFieldValidationStatus.FAIL
 
 

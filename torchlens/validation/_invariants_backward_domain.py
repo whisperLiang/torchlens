@@ -288,6 +288,27 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
     values. Preview backends do not yet route every lane through the writer;
     they join this check in the ports phase.
 
+    DENSITY (finding B1-08). Stamped/monotone/unique/counter-bounded are all
+    preserved by DELETING an event, so popping ``op_events[1]`` used to pass
+    both this check and the full metadata gate -- an omission is exactly what a
+    tampered or lossy journal looks like. ``next_seq()`` is called ONLY by the
+    nine single-writer append methods, so every consumed seq lands on an
+    appended event and a retaining journal's seq domain is provably DENSE:
+    ``{1 .. event_seq}`` with no holes. Measured dense on plain, selective,
+    intervened, lookback, buffer, recurrent, CNN, halted, cooked-recording,
+    fast-run and post-``log_backward`` captures. A journal that retains NOTHING
+    is excluded: releasing a working projection legitimately empties every lane
+    while the counter stands (a graph-vs-events reconciliation is a different
+    obligation, not this one).
+
+    The amendment lane rides its OWN counter and is checked in the same spirit,
+    but only for shape: ``copy_for_replay`` legitimately filters it to
+    ``seq > core_seal_watermark``, so a non-empty lane must be strictly
+    increasing, counter-bounded, and CONTIGUOUS, starting at either 1 (the
+    unfiltered source) or ``core_seal_watermark + 1`` (a filtered projection).
+    A deletion inside the retained range is therefore red; an empty lane stays
+    legitimate.
+
     Parameters
     ----------
     trace:
@@ -298,7 +319,9 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
     Raises
     ------
     MetadataInvariantError
-        If any lane holds an unstamped, reordered, or duplicated seq value.
+        If any lane holds an unstamped, reordered, or duplicated seq value, if
+        the retained seq domain has a hole, or if the amendment lane is not a
+        contiguous run anchored at 1 or the seal watermark.
     """
 
     if getattr(trace, "backend", "torch") != "torch":
@@ -349,3 +372,60 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
                 f"journal seq {max_seen} exceeds the writer counter {counter}: "
                 "an event bypassed the single-writer append path",
             )
+        missing = sorted(set(range(1, counter + 1)) - set(seen_lane_by_seq))
+        if missing:
+            neighbors = {seq: seen_lane_by_seq.get(seq - 1, "<start>") for seq in missing[:5]}
+            raise MetadataInvariantError(
+                name,
+                f"journal retains {len(seen_lane_by_seq)} of {counter} stamped events; "
+                f"seq {missing[:5]}{'...' if len(missing) > 5 else ''} were consumed by "
+                "the single writer but are not retained by any lane (preceded by "
+                f"{neighbors}). Every seq the writer hands out lands on an appended "
+                "event, so a hole means an event was DELETED from the journal",
+            )
+    # Amendment lane (its own counter and its own single writer): a
+    # deletion inside the retained run is red, while an EMPTY lane stays
+    # legitimate (released, never amended, or fully folded at the seal).
+    amendments = list(getattr(capture_events, "op_amendments", ()) or ())
+    if not amendments:
+        # A released or never-amended lane; ``copy_for_replay`` may also filter
+        # every carried amendment away when the seal folded all of them.
+        return
+    amendment_counter = int(getattr(capture_events, "amendment_seq", 0) or 0)
+    seqs = [int(getattr(amendment, "seq", 0) or 0) for amendment in amendments]
+    previous_amendment_seq = 0
+    for seq in seqs:
+        if seq < 1:
+            raise MetadataInvariantError(
+                name,
+                "op_amendments holds an amendment with no writer-stamped seq: "
+                "the lane's single writer is append_amendment",
+            )
+        if seq <= previous_amendment_seq:
+            raise MetadataInvariantError(
+                name,
+                f"op_amendments seq {seq} does not increase past {previous_amendment_seq}",
+            )
+        previous_amendment_seq = seq
+    if previous_amendment_seq > amendment_counter:
+        raise MetadataInvariantError(
+            name,
+            f"op_amendments seq {previous_amendment_seq} exceeds the amendment writer counter "
+            f"{amendment_counter}: an amendment bypassed append_amendment",
+        )
+    watermark = getattr(capture_events, "core_seal_watermark", None)
+    expected_starts = {1} | ({int(watermark) + 1} if isinstance(watermark, int) else set())
+    if seqs[0] not in expected_starts:
+        raise MetadataInvariantError(
+            name,
+            f"op_amendments starts at seq {seqs[0]}, which is neither 1 (an "
+            f"unfiltered journal) nor {sorted(expected_starts - {1})} (a projection "
+            "filtered at the seal watermark): earlier amendments were dropped",
+        )
+    if seqs != list(range(seqs[0], seqs[0] + len(seqs))):
+        holes = sorted(set(range(seqs[0], previous_amendment_seq + 1)) - set(seqs))
+        raise MetadataInvariantError(
+            name,
+            f"op_amendments is not contiguous over its retained range: seq {holes[:5]} "
+            "missing -- an amendment was deleted from the lane",
+        )

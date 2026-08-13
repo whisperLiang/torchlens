@@ -36,6 +36,64 @@ _RECAPTURE_RECIPE = (
 )
 
 
+def _no_projective_vjp_reason(source: Op, targets: Sequence[Op], trace: Trace) -> str:
+    """Return the honest reason a projective VJP came back empty.
+
+    Finding B1-19b (SF-04 class): this message used to prescribe
+    ``save_mode="reference"`` unconditionally -- including on traces already
+    captured in that exact mode, which is the shape of remedy that sends a user
+    in a circle. It also blamed a "stale saved tensor identity" for a case that
+    is neither stale nor a mode problem: when the only target is a structural
+    OUTPUT MARKER whose sole parent is the source, both payloads are independent
+    clones of the SAME captured value, so there is no autograd edge between them
+    for any VJP to traverse.
+
+    Parameters
+    ----------
+    source:
+        Source operation whose unit was probed.
+    targets:
+        Selected projective targets.
+    trace:
+        Trace both payloads were captured into.
+
+    Returns
+    -------
+    str
+        Cause-specific message; the ``save_mode`` prescription appears only when
+        that mode is NOT already in force.
+    """
+
+    marker_targets = [
+        target
+        for target in targets
+        if getattr(target, "layer_type", None) == "output"
+        and set(getattr(target, "parents", ()) or ()) == {source.layer_label}
+    ]
+    if marker_targets and len(marker_targets) == len(targets):
+        names = ", ".join(repr(target.label) for target in marker_targets)
+        return (
+            f"Projective validation is not applicable from {source.label!r} to {names}: the "
+            "target is a structural output marker whose only parent is the source, so both "
+            "saved payloads are independent clones of ONE captured value and no autograd "
+            "edge exists between them to differentiate. The projective mapping here is the "
+            "identity; probe a downstream COMPUTATIONAL op for a non-trivial projective "
+            "field, or read the receptive-direction result, which is unaffected."
+        )
+    reason = (
+        f"Source {source.label!r} is structurally reachable from the selected targets, "
+        "but autograd returned no VJP, so the saved tensor identity is not the one in the "
+        "captured graph."
+    )
+    if str(getattr(trace, "save_mode", "")) != "reference":
+        return reason + ' Recapture with save_mode="reference".'
+    return (
+        reason + ' This trace already used save_mode="reference", so the cause is not the '
+        "save mode: probe in the same process and before any in-place mutation of the saved "
+        f"payloads, recapturing with {_RECAPTURE_RECIPE} if the graph was released."
+    )
+
+
 def _target_key(target: Op) -> str:
     """Return the canonical result key for a projective target.
 
@@ -353,9 +411,7 @@ def projective_gradient_for_unit(
             )[0]
             if vjp is None:
                 raise ReceptiveFieldUnavailableError(
-                    f"Source {source.label!r} is structurally reachable from the selected "
-                    "targets, but autograd returned no VJP. The saved tensor identity may be "
-                    'stale or the trace used a detaching save mode; use save_mode="reference".'
+                    _no_projective_vjp_reason(source, targets, trace)
                 )
             columns = torch.autograd.grad(
                 vjp,

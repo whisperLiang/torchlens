@@ -125,6 +125,16 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
+
+# NOT unused (and NOT dead, despite reading that way to a scanner -- finding
+# B1-23c proposed deleting it and three producer-parity tests died with
+# NameError): the ``_ops_*`` slices below are REBOUND into this module's
+# ``globals()``, so every name their bodies reference must resolve HERE.
+# ``amend_lookback_retention`` is used by the rebound
+# ``_ops_retention.amend_lookback_retention`` caller. That is also why this file
+# carries a module-level ``ruff: noqa: F401``: rebind-required imports look
+# unused to static analysis. Verify with the producer-parity suite before
+# removing any import from this module.
 from ...ir.op_record import amend_lookback_retention
 from ...ir.predicate import RetroactiveCaptureDecision
 from ...ir.refs import ParamRef, TensorRef

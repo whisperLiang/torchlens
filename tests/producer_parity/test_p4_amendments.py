@@ -29,7 +29,10 @@ from torchlens.ir.capture_events import (
     REBINDABLE_TARGET_LANES,
     AmendmentTargetError,
     CaptureEvents,
+    LaneMergePolicyError,
     SealedJournalAmendmentError,
+    SealedJournalAppendError,
+    SealedJournalWriteError,
     _clone_op_event_for_replay,
 )
 from torchlens.ir.op_record import (
@@ -472,3 +475,180 @@ def test_graph_edge_insertion_folds_parents(leg: str, leg_templates: dict[str, l
     folded = journal.amended_op_record(child.label_raw)
     assert folded.parents == new_parents
     assert folded.parent_arg_positions is positions
+
+
+# ---------------------------------------------------------------------------
+# FINDING B1-15: sealed-journal enforcement was HALF-HEIGHT.
+#
+# Only ``append_amendment`` checked ``amendments_sealed``; the op lane's
+# ``append`` and every forward sibling appender wrote to a sealed source
+# unconditionally, so code holding a sealed journal could diverge the live
+# stream from its sealed ``CapturedRunCore`` snapshot with no signal.
+# ---------------------------------------------------------------------------
+
+#: Every appender the seal now fences, with the lane it names in the refusal.
+_FENCED_APPENDERS: tuple[tuple[str, str], ...] = (
+    ("append", "op_events"),
+    ("append_module_prep", "module_prep_events"),
+    ("append_module_enter", "module_enter_events"),
+    ("append_module_exit", "module_exit_events"),
+    ("append_pre_hook", "pre_hook_events"),
+    ("append_buffer_write", "buffer_write_events"),
+    ("append_intervention", "intervention_events"),
+    ("append_output_version", "output_version_events"),
+)
+
+
+class _DummyEvent:
+    """Stand-in event: the seal fence fires before any field is stamped."""
+
+    seq: int = 0
+
+
+@pytest.mark.parametrize(("appender", "lane"), _FENCED_APPENDERS, ids=lambda value: str(value))
+def test_sealed_journal_refuses_every_forward_lane_append(
+    appender: str, lane: str, leg_templates: dict[str, list[Any]]
+) -> None:
+    """Each forward lane gets the fence the amendment lane always had."""
+
+    journal = _fresh_journal(leg_templates["decomposed"])
+    lane_length_before = len(getattr(journal, lane))
+    counter_before = journal.event_seq
+    journal.core_seal_watermark = journal.amendment_seq
+    journal.amendments_sealed = True
+
+    with pytest.raises(SealedJournalAppendError, match=lane):
+        getattr(journal, appender)(_DummyEvent())
+
+    # Fail-closed: the refusal happens BEFORE the lane or the counter moves.
+    assert len(getattr(journal, lane)) == lane_length_before
+    assert journal.event_seq == counter_before
+
+
+def test_sealed_journal_refusals_share_one_catchable_base(
+    leg_templates: dict[str, list[Any]],
+) -> None:
+    """Amendment and forward-lane refusals are one class of defect."""
+
+    journal = _fresh_journal(leg_templates["decomposed"])
+    target = _target(journal)
+    journal.core_seal_watermark = journal.amendment_seq
+    journal.amendments_sealed = True
+    with pytest.raises(SealedJournalWriteError):
+        journal.append(_DummyEvent())
+    with pytest.raises(SealedJournalWriteError):
+        journal.append_amendment(
+            amend_raw_hook_intervention(target.seq, target.label_raw, intervention_replaced=True)
+        )
+    assert issubclass(SealedJournalAppendError, SealedJournalWriteError)
+    assert issubclass(SealedJournalAmendmentError, SealedJournalWriteError)
+
+
+def test_sealed_journal_still_accepts_backward_events(
+    leg_templates: dict[str, list[Any]],
+) -> None:
+    """The ONE documented exception: backward capture runs after the seal.
+
+    ``Trace.log_backward`` / ``Recording.log_backward`` append to the sealed
+    journal by design and ``backward_events`` is not part of the sealed core, so
+    fencing that lane would break real backward capture. Measured across the
+    smoke tier: ``append_backward`` is the only appender that ever fires on a
+    sealed journal.
+    """
+
+    from torchlens.ir.events import BackwardCoverageGap
+
+    journal = _fresh_journal(leg_templates["decomposed"])
+    journal.core_seal_watermark = journal.amendment_seq
+    journal.amendments_sealed = True
+    journal.append_backward(
+        BackwardCoverageGap(
+            pass_index=1,
+            object_id=None,
+            class_qualname=None,
+            reason="dead_node",
+            detail=None,
+            timestamp=1.0,
+        )
+    )
+    assert len(journal.backward_events) == 1
+    assert journal.backward_events[0].seq >= 1
+
+
+def test_working_projection_of_a_sealed_journal_accepts_forward_appends(
+    leg_templates: dict[str, list[Any]],
+) -> None:
+    """The fence names the escape hatch, and the escape hatch works."""
+
+    journal = _fresh_journal(leg_templates["decomposed"])
+    journal.core_seal_watermark = journal.amendment_seq
+    journal.amendments_sealed = True
+    working = journal.copy_for_replay()
+    assert working.amendments_sealed is False
+    template = journal.op_events[0]
+    working.append(_clone_op_event_for_replay(template))
+    assert len(working.op_events) == len(journal.op_events) + 1
+    # And the sealed source is untouched.
+    assert len(journal.op_events) == len(working.op_events) - 1
+
+
+def test_extend_is_fenced_through_append(leg_templates: dict[str, list[Any]]) -> None:
+    """``extend`` delegates to ``append``, so it inherits the fence."""
+
+    journal = _fresh_journal(leg_templates["decomposed"])
+    template = journal.op_events[0]
+    journal.core_seal_watermark = journal.amendment_seq
+    journal.amendments_sealed = True
+    with pytest.raises(SealedJournalAppendError):
+        journal.extend([_clone_op_event_for_replay(template)])
+
+
+def test_concat_refuses_amendments_without_the_op_lane(
+    leg_templates: dict[str, list[Any]],
+) -> None:
+    """Companion LOW (fable R03-F2): an empty seq map cannot rebind targets.
+
+    Merging ``op_amendments`` without ``op_events`` left ``seq_map`` empty, so
+    every ``target_seq`` silently kept its SOURCE-domain value and then bound
+    against whatever the target journal holds at that seq. The lane selection is
+    now refused instead.
+    """
+
+    source = _fresh_journal(leg_templates["decomposed"], count=3)
+    source_target = source.op_events[2]
+    source.append_amendment(
+        amend_raw_hook_intervention(
+            source_target.seq, source_target.label_raw, intervention_replaced=True
+        )
+    )
+    target_journal = _fresh_journal(leg_templates["decomposed"], count=0)
+    with pytest.raises(LaneMergePolicyError, match="without 'op_events'"):
+        target_journal.concat(source, lanes=("op_amendments",))
+    assert not target_journal.op_amendments
+
+    # An amendment-free source with the same lane selection stays legal: there
+    # is nothing whose target could dangle.
+    empty_source = _fresh_journal(leg_templates["decomposed"], count=2)
+    target_journal.concat(empty_source, lanes=("op_amendments",))
+    assert not target_journal.op_amendments
+
+
+def test_concat_refuses_an_unrebindable_amendment_target(
+    leg_templates: dict[str, list[Any]],
+) -> None:
+    """A target_seq with no merged op is refused, never silently carried."""
+
+    import dataclasses
+
+    source = _fresh_journal(leg_templates["decomposed"], count=3)
+    source_target = source.op_events[2]
+    source.append_amendment(
+        amend_raw_hook_intervention(
+            source_target.seq, source_target.label_raw, intervention_replaced=True
+        )
+    )
+    # Forge a target_seq the merge map cannot possibly contain.
+    source.op_amendments[0] = dataclasses.replace(source.op_amendments[0], target_seq=10_000)
+    target_journal = _fresh_journal(leg_templates["decomposed"], count=0)
+    with pytest.raises(LaneMergePolicyError, match="no merged op"):
+        target_journal.concat(source)

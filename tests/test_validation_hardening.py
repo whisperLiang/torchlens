@@ -61,6 +61,32 @@ def _capture(model: nn.Module, x: torch.Tensor, seed: int = 0):
     return trace, ground_truth
 
 
+def _plant_forged_intervention_edit(trace, event):
+    """Splice a forged intervention edit into a FINISHED trace's journal.
+
+    The ordinary writer (``append_intervention``) now refuses on a sealed
+    journal (finding B1-15), which is a real boundary defense and not the
+    property these tests pin: the point is that a forged edit stays INERT even
+    when it reaches the lane. So the forger bypasses the single writer and also
+    fakes its bookkeeping -- a writer-plausible ``seq`` plus the matching
+    counter bump -- leaving the journal's seq invariants (stamped, monotone,
+    unique, counter-bounded, dense) satisfied. The forgery must therefore be
+    refused for the RIGHT reason: no causal binding.
+
+    Parameters
+    ----------
+    trace:
+        Finished trace whose journal is being tampered with.
+    event:
+        Forged ``InterventionAppliedEvent``.
+    """
+
+    events = trace._capture_events
+    object.__setattr__(event, "seq", events.event_seq + 1)
+    events.event_seq += 1
+    events.intervention_events.append(event)
+
+
 def _quiet_validate(model: nn.Module, x) -> bool:
     """Public-path validation with provenance warnings silenced."""
 
@@ -807,6 +833,7 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
 
     import dataclasses
 
+    from torchlens.ir.capture_events import SealedJournalAppendError
     from torchlens.ir.events import InterventionAppliedEvent
 
     trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
@@ -814,14 +841,18 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
     object.__setattr__(relu_op, "intervention_replaced", True)
-    trace._capture_events.append_intervention(
-        InterventionAppliedEvent(
-            label_raw=relu_op._label_raw,
-            kind="replaced",
-            origin="raw_forward_hook",
-            timestamp=2.0,
-        )
+    bare_edit = InterventionAppliedEvent(
+        label_raw=relu_op._label_raw,
+        kind="replaced",
+        origin="raw_forward_hook",
+        timestamp=2.0,
     )
+    # B1-15: the ordinary writer no longer accepts this at all -- the journal is
+    # sealed once the capture finished. The inertness pin below therefore uses
+    # the harder attack that bypasses the writer entirely.
+    with pytest.raises(SealedJournalAppendError):
+        trace._capture_events.append_intervention(bare_edit)
+    _plant_forged_intervention_edit(trace, bare_edit)
 
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "failed"
@@ -835,7 +866,8 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
     object.__setattr__(relu_op2, "func", None)
     object.__setattr__(relu_op2, "func_name", "intervention_replacement")
     object.__setattr__(relu_op2, "intervention_replaced", True)
-    trace2._capture_events.append_intervention(
+    _plant_forged_intervention_edit(
+        trace2,
         dataclasses.replace(
             InterventionAppliedEvent(
                 label_raw=relu_op2._label_raw,
@@ -845,7 +877,7 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
             ),
             run_token=trace2._capture_events.run_nonce,
             target_seq=10_000,
-        )
+        ),
     )
     status2 = validate_saved_outs(trace2, [ground_truth2], validate_metadata=False)
     assert status2.state == "failed"
@@ -890,8 +922,8 @@ def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
     object.__setattr__(relu_op, "intervention_replaced", True)
-    trace_b._capture_events.append_intervention(
-        dataclasses.replace(genuine_edits[0], label_raw=relu_op._label_raw)
+    _plant_forged_intervention_edit(
+        trace_b, dataclasses.replace(genuine_edits[0], label_raw=relu_op._label_raw)
     )
 
     status = validate_saved_outs(trace_b, [ground_truth_b], validate_metadata=False)

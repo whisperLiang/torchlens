@@ -727,7 +727,20 @@ def test_recurrent_relationship_fallback_is_bounded_and_equivalent(
 
 
 def test_relationship_resolver_preserves_ambiguity_error() -> None:
-    """A genuinely ambiguous recurrent relationship keeps the accessor error."""
+    """A genuinely ambiguous recurrent relationship keeps the accessor error.
+
+    Vehicle rebuilt for the immutable relation views (finding B1-19a). The plant
+    used to be ``relationship_owner.children[0] = <ambiguous label>``, which the
+    M6 type break turned into ``TypeError: 'tuple' object does not support item
+    assignment`` -- a DEAD plant, i.e. a silently disarmed tripwire, not a fixed
+    bug. Whole-sequence ASSIGNMENT is still the sanctioned mutation on a finished
+    trace, so the plant now goes through that (and the raw tuple normalizes back
+    to the view type), keeping the property under test intact: the internal
+    relationship resolver must raise the SAME ambiguity error the public
+    accessor raises, never silently pick one of the candidates.
+    """
+
+    from torchlens._errors import AmbiguousOpLookupError
 
     trace = _trace(UnevenReusedSiblings(), torch.randn(2, 4))
     try:
@@ -735,13 +748,24 @@ def test_relationship_resolver_preserves_ambiguity_error() -> None:
             op for op in trace.ops if len(trace.ops.resolve_all(op.layer_label)) > 1
         )
         relationship_owner = next(op for op in trace.ops if op.children)
-        original_child = relationship_owner.children[0]
-        relationship_owner.children[0] = recurrent_op.layer_label
+        original_children = tuple(relationship_owner.children)
+        # Pre-flight: the plant must really BE ambiguous, or every assertion
+        # below would pass vacuously on a resolvable label.
+        with pytest.raises(AmbiguousOpLookupError):
+            trace.ops[recurrent_op.layer_label]
+
+        relationship_owner.children = (recurrent_op.layer_label, *original_children[1:])
+        assert relationship_owner.children[0] == recurrent_op.layer_label
         auto_collapse._OP_ADJACENCY_INDEX_CACHE.pop(trace, None)
 
+        # Explicit, non-vacuous form of the property: the resolver refuses the
+        # planted ambiguous label rather than silently picking a pass.
+        with pytest.raises(AmbiguousOpLookupError):
+            _resolve_relationship_op(trace, recurrent_op.layer_label)
         _assert_relationship_resolution_matches_accessor(trace)
 
-        relationship_owner.children[0] = original_child
+        relationship_owner.children = original_children
+        assert tuple(relationship_owner.children) == original_children
     finally:
         trace.cleanup()
 
