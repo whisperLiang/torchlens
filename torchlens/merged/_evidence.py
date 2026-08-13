@@ -204,6 +204,18 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
         ledger = GroupLifecycleLedger.from_payload(ledger_payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise _refuse(f"group_lifecycle_ledger does not parse ({exc})", source=source) from exc
+    # ``lineage_vectors()`` stamps each vector's install epoch from the EVENTS, while
+    # the audit's completeness reasoning also reads the record-level epoch. A rank
+    # has exactly one epoch, so a disagreement is a forged/corrupt sidecar trying to
+    # promote a ``seeded`` rank to a complete witness; refuse rather than let the two
+    # readings diverge.
+    event_epochs = {event.install_epoch for event in ledger.events}
+    if event_epochs != {install_epoch}:
+        raise _refuse(
+            f"group_lifecycle_ledger event install_epochs {sorted(event_epochs)} disagree "
+            f"with the record install_epoch {install_epoch!r}",
+            source=source,
+        )
     return RankEvidence(
         rank=ranks.pop(),
         boundaries=tuple(boundaries),

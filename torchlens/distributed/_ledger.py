@@ -18,8 +18,10 @@ diagnostics only and never participate in identity.
 from __future__ import annotations
 
 import hashlib
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 __all__ = [
     "GroupLifecycleEvent",
@@ -43,6 +45,59 @@ provable only through the merge-time audit.
 EventKind = Literal["create", "destroy", "seed"]
 
 OrdinalSource = Literal["wrapped", "seeded"]
+
+_INSTALL_EPOCHS = frozenset({"armed_before_any_group", "seeded"})
+_EVENT_KINDS = frozenset({"create", "destroy", "seed"})
+_ORDINAL_SOURCES = frozenset({"wrapped", "seeded"})
+_CREATION_KINDS = frozenset({"create", "seed"})
+
+# ``to_payload`` emits exactly these keys; an unknown key in a loaded payload is a
+# forged or drifted sidecar, never something to silently ignore.
+_EVENT_PAYLOAD_KEYS = frozenset(
+    {
+        "event_index",
+        "kind",
+        "membership_digest",
+        "ordinal",
+        "ordinal_source",
+        "install_epoch",
+        "local_creation_index",
+        "group_name",
+        "name_scheme",
+    }
+)
+
+_MEMBERSHIP_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _require_non_negative_int(payload: Mapping[str, Any], key: str) -> int:
+    """Return a required non-negative integer field, refusing anything else."""
+
+    value = payload[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"group-lifecycle event field {key!r} must be a non-negative int")
+    return value
+
+
+def _require_vocabulary(payload: Mapping[str, Any], key: str, vocabulary: frozenset[str]) -> str:
+    """Return a required closed-vocabulary field, refusing anything else."""
+
+    value = payload[key]
+    if value not in vocabulary:
+        raise ValueError(
+            f"group-lifecycle event field {key!r} is {value!r}, outside the closed "
+            f"vocabulary {sorted(vocabulary)}"
+        )
+    return str(value)
+
+
+def _optional_str(payload: Mapping[str, Any], key: str) -> str | None:
+    """Return an optional string diagnostic field, refusing a non-string value."""
+
+    value = payload.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"group-lifecycle event field {key!r} must be a string or null")
+    return value
 
 
 def membership_digest_for_ranks(global_ranks: Any) -> str:
@@ -124,18 +179,68 @@ class GroupLifecycleEvent:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> GroupLifecycleEvent:
-        """Rebuild an event from :meth:`to_payload` output."""
+        """Rebuild an event from :meth:`to_payload` output, FAIL-CLOSED.
 
+        This is a PARSE BOUNDARY over an artifact sidecar the merge engine treats
+        as evidence, so every field is validated against its declared type and
+        closed vocabulary here. The previous version assigned
+        ``kind`` / ``ordinal_source`` / ``install_epoch`` straight from the payload:
+        a forged sidecar could carry an out-of-vocabulary ``kind``, which
+        :meth:`GroupLifecycleLedger.lineage_vectors` then silently DROPPED --
+        erasing a generation from the lineage evidence the pre-join audit reads --
+        or an ``install_epoch`` of ``armed_before_any_group`` that promotes the rank
+        to a complete witness it never was.
+
+        Parameters
+        ----------
+        payload:
+            One :meth:`to_payload` mapping from a portable artifact.
+
+        Returns
+        -------
+        GroupLifecycleEvent
+            The validated event.
+
+        Raises
+        ------
+        ValueError
+            On an unknown key, a missing/ill-typed field, or a value outside a
+            closed vocabulary. Callers (``merged._evidence``) convert this into a
+            typed ``merged_schema_invalid`` refusal.
+        TypeError
+            When ``payload`` is not a mapping.
+        """
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("group-lifecycle event payload must be a mapping")
+        unknown = set(payload) - _EVENT_PAYLOAD_KEYS
+        if unknown:
+            raise ValueError(f"group-lifecycle event payload has unknown keys {sorted(unknown)}")
+        missing = _EVENT_PAYLOAD_KEYS - set(payload)
+        if missing:
+            raise ValueError(f"group-lifecycle event payload is missing keys {sorted(missing)}")
+        digest = payload["membership_digest"]
+        if not isinstance(digest, str) or not _MEMBERSHIP_DIGEST_RE.match(digest):
+            raise ValueError(
+                "group-lifecycle event field 'membership_digest' must be a hex SHA-256 digest"
+            )
+        local_creation_index = payload["local_creation_index"]
+        if local_creation_index is not None:
+            local_creation_index = _require_non_negative_int(payload, "local_creation_index")
         return cls(
-            event_index=int(payload["event_index"]),
-            kind=payload["kind"],
-            membership_digest=payload["membership_digest"],
-            ordinal=int(payload["ordinal"]),
-            ordinal_source=payload["ordinal_source"],
-            install_epoch=payload["install_epoch"],
-            local_creation_index=payload.get("local_creation_index"),
-            group_name=payload.get("group_name"),
-            name_scheme=payload.get("name_scheme"),
+            event_index=_require_non_negative_int(payload, "event_index"),
+            kind=cast(EventKind, _require_vocabulary(payload, "kind", _EVENT_KINDS)),
+            membership_digest=digest,
+            ordinal=_require_non_negative_int(payload, "ordinal"),
+            ordinal_source=cast(
+                OrdinalSource, _require_vocabulary(payload, "ordinal_source", _ORDINAL_SOURCES)
+            ),
+            install_epoch=cast(
+                InstallEpoch, _require_vocabulary(payload, "install_epoch", _INSTALL_EPOCHS)
+            ),
+            local_creation_index=local_creation_index,
+            group_name=_optional_str(payload, "group_name"),
+            name_scheme=_optional_str(payload, "name_scheme"),
         )
 
 
@@ -258,13 +363,22 @@ class GroupLifecycleLedger:
             digest = event.membership_digest
             epochs.setdefault(digest, event.install_epoch)
             rows = generations.setdefault(digest, {})
-            if event.kind in ("create", "seed"):
+            if event.kind in _CREATION_KINDS:
                 rows[event.ordinal] = {
                     "source": event.ordinal_source,
                     "destroyed": False,
                 }
-            elif event.kind == "destroy" and event.ordinal in rows:
-                rows[event.ordinal]["destroyed"] = True
+            elif event.kind == "destroy":
+                if event.ordinal in rows:
+                    rows[event.ordinal]["destroyed"] = True
+            else:
+                # Unreachable for a well-typed live ledger and for any payload that
+                # passed ``GroupLifecycleEvent.from_payload``; the belt exists so an
+                # unrecognized kind can never be SILENTLY dropped from the evidence.
+                raise ValueError(
+                    f"group-lifecycle event kind {event.kind!r} is outside the closed "
+                    f"vocabulary {sorted(_EVENT_KINDS)}"
+                )
         vectors: dict[str, LineageVector] = {}
         for digest, rows in generations.items():
             entries = tuple(
@@ -289,6 +403,36 @@ class GroupLifecycleLedger:
 
     @classmethod
     def from_payload(cls, payload: list[dict[str, Any]]) -> GroupLifecycleLedger:
-        """Rebuild a ledger from :meth:`to_payload` output."""
+        """Rebuild a ledger from :meth:`to_payload` output, FAIL-CLOSED.
 
-        return cls([GroupLifecycleEvent.from_payload(entry) for entry in payload])
+        The rebuild routes every event through :meth:`append`, so the monotone
+        ``event_index`` contract the live ledger enforces holds identically for a
+        LOADED one. The previous version handed the list straight to ``__init__``
+        and bypassed that check, so a forged sidecar could carry duplicate or
+        decreasing indices -- reordering or masking the generation evidence the
+        pre-join membership-lineage audit reads.
+
+        Parameters
+        ----------
+        payload:
+            List of :meth:`GroupLifecycleEvent.to_payload` mappings, in order.
+
+        Returns
+        -------
+        GroupLifecycleLedger
+            The validated ledger.
+
+        Raises
+        ------
+        TypeError
+            When ``payload`` is not a list.
+        ValueError
+            On any invalid event payload or an event-index contract violation.
+        """
+
+        if not isinstance(payload, list):
+            raise TypeError("group-lifecycle ledger payload must be a list")
+        ledger = cls()
+        for entry in payload:
+            ledger.append(GroupLifecycleEvent.from_payload(entry))
+        return ledger

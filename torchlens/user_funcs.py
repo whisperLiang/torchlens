@@ -22,6 +22,7 @@ import functools
 import os
 import pickle
 import re
+import stat
 import tempfile
 import time
 import warnings
@@ -150,6 +151,325 @@ _is_hf_text_input = _hf_bridge._is_hf_text_input
 _MLX_STATIC_LABEL_SAVE_SELECTOR_KINDS = frozenset(
     {"label", "func", "module", "contains", "in_module", "and", "or", "not"}
 )
+
+# --------------------------------------------------------------------------- #
+# Capture-cache integrity (``trace(..., cache=True)``)                         #
+# --------------------------------------------------------------------------- #
+#
+# The capture cache stores a whole pickled ``Trace``. That object graph is far
+# outside what ``_io._safe_unpickle.SafeBundleUnpickler`` admits (it deliberately
+# refuses tensor/storage CONSTRUCTION and every non-allowlisted torchlens type), and
+# widening that allowlist to fit a full ``Trace`` would disarm the ``.tlspec`` front
+# door -- so the cache CANNOT route through it. The cache boundary is instead closed
+# on the AUTHENTICITY axis, which is the axis the threat actually lives on:
+#
+# 1. The cache directories torchlens itself creates are made PRIVATE to this user.
+#    ``TORCHLENS_CACHE_DIR`` pointed at a shared path (CI cache mount, container
+#    volume, group-writable NFS home, a world-writable tmpdir) turned the next cache
+#    HIT into arbitrary code execution with no error and no warning. Group/other write
+#    bits are stripped from the two directories torchlens owns; a root owned by another
+#    user, or one whose permissions cannot be tightened, refuses typed. Ancestors ABOVE
+#    the configured cache directory are the caller's to secure and are not inspected.
+# 2. Every entry carries an HMAC-SHA256 tag keyed by a 0600 secret inside that
+#    directory. Bytes we cannot authenticate are NEVER handed to ``pickle`` -- they are
+#    a cache MISS with a warning, so a planted, stale, or corrupt entry is inert while
+#    a legitimate pre-upgrade cache simply refills.
+#
+# (2) is the load-bearing guard and (1) is defense in depth: a mode check alone cannot
+# speak to a file planted while the mode was briefly permissive, nor to bytes copied in
+# from an untrusted archive, while the tag makes any such entry inert.
+
+_CAPTURE_CACHE_SECRET_FILE = ".capture_cache_secret"
+_CAPTURE_CACHE_TAG_SUFFIX = ".hmac"
+_CAPTURE_CACHE_SECRET_BYTES = 32
+
+
+def _capture_cache_io_error(message: str) -> Exception:
+    """Build the typed artifact-boundary error for a refused capture cache."""
+
+    from ._io import TorchLensIOError
+
+    return TorchLensIOError(message)
+
+
+def _harden_capture_cache_dir(directory: Path) -> None:
+    """Make one torchlens-owned cache directory private to the current user.
+
+    The default cache path is created under the caller's umask, which on a great many
+    Linux installs (umask 002) yields a group-writable ``0775`` directory -- so a hard
+    refusal would break the DEFAULT cache. Since torchlens owns these directories, the
+    write bits are stripped instead. A directory owned by a different user, or one whose
+    permissions cannot be tightened, is a genuine misconfiguration and refuses typed.
+
+    Parameters
+    ----------
+    directory
+        A cache directory torchlens created (the configured root, or its ``capture``
+        subdirectory). Ancestors above the configured root are the caller's to secure
+        and are deliberately not inspected.
+
+    Returns
+    -------
+    None
+        Returns normally once the directory is private.
+
+    Raises
+    ------
+    torchlens.errors.TorchLensIOError
+        When the directory is owned by another user, or is group/other-writable and
+        cannot be tightened. Either condition means a second principal can substitute
+        the pickle this process will load.
+    """
+
+    if os.name != "posix":  # pragma: no cover - POSIX mode bits are the checked signal
+        return
+    euid = os.geteuid()
+    try:
+        info = directory.stat()
+    except OSError as exc:  # pragma: no cover - mkdir ran immediately before
+        raise _capture_cache_io_error(
+            f"TorchLens capture cache directory {directory} cannot be inspected ({exc})."
+        ) from exc
+    if info.st_uid != euid:
+        raise _capture_cache_io_error(
+            f"TorchLens capture cache directory {directory} is owned by uid "
+            f"{info.st_uid}, not this process (uid {euid}). The cache stores pickled "
+            "traces, so loading one written by another user would execute their code. "
+            "Point TORCHLENS_CACHE_DIR at a directory you own, or drop cache=True."
+        )
+    permissive = info.st_mode & 0o022
+    if not permissive:
+        return
+    try:
+        directory.chmod(stat.S_IMODE(info.st_mode) & ~0o022)
+    except OSError as exc:
+        raise _capture_cache_io_error(
+            f"TorchLens capture cache directory {directory} is group- or "
+            f"world-writable (mode {stat.S_IMODE(info.st_mode):04o}) and could not be "
+            f"tightened ({exc}). The cache stores pickled traces, so any principal who "
+            "can write there could execute arbitrary code in this process on the next "
+            f"cache hit. Run 'chmod go-w {directory}', point TORCHLENS_CACHE_DIR at a "
+            "private directory, or drop cache=True."
+        ) from exc
+    if directory.stat().st_mode & 0o022:  # pragma: no cover - chmod silently ignored
+        raise _capture_cache_io_error(
+            f"TorchLens capture cache directory {directory} stayed group- or "
+            "world-writable after chmod (a filesystem that ignores mode bits). Point "
+            "TORCHLENS_CACHE_DIR at a private directory, or drop cache=True."
+        )
+
+
+def _prepare_capture_cache_dir(cache_dir_value: str | Path | None) -> tuple[Path, bytes]:
+    """Create, harden, and key the capture-cache directory.
+
+    Parameters
+    ----------
+    cache_dir_value
+        Explicit ``cache_dir`` argument, or ``None`` to use ``TORCHLENS_CACHE_DIR`` /
+        the ``~/.cache/torchlens`` default.
+
+    Returns
+    -------
+    tuple[pathlib.Path, bytes]
+        The per-capture entry directory and the secret authenticating its entries.
+    """
+
+    cache_dir = _capture_cache_dir(cache_dir_value)
+    # ``mkdir(parents=True, mode=...)`` applies the mode to the LEAF only, so the
+    # configured directory itself would keep the ambient umask permissions. Harden it
+    # only when THIS call created it: a caller-supplied ``cache_dir`` that already exists
+    # may be shared with other purposes, and silently tightening it would be a surprising
+    # side effect on a path torchlens does not own. ``capture/`` is unambiguously ours and
+    # is always hardened -- and the authentication tag, not the mode, is what makes a
+    # permissive ancestor harmless (a planted entry carries no valid tag, and an
+    # attacker-supplied secret fails the ownership check).
+    created_cache_dir = not cache_dir.exists()
+    cache_root = cache_dir / "capture"
+    cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if created_cache_dir:
+        _harden_capture_cache_dir(cache_dir)
+    _harden_capture_cache_dir(cache_root)
+    return cache_root, _capture_cache_secret(cache_root)
+
+
+def _capture_cache_secret(cache_root: Path) -> bytes:
+    """Return the per-root HMAC secret, creating it 0600 on first use.
+
+    Parameters
+    ----------
+    cache_root
+        Private capture-cache directory (already validated).
+
+    Returns
+    -------
+    bytes
+        The secret keying every entry's authentication tag.
+
+    Raises
+    ------
+    torchlens.errors.TorchLensIOError
+        When an existing secret file is not a private regular file, so a tag
+        computed with it would prove nothing.
+    """
+
+    secret_path = cache_root / _CAPTURE_CACHE_SECRET_FILE
+    if secret_path.exists():
+        if secret_path.is_symlink() or not secret_path.is_file():
+            raise _capture_cache_io_error(
+                f"TorchLens capture cache secret {secret_path} is not a regular file; "
+                "remove it (the cache refills automatically) or drop cache=True."
+            )
+        info = secret_path.stat()
+        if os.name == "posix" and info.st_uid != os.geteuid():
+            raise _capture_cache_io_error(
+                f"TorchLens capture cache secret {secret_path} is owned by uid "
+                f"{info.st_uid}, not this process; a tag keyed by it would prove "
+                "nothing. Remove it (the cache refills automatically) or drop "
+                "cache=True."
+            )
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise _capture_cache_io_error(
+                f"TorchLens capture cache secret {secret_path} is readable or writable "
+                f"by other users (mode {stat.S_IMODE(info.st_mode):04o}); run "
+                f"'chmod 600 {secret_path}' or remove it to have it regenerated."
+            )
+        try:
+            return secret_path.read_bytes()
+        except OSError as exc:
+            raise _capture_cache_io_error(
+                f"TorchLens capture cache secret {secret_path} cannot be read ({exc}); "
+                "remove it (the cache refills automatically) or drop cache=True."
+            ) from exc
+    secret = os.urandom(_CAPTURE_CACHE_SECRET_BYTES)
+    # O_EXCL so two concurrent first-captures cannot each believe they own the
+    # secret; the loser re-reads the winner's bytes.
+    try:
+        descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:  # pragma: no cover - concurrent first capture
+        return secret_path.read_bytes()
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(secret)
+    return secret
+
+
+_CAPTURE_CACHE_CHUNK_BYTES = 1 << 20
+
+
+def _capture_cache_tag_of_file(secret: bytes, path: Path) -> str:
+    """Return the hex HMAC-SHA256 tag over a cache file, read in bounded chunks.
+
+    Parameters
+    ----------
+    secret
+        Secret keying the tag.
+    path
+        Cache payload file.
+
+    Returns
+    -------
+    str
+        Hex digest. Chunked so authenticating a multi-GiB cached trace costs one
+        buffer, not a second full copy of the payload.
+    """
+
+    import hashlib
+    import hmac
+
+    mac = hmac.new(secret, digestmod=hashlib.sha256)
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_CAPTURE_CACHE_CHUNK_BYTES)
+            if not chunk:
+                break
+            mac.update(chunk)
+    return mac.hexdigest()
+
+
+class _TaggingWriter:
+    """File wrapper that HMACs every byte ``pickle.dump`` streams through it."""
+
+    def __init__(self, handle: Any, mac: Any) -> None:
+        self._handle = handle
+        self._mac = mac
+
+    def write(self, data: Any) -> int:
+        """Tag and forward one write, returning the bytes written."""
+
+        self._mac.update(data)
+        return cast(int, self._handle.write(data))
+
+
+def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
+    """Unpickle a cache entry ONLY after its HMAC tag verifies.
+
+    Parameters
+    ----------
+    cache_path
+        Path of the cached pickle.
+    secret
+        Secret keying the entry's tag.
+
+    Returns
+    -------
+    Any
+        The cached ``Trace``, or ``None`` when the entry cannot be authenticated
+        (treated as a cache miss; the caller recaptures and rewrites it).
+    """
+
+    import hmac
+
+    tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
+    if cache_path.is_symlink() or tag_path.is_symlink():
+        reason = "the entry or its tag is a symlink"
+    elif not tag_path.is_file():
+        reason = "no authentication tag accompanies it"
+    else:
+        recorded = tag_path.read_text(encoding="ascii").strip()
+        if not hmac.compare_digest(recorded, _capture_cache_tag_of_file(secret, cache_path)):
+            reason = "its authentication tag does not match its bytes"
+        else:
+            with cache_path.open("rb") as handle:
+                return pickle.load(handle)
+    warnings.warn(
+        f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
+        "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
+        "capture runs normally and the entry is rewritten.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return None
+
+
+def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: bytes) -> None:
+    """Write a cache entry plus the HMAC tag that authenticates it.
+
+    Parameters
+    ----------
+    trace
+        Trace to cache.
+    cache_path
+        Destination pickle path.
+    secret
+        Secret keying the entry's tag.
+
+    Returns
+    -------
+    None
+        Writes the payload and its tag in place.
+    """
+
+    import hashlib
+    import hmac
+
+    mac = hmac.new(secret, digestmod=hashlib.sha256)
+    # Streamed, so caching a multi-GiB trace does not additionally materialize the
+    # whole pickle in memory just to tag it.
+    with cache_path.open("wb") as file:
+        pickle.dump(trace, _TaggingWriter(file, mac))
+    tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
+    # Payload first, then tag: a crash between the two leaves an unauthenticated
+    # entry, which the loader treats as a miss rather than trusting it.
+    tag_path.write_text(mac.hexdigest(), encoding="ascii")
 
 
 def list_logs() -> tuple[Trace, ...]:
@@ -2436,6 +2756,7 @@ def _trace_torch_model(
     log_name = name if name is not None else _state._auto_name(model)
     cache_path: Path | None = None
     cache_key: str | None = None
+    cache_secret: bytes | None = None
     if cache_enabled:
         cache_config = {
             "layers_to_save": requested_layers_to_save,
@@ -2497,17 +2818,18 @@ def _trace_torch_model(
             "save_preview": capture_options.save_preview,
         }
         cache_key = _capture_cache_key(model, input_args, input_kwargs, cache_config)
-        cache_root = _capture_cache_dir(cache_dir_value) / "capture"
-        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_root, cache_secret = _prepare_capture_cache_dir(cache_dir_value)
         cache_path = cache_root / f"{cache_key}.pkl"
         if cache_path.exists():
-            with cache_path.open("rb") as file:
-                cached_log = cast(Trace, pickle.load(file))
-            cached_log.capture_cache_hit = True
-            cached_log.capture_cache_key = cache_key
-            cached_log.capture_cache_path = str(cache_path)
-            cached_log.batch_render = batch_render_policy
-            return cached_log
+            cached_log = cast(
+                "Trace | None", _load_authenticated_capture_cache(cache_path, cache_secret)
+            )
+            if cached_log is not None:
+                cached_log.capture_cache_hit = True
+                cached_log.capture_cache_key = cache_key
+                cached_log.capture_cache_path = str(cache_path)
+                cached_log.batch_render = batch_render_policy
+                return cached_log
     if (
         chunk_plan is not None
         and normalized_chunk_size is not None
@@ -2778,13 +3100,12 @@ def _trace_torch_model(
             from .backends.torch.wrappers import unwrap_torch
 
             unwrap_torch()
-        if cache_path is not None and cache_key is not None:
+        if cache_path is not None and cache_key is not None and cache_secret is not None:
             trace.capture_cache_hit = False
             trace.capture_cache_key = cache_key
             trace.capture_cache_path = str(cache_path)
             _prepare_log_for_capture_cache(trace)
-            with cache_path.open("wb") as file:
-                pickle.dump(trace, file)
+            _store_authenticated_capture_cache(trace, cache_path, cache_secret)
         return trace
 
     run_capture = functools.partial(
@@ -2901,13 +3222,12 @@ def _trace_torch_model(
 
         unwrap_torch()
 
-    if cache_path is not None and cache_key is not None:
+    if cache_path is not None and cache_key is not None and cache_secret is not None:
         trace.capture_cache_hit = False
         trace.capture_cache_key = cache_key
         trace.capture_cache_path = str(cache_path)
         _prepare_log_for_capture_cache(trace)
-        with cache_path.open("wb") as file:
-            pickle.dump(trace, file)
+        _store_authenticated_capture_cache(trace, cache_path, cache_secret)
 
     return trace
 
@@ -2957,6 +3277,7 @@ def _public_impls_module() -> Any:
 
     _user_public_impls.trace = trace
     _user_public_impls._run_model_and_save_specified_outs = _run_model_and_save_specified_outs
+    _sync_public_impl_wrapper_metadata(_user_public_impls)
     return _user_public_impls
 
 
@@ -3046,28 +3367,57 @@ def validate_batch_of_models_and_inputs(*args: Any, **kwargs: Any) -> Any:
     return _public_impls_module().validate_batch_of_models_and_inputs(*args, **kwargs)
 
 
-def _sync_public_impl_wrapper_metadata() -> None:
+_PUBLIC_IMPL_WRAPPER_NAMES = (
+    "summary",
+    "show_model_graph",
+    "draw_backward",
+    "draw_combined",
+    "show_bundle_graph",
+    "validate_forward_pass",
+    "validate_backward_pass",
+    "validate_saved_outs",
+    "validate_batch_of_models_and_inputs",
+)
+
+_public_impl_metadata_synced = False
+
+
+def _sync_public_impl_wrapper_metadata(implementations: Any = None) -> None:
     """Expose canonical signatures on lazily delegated public wrappers.
+
+    ``torchlens._user_public_impls`` imports this module at its top, so when IT is
+    the module imported first (``import torchlens._user_public_impls``) the sync
+    below observes a partially initialized implementation module. Skipping the
+    not-yet-defined names -- instead of raising ``AttributeError`` and breaking a
+    standalone import -- keeps the cycle inert; the next
+    :func:`_public_impls_module` call completes the sync, and the flag makes the
+    completed sync a one-time cost.
+
+    Parameters
+    ----------
+    implementations:
+        Already-resolved implementation module, when the caller holds one.
 
     Returns
     -------
     None
-        Updates wrapper metadata in place after the implementation module is loaded.
+        Updates wrapper metadata in place once the implementation module is fully
+        loaded.
     """
 
-    implementations = _public_impls_module()
-    for name in (
-        "summary",
-        "show_model_graph",
-        "draw_backward",
-        "draw_combined",
-        "show_bundle_graph",
-        "validate_forward_pass",
-        "validate_backward_pass",
-        "validate_saved_outs",
-        "validate_batch_of_models_and_inputs",
-    ):
-        functools.update_wrapper(globals()[name], getattr(implementations, name))
+    global _public_impl_metadata_synced
+    if _public_impl_metadata_synced:
+        return
+    if implementations is None:
+        from . import _user_public_impls as implementations  # type: ignore[no-redef]
+    pending = False
+    for name in _PUBLIC_IMPL_WRAPPER_NAMES:
+        implementation = getattr(implementations, name, None)
+        if implementation is None:
+            pending = True
+            continue
+        functools.update_wrapper(globals()[name], implementation)
+    _public_impl_metadata_synced = not pending
 
 
 _sync_public_impl_wrapper_metadata()

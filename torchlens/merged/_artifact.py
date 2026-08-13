@@ -41,6 +41,8 @@ from ._presenter import MergedTrace, _RankHandle
 
 __all__ = ["canonical_json_bytes", "load_merged", "save_merged", "tree_hash"]
 
+_TREE_HASH_CHUNK_BYTES = 1 << 20
+
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
 """UTF-8, sorted keys, no NaN/Infinity, LF, no insignificant whitespace."""
 
@@ -72,13 +74,23 @@ def tree_hash(root: Path) -> str:
             )
         if not candidate.is_file():
             continue
-        data = candidate.read_bytes()
+        # Chunked: a rank core's safetensors blobs are legitimately multi-GiB, so
+        # ``read_bytes()`` materialized the whole file just to hash it.
+        size = 0
+        digest = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            while True:
+                chunk = handle.read(_TREE_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
         entry = (
             candidate.relative_to(root).as_posix().encode("utf-8")
             + b"\0"
-            + str(len(data)).encode("ascii")
+            + str(size).encode("ascii")
             + b"\0"
-            + hashlib.sha256(data).hexdigest().encode("ascii")
+            + digest.hexdigest().encode("ascii")
         )
         entries.append(entry)
     return hashlib.sha256(b"\n".join(entries)).hexdigest()
@@ -246,7 +258,9 @@ def load_merged(path: str | Path) -> MergedTrace:
     if not manifest_path.is_file():
         raise _schema_refusal(f"{root} has no manifest.json")
     try:
-        manifest = _json.loads_bounded(manifest_path.read_text(encoding="utf-8"))
+        # Bounded PATH read: ``read_text`` allocated the whole attacker-sized file
+        # before the ceiling applied, so the byte limit was advisory only here.
+        manifest = _json.read_bounded(manifest_path)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _schema_refusal(f"root manifest does not parse ({exc})") from exc
     if not isinstance(manifest, dict):
@@ -264,7 +278,12 @@ def load_merged(path: str | Path) -> MergedTrace:
     descriptor_path = root / "merge" / "descriptor.json"
     if not descriptor_path.is_file():
         raise _tamper("merge/descriptor.json is missing")
-    descriptor_bytes = descriptor_path.read_bytes()
+    # The descriptor's EXACT on-disk bytes are the checksum subject, so they must be
+    # read raw -- but under the same ceiling, not via an unbounded ``read_bytes``.
+    try:
+        descriptor_bytes = _json.read_bytes_bounded(descriptor_path)
+    except json.JSONDecodeError as exc:
+        raise _schema_refusal(f"descriptor does not parse ({exc})") from exc
     recorded_sha = manifest.get("descriptor_sha256")
     if hashlib.sha256(descriptor_bytes).hexdigest() != recorded_sha:
         raise _tamper("descriptor bytes do not match the root-manifest checksum")
