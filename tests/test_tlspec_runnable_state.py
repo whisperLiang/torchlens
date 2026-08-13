@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ class StatefulRunnableModel(nn.Module):
 @pytest.fixture(scope="module")
 def runnable_artifact(
     tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[Path, dict[str, torch.Tensor]]:
+) -> Iterator[tuple[Path, dict[str, torch.Tensor]]]:
     """Create one sparse runnable artifact and its independent user state mapping."""
 
     model = StatefulRunnableModel().eval()
@@ -54,7 +55,11 @@ def runnable_artifact(
     assert model.forward_calls == 1
     path = tmp_path_factory.mktemp("runnable-state") / "state.tlspec"
     trace.save(path, level="runnable")
-    return path, {name: value.detach().clone() for name, value in model.state_dict().items()}
+    state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    try:
+        yield path, state
+    finally:
+        trace.cleanup()
 
 
 def _with_rebuilt_state_metadata_witnesses(descriptor: Any) -> Any:

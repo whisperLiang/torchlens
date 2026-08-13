@@ -4,6 +4,7 @@ All existing validation + visualization tests migrated from test_validation_and_
 plus new API coverage tests.
 """
 
+from collections.abc import Iterator
 from os.path import join as opj
 
 import example_models
@@ -3933,10 +3934,19 @@ LOOP_COMPARISON_DIR = opj(VIS_OUTPUT_DIR, "loop-comparison")
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _ensure_loop_comparison_dir():
-    import os
+def _ensure_loop_comparison_dir(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Route loop-comparison artifacts to this session's private temp tree."""
 
-    os.makedirs(LOOP_COMPARISON_DIR, exist_ok=True)
+    global LOOP_COMPARISON_DIR
+
+    previous = LOOP_COMPARISON_DIR
+    LOOP_COMPARISON_DIR = str(tmp_path_factory.mktemp("loop-comparison"))
+    try:
+        yield
+    finally:
+        LOOP_COMPARISON_DIR = previous
 
 
 def _assert_render_pdf(stem: str) -> None:

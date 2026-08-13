@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 from torch import nn
@@ -27,11 +29,15 @@ class _TwoBlockModel(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def profiled_trace():
+def profiled_trace() -> Iterator[tl.Trace]:
     """One captured trace shared across profile assertions."""
 
     torch.manual_seed(6)
-    return tl.trace(_TwoBlockModel(), torch.randn(2, 4))
+    trace = tl.trace(_TwoBlockModel(), torch.randn(2, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def test_build_profile_validates_level_sort_and_top_k(profiled_trace) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -316,7 +317,7 @@ class SingleTensorContainerOutputModel(nn.Module):
 @pytest.fixture(scope="module")
 def runnable_execution_artifact(
     tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[Path, RunnableExecutionModel, tl.Trace]:
+) -> Iterator[tuple[Path, RunnableExecutionModel, tl.Trace]]:
     """Build one reusable sparse artifact and its independent live oracle."""
 
     torch.manual_seed(11)
@@ -332,11 +333,14 @@ def runnable_execution_artifact(
     )
     path = tmp_path_factory.mktemp("runnable-execution") / "model.tlspec"
     trace.save(path, level="runnable")
-    return path, model, trace
+    try:
+        yield path, model, trace
+    finally:
+        trace.cleanup()
 
 
 @pytest.fixture(scope="module")
-def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """Build a sparse artifact carrying complete control witnesses."""
 
     trace = tl.trace(
@@ -350,7 +354,10 @@ def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     path = tmp_path_factory.mktemp("runnable-honesty") / "control.tlspec"
     trace.save(path, level="runnable")
-    return path
+    try:
+        yield path
+    finally:
+        trace.cleanup()
 
 
 @pytest.mark.smoke

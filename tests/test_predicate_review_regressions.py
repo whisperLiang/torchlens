@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, get_args
 
@@ -56,10 +57,16 @@ def _conv_input() -> torch.Tensor:
 
 
 @pytest.fixture(scope="module")
-def conv_trace() -> Any:
+def conv_trace() -> Iterator[Any]:
+    """Yield one warning-suppressed convolution Trace and clean it up."""
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return tl.trace(TinyConvNet(), _conv_input())
+        trace = tl.trace(TinyConvNet(), _conv_input())
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 # ---------------------------------------------------------------------------

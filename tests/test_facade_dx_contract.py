@@ -10,6 +10,8 @@ break IDE field preview fails here first.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 from torch import nn
@@ -41,12 +43,16 @@ class _DxModel(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def dx_trace() -> Trace:
+def dx_trace() -> Iterator[Trace]:
     """Capture one deterministic trace for DX assertions."""
 
     torch.manual_seed(0)
     model = _DxModel()
-    return tl.trace(model, torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
+    trace = tl.trace(model, torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _debugger_visible_names(obj: object) -> set[str]:

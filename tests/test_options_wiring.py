@@ -10,7 +10,6 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._deprecations import _WARNED_DEPRECATIONS
 from torchlens.options import CaptureOptions, SaveOptions, VisualizationOptions
 
 
@@ -27,13 +26,6 @@ class _TinyModel(nn.Module):
         """Run the forward pass."""
 
         return self.fc1(x)
-
-
-@pytest.fixture(autouse=True)
-def clear_deprecation_state() -> None:
-    """Reset once-per-process deprecation state between tests."""
-
-    _WARNED_DEPRECATIONS.clear()
 
 
 def _input() -> torch.Tensor:

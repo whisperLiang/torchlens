@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
-from os.path import join as opj
-from pathlib import Path
 from typing import Any
 
 import pytest
 from packaging.version import InvalidVersion, Version
-
-TESTS_DIR = str(Path(__file__).resolve().parents[1])
-TEST_OUTPUTS_DIR = opj(TESTS_DIR, "generated_outputs")
-REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
-VIS_OUTPUT_DIR = opj(TEST_OUTPUTS_DIR, "visualizations")
 
 _MIN_TENSORFLOW_VERSION = Version("2.16")
 _MIN_KERAS_MAJOR = 3
