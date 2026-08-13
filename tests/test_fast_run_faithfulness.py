@@ -260,3 +260,69 @@ def test_fast_live_inherited_divergence_never_unregisters_user_trace() -> None:
     with pytest.raises(PathDivergenceError):
         captured.run(inputs=torch.ones(2), fast=True)
     assert any(log is captured for log in _state.list_logs())
+
+
+def test_remove_fast_live_hooks_survives_raising_remove() -> None:
+    """One raising handle.remove() must not strand the remaining hooks."""
+
+    from torchlens._fast_run import _remove_fast_live_hooks
+
+    removed: list[int] = []
+
+    class Handle:
+        """Hook-handle stand-in with an optional failing removal."""
+
+        def __init__(self, key: int, fail: bool = False) -> None:
+            """Record the handle identity and failure mode."""
+
+            self.key = key
+            self.fail = fail
+
+        def remove(self) -> None:
+            """Remove the handle or raise like a torn hook registry."""
+
+            if self.fail:
+                raise RuntimeError("torn hook registry")
+            removed.append(self.key)
+
+    handles: list = [Handle(1), Handle(2, fail=True), Handle(3)]
+    with pytest.raises(RuntimeError, match="torn hook registry"):
+        _remove_fast_live_hooks(handles)
+    assert removed == [1, 3]
+    assert handles == []
+
+
+def test_close_fast_run_session_retryable_after_raising_close() -> None:
+    """A raising close leaves the session attached and retryable, never stranded."""
+
+    from torchlens._fast_run import close_fast_run_session
+
+    class FlakySession:
+        """Session stand-in whose first close raises."""
+
+        def __init__(self) -> None:
+            """Arm one failing close."""
+
+            self.calls = 0
+
+        def close(self) -> None:
+            """Raise once, then succeed."""
+
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("first close fails")
+
+    class Holder:
+        """Bare object with a Trace-like __dict__."""
+
+    trace = Holder()
+    session = FlakySession()
+    trace.__dict__["_fast_run_session"] = session
+
+    with pytest.raises(RuntimeError, match="first close fails"):
+        close_fast_run_session(trace)
+    assert trace.__dict__["_fast_run_session"] is session
+
+    close_fast_run_session(trace)
+    assert "_fast_run_session" not in trace.__dict__
+    assert session.calls == 2

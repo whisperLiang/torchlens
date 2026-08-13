@@ -442,11 +442,25 @@ def _state_mutating_call_ids(
 
 
 def _remove_fast_live_hooks(handles: list[Any]) -> None:
-    """Remove and discard module-hook handles without retaining their session."""
+    """Remove and discard module-hook handles without retaining their session.
 
+    Every handle gets its own removal attempt: ``weakref.finalize`` pops its
+    registry entry BEFORE invoking the callback, so this is the one chance to
+    remove these hooks -- a single raising ``remove()`` must never strand the
+    remaining handles on the user's modules forever. The first failure
+    re-raises only after every handle was attempted and the list cleared.
+    """
+
+    first_error: BaseException | None = None
     for handle in handles:
-        handle.remove()
+        try:
+            handle.remove()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
     handles.clear()
+    if first_error is not None:
+        raise first_error
 
 
 class _FastSparseSession:
@@ -1451,8 +1465,14 @@ def run_fast_live_trace(trace: Any, inputs: Any, *, seed: int | None) -> RunResu
 
 
 def close_fast_run_session(trace: Any) -> None:
-    """Close and discard a Trace's internal fast-run session, if present."""
+    """Close and discard a Trace's internal fast-run session, if present.
 
-    session = trace.__dict__.pop("_fast_run_session", None)
+    Close BEFORE discarding: a raising ``close()`` leaves the session attached
+    (and therefore retryable) instead of popping it into an unreachable state
+    with its hooks still installed.
+    """
+
+    session = trace.__dict__.get("_fast_run_session")
     if hasattr(session, "close"):
         session.close()
+    trace.__dict__.pop("_fast_run_session", None)
