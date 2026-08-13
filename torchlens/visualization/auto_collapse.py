@@ -380,12 +380,9 @@ def collapse_order(
 
     _ = weights
     if mode not in {"auto", "max"}:
-        # Distinct code from the render-surface `collapse_mode_invalid`: this
-        # diagnostic surface accepts only the two landmark policies, so the
-        # render remedy ("choose 'none', ...") would refuse again here.
         raise InvalidArgumentError(
             f"mode must be 'auto' or 'max'; received {mode!r}",
-            code="collapse_order_mode_invalid",
+            code="collapse_mode_invalid",
             remedy="pass mode='auto' or 'max'",
             argument="mode",
         )

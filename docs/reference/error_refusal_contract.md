@@ -66,8 +66,7 @@ add names to the top-level `torchlens` namespace:
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
-| `collapse_mode_invalid` | Collapse mode is unsupported | Rendering `collapse=`: choose `none`, `auto`, `max`, or a float; `collapse_plan(mode=)`: choose `auto`, `max`, or a float |
-| `collapse_order_mode_invalid` | `collapse_order(mode=)` is not a landmark policy | Pass `mode='auto'` or `'max'` |
+| `collapse_mode_invalid` | Collapse mode is unsupported — PER-SURFACE DOMAINS: rendering `collapse=` accepts `none`/`auto`/`max`/float, `collapse_plan(mode=)` accepts `auto`/`max`/float, `collapse_order(mode=)` accepts only `auto`/`max` | Choose a mode documented for that surface; the raised remedy names the exact set |
 | `collapse_plan_unavailable` | Collapse optimizer declined the render context | Use a supported render context and mode |
 | `container_leaf_not_saved` | Container leaf value was not retained | Re-run with `save=` covering the leaves |
 | `container_not_reconstructable` | Container spec or backend support is absent | Capture with `capture_container_structure=True` |

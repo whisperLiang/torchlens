@@ -857,12 +857,13 @@ def test_save_argument_door_is_typed_and_redirects_save_all() -> None:
     assert "Remedy:" in str(exc_info.value)
 
 
-def test_collapse_order_mode_door_has_its_own_code() -> None:
-    """The collapse_order diagnostic surface refuses under its own code.
+def test_collapse_order_mode_door_names_its_narrower_domain() -> None:
+    """The collapse_order refusal remedy never sends the caller back in circles.
 
-    ``collapse_order(mode=)`` accepts only the two landmark policies, so it no
-    longer shares ``collapse_mode_invalid`` with the render surfaces whose
-    documented remedy (``'none'``, floats) would refuse again here.
+    ``collapse_order(mode=)`` accepts only the two landmark policies. It shares
+    ``collapse_mode_invalid`` with the wider render surfaces (the contract row
+    documents the per-surface domains), so the raised remedy itself must name
+    exactly the accepted set — never ``'none'`` or floats, which refuse here.
     """
 
     from torchlens.visualization.auto_collapse import collapse_order
@@ -870,8 +871,11 @@ def test_collapse_order_mode_door_has_its_own_code() -> None:
     with pytest.raises(errors.InvalidArgumentError) as exc_info:
         collapse_order(object(), mode="none")  # type: ignore[arg-type]
 
-    assert exc_info.value.fields["code"] == "collapse_order_mode_invalid"
-    assert "auto" in exc_info.value.fields["remedy"]
+    assert exc_info.value.fields["code"] == "collapse_mode_invalid"
+    remedy = exc_info.value.fields["remedy"]
+    assert "auto" in remedy and "max" in remedy
+    assert "none" not in remedy
+    assert "float" not in remedy
 
 
 def test_code_panel_doors_split_render_from_config_refusals() -> None:
