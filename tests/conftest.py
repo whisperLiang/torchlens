@@ -31,6 +31,7 @@ VIS_OUTPUT_DIR = ""
 
 _MISSING = object()
 _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
+    ("torchlens._capture_state_helpers", "_VALIDATION_DEEPCOPY_WARNING_TYPES", set()),
     ("torchlens._capture_state_helpers", "_COMPILED_MODEL_UNWRAP_WARNED", False),
     ("torchlens._capture_state_helpers", "_COMPILED_FORCED_EAGER_WARNED", False),
     ("torchlens._deprecations", "_WARNED_DEPRECATIONS", set()),
@@ -48,6 +49,7 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
     ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),
     ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),
+    ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED", False),
     ("torchlens.visualization.auto_collapse", "_COUNT_MISMATCH_WARNING_EMITTED", False),
 )
 

@@ -52,6 +52,18 @@ def grab_journal_events(monkeypatch: Any, producer: str) -> list[Any]:
     captured ``OpRecord`` rows; ``"legacy"`` returns genuine compat
     ``OpEvent``s projected through the inverse adapter (the preview-journal
     stand-in until S15).
+
+    Parameters
+    ----------
+    monkeypatch:
+        Patch controller used to intercept materialization.
+    producer:
+        Journal shape to return.
+
+    Returns
+    -------
+    list[Any]
+        Detached journal templates from the tiny capture.
     """
 
     assert producer in ("legacy", "decomposed"), producer
@@ -67,8 +79,11 @@ def grab_journal_events(monkeypatch: Any, producer: str) -> list[Any]:
 
     monkeypatch.setattr(postprocess_module, "materialize_from_events", observing)
     monkeypatch.setattr(materialize_module, "materialize_from_events", observing)
-    tl.trace(ProbeCNN(), probe_input())
-    assert grabbed, "journal interception grabbed no events"
-    if producer == "legacy":
-        return [op_event_from_record(entry) for entry in grabbed]
-    return grabbed
+    trace = tl.trace(ProbeCNN(), probe_input())
+    try:
+        assert grabbed, "journal interception grabbed no events"
+        if producer == "legacy":
+            return [op_event_from_record(entry) for entry in grabbed]
+        return grabbed
+    finally:
+        trace.cleanup()

@@ -160,7 +160,11 @@ def _warn_once_declarations(package_root: Path) -> set[tuple[str, str]]:
         for statement in tree.body:
             for name in _assigned_module_names(statement):
                 normalized = name.lower()
-                if "warned" in normalized or "warning_emitted" in normalized:
+                if (
+                    "warned" in normalized
+                    or "warning_emitted" in normalized
+                    or normalized.endswith("_warning_types")
+                ):
                     declarations.add((module_name, name))
     return declarations
 
@@ -176,11 +180,14 @@ def test_warn_once_sentinel_census_matches_autouse_reset(
         request.config._tl_warn_once_sentinel_specs
     )
     configured = {(module_name, name) for module_name, name, _default in configured_specs}
-    assert configured == discovered, (
+    runtime_only = {
+        ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED")
+    }
+    assert configured == discovered | runtime_only, (
         "Warn-once sentinel reset inventory drifted. Add/remove entries in "
         "tests/conftest.py::_WARN_ONCE_SENTINELS. "
         f"Missing resets: {sorted(discovered - configured)}; "
-        f"stale resets: {sorted(configured - discovered)}"
+        f"stale resets: {sorted(configured - discovered - runtime_only)}"
     )
 
 
