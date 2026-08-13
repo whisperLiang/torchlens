@@ -190,6 +190,26 @@ def test_recorder_option_refusals_carry_codes_and_remedies(
     _assert_contract(exc_info.value, expected_code, builtin)
 
 
+def test_intervention_doors_carry_codes_and_remedies() -> None:
+    """Converted intervention-family doors expose codes and remedies."""
+
+    from torchlens.intervention.errors import SiteResolutionError
+    from torchlens.intervention.resolver import resolve_import_ref
+    from torchlens.intervention.save import _validate_format_version
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        SiteResolutionError("message", selector="both")  # args + fields conflict
+    _assert_contract(exc_info.value, "error_constructor_args_conflict", TypeError)
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        resolve_import_ref("no-colon-here")
+    _assert_contract(exc_info.value, "import_path_invalid", ValueError)
+
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        _validate_format_version("999.0")
+    _assert_contract(exc_info.value, "spec_format_version_unsupported", ValueError)
+
+
 def test_trace_stack_shape_mismatch_is_typed(small_trace: Any) -> None:
     """Stacking differently-shaped saved outs refuses with the stack code."""
 

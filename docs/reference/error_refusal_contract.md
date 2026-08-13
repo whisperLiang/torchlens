@@ -41,6 +41,11 @@ add names to the top-level `torchlens` namespace:
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
 | `backend_unsupported` | Backend does not implement the requested capability | Omit it or use another backend |
 | `buffer_visibility_invalid` | Unsupported `show_buffers` value | Choose a documented visibility policy |
+| `bundle_member_payload_missing` | Bundle member retained no tensor at this node | Query a node with stored tensors |
+| `bundle_member_unknown` | Bundle member name is not in the bundle | Pass a known member name |
+| `bundle_shape_mismatch` | Bundle members have incompatible shapes | Query members with matching shapes |
+| `bundle_stack_incomplete` | Not every bundle member retained a tensor | Stack where every member has a tensor |
+| `bundle_statistic_invalid` | Bundle statistic is unknown | Choose `mean`, `std`, `var`, or `norm` |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
 | `collapse_mode_invalid` | Collapse mode is unsupported | Choose `none`, `auto`, `max`, or a float |
@@ -58,8 +63,11 @@ add names to the top-level `torchlens` namespace:
 | `diagnostic_severity_invalid` | Diagnostic severity is outside the closed vocabulary | Choose a documented severity |
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
+| `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
 | `fsdp_capture_unsupported` | `record()` received an FSDP-wrapped model | Record the unsharded module |
+| `import_path_invalid` | Custom-callable import reference is malformed | Use the `module:qualname` form |
+| `intervention_tensor_unsupported` | Intervention save tensor fails the codec | Use dense, codec-supported tensors |
 | `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
@@ -102,6 +110,7 @@ add names to the top-level `torchlens` namespace:
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
+| `run_input_missing` | Legacy rerun received no forward input | Pass the input as `log.run(model, x)` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |
 | `run_legacy_arguments_conflict` | Unified and legacy run arguments were mixed | Pass one input form only |
 | `run_legacy_options_conflict` | Unified run received legacy rerun options | Drop the legacy options |
@@ -110,6 +119,7 @@ add names to the top-level `torchlens` namespace:
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
+| `spec_format_version_unsupported` | Intervention `.tlspec` format version is unknown | Use a supported format version |
 | `stack_ordinals_duplicate` | Stacked ops share an execution ordinal | Narrow the selector to distinct ops |
 | `stack_ordinals_unavailable` | Matched ops lack recorded execution ordinals | Select ops with recorded ordinals |
 | `stack_output_not_tensor` | Stacked op's saved primary out is not one tensor | Select single-tensor-output ops |
