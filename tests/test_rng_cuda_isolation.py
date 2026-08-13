@@ -31,7 +31,8 @@ import torch
 from torchlens.utils import rng as tl_rng
 from torchlens.utils import tensor_utils
 
-pytestmark = pytest.mark.smoke
+# Markers are additive: a file-level smoke pytestmark would keep the heavy tests
+# in the `-m smoke` tier, so tier marks are applied per test instead.
 
 
 # ======================================================================================
@@ -150,6 +151,7 @@ def _run_child(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.heavy
 def test_cpu_capture_ignores_unusable_visible_cuda_device() -> None:
     """A CPU capture completes without initializing a visible, unusable device."""
 
@@ -163,6 +165,7 @@ def test_cpu_capture_ignores_unusable_visible_cuda_device() -> None:
     assert "OK" in completed.stdout
 
 
+@pytest.mark.heavy
 def test_cpu_capture_tolerates_failing_cuda_rng_read() -> None:
     """A failing CUDA generator read degrades to a warning, not a capture abort."""
 
@@ -181,6 +184,7 @@ def test_cpu_capture_tolerates_failing_cuda_rng_read() -> None:
 # ======================================================================================
 
 
+@pytest.mark.smoke
 def test_snapshot_skips_cuda_until_initialized(monkeypatch: pytest.MonkeyPatch) -> None:
     """An available-but-never-initialized CUDA runtime is never read."""
 
@@ -202,6 +206,7 @@ def test_snapshot_skips_cuda_until_initialized(monkeypatch: pytest.MonkeyPatch) 
     tl_rng.set_rng_from_saved_states(states)
 
 
+@pytest.mark.smoke
 def test_initialized_cuda_snapshot_shape_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -228,6 +233,7 @@ def test_initialized_cuda_snapshot_shape_is_unchanged(
     assert states["torch_cuda"] is fake_states[0]
 
 
+@pytest.mark.smoke
 def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,6 +268,7 @@ def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
     tl_rng.set_rng_from_saved_states({"torch": torch.random.get_rng_state(), "torch_cuda_all": []})
 
 
+@pytest.mark.smoke
 def test_cuda_availability_probe_failure_degrades_to_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -281,6 +288,7 @@ def test_cuda_availability_probe_failure_degrades_to_unavailable(
     assert tensor_utils._is_cuda_available() is False
 
 
+@pytest.mark.smoke
 def test_cuda_initialized_probe_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_is_cuda_initialized`` tracks torch's flag instead of caching it."""
 

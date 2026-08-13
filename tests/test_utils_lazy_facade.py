@@ -77,7 +77,7 @@ _REEXPORTED_OBJECTS = {
 }
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_utils_facade_defers_reexport_modules() -> None:
     """Importing TorchLens leaves utility re-export modules unloaded."""
 

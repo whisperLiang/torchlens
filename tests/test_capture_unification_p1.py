@@ -107,7 +107,7 @@ def test_phase1_event_materializer_recurrent_params() -> None:
     assert validate_forward_pass(model, x)
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_phase1_event_materializer_buffers_and_conditionals() -> None:
     """Trace buffer and conditional models through event materialization."""
 

@@ -84,6 +84,36 @@ def pytest_configure(config: pytest.Config) -> None:
     _state._function_call_models.clear()
 
 
+# Smoke-tier duration budget (see tests/test_marker_lint.py). The partition
+# threshold for moving a test out of smoke is 5s measured; the enforcement
+# budget is ~3x that so parallel-box load noise does not false-trip the lint.
+SMOKE_DURATION_BUDGET_SECONDS = 15.0
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    """Record smoke-marked tests that blow the tier's duration budget.
+
+    A static lint cannot know runtimes, so an UNMARKED slow test landing in the
+    smoke tier is only catchable at runtime. Offenders are stashed on the session
+    and asserted empty by ``test_marker_lint.py`` (ordered last), which names each
+    offender and its measured duration.
+    """
+
+    report = yield
+    if (
+        report.when == "call"
+        and report.duration > SMOKE_DURATION_BUDGET_SECONDS
+        and item.get_closest_marker("smoke") is not None
+    ):
+        offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
+        if offenders is None:
+            offenders = []
+            item.session._tl_smoke_budget_offenders = offenders
+        offenders.append((item.nodeid, report.duration))
+    return report
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Order the ArgSpec coverage test last; skip assertion-dependent tests under -O.
 
@@ -103,13 +133,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(skip_no_assertions)
 
     coverage_tests = []
+    lint_tests = []
     other_tests = []
     for item in items:
         if "test_arg_positions" in item.nodeid:
             coverage_tests.append(item)
+        elif "test_marker_lint" in item.nodeid:
+            # The duration-budget lint reads offenders recorded during the run,
+            # so it must execute after every other test in the session.
+            lint_tests.append(item)
         else:
             other_tests.append(item)
-    items[:] = other_tests + coverage_tests
+    items[:] = other_tests + coverage_tests + lint_tests
 
 
 def _coverage_requested(config: pytest.Config) -> bool:

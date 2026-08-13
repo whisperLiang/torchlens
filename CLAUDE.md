@@ -566,14 +566,22 @@ only** and must NEVER be committed.
 ```bash
 ruff check . --fix
 mypy torchlens/
-pytest tests/ -m smoke -x --tb=short                            # ~28s: true sub-minute per-step gate
-pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # ~8min mid backstop (heavy = 5-20s tests)
-pytest tests/ -m "not slow" -x --tb=short  # full fast suite (~15min); for public API or boundary changes
+pytest tests/<files for the code you touched> -x --tb=short     # per-step gate: targeted suites (seconds-minutes)
+pytest tests/ -m smoke -x --tb=short                            # commit-level gate (~20 min; measured 2026-08-13)
+pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop (heavy = 5-20s tests)
+pytest tests/ -m "not slow" -x --tb=short  # phase-boundary backstop; for public API or boundary changes
 ```
 
-Tiers by cost: `smoke` (~28s) is the real per-step gate; `heavy` carries the 5-20s tests and
-`slow` the >20s ones, so the `not rare and not slow and not heavy` tier (~8min) is a mid
-backstop and full `not slow` (~15min) is the phase-boundary backstop. NOTE: `pytest -n auto`
+Tiers by cost (measured 2026-08-13, instrumented `--durations=0` smoke run, 4-core devbox
+under parallel sprint load): `smoke` selects ~3.2k tests and took 1194s (~20 min) wall;
+the same tier measured ~500s on a quieter box earlier the same sprint. Smoke is NOT
+sub-minute and NOT a per-step gate — per-step verification is the targeted test files for
+the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
+the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
+must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
+`tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow` fails
+(markers are additive — the test would still run under `-m smoke`), and any smoke test
+exceeding a 15s runtime budget fails the session it ran in. NOTE: `pytest -n auto`
 (xdist) is NOT faster here — torch's intra-op threads oversubscribe the 20 workers and the
 fast tier rises to ~13min; the per-test bottleneck is torch import/fixture setup, not CPU.
 
