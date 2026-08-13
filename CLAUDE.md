@@ -217,6 +217,13 @@ print(tl.compat.report(model, x).to_markdown())
   may be value-dependent (real `tensor_requires_grad`/`is_scalar_bool`/`bool_value` in the ctx);
   `recipes=` attaches facet recipes; `grad_options` cannot combine with `intervene=`/`halt=`.
   Value-dependent `save=`, streaming, fastlog, and rng_replay stay refused on paddle.
+- All four eager previews (tf/mlx/tinygrad/paddle) group recurrent calls into multi-pass layers
+  through the same neutral grouper torch and JAX use (`layer_label:pass` labels, `pass_index`/
+  `num_passes`, `recurrent_ops`; `recurrence_detection=False` opts back into the historical
+  single-pass layout). The stored `recurrence_detection` flag is the EFFECTIVE value — the TF
+  static FuncGraph path stays ungrouped and keeps `False`. Validation sidecars stay keyed to raw
+  capture identities and oracles compare in raw-label space; per-backend tamper tests prove a
+  stale-label sidecar FAILS validation rather than silently passing.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

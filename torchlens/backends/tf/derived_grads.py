@@ -431,6 +431,17 @@ def _tf_trace_intermediate_signatures(
     """
 
     groups: dict[TFIntermediateSignature, list[Any]] = defaultdict(list)
+    # Replay-side signatures speak RAW label space (capture input records).
+    # Recurrence grouping rewrites ``op.parents`` to final pass-qualified
+    # labels, so parents are resolved back to raw space before signature
+    # construction; without this every grouped intermediate would silently
+    # fail to match its replay candidate.
+    final_to_raw = {
+        str(getattr(op, "label", "")): str(getattr(op, "_label_raw", ""))
+        for op in getattr(trace, "layer_list", ())
+        if isinstance(getattr(op, "label", None), str)
+        and isinstance(getattr(op, "_label_raw", None), str)
+    }
     for op in getattr(trace, "layer_list", ()):
         if bool(getattr(op, "is_input", False)) or not bool(
             getattr(op, "has_saved_activation", False)
@@ -442,7 +453,10 @@ def _tf_trace_intermediate_signatures(
             func_call_id=int(getattr(op, "func_call_id", 0)),
             op_name=str(getattr(op, "func_name", "")),
             parent_labels=tuple(
-                dict.fromkeys(str(parent) for parent in getattr(op, "parents", ()))
+                dict.fromkeys(
+                    final_to_raw.get(str(parent), str(parent))
+                    for parent in getattr(op, "parents", ())
+                )
             ),
             module_stack=tuple(str(module) for module in getattr(op, "modules", ())),
         )

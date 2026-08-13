@@ -30,9 +30,19 @@ Two cross-backend honesty notes apply to every preview row above:
 - **Auto-routing applies to every preview, not just MLX.** Each registered preview declares a
   `can_handle` detector, so `backend=None` routes a genuine framework model (framework installed,
   no foreign tensors) to its preview automatically. Pass an explicit `backend=` to pin capture.
-- **Recurrence and depth.** JAX groups recurrent calls into multi-pass layers through the neutral
-  grouper; the four single-pass previews (tf/mlx/tinygrad/paddle) do not group, and their traces
-  now store `recurrence_detection=False` to say so. `compute_input_output_distances` (input/output
+- **Recurrence and depth.** Every preview backend now groups recurrent calls into multi-pass
+  layers through the same neutral grouper torch and JAX use: a reused submodule or repeated
+  structurally identical block becomes one N-pass layer (`layer_label:pass` op labels,
+  `pass_index`/`num_passes`, `recurrent_ops`), with grouped graph edges rewritten to the
+  pass-qualified labels while raw capture labels stay resolvable. The stored
+  `recurrence_detection` flag remains the EFFECTIVE value: `True` where the grouper ran (all
+  eager preview captures by default; `recurrence_detection=False` opts back into the historical
+  single-pass layout), `False` where finalize never grouped — the TF static FuncGraph importer
+  keeps `False` because graph node names are one-shot sites. Grouping never weakens the
+  validation tripwire: each backend's label-keyed replay sidecars stay keyed to raw capture
+  identities, oracles compare in raw-label space, and per-backend tamper tests prove a
+  stale-label sidecar FAILS validation rather than silently passing.
+  `compute_input_output_distances` (input/output
   hop distances plus ancestor/descendant sets) defaults to `True` on every backend — the same
   torch `CaptureOptions` default — and `=False` disables the flood on every backend, torch and all
   five previews alike.

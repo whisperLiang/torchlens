@@ -7,9 +7,10 @@ canonical ``compute_input_output_distances`` AND the deprecated public
 on every backend, with input/output hop distances plus ancestor/descendant
 lineage sets and the effective value stored on ``trace.mark_layer_depths``.
 Distances are asserted EXACTLY, including min/max splits on branch/merge
-graphs, not just non-emptiness. Single-pass previews must also store the
-EFFECTIVE ``recurrence_detection`` (False — they never group), while JAX
-keeps its real grouping value.
+graphs, not just non-emptiness. Previews must also store the EFFECTIVE
+``recurrence_detection``: True where the neutral grouper actually ran
+(JAX, plus each backend ported in parity wave 2), False where finalize
+never grouped.
 """
 
 from __future__ import annotations
@@ -87,7 +88,10 @@ def test_paddle_depth_parity() -> None:
     trace = tl.trace(
         M(), paddle.ones([1, 4]), backend="paddle", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=3)
+    # Paddle runs the neutral recurrence grouper by default (parity wave 2), so
+    # the stored EFFECTIVE value is True; this model has no recurrence and all
+    # layers stay single-pass.
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=3)
     assert _depth_by_prefix(trace, "functional.relu") == (2, 2)
     _assert_alias_matches(
         lambda: tl.trace(M(), paddle.ones([1, 4]), backend="paddle", mark_layer_depths=True)
@@ -96,7 +100,9 @@ def test_paddle_depth_parity() -> None:
         lambda kw: tl.trace(M(), paddle.ones([1, 4]), backend="paddle", **kw)
     )
     base = tl.trace(M(), paddle.ones([1, 4]), backend="paddle")
-    assert base.recurrence_detection is False
+    assert base.recurrence_detection is True
+    ungrouped = tl.trace(M(), paddle.ones([1, 4]), backend="paddle", recurrence_detection=False)
+    assert ungrouped.recurrence_detection is False
 
 
 @pytest.mark.backend_tinygrad
@@ -114,7 +120,9 @@ def test_tinygrad_depth_parity() -> None:
         backend="tinygrad",
         compute_input_output_distances=True,
     )
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    # tinygrad runs the neutral recurrence grouper by default (parity wave 2);
+    # this model has no recurrence and all layers stay single-pass.
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=5)
     # relu decomposes through where; mul merges the where branch (depth 3)
     # with the broadcast constant path, so its min/max split is exact.
     assert _depth_by_prefix(trace, "mul_1") == (3, 4)
@@ -173,7 +181,9 @@ def test_mlx_depth_parity() -> None:
     trace = tl.trace(
         M(), mx.ones((1, 4)), backend="mlx", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=3)
+    # MLX runs the neutral recurrence grouper by default (parity wave 2); this
+    # model has no recurrence and all layers stay single-pass.
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=3)
     assert _depth_by_prefix(trace, "linear_1") == (1, 1)
     assert _depth_by_prefix(trace, "relu_1") == (2, 2)
     assert _depth_by_prefix(trace, "linear_2") == (3, 3)
@@ -226,8 +236,10 @@ def test_tf_depth_parity() -> None:
     trace = tl.trace(
         model, inputs, backend="tf", compute_input_output_distances=True
     )
+    # TF eager runs the neutral recurrence grouper by default (parity wave
+    # 2); this model has no recurrence and all layers stay single-pass.
     # matmul(1) -> biasadd(2) -> relu(3) -> matmul(4) -> biasadd(5)
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=5)
     assert _depth_by_prefix(trace, "relu_1") == (3, 3)
     _assert_alias_matches(
         lambda: tl.trace(model, inputs, backend="tf", mark_layer_depths=True)

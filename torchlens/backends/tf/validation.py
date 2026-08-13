@@ -352,6 +352,22 @@ def _propagate_control_region_classes(
         Mutates ``classes`` in place.
     """
 
+    def _raw_parent_labels(op: Any) -> tuple[str, ...]:
+        """Return the op's parents resolved to raw label space.
+
+        Classes are keyed by RAW labels while grouped edges hold final
+        pass-qualified labels, so parents resolve through the op index back
+        to their raw capture identity before region membership tests.
+        """
+
+        resolved: list[str] = []
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            resolved.append(parent_raw if isinstance(parent_raw, str) else parent_text)
+        return tuple(resolved)
+
     changed = True
     while changed:
         changed = False
@@ -363,7 +379,7 @@ def _propagate_control_region_classes(
                 continue
             if classes.get(label) in {"source", "control-region"}:
                 continue
-            if any(parent in region_labels for parent in getattr(op, "parents", ())):
+            if any(parent in region_labels for parent in _raw_parent_labels(op)):
                 classes[label] = "control-region"
                 changed = True
 
@@ -480,7 +496,16 @@ def _validate_self_consistency(
         op = ops_by_label.get(capture.label_raw)
         if op is None:
             continue
-        graph_parents = set(getattr(op, "parents", ()))
+        # Capture records speak RAW label space. Recurrence grouping rewrites
+        # graph edges to final pass-qualified labels, so parents are resolved
+        # back to raw space before the conservation comparison; an
+        # unresolvable parent keeps its literal label and fails closed.
+        graph_parents: set[str] = set()
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
         if expected_graph_parents != graph_parents:
             failures.append(
                 f"graph_parent_edges_not_conserved:{capture.label_raw}:"
@@ -1083,17 +1108,30 @@ def _ops_by_label(trace: Any) -> dict[str, Any]:
     -------
     dict[str, Any]
         Operations keyed by raw, layer, and public labels.
+
+    Notes
+    -----
+    Key precedence is load-bearing under recurrence grouping: a group
+    leader's RAW label doubles as the shared ``layer_label`` of every later
+    pass, so naive last-writer insertion would silently rebind a capture
+    record's ``label_raw`` to the wrong pass. Raw labels are the immutable
+    capture identity and always win; pass labels are unique; the ambiguous
+    layer label resolves to its first pass.
     """
 
     result: dict[str, Any] = {}
     for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
+        layer_label = getattr(op, "layer_label", None)
+        if isinstance(layer_label, str) and layer_label not in result:
+            result[layer_label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label = getattr(op, "label", None)
+        if isinstance(label, str):
+            result[label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label_raw = getattr(op, "_label_raw", None)
+        if isinstance(label_raw, str):
+            result[label_raw] = op
     return result
 
 

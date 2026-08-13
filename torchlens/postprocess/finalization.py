@@ -249,8 +249,8 @@ def _build_root_module_log(
         call_index=1,
         call_label="self:1",
         ops=root_layers,
-        input_layers=list(self.input_layers),
-        output_layers=list(self.output_layers),
+        input_layers=_layer_space_labels(self, self.input_layers),
+        output_layers=_layer_space_labels(self, self.output_layers),
         output_ops=list(self.output_layers),
         output_structure=_first_output_structure(self, list(self.output_layers)),
         inputs_before_pre_hooks=root_pre_hook_provenance[0],
@@ -409,6 +409,38 @@ def _strip_pass_suffix(layer_label: str) -> str:
         Layer label without any pass suffix.
     """
     return layer_label.split(":", 1)[0]
+
+
+def _layer_space_labels(self: "Trace", labels: list[str]) -> list[str]:
+    """Map op-space labels to layer space for module-log containers.
+
+    Module-log ``input_layers``/``output_layers`` speak layer-label space (the
+    backend-neutral module invariants require them to be a subset of
+    ``trace.layer_labels``), while the trace-side lists speak op space so each
+    entry resolves to the specific producing pass. For torch the two spaces
+    coincide (inputs and outputs are dedicated single-pass nodes); they diverge
+    only for preview backends whose recurrence grouping made an output the
+    later pass of a multi-pass layer.
+
+    Parameters
+    ----------
+    self:
+        Trace owning the label lookup tables.
+    labels:
+        Op-space labels (raw, pass-qualified, or layer labels).
+
+    Returns
+    -------
+    list[str]
+        Layer labels, preserving order; unresolvable labels pass through.
+    """
+
+    layer_labels: list[str] = []
+    for label in labels:
+        op = self.layer_dict_all_keys.get(label)
+        resolved = getattr(op, "layer_label", None) if op is not None else None
+        layer_labels.append(resolved if isinstance(resolved, str) else label)
+    return layer_labels
 
 
 def _first_output_structure(self: "Trace", output_layers: list[str]) -> Any | None:

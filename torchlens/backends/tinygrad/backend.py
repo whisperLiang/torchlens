@@ -1179,6 +1179,10 @@ class TinygradBackend:
             Trace accessors are populated.
         """
 
+        # The tinygrad validation sidecar (trace.tinygrad_uop_captures) speaks
+        # RAW label space and the replay resolver is raw-keyed; op-side labels
+        # are resolved back to raw space at comparison time, so no relabel
+        # hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
@@ -1189,6 +1193,7 @@ class TinygradBackend:
             enrich_layer=_enrich_tinygrad_layer,
             update_param_totals_from_layers=True,
             finish_before_module_logs=False,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
 
     def _attach_object_module_logs(self, trace: Trace, tree: TinygradModuleTree) -> None:
@@ -1486,8 +1491,25 @@ class TinygradBackend:
         """
 
         src = list(getattr(capture.uop, "src", ()) or ())
-        graph_positions = getattr(op, "parent_arg_positions", {}).get("args", {})
-        parent_labels = tuple(getattr(op, "parents", ()))
+        # Captured UOp metadata speaks RAW label space (frozen at emit time).
+        # Recurrence grouping rewrites graph edges to final pass-qualified
+        # labels, so op-side labels are resolved back to raw space before the
+        # frozen-capture comparison; an unresolvable label keeps its literal
+        # text and fails closed against the capture.
+        final_to_raw = {
+            str(known_op.label): str(known_op._label_raw)
+            for known_op in ops_by_raw_label.values()
+            if isinstance(getattr(known_op, "label", None), str)
+            and isinstance(getattr(known_op, "_label_raw", None), str)
+        }
+        graph_positions = {
+            position: (final_to_raw.get(label, label) if isinstance(label, str) else label)
+            for position, label in getattr(op, "parent_arg_positions", {}).get("args", {}).items()
+        }
+        parent_labels = tuple(
+            final_to_raw.get(label, label) if isinstance(label, str) else label
+            for label in getattr(op, "parents", ())
+        )
         if not graph_positions and not parent_labels:
             return capture.payload_snapshot
         positioned_labels = {label for label in graph_positions.values() if isinstance(label, str)}
@@ -2382,7 +2404,10 @@ def _enrich_tinygrad_op(op_log: Any) -> None:
 
     op_log.dtype_ref = DtypeRef(backend="tinygrad", name=str(op_log.dtype))
     op_log.device_ref = DeviceRef.from_value(getattr(op_log.out, "device", None))
-    op_log.backend_address = f"uop:{op_log.layer_label}"
+    # The raw label is the per-op capture identity; the layer label is shared
+    # across recurrent passes and would collide under grouping. Identical for
+    # single-pass layers (raw label == layer label).
+    op_log.backend_address = f"uop:{op_log._label_raw}"
     op_log.resolver_status = "resolved"
 
 
@@ -3046,7 +3071,18 @@ def _parent_perturbations_change_output(
         True when a value parent perturbation affects replayed child output.
     """
 
-    graph_positions = getattr(op, "parent_arg_positions", {}).get("args", {})
+    # Op-side labels may be pass-qualified after recurrence grouping; resolve
+    # them back to the raw capture identity before raw-keyed lookups.
+    final_to_raw = {
+        str(known_op.label): str(known_op._label_raw)
+        for known_op in ops_by_raw_label.values()
+        if isinstance(getattr(known_op, "label", None), str)
+        and isinstance(getattr(known_op, "_label_raw", None), str)
+    }
+    graph_positions = {
+        position: (final_to_raw.get(label, label) if isinstance(label, str) else label)
+        for position, label in getattr(op, "parent_arg_positions", {}).get("args", {}).items()
+    }
     if not graph_positions:
         return True
     positions_by_parent: dict[str, list[int]] = {}

@@ -2226,6 +2226,11 @@ class MLXBackend:
             Trace accessors are populated in place.
         """
 
+        # The MLX validation sidecars (`_mlx_op_captures`, `_mlx_replay_inventory`)
+        # speak RAW label space on both the build and consume sides, and raw
+        # labels are never rewritten by recurrence grouping (they stay resolvable
+        # through `_label_raw` with recurrence-safe key precedence in
+        # `_ops_by_label`), so no relabel hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
@@ -2234,6 +2239,7 @@ class MLXBackend:
             attach_object_module_logs=self._attach_object_module_logs,
             attach_op_params=_attach_mlx_op_params_for_finalize,
             count_layers_with_attached_params=True,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
 
     def _attach_object_module_logs(self, trace: Trace, tree: MLXModuleTree) -> None:
@@ -2932,14 +2938,36 @@ def _mlx_trace_intermediate_signatures(
     -------
     dict[_MLXIntermediateSignature, list[Any]]
         Trace ops grouped by attachment signature.
+
+    Notes
+    -----
+    Replay-side signatures speak RAW label space (the tap observer labels
+    values with ``_label_raw``), so recurrence-grouped parents (rewritten to
+    final pass-qualified labels at finalize) are resolved back to raw space
+    here; without that, every grouped intermediate would silently fail to
+    match its replay candidate.
     """
 
+    final_to_raw: dict[str, str] = {}
+    for op in ops:
+        source_trace = getattr(op, "source_trace", None)
+        if source_trace is None:
+            continue
+        for trace_op in getattr(source_trace, "layer_list", ()):
+            label = getattr(trace_op, "label", None)
+            label_raw = getattr(trace_op, "_label_raw", None)
+            if isinstance(label, str) and isinstance(label_raw, str):
+                final_to_raw[label] = label_raw
+        break
     grouped: dict[_MLXIntermediateSignature, list[Any]] = defaultdict(list)
     for op in ops:
         signature = _MLXIntermediateSignature(
             op_name=str(op.func_name or op.layer_type),
             call_ordinal=int(op.func_call_id or 0),
-            parent_labels=tuple(str(parent) for parent in getattr(op, "parents", ())),
+            parent_labels=tuple(
+                final_to_raw.get(str(parent), str(parent))
+                for parent in getattr(op, "parents", ())
+            ),
             shape=tuple(getattr(op, "shape", ()) or ()),
             dtype=str(getattr(op, "dtype", "")),
             module_calls=tuple(str(module) for module in getattr(op, "modules", ())),

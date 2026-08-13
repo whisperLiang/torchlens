@@ -371,7 +371,11 @@ class TFBackend:
         materialize_from_events(trace, trace.capture_events)
         delattr(trace, "capture_events")
         self._attach_param_logs(trace, module_tree)
-        self._finish_trace(trace, module_tree)
+        self._finish_trace(
+            trace,
+            module_tree,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
+        )
         if grad_options is not None:
             from .derived_grads import GradOptions, attach_tf_derived_grads
 
@@ -623,7 +627,13 @@ class TFBackend:
         trace.num_params_frozen = trace.num_params - trace.num_params_trainable
         trace.param_source = "native-module"
 
-    def _finish_trace(self, trace: Trace, module_tree: TFModuleTree | None) -> None:
+    def _finish_trace(
+        self,
+        trace: Trace,
+        module_tree: TFModuleTree | None,
+        *,
+        recurrence_detection: bool = False,
+    ) -> None:
         """Finalize a manually materialized TensorFlow Trace.
 
         Parameters
@@ -632,6 +642,11 @@ class TFBackend:
             Materialized trace.
         module_tree
             Discovered module tree, if object attribution is active.
+        recurrence_detection
+            Whether to run the neutral recurrence grouper. The eager
+            op-callback path passes the user's request; the static FuncGraph
+            path stays ungrouped (graph node names are one-shot sites, and the
+            stored flag remains the honest EFFECTIVE value ``False``).
 
         Returns
         -------
@@ -639,6 +654,10 @@ class TFBackend:
             Populates public lookup structures.
         """
 
+        # The TF validation sidecar (``trace._tf_op_captures``) speaks RAW
+        # label space and every consumer resolves op-side labels back to raw
+        # space (recurrence-safe ``_ops_by_label`` precedence plus raw-space
+        # graph-parent comparisons), so no relabel hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
@@ -648,6 +667,7 @@ class TFBackend:
             attach_op_params=_attach_tf_op_params_for_finalize,
             update_param_usage=False,
             count_layers_with_attached_params=True,
+            recurrence_detection=recurrence_detection,
         )
 
     def normalize_call(self, *args: Any, **kwargs: Any) -> TFCallPlan:

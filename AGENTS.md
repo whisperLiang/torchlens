@@ -193,6 +193,10 @@ pytest tests/ -m "not slow" -x --tb=short
     captures refuse `grad_options` typed; static-label `intervene=` ships for eager entries
     through the two-level writable layer (module-boundary + curated functional wrap) with
     fail-closed site reachability; `halt=`, `recipes=`, and true backward capture are deferred.
+    All four eager previews (tf/mlx/tinygrad/paddle) group recurrent calls into multi-pass
+    layers through the neutral grouper; `recurrence_detection` stores the EFFECTIVE value
+    (the TF static FuncGraph path stays ungrouped at `False`), validation sidecars stay keyed
+    to raw capture identities, and tamper tests prove stale-label oracles fail closed.
 16. Smart-collapse metadata is computed, not serialized: `Module.collapse_score`,
     `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)` must stay
     out of `*_FIELD_ORDER` schemas until the policy is intentionally stabilized.

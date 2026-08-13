@@ -318,11 +318,19 @@ def _coverage_oracle(trace: Any) -> bool:
         op = ops_by_label.get(getattr(capture, "label_raw", ""))
         if op is None:
             continue
-        graph_parents = {
-            str(parent)
-            for parent in getattr(op, "parents", ())
-            if not str(parent).startswith("input.")
-        }
+        # Capture records speak RAW label space (their labels are immutable
+        # capture identities). Recurrence grouping rewrites graph edges to
+        # final pass-qualified labels, so parents are resolved back to raw
+        # space before comparison; an unresolvable parent keeps its literal
+        # label and fails closed.
+        graph_parents: set[str] = set()
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            if parent_text.startswith("input."):
+                continue
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
         for label in getattr(capture, "producer_labels", frozenset()):
             if not isinstance(label, str):
                 return False
@@ -345,17 +353,30 @@ def _ops_by_label(trace: Any) -> dict[str, Any]:
     -------
     dict[str, Any]
         Operations keyed by raw, layer, and pass labels.
+
+    Notes
+    -----
+    Key precedence is load-bearing under recurrence grouping: a group
+    leader's RAW label doubles as the shared ``layer_label`` of every later
+    pass, so naive last-writer insertion would silently rebind a capture
+    record's ``label_raw`` to the wrong pass. Raw labels are the immutable
+    capture identity and always win; pass labels are unique; the ambiguous
+    layer label resolves to its first pass.
     """
 
     result: dict[str, Any] = {}
     for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
+        layer_label = getattr(op, "layer_label", None)
+        if isinstance(layer_label, str) and layer_label not in result:
+            result[layer_label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label = getattr(op, "label", None)
+        if isinstance(label, str):
+            result[label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label_raw = getattr(op, "_label_raw", None)
+        if isinstance(label_raw, str):
+            result[label_raw] = op
     return result
 
 
