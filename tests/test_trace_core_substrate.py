@@ -468,9 +468,7 @@ def test_pickle_load_rehydrates_into_the_store() -> None:
 
     import torchlens as tl
 
-    model = torch.nn.Sequential(
-        torch.nn.Linear(3, 4), torch.nn.ReLU(), torch.nn.Linear(4, 2)
-    )
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU(), torch.nn.Linear(4, 2))
     trace = tl.trace(model, torch.randn(1, 3))
     clone = pickle.loads(pickle.dumps(trace))
 
@@ -535,9 +533,7 @@ def test_fork_isolation_sweep_is_index_driven_and_never_stale() -> None:
     # Never stale: a container written into an atomic cell after the index
     # was built registers there, so the next fork still isolates it.
     store.cell_set(row, 0, ["post-index"])
-    assert row in index.get(0, set()), (
-        "post-seal container write must register in the cached index"
-    )
+    assert row in index.get(0, set()), "post-seal container write must register in the cached index"
     second = OpStoreView(store)
     second.isolate_mutable_cells()
     assert store._mutable_keys is index, "index is cached, never rebuilt per fork"
@@ -791,9 +787,7 @@ def test_rehydrate_mixed_ownership_aborts_with_zero_mutations() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
     trace = tl.trace(model, torch.randn(1, 3))
     payload = pickle.dumps(trace)
-    with mock.patch.object(
-        _trace_rehydrate, "rehydrate_trace_core", return_value=False
-    ):
+    with mock.patch.object(_trace_rehydrate, "rehydrate_trace_core", return_value=False):
         clone = pickle.loads(payload)  # genuine coreless island
     assert clone.__dict__.get("_trace_core") is None
 
@@ -812,6 +806,8 @@ def test_rehydrate_mixed_ownership_aborts_with_zero_mutations() -> None:
         assert isinstance(bound, DetachedOpStore), (
             "earlier op re-bound to an orphaned store after abort"
         )
+
+
 @pytest.mark.smoke
 def test_rehydrate_rollback_after_relation_freeze_is_atomic() -> None:
     """A failure AFTER the relation freeze leaves detached topology intact.
@@ -840,9 +836,7 @@ def test_rehydrate_rollback_after_relation_freeze_is_atomic() -> None:
 
     # Clean-load control: the public relation topology every op must keep.
     control = pickle.loads(payload)
-    expected = {
-        op.layer_label: (op.parents, op.children) for op in control.layer_list
-    }
+    expected = {op.layer_label: (op.parents, op.children) for op in control.layer_list}
 
     real_freeze = relation_views.freeze_trace_relation_views
 
@@ -868,9 +862,7 @@ def test_rehydrate_rollback_after_relation_freeze_is_atomic() -> None:
             assert value is not _CSR and value is not _FACT, (
                 f"freeze sentinel leaked into detached cell {name}"
             )
-            assert value.__class__ is not GroupRef, (
-                f"GroupRef leaked into detached cell {name}"
-            )
+            assert value.__class__ is not GroupRef, f"GroupRef leaked into detached cell {name}"
     for op in clone.layer_list:
         assert (op.parents, op.children) == expected[op.layer_label], (
             f"detached topology corrupted for {op.layer_label}"
@@ -903,9 +895,7 @@ def test_loaded_partial_capture_stays_staging() -> None:
 
     # Fail LATE in postprocess (after layer logs exist) so the partial has
     # reachable ops — the case where an unguarded rehydrate would freeze.
-    with mock.patch.object(
-        postprocess, "_build_module_logs", side_effect=RuntimeError("boom")
-    ):
+    with mock.patch.object(postprocess, "_build_module_logs", side_effect=RuntimeError("boom")):
         with pytest.raises(Exception) as exc_info:
             tl.trace(model, torch.randn(1, 3))
     partial = tl.partial.from_failed_capture(exc_info.value)
@@ -916,9 +906,7 @@ def test_loaded_partial_capture_stays_staging() -> None:
 
     clone = pickle.loads(pickle.dumps(source))
     assert clone.__dict__.get("_tracing_finished") is False
-    assert clone.__dict__.get("_trace_core") is None, (
-        "partial captures must stay coreless on load"
-    )
+    assert clone.__dict__.get("_trace_core") is None, "partial captures must stay coreless on load"
     for staged in clone.layer_list:
         bound = object.__getattribute__(staged, "_core")
         assert isinstance(bound, DetachedOpStore), (
@@ -933,6 +921,8 @@ def test_loaded_partial_capture_stays_staging() -> None:
     if fid is not None:
         cell = store.cell_get(0, fid)
         assert type(cell).__name__ != "GroupRef"
+
+
 @pytest.mark.smoke
 def test_tlspec_load_adopts_every_record_kind() -> None:
     """A ``.tlspec`` load leaves NO reachable facade outside the store (F9).

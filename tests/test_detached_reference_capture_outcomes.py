@@ -364,9 +364,7 @@ def _import_temp_module(tmp_path: Path, mod_name: str, source: str) -> types.Mod
         sys.path.remove(str(tmp_path))
 
 
-def test_torch_free_source_class_attr_is_rescued(
-    corpus_env: _CorpusEnv, tmp_path: Path
-) -> None:
+def test_torch_free_source_class_attr_is_rescued(corpus_env: _CorpusEnv, tmp_path: Path) -> None:
     """Torch-free FILE-BACKED source: the source gate skips the deep scan."""
     mod = _import_temp_module(tmp_path, "_tl_outcome_torch_free_mid", "class Holder:\n    pass\n")
     corpus_env.temp_modules.append(mod.__name__)

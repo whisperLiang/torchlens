@@ -251,11 +251,7 @@ def test_capability_table_is_total() -> None:
     for capability, row in CAPTURE_OUTCOME_CAPABILITIES.items():
         assert set(row) == set(CaptureStatus), capability
         for cell in row.values():
-            assert (
-                cell == "allow"
-                or cell.startswith("allow_scoped:")
-                or cell.startswith("refuse:")
-            )
+            assert cell == "allow" or cell.startswith("allow_scoped:") or cell.startswith("refuse:")
 
 
 @pytest.mark.parametrize(

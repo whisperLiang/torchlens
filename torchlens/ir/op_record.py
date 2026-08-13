@@ -601,10 +601,7 @@ PATH_TO_FLAT: dict[str, str] = {
 }
 
 
-
-def record_with_path_updates(
-    record: "OpRecord", items: Iterable[tuple[str, Any]]
-) -> "OpRecord":
+def record_with_path_updates(record: "OpRecord", items: Iterable[tuple[str, Any]]) -> "OpRecord":
     """Return a new record with ordered ``(facet path, value)`` pairs applied.
 
     Each path names its owning core field or facet slot directly; an absent
@@ -674,9 +671,7 @@ def validate_amendment(amendment: OpAmendment) -> None:
 
     schema = AMENDMENT_FAMILIES.get(amendment.family)
     if schema is None:
-        raise AmendmentValidationError(
-            f"unregistered amendment family {amendment.family!r}"
-        )
+        raise AmendmentValidationError(f"unregistered amendment family {amendment.family!r}")
     patch_paths = tuple(path for path, _ in amendment.patch)
     if len(set(patch_paths)) != len(patch_paths):
         raise AmendmentValidationError(
@@ -727,9 +722,7 @@ def amend_lookback_retention(
 ) -> OpAmendment:
     """Lookback retention replaces the committed output payload."""
 
-    return _amendment(
-        "lookback_retention", target_seq, target_label_raw, output, predicate_matched
-    )
+    return _amendment("lookback_retention", target_seq, target_label_raw, output, predicate_matched)
 
 
 def amend_graph_edge_insertion(
@@ -751,9 +744,7 @@ def amend_raw_hook_intervention(
 ) -> OpAmendment:
     """A raw forward hook replaced the module output."""
 
-    return _amendment(
-        "raw_hook_intervention", target_seq, target_label_raw, intervention_replaced
-    )
+    return _amendment("raw_hook_intervention", target_seq, target_label_raw, intervention_replaced)
 
 
 def amend_module_exit_intervention(
@@ -829,9 +820,7 @@ def amend_late_buffer_output_parent(
 ) -> OpAmendment:
     """Pre-0 late-buffer output-parent marking."""
 
-    return _amendment(
-        "late_buffer_output_parent", target_seq, target_label_raw, is_output_parent
-    )
+    return _amendment("late_buffer_output_parent", target_seq, target_label_raw, is_output_parent)
 
 
 def amend_preview_output_parent_mark(
@@ -839,9 +828,7 @@ def amend_preview_output_parent_mark(
 ) -> OpAmendment:
     """Preview-backend output-parent promotion (mark only)."""
 
-    return _amendment(
-        "preview_output_parent_mark", target_seq, target_label_raw, is_output_parent
-    )
+    return _amendment("preview_output_parent_mark", target_seq, target_label_raw, is_output_parent)
 
 
 def amend_preview_output_parent_rebind(
@@ -1022,6 +1009,5 @@ def record_facet_field_names() -> dict[str, tuple[str, ...]]:
     """Facet name -> field names (Tier walker + manifest generator input)."""
 
     return {
-        name: tuple(f.name for f in dataclass_fields(cls))
-        for name, cls in FACET_CLASSES.items()
+        name: tuple(f.name for f in dataclass_fields(cls)) for name, cls in FACET_CLASSES.items()
     }

@@ -2375,9 +2375,7 @@ _AUTHORIZED_INTERNAL_CALLER_CODE: list[types.CodeType] = []
 _AUTHORIZED_INTERNAL_CALLER_CODE_IDS: set[int] = set()
 
 
-def _register_authorized_caller_namespace(
-    namespace: Mapping[str, Any], module_file: str
-) -> None:
+def _register_authorized_caller_namespace(namespace: Mapping[str, Any], module_file: str) -> None:
     """Collect a module namespace's own code objects into the witness roster.
 
     Only code objects whose ``co_filename`` is ``module_file`` register (read

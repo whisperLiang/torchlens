@@ -85,9 +85,7 @@ def test_trace_build_state_has_one_eager_owner_and_no_flat_alias_shim() -> None:
 def test_backend_finalization_requires_explicit_trace_build_state() -> None:
     """Keep the backend protocol's build-state ownership argument mandatory."""
 
-    parameter = inspect.signature(CaptureBackend.finalize_forward_session).parameters[
-        "trace_state"
-    ]
+    parameter = inspect.signature(CaptureBackend.finalize_forward_session).parameters["trace_state"]
     assert parameter.default is inspect.Parameter.empty
 
 

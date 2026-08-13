@@ -389,9 +389,7 @@ def _snapshot_events(journal: Any) -> list[dict[str, Any]]:
 
     handles = getattr(journal, "grad_fn_handles_by_label_raw", {})
     return [
-        _project_event(
-            op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw))
-        )
+        _project_event(op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw)))
         for event in journal.op_events
         if event.kind == "op"
     ]

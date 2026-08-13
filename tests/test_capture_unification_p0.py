@@ -63,9 +63,7 @@ def _trace_and_capture_events(
                 module_prep_events=tuple(inputs.journal.module_prep_events),
                 module_enter_events=tuple(inputs.journal.module_enter_events),
                 module_exit_events=tuple(inputs.journal.module_exit_events),
-                grad_fn_handles_by_label_raw=dict(
-                    inputs.journal.grad_fn_handles_by_label_raw
-                ),
+                grad_fn_handles_by_label_raw=dict(inputs.journal.grad_fn_handles_by_label_raw),
             )
         )
         return real_ingest(inputs, manifest)

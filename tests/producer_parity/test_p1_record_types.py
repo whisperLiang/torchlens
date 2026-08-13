@@ -84,24 +84,36 @@ def test_amendment_registry_exact_sets() -> None:
     # wrong path set (missing member)
     with pytest.raises(AmendmentValidationError, match="exact"):
         validate_amendment(
-            OpAmendment(0, 0, 7, "x_raw", "module_exit_intervention", (
-                ("intervention.intervention_fired", True),
-            ))
+            OpAmendment(
+                0,
+                0,
+                7,
+                "x_raw",
+                "module_exit_intervention",
+                (("intervention.intervention_fired", True),),
+            )
         )
     # same-set wrong ORDER also refused (ordered exact-set)
     with pytest.raises(AmendmentValidationError, match="exact"):
         validate_amendment(
-            OpAmendment(0, 0, 7, "x_raw", "lookback_retention", (
-                ("policy.predicate_matched", True),
-                ("core.output", object()),
-            ))
+            OpAmendment(
+                0,
+                0,
+                7,
+                "x_raw",
+                "lookback_retention",
+                (
+                    ("policy.predicate_matched", True),
+                    ("core.output", object()),
+                ),
+            )
         )
     # value type violation
     with pytest.raises(AmendmentValidationError, match="value type"):
         validate_amendment(
-            OpAmendment(0, 0, 7, "x_raw", "late_buffer_output_parent", (
-                ("graph.is_output_parent", "yes"),
-            ))
+            OpAmendment(
+                0, 0, 7, "x_raw", "late_buffer_output_parent", (("graph.is_output_parent", "yes"),)
+            )
         )
     # identity fields unpatchable even under a forged family row
     forged = dict(AMENDMENT_FAMILIES)
@@ -118,9 +130,9 @@ def test_amendment_registry_exact_sets() -> None:
     # anchor required
     with pytest.raises(AmendmentValidationError, match="anchor"):
         validate_amendment(
-            OpAmendment(0, 0, 7, "", "late_buffer_output_parent", (
-                ("graph.is_output_parent", True),
-            ))
+            OpAmendment(
+                0, 0, 7, "", "late_buffer_output_parent", (("graph.is_output_parent", True),)
+            )
         )
 
 
@@ -222,8 +234,7 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
         # scatter output lands verbatim in the materialized rows (identity cells)
         trace = run.trace
         raw_labels = {
-            getattr(op, "raw_label", None) or getattr(op, "_label_raw", None)
-            for op in trace.ops
+            getattr(op, "raw_label", None) or getattr(op, "_label_raw", None) for op in trace.ops
         }
         for label, cells in scattered:
             assert cells["_label_raw"] == label
@@ -293,6 +304,7 @@ def test_ingest_inputs_v1_reserves_aten_lane_and_covers_step0_reads() -> None:
         uncovered = {
             name
             for name in observed
-            if name in covered and covered[name] not in {f.name for f in dataclasses.fields(IngestInputs)}
+            if name in covered
+            and covered[name] not in {f.name for f in dataclasses.fields(IngestInputs)}
         }
         assert not uncovered, f"declared coverage broken: {uncovered}"

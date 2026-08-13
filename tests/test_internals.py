@@ -121,10 +121,7 @@ class TestFieldOrderSync:
             "measure_python_peak_memory",
             "save_budget",
             "distributed_witness",
-        }, (
-            "Trace public fields classified as non-user-facing changed: "
-            f"{non_user_facing}"
-        )
+        }, f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall

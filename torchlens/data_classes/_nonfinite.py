@@ -457,9 +457,7 @@ def coverage_gap_note(log: Any, *, kind: str = "saved") -> str:
     if not uncheckable:
         gaps = []
     if disk_backed:
-        gaps.append(
-            f"{disk_backed} disk-backed payload(s) were not materialized by reporting"
-        )
+        gaps.append(f"{disk_backed} disk-backed payload(s) were not materialized by reporting")
     if unsaved:
         gaps.insert(0, f"{unsaved} op(s) retained no payload")
     return f" ({'; '.join(gaps)}, so they could not be examined)"

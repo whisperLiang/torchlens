@@ -139,13 +139,9 @@ class ColumnBuilder:
 
         if self._frozen is not None:
             return self._frozen
-        validity = np.array(
-            [value is not _MISSING for value in self._values], dtype=np.bool_
-        )
+        validity = np.array([value is not _MISSING for value in self._values], dtype=np.bool_)
         if self.codec == "object":
-            values: Any = tuple(
-                None if value is _MISSING else value for value in self._values
-            )
+            values: Any = tuple(None if value is _MISSING else value for value in self._values)
         else:
             dtype = _CODEC_DTYPES[self.codec]
             fill = False if dtype is np.bool_ else 0

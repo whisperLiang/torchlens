@@ -550,9 +550,7 @@ class CaptureSession:
                 "forward_memory_backend": getattr(trace, "forward_memory_backend", None),
                 "random_seed": getattr(trace, "random_seed", None),
                 "source_model_ref": getattr(trace, "_source_model_ref", None),
-                "layer_counter": getattr(
-                    getattr(trace, "_raw_graph_ws", None), "layer_counter", 0
-                ),
+                "layer_counter": getattr(getattr(trace, "_raw_graph_ws", None), "layer_counter", 0),
             }
         )
 

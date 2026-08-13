@@ -125,9 +125,7 @@ def test_nary_live_backward_matcher_does_not_crash() -> None:
         )
         armed.log_backward(armed[armed.output_layers[0]].out.sum(), retain_graph=True)
     grad_fns = {g.label: g for g in armed.grad_fns}
-    selector = CompositeSelector(
-        "and", (tl.grad_input(), tl.func("relu"), tl.contains("relu"))
-    )
+    selector = CompositeSelector("and", (tl.grad_input(), tl.func("relu"), tl.contains("relu")))
     grads = (torch.ones(1),)
     matches = {
         label: live_backward_selector_matches(
@@ -154,13 +152,18 @@ def test_flat_nary_followed_by_conjunction_capture() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         flat_log = tl.trace(
-            TinyConvNet(), _conv_input(), save=flat, lookback=4,
+            TinyConvNet(),
+            _conv_input(),
+            save=flat,
+            lookback=4,
             lookback_payload_policy="detached_raw",
         )
         binary_log = tl.trace(
-            TinyConvNet(), _conv_input(),
+            TinyConvNet(),
+            _conv_input(),
             save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-            lookback=4, lookback_payload_policy="detached_raw",
+            lookback=4,
+            lookback_payload_policy="detached_raw",
         )
 
     def _saved(log: Any) -> list[str]:
@@ -219,9 +222,7 @@ def test_posthoc_and_short_circuits_where_predicate(conv_trace: Any) -> None:
         calls.append(str(getattr(p, "layer_label", "?")))
         return True
 
-    labels = conv_trace.find_sites(
-        tl.func("relu") & tl.where(_pred), max_fanout=10**6
-    ).labels()
+    labels = conv_trace.find_sites(tl.func("relu") & tl.where(_pred), max_fanout=10**6).labels()
     assert labels == ("relu_1_2", "relu_2_4")
     assert sorted(calls) == ["relu_1_2", "relu_2_4"]
 
@@ -235,9 +236,7 @@ def test_posthoc_or_short_circuits_where_predicate(conv_trace: Any) -> None:
         calls.append(str(getattr(p, "layer_label", "?")))
         return False
 
-    labels = conv_trace.find_sites(
-        tl.func("relu") | tl.where(_pred), max_fanout=10**6
-    ).labels()
+    labels = conv_trace.find_sites(tl.func("relu") | tl.where(_pred), max_fanout=10**6).labels()
     assert labels == ("relu_1_2", "relu_2_4")
     assert "relu_1_2" not in calls and "relu_2_4" not in calls
     assert calls, "predicate should still run on non-relu sites"
@@ -340,9 +339,7 @@ def test_facet_spec_roundtrip_is_lossless(make_selector: Any) -> None:
         spec.selector_kind, spec.selector_value, spec.metadata, lifecycle="site"
     )
     assert repr(rebuilt) == repr(selector)
-    assert getattr(rebuilt, "module_address", None) == getattr(
-        selector, "module_address", None
-    )
+    assert getattr(rebuilt, "module_address", None) == getattr(selector, "module_address", None)
 
 
 # ---------------------------------------------------------------------------
@@ -354,9 +351,7 @@ def test_followed_by_posthoc_refusal_message(conv_trace: Any) -> None:
     """The helpful capture-only message is the deliverable of the refusal."""
 
     with pytest.raises(SelectorCapabilityError) as excinfo:
-        conv_trace.find_sites(
-            tl.func("conv2d") & tl.followed_by(tl.func("relu")), max_fanout=10**6
-        )
+        conv_trace.find_sites(tl.func("conv2d") & tl.followed_by(tl.func("relu")), max_fanout=10**6)
     message = str(excinfo.value)
     assert "capture-time-only retroactive save sugar" in message
     assert "no retroactive window" in message

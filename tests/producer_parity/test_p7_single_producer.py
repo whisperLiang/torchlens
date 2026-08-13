@@ -39,9 +39,7 @@ def test_torch_capture_journals_records_unconditionally() -> None:
     assert all(seq > 0 for seq in seqs), "unstamped record reached the journal"
     assert seqs == sorted(seqs)
     # grad-fn single ownership: no record carries a handle attribute at all.
-    assert all(
-        getattr(event, "grad_fn_handle", None) is None for event in events
-    )
+    assert all(getattr(event, "grad_fn_handle", None) is None for event in events)
 
 
 def test_environment_switch_is_dead(monkeypatch: pytest.MonkeyPatch) -> None:

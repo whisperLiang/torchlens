@@ -76,13 +76,13 @@ def test_root_only_model_emits_root_events() -> None:
     """Root-only models still get synthetic root enter and exit events."""
 
     output, recording = tl.fastlog.record(
-            RootOnly(),
-            torch.ones(1),
-            save=_options().keep_op,
-            default_module=True,
-            include_source_events=True,
-            return_output=True,
-        )
+        RootOnly(),
+        torch.ones(1),
+        save=_options().keep_op,
+        default_module=True,
+        include_source_events=True,
+        return_output=True,
+    )
     kinds = [record.ctx.kind for record in recording]
 
     assert torch.equal(output, torch.tensor([2.0]))
@@ -96,12 +96,12 @@ def test_shared_module_called_twice_has_balanced_events() -> None:
     """A shared child module called twice emits balanced enter/exit events."""
 
     recording = tl.fastlog.record(
-            SharedModule(),
-            torch.ones(1, 3),
-            save=_options().keep_op,
-            default_module=True,
-            include_source_events=True,
-        )
+        SharedModule(),
+        torch.ones(1, 3),
+        save=_options().keep_op,
+        default_module=True,
+        include_source_events=True,
+    )
     child_events = [
         record.ctx
         for record in recording
@@ -121,13 +121,13 @@ def test_identity_passthrough_has_module_events() -> None:
     """Identity modules are represented even when their tensor ops through."""
 
     output, recording = tl.fastlog.record(
-            IdentityModel(),
-            torch.ones(1),
-            save=_options().keep_op,
-            default_module=True,
-            include_source_events=True,
-            return_output=True,
-        )
+        IdentityModel(),
+        torch.ones(1),
+        save=_options().keep_op,
+        default_module=True,
+        include_source_events=True,
+        return_output=True,
+    )
     labels = [record.ctx.address for record in recording]
 
     assert torch.equal(output, torch.ones(1))

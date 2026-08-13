@@ -534,7 +534,9 @@ class ModuleCall:
         "_source_trace_strong": FieldPolicy.DROP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
-    FIELD_POLICY = build_record_field_policy_table(MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module_call")
+    FIELD_POLICY = build_record_field_policy_table(
+        MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module_call"
+    )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str
@@ -1420,7 +1422,9 @@ class Module:
         "custom_methods": FieldPolicy.KEEP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
-    FIELD_POLICY = build_record_field_policy_table(MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module")
+    FIELD_POLICY = build_record_field_policy_table(
+        MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module"
+    )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str

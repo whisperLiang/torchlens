@@ -820,9 +820,7 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
         "torch": torch,
         "_raw_storage_ptr_no_observe": _raw_storage_ptr_no_observe,
     }
-    forged_filename = str(
-        Path(witness_module.__file__).resolve().parent / "user_supplied_model.py"
-    )
+    forged_filename = str(Path(witness_module.__file__).resolve().parent / "user_supplied_model.py")
     code = compile(
         "def forward(self, x):\n"
         "    ptr = _raw_storage_ptr_no_observe(x)\n"

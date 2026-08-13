@@ -4515,9 +4515,7 @@ def _emit_exhaustive_operation_events(
         # call-shared container would already be a bug there). The frozen
         # ``OpEvent`` isolates at construction (tuple/deepcopy), so sibling
         # dicts sharing the call-level container objects is unobservable.
-        fields_dict_onetensor = (
-            fields_dict if use_single_output_fields else dict(fields_dict)
-        )
+        fields_dict_onetensor = fields_dict if use_single_output_fields else dict(fields_dict)
         fields_dict_onetensor["container_path"] = output_entry.container_path
         fields_dict_onetensor["container_spec"] = output_entry.container_spec
         if output_entry.container_spec is not None:
@@ -6082,9 +6080,7 @@ def _replace_event_with_retained_payload(
         has_saved_activation=True,
     )
     trace.capture_events.append_amendment(
-        amend_lookback_retention(
-            event.seq, raw_label, output=output_ref, predicate_matched=True
-        )
+        amend_lookback_retention(event.seq, raw_label, output=output_ref, predicate_matched=True)
     )
 
 

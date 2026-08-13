@@ -1785,8 +1785,7 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     # op after a multi-pass merge (concat re-binds sanctioned merges).
     run_nonce = getattr(stream, "run_nonce", None)
     target_event_ids = {
-        (event.label_raw, event.seq)
-        for event in getattr(stream, "op_events", ()) or ()
+        (event.label_raw, event.seq) for event in getattr(stream, "op_events", ()) or ()
     }
     bound_edits = [
         event

@@ -275,9 +275,7 @@ def freeze_op_relation_views(
                 if not isinstance(domain_map, dict):
                     continue
                 for position, parent_label in domain_map.items():
-                    positions_by_parent.setdefault(parent_label, []).append(
-                        (domain, position)
-                    )
+                    positions_by_parent.setdefault(parent_label, []).append((domain, position))
         for parent_label in parents:
             source = row_of_label.get(parent_label)
             if source is None:

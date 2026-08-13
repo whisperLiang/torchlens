@@ -510,7 +510,9 @@ def _canon_manifest(canonizer: _Canonicalizer, value: Any, path: str) -> Any:
                 bucket = ARTIFACT_TOKEN_KEYED_DICTS[rendered]
                 inner = {}
                 for index, (token_key, entry) in enumerate(value[key].items()):
-                    marker = canonizer.token(bucket, f"{path}.{rendered}.entry{index}", str(token_key))
+                    marker = canonizer.token(
+                        bucket, f"{path}.{rendered}.entry{index}", str(token_key)
+                    )
                     inner[f"entry{index}"] = [
                         marker,
                         _canon_manifest(canonizer, entry, f"{path}.{rendered}.val{index}"),

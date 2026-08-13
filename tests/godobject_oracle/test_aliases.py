@@ -72,9 +72,7 @@ def _capture_cnn() -> tl.Trace:
     """Capture the deterministic CNN trace."""
 
     torch.manual_seed(_SEED)
-    return tl.trace(
-        _AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4)
-    )
+    return tl.trace(_AliasCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
 
 
 def _capture_recurrent() -> tl.Trace:
@@ -266,9 +264,7 @@ def test_op_copy_selective_depth() -> None:
     """Row 6: Op.copy() honors the documented share/deep split, field by field."""
 
     trace = _capture_cnn()
-    op = next(
-        op for op in trace.ops.values() if isinstance(op.out, torch.Tensor)
-    )
+    op = next(op for op in trace.ops.values() if isinstance(op.out, torch.Tensor))
     clone = op.copy()
     assert clone is not op
     assert type(clone) is type(op)
@@ -321,33 +317,21 @@ def test_direct_write_warning_and_dirty_transition() -> None:
     """
 
     trace = _capture_cnn()
-    op = next(
-        op for op in trace.ops.values() if isinstance(op.out, torch.Tensor)
-    )
+    op = next(op for op in trace.ops.values() if isinstance(op.out, torch.Tensor))
     assert trace.state is not TraceState.DIRECT_WRITE_DIRTY
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         op.out = torch.zeros_like(op.out)
-    direct = [
-        w for w in caught if issubclass(w.category, DirectActivationWriteWarning)
-    ]
+    direct = [w for w in caught if issubclass(w.category, DirectActivationWriteWarning)]
     assert len(direct) == 1
     assert trace.state is TraceState.DIRECT_WRITE_DIRTY
 
-    other = next(
-        o
-        for o in trace.ops.values()
-        if o is not op and isinstance(o.out, torch.Tensor)
-    )
+    other = next(o for o in trace.ops.values() if o is not op and isinstance(o.out, torch.Tensor))
     with warnings.catch_warnings(record=True) as caught_again:
         warnings.simplefilter("always")
         other.out = torch.zeros_like(other.out)
-    repeat = [
-        w
-        for w in caught_again
-        if issubclass(w.category, DirectActivationWriteWarning)
-    ]
+    repeat = [w for w in caught_again if issubclass(w.category, DirectActivationWriteWarning)]
     assert repeat == []
 
 
@@ -385,9 +369,7 @@ def test_equivalence_group_shared_live_view() -> None:
     assert multi, "no multi-member equivalence group captured"
     first, second = multi[0][0], multi[0][1]
     assert first.equivalent_ops == second.equivalent_ops
-    assert first.equivalent_ops is second.equivalent_ops, (
-        "group members must share ONE cached view"
-    )
+    assert first.equivalent_ops is second.equivalent_ops, "group members must share ONE cached view"
     with pytest.raises(AttributeError):
         first.equivalent_ops.add("__aliases_v1_group__")
 

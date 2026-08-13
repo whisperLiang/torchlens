@@ -247,10 +247,7 @@ class TestCollectiveRecognizer:
             derive_collective_recognizer()
         assert excinfo.value.fields["kind"] == "uncaptured_collective_op"
         assert excinfo.value.fields["layer"] == 2
-        assert any(
-            name.startswith("symm_mem::")
-            for name in excinfo.value.fields["offending_ops"]
-        )
+        assert any(name.startswith("symm_mem::") for name in excinfo.value.fields["offending_ops"])
 
 
 @pytest.fixture()

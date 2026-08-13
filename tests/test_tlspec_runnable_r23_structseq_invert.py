@@ -180,9 +180,7 @@ def _rewrite_structseq_paths_to_positional(trace: tl.Trace) -> str:
         else slot
         for slot in descriptor.tensor_slots
     )
-    trace._runnable.descriptor = dataclasses.replace(
-        descriptor, tensor_slots=tensor_slots
-    )
+    trace._runnable.descriptor = dataclasses.replace(descriptor, tensor_slots=tensor_slots)
     return call_id
 
 

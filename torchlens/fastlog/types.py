@@ -289,9 +289,7 @@ class RecordingTrace:
 
         decisions: list[bool] = []
         for ctx in self.contexts:
-            predicate = (
-                None if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
-            )
+            predicate = None if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
             result = predicate(ctx) if predicate is not None else False
             spec = _normalize_capture_decision(result, ctx, False)
             if not isinstance(spec, CaptureSpec):
@@ -909,9 +907,7 @@ class Recording(CapturedRun):
             return halt_label, payload_by_label_raw[halt_label]
 
         # Fallback: last captured op with a retained raw activation.
-        core_events = tuple(
-            event for core in self._captured_run_cores for event in core.events
-        )
+        core_events = tuple(event for core in self._captured_run_cores for event in core.events)
         for event in reversed(core_events):
             payload = payload_by_label_raw.get(event.label_raw)
             if payload is not None:

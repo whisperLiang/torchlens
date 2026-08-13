@@ -1696,8 +1696,7 @@ def run_and_log_inputs_through_model(
                 capture_session,
                 secondary_exc,
                 settlement_note=(
-                    "halted cleanup failed after halt at "
-                    f"{getattr(halt_exc, 'reason', '')!r}"
+                    f"halted cleanup failed after halt at {getattr(halt_exc, 'reason', '')!r}"
                 ),
             )
             raise

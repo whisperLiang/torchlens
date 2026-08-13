@@ -92,9 +92,7 @@ _SITE_FAMILIES: dict[tuple[str, str], str] = {
 # Lane transport, not emit sites: concat re-appends already-emitted amendments
 # when a per-pass journal merges into an accumulating one (the fastlog
 # recorder path). Any family may legitimately pass through here.
-_TRANSPORT_SITES: frozenset[tuple[str, str]] = frozenset(
-    {("capture_events.py", "concat")}
-)
+_TRANSPORT_SITES: frozenset[tuple[str, str]] = frozenset({("capture_events.py", "concat")})
 
 
 @dataclass
@@ -109,9 +107,7 @@ class _Observation:
 
 
 @contextmanager
-def _spy_append_amendment(
-    observations: list[_Observation], failures: list[str]
-) -> Iterator[None]:
+def _spy_append_amendment(observations: list[_Observation], failures: list[str]) -> Iterator[None]:
     """Wrap the ONE amendment chokepoint, ``CaptureEvents.append_amendment``."""
 
     real_append = CaptureEvents.append_amendment
@@ -157,20 +153,14 @@ def _spy_append_amendment(
             if isinstance(folded, OpRecord):
                 owner, _, field_name = path.partition(".")
                 holder = (
-                    folded.core
-                    if owner == "core"
-                    else getattr(folded, _FACET_ATTRIBUTES[owner])
+                    folded.core if owner == "core" else getattr(folded, _FACET_ATTRIBUTES[owner])
                 )
                 if holder is None:
-                    failures.append(
-                        f"{site}: facet {owner!r} absent after folding {path!r}"
-                    )
+                    failures.append(f"{site}: facet {owner!r} absent after folding {path!r}")
                     continue
                 facet_value = getattr(holder, field_name)
                 facet_ok = (
-                    facet_value is value
-                    if not isinstance(value, bool)
-                    else facet_value == value
+                    facet_value is value if not isinstance(value, bool) else facet_value == value
                 )
                 if not facet_ok:
                     failures.append(
@@ -361,9 +351,7 @@ def test_live_legacy_sites_completeness() -> None:
             capture(model, inputs)
 
     for observation in observations:
-        expected = tuple(
-            PATH_TO_FLAT[path] for path, _ in AMENDMENT_FAMILIES[observation.family]
-        )
+        expected = tuple(PATH_TO_FLAT[path] for path, _ in AMENDMENT_FAMILIES[observation.family])
         assert observation.kwarg_names == expected, (
             f"{observation.site} ({observation.family}): observed kwargs "
             f"{observation.kwarg_names} != registry (path, flat) join {expected} "
@@ -379,11 +367,7 @@ def test_live_legacy_sites_completeness() -> None:
         "silently non-triggering scenario proves nothing"
     )
 
-    wrong_shape = {
-        (o.site, o.record_type)
-        for o in observations
-        if o.record_type != "OpRecord"
-    }
+    wrong_shape = {(o.site, o.record_type) for o in observations if o.record_type != "OpRecord"}
     assert not wrong_shape, f"foreign record shapes in the journal: {wrong_shape}"
 
 
@@ -443,9 +427,7 @@ _BOOL_PATTERNS = (False, True)
 
 
 @pytest.mark.parametrize("producer", _LEGS)
-def test_distinct_sentinel_fold_routing(
-    monkeypatch: pytest.MonkeyPatch, producer: str
-) -> None:
+def test_distinct_sentinel_fold_routing(monkeypatch: pytest.MonkeyPatch, producer: str) -> None:
     """Every registry path routes to its OWN destination on both fold legs.
 
     For each family, per-path distinct sentinels are applied through the ONE
@@ -484,8 +466,7 @@ def test_distinct_sentinel_fold_routing(
                 landed = getattr(folded, flat)
                 ok = landed is value if not isinstance(value, bool) else landed == value
                 assert ok, (
-                    f"{family}: sentinel for {path!r} did not land at {flat!r} "
-                    f"(got {landed!r})"
+                    f"{family}: sentinel for {path!r} did not land at {flat!r} (got {landed!r})"
                 )
                 if isinstance(folded, OpRecord):
                     owner, _, field_name = path.partition(".")
@@ -501,9 +482,7 @@ def test_distinct_sentinel_fold_routing(
                         if not isinstance(value, bool)
                         else facet_value == value
                     )
-                    assert facet_ok, (
-                        f"{family}: sentinel for {path!r} not at its facet slot"
-                    )
+                    assert facet_ok, f"{family}: sentinel for {path!r} not at its facet slot"
             touched = set(updates)
             for name in flat_names:
                 if name in touched:
@@ -576,8 +555,7 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
             if _call_name(node) not in _GUARDED_CALLEES:
                 continue
             assert _call_name(node) != "replace_op_event", (
-                f"{relative}:{node.lineno}: replace_op_event caller survived "
-                "the P4 migration"
+                f"{relative}:{node.lineno}: replace_op_event caller survived the P4 migration"
             )
             sites.append((relative, node.lineno))
             starred_kwargs = [kw for kw in node.keywords if kw.arg is None]

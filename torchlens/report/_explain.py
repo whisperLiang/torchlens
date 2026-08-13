@@ -355,10 +355,7 @@ def _first_nonfinite_summary(log: Any) -> str:
 
     layer = first_nonfinite_layer(log, kind="saved")
     if layer is None:
-        return (
-            "No non-finite values found in saved outputs"
-            f"{coverage_gap_note(log, kind='saved')}."
-        )
+        return f"No non-finite values found in saved outputs{coverage_gap_note(log, kind='saved')}."
     return _first_nonfinite_detail(log, str(getattr(layer, "layer_label", "unknown")))
 
 

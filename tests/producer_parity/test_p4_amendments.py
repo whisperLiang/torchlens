@@ -84,9 +84,7 @@ def test_append_stamps_folds_and_keeps_raw_lane_append_only(
     target = _target(journal)
 
     folded = journal.append_amendment(
-        amend_raw_hook_intervention(
-            target.seq, target.label_raw, intervention_replaced=True
-        )
+        amend_raw_hook_intervention(target.seq, target.label_raw, intervention_replaced=True)
     )
 
     amendment = journal.op_amendments[0]
@@ -132,9 +130,7 @@ def test_validation_refusals(leg: str, leg_templates: dict[str, list[Any]]) -> N
 
     # Unregistered family on a forged raw record.
     with pytest.raises(AmendmentValidationError, match="unregistered"):
-        validate_amendment(
-            OpAmendment(0, 0, target.seq, target.label_raw, "no_such_family", ())
-        )
+        validate_amendment(OpAmendment(0, 0, target.seq, target.label_raw, "no_such_family", ()))
     # Path set must equal the registry's exactly (ordered).
     with pytest.raises(AmendmentValidationError, match="exact"):
         validate_amendment(
@@ -316,9 +312,7 @@ def test_multi_domain_resolves_by_label_last_occurrence(
         )
     )
     view = seeded.amended_op_records()
-    positions = [
-        index for index, event in enumerate(view) if event.label_raw == target.label_raw
-    ]
+    positions = [index for index, event in enumerate(view) if event.label_raw == target.label_raw]
     assert len(positions) == 2
     first_occurrence, last_occurrence = positions
     assert view[last_occurrence].intervention_replaced is True
@@ -367,9 +361,7 @@ def test_merged_multi_pass_journal_binds_amendments_by_seq(
 
     view = accumulator.amended_op_records()
     positions = [
-        index
-        for index, event in enumerate(view)
-        if event.label_raw == target_one.label_raw
+        index for index, event in enumerate(view) if event.label_raw == target_one.label_raw
     ]
     assert len(positions) == 2
     first_occurrence, last_occurrence = positions
@@ -415,9 +407,7 @@ def test_concat_rebinds_target_seq_and_refolds(
     # target_seq rebound through the merge seq map onto the merged clone.
     merged_target = target_journal.op_event_by_label_raw[source_target.label_raw]
     assert merged_amendment.target_seq == merged_target.seq
-    assert target_journal.amended_op_record(
-        source_target.label_raw
-    ).intervention_replaced
+    assert target_journal.amended_op_record(source_target.label_raw).intervention_replaced
 
 
 class _RecordModel(nn.Module):
@@ -459,9 +449,7 @@ def test_seal_dual_stamps_live_journal_and_projection_clone() -> None:
 
 
 @pytest.mark.parametrize("leg", _LEGS)
-def test_graph_edge_insertion_folds_parents(
-    leg: str, leg_templates: dict[str, list[Any]]
-) -> None:
+def test_graph_edge_insertion_folds_parents(leg: str, leg_templates: dict[str, list[Any]]) -> None:
     """A registered-connection amendment folds parent facts on both legs."""
 
     journal = _fresh_journal(leg_templates[leg])

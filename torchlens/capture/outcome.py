@@ -565,11 +565,7 @@ def resolve_loaded_outcome(state: Mapping[str, Any]) -> CaptureOutcome:
     try:
         # In-process restores may hand back an already-typed record; it still
         # passes through the same coherence matrix below.
-        outcome = (
-            payload
-            if isinstance(payload, CaptureOutcome)
-            else parse_outcome_payload(payload)
-        )
+        outcome = payload if isinstance(payload, CaptureOutcome) else parse_outcome_payload(payload)
     except ValueError as exc:
         warnings.warn(
             f"TorchLens could not parse this artifact's capture-outcome attestation ({exc}); "
@@ -866,9 +862,7 @@ def settle_failed(
                 settlement_note=settlement_note,
             ),
         )
-    origin = (
-        FailureOrigin.INTERRUPT if interrupted else classify_failure_origin(exc)
-    )
+    origin = FailureOrigin.INTERRUPT if interrupted else classify_failure_origin(exc)
     return _stamp(
         trace,
         session,

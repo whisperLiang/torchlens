@@ -246,9 +246,7 @@ def _record_destroyed_group(state: _ArmedState, group: Any) -> None:
                 return
             identity = GroupIdentity(
                 membership_digest=membership_digest_for_ranks(ranks),
-                lifetime_ordinal=state.ledger.next_ordinal(
-                    membership_digest_for_ranks(ranks)
-                ),
+                lifetime_ordinal=state.ledger.next_ordinal(membership_digest_for_ranks(ranks)),
                 ordinal_source="wrapped",
                 global_ranks=ranks,
                 backend=None,
@@ -389,9 +387,7 @@ def _arm(source: str) -> ArmingRecord:
             return _STATE.arming
         _dist()
         recognizer = derive_collective_recognizer()
-        epoch: InstallEpoch = (
-            "seeded" if _any_group_history() else "armed_before_any_group"
-        )
+        epoch: InstallEpoch = "seeded" if _any_group_history() else "armed_before_any_group"
         arming = ArmingRecord(
             install_epoch=epoch,
             recognizer_snapshot=recognizer.snapshot_name,
@@ -492,9 +488,7 @@ def resolve_group_identity(group: Any) -> GroupIdentity:
 
     state = _STATE
     if state is None:
-        raise RuntimeError(
-            "resolve_group_identity() requires torchlens.distributed to be armed"
-        )
+        raise RuntimeError("resolve_group_identity() requires torchlens.distributed to be armed")
     dist = torch.distributed
     if group is None:
         group = dist.group.WORLD
@@ -543,11 +537,7 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
             reason=reason,
         )
 
-    churn = [
-        event
-        for event in state.ledger.events
-        if event.membership_digest == digest
-    ]
+    churn = [event for event in state.ledger.events if event.membership_digest == digest]
     if churn:
         raise refuse(
             "lifecycle churn of this membership was already observed "

@@ -407,7 +407,9 @@ def test_compiled_attribute_boundary_does_not_depend_on_is_compiling_timing(
 
 
 @pytest.mark.heavy
-def test_compile_compat_row_reports_direct_attribute_and_free_function_residual(_no_stance: None) -> None:
+def test_compile_compat_row_reports_direct_attribute_and_free_function_residual(
+    _no_stance: None,
+) -> None:
     """Compatibility reporting matches the preflight inventory and its residual."""
 
     compiled_row = tl.compat.report(_CompiledAttributeModel(), torch.randn(2, 4)).row(

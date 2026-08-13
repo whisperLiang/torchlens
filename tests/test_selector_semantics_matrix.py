@@ -210,9 +210,7 @@ def _probe_capture(model_key: str, make_selector: Callable[[], Any]) -> Any:
     except Exception as exc:  # noqa: BLE001 - characterization records error shape
         return _error_cell(exc)
     return sorted(
-        str(op.layer_label)
-        for op in log.layer_list
-        if getattr(op, "has_saved_activation", False)
+        str(op.layer_label) for op in log.layer_list if getattr(op, "has_saved_activation", False)
     )
 
 
@@ -244,9 +242,7 @@ def _probe_live(model_key: str, make_selector: Callable[[], Any]) -> Any:
         selector = make_selector()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            tl.trace(
-                model, x, hooks=[(selector, _probe_hook)], **_extra_trace_kwargs(model_key)
-            )
+            tl.trace(model, x, hooks=[(selector, _probe_hook)], **_extra_trace_kwargs(model_key))
     except Exception as exc:  # noqa: BLE001
         return _error_cell(exc)
     return sorted(fired)
@@ -290,7 +286,9 @@ def _probe_live_backward(make_selector: Callable[[], Any]) -> Any:
     return sorted(matched)
 
 
-def _probe_where_calls(model_key: str, make_selector: Callable[[Callable[[Any], bool]], Any], *, result: bool) -> Any:
+def _probe_where_calls(
+    model_key: str, make_selector: Callable[[Callable[[Any], bool]], Any], *, result: bool
+) -> Any:
     """Post-hoc labels plus the exact site set a ``tl.where`` predicate saw.
 
     Pins the enumerated per-site short-circuit semantics: composite branches
@@ -489,9 +487,7 @@ LIVE_BACKWARD_CASES: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("bwd_and_binary", lambda: tl.grad_fn("ReluBackward0") & tl.grad_input()),
     (
         "bwd_and_nary_flat",
-        lambda: CompositeSelector(
-            "and", (tl.grad_input(), tl.func("relu"), tl.contains("relu"))
-        ),
+        lambda: CompositeSelector("and", (tl.grad_input(), tl.func("relu"), tl.contains("relu"))),
     ),
     ("bwd_not", lambda: ~tl.grad_input()),
     ("bwd_label_finalized", lambda: tl.label("relu_back_1_9")),
@@ -499,9 +495,7 @@ LIVE_BACKWARD_CASES: tuple[tuple[str, Callable[[], Any]], ...] = (
 
 #: Stateful tl.where under composition: pins the enumerated per-site
 #: short-circuit semantics (branches never evaluate over the full site set).
-SHORT_CIRCUIT_CASES: tuple[
-    tuple[str, str, Callable[[Callable[[Any], bool]], Any], bool], ...
-] = (
+SHORT_CIRCUIT_CASES: tuple[tuple[str, str, Callable[[Callable[[Any], bool]], Any], bool], ...] = (
     ("and_where", "conv", lambda pred: tl.func("relu") & tl.where(pred), True),
     ("or_where", "conv", lambda pred: tl.func("relu") | tl.where(pred), False),
     ("not_where", "conv", lambda pred: ~tl.where(pred), False),
@@ -542,9 +536,7 @@ FLAT_SPEC_CASES: tuple[tuple[str, str, Callable[[], Any]], ...] = (
     (
         "flat_and_single_child",
         "conv",
-        lambda: TargetSpec(
-            selector_kind="and", selector_value=(TargetSpec("func", "relu"),)
-        ),
+        lambda: TargetSpec(selector_kind="and", selector_value=(TargetSpec("func", "relu"),)),
     ),
 )
 
@@ -623,9 +615,7 @@ def _compute_matrix() -> dict[str, Any]:
         matrix[f"sites_bwd/conv/{name}"] = _probe_sites("conv", factory, backward=True)
         matrix[f"spec_bwd/{name}"] = _probe_spec(factory, model_key="conv", backward=True)
     for name, model_key, factory in BACKWARD_CONTAINER_CASES:
-        matrix[f"sites_bwd/{model_key}/{name}"] = _probe_sites(
-            model_key, factory, backward=True
-        )
+        matrix[f"sites_bwd/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=True)
     for name, factory in CONSTRUCT_CASES:
         matrix[f"construct/{name}"] = _construct_cell(factory)
     for name, model_key, factory in DEFAULT_FANOUT_CASES:
@@ -639,9 +629,7 @@ def _compute_matrix() -> dict[str, Any]:
             model_key, factory, result=result
         )
     for name, model_key, factory in FLAT_SPEC_CASES:
-        matrix[f"flat_spec/{model_key}/{name}"] = _probe_sites(
-            model_key, factory, backward=False
-        )
+        matrix[f"flat_spec/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=False)
     for name, factory in FACET_SPEC_CASES:
         matrix[f"facet_spec/{name}"] = _probe_spec(factory)
     return matrix
@@ -659,15 +647,16 @@ def _golden() -> dict[str, Any]:
         _GOLDEN_PATH.write_text(json.dumps(matrix, indent=1, sort_keys=True) + "\n")
         return matrix
     if not _GOLDEN_PATH.exists():
-        pytest.fail(
-            f"Missing golden {_GOLDEN_PATH}; regenerate with TL_SELECTOR_MATRIX_REGEN=1."
-        )
+        pytest.fail(f"Missing golden {_GOLDEN_PATH}; regenerate with TL_SELECTOR_MATRIX_REGEN=1.")
     return json.loads(_GOLDEN_PATH.read_text())
 
 
 _CELL_KEYS: tuple[str, ...] = tuple(
-    [f"{lifecycle}/{model_key}/{name}" for name, model_key, _ in FORWARD_CASES
-     for lifecycle in ("capture", "sites", "live")]
+    [
+        f"{lifecycle}/{model_key}/{name}"
+        for name, model_key, _ in FORWARD_CASES
+        for lifecycle in ("capture", "sites", "live")
+    ]
     + [f"spec/{name}" for name, _, _ in FORWARD_CASES]
     + [f"sites_bwd/conv/{name}" for name, _ in BACKWARD_CASES]
     + [f"sites_bwd/{model_key}/{name}" for name, model_key, _ in BACKWARD_CONTAINER_CASES]

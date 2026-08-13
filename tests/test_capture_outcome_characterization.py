@@ -281,10 +281,7 @@ def test_halted_trace_runnable_save_refuses_typed() -> None:
     trace = tl.trace(model, x, halt=_halt_on_relu)
     with pytest.raises(RunnablePreflightError) as exc_info:
         tl.save(trace, "/tmp/tl_p0_halted_runnable.tlspec", level="runnable", overwrite=True)
-    assert (
-        exc_info.value.fields.get("code")
-        == RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value
-    )
+    assert exc_info.value.fields.get("code") == RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value
 
 
 # ---------------------------------------------------------------------------

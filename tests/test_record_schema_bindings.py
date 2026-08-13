@@ -84,11 +84,7 @@ def test_binding_axes_are_coherent(schema_key: str) -> None:
         binding = policy.storage
         if binding.kind is StorageKind.COMPUTED:
             resolved = next(
-                (
-                    mro.__dict__[name]
-                    for mro in cls.__mro__
-                    if name in mro.__dict__
-                ),
+                (mro.__dict__[name] for mro in cls.__mro__ if name in mro.__dict__),
                 None,
             )
             assert isinstance(resolved, property), (
@@ -121,6 +117,4 @@ def test_bindings_module_regenerates_identically() -> None:
         timeout=300,
         cwd=str(_REPO_ROOT),
     )
-    assert result.returncode == 0, (
-        f"stale _schema_bindings.py:\n{result.stdout}\n{result.stderr}"
-    )
+    assert result.returncode == 0, f"stale _schema_bindings.py:\n{result.stdout}\n{result.stderr}"

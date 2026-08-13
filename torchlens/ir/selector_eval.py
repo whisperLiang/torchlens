@@ -189,8 +189,7 @@ def contains_followed_by(selector: Any, *, unwrap: bool = False) -> bool:
     """
 
     return any(
-        isinstance(node, FollowedBySelector)
-        for node in walk_selector(selector, unwrap=unwrap)
+        isinstance(node, FollowedBySelector) for node in walk_selector(selector, unwrap=unwrap)
     )
 
 
@@ -731,7 +730,9 @@ def _output_matches(subject: Any, value: Any, lifecycle: str) -> bool:
     return getattr(subject, "multi_output_name", None) == str(value)
 
 
-def _input_path_subject_matches(subject: Any, requested_path: tuple[Any, ...], lifecycle: str) -> bool:
+def _input_path_subject_matches(
+    subject: Any, requested_path: tuple[Any, ...], lifecycle: str
+) -> bool:
     """Return whether a subject consumes an input at ``requested_path``.
 
     Parameters
@@ -923,9 +924,7 @@ def _evaluate_subject(selector: BaseSelector, subject: Any, lifecycle: str) -> b
         if isinstance(value, dict):
             name = value.get("name")
             output_target = value.get("output")
-            if output_target is not None and not _output_matches(
-                subject, output_target, lifecycle
-            ):
+            if output_target is not None and not _output_matches(subject, output_target, lifecycle):
                 return False
         else:
             name = value
@@ -1032,9 +1031,7 @@ def _preceded_by_matches(selector: PrecededBySelector, ctx: Any) -> bool:
         Whether a retained (parent) predecessor matches the inner predicate.
     """
 
-    parent_labels = set(
-        getattr(ctx, "parent_labels_raw", ()) or getattr(ctx, "parent_labels", ())
-    )
+    parent_labels = set(getattr(ctx, "parent_labels_raw", ()) or getattr(ctx, "parent_labels", ()))
     recent_ops = tuple(getattr(ctx, "recent_ops", ()))
     inner = selector.inner
     if parent_labels:
@@ -1081,8 +1078,7 @@ def _evaluate_grad_fn_site(selector: BaseSelector, site: Any) -> bool:
         if site.op is not None and _evaluate_subject(selector, site.op, "site"):
             return True
         return any(
-            _evaluate_subject(selector, alias, "site")
-            for alias in _grad_fn_boundary_aliases(site)
+            _evaluate_subject(selector, alias, "site") for alias in _grad_fn_boundary_aliases(site)
         )
     if kind in {"intervening", "without_op"}:
         return not site.has_op
@@ -1323,9 +1319,7 @@ def selector_from_spec(
             raise SiteResolutionError(
                 f"{kind!r} target specs require a sequence of nested selectors."
             )
-        children = tuple(
-            normalize_selector_like(child, lifecycle=lifecycle) for child in value
-        )
+        children = tuple(normalize_selector_like(child, lifecycle=lifecycle) for child in value)
         return CompositeSelector(cast("Literal['and', 'or']", kind), cast(Any, children))
     if kind in {"followed_by", "preceded_by"}:
         if lifecycle != "capture":

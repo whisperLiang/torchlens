@@ -84,9 +84,7 @@ class Transaction:
         """Checkpoint every overlay immediately."""
 
         self._overlays = overlays
-        self._checkpoints = {
-            name: overlay.snapshot() for name, overlay in overlays.items()
-        }
+        self._checkpoints = {name: overlay.snapshot() for name, overlay in overlays.items()}
         self._extra_state: dict[Hashable, Any] = {}
         self._extra_restore: dict[Hashable, Any] = {}
 

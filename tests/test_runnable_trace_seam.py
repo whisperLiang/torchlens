@@ -154,9 +154,7 @@ def test_runnable_coordinator_has_exactly_four_verbs() -> None:
 def test_trace_runnable_fields_are_collapsed_behind_the_seam() -> None:
     """Keep the collapsed state owner singular and legacy readers absent."""
 
-    declared = frozenset(
-        name for name in Trace.__annotations__ if name.startswith("_runnable")
-    )
+    declared = frozenset(name for name in Trace.__annotations__ if name.startswith("_runnable"))
     ordered = frozenset(name for name in MODEL_LOG_FIELD_ORDER if name.startswith("_runnable"))
     assert declared == {"_runnable"}
     assert ordered == {"_runnable"}
@@ -188,9 +186,7 @@ def test_trace_pickled_at_pre_seam_commit_loads_with_collapsed_state() -> None:
     assert isinstance(trace, Trace)
     assert len(trace) == 2
     assert isinstance(trace.__dict__.get("_runnable"), RunnableTraceState)
-    assert not any(
-        legacy_name in trace.__dict__ for legacy_name in LEGACY_RUNNABLE_TRACE_FIELD_MAP
-    )
+    assert not any(legacy_name in trace.__dict__ for legacy_name in LEGACY_RUNNABLE_TRACE_FIELD_MAP)
     assert "_build_state" not in trace.__dict__
     assert "_raw_graph_ws" not in trace.__dict__
     assert "_module_capture_ws" not in trace.__dict__

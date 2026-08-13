@@ -818,18 +818,11 @@ class _FastLiveSession:
         boundary_layer_labels = set(getattr(trace, "input_layers", ())) | set(
             getattr(trace, "output_layers", ())
         )
-        supported_labels = (
-            {
-                label
-                for plan in (*self.module_plans, *self.function_plans)
-                for label in plan.save_labels
-            }
-            | {
-                op.label
-                for op in trace.layer_list
-                if op.layer_label in boundary_layer_labels
-            }
-        )
+        supported_labels = {
+            label
+            for plan in (*self.module_plans, *self.function_plans)
+            for label in plan.save_labels
+        } | {op.label for op in trace.layer_list if op.layer_label in boundary_layer_labels}
         unsupported_function_labels = tuple(
             op.label
             for op in trace.layer_list

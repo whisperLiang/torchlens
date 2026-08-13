@@ -66,9 +66,7 @@ def _resolver(store: OpRowStore) -> dict[str, int]:
     fid = store.layout.fid_by_name["layer_label"]
     rows = store.rows_building()
     assert rows is not None
-    return {
-        cells[fid]: row for row, cells in enumerate(rows) if cells[fid] is not _MISSING
-    }
+    return {cells[fid]: row for row, cells in enumerate(rows) if cells[fid] is not _MISSING}
 
 
 class TestInternPool:
@@ -487,9 +485,7 @@ class TestFactBlocks:
     def test_fact_cell_delete_is_genuinely_absent(self) -> None:
         from torchlens._trace_core.fact_blocks import convert_fact_cells
 
-        store = self._fact_store(
-            [{"func_call_id": 1, "func_config": {"dim": 0}}]
-        )
+        store = self._fact_store([{"func_call_id": 1, "func_config": {"dim": 0}}])
         convert_fact_cells(store, {})
         fid = store.layout.fid_by_name["func_config"]
         assert store.cell_del(0, fid) is True

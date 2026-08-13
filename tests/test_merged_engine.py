@@ -118,9 +118,7 @@ def boundary(
             "contribution_digests": contribution_digests,
             "destination_digests": destination_digests,
             "not_present_reason": (
-                "async_completion_unobserved"
-                if async_op and witness_policy == "digest"
-                else None
+                "async_completion_unobserved" if async_op and witness_policy == "digest" else None
             ),
         },
         "lifetime_evidence": {
@@ -342,8 +340,20 @@ class TestRelationsAndCrossChecks:
 
     def test_all_gather_wrong_destination_count_conflicts(self):
         roles = [
-            {"role": "contribution", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
-            {"role": "destination", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
+            {
+                "role": "contribution",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
+            {
+                "role": "destination",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
         ]  # group of 2 but only ONE destination
         d = derive_merge(
             {
@@ -463,7 +473,10 @@ class TestWitnessDerivation:
                     0,
                     [
                         boundary(
-                            0, 0, contribution_digests=["r0-pre"], **{k: v for k, v in kwargs.items() if k != "contribution_digests"}
+                            0,
+                            0,
+                            contribution_digests=["r0-pre"],
+                            **{k: v for k, v in kwargs.items() if k != "contribution_digests"},
                         )
                     ],
                 ),
@@ -471,7 +484,10 @@ class TestWitnessDerivation:
                     1,
                     [
                         boundary(
-                            1, 0, contribution_digests=["r1-pre"], **{k: v for k, v in kwargs.items() if k != "contribution_digests"}
+                            1,
+                            0,
+                            contribution_digests=["r1-pre"],
+                            **{k: v for k, v in kwargs.items() if k != "contribution_digests"},
                         )
                     ],
                 ),
@@ -482,10 +498,22 @@ class TestWitnessDerivation:
 
     def test_reduce_is_not_applicable_at_every_level(self):
         roles_root = [
-            {"role": "contribution_destination", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
+            {
+                "role": "contribution_destination",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
         ]
         roles_leaf = [
-            {"role": "contribution", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
+            {
+                "role": "contribution",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
         ]
         d = derive_merge(
             {
@@ -495,7 +523,16 @@ class TestWitnessDerivation:
                 ),
                 1: evidence(
                     1,
-                    [boundary(1, 0, kind="reduce", roles=roles_leaf, witness_policy="digest", contribution_digests=["x"])],
+                    [
+                        boundary(
+                            1,
+                            0,
+                            kind="reduce",
+                            roles=roles_leaf,
+                            witness_policy="digest",
+                            contribution_digests=["x"],
+                        )
+                    ],
                 ),
             }
         )
@@ -513,10 +550,22 @@ class TestWitnessDerivation:
 
     def test_broadcast_root_contribution_witnesses_destinations(self):
         root_roles = [
-            {"role": "contribution", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
+            {
+                "role": "contribution",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
         ]
         leaf_roles = [
-            {"role": "destination", "index": 0, "shape": [2], "logical_shape": None, "placements": None},
+            {
+                "role": "destination",
+                "index": 0,
+                "shape": [2],
+                "logical_shape": None,
+                "placements": None,
+            },
         ]
         d = derive_merge(
             {
@@ -524,8 +573,13 @@ class TestWitnessDerivation:
                     0,
                     [
                         boundary(
-                            0, 0, kind="broadcast", roles=root_roles, reduce_op=None,
-                            witness_policy="digest", contribution_digests=["same"],
+                            0,
+                            0,
+                            kind="broadcast",
+                            roles=root_roles,
+                            reduce_op=None,
+                            witness_policy="digest",
+                            contribution_digests=["same"],
                         )
                     ],
                 ),
@@ -533,8 +587,13 @@ class TestWitnessDerivation:
                     1,
                     [
                         boundary(
-                            1, 0, kind="broadcast", roles=leaf_roles, reduce_op=None,
-                            witness_policy="digest", destination_digests=["same"],
+                            1,
+                            0,
+                            kind="broadcast",
+                            roles=leaf_roles,
+                            reduce_op=None,
+                            witness_policy="digest",
+                            destination_digests=["same"],
                         )
                     ],
                 ),

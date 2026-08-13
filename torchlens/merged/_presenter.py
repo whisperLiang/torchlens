@@ -181,8 +181,7 @@ def _report_from(
     findings = derivation.findings
     if load_degradations:
         findings = findings + tuple(
-            MergedFinding(kind="load_degradation", detail=detail)
-            for detail in load_degradations
+            MergedFinding(kind="load_degradation", detail=detail) for detail in load_degradations
         )
     effective = derivation.stored_alignment
     if load_degradations and effective is MergeAlignment.ALIGNED:

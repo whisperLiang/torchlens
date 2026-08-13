@@ -497,9 +497,7 @@ class _LayerMirrorField:
         relation container (the invariant the op-cell descriptors enforce).
         """
 
-        layer.__dict__[self._name] = _layer_normalize_relation_write(
-            layer, self._name, value
-        )
+        layer.__dict__[self._name] = _layer_normalize_relation_write(layer, self._name, value)
 
     def __delete__(self, layer: Any) -> None:
         """Tombstone the field so it stays deleted instead of re-mirroring."""
@@ -868,7 +866,9 @@ class Layer:
         "ops": FieldPolicy.KEEP,
         "call_labels": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="layer")
+    FIELD_POLICY = build_record_field_policy_table(
+        LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="layer"
+    )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(self, first_pass: "Op") -> None:
@@ -2137,9 +2137,7 @@ class _LayerViewField:
     def __set__(self, layer: Any, value: Any) -> None:
         """Store the value, view-normalized on finished layers."""
 
-        layer.__dict__[self._name] = _layer_normalize_relation_write(
-            layer, self._name, value
-        )
+        layer.__dict__[self._name] = _layer_normalize_relation_write(layer, self._name, value)
 
     def __delete__(self, layer: Any) -> None:
         """Delete the stored value; a missing field raises ``AttributeError``."""

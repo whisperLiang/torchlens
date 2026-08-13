@@ -63,8 +63,4 @@ class PayloadArena:
     def aliases(self, value: Any) -> list[int]:
         """Return every handle whose stored object IS ``value``."""
 
-        return [
-            handle
-            for handle, stored in enumerate(self._values)
-            if stored is value
-        ]
+        return [handle for handle, stored in enumerate(self._values) if stored is value]

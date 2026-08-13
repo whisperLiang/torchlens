@@ -219,11 +219,7 @@ def test_same_role_same_spec_value_mutation_keeps_distinct_snapshots() -> None:
         capture_container_structure=True,
     )
     candidate_snapshot_groups = [
-        [
-            snapshot
-            for snapshot in record.snapshots
-            if snapshot.role is Role.CALL_INPUT
-        ]
+        [snapshot for snapshot in record.snapshots if snapshot.role is Role.CALL_INPUT]
         for record in trace._containers.values()
     ]
     input_snapshots = max(candidate_snapshot_groups, key=len)

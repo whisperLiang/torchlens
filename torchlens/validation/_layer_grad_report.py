@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 else:
     ModuleOutputGradKey = tuple[str, int, int]
 
+
 @dataclass
 class LayerGradReport:
     """PATH E module-output gradient comparison report.
@@ -225,9 +226,7 @@ def _compare_module_output_grads(
     uncaptured_module_output_count = sum(
         value == "uncaptured_module_output" for value in coverage.values()
     )
-    missing_module_call_count = sum(
-        value == "missing_module_call" for value in coverage.values()
-    )
+    missing_module_call_count = sum(value == "missing_module_call" for value in coverage.values())
     unresolved_output_label_count = sum(
         value == "unresolved_output_label" for value in coverage.values()
     )

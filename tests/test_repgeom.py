@@ -318,9 +318,7 @@ def test_classical_mds_explicit_input_kind_resolves_the_ambiguity() -> None:
         as_distances, distance_info = repgeom.classical_mds(
             ambiguous, min_n=3, input_kind="distances"
         )
-        as_features, feature_info = repgeom.classical_mds(
-            ambiguous, min_n=3, input_kind="features"
-        )
+        as_features, feature_info = repgeom.classical_mds(ambiguous, min_n=3, input_kind="features")
 
     assert distance_info["input_kind"] == "distances"
     assert feature_info["input_kind"] == "features"

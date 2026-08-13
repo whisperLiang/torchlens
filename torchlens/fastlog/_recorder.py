@@ -612,9 +612,7 @@ class Recorder:
         """Stamp string-only failure metadata onto a frozen recording."""
 
         op_events = tuple(
-            self._capture_events.amended_op_records()
-            if self._capture_events is not None
-            else ()
+            self._capture_events.amended_op_records() if self._capture_events is not None else ()
         )
         last_event = op_events[-1] if op_events else None
         last_ctx = getattr(last_event, "record_context", None)
@@ -679,9 +677,7 @@ class Recorder:
             CaptureStatus.FAILED,
             CaptureStatus.ABORTED_NONFINITE,
         ):
-            stamped = dataclass_replace(
-                settled, n_ops_committed=recording.n_ops_completed
-            )
+            stamped = dataclass_replace(settled, n_ops_committed=recording.n_ops_completed)
         else:
             stamped = CaptureOutcome(
                 status=CaptureStatus.FAILED,

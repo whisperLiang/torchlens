@@ -366,17 +366,14 @@ def test_backward_reprojection_folds_incrementally() -> None:
         full_rebuild_sizes.append(len(events))
         real_impl(trace_arg, events, stream=stream)
 
-    with mock.patch.object(
-        backward_mod, "_materialize_backward_projections_impl", counting_impl
-    ):
+    with mock.patch.object(backward_mod, "_materialize_backward_projections_impl", counting_impl):
         with trace.recording_backward():
             loss.backward(retain_graph=True)
             loss.backward(retain_graph=True)
             loss.backward()
     assert trace.num_backward_passes == 3
     assert len(full_rebuild_sizes) == 1, (
-        "later same-graph passes must fold incrementally, not rebuild: "
-        f"{full_rebuild_sizes}"
+        f"later same-graph passes must fold incrementally, not rebuild: {full_rebuild_sizes}"
     )
 
     incremental_snapshot = _backward_projection_snapshot(trace)
@@ -500,9 +497,7 @@ def test_param_gradients_enter_the_backward_event_stream() -> None:
         event for event in trace.backward_events if isinstance(event, ParamGradObserved)
     ]
     assert param_events
-    event_records = {
-        (event.param_address, event.pass_index) for event in param_events
-    }
+    event_records = {(event.param_address, event.pass_index) for event in param_events}
     projected_records = {
         (address, record.backward_pass_index)
         for address, param_log in trace.param_logs.items()
@@ -1286,9 +1281,7 @@ def test_pass_brackets_reject_partial_interleaving() -> None:
         event for event in events if isinstance(event, BackwardPassEnd) and event.pass_index == 1
     )
     start_two = next(
-        event
-        for event in events
-        if isinstance(event, BackwardPassStart) and event.pass_index == 2
+        event for event in events if isinstance(event, BackwardPassStart) and event.pass_index == 2
     )
     # Interleave: end(1) slides just after start(2) and every seq is
     # renumbered monotonically -> [1 .. [2 .. 1] .. 2]. Each pass-scoped fact
@@ -1372,9 +1365,7 @@ def _assert_pass_one_calls_survive_rebase(trace, pass_one_call_snapshot) -> None
             assert merged_calls.get(call_ordinal) is pass_one_call
             assert pass_one_call.backward_pass_index == 1
         if snapshot:
-            call_passes = sorted(
-                call.backward_pass_index for call in merged_calls.values()
-            )
+            call_passes = sorted(call.backward_pass_index for call in merged_calls.values())
             assert call_passes == [1, 2], (
                 f"grad-fn {record.label} call passes {call_passes}: the retained "
                 "pass-1 call must survive next to the new pass-2 call"
@@ -1388,9 +1379,7 @@ def _assert_pass_record_calls_owned(trace, pass_record) -> None:
     record still owns — the two projections must never diverge.
     """
     owned_call_ids = {
-        id(call)
-        for record in trace.grad_fn_logs.values()
-        for call in record.calls._dict.values()
+        id(call) for record in trace.grad_fn_logs.values() for call in record.calls._dict.values()
     }
     assert pass_record.grad_fn_calls
     for call in pass_record.grad_fn_calls:
@@ -1422,13 +1411,11 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     # Full pass-1 projection content, not just ID presence: the exact
     # GradFnCall objects each grad-fn record holds before the rebase.
     pass_one_call_snapshot = {
-        object_id: dict(record.calls._dict)
-        for object_id, record in restored.grad_fn_logs.items()
+        object_id: dict(record.calls._dict) for object_id, record in restored.grad_fn_logs.items()
     }
     assert any(pass_one_call_snapshot.values())
     pass_one_param_counts = {
-        address: len(param_log._grad_records)
-        for address, param_log in restored.param_logs.items()
+        address: len(param_log._grad_records) for address, param_log in restored.param_logs.items()
     }
     assert any(pass_one_param_counts.values())
 
@@ -1447,9 +1434,7 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     all_labels = [record.label for record in restored.grad_fn_logs.values()]
     assert len(all_labels) == len(set(all_labels)), "merged grad-fn labels must stay unique"
     for address, param_log in restored.param_logs.items():
-        pass_indices = sorted(
-            record.backward_pass_index for record in param_log._grad_records
-        )
+        pass_indices = sorted(record.backward_pass_index for record in param_log._grad_records)
         preserved = [index for index in pass_indices if index == 1]
         assert len(preserved) == pass_one_param_counts[address]
         if pass_one_param_counts[address]:
@@ -1481,8 +1466,7 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
                 "must stay contiguous across a repeat rebuild"
             )
             assert [
-                merged_calls[ordinal].backward_pass_index
-                for ordinal in sorted(merged_calls)
+                merged_calls[ordinal].backward_pass_index for ordinal in sorted(merged_calls)
             ] == [1, 2, 3]
     _invariant_check(restored_again)
 
@@ -1513,8 +1497,7 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
     parent_revision = trace._capture_events.backward_revision
     fork_pass_one_record = fork.backward_pass_logs[1]
     fork_pass_one_call_snapshot = {
-        object_id: dict(record.calls._dict)
-        for object_id, record in fork.grad_fn_logs.items()
+        object_id: dict(record.calls._dict) for object_id, record in fork.grad_fn_logs.items()
     }
     assert any(fork_pass_one_call_snapshot.values())
     with warnings.catch_warnings():
@@ -1603,9 +1586,7 @@ def test_fork_deep_copy_debug_mode_rethrows(monkeypatch: pytest.MonkeyPatch) -> 
             raise RuntimeError("planted deepcopy failure")
 
     monkeypatch.delenv("TORCHLENS_DEBUG_FORK_COPY", raising=False)
-    degraded = trace_intervention._memoized_deep_copy(
-        _PoisonDeepCopy(), None, on_failure=copy.copy
-    )
+    degraded = trace_intervention._memoized_deep_copy(_PoisonDeepCopy(), None, on_failure=copy.copy)
     assert isinstance(degraded, _PoisonDeepCopy)  # default: silent degradation
 
     monkeypatch.setenv("TORCHLENS_DEBUG_FORK_COPY", "1")
@@ -1781,9 +1762,7 @@ def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     trace.log_backward(trace[trace.output_layers[0]].out.sum())
     events = _ensure_backward_event_stream(trace).backward_events
     op_grad_counts = collections.Counter(
-        (event.op_label, event.pass_index)
-        for event in events
-        if isinstance(event, OpGradObserved)
+        (event.op_label, event.pass_index) for event in events if isinstance(event, OpGradObserved)
     )
     assert op_grad_counts, "backward must observe op gradients"
     duplicated = {key: count for key, count in op_grad_counts.items() if count > 1}

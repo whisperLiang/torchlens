@@ -258,9 +258,7 @@ class TraceCore:
             # whose refs bind the root tables); all translate to the clone.
             for source_table in clone._source_tables:
                 group_tables[id(source_table)] = clone
-        child.ops = (
-            OpStoreView(self.ops, group_tables) if self.ops is not None else None
-        )
+        child.ops = OpStoreView(self.ops, group_tables) if self.ops is not None else None
         # An unfrozen kind table (born after a rehydrated load's seal and not
         # yet sealed itself) cannot back a view; its records take the fork
         # builder's detached-duplication fallback instead.

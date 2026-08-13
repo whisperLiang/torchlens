@@ -190,9 +190,7 @@ def convert_fact_cells(store: Any, pool: dict[Any, Any]) -> None:
                 if value.__class__ is not OP_CALL_FACT_FIELDS[name]:
                     continue
                 try:
-                    matches = (
-                        _canonical_snapshot(value, OP_CALL_FACT_FIELDS[name]) == canonical
-                    )
+                    matches = _canonical_snapshot(value, OP_CALL_FACT_FIELDS[name]) == canonical
                 except Exception:
                     matches = False
                 if matches is True:

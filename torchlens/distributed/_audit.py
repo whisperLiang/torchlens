@@ -93,9 +93,7 @@ def _describe(vector: LineageVector) -> str:
     return "{" + body + "}"
 
 
-def _mixed_case_compatible(
-    agreed: LineageVector, candidate: LineageVector
-) -> tuple[bool, str]:
+def _mixed_case_compatible(agreed: LineageVector, candidate: LineageVector) -> tuple[bool, str]:
     """Check a seeded-epoch rank's vector against the agreed witness lineage.
 
     Returns
@@ -124,9 +122,7 @@ def _mixed_case_compatible(
         )
     for agreed_entry, candidate_entry in zip(agreed.entries, candidate.entries):
         if candidate_entry.destroyed != agreed_entry.destroyed:
-            return False, (
-                f"destroy marks disagree at ordinal {agreed_entry.ordinal}"
-            )
+            return False, (f"destroy marks disagree at ordinal {agreed_entry.ordinal}")
         if candidate_entry.source == agreed_entry.source:
             continue
         if candidate_entry.source == "seeded" and candidate_entry.ordinal == 0:
@@ -250,8 +246,7 @@ def _audit_one_membership(
                     f"complete witnesses' agreed {_describe(agreed)}: {reason}."
                 )
         return compatible(
-            "complete witnesses agree and every non-witness vector is "
-            "identical or seed-discharged"
+            "complete witnesses agree and every non-witness vector is identical or seed-discharged"
         )
 
     # No complete witness: every presenting vector must be element-wise

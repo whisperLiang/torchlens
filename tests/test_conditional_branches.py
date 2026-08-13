@@ -1704,7 +1704,9 @@ def test_nested_helper_same_name_model_distinguishes_helpers_by_code_firstlineno
     assert len(positive_log.conditional_records) == 2
     assert len({layer.terminal_conditional_id for layer in bool_layers}) == 2
     assert len({frame.code_firstlineno for frame in helper_frames}) == 2
-    assert list(relu_layer.conditional_branch_stack) == [(bool_layers[0].terminal_conditional_id, "then")]
+    assert list(relu_layer.conditional_branch_stack) == [
+        (bool_layers[0].terminal_conditional_id, "then")
+    ]
     assert square_layer.conditional_branch_stack == ((outer_two_event.id, "then"),)
 
 

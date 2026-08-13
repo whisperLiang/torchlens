@@ -179,9 +179,7 @@ class TestBoundaryNode:
         assert kinds == ["all_gather_object"]
         assert not any(op.type == "allgather" for op in log.ops)
         state = lifecycle.armed_state()
-        coll_ticks = sum(
-            count for key, count in state.seq_counters.items() if key[2] == "coll"
-        )
+        coll_ticks = sum(count for key, count in state.seq_counters.items() if key[2] == "coll")
         assert coll_ticks == 1
 
     def test_barrier_is_journal_only(self, gloo_world):
@@ -269,9 +267,9 @@ class TestWitnessPolicy:
             torch.randn(2, 4),
             capture=tl.options.CaptureOptions(distributed_witness="digest"),
         )
-        witness = [op for op in log.ops if op.type == "allreduce"][0].annotations[
-            "collective"
-        ]["witness"]
+        witness = [op for op in log.ops if op.type == "allreduce"][0].annotations["collective"][
+            "witness"
+        ]
         assert witness["contribution_digests"] is not None
         assert witness["destination_digests"] is None
         assert witness["not_present_reason"] == "async_completion_unobserved"
@@ -302,10 +300,7 @@ class TestReplayRefusals:
         log = tl.trace(HandRolledTP(), torch.randn(2, 4))
         with pytest.raises(CollectiveBoundaryReplayError) as excinfo:
             log.validate_forward_pass([torch.zeros(2, 4)])
-        assert (
-            excinfo.value.fields["code"]
-            == "collective_boundary_runnable_unsupported"
-        )
+        assert excinfo.value.fields["code"] == "collective_boundary_runnable_unsupported"
 
     def test_runnable_save_refuses_typed(self, gloo_world, tmp_path):
         from torchlens.errors import RunnablePreflightError

@@ -2610,9 +2610,7 @@ class Trace(
         # persists None and loads derive from the structural lattice.
         outcome = state.get("_capture_outcome")
         state["_capture_outcome"] = (
-            outcome.to_payload()
-            if outcome is not None and hasattr(outcome, "to_payload")
-            else None
+            outcome.to_payload() if outcome is not None and hasattr(outcome, "to_payload") else None
         )
         state["tlspec_version"] = TLSPEC_VERSION
         return state

@@ -181,14 +181,14 @@ class TestArtifact:
         member = art / "members" / "rank_0000.tlspec"
         from_path = tl.merge_ranks([str(member)])
         from_loaded = tl.merge_ranks([tl.load(member)])
-        assert canonical_json_bytes(
-            from_path._derivation.to_payload()
-        ) == canonical_json_bytes(from_loaded._derivation.to_payload())
+        assert canonical_json_bytes(from_path._derivation.to_payload()) == canonical_json_bytes(
+            from_loaded._derivation.to_payload()
+        )
         # The live derivation equals the loaded one too (P1: rank cores are
         # single truth; save/load changes nothing the merge reads).
-        assert canonical_json_bytes(
-            merged._derivation.to_payload()
-        ) == canonical_json_bytes(from_path._derivation.to_payload())
+        assert canonical_json_bytes(merged._derivation.to_payload()) == canonical_json_bytes(
+            from_path._derivation.to_payload()
+        )
 
     def test_resave_of_loaded_artifact_copies_members(self, gloo_world, tmp_path):
         merged = tl.merge_ranks([_capture()])
@@ -296,14 +296,14 @@ def _tp_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
     model = TP()
     torch.manual_seed(77)
     x = torch.randn(2, 4)
-    log = tl.trace(
-        model, x, capture=tl.options.CaptureOptions(distributed_witness="digest")
-    )
+    log = tl.trace(model, x, capture=tl.options.CaptureOptions(distributed_witness="digest"))
     tl.save(log, os.path.join(out_dir, f"rank{rank}.tlspec"))
     dist.destroy_process_group()
 
 
-def _asymmetric_worker(rank: int, world_size: int, init_file: str, init_file_2: str, out_dir: str) -> None:
+def _asymmetric_worker(
+    rank: int, world_size: int, init_file: str, init_file_2: str, out_dir: str
+) -> None:
     """Sol's seed-discharge-negative shape, live: rank 0 arms before any
     group and witnesses a destroy/re-init cycle; rank 1 arms only after the
     re-init, so its restricted seed denotes generation 1 while claiming
@@ -363,9 +363,9 @@ class TestSpawnSims:
 
         # Loaded-vs-path parity.
         from_loaded = tl.merge_ranks([tl.load(path) for path in paths])
-        assert canonical_json_bytes(
-            from_loaded._derivation.to_payload()
-        ) == canonical_json_bytes(merged._derivation.to_payload())
+        assert canonical_json_bytes(from_loaded._derivation.to_payload()) == canonical_json_bytes(
+            merged._derivation.to_payload()
+        )
 
         # Artifact round trip with full rederivation.
         art = tmp_path / "merged.tlspec"
@@ -397,9 +397,7 @@ class TestSpawnSims:
         assert report.alignment.value == "partial"
 
     def test_asymmetric_arming_refuses_structurally_live(self, tmp_path):
-        paths = self._spawn(
-            _asymmetric_worker, 2, tmp_path, extra_args=(str(tmp_path / "init2"),)
-        )
+        paths = self._spawn(_asymmetric_worker, 2, tmp_path, extra_args=(str(tmp_path / "init2"),))
         report = tl.merge_report(paths)
         assert report.alignment.value == "conflicted"
         kinds = [finding.kind for finding in report.findings]

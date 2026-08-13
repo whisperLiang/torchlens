@@ -258,9 +258,9 @@ def test_empty_opaque_queue_stays_verified(queue_factory: Any, tmp_path: Path) -
             return self.lin(x).relu()
 
     trace, result = _roundtrip(_EmptyQueueModel(), torch.randn(2, 4), tmp_path)
-    assert (
-        "inventory_opaque_container" not in trace._runnable.rng_monitor_uncertain_detail
-    ), "an empty opaque queue must not fail closed to inventory_opaque_container"
+    assert "inventory_opaque_container" not in trace._runnable.rng_monitor_uncertain_detail, (
+        "an empty opaque queue must not fail closed to inventory_opaque_container"
+    )
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert result.report.numeric_attestation is NumericAttestationStatus.ATTESTED
 

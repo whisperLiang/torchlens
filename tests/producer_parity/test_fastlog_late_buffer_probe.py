@@ -51,9 +51,7 @@ def _cooked_with_spy() -> "tuple[Any, dict]":
     try:
         model, inputs = BufferOutputModel(), _small_vec_input()
         recording = tl.record(model, inputs, save=tl.func("linear"))
-        recording_labels = [
-            event.label_raw for event in recording._capture_events.op_events
-        ]
+        recording_labels = [event.label_raw for event in recording._capture_events.op_events]
         seen["recording_labels"] = recording_labels
         cooked = recording.to_trace()
     finally:

@@ -118,9 +118,7 @@ class RunnableTraceState:
             staged_user_state=_plain_mapping(self.staged_user_state),
             embedded_state=_plain_mapping(self.embedded_state),
             capture_state=_plain_mapping(self.capture_state),
-            embedded_nonpersistent_buffers=_plain_mapping(
-                self.embedded_nonpersistent_buffers
-            ),
+            embedded_nonpersistent_buffers=_plain_mapping(self.embedded_nonpersistent_buffers),
         )
 
 

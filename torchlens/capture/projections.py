@@ -809,9 +809,7 @@ def _record_from_record_context(
         ),
         control=control,
         annotations_facet=(
-            AnnotationsFacet(annotations=dict(annotations_payload))
-            if annotations_payload
-            else None
+            AnnotationsFacet(annotations=dict(annotations_payload)) if annotations_payload else None
         ),
         policy_facet=PolicyFacet(
             backend_semantics=backend_semantics
@@ -886,10 +884,13 @@ class SparseOpDraft:
     backend_semantics: BackendSemantics | None
     function: FunctionCallRef | None
     container_path: tuple[Any, ...]
-    module_fields: tuple[
-        tuple[ModuleFrame, ...],
-        tuple[tuple[str, int], ...],
-    ] | None
+    module_fields: (
+        tuple[
+            tuple[ModuleFrame, ...],
+            tuple[tuple[str, int], ...],
+        ]
+        | None
+    )
 
     pipeline: str = field(default="sparse", init=False)
 
