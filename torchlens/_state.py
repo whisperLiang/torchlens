@@ -649,6 +649,27 @@ class ReentrantTraceError(RuntimeError):
     """Raised when a TorchLens trace is started while another trace is active."""
 
 
+_capture_admission_lock = threading.Lock()
+"""Serializes capture ADMISSION and teardown bookkeeping (never the forward).
+
+``active_logging`` reads the "is a capture already running?" predicate and then
+publishes ``_active_trace`` / ``_active_owner_thread_id`` / ``_logging_enabled``.
+Those are separate bytecodes: without a lock two threads entering together can
+both pass the check, and the loser overwrites the winner's owner id -- after
+which the winner's ops are dropped by the owner-thread fast path and its Trace
+is silently short. Holding this lock across check-then-publish makes admission
+atomic, so exactly one of N racing captures is admitted and the rest get the
+documented ``ReentrantTraceError``. It is held for a handful of assignments
+once per capture (never for the forward pass, never around user code), so it
+costs nothing measurable and cannot deadlock: no other lock is acquired under
+it, and it is never re-entered (a nested capture is refused before publishing).
+
+The wrapper hot path deliberately does NOT take this lock -- it reads the
+published globals unsynchronized, exactly as before. The lock closes the
+admission race, not the (documented, unsupported) concurrent-capture case.
+"""
+
+
 @contextmanager
 def active_logging(trace: "Trace") -> Iterator[None]:
     """Activate logging for the duration of a forward pass.
@@ -670,34 +691,39 @@ def active_logging(trace: "Trace") -> Iterator[None]:
     global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_counter
     global _dynamo_warning_emitted
     global _active_owner_thread_id
-    if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
-        active_model = getattr(_active_trace, "model_label", None)
-        if active_model is None:
-            active_model = getattr(_active_trace, "model_class_name", None)
-        active_model_text = f" for active model {active_model!r}" if active_model else ""
-        raise ReentrantTraceError(
-            "torchlens.trace / active_logging is not re-entrant: "
-            f"another forward pass{active_model_text} is already being logged. Nested logging "
-            "would silently corrupt the outer Trace. If you need to log a "
-            "model's forward pass from inside another trace call "
-            "(e.g., a custom activation_transform), finish the outer capture "
-            "before starting another one."
-        )
-    # Model log must be visible before the toggle flips — wrappers will
-    # immediately read _active_trace once _logging_enabled is True.
-    _active_trace = trace
-    _active_owner_thread_id = threading.get_ident()
-    _functorch_warning_emitted = False
-    _dynamo_warning_emitted = False
-    _func_call_id_counter = 0
-    _logging_enabled = True
+    # Admission is atomic: the refusal check and the publication of the three
+    # owner globals happen under one lock, so two threads entering together
+    # cannot both be admitted (see ``_capture_admission_lock``).
+    with _capture_admission_lock:
+        if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
+            active_model = getattr(_active_trace, "model_label", None)
+            if active_model is None:
+                active_model = getattr(_active_trace, "model_class_name", None)
+            active_model_text = f" for active model {active_model!r}" if active_model else ""
+            raise ReentrantTraceError(
+                "torchlens.trace / active_logging is not re-entrant: "
+                f"another forward pass{active_model_text} is already being logged. Nested logging "
+                "would silently corrupt the outer Trace. If you need to log a "
+                "model's forward pass from inside another trace call "
+                "(e.g., a custom activation_transform), finish the outer capture "
+                "before starting another one."
+            )
+        # Model log must be visible before the toggle flips — wrappers will
+        # immediately read _active_trace once _logging_enabled is True.
+        _active_trace = trace
+        _active_owner_thread_id = threading.get_ident()
+        _functorch_warning_emitted = False
+        _dynamo_warning_emitted = False
+        _func_call_id_counter = 0
+        _logging_enabled = True
     try:
         yield
     finally:
-        # Toggle off first so no wrapper sees enabled=True with trace=None
-        _logging_enabled = False
-        _active_trace = None
-        _active_owner_thread_id = None
+        with _capture_admission_lock:
+            # Toggle off first so no wrapper sees enabled=True with trace=None
+            _logging_enabled = False
+            _active_trace = None
+            _active_owner_thread_id = None
 
 
 class _PauseLogging:
@@ -712,17 +738,37 @@ class _PauseLogging:
     exception, matching the generator's ``finally`` — and exceptions are never
     suppressed. Nesting works because every ``pause_logging()`` call returns a
     fresh instance with its own saved state.
+
+    A pause entered from a NON-OWNER thread while a capture is live is a no-op:
+    the toggle belongs to the owner's forward pass, and clearing it from another
+    thread blinds that capture (ops silently missing, no error). This is the
+    general form of the r43 fix that ``materialize_deferred_for_call`` applied at
+    one call site; every one of the ~40 ``pause_logging()`` sites is covered here,
+    including the ones reachable with NO concurrent capture at all -- a thread
+    merely analyzing an older Trace (``tl.save``, validation, an ``.out``
+    transform) while another thread captures.
     """
 
-    __slots__ = ("_prev",)
+    __slots__ = ("_prev", "_owns_toggle")
 
     def __enter__(self) -> None:
         global _logging_enabled
+        owner = _active_owner_thread_id
+        if owner is not None and owner != threading.get_ident():
+            # Live capture owned by a different thread: do not touch the global.
+            self._owns_toggle = False
+            self._prev = False
+            return
+        self._owns_toggle = True
         self._prev = _logging_enabled  # save current state (True or False)
         _logging_enabled = False
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         global _logging_enabled
+        if not self._owns_toggle:
+            # Symmetric no-op: a stale restore from a non-owner thread could
+            # re-enable logging after the owner's capture already finished.
+            return
         _logging_enabled = self._prev  # restore — enables nesting without corruption
 
 

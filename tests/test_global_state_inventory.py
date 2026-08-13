@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import ast
+import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import torch
@@ -225,6 +226,77 @@ class _BlockingCapture(nn.Module):
         return out
 
 
+class _PauseFromForeignThread(nn.Module):
+    """Log ops before and after a NON-OWNER thread enters ``pause_logging()``.
+
+    The foreign thread models the reachable-without-concurrent-capture case: a
+    thread merely ANALYZING an older Trace (``tl.save``, validation, an ``.out``
+    transform) enters the same process-global pause the owner's forward relies on.
+
+    The foreign pause is HELD OPEN across the owner's second op group, which is
+    the realistic shape: an analysis thread's ``pause_logging()`` body spans a
+    whole save / validation pass, not a single statement.
+    """
+
+    def __init__(self, ops_per_side: int) -> None:
+        """Store how many logged ops run on each side of the foreign pause.
+
+        Parameters
+        ----------
+        ops_per_side:
+            Number of logged operations before, during, and after the pause.
+        """
+
+        super().__init__()
+        self.ops_per_side = ops_per_side
+        self.foreign_paused = threading.Event()
+        self.foreign_release = threading.Event()
+        self.foreign_error: list[BaseException] = []
+
+    def _foreign_pause(self) -> None:
+        """Hold ``pause_logging()`` open from a non-owner thread."""
+
+        try:
+            with _state.pause_logging():
+                self.foreign_paused.set()
+                if not self.foreign_release.wait(timeout=10.0):
+                    raise TimeoutError("owner never released the foreign pause")
+        except BaseException as error:  # pragma: no cover - reported by the test
+            self.foreign_error.append(error)
+        finally:
+            self.foreign_paused.set()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run ops before, during, and after a held foreign pause.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Activation after all three op groups ran.
+        """
+
+        for _ in range(self.ops_per_side):
+            x = torch.relu(x)
+        foreign = threading.Thread(target=self._foreign_pause)
+        foreign.start()
+        assert self.foreign_paused.wait(timeout=10.0), "foreign pause never entered"
+        # These ops run while a NON-OWNER thread holds the pause open.
+        for _ in range(self.ops_per_side):
+            x = torch.relu(x)
+        self.foreign_release.set()
+        foreign.join(timeout=10.0)
+        assert not foreign.is_alive(), "foreign pause thread did not exit"
+        # And these run after the foreign thread restored what it saved.
+        for _ in range(self.ops_per_side):
+            x = torch.relu(x)
+        return x
+
+
 def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     """Every trust-lane ``global`` declaration has one lifecycle class."""
 
@@ -290,4 +362,149 @@ def test_concurrent_public_capture_refuses_without_corruption() -> None:
 
     assert not owner.is_alive(), "owner capture did not finish after release"
     assert owner_errors == []
+    assert _capture_scope_snapshot() == before
+
+
+def test_foreign_thread_pause_does_not_blind_the_owner_capture() -> None:
+    """A non-owner ``pause_logging()`` never drops the owner's later ops.
+
+    ``_PauseLogging.__enter__`` used to clear the process-global toggle
+    unconditionally, so ANY thread pausing (even one only analyzing an old
+    Trace) silently truncated a live capture from that instant on. The owner
+    check now lives in the context manager itself, covering every call site.
+    """
+
+    ops_per_side = 3
+    model = _PauseFromForeignThread(ops_per_side)
+    trace = tl.trace(model, torch.ones(2))
+
+    assert model.foreign_error == [], f"foreign pause raised {model.foreign_error!r}"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 3 * ops_per_side, (
+        "ops logged while a non-owner thread held pause_logging() are missing: "
+        f"the foreign pause blinded the capture (saw {len(relu_ops)} of "
+        f"{3 * ops_per_side} relu ops)"
+    )
+    assert _state._logging_enabled is False
+    assert _state._active_owner_thread_id is None
+
+
+def test_capture_admission_runs_under_the_admission_lock() -> None:
+    """Admission blocks while another thread holds the admission lock.
+
+    ``active_logging``'s refusal check and its publication of ``_active_trace`` /
+    ``_active_owner_thread_id`` / ``_logging_enabled`` are separate bytecodes.
+    Unlocked, two threads entering together can both pass the check, and the
+    loser then overwrites the winner's owner id — after which every op the winner
+    logs is dropped by the wrapper's owner-thread fast path and its Trace is
+    silently short, with no error anywhere. The check and the publication
+    therefore have to happen under one lock; this asserts that directly, because
+    the racing window itself is only a few bytecodes wide and a probabilistic
+    probe cannot gate it reliably.
+    """
+
+    before = _capture_scope_snapshot()
+    entered = threading.Event()
+    blocked_for_lock = threading.Event()
+    admitted = threading.Event()
+    failures: list[BaseException] = []
+
+    def admit() -> None:
+        """Enter and immediately leave one capture session."""
+
+        try:
+            with _state.active_logging(cast("Any", object())):
+                admitted.set()
+        except BaseException as error:  # pragma: no cover - reported by the test
+            failures.append(error)
+            admitted.set()
+
+    with _state._capture_admission_lock:
+        entered.set()
+        worker = threading.Thread(target=admit)
+        worker.start()
+        # The worker cannot reach the check, let alone publish, while the lock
+        # is held here. If admission ran outside the lock it would sail through.
+        blocked_for_lock.wait(timeout=0.5)
+        assert not admitted.is_set(), (
+            "active_logging admitted a capture while the admission lock was "
+            "held: the check-then-publish sequence is not serialized"
+        )
+        assert _state._active_trace is None
+        assert _state._active_owner_thread_id is None
+
+    assert admitted.wait(timeout=10.0), "admission never completed after release"
+    worker.join(timeout=10.0)
+    assert not worker.is_alive(), "admission worker hung"
+    assert failures == [], f"admission failed after the lock was released: {failures!r}"
+    assert _capture_scope_snapshot() == before
+
+
+def test_contended_admission_never_publishes_partial_owner_state() -> None:
+    """Under contention, an admitted session owns the globals for its whole body.
+
+    Complements the lock test above: whatever the interleaving, a thread that is
+    admitted must see its OWN owner id and trace for the entire session, and
+    every other thread must get the documented refusal rather than a corrupted
+    half-published state. Concurrent capture stays unsupported by design; this
+    pins the admission mechanism's behavior under contention.
+    """
+
+    before = _capture_scope_snapshot()
+    contenders = 4
+    rounds = 25
+    admitted = 0
+    refused = 0
+    stolen: list[tuple[int, int | None]] = []
+    unexpected: list[BaseException] = []
+    lock = threading.Lock()
+    # Bytecode-level interleaving is what the admission lock excludes; make the
+    # scheduler switch as often as possible so contention is real here.
+    prior_switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(rounds):
+            barrier = threading.Barrier(contenders)
+
+            def contend() -> None:
+                """Enter ``active_logging`` at the same instant as the others."""
+
+                nonlocal admitted, refused
+                token = object()
+                barrier.wait(timeout=10.0)
+                try:
+                    with _state.active_logging(cast("Any", token)):
+                        mine = threading.get_ident()
+                        for _ in range(200):
+                            owner = _state._active_owner_thread_id
+                            if owner != mine or _state._active_trace is not token:
+                                with lock:
+                                    stolen.append((mine, owner))
+                                break
+                except _state.ReentrantTraceError:
+                    with lock:
+                        refused += 1
+                except BaseException as error:  # pragma: no cover - test signal
+                    with lock:
+                        unexpected.append(error)
+                else:
+                    with lock:
+                        admitted += 1
+
+            threads = [threading.Thread(target=contend) for _ in range(contenders)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20.0)
+            assert not any(thread.is_alive() for thread in threads), "contender hung"
+    finally:
+        sys.setswitchinterval(prior_switch_interval)
+
+    assert unexpected == [], f"unexpected admission failure: {unexpected!r}"
+    assert stolen == [], (
+        "an admitted capture's owner globals were overwritten by a racing "
+        f"contender (mine, observed_owner) pairs: {stolen!r}"
+    )
+    assert admitted + refused == contenders * rounds
+    assert admitted >= 1, "no capture was admitted at all"
     assert _capture_scope_snapshot() == before
