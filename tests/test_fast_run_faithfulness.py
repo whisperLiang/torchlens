@@ -1,0 +1,160 @@
+"""fast=True per-iteration faithfulness ceilings (grind B3-L1, Tier-1 #1).
+
+The verify-once gate proves only the FIRST input settled ``verified``; every
+later fast iteration runs on a different input and must re-derive the
+per-input dynamic ceilings through ``_path_faithfulness`` exactly like the
+ordinary provider. These tests pin the two published wrong-value repros
+(host-scalar escape, layout twin) to the honest ``unverifiable`` verdict and
+prove fast mode can never IMPROVE the verdict over ``fast=False`` on the same
+artifact and input.
+"""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens.options import CaptureOptions
+from torchlens.runnable import PathFaithfulness
+
+pytestmark = pytest.mark.smoke
+
+
+class HostScalarEscapeModel(nn.Module):
+    """Bakes a tensor->host escaped scalar into a downstream literal."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Multiply by a host-escaped derived integer constant."""
+
+        scale = int(value.sum().item()) % 5 + 1
+        return value * scale
+
+
+class LayoutPredicateModel(nn.Module):
+    """Branches on a layout predicate derived from the model input."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Take a contiguity-dependent arm on an input-rooted activation."""
+
+        doubled = value * 2
+        if doubled.is_contiguous():
+            return doubled + 100
+        return doubled - 100
+
+
+def _runnable_artifact(model: nn.Module, inputs: torch.Tensor, path: Path) -> Path:
+    """Capture and save one runnable artifact for the fast-path repros."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(
+            model,
+            inputs,
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    captured.save(path, level="runnable")
+    return path
+
+
+def test_fast_run_host_scalar_escape_changed_input_never_verified(tmp_path: Path) -> None:
+    """A changed-input fast iteration with a baked host scalar settles unverifiable."""
+
+    original = torch.ones(4)
+    changed = torch.ones(4) * 2
+    path = _runnable_artifact(
+        HostScalarEscapeModel(), original, tmp_path / "escape-fast.tlspec"
+    )
+
+    ordinary = tl.load(path).run(inputs=changed)
+    assert ordinary.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert ordinary.report.poisoned
+
+    loaded = tl.load(path)
+    first = loaded.run(inputs=original, fast=True)
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+    fast = loaded.run(inputs=changed, fast=True)
+    assert fast.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert fast.report.poisoned
+    # The wrong replayed value must never be blessed: the report matches the
+    # ordinary provider's verdict on the identical artifact and input.
+    assert fast.report.path_faithfulness is ordinary.report.path_faithfulness
+
+
+def test_fast_run_original_input_escape_stays_verified(tmp_path: Path) -> None:
+    """Repeating the ORIGINAL input keeps the escape digest fresh: still verified."""
+
+    original = torch.ones(4)
+    path = _runnable_artifact(
+        HostScalarEscapeModel(), original, tmp_path / "escape-fast-orig.tlspec"
+    )
+
+    loaded = tl.load(path)
+    first = loaded.run(inputs=original, fast=True)
+    second = loaded.run(inputs=original.clone(), fast=True)
+
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert torch.equal(second.output, HostScalarEscapeModel()(original))
+
+
+def test_fast_run_layout_twin_never_verified(tmp_path: Path) -> None:
+    """A same-shape stride-twin input settles unverifiable on the fast path too."""
+
+    original = torch.ones(3, 3)
+    twin = torch.ones(3, 3).t()
+    assert twin.shape == original.shape
+    assert twin.stride() != original.stride()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(
+            LayoutPredicateModel(),
+            original,
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    path = tmp_path / "layout-fast.tlspec"
+    captured.save(path, level="runnable")
+
+    ordinary = tl.load(path).run(inputs=twin)
+    assert ordinary.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+
+    loaded = tl.load(path)
+    first = loaded.run(inputs=original, fast=True)
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+    fast = loaded.run(inputs=twin, fast=True)
+    assert fast.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert fast.report.poisoned
+
+
+def test_fast_sparse_run_consumes_alias_unresolved_flag() -> None:
+    """The alias-topology ``unresolved`` ceiling is threaded, never discarded.
+
+    Guards the B3-R09-2 discard site structurally: ``_bind_inputs`` returns the
+    flag and ``run`` must pass it to ``_path_faithfulness``. A source scan is
+    the cheapest tripwire against the discarded-binding regression.
+    """
+
+    import inspect
+
+    from torchlens import _fast_run
+
+    source = inspect.getsource(_fast_run._FastSparseSession)
+    assert "alias_unresolved" in source
+    assert "input_alias_unresolved=input_alias_unresolved" in source
+    assert "_, _unresolved" not in source
+    run_source = inspect.getsource(_fast_run._FastSparseSession.run)
+    assert "provisional_path_faithfulness=PathFaithfulness.VERIFIED" not in run_source
