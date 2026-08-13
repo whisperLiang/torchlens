@@ -152,11 +152,24 @@ Homepage = "https://github.com/johnmarktaylor91/torchlens"
 Repository = "https://github.com/johnmarktaylor91/torchlens"
 
 [tool.setuptools.packages.find]
-include = ["torchlens*", "menagerie*"]
+# menagerie* is deliberately NOT distributed. It is a dated reference corpus (the
+# model atlas + its crawler), not part of the importable library: it depends on
+# torchlens rather than the reverse, nothing in torchlens imports it, and
+# including it shipped 2886 of the wheel's 3316 members (~13.5 MB) into every
+# `pip install torchlens` while squatting `menagerie` as a top-level import name.
+# It stays in the repo and the sdist-from-git; consumers use it from a checkout.
+# Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
+include = ["torchlens*"]
 
 [tool.setuptools.package-data]
-torchlens = ["autoroute/data/*.json", "autoroute/data/*.md", "schemas/*.json"]
-menagerie = ["crawler/prompts/pool/*"]
+# py.typed is REQUIRED for PEP 561: without it downstream mypy silently ignores
+# every annotation in the package.
+torchlens = [
+    "py.typed",
+    "autoroute/data/*.json",
+    "autoroute/data/*.md",
+    "schemas/*.json",
+]
 
 [tool.pytest.ini_options]
 markers = [

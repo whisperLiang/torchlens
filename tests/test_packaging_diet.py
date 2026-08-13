@@ -265,8 +265,15 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
 
 
 @pytest.mark.slow
-def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
-    """Built wheels must ship the public ``torchlens/schemas/*.json`` files."""
+def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
+    """Assert the built wheel's manifest: schemas in, py.typed in, menagerie OUT.
+
+    Nothing used to test the wheel manifest, and it had drifted three ways at
+    once: ``menagerie*`` was in the distributed package set (2886 of 3316
+    members, ~13.5 MB, plus ``menagerie`` squatting as a top-level import name),
+    ``torchlens/py.typed`` was missing so downstream mypy ignored every
+    annotation in the package (PEP 561), and only the schema files were checked.
+    """
 
     project_root = Path(__file__).resolve().parent.parent
     wheel_dir = tmp_path / "wheelhouse"
@@ -284,10 +291,26 @@ def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
     assert len(wheels) == 1
 
     with zipfile.ZipFile(wheels[0]) as wheel_zip:
-        schema_members = [
-            member
-            for member in wheel_zip.namelist()
-            if member.startswith("torchlens/schemas/") and member.endswith(".json")
-        ]
+        members = wheel_zip.namelist()
+        top_level_members = [m for m in members if m.endswith("top_level.txt")]
+        assert len(top_level_members) == 1
+        top_level = wheel_zip.read(top_level_members[0]).decode().split()
 
+    schema_members = [
+        m for m in members if m.startswith("torchlens/schemas/") and m.endswith(".json")
+    ]
     assert schema_members, "expected at least one torchlens/schemas/*.json wheel member"
+
+    # PEP 561: without this marker file downstream type checkers treat the
+    # package as untyped and skip every annotation it ships.
+    assert "torchlens/py.typed" in members, "wheel must ship the PEP 561 py.typed marker"
+
+    # The menagerie corpus is repo/sdist-only, never part of the installed library.
+    menagerie_members = [m for m in members if m.startswith("menagerie")]
+    assert not menagerie_members, (
+        f"wheel ships {len(menagerie_members)} menagerie member(s); the corpus is "
+        "not part of the distributed library (see [tool.setuptools.packages.find])"
+    )
+    assert top_level == ["torchlens"], (
+        f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
+    )
