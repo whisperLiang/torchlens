@@ -69,14 +69,13 @@ class FactFamily:
         """Create an empty family for ``fields``."""
 
         self.fields = fields
-        self.group_of_row: dict[int, int] = {}
+        self.group_of_row: dict[tuple[str, int], int] = {}
         self.columns: dict[str, list[Any]] = {name: [] for name in fields}
 
     def __len__(self) -> int:
         """Return the number of group rows."""
 
-        first = next(iter(self.columns.values()), None)
-        return 0 if first is None else len(first)
+        return max((len(column) for column in self.columns.values()), default=0)
 
 
 class FactBlocks:
@@ -108,7 +107,7 @@ class FactBlocks:
         """
 
         family = self.families[self.family_of_field[field_name]]
-        canonical = family.columns[field_name][family.group_of_row[row]]
+        canonical = family.columns[field_name][family.group_of_row[(field_name, row)]]
         public_type = family.fields[field_name]
         if public_type is tuple:
             return canonical
@@ -175,13 +174,12 @@ def convert_fact_cells(store: Any, pool: dict[Any, Any]) -> None:
                         )
                         column.append(canonical)
                         row_cells[fid] = _FACT
+                        call_family.group_of_row[(name, row)] = gid
                     else:
                         column.append(_MISSING)
-                call_family.group_of_row[row] = gid
                 continue
             # Sibling member: convert only where it provably equals the
             # group canonical (differential discipline, like M6).
-            converted = False
             for name, fid in call_fids.items():
                 canonical = call_family.columns[name][gid]
                 if canonical is _MISSING:
@@ -195,9 +193,7 @@ def convert_fact_cells(store: Any, pool: dict[Any, Any]) -> None:
                     matches = False
                 if matches is True:
                     row_cells[fid] = _FACT
-                    converted = True
-            if converted:
-                call_family.group_of_row[row] = gid
+                    call_family.group_of_row[(name, row)] = gid
 
     param_family = blocks.add_family("param", OP_PARAM_FACT_FIELDS)
     param_fids = {
@@ -223,6 +219,6 @@ def convert_fact_cells(store: Any, pool: dict[Any, Any]) -> None:
                 gid_by_canonical[canonical] = gid
                 column.append(canonical)
             row_cells[fid] = _FACT
-            param_family.group_of_row[row] = gid
+            param_family.group_of_row[(name, row)] = gid
 
     store.fact_blocks = blocks

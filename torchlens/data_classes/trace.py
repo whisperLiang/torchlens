@@ -30,6 +30,7 @@ import copy
 import difflib
 import inspect
 import json
+import pickle
 import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -1310,7 +1311,7 @@ class Trace(
         "orphan_records": FieldPolicy.BLOB_RECURSIVE,
         "_saved_grad_labels": FieldPolicy.DROP,
         "layers_with_params": FieldPolicy.KEEP,
-        "ops_with_params": FieldPolicy.KEEP,
+        "ops_with_params": FieldPolicy.DROP,
         "op_equivalence_classes": FieldPolicy.KEEP,
         "total_activation_memory": FieldPolicy.KEEP,
         "total_gradient_memory": FieldPolicy.KEEP,
@@ -2626,6 +2627,7 @@ class Trace(
     def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with non-picklable weakref-backed accessors stripped."""
         state = self.__dict__.copy()
+        state["_pickle_module_accessor_state"] = self.__dict__.get("_module_logs")
         # Event streams never serialize (FieldPolicy.DROP): strip the stream
         # AND the projection guard derived from it, or a restored trace would
         # claim a source-process revision/fold-state over a fresh empty stream
@@ -2686,8 +2688,33 @@ class Trace(
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> "Trace":
+        """Return a detached deep copy using the supported pickle semantics.
+
+        Parameters
+        ----------
+        memo:
+            Standard deepcopy memo populated with the cloned trace.
+
+        Returns
+        -------
+        Trace
+            Detached trace copy whose tensor payloads no longer carry autograd history.
+        """
+
+        existing = memo.get(id(self))
+        if existing is not None:
+            return cast("Trace", existing)
+        cloned = cast(
+            "Trace",
+            pickle.loads(pickle.dumps(self, protocol=pickle.HIGHEST_PROTOCOL)),
+        )
+        memo[id(self)] = cloned
+        return cloned
+
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
+        pickle_module_accessor_state = state.pop("_pickle_module_accessor_state", None)
         for field_name in (
             *LEGACY_TRACE_BUILD_STATE_KEYS,
             # "_build_state" is the pre-M10 flat scratchpad key; the three
@@ -2700,11 +2727,11 @@ class Trace(
             "_trace_core",
         ):
             state.pop(field_name, None)
-        read_tlspec_version(state, cls_name=type(self).__name__)
+        serialized_tlspec_version = read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None
         setstate_defaults = {
             **_MODEL_LOG_DEFAULT_FILL,
-            "tlspec_version": TLSPEC_VERSION,
+            "tlspec_version": serialized_tlspec_version,
             "transform_repr": None,
             "decoded_output": None,
             "output_postprocessor": None,
@@ -2944,6 +2971,15 @@ class Trace(
         from ._trace_rehydrate import rehydrate_trace_core
 
         rehydrate_trace_core(self)
+        if pickle_module_accessor_state is not None:
+            from .._io.accessor_rebuild import rebuild_trace_accessors
+
+            rebuild_trace_accessors(
+                self,
+                pickle_module_accessor_state._dict,
+                pickle_module_accessor_state._list,
+                pickle_module_accessor_state._pass_dict,
+            )
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:

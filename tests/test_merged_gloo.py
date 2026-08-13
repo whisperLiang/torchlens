@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 import shutil
+from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -200,6 +202,31 @@ class TestArtifact:
         loaded.save(second)
         reloaded = tl.load(second)
         assert reloaded.alignment.value == "aligned"
+
+    def test_failed_overwrite_preserves_previous_artifact(
+        self,
+        gloo_world: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A staging failure cannot delete the currently installed merged artifact."""
+
+        merged = tl.merge_ranks([_capture()])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+
+        def fail_copytree(*_args: Any, **_kwargs: Any) -> None:
+            """Simulate a member-copy failure while staging the replacement."""
+
+            raise OSError("simulated merged member copy failure")
+
+        loaded = tl.load(art)
+        monkeypatch.setattr(shutil, "copytree", fail_copytree)
+        with pytest.raises(OSError, match="member copy failure"):
+            loaded.save(art, overwrite=True)
+
+        restored = tl.load(art)
+        assert restored.alignment.value == "aligned"
 
 
 class TestTamperMatrix:

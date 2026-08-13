@@ -1864,7 +1864,7 @@ class Op:
         "bool_value": FieldPolicy.KEEP,
         "in_conditionals": FieldPolicy.KEEP,
         "terminal_bool_for": FieldPolicy.KEEP,
-        "is_in_conditional_body": FieldPolicy.KEEP,
+        "is_in_conditional_body": FieldPolicy.DROP,
         "conditional_branch_stack": FieldPolicy.KEEP,
         "conditional_branch_depth": FieldPolicy.KEEP,
         "conditional_entry_children": FieldPolicy.KEEP,
@@ -3437,6 +3437,7 @@ class Op:
         """Restore pickle state produced by ``__getstate__``."""
         _ensure_detached_store(self)
         read_tlspec_version(state, cls_name=type(self).__name__)
+        resolver_status_was_present = "resolver_status" in state
         default_fill_state(
             state,
             defaults=self.DEFAULT_FILL_STATE,
@@ -3453,7 +3454,7 @@ class Op:
             state["device_ref"] = _device_ref_from_metadata(
                 state.get("out"), state.get("output_device")
             )
-        if state.get("resolver_status") is None:
+        if not resolver_status_was_present:
             state["resolver_status"] = "resolved"
         for field_name in (
             "activation_memory",

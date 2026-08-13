@@ -34,6 +34,8 @@ from . import (
 
 LOGGER = logging.getLogger(__name__)
 
+_CODEC_METADATA_TUPLE_TAG = "__torchlens_codec_tuple_v1__"
+
 
 @dataclass(frozen=True)
 class TensorEntry:
@@ -161,6 +163,12 @@ class TensorEntry:
         codec_metadata = data.get("codec_metadata")
         if codec_metadata is not None and not isinstance(codec_metadata, dict):
             raise TorchLensIOError("Manifest tensor entry 'codec_metadata' must be an object.")
+        if codec_metadata is not None:
+            codec_metadata = _restore_codec_metadata_value(codec_metadata)
+            if not isinstance(codec_metadata, dict):
+                raise TorchLensIOError(
+                    "Manifest tensor entry 'codec_metadata' must decode to an object."
+                )
         requires_grad = data.get("requires_grad", False)
         if not isinstance(requires_grad, bool):
             raise TorchLensIOError("Manifest tensor entry 'requires_grad' must be a boolean.")
@@ -191,7 +199,67 @@ class TensorEntry:
             JSON-ready manifest entry.
         """
 
-        return {key: value for key, value in asdict(self).items() if value is not None}
+        data = {key: value for key, value in asdict(self).items() if value is not None}
+        if self.codec_metadata is not None:
+            data["codec_metadata"] = _json_ready_codec_metadata_value(self.codec_metadata)
+        return data
+
+
+def _json_ready_codec_metadata_value(value: Any) -> Any:
+    """Encode tuple identity while making codec metadata JSON-ready.
+
+    Parameters
+    ----------
+    value:
+        Codec metadata value to encode.
+
+    Returns
+    -------
+    Any
+        JSON-ready value with tuples represented by an explicit tag.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return {
+            _CODEC_METADATA_TUPLE_TAG: [
+                _json_ready_codec_metadata_value(item) for item in value
+            ]
+        }
+    if isinstance(value, list):
+        return [_json_ready_codec_metadata_value(item) for item in value]
+    return str(value)
+
+
+def _restore_codec_metadata_value(value: Any) -> Any:
+    """Restore tagged container types in codec metadata.
+
+    Parameters
+    ----------
+    value:
+        JSON-decoded codec metadata value.
+
+    Returns
+    -------
+    Any
+        Value with tagged tuples reconstructed recursively.
+    """
+
+    if isinstance(value, list):
+        return [_restore_codec_metadata_value(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {_CODEC_METADATA_TUPLE_TAG}:
+            items = value[_CODEC_METADATA_TUPLE_TAG]
+            if not isinstance(items, list):
+                raise TorchLensIOError("Tagged codec metadata tuple must contain a list.")
+            return tuple(_restore_codec_metadata_value(item) for item in items)
+        return {key: _restore_codec_metadata_value(item) for key, item in value.items()}
+    return value
 
 
 @dataclass(frozen=True)
@@ -511,10 +579,14 @@ class Manifest:
 
         manifest_path = Path(path)
         try:
-            with manifest_path.open("w", encoding="utf-8") as handle:
-                json.dump(self.to_dict(), handle, indent=2, sort_keys=False)
-                handle.write("\n")
-        except OSError as exc:
+            text = json.dumps(
+                self.to_dict(),
+                indent=2,
+                sort_keys=False,
+                allow_nan=False,
+            )
+            manifest_path.write_text(text + "\n", encoding="utf-8")
+        except (OSError, ValueError) as exc:
             raise TorchLensIOError(f"Failed to write manifest at {manifest_path}.") from exc
 
     def to_dict(self) -> dict[str, Any]:
@@ -701,7 +773,17 @@ def enforce_version_policy(manifest: Manifest) -> None:
         )
 
     runtime_torchlens = _parse_version(TORCHLENS_VERSION, label="runtime torchlens")
-    manifest_torchlens = _parse_version(manifest.torchlens_version, label="manifest torchlens")
+    manifest_torchlens = _parse_version(
+        manifest.torchlens_version,
+        label="manifest torchlens",
+        warn_on_failure=False,
+    )
+    if manifest_torchlens is None:
+        raise TorchLensIOError(
+            "Bundle torchlens_version="
+            f"{manifest.torchlens_version!r} could not be parsed under PEP 440; "
+            "refusing a current-schema artifact with unverifiable producer provenance."
+        )
     # A parseable torchlens_version below the floor refuses even when the
     # manifest claims a current tlspec_version: a real 2.33+ save can never
     # carry a pre-2.33 torchlens_version, so the pair is inconsistent.
@@ -729,14 +811,6 @@ def enforce_version_policy(manifest: Manifest) -> None:
                 manifest.torchlens_version,
                 TORCHLENS_VERSION,
             )
-    elif manifest.torchlens_version != TORCHLENS_VERSION:
-        warnings.warn(
-            "Bundle torchlens_version="
-            f"{manifest.torchlens_version} differs from runtime torchlens_version="
-            f"{TORCHLENS_VERSION} and could not be parsed under PEP 440.",
-            UserWarning,
-            stacklevel=2,
-        )
 
     runtime_python = _parse_version(_runtime_python_version(), label="runtime python")
     manifest_python = _parse_version(manifest.python_version, label="manifest python")
@@ -759,7 +833,12 @@ def enforce_version_policy(manifest: Manifest) -> None:
         )
 
 
-def _parse_version(version_text: str, *, label: str) -> Version | None:
+def _parse_version(
+    version_text: str,
+    *,
+    label: str,
+    warn_on_failure: bool = True,
+) -> Version | None:
     """Parse a version string under PEP 440 with warning fallback.
 
     Parameters
@@ -768,6 +847,8 @@ def _parse_version(version_text: str, *, label: str) -> Version | None:
         Raw version string to parse.
     label:
         Human-readable label for warnings.
+    warn_on_failure:
+        Whether an unparseable version should emit the legacy fallback warning.
 
     Returns
     -------
@@ -778,12 +859,13 @@ def _parse_version(version_text: str, *, label: str) -> Version | None:
     try:
         return Version(version_text)
     except InvalidVersion:
-        warnings.warn(
-            f"Could not parse {label} version {version_text!r} under PEP 440; "
-            "falling back to string comparison.",
-            UserWarning,
-            stacklevel=3,
-        )
+        if warn_on_failure:
+            warnings.warn(
+                f"Could not parse {label} version {version_text!r} under PEP 440; "
+                "falling back to string comparison.",
+                UserWarning,
+                stacklevel=3,
+            )
         return None
 
 

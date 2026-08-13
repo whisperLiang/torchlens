@@ -8,10 +8,11 @@ tensor shapes, or dtypes.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from hashlib import sha256
 from typing import Any
 
+import numpy as np
 import torch
 
 from .options import CaptureOptions
@@ -89,11 +90,18 @@ def _update_content_digest(digest: Any, value: Any) -> None:
         return
     if isinstance(value, Mapping):
         digest.update(b"mapping\0")
-        items = sorted(value.items(), key=lambda item: (type(item[0]).__name__, repr(item[0])))
-        digest.update(len(items).to_bytes(8, "big"))
-        for key, item_value in items:
-            _update_content_digest(digest, key)
-            _update_content_digest(digest, item_value)
+        framed_items = []
+        for key, item_value in value.items():
+            key_digest = sha256()
+            value_digest = sha256()
+            _update_content_digest(key_digest, key)
+            _update_content_digest(value_digest, item_value)
+            framed_items.append((key_digest.digest(), value_digest.digest()))
+        framed_items.sort()
+        digest.update(len(framed_items).to_bytes(8, "big"))
+        for key_frame, value_frame in framed_items:
+            digest.update(key_frame)
+            digest.update(value_frame)
         return
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         digest.update(type(value).__name__.encode("utf-8") + b"\0")
@@ -105,9 +113,48 @@ def _update_content_digest(digest: Any, value: Any) -> None:
         raw_bytes = bytes(value)
         digest.update(b"bytes\0" + len(raw_bytes).to_bytes(8, "big") + raw_bytes)
         return
+    if isinstance(value, Set):
+        digest.update(type(value).__name__.encode("utf-8") + b"\0")
+        item_frames = []
+        for item in value:
+            item_digest = sha256()
+            _update_content_digest(item_digest, item)
+            item_frames.append(item_digest.digest())
+        item_frames.sort()
+        digest.update(len(item_frames).to_bytes(8, "big"))
+        for item_frame in item_frames:
+            digest.update(item_frame)
+        return
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        raw = contiguous.tobytes(order="C")
+        digest.update(b"numpy.ndarray\0")
+        digest.update(str(contiguous.dtype).encode("utf-8") + b"\0")
+        digest.update(repr(tuple(contiguous.shape)).encode("ascii") + b"\0")
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+        return
+    if isinstance(value, np.generic):
+        _update_content_digest(digest, value.item())
+        return
+    if value is None or isinstance(value, str | int | float | bool | complex):
+        digest.update(type(value).__name__.encode("utf-8") + b"\0")
+        digest.update(repr(value).encode("utf-8") + b"\0")
+        return
+    if isinstance(value, torch.dtype | torch.device):
+        digest.update(type(value).__name__.encode("utf-8") + b"\0")
+        digest.update(str(value).encode("utf-8") + b"\0")
+        return
     digest.update(type(value).__module__.encode("utf-8") + b".")
     digest.update(type(value).__qualname__.encode("utf-8") + b"\0")
-    digest.update(repr(value).encode("utf-8") + b"\0")
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, Mapping):
+        _update_content_digest(digest, attributes)
+        return
+    raise TypeError(
+        f"torchlens.hash.content cannot deterministically encode {type(value).__module__}."
+        f"{type(value).__qualname__}"
+    )
 
 
 def trace(captured_trace: Any) -> str:

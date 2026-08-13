@@ -17,7 +17,7 @@ import subprocess
 import sys
 import uuid
 import warnings
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -510,13 +510,19 @@ def save(
             legacy_manifest=manifest,
             save_level=save_level,
             sparse_run=sparse_run_json,
+            scrubbed_state=scrubbed_state,
         )
         with (tmp_path / "metadata.pkl").open("wb") as handle:
             pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         tmp_path.rename(bundle_path)
         if backup_path is not None:
-            _remove_path(backup_path)
+            try:
+                _remove_path(backup_path)
+            except OSError:
+                # The replacement is already installed atomically. A stale backup
+                # is recoverable cleanup debris, not a failed save.
+                pass
     except TorchLensIOError:
         _mark_partial(tmp_path)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
@@ -1207,6 +1213,7 @@ def _load_trace_payload(
     setattr(trace, "_source_bundle_manifest_sha256", sha256_of_file(manifest_path))
     setattr(trace, "_source_bundle_path", bundle_path)
     setattr(trace, "_source_bundle_created_at", manifest.created_at)
+    setattr(trace, "_source_bundle_provenance", manifest.provenance)
     from .runnable_load import attach_sparse_run_readiness
 
     attach_sparse_run_readiness(trace, sparse_run)
@@ -1680,7 +1687,7 @@ def _load_unified_tlspec(
     if kind == "trace":
         _preflight_unified_trace_manifest(manifest, bundle_path=bundle_path)
         parsed_manifest = _manifest_for_unified_trace_load(manifest)
-        return _load_trace_payload(
+        loaded_trace = _load_trace_payload(
             bundle_path,
             parsed_manifest,
             lazy=lazy,
@@ -1691,6 +1698,10 @@ def _load_unified_tlspec(
             trust_custom_callables=trust_custom_callables,
             allowed_custom_callable_modules=allowed_custom_callable_modules,
         )
+        model_fingerprint = manifest.get("model_fingerprint")
+        if isinstance(model_fingerprint, dict):
+            setattr(loaded_trace, "_source_bundle_model_fingerprint", model_fingerprint)
+        return loaded_trace
     if kind == "bundle":
         return _load_unified_bundle(bundle_path, bundle_visited=bundle_visited)
     raise TorchLensIOError(f"Unsupported unified tlspec kind={kind!r}.")
@@ -2508,6 +2519,8 @@ def _scrub_trace_for_bundle(
         "_source_bundle_manifest_sha256",
         "_source_bundle_path",
         "_source_bundle_created_at",
+        "_source_bundle_provenance",
+        "_source_bundle_model_fingerprint",
         "payload_load_status",
         "_validation_replay_status",
     ):
@@ -2613,7 +2626,7 @@ def _write_tensor_blob(
         Manifest tensor entry for the written blob.
     """
 
-    contiguous_tensor = tensor.contiguous()
+    contiguous_tensor = tensor.resolve_conj().resolve_neg().contiguous()
     relative_path = Path("blobs") / f"{blob_id}.safetensors"
     blob_path = tmp_path / relative_path
     save_file({_BLOB_TENSOR_KEY: contiguous_tensor}, str(blob_path))
@@ -3022,6 +3035,10 @@ def _collect_provenance(trace: Trace) -> Provenance:
 
     from .. import hash as trace_hash
 
+    source_provenance = getattr(trace, "_source_bundle_provenance", None)
+    if isinstance(source_provenance, Provenance):
+        return source_provenance
+
     devices = sorted(
         {
             str(device)
@@ -3098,6 +3115,12 @@ def _json_ready_provenance_value(value: Any) -> Any:
         return value
     if isinstance(value, Mapping):
         return {str(key): _json_ready_provenance_value(item) for key, item in value.items()}
+    if isinstance(value, Set):
+        normalized = [_json_ready_provenance_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
     if isinstance(value, Collection) and not isinstance(value, str | bytes | bytearray):
         return [_json_ready_provenance_value(item) for item in value]
     return str(value)

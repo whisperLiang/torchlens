@@ -183,8 +183,141 @@ def scrub_for_save(
         )
     else:
         scrubbed_state["_io_module_accessor_state"] = None
+    _scrub_nondeterministic_identities(scrubbed_state)
     detach_conditional_trace_backrefs(scrubbed_state)
     return scrubbed_state, blob_specs, options.unsupported_tensor_records
+
+
+def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
+    """Remap process-local identity tokens to deterministic trace-local ordinals.
+
+    Parameters
+    ----------
+    state:
+        Scrubbed top-level trace state, mutated before it is persisted.
+
+    Notes
+    -----
+    Capture-time parameter barcodes and CPython ``id()`` values are useful while
+    constructing a trace, but neither is a portable identity.  The remap keeps all
+    within-artifact joins intact while making equivalent captures serialize the same
+    logical identifiers.
+    """
+
+    ops = list(state.get("layer_list") or ())
+    layers = list((state.get("layer_logs") or {}).values())
+    params = sorted(
+        (state.get("param_logs") or {}).values(),
+        key=lambda param: (
+            str(getattr(param, "address", "")),
+            str(getattr(param, "name", "")),
+        ),
+    )
+
+    barcode_map: dict[str, str] = {}
+
+    def register_barcode(value: Any) -> None:
+        """Register one live barcode in deterministic encounter order."""
+
+        if isinstance(value, str) and value not in barcode_map:
+            barcode_map[value] = f"param_{len(barcode_map) + 1:06d}"
+
+    for param in params:
+        register_barcode(getattr(param, "barcode", None))
+    for record in (*ops, *layers):
+        for barcode in getattr(record, "_param_barcodes", ()) or ():
+            register_barcode(barcode)
+
+    def remap_barcode_text(value: Any) -> Any:
+        """Replace registered barcodes in a scalar identity string."""
+
+        if not isinstance(value, str):
+            return value
+        if value in barcode_map:
+            return barcode_map[value]
+        for old, new in barcode_map.items():
+            value = value.replace(old, new)
+        return value
+
+    equivalence_class_map: dict[str, str] = {}
+    for param in params:
+        param.barcode = remap_barcode_text(getattr(param, "barcode", None))
+    for record in (*ops, *layers):
+        original_barcodes = list(getattr(record, "_param_barcodes", ()) or ())
+        original_group = "_".join(sorted(original_barcodes))
+        remapped_barcodes = [remap_barcode_text(barcode) for barcode in original_barcodes]
+        remapped_group = "_".join(sorted(remapped_barcodes))
+        record._param_barcodes = [
+            remap_barcode_text(barcode) for barcode in original_barcodes
+        ]
+        equivalence_class = getattr(record, "equivalence_class", None)
+        if isinstance(equivalence_class, str) and original_group:
+            record.equivalence_class = equivalence_class.replace(original_group, remapped_group)
+        else:
+            record.equivalence_class = remap_barcode_text(equivalence_class)
+        if isinstance(equivalence_class, str) and isinstance(record.equivalence_class, str):
+            equivalence_class_map[equivalence_class] = record.equivalence_class
+        parent_param_ops = getattr(record, "parent_param_ops", None)
+        record_spec = getattr(type(record), "PORTABLE_STATE_SPEC", {})
+        if isinstance(parent_param_ops, dict) and "parent_param_ops" in record_spec:
+            record.parent_param_ops = {
+                remap_barcode_text(key): value for key, value in parent_param_ops.items()
+            }
+
+    equivalence_groups = state.get("op_equivalence_classes")
+    if isinstance(equivalence_groups, dict):
+        state["op_equivalence_classes"] = type(equivalence_groups)(
+            (equivalence_class_map.get(key, remap_barcode_text(key)), value)
+            for key, value in equivalence_groups.items()
+        )
+
+    grad_fn_order = list(state.get("grad_fn_order") or ())
+    grad_fn_logs = state.get("grad_fn_logs") or {}
+    grad_id_map: dict[int, int] = {}
+
+    def register_grad_id(value: Any) -> None:
+        """Register one autograd identity in deterministic discovery order."""
+
+        if isinstance(value, int) and not isinstance(value, bool) and value not in grad_id_map:
+            grad_id_map[value] = len(grad_id_map) + 1
+
+    for grad_id in grad_fn_order:
+        register_grad_id(grad_id)
+    for grad_id in grad_fn_logs:
+        register_grad_id(grad_id)
+    for grad_fn in grad_fn_logs.values():
+        register_grad_id(getattr(grad_fn, "grad_fn_object_id", None))
+        register_grad_id(getattr(grad_fn, "creator_object_id", None))
+        for next_id in getattr(grad_fn, "next_grad_fn_ids", ()) or ():
+            register_grad_id(next_id)
+    for record in (*ops, *layers):
+        register_grad_id(getattr(record, "grad_fn_object_id", None))
+
+    def remap_grad_id(value: Any) -> Any:
+        """Return the trace-local ordinal for one autograd identity."""
+
+        return grad_id_map.get(value, value)
+
+    if isinstance(grad_fn_logs, dict):
+        remapped_logs = type(grad_fn_logs)()
+        for grad_id, grad_fn in grad_fn_logs.items():
+            grad_fn.grad_fn_object_id = remap_grad_id(grad_fn.grad_fn_object_id)
+            grad_fn.creator_object_id = remap_grad_id(grad_fn.creator_object_id)
+            grad_fn.next_grad_fn_ids = [
+                remap_grad_id(next_id) for next_id in grad_fn.next_grad_fn_ids
+            ]
+            remapped_logs[remap_grad_id(grad_id)] = grad_fn
+        state["grad_fn_logs"] = remapped_logs
+    state["grad_fn_order"] = [remap_grad_id(grad_id) for grad_id in grad_fn_order]
+    state["backward_root_grad_fn_object_ids"] = [
+        remap_grad_id(grad_id)
+        for grad_id in (state.get("backward_root_grad_fn_object_ids") or ())
+    ]
+    for record in (*ops, *layers):
+        record.grad_fn_object_id = remap_grad_id(getattr(record, "grad_fn_object_id", None))
+
+    state["model_object_id"] = 1 if state.get("model_object_id") is not None else None
+    state["input_object_id"] = 1 if state.get("input_object_id") is not None else None
 
 
 def detach_conditional_trace_backrefs(value: Any) -> None:
@@ -285,11 +418,12 @@ _SCRUB_BLOBREF = 2
 _SCRUB_LIST = 3
 _SCRUB_TUPLE = 4
 _SCRUB_SET = 5
-_SCRUB_OBJECT = 6
+_SCRUB_FROZENSET = 6
+_SCRUB_OBJECT = 7
 # The two mapping kinds sort ABOVE _SCRUB_OBJECT so one ``>=`` test selects "is a
 # mapping" (which shares the key-payload refusal) before splitting on flavour.
-_SCRUB_ORDERED_DICT = 7
-_SCRUB_MAPPING = 8
+_SCRUB_ORDERED_DICT = 8
+_SCRUB_MAPPING = 9
 
 _SCRUB_VALUE_KINDS: dict[type, int] = {}
 
@@ -299,8 +433,8 @@ def _scrub_value_kind(value_type: type) -> int:
 
     The branch order below is exactly the ``isinstance`` chain it replaces:
     ``torch.Size`` before ``tuple`` (it is a tuple subclass), and
-    ``OrderedDict``/``defaultdict`` before plain ``dict`` (both are dict
-    subclasses, and ``defaultdict`` rebuilds as a plain dict just as before).
+    ``OrderedDict``/``defaultdict`` before plain ``dict`` so their observable
+    ordering and default-factory behavior survive a round trip.
     """
 
     if issubclass(value_type, _SIMPLE_KEEP_TYPES):
@@ -315,6 +449,8 @@ def _scrub_value_kind(value_type: type) -> int:
         kind = _SCRUB_TUPLE
     elif issubclass(value_type, set):
         kind = _SCRUB_SET
+    elif issubclass(value_type, frozenset):
+        kind = _SCRUB_FROZENSET
     elif issubclass(value_type, OrderedDict):
         kind = _SCRUB_ORDERED_DICT
     elif issubclass(value_type, dict):
@@ -323,6 +459,39 @@ def _scrub_value_kind(value_type: type) -> int:
         kind = _SCRUB_OBJECT
     _SCRUB_VALUE_KINDS[value_type] = kind
     return kind
+
+
+def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
+    """Rebuild a tuple-like container without erasing its public type.
+
+    Parameters
+    ----------
+    value:
+        Source tuple-like container.
+    items:
+        Scrubbed child values.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Rebuilt tuple subclass, or a plain tuple when its constructor is not portable.
+    """
+
+    materialized = tuple(items)
+    if isinstance(value, torch.Size):
+        return torch.Size(materialized)
+    maker = getattr(type(value), "_make", None)
+    if callable(maker):
+        try:
+            return maker(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    if type(value) is not tuple:
+        try:
+            return type(value)(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    return materialized
 
 
 def _scrub_value(
@@ -359,7 +528,7 @@ def _scrub_value(
     if kind == _SCRUB_SIMPLE:
         return value
     if kind == _SCRUB_SIZE:
-        return tuple(value)
+        return torch.Size(value)
     if kind == _SCRUB_BLOBREF:
         return value
     if kind == _SCRUB_LIST:
@@ -368,20 +537,40 @@ def _scrub_value(
             for item in value
         ]
     if kind == _SCRUB_TUPLE:
-        return tuple(
-            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+                for item in value
+            ),
         )
     if kind == _SCRUB_SET:
         return {
             _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for item in value
         }
+    if kind == _SCRUB_FROZENSET:
+        return frozenset(
+            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+            for item in value
+        )
     if kind >= _SCRUB_ORDERED_DICT:
         # Every mapping kind: refuse tensor-payload keys before the type-specific
         # branches rebuild the mapping so a payload cannot slip into
         # ``metadata.pkl`` unscrubbed and un-inventoried.
         _reject_payload_mapping_keys(value, options)
+        if isinstance(value, defaultdict):
+            rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+            for key, item in value.items():
+                rebuilt[key] = _scrub_value(
+                    item,
+                    options,
+                    memo,
+                    blob_specs,
+                    blob_counter,
+                    stringify_unknown,
+                )
+            return rebuilt
         if kind == _SCRUB_ORDERED_DICT:
             return OrderedDict(
                 (
@@ -1153,7 +1342,7 @@ def _blobify_recursive_value(
     if isinstance(value, _SIMPLE_KEEP_TYPES):
         return value
     if isinstance(value, torch.Size):
-        return tuple(value)
+        return torch.Size(value)
     if isinstance(value, BlobRef):
         return value
     if options.payload_codec.can_encode(value):
@@ -1172,17 +1361,20 @@ def _blobify_recursive_value(
             for item in value
         ]
     if isinstance(value, tuple):
-        return tuple(
-            _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _blobify_recursive_value(
+                    owner=owner,
+                    field_name=field_name,
+                    value=item,
+                    options=options,
+                    memo=memo,
+                    blob_specs=blob_specs,
+                    blob_counter=blob_counter,
+                )
+                for item in value
+            ),
         )
     if isinstance(value, dict):
         # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload
@@ -1206,8 +1398,9 @@ def _blobify_recursive_value(
             for key, item in value.items()
         )
     if isinstance(value, defaultdict):
-        return {
-            key: _blobify_recursive_value(
+        rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        for key, item in value.items():
+            rebuilt[key] = _blobify_recursive_value(
                 owner=owner,
                 field_name=field_name,
                 value=item,
@@ -1216,8 +1409,7 @@ def _blobify_recursive_value(
                 blob_specs=blob_specs,
                 blob_counter=blob_counter,
             )
-            for key, item in value.items()
-        }
+        return rebuilt
     if isinstance(value, dict):
         return {
             key: _blobify_recursive_value(
@@ -1244,6 +1436,19 @@ def _blobify_recursive_value(
             )
             for item in value
         }
+    if isinstance(value, frozenset):
+        return frozenset(
+            _blobify_recursive_value(
+                owner=owner,
+                field_name=field_name,
+                value=item,
+                options=options,
+                memo=memo,
+                blob_specs=blob_specs,
+                blob_counter=blob_counter,
+            )
+            for item in value
+        )
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None:

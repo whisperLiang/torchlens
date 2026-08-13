@@ -19,6 +19,7 @@ import torch
 
 from . import JaxPayloadLoadHint, PayloadLoadHints, _json
 from ._artifact_strings import _resolve_portable_device
+from .manifest import _json_ready_codec_metadata_value
 from .tensor_policy import FailReason, Ok, SkipReason, TensorPolicyDecision, is_supported_for_save
 
 
@@ -282,8 +283,19 @@ class JaxPayloadCodec:
             )
             return hint_result.value
 
-        dtype = getattr(jnp, logical_dtype, None)
-        value = jnp.asarray(array, dtype=dtype) if dtype is not None else jnp.asarray(array)
+        dtype_candidate = getattr(jnp, logical_dtype, None)
+        if dtype_candidate is None:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            )
+        try:
+            dtype = jnp.dtype(dtype_candidate)
+        except (TypeError, ValueError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            ) from exc
+        value = jnp.asarray(array, dtype=dtype)
+        value = _restore_jax_scalar_semantics(jax, value, entry)
         hint_result = _apply_jax_payload_hints(
             jax,
             value,
@@ -1080,6 +1092,60 @@ def _entry_field(entry: Any, field_name: str) -> Any:
     return getattr(entry, field_name, None)
 
 
+def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> Any:
+    """Restore captured JAX weak-type and commitment semantics.
+
+    Parameters
+    ----------
+    jax_module:
+        Imported JAX module.
+    value:
+        Decoded JAX array.
+    entry:
+        Manifest entry carrying codec metadata.
+
+    Returns
+    -------
+    Any
+        JAX array with captured scalar semantics restored.
+
+    Raises
+    ------
+    BackendRuntimeCompatibilityError
+        If the installed JAX runtime cannot restore a declared semantic flag.
+    """
+
+    from ..backends.registry import BackendRuntimeCompatibilityError
+
+    metadata = _entry_field(entry, "codec_metadata")
+    if not isinstance(metadata, Mapping):
+        return value
+    if metadata.get("weak_type") is True and getattr(value, "weak_type", False) is not True:
+        try:
+            value = jax_module.lax.convert_element_type(
+                value,
+                value.dtype,
+                weak_type=True,
+            )
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore weak_type=True."
+            ) from exc
+    if metadata.get("committed") is True and getattr(value, "committed", False) is not True:
+        devices = list(jax_module.devices())
+        if not devices:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload declared committed=True but no JAX device is available."
+            )
+        try:
+            value = jax_module.device_put(value, devices[0])
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore committed=True."
+            ) from exc
+    return value
+
+
 def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
     """Convert a torch transport tensor to host NumPy storage for a codec."""
 
@@ -1673,26 +1739,13 @@ def _jax_prng_dtag_from_dtype(dtype: str) -> str | None:
 def _json_ready_mapping(values: dict[str, Any]) -> dict[str, Any]:
     """Return a mapping with only JSON-friendly values."""
 
-    cleaned: dict[str, Any] = {}
-    for key, value in values.items():
-        if value is None:
-            continue
-        cleaned[key] = _json_ready_value(value)
-    return cleaned
+    return {key: _json_ready_value(value) for key, value in values.items()}
 
 
 def _json_ready_value(value: Any) -> Any:
     """Convert one value to JSON-friendly primitives."""
 
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {
-            str(key): _json_ready_value(item) for key, item in value.items() if item is not None
-        }
-    if isinstance(value, (list, tuple)):
-        return [_json_ready_value(item) for item in value]
-    return str(value)
+    return _json_ready_codec_metadata_value(value)
 
 
 def _jax_unaddressable_reason(value: Any) -> str | None:

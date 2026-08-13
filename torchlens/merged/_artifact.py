@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,7 @@ def canonical_json_bytes(obj: Any) -> bytes:
 def tree_hash(root: Path) -> str:
     """Canonical tree hash of a rank-core directory (4.1).
 
-    Sorted POSIX-relative paths; per entry ``path \\0 size \\0 sha256(bytes)``;
+    Sorted POSIX-relative paths; per entry ``path_len path size sha256(bytes)``;
     the tree hash is the SHA-256 of the concatenated entries. Symlinks are
     REJECTED at hash time, matching the loader guards.
     """
@@ -85,15 +86,40 @@ def tree_hash(root: Path) -> str:
                     break
                 size += len(chunk)
                 digest.update(chunk)
-        entry = (
-            candidate.relative_to(root).as_posix().encode("utf-8")
-            + b"\0"
-            + str(size).encode("ascii")
-            + b"\0"
-            + digest.hexdigest().encode("ascii")
+        entry = _tree_hash_entry(
+            candidate.relative_to(root).as_posix(),
+            size,
+            digest.hexdigest(),
         )
         entries.append(entry)
     return hashlib.sha256(b"\n".join(entries)).hexdigest()
+
+
+def _tree_hash_entry(relative_path: str, size: int, digest: str) -> bytes:
+    """Frame one merged tree-hash entry without delimiter ambiguity.
+
+    Parameters
+    ----------
+    relative_path:
+        POSIX-relative member path.
+    size:
+        File size in bytes.
+    digest:
+        Hexadecimal SHA-256 of the file body.
+
+    Returns
+    -------
+    bytes
+        Length-prefixed canonical entry bytes.
+    """
+
+    path_bytes = relative_path.encode("utf-8")
+    return (
+        len(path_bytes).to_bytes(8, "big")
+        + path_bytes
+        + size.to_bytes(8, "big")
+        + bytes.fromhex(digest)
+    )
 
 
 def _member_dirname(rank: int) -> str:
@@ -142,75 +168,92 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
     """
 
     root = Path(path)
-    if root.exists():
-        if not overwrite:
-            raise MergedArtifactError(
-                f"{root} already exists; pass overwrite=True to replace it.",
-                code=MergedErrorCode.MERGE_INPUT_INVALID,
-            )
-        shutil.rmtree(root)
-    members_dir = root / "members"
-    members_dir.mkdir(parents=True)
-    (root / "merge").mkdir()
+    if root.exists() and not overwrite:
+        raise MergedArtifactError(
+            f"{root} already exists; pass overwrite=True to replace it.",
+            code=MergedErrorCode.MERGE_INPUT_INVALID,
+        )
+    staging_root = root.parent / f"{root.name}.tmp.{uuid.uuid4().hex}"
+    backup_root: Path | None = None
+    try:
+        members_dir = staging_root / "members"
+        members_dir.mkdir(parents=True)
+        (staging_root / "merge").mkdir()
 
-    members_payload: list[dict[str, Any]] = []
-    for rank in merged.rank_ids:
-        handle = merged._handles[rank]
-        member_path = members_dir / _member_dirname(rank)
-        if handle.path is not None:
-            source = Path(handle.path)
-            if source.is_dir():
-                # Copy is the only link mode: member bytes stay byte-identical
-                # to the standalone rank-core save (P1).
-                shutil.copytree(source, member_path)
+        members_payload: list[dict[str, Any]] = []
+        for rank in merged.rank_ids:
+            handle = merged._handles[rank]
+            member_path = members_dir / _member_dirname(rank)
+            if handle.path is not None:
+                source = Path(handle.path)
+                if source.is_dir():
+                    # Copy is the only link mode: member bytes stay byte-identical
+                    # to the standalone rank-core save (P1).
+                    shutil.copytree(source, member_path)
+                else:
+                    raise MergedArtifactError(
+                        f"Rank {rank} core path {source} is not a bundle directory.",
+                        code=MergedErrorCode.MERGE_INPUT_INVALID,
+                    )
             else:
-                raise MergedArtifactError(
-                    f"Rank {rank} core path {source} is not a bundle directory.",
-                    code=MergedErrorCode.MERGE_INPUT_INVALID,
-                )
-        else:
-            from .._io.bundle import save as save_bundle
+                from .._io.bundle import save as save_bundle
 
-            save_bundle(handle.trace, member_path)
-        members_payload.append(
-            {
-                "rank": rank,
-                "path": f"members/{_member_dirname(rank)}",
-                "tree_sha256": tree_hash(member_path),
-            }
+                save_bundle(handle.trace, member_path)
+            members_payload.append(
+                {
+                    "rank": rank,
+                    "path": f"members/{_member_dirname(rank)}",
+                    "tree_sha256": tree_hash(member_path),
+                }
+            )
+
+        descriptor = {
+            "descriptor_kind": MERGED_DESCRIPTOR_KIND,
+            "schema_version": MERGED_DESCRIPTOR_SCHEMA_VERSION,
+            "encoding": CANONICAL_ENCODING,
+            "members": members_payload,
+            "derivation": merged._derivation.to_payload(),
+        }
+        descriptor_bytes = canonical_json_bytes(descriptor)
+        (staging_root / "merge" / "descriptor.json").write_bytes(descriptor_bytes)
+
+        import platform as platform_module
+        from datetime import datetime, timezone
+
+        import torch
+
+        from .. import __version__ as torchlens_version
+
+        manifest = {
+            "tlspec_version": MERGED_TLSPEC_VERSION,
+            "bundle_format": MERGED_BUNDLE_FORMAT,
+            "descriptor_sha256": hashlib.sha256(descriptor_bytes).hexdigest(),
+            "members": {str(entry["rank"]): entry["tree_sha256"] for entry in members_payload},
+            "torchlens_version": str(torchlens_version),
+            "torch_version": str(torch.__version__),
+            "python_version": platform_module.python_version(),
+            "platform": platform_module.platform(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (staging_root / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
-    descriptor = {
-        "descriptor_kind": MERGED_DESCRIPTOR_KIND,
-        "schema_version": MERGED_DESCRIPTOR_SCHEMA_VERSION,
-        "encoding": CANONICAL_ENCODING,
-        "members": members_payload,
-        "derivation": merged._derivation.to_payload(),
-    }
-    descriptor_bytes = canonical_json_bytes(descriptor)
-    (root / "merge" / "descriptor.json").write_bytes(descriptor_bytes)
-
-    import platform as platform_module
-    from datetime import datetime, timezone
-
-    import torch
-
-    from .. import __version__ as torchlens_version
-
-    manifest = {
-        "tlspec_version": MERGED_TLSPEC_VERSION,
-        "bundle_format": MERGED_BUNDLE_FORMAT,
-        "descriptor_sha256": hashlib.sha256(descriptor_bytes).hexdigest(),
-        "members": {str(entry["rank"]): entry["tree_sha256"] for entry in members_payload},
-        "torchlens_version": str(torchlens_version),
-        "torch_version": str(torch.__version__),
-        "python_version": platform_module.python_version(),
-        "platform": platform_module.platform(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    (root / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+        if root.exists():
+            backup_root = root.parent / f"{root.name}.bak.{uuid.uuid4().hex}"
+            root.rename(backup_root)
+        staging_root.rename(root)
+        if backup_root is not None:
+            shutil.rmtree(backup_root, ignore_errors=True)
+    except BaseException:
+        if staging_root.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
+        if backup_root is not None and not root.exists() and backup_root.exists():
+            try:
+                backup_root.rename(root)
+            except OSError:
+                pass
+        raise
 
 
 def _resolve_member_path(root: Path, relative: str) -> Path:

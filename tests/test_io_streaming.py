@@ -310,6 +310,38 @@ def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     assert not _tmp_dirs_for(bundle_path)
 
 
+def test_streaming_finalize_rename_failure_marks_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final atomic-rename failure leaves a sweepable partial bundle."""
+
+    bundle_path = tmp_path / "stream_bundle.tl"
+    model, inputs = _make_streaming_model()
+    original_rename = Path.rename
+
+    def fail_final_rename(source: Path, target: str | Path) -> Path:
+        """Fail only the stream writer's final temp-to-target rename."""
+
+        if ".tmp." in source.name and Path(target) == bundle_path:
+            raise OSError("simulated final rename refusal")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", fail_final_rename)
+    with pytest.raises(TorchLensIOError, match="atomically rename"):
+        tl.trace(
+            model,
+            inputs,
+            storage=tl.to_disk(bundle_path),
+            layers_to_save="all",
+        )
+
+    tmp_dirs = _tmp_dirs_for(bundle_path)
+    assert len(tmp_dirs) == 1
+    assert (tmp_dirs[0] / "PARTIAL").exists()
+    assert (tmp_dirs[0] / "REASON.txt").exists()
+
+
 def test_streaming_write_blob_baseexception_marks_partial_and_is_sweepable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

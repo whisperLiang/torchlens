@@ -80,6 +80,7 @@ class _TlSpecWriter:
         legacy_manifest: Manifest,
         save_level: str,
         sparse_run: dict[str, Any] | None = None,
+        scrubbed_state: dict[str, Any] | None = None,
     ) -> None:
         """Write a unified manifest for a saved ``Trace`` payload.
 
@@ -96,6 +97,8 @@ class _TlSpecWriter:
         sparse_run:
             Authoritative sparse runnable descriptor, or ``None`` for all
             pre-existing analysis save levels.
+        scrubbed_state:
+            Portable trace state whose remapped identities must feed public sites.
         """
 
         manifest = legacy_manifest.to_dict()
@@ -107,6 +110,8 @@ class _TlSpecWriter:
             spec_compat_info=None,
             intervention_compat_metadata=None,
         )
+        if scrubbed_state is not None:
+            unified_fields["sites"] = cls._sites(scrubbed_state, kind="trace")
         # ``legacy_manifest.to_dict()`` already carries the authoritative
         # ``tlspec_version`` (sourced from the same ``TLSPEC_VERSION`` single
         # source of truth). Drop the duplicate key from the unified fields
@@ -405,9 +410,8 @@ class _TlSpecWriter:
             JSON object to write.
         """
 
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=False)
-            handle.write("\n")
+        text = json.dumps(data, indent=2, sort_keys=False, allow_nan=False)
+        path.write_text(text + "\n", encoding="utf-8")
 
     @staticmethod
     def _backend_runtime(source: Any, *, backend_name: str) -> dict[str, Any]:
@@ -596,6 +600,10 @@ class _TlSpecWriter:
         if kind == "bundle":
             return cls._bundle_fingerprint(source, model_signature)
 
+        source_fingerprint = getattr(source, "_source_bundle_model_fingerprint", None)
+        if isinstance(source_fingerprint, dict):
+            return dict(source_fingerprint)
+
         model = _source_model(source)
         if model is not None:
             parameter_hash = _hash_named_tensor_meta(model.named_parameters())
@@ -676,7 +684,11 @@ class _TlSpecWriter:
                         site["bundle_member"] = member_name
                         sites.append(site)
             return sites
-        layers = getattr(source, "layer_list", [])
+        layers = (
+            source.get("layer_list", [])
+            if isinstance(source, dict)
+            else getattr(source, "layer_list", [])
+        )
         sites = []
         for layer in layers if isinstance(layers, list) else []:
             sites.append(
