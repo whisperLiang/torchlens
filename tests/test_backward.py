@@ -1724,6 +1724,142 @@ def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
 
 
 @pytest.mark.smoke
+def test_journal_seq_invariant_fires_on_event_deletion() -> None:
+    """FINDING B1-08: DELETING an event used to pass every journal check.
+
+    Stamped / lane-monotone / journal-unique / counter-bounded are all preserved
+    by removing an event, so popping ``op_events[1]`` from a real capture passed
+    both ``_check_journal_seq_invariants`` AND the full ``check_metadata_
+    invariants`` gate -- the omission a tampered or lossy journal produces was
+    the one mutation the tripwire could not see. ``next_seq()`` is called only by
+    the nine single-writer appenders, so a retaining journal's seq domain is
+    DENSE and every hole is a deletion.
+    """
+
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        _check_journal_seq_invariants,
+        check_metadata_invariants,
+    )
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    stream = _ensure_backward_event_stream(trace)
+
+    def check() -> None:
+        _check_journal_seq_invariants(trace, "backward_graph_invariants")
+
+    check()  # positive control
+    check_metadata_invariants(trace)
+
+    # Sol's exact repro: pop one op event out of the middle of the lane.
+    popped_op = stream.op_events.pop(1)
+    with pytest.raises(MetadataInvariantError, match="not retained by any lane"):
+        check()
+    with pytest.raises(MetadataInvariantError, match="not retained by any lane"):
+        check_metadata_invariants(trace)
+    stream.op_events.insert(1, popped_op)
+    check()
+
+    # Every lane is covered, not just the op lane.
+    for lane_name in ("module_enter_events", "module_exit_events", "backward_events"):
+        lane = getattr(stream, lane_name)
+        if not lane:
+            continue
+        removed = lane.pop(0)
+        with pytest.raises(MetadataInvariantError, match="not retained by any lane"):
+            check()
+        lane.insert(0, removed)
+        check()
+
+    # A counter advanced past the events it stamped is the same hole seen from
+    # the other side (a writer that consumed a seq without appending).
+    stream.event_seq += 3
+    with pytest.raises(MetadataInvariantError, match="not retained by any lane"):
+        check()
+    stream.event_seq -= 3
+    check()
+
+
+@pytest.mark.smoke
+def test_amendment_lane_deletion_is_visible_to_the_journal_invariant() -> None:
+    """The amendment lane rides its own counter and is checked the same way.
+
+    Companion half of B1-08: the typed post-commit lane was absent from the
+    invariant entirely. An EMPTY lane stays legitimate (released, never amended,
+    or fully folded at the seal) but a hole inside a retained run, an unstamped
+    amendment, or a start offset the seal watermark does not explain is red.
+    """
+
+    from torchlens.ir.capture_events import CaptureEvents
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        _check_journal_seq_invariants,
+    )
+
+    _model, _x, trace = _logged_model()
+    stream = trace._capture_events
+
+    class _FakeAmendment:
+        """Minimal stand-in carrying only the lane's sequencing facts."""
+
+        def __init__(self, seq: int) -> None:
+            self.seq = seq
+
+    def check() -> None:
+        _check_journal_seq_invariants(trace, "backward_graph_invariants")
+
+    original_lane = list(stream.op_amendments)
+    original_counter = stream.amendment_seq
+    original_watermark = stream.core_seal_watermark
+    try:
+        # A contiguous unfiltered run passes.
+        stream.op_amendments[:] = [_FakeAmendment(1), _FakeAmendment(2), _FakeAmendment(3)]
+        stream.amendment_seq = 3
+        stream.core_seal_watermark = None
+        check()
+
+        # A middle deletion is a hole in the retained run.
+        del stream.op_amendments[1]
+        with pytest.raises(MetadataInvariantError, match="not contiguous"):
+            check()
+
+        # A projection legitimately starts one past the seal watermark.
+        stream.op_amendments[:] = [_FakeAmendment(3), _FakeAmendment(4)]
+        stream.amendment_seq = 4
+        stream.core_seal_watermark = 2
+        check()
+
+        # An unexplained start offset (no watermark to justify it) is red.
+        stream.core_seal_watermark = None
+        with pytest.raises(MetadataInvariantError, match="starts at seq"):
+            check()
+
+        # An unstamped amendment bypassed the lane's single writer.
+        stream.op_amendments[:] = [_FakeAmendment(0)]
+        stream.amendment_seq = 1
+        with pytest.raises(MetadataInvariantError, match="no writer-stamped seq"):
+            check()
+
+        # A stamp beyond the lane counter is a bypass too.
+        stream.op_amendments[:] = [_FakeAmendment(1), _FakeAmendment(9)]
+        stream.amendment_seq = 2
+        with pytest.raises(MetadataInvariantError, match="exceeds the amendment writer counter"):
+            check()
+
+        # An empty lane stays legitimate.
+        stream.op_amendments[:] = []
+        check()
+    finally:
+        stream.op_amendments[:] = original_lane
+        stream.amendment_seq = original_counter
+        stream.core_seal_watermark = original_watermark
+    check()
+    assert isinstance(stream, CaptureEvents)
+
+
+@pytest.mark.smoke
 def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     """One logical op output emits exactly ONE OpGradObserved per pass.
 
