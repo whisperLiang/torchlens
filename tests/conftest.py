@@ -1,6 +1,7 @@
 import os
 import random
 import sys
+import time
 from collections.abc import Iterator
 from os.path import join as opj
 from pathlib import Path
@@ -11,11 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from torchlens import _state  # noqa: E402
+from torchlens import _state
 
 # Menagerie tests exercise the menagerie/ build subsystem, which is not importable
 # on Python < 3.11 because it uses datetime.UTC. Skip collecting them on those
@@ -80,6 +77,12 @@ def pytest_configure(config: pytest.Config) -> None:
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
     _state._function_call_models.clear()
+    # Pay PyTorch's one-time RNG and deterministic-mode initialization during
+    # session setup, not against whichever smoke test happens to run first.
+    torch.random.get_rng_state()
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
 
 
 # Smoke-tier duration budget (see tests/test_marker_lint.py). The partition
@@ -122,6 +125,29 @@ def pytest_runtest_makereport(
             offenders = []
             item.session._tl_smoke_budget_offenders = offenders
         offenders.append((item.nodeid, total_duration, SMOKE_DURATION_BUDGET_SECONDS))
+    return report
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(
+    collector: pytest.Collector,
+) -> Iterator[pytest.CollectReport]:
+    """Record test-module import and collection time for smoke-tier enforcement.
+
+    Parameters
+    ----------
+    collector:
+        Collector whose work is about to run.
+    """
+
+    started = time.perf_counter()
+    report = yield
+    if isinstance(collector, pytest.Module):
+        durations = getattr(collector.session, "_tl_module_collection_durations", None)
+        if durations is None:
+            durations = {}
+            collector.session._tl_module_collection_durations = durations
+        durations[str(collector.path)] = time.perf_counter() - started
     return report
 
 

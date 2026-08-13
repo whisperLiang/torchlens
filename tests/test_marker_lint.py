@@ -89,6 +89,30 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
     )
 
 
+def test_smoke_module_imports_stay_within_duration_budget(
+    request: pytest.FixtureRequest,
+) -> None:
+    """Smoke-bearing modules must import and collect within the 5s boundary."""
+
+    budget = 5.0
+    durations = getattr(request.session, "_tl_module_collection_durations", {})
+    smoke_paths = {
+        str(item.path)
+        for item in request.session.items
+        if item.get_closest_marker("smoke") is not None
+    }
+    offenders = [
+        (path, durations[path])
+        for path in sorted(smoke_paths)
+        if durations.get(path, 0.0) > budget
+    ]
+    lines = [f"{path}: {duration:.1f}s (budget {budget:.0f}s)" for path, duration in offenders]
+    assert not offenders, (
+        "Smoke-bearing modules exceeded the import/collection budget. Move expensive setup "
+        "behind fixtures or re-tier the module:\n  " + "\n  ".join(lines)
+    )
+
+
 def _assigned_module_names(statement: ast.stmt) -> set[str]:
     """Return module names assigned by one top-level statement.
 
@@ -256,4 +280,28 @@ def test_module_scoped_trace_fixtures_have_teardown() -> None:
     assert not violations, (
         "Module-scoped fixtures create live Traces without a teardown path. Yield the Trace "
         "and call cleanup() in finally:\n  " + "\n  ".join(violations)
+    )
+
+
+def test_root_conftest_does_not_inject_repo_into_sys_path() -> None:
+    """The suite must not hide an unusable editable install via path mutation."""
+
+    conftest_path = Path(__file__).with_name("conftest.py")
+    tree = ast.parse(conftest_path.read_text(encoding="utf-8"), filename=str(conftest_path))
+    violations: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        is_sys_path = (
+            isinstance(owner, ast.Attribute)
+            and isinstance(owner.value, ast.Name)
+            and owner.value.id == "sys"
+            and owner.attr == "path"
+        )
+        if is_sys_path and node.func.attr in {"append", "extend", "insert"}:
+            violations.append(node.lineno)
+    assert not violations, (
+        "tests/conftest.py mutates sys.path and can mask a broken installed distribution; "
+        f"offending lines: {violations}"
     )
