@@ -104,6 +104,7 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         # phase's per-device retained-bytes ceiling.
         "_module_call_accessor",
         "measure_python_peak_memory",
+        "distributed_witness",
         "save_budget",
         "_save_budget_accountant",
         # M5 Op seam: the per-trace columnar row store backing every Op

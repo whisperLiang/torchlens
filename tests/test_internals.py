@@ -112,7 +112,16 @@ class TestFieldOrderSync:
         missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
         assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
         non_user_facing = public_attrs - user_facing
-        assert non_user_facing == {"measure_python_peak_memory"}, (
+        # The declared inventory of deliberate session-time knobs: public-named,
+        # FieldPolicy.DROP, absent from MODEL_LOG_FIELD_ORDER because they do
+        # not survive save/load. (``save_budget`` was already DROP when this
+        # assertion listed only ``measure_python_peak_memory``; that was a
+        # stale pin, red on the producer baseline, corrected here.)
+        assert non_user_facing == {
+            "measure_python_peak_memory",
+            "save_budget",
+            "distributed_witness",
+        }, (
             "Trace public fields classified as non-user-facing changed: "
             f"{non_user_facing}"
         )

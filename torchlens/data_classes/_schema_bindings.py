@@ -249,6 +249,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_rf_target_solutions": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
         "_optimizer": StorageBinding(StorageKind.RUNTIME),
         "measure_python_peak_memory": StorageBinding(StorageKind.RUNTIME),
+        "distributed_witness": StorageBinding(StorageKind.RUNTIME),
         "save_budget": StorageBinding(StorageKind.RUNTIME),
         "_warned_nonfinite_check_unavailable": StorageBinding(StorageKind.RUNTIME),
         "_predicate_save_options": StorageBinding(StorageKind.RUNTIME),

@@ -124,6 +124,7 @@ __all__ = [
     "get_jit_builtin_table",
     "get_optional_torch_namespace",
     "get_torch_capability_snapshot",
+    "probe_c10d_capabilities",
     "get_torch_function_mode_stack_length",
     "get_torch_vf_namespace",
     "get_variable_function_names",
@@ -1127,6 +1128,12 @@ _TRACING_TENSOR_TYPES_PROBED: bool = False
 HAS_FP8_DTYPES: bool = False
 _FP8_DTYPES: frozenset[Any] = frozenset()
 _FP8_DTYPES_PROBED: bool = False
+HAS_C10D_GROUP_REGISTRY: bool = False
+_C10D_GROUP_REGISTRY_PROBED: bool = False
+HAS_C10D_GROUP_SEQ: bool = False
+_C10D_GROUP_SEQ_PROBED: bool = False
+HAS_C10D_ABORT_PG: bool = False
+_C10D_ABORT_PG_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1147,12 +1154,18 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_DYNAMO_EXPLAIN",
     "HAS_FSDP_WRAPPER",
+    "HAS_C10D_ABORT_PG",
+    "HAS_C10D_GROUP_REGISTRY",
+    "HAS_C10D_GROUP_SEQ",
     "HAS_DTENSOR",
     "HAS_DEVICE_MESH",
     "HAS_PIPELINING",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_TRACING_TENSOR_TYPES",
     "HAS_FP8_DTYPES",
+    "HAS_C10D_GROUP_REGISTRY",
+    "HAS_C10D_GROUP_SEQ",
+    "HAS_C10D_ABORT_PG",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -1229,6 +1242,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_pipelining_module_types(force_probe=True)
     get_tracing_tensor_types(force_probe=True)
     get_fp8_dtypes(force_probe=True)
+    probe_c10d_capabilities(force_probe=True)
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
@@ -1760,6 +1774,83 @@ def dynamo_is_compiling() -> bool:
         return bool(probe())
     except Exception:
         return False
+
+
+def probe_c10d_capabilities(*, force_probe: bool = False) -> dict[str, bool]:
+    """Probe the c10d group-registry / group-seq / abort surfaces lazily.
+
+    Parameters
+    ----------
+    force_probe:
+        Probe even when ``torch.distributed`` has never been imported.
+
+    Returns
+    -------
+    dict[str, bool]
+        The three flag values. Each degradation is named through
+        :func:`mark_torch_capability_missing` exactly once.
+
+    Notes
+    -----
+    * ``HAS_C10D_GROUP_REGISTRY`` -- ``torch.distributed.distributed_c10d._world``
+      exposes the live group registry (``pg_map``); restricted registry seeding
+      and the two-alive-same-membership refusal read it.
+    * ``HAS_C10D_GROUP_SEQ`` -- ``ProcessGroup._get_sequence_number_for_group``
+      exists; the redundant ``c10d_group_seq`` cross-check on collective
+      boundary records reads it (diagnostic, never correlation authority).
+    * ``HAS_C10D_ABORT_PG`` -- ``torch.distributed._abort_process_group`` exists
+      and is wrapped observationally by the group-lifecycle wraps.
+    """
+
+    global HAS_C10D_GROUP_REGISTRY, _C10D_GROUP_REGISTRY_PROBED
+    global HAS_C10D_GROUP_SEQ, _C10D_GROUP_SEQ_PROBED
+    global HAS_C10D_ABORT_PG, _C10D_ABORT_PG_PROBED
+
+    needs_probe = not (
+        _C10D_GROUP_REGISTRY_PROBED and _C10D_GROUP_SEQ_PROBED and _C10D_ABORT_PG_PROBED
+    )
+    if needs_probe and (force_probe or "torch.distributed" in sys.modules):
+        c10d = _import_module_attr_or_none("torch.distributed", "distributed_c10d")
+        if not _C10D_GROUP_REGISTRY_PROBED:
+            world = getattr(c10d, "_world", None)
+            HAS_C10D_GROUP_REGISTRY = isinstance(getattr(world, "pg_map", None), dict)
+            _C10D_GROUP_REGISTRY_PROBED = True
+            if not HAS_C10D_GROUP_REGISTRY:
+                mark_torch_capability_missing(
+                    "HAS_C10D_GROUP_REGISTRY",
+                    "restricted registry seeding of pre-arming process groups "
+                    "refuses (ambiguous_group_lifetime) instead of proving "
+                    "single-generation membership",
+                )
+        if not _C10D_GROUP_SEQ_PROBED:
+            process_group_type = _nested_getattr_or_none(
+                torch, ("_C", "_distributed_c10d", "ProcessGroup")
+            )
+            HAS_C10D_GROUP_SEQ = hasattr(
+                process_group_type, "_get_sequence_number_for_group"
+            )
+            _C10D_GROUP_SEQ_PROBED = True
+            if not HAS_C10D_GROUP_SEQ:
+                mark_torch_capability_missing(
+                    "HAS_C10D_GROUP_SEQ",
+                    "collective boundary records omit the redundant "
+                    "c10d_group_seq cross-check field",
+                )
+        if not _C10D_ABORT_PG_PROBED:
+            HAS_C10D_ABORT_PG = callable(getattr(c10d, "_abort_process_group", None))
+            _C10D_ABORT_PG_PROBED = True
+            if not HAS_C10D_ABORT_PG:
+                mark_torch_capability_missing(
+                    "HAS_C10D_ABORT_PG",
+                    "NCCL abort-recreate lifecycle events are observed only "
+                    "through destroy_process_group; unobserved destruction "
+                    "remains harmless by ordinal construction",
+                )
+    return {
+        "HAS_C10D_GROUP_REGISTRY": HAS_C10D_GROUP_REGISTRY,
+        "HAS_C10D_GROUP_SEQ": HAS_C10D_GROUP_SEQ,
+        "HAS_C10D_ABORT_PG": HAS_C10D_ABORT_PG,
+    }
 
 
 def get_tracing_tensor_types(*, force_probe: bool = False) -> tuple[type[Any], ...]:

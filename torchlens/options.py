@@ -77,6 +77,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "emit_nvtx",
     "measure_python_peak_memory",
     "save_budget",
+    "distributed_witness",
     "raise_on_nan",
     "_module_containment_engine",
 )
@@ -542,6 +543,13 @@ def _validate_capture_values(values: Mapping[str, Any]) -> None:
         raise TypeError("jax_max_control_flow_unroll must be an integer")
     if values["jax_max_control_flow_unroll"] < 1:
         raise ValueError("jax_max_control_flow_unroll must be >= 1")
+    if values["distributed_witness"] not in {"none", "digest", "payload"}:
+        raise ValueError("distributed_witness must be 'none', 'digest', or 'payload'")
+    if values["distributed_witness"] == "payload":
+        raise ValueError(
+            "distributed_witness='payload' is reserved: payload witnesses land "
+            "with the merge artifact story (merge-ranks C1). Use 'digest'."
+        )
 
 
 def _set_frozen_fields(
@@ -792,6 +800,19 @@ class CaptureOptions:
         but taxes every traced operation (measured at 1.7x-2.5x total capture
         time on torchvision CNNs and ViTs), so it is opt-in. CUDA captures
         report the true device peak and ignore this option.
+    distributed_witness:
+        Session-time witness level for collective boundary records captured
+        under the distributed opt-in. ``"none"`` (the default) records
+        structure and correlation only; ``"digest"`` additionally stores
+        byte-exact SHA-256 digests of each contribution at issue and each
+        destination at observed completion (redundant evidence that can only
+        DEMOTE a merge verdict, never rescue one -- and a synchronization cost
+        on accelerator captures). ``"payload"`` is reserved for the merge
+        artifact story and currently refuses. Like
+        ``measure_python_peak_memory`` this is a session-time knob: it changes
+        what capture pays for, not what a trace means, and load restores the
+        default. The per-boundary ``witness.policy_resolved`` field IS
+        portable evidence of what was captured.
     save_budget:
         Ceiling on the bytes of activation payload a single capture may retain,
         enforced per device. ``"auto"`` (the default)
@@ -861,6 +882,7 @@ class CaptureOptions:
     emit_nvtx: bool = False
     measure_python_peak_memory: bool = False
     save_budget: SaveBudgetOption = "auto"
+    distributed_witness: str = "none"
     raise_on_nan: bool = False
     _module_containment_engine: Literal["thread_replay", "hook_stack", "both"] = "hook_stack"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
@@ -910,6 +932,7 @@ class CaptureOptions:
         emit_nvtx: bool | MissingType = MISSING,
         measure_python_peak_memory: bool | MissingType = MISSING,
         save_budget: SaveBudgetOption | MissingType = MISSING,
+        distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         _module_containment_engine: (
             Literal["thread_replay", "hook_stack", "both"] | MissingType
@@ -1074,6 +1097,12 @@ class CaptureOptions:
                 "save_budget",
                 save_budget,
                 "auto",
+                specified_fields,
+            ),
+            "distributed_witness": _resolve_option_value(
+                "distributed_witness",
+                distributed_witness,
+                "none",
                 specified_fields,
             ),
             "raise_on_nan": _resolve_option_value(

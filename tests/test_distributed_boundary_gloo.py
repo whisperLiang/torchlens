@@ -235,6 +235,58 @@ class TestBoundaryNode:
         assert "distributed" not in log.annotations
 
 
+class TestWitnessPolicy:
+    def test_digest_witness_records_byte_exact_digests(self, gloo_world):
+        from torchlens.backends.torch.collectives import _digest_tensor
+
+        lifecycle.arm()
+        log = tl.trace(
+            HandRolledTP(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(distributed_witness="digest"),
+        )
+        boundary = [op for op in log.ops if op.type == "allreduce"][0]
+        witness = boundary.annotations["collective"]["witness"]
+        assert witness["policy_resolved"] == "digest"
+        assert len(witness["contribution_digests"]) == 1
+        # The destination digest is byte-exact evidence: recomputing it over
+        # the saved boundary output must reproduce it.
+        assert witness["destination_digests"] == [_digest_tensor(boundary.out)]
+
+    def test_async_digest_destination_not_present(self, gloo_world):
+        dist = gloo_world
+
+        class AsyncModel(nn.Module):
+            def forward(self, x):
+                doubled = x * 2
+                work = dist.all_reduce(doubled, async_op=True)
+                work.wait()
+                return doubled + 1
+
+        lifecycle.arm()
+        log = tl.trace(
+            AsyncModel(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(distributed_witness="digest"),
+        )
+        witness = [op for op in log.ops if op.type == "allreduce"][0].annotations[
+            "collective"
+        ]["witness"]
+        assert witness["contribution_digests"] is not None
+        assert witness["destination_digests"] is None
+        assert witness["not_present_reason"] == "async_completion_unobserved"
+
+    def test_payload_witness_is_reserved_and_refuses(self, gloo_world):
+        lifecycle.arm()
+        with pytest.raises(ValueError, match="payload"):
+            tl.options.CaptureOptions(distributed_witness="payload")
+
+    def test_unknown_witness_level_refuses(self, gloo_world):
+        lifecycle.arm()
+        with pytest.raises(ValueError, match="distributed_witness"):
+            tl.options.CaptureOptions(distributed_witness="everything")
+
+
 # ---------------------------------------------------------------------------
 # 2-rank spawn sims
 # ---------------------------------------------------------------------------
