@@ -2626,6 +2626,7 @@ class Trace(
     def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with non-picklable weakref-backed accessors stripped."""
         state = self.__dict__.copy()
+        state["_pickle_module_accessor_state"] = self.__dict__.get("_module_logs")
         # Event streams never serialize (FieldPolicy.DROP): strip the stream
         # AND the projection guard derived from it, or a restored trace would
         # claim a source-process revision/fold-state over a fresh empty stream
@@ -2688,6 +2689,7 @@ class Trace(
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
+        pickle_module_accessor_state = state.pop("_pickle_module_accessor_state", None)
         for field_name in (
             *LEGACY_TRACE_BUILD_STATE_KEYS,
             # "_build_state" is the pre-M10 flat scratchpad key; the three
@@ -2944,6 +2946,15 @@ class Trace(
         from ._trace_rehydrate import rehydrate_trace_core
 
         rehydrate_trace_core(self)
+        if pickle_module_accessor_state is not None:
+            from .._io.accessor_rebuild import rebuild_trace_accessors
+
+            rebuild_trace_accessors(
+                self,
+                pickle_module_accessor_state._dict,
+                pickle_module_accessor_state._list,
+                pickle_module_accessor_state._pass_dict,
+            )
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:

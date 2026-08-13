@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import torch
@@ -54,6 +55,33 @@ class _ComplexModel(torch.nn.Module):
         """
 
         return value * (1 + 0j)
+
+
+class _BufferedModel(torch.nn.Module):
+    """Model with a child module and persistent buffer for pickle tests."""
+
+    def __init__(self) -> None:
+        """Initialize the child module and buffer."""
+
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+        self.register_buffer("offset", torch.ones(2))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply the child module and buffer.
+
+        Parameters
+        ----------
+        value:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Buffered output.
+        """
+
+        return self.linear(value) + self.offset
 
 
 def _save_seeded_trace(path: Path, *, random_seed: int) -> tl.Trace:
@@ -140,3 +168,18 @@ def test_bundle_writer_resolves_lazy_conjugate_payloads(tmp_path: Path) -> None:
 
     loaded = tl.load(path)
     assert torch.equal(loaded.output_ops[0].transformed_out, expected)
+
+
+def test_pickle_preserves_module_and_buffer_hierarchy() -> None:
+    """Plain pickle rebuilds the same module and buffer accessors as TLSPEC load."""
+
+    trace = tl.trace(_BufferedModel(), torch.ones(1, 2))
+    restored = pickle.loads(pickle.dumps(trace))
+
+    assert [module.address for module in restored.modules] == [
+        module.address for module in trace.modules
+    ]
+    assert [buffer.address for buffer in restored.buffers] == [
+        buffer.address for buffer in trace.buffers
+    ]
+    assert restored.modules["linear"]._source_trace is restored
