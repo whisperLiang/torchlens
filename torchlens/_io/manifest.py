@@ -21,6 +21,7 @@ from typing import Any
 import torch
 from packaging.version import InvalidVersion, Version
 
+from .. import __version__ as TORCHLENS_VERSION
 from . import (
     MIN_TLSPEC_VERSION,
     MIN_TORCHLENS_VERSION_TEXT,
@@ -28,9 +29,8 @@ from . import (
     ArtifactSchemaAgeWarning,
     ArtifactVersionBelowFloorError,
     TorchLensIOError,
+    _json,
 )
-from . import _json
-from .. import __version__ as TORCHLENS_VERSION
 
 LOGGER = logging.getLogger(__name__)
 

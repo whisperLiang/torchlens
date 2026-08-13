@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,7 +20,6 @@ import torchlens as tl
 from torchlens import repgeom
 from torchlens.visualization.node_spec import NodeSpec
 from torchlens.viz.node_plots import _DRAW_SCALE, _legend_bbox, _legend_height
-
 
 ANALYTIC_POINTS = np.array(
     [

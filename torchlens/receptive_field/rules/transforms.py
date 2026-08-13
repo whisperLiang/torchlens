@@ -142,7 +142,7 @@ def permute(context: ReceptiveFieldRuleContext) -> _RuleResult:
     if sorted(order) != list(range(rank)):
         return context.unknown("permutation dimensions did not form a complete axis order")
     return context.axis_map(
-        {output_axis: parent_axis for output_axis, parent_axis in enumerate(order)},
+        dict(enumerate(order)),
         note="structural permutation preserves axis coordinates exactly",
     )
 

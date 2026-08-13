@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
 import gc
 import importlib.util
-import os
-from pathlib import Path
 import math
+import os
 import resource
 import statistics
 import tempfile
 import time
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest

@@ -1700,10 +1700,7 @@ def _should_mark_arguments_on_unrolled_edge(
             ]
         )
 
-    if num_parents_shown > 1:
-        return True
-    else:
-        return False
+    return num_parents_shown > 1
 
 
 def _should_mark_arguments_on_rolled_edge(
@@ -1720,7 +1717,7 @@ def _should_mark_arguments_on_rolled_edge(
         rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
     maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
-    for call_index, pass_parents in maps.parents_per_pass(child_node).items():
+    for _call_index, pass_parents in maps.parents_per_pass(child_node).items():
         num_parents_shown = len(pass_parents)
         if show_buffer_layers != "always":
             num_parents_shown -= sum(

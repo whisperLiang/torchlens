@@ -13,8 +13,8 @@ import torch.nn.modules.module as torch_module
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch import prehook_provenance as provenance
 from torchlens._io import BlobRef
+from torchlens.backends.torch import prehook_provenance as provenance
 from torchlens.fastlog import PredicateError
 from torchlens.validation.core import validate_saved_outs
 

@@ -32,7 +32,8 @@ replacement, and a first question asked after the write are all seen normally.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Callable, Iterator, NamedTuple
+from collections.abc import Callable, Iterator
+from typing import Any, NamedTuple
 
 import torch
 
@@ -52,7 +53,7 @@ class _ScanMemo(NamedTuple):
 
 # Keyed by log object so a memo never keeps a Trace alive, and holding only
 # weakrefs to the examined tensors so it never keeps an activation alive either.
-_MEMOS: "weakref.WeakKeyDictionary[Any, dict[str, _ScanMemo]]" = weakref.WeakKeyDictionary()
+_MEMOS: weakref.WeakKeyDictionary[Any, dict[str, _ScanMemo]] = weakref.WeakKeyDictionary()
 
 
 def _trace_out(layer: Any) -> Any:

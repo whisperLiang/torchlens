@@ -311,7 +311,7 @@ def test_n1a_initializes_every_role_deterministically_and_names_every_slot(
     )
     roles = tuple(StateSlotRole)
     slots = []
-    for index, role in enumerate(roles):
+    for _index, role in enumerate(roles):
         is_counter = role is StateSlotRole.COUNTER
         binding = template.state_binding
         assert binding is not None

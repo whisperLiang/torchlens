@@ -22,7 +22,7 @@ Step 11 (_build_lookup_keys_and_finalize_retained_layers): Builds lookup key map
 
 from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
-from typing import Any, Dict, List, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .._errors import AmbiguousOpLookupError
 from ..data_classes.cleanup import _project_conditional_child_views
@@ -151,10 +151,10 @@ def _log_final_info_for_layers(self: "Trace") -> None:
     # One rename per equivalence class / recurrence group instead of one per
     # pass; see ``_replace_layer_names_for_layer_entry`` for why the shared
     # results are safe.
-    equivalent_ops_memo: Dict[int, Tuple[Any, Any]] = {}
-    recurrent_ops_memo: Dict[Tuple[str, ...], List[str]] = {}
+    equivalent_ops_memo: dict[int, tuple[Any, Any]] = {}
+    recurrent_ops_memo: dict[tuple[str, ...], list[str]] = {}
 
-    for t, layer_entry in enumerate(self):
+    for _t, layer_entry in enumerate(self):
         _normalize_io_role_flags(layer_entry)
         if layer_entry.layer_type in ["input", "buffer"]:
             layer_entry.step_index = 0
@@ -311,9 +311,9 @@ _LIST_FIELDS_TO_RENAME = [
 
 
 def _rename_elif_children(
-    conditional_elif_children: Dict[int, List[str]],
-    mapping: Dict[str, str],
-) -> Dict[int, List[str]]:
+    conditional_elif_children: dict[int, list[str]],
+    mapping: dict[str, str],
+) -> dict[int, list[str]]:
     """Rename labels inside ``conditional_elif_children``.
 
     Args:
@@ -330,9 +330,9 @@ def _rename_elif_children(
 
 
 def _rename_children_by_cond(
-    conditional_arm_children: Dict[int, Dict[str, List[str]]],
-    mapping: Dict[str, str],
-) -> Dict[int, Dict[str, List[str]]]:
+    conditional_arm_children: dict[int, dict[str, list[str]]],
+    mapping: dict[str, str],
+) -> dict[int, dict[str, list[str]]]:
     """Rename labels inside ``conditional_arm_children``.
 
     Args:
@@ -354,8 +354,8 @@ def _rename_children_by_cond(
 def _replace_layer_names_for_layer_entry(
     self: "Trace",
     layer_entry: Op,
-    equivalent_ops_memo: Dict[int, Tuple[Any, Any]] | None = None,
-    recurrent_ops_memo: Dict[Tuple[str, ...], List[str]] | None = None,
+    equivalent_ops_memo: dict[int, tuple[Any, Any]] | None = None,
+    recurrent_ops_memo: dict[tuple[str, ...], list[str]] | None = None,
 ) -> None:
     """Replace all raw labels in a Op's fields with final labels.
 
@@ -527,7 +527,7 @@ def _replace_layer_names_for_layer_entry(
         )
 
 
-def _rename_template_parent_refs(value: Any, mapping: Dict[str, str]) -> Any:
+def _rename_template_parent_refs(value: Any, mapping: dict[str, str]) -> Any:
     """Rename ``ParentRef.parent_label`` leaves in replay templates.
 
     Args:
@@ -556,7 +556,7 @@ def _rename_template_parent_refs(value: Any, mapping: Dict[str, str]) -> Any:
     return value
 
 
-def _rename_label_dataclass(value: Any, mapping: Dict[str, str]) -> Any:
+def _rename_label_dataclass(value: Any, mapping: dict[str, str]) -> Any:
     """Rename known label fields on frozen intervention dataclasses.
 
     Args:
@@ -949,9 +949,9 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
 
     new_equiv_operations_tensors: dict[Any, set[str]] = {}
     for key, equiv_values in self.op_equivalence_classes.items():
-        new_equiv_operations_tensors[key] = set(
-            [self._raw_to_final_op_labels[tensor_label] for tensor_label in equiv_values]
-        )
+        new_equiv_operations_tensors[key] = {
+            self._raw_to_final_op_labels[tensor_label] for tensor_label in equiv_values
+        }
     self.op_equivalence_classes = new_equiv_operations_tensors
 
     for t, (child, parent) in enumerate(self.conditional_branch_edges):

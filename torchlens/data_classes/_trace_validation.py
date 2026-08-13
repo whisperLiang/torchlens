@@ -1,7 +1,7 @@
 """Trace validation and replay mixin."""
 
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, Union, cast
 
 import torch
 from torch import nn
@@ -136,11 +136,11 @@ class TraceValidationMixin(_TraceMixinBase):
     def save_new_outs(
         self: "Trace",
         model: torch.nn.Module,
-        input_args: torch.Tensor | List[Any],
-        input_kwargs: Optional[Dict[Any, Any]] = None,
-        layers_to_save: str | List[str] = "all",
-        grad_layers_to_save: str | List[str] | None = "all",
-        random_seed: Optional[int] = None,
+        input_args: torch.Tensor | list[Any],
+        input_kwargs: dict[Any, Any] | None = None,
+        layers_to_save: str | list[str] = "all",
+        grad_layers_to_save: str | list[str] | None = "all",
+        random_seed: int | None = None,
         backward_ready: bool | None = None,
     ) -> None:
         """Re-run the model with new inputs, saving only outs.
@@ -151,9 +151,9 @@ class TraceValidationMixin(_TraceMixinBase):
             Forwarded unchanged to
             :func:`torchlens.capture.trace.save_new_outs`.
         """
+        from .._capture_state_helpers import unwrap_compiled_model
         from ..capture.outcome import require_capture_capability
         from ..capture.trace import save_new_outs as _impl
-        from .._capture_state_helpers import unwrap_compiled_model
 
         # N3/N5: a live refresh re-drives the FULL native forward against the
         # recorded graph, which a halted/failed/unproven capture cannot honor.
@@ -173,7 +173,7 @@ class TraceValidationMixin(_TraceMixinBase):
 
     def validate_saved_outs(
         self: "Trace",
-        ground_truth_output_tensors: List[torch.Tensor],
+        ground_truth_output_tensors: list[torch.Tensor],
         verbose: bool = False,
         validate_metadata: bool = True,
     ) -> Union[bool, "ValidationReplayStatus"]:
@@ -203,7 +203,7 @@ class TraceValidationMixin(_TraceMixinBase):
 
     def validate_forward_pass(
         self: "Trace",
-        ground_truth_output_tensors: List[torch.Tensor],
+        ground_truth_output_tensors: list[torch.Tensor],
         verbose: bool = False,
         validate_metadata: bool = True,
     ) -> Union[bool, "ValidationReplayStatus"]:
@@ -759,8 +759,8 @@ class TraceValidationMixin(_TraceMixinBase):
 
     def _postprocess(
         self: "Trace",
-        output_tensors: List[torch.Tensor],
-        output_tensor_addresses: List[str],
+        output_tensors: list[torch.Tensor],
+        output_tensor_addresses: list[str],
     ) -> None:
         """Run postprocessing on a completed raw capture pass.
 
@@ -786,11 +786,11 @@ class TraceValidationMixin(_TraceMixinBase):
     def _run_and_log_inputs_through_model(
         self: "Trace",
         model: torch.nn.Module,
-        input_args: torch.Tensor | List[Any],
-        input_kwargs: Optional[Dict[Any, Any]] = None,
-        layers_to_save: Optional[str | List[str | int]] = "all",
-        grad_layers_to_save: Optional[str | List[str | int]] = "all",
-        random_seed: Optional[int] = None,
+        input_args: torch.Tensor | list[Any],
+        input_kwargs: dict[Any, Any] | None = None,
+        layers_to_save: str | list[str | int] | None = "all",
+        grad_layers_to_save: str | list[str | int] | None = "all",
+        random_seed: int | None = None,
         postprocess: bool = True,
     ) -> Any:
         """Run a forward pass and capture it into this model log.
@@ -970,7 +970,7 @@ class TraceValidationMixin(_TraceMixinBase):
             if len(tensor_labels) > 0
         }
 
-        for equiv_group, equivalent_label_set in list(self.op_equivalence_classes.items()):
+        for _equiv_group, equivalent_label_set in list(self.op_equivalence_classes.items()):
             equivalent_label_set -= labels_to_remove
         self.op_equivalence_classes = {
             equiv_group: equivalent_label_set

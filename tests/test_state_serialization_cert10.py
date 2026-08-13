@@ -37,8 +37,8 @@ from torchlens._io import TorchLensIOError
 from torchlens.data_classes.backward_pass import BackwardPass
 from torchlens.data_classes.grad_fn import GradFn
 from torchlens.data_classes.grad_fn_call import GradFnCall
-from torchlens.data_classes.module import Module, ModuleCall
 from torchlens.data_classes.layer import Layer
+from torchlens.data_classes.module import Module, ModuleCall
 from torchlens.data_classes.param import Param
 from torchlens.options import CaptureOptions
 

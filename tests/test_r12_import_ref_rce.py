@@ -22,11 +22,11 @@ materialized ``LazyImportRef`` so the deferred resolution enforces the gate.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
-from pathlib import Path
 import sys
 import textwrap
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 import torch

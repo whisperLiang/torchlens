@@ -4,32 +4,31 @@ This module creates input and buffer Op entries, updates fast-capture source
 payloads, and preserves source equivalence metadata for postprocessing.
 """
 
-from collections import defaultdict
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..._errors import TorchLensPostfuncError
-from ...fastlog.exceptions import PredicateError
-from ...fastlog._halt import HaltSignal
-from ...ir.predicate import RetroactiveCaptureDecision
-from ._tl import get_tensor_meta, set_tensor_label
-from .completeness_witness import internal_scalar_read
 from ..._training_validation import TrainingModeConfigError
-from . import module_stack as _mstack
 from ...capture.predicates import _evaluate_halt, _evaluate_keep_op, _is_halt_only_capture
 from ...capture.projections import (
     _build_record_context,
     append_projected_event,
     get_active_recording_state,
 )
+from ...fastlog._halt import HaltSignal
+from ...fastlog.exceptions import PredicateError
 from ...fastlog.types import ActivationRecord, CaptureSpec
+from ...ir.predicate import RetroactiveCaptureDecision
 from ...utils.arg_handling import INPUT_WAS_PARAMETER_ATTR
 from ...utils.introspection import _get_code_context
 from ...utils.rng import log_current_rng_states
 from ...utils.tensor_utils import get_memory_amount_from_metadata
-
+from . import module_stack as _mstack
+from ._tl import get_tensor_meta, set_tensor_label
+from .completeness_witness import internal_scalar_read
 from .tensor_tracking import _add_tensor_backward_hook, _append_module_suffix_to_equivalence_class
 
 if TYPE_CHECKING:
@@ -400,7 +399,7 @@ def log_source_tensor_exhaustive(
         "parent_param_ops": {},
         "_param_logs": [],
         "param_shapes": [],
-        "num_params": int(0),
+        "num_params": 0,
         "num_params_trainable": 0,
         "num_params_frozen": 0,
         "param_memory": 0,

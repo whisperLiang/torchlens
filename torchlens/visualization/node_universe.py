@@ -11,8 +11,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from ..data_classes.module import Module
-    from .auto_collapse import ModuleRepeatFold
     from ._render_common import RenderEdge, RenderedNodeEmission
+    from .auto_collapse import ModuleRepeatFold
 
 NodeUnitKind = Literal[
     "raw_op",
@@ -46,7 +46,7 @@ class NodeUnit:
 
     unit_id: str
     kind: NodeUnitKind
-    emission: "RenderedNodeEmission"
+    emission: RenderedNodeEmission
     source_nodes: tuple[Any, ...]
     hidden_members: tuple[str, ...]
     counts_for_collapse: bool = True
@@ -99,7 +99,7 @@ class NodeUniverse:
     projected_edges: tuple[ProjectedEdgeOccurrence, ...]
 
     @property
-    def emissions(self) -> tuple["RenderedNodeEmission", ...]:
+    def emissions(self) -> tuple[RenderedNodeEmission, ...]:
         """Return temporary renderer-compatible visible emissions.
 
         Returns
@@ -113,9 +113,9 @@ class NodeUniverse:
 
 def build_node_universe(
     source_graph: SourceGraph,
-    collapse_fn: "Callable[[Module], bool] | None",
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segments: "Mapping[str, Any] | None" = None,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    segments: Mapping[str, Any] | None = None,
     containers: Any = None,
 ) -> NodeUniverse:
     """Project one normalized source graph into visible structural units.
@@ -260,9 +260,9 @@ def build_node_universe(
 
 
 def _project_edges(
-    edge_map: "Mapping[str, list[RenderEdge]]",
-    projection: "Mapping[str, str]",
-    original_labels: "Mapping[str, str]",
+    edge_map: Mapping[str, list[RenderEdge]],
+    projection: Mapping[str, str],
+    original_labels: Mapping[str, str],
     vis_mode: str,
 ) -> tuple[ProjectedEdgeOccurrence, ...]:
     """Project normalized edge occurrences onto visible unit identifiers.

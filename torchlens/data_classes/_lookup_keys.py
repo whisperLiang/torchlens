@@ -1,16 +1,16 @@
 """Shared lookup-key validation helpers for ``Trace`` access paths."""
 
 import random
-from typing import TYPE_CHECKING, Union, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from .trace import Trace
     from .module import Module
+    from .trace import Trace
 
 
 def _give_user_feedback_about_lookup_key(
     self: "Trace",
-    key: Union[int, str],
+    key: int | str,
     mode: str,
 ) -> None:
     """Raise a contextual error for an invalid user lookup key.
@@ -66,7 +66,7 @@ def _give_user_feedback_about_lookup_key(
     raise ValueError(_get_lookup_help_str(self, key, mode))
 
 
-def _get_lookup_help_str(self: "Trace", layer_label: Union[int, str], mode: str) -> str:
+def _get_lookup_help_str(self: "Trace", layer_label: int | str, mode: str) -> str:
     """Build the standard help text for failed Trace lookups.
 
     Parameters

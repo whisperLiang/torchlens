@@ -22,7 +22,7 @@ the non-reentrant checkpoint hook subclass the same class and are covered.
 from __future__ import annotations
 
 import warnings
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 import torch

@@ -8,17 +8,16 @@ tests and future materialization-enabled saves.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
 import json
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
 import torch
 
-from . import JaxPayloadLoadHint, PayloadLoadHints
-from . import _json
+from . import JaxPayloadLoadHint, PayloadLoadHints, _json
 from ._artifact_strings import _resolve_portable_device
 from .tensor_policy import FailReason, Ok, SkipReason, TensorPolicyDecision, is_supported_for_save
 

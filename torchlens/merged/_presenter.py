@@ -10,9 +10,10 @@ string is validated sugar. Refused surfaces raise typed
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 from ._engine import JoinKey, JoinRecord, MergeDerivation, derive_merge
 from ._enums import BoundaryConsistency, MergeAlignment, MergedErrorCode, MergeValueStatus

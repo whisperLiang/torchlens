@@ -1447,14 +1447,13 @@ def _call_groups_for_layer_uncached(layer_log: "Layer") -> tuple[tuple[int, ...]
     common_calls = _common_module_call_indices(layer_log)
     if len(common_calls) != 1:
         return ()
-    pass_to_call_index = {
-        pass_index: call_index
-        for pass_index, call_index in zip(
+    pass_to_call_index = dict(
+        zip(
             layer_log.ops,
             next(iter(common_calls.values())),
             strict=True,
         )
-    }
+    )
     components = _same_layer_dependency_components(layer_log)
     if len(components) <= 1:
         return ()

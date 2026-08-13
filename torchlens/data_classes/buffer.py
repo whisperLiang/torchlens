@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Dict, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from .._errors import AmbiguousOpLookupError
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
+from .._io import TLSPEC_VERSION, FieldPolicy, default_fill_state, read_tlspec_version
 from ..constants import BUFFER_LOG_FIELD_ORDER
 from ._accessor_base import Accessor
-from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
-from ._runtime_handles import runtime_handle_from_trace
 from ._repr import format_summary_lines
+from ._runtime_handles import runtime_handle_from_trace
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -39,7 +39,7 @@ _TO_PANDAS_EXCLUDED_BUFFER_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def _buffer_log_to_row(buffer_log: "Buffer") -> Dict[str, Any]:
+def _buffer_log_to_row(buffer_log: Buffer) -> dict[str, Any]:
     """Convert a Buffer into one DataFrame row.
 
     Parameters
@@ -79,9 +79,9 @@ class Buffer:
     def __init__(
         self,
         address: str,
-        versions: Sequence["Op"],
+        versions: Sequence[Op],
         initial_value: Any | None = None,
-        source_trace: "Trace | None" = None,
+        source_trace: Trace | None = None,
     ) -> None:
         """Initialize a buffer entity from graph version nodes.
 
@@ -108,14 +108,14 @@ class Buffer:
 
         return record_state_items(self)
 
-    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
         """Install a state mapping through the cell descriptors (M8 hook)."""
 
         from .._trace_core.record_rows import record_state_restore
 
         record_state_restore(self, mapping)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with the non-picklable weakref stripped.
 
         ``_source_ref`` is a live ``weakref.ref`` to the owning ``Trace``
@@ -132,7 +132,7 @@ class Buffer:
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state without reviving the source-trace weakref."""
 
         read_tlspec_version(state, cls_name=type(self).__name__)
@@ -152,7 +152,7 @@ class Buffer:
         record_state_restore(self, state)
 
     @property
-    def source_trace(self) -> "Trace | None":
+    def source_trace(self) -> Trace | None:
         """Return the owning trace if it is still alive."""
 
         if self._source_ref is None:
@@ -160,7 +160,7 @@ class Buffer:
         return self._source_ref()
 
     @property
-    def trace(self) -> "Trace | None":
+    def trace(self) -> Trace | None:
         """Compatibility alias for ``source_trace``."""
 
         return self.source_trace
@@ -226,7 +226,7 @@ class Buffer:
         return self.num_overwrites > 0
 
     @property
-    def write_versions(self) -> list["Op"]:
+    def write_versions(self) -> list[Op]:
         """Return versions produced by writes, excluding static initial reads."""
 
         return [version for version in self.versions if version.buffer_write_kind is not None]
@@ -335,7 +335,7 @@ class Buffer:
         writes = self.write_versions
         return writes[overwrite_index - 1].out
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export this Buffer as a one-row pandas DataFrame.
 
         Driven by ``BUFFER_LOG_FIELD_ORDER`` minus the documented, genuinely
@@ -402,15 +402,15 @@ class BufferAccessor(Accessor["Buffer"]):
 
     def __init__(
         self,
-        buffer_dict: Dict[str, "Buffer"],
-        source_trace: "Trace | None" = None,
+        buffer_dict: dict[str, Buffer],
+        source_trace: Trace | None = None,
     ) -> None:
         """Initialize the accessor from address-keyed buffer entities."""
 
         source_ref = weakref.ref(source_trace) if source_trace is not None else None
         super().__init__(buffer_dict, source_ref=source_ref)
 
-    def _resolve_substring(self, key: str) -> "Buffer | None":
+    def _resolve_substring(self, key: str) -> Buffer | None:
         """Resolve an unambiguous buffer short name."""
 
         matches = [bl for bl in self._list if bl.name == key]
@@ -420,7 +420,7 @@ class BufferAccessor(Accessor["Buffer"]):
             raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
         return None
 
-    def _resolve_pass_qualified(self, key: str) -> "Buffer | None":
+    def _resolve_pass_qualified(self, key: str) -> Buffer | None:
         """Resolve pass-qualified notation to the parent Buffer."""
 
         base, _, pass_str = key.rpartition(":")
@@ -454,7 +454,7 @@ class BufferAccessor(Accessor["Buffer"]):
         inner = ",\n ".join(items)
         return "{" + inner + "}"
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export buffer metadata as a pandas DataFrame.
 
         Driven by ``BUFFER_LOG_FIELD_ORDER`` minus the documented, genuinely

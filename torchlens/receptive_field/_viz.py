@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from PIL import Image, ImageDraw
 
+from ..visualization.node_spec import NodeSpec, NodeSpecFn
+from ..viz.node_plots import render_heatmap
 from ._errors import AmbiguousInputError, ReceptiveFieldError
 from ._types import (
     GradientReceptiveField,
@@ -16,12 +18,10 @@ from ._types import (
     ReceptiveFieldDirection,
     ReceptiveFieldStatus,
 )
-from ..viz.node_plots import render_heatmap
-from ..visualization.node_spec import NodeSpec, NodeSpecFn
 
 if TYPE_CHECKING:
-    from ._types import ReceptiveFieldView
     from ..data_classes.op import Op
+    from ._types import ReceptiveFieldView
 
 
 _CONE_FILL = "#FFD8A8"
@@ -29,7 +29,7 @@ _DIM_FILL = "#E4E7EB"
 
 
 def show(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int] | None = None,
     *,
     input: Any | None = None,
@@ -108,7 +108,7 @@ def show(
 
 
 def node_spec(
-    op: "Op",
+    op: Op,
     *,
     unit: Sequence[int] | None = None,
     input: Any | None = None,
@@ -172,7 +172,7 @@ def node_spec(
     return node_spec_fn
 
 
-def _select_descriptor(view: "ReceptiveFieldView", selected: Any | None) -> ReceptiveField:
+def _select_descriptor(view: ReceptiveFieldView, selected: Any | None) -> ReceptiveField:
     """Resolve one descriptor from a view without guessing a multi-input role."""
 
     per_input = view.per_input
@@ -189,7 +189,7 @@ def _select_descriptor(view: "ReceptiveFieldView", selected: Any | None) -> Rece
 
 
 def _view_box(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int],
     descriptor: ReceptiveField,
     selected: Any | None,
@@ -218,7 +218,7 @@ def _view_box(
 
 
 def _view_gradient(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int] | None,
     selected: Any | None,
     direction: ReceptiveFieldDirection,
@@ -278,7 +278,7 @@ def _rendered_axes(
 
 
 def _base_image(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     descriptor: ReceptiveField,
     image: Image.Image | None,
     rendered_axes: tuple[int, ...],
@@ -420,7 +420,7 @@ def _dashed_rectangle(
 
 
 def _descriptor_for_op(
-    op: "Op", selected: Any | None, direction: ReceptiveFieldDirection
+    op: Op, selected: Any | None, direction: ReceptiveFieldDirection
 ) -> ReceptiveField:
     """Resolve an RF descriptor for one target operation."""
 
@@ -443,7 +443,7 @@ def _descriptor_for_op(
     return descriptors[cast(str, role)]
 
 
-def _projective_cone(op: "Op", target_label: str) -> frozenset[str]:
+def _projective_cone(op: Op, target_label: str) -> frozenset[str]:
     """Return the source-to-target path slice for a projective graph cone."""
 
     from ._path import between_labels
@@ -451,7 +451,7 @@ def _projective_cone(op: "Op", target_label: str) -> frozenset[str]:
     return between_labels(op.source_trace, op, target_label)
 
 
-def _ancestor_cone(op: "Op", io_role: str) -> frozenset[str]:
+def _ancestor_cone(op: Op, io_role: str) -> frozenset[str]:
     """Reverse-walk target parents to one selected model input on demand."""
 
     trace = op.source_trace

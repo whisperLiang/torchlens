@@ -232,7 +232,7 @@ def test_builtin_rules_install_rolls_back_on_reload_failure(
 
         assert calls["n"] >= 2  # the failure really fired mid reload loop
         assert len(_rules._RF_RULES) == 0  # no partial registry leaked
-        assert _rules._RF_RULES_EPOCH == pre_epoch  # epoch fully restored
+        assert pre_epoch == _rules._RF_RULES_EPOCH  # epoch fully restored
     finally:
         _rules._RF_RULES.clear()
         _rules._RF_RULES.update(saved_rules)

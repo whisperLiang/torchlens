@@ -37,9 +37,7 @@ def _is_interactive_display_context() -> bool:
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if sys.platform.startswith("linux") and not has_display:
         return False
-    if os.environ.get("SSH_CONNECTION") and not has_display:
-        return False
-    return True
+    return not (os.environ.get("SSH_CONNECTION") and not has_display)
 
 
 def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> bool:
@@ -338,7 +336,7 @@ def merge_edge_style(
 
 
 def render_dot_to_file(
-    dot: "graphviz.Digraph",
+    dot: graphviz.Digraph,
     outpath: str,
     file_format: str,
     save_only: bool,

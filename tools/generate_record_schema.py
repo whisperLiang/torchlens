@@ -168,12 +168,8 @@ def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
     from torchlens.data_classes.param import Param
     from torchlens.data_classes.trace import Trace
 
-    op_container_defaults = dict(
-        getattr(op_module, "_LAYER_PASS_LOG_CONTAINER_DEFAULTS", {})
-    )
-    op_container_defaults.update(
-        getattr(op_module, "_LAYER_PASS_LOG_DEFAULT_FILL", {})
-    )
+    op_container_defaults = dict(getattr(op_module, "_LAYER_PASS_LOG_CONTAINER_DEFAULTS", {}))
+    op_container_defaults.update(getattr(op_module, "_LAYER_PASS_LOG_DEFAULT_FILL", {}))
     pooled_slots = frozenset(getattr(op_module, "_POOLED_SLOTS", ()))
 
     classes: list[tuple[str, type, dict[str, Any], frozenset[str]]] = [
@@ -194,9 +190,7 @@ def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
     for key, cls, container_defaults, pooled in classes:
         rows: list[tuple[str, str, str | None, str]] = []
         for name, policy in cls.FIELD_POLICY.items():
-            kind, mutability = _classify(
-                cls, name, policy, container_defaults, pooled
-            )
+            kind, mutability = _classify(cls, name, policy, container_defaults, pooled)
             rows.append((name, kind, _annotation_for(cls, name), mutability))
         schema[key] = rows
     return schema
@@ -206,9 +200,7 @@ def _render(schema: dict[str, list[tuple[str, str, str | None, str]]]) -> str:
     """Render the bindings module source deterministically."""
 
     lines = [_HEADER]
-    lines.append(
-        "STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {\n"
-    )
+    lines.append("STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {\n")
     for key, rows in schema.items():
         lines.append(f'    "{key}": {{\n')
         for name, kind, annotation, mutability in rows:
@@ -217,9 +209,7 @@ def _render(schema: dict[str, list[tuple[str, str, str | None, str]]]) -> str:
                 parts.append(f"annotation={annotation!r}")
             if mutability != "immutable":
                 parts.append(f'mutability="{mutability}"')
-            lines.append(
-                f'        "{name}": StorageBinding({", ".join(parts)}),\n'
-            )
+            lines.append(f'        "{name}": StorageBinding({", ".join(parts)}),\n')
         lines.append("    },\n")
     lines.append("}\n")
     return "".join(lines)

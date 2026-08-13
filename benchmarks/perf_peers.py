@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import importlib.util
-from typing import Any, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 import torch
 from torch import nn

@@ -9,7 +9,6 @@ import pytest
 
 from torchlens.validation import invariants
 
-
 # The pre-refactor sequences below are the dispatch-parity baseline. cert10
 # ADDED three checks (receptive_field_metadata for every backend,
 # pass_count_consistency for torch, and backend_neutral_graph_topology for

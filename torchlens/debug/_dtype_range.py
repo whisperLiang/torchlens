@@ -230,7 +230,7 @@ def _wider_input_dtypes(op: Any, output_dtype: torch.dtype) -> tuple[torch.dtype
 
 
 def dtype_range_audit(
-    trace: "Trace",
+    trace: Trace,
     *,
     max_fraction: float = 0.9,
     subnormal_fraction_threshold: float = 0.1,

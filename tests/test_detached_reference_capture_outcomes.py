@@ -54,8 +54,9 @@ import importlib
 import sys
 import threading
 import types
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -65,7 +66,6 @@ from torch import nn
 import torchlens as tl
 from torchlens.backends.torch._tl import is_decorated_function
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-
 
 # ---------------------------------------------------------------------------
 # Environment: pristine originals, holder construction, rewrap

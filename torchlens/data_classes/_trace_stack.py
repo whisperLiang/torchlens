@@ -72,7 +72,7 @@ class StackedActivations:
 class TraceStackMixin(_TraceMixinBase):
     """Mixin providing order-aligned saved activation stacks."""
 
-    def stack(self: "Trace", selector: Any) -> StackedActivations:
+    def stack(self: Trace, selector: Any) -> StackedActivations:
         """Stack selector-matched saved outputs in recorded execution order.
 
         Selector evaluation reuses :meth:`Trace.find_sites`. Matching operations

@@ -7,12 +7,12 @@ import time
 from typing import Any
 
 from ._deprecations import MISSING
+from ._trace_state import TraceState
+from .data_classes.trace import Trace
 from .fastlog.options import HaltPredicateFn
 from .intervention.errors import AppendMismatchError, ChunkedForwardConfigError
 from .intervention.predicates import InterventionPredicate
 from .options import StreamingOptions
-from .data_classes.trace import Trace
-from ._trace_state import TraceState
 
 
 def _should_store_auto_coerced_raw_input(original: Any, coerced: Any) -> bool:

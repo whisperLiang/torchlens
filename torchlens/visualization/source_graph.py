@@ -35,11 +35,11 @@ class SourceGraph:
     skipped_labels: set[str]
     module_ancestry: Mapping[str, tuple[str, ...]]
     container_ancestry: Mapping[str, tuple[Any, ...]]
-    trace: "Trace"
+    trace: Trace
     request: ResolvedRenderRequest
 
 
-def build_source_graph(trace: "Trace", request: ResolvedRenderRequest) -> SourceGraph:
+def build_source_graph(trace: Trace, request: ResolvedRenderRequest) -> SourceGraph:
     """Extract the normalized forward source graph for one draw request.
 
     Parameters
@@ -94,7 +94,7 @@ def build_source_graph(trace: "Trace", request: ResolvedRenderRequest) -> Source
     )
 
 
-def _resolve_focus_module(trace: "Trace", module: Any) -> Any:
+def _resolve_focus_module(trace: Trace, module: Any) -> Any:
     """Resolve and validate a module focus argument.
 
     Parameters

@@ -14,11 +14,11 @@ import itertools
 from collections.abc import Hashable, Mapping, Sequence
 from typing import Any
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 from torchlens import trace as trace_fn
 from torchlens.validation.invariants import check_metadata_invariants
 

@@ -5,9 +5,9 @@ import warnings
 from types import MethodType
 from unittest import mock
 
+import pytest
 import torch
 from torch import nn
-import pytest
 
 import torchlens as tl
 import torchlens.validation as tl_validation
@@ -893,12 +893,14 @@ def test_validate_backward_pass_random_seed_kwarg_public_wrapper() -> None:
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    with mock.patch(
-        "torchlens.validation.consolidated.validate_backward_pass",
-        wraps=consolidated_validation.validate_backward_pass,
-    ) as validator:
-        with pytest.warns(DeprecationWarning):
-            assert tl.validate_backward_pass(model, x, random_seed=42)
+    with (
+        mock.patch(
+            "torchlens.validation.consolidated.validate_backward_pass",
+            wraps=consolidated_validation.validate_backward_pass,
+        ) as validator,
+        pytest.warns(DeprecationWarning),
+    ):
+        assert tl.validate_backward_pass(model, x, random_seed=42)
     assert validator.call_args is not None
     assert validator.call_args.kwargs["random_seed"] == 42
 
@@ -1782,13 +1784,15 @@ def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
 
-    with mock.patch.object(
-        backward_mod,
-        "_walk_and_hook_backward_graph",
-        side_effect=RuntimeError("planted walk failure"),
+    with (
+        mock.patch.object(
+            backward_mod,
+            "_walk_and_hook_backward_graph",
+            side_effect=RuntimeError("planted walk failure"),
+        ),
+        pytest.raises(RuntimeError, match="planted walk failure"),
     ):
-        with pytest.raises(RuntimeError, match="planted walk failure"):
-            trace.log_backward(loss)
+        trace.log_backward(loss)
 
     events = _ensure_backward_event_stream(trace).backward_events
     starts = [e for e in events if isinstance(e, BackwardPassStart)]
@@ -1842,18 +1846,20 @@ def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3)
-    with mock.patch.object(
-        backward_mod,
-        "_make_grad_fn_hook",
-        side_effect=RuntimeError("planted registration failure"),
+    with (
+        mock.patch.object(
+            backward_mod,
+            "_make_grad_fn_hook",
+            side_effect=RuntimeError("planted registration failure"),
+        ),
+        pytest.warns(RuntimeWarning, match="coverage gap"),
     ):
-        with pytest.warns(RuntimeWarning, match="coverage gap"):
-            passed = backward_validation.validate_backward_pass(
-                model,
-                x,
-                loss_fn=lambda output: output.sum(),
-                random_seed=11,
-            )
+        passed = backward_validation.validate_backward_pass(
+            model,
+            x,
+            loss_fn=lambda output: output.sum(),
+            random_seed=11,
+        )
     assert passed is False
 
 

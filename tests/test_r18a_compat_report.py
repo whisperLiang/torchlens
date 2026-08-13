@@ -14,7 +14,6 @@ from torch import nn
 
 from torchlens.compat import report
 
-
 # ---------------------------------------------------------------------------
 # A3-08 — HF Transformers detection must key on real transformers namespace,
 # not on the mere presence of a ``.config`` attribute.

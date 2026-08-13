@@ -255,7 +255,7 @@ def _patch_class_call(
 
     if module_class in originals:
         return
-    original_call = getattr(module_class, "__call__")
+    original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
     originals[module_class] = original_call
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:

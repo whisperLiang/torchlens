@@ -12,9 +12,9 @@ when we cannot install an actual torch-2.1 environment.
 
 from __future__ import annotations
 
+import warnings
 from types import SimpleNamespace
 from typing import cast
-import warnings
 
 import pytest
 import torch

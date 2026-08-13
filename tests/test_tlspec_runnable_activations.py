@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from pathlib import Path
 import pickle
+from pathlib import Path
 from typing import Any
 
 import pytest

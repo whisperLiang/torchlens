@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 
 import torch
 from example_models import RandomGraphModel
+
 from torchlens import log_forward_pass
 
 

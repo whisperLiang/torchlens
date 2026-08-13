@@ -188,7 +188,6 @@ _TO_PANDAS_EXCLUDED_OP_FIELDS: frozenset[str] = frozenset(
         "annotations",
         # Live-trace-derived views (raise on detached/rehydrated logs; the
         # ``parents`` column plus parent rows carry the same information):
-        "input_ops",
         "input_shapes",
         "input_dtypes",
         "input_memory",

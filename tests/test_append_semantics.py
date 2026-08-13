@@ -9,8 +9,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.io import load_intervention_spec
 from torchlens.intervention.errors import AppendBatchDependenceError, ControlFlowDivergenceWarning
+from torchlens.io import load_intervention_spec
 from torchlens.options import CaptureOptions, ReplayOptions
 
 

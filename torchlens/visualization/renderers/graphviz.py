@@ -10,7 +10,7 @@ import graphviz
 
 from ..render_ir import RenderIR, RenderIRDotStatement
 from ..request import RenderTarget
-from .base import RenderReport, RendererCapabilities
+from .base import RendererCapabilities, RenderReport
 
 
 class GraphvizRenderer:

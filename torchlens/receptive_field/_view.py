@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from importlib import import_module
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Mapping, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ._errors import (
     AmbiguousInputError,
@@ -23,7 +23,6 @@ from ._types import (
     ReceptiveFieldStatus,
     ReceptiveFieldValidation,
 )
-
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -92,7 +91,7 @@ class ReceptiveFieldView:
         self.per_input: Mapping[str, ReceptiveField] = solution.per_op.get(op.label, {})
 
     @classmethod
-    def projective(cls, op: Op) -> "ReceptiveFieldView":
+    def projective(cls, op: Op) -> ReceptiveFieldView:
         """Build the source-anchored projective sibling view.
 
         Parameters

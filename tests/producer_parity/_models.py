@@ -8,8 +8,9 @@ harness proofs; the P5 campaign widens the model set.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from torch import nn

@@ -2,10 +2,10 @@
 
 import argparse
 import os
-import sys
 import statistics
+import sys
 import time
-from typing import Sequence
+from collections.abc import Sequence
 
 import torch
 from torch import nn

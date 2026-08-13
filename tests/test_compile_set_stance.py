@@ -446,10 +446,9 @@ def test_count_compiles_verifies_the_coexistence_contract() -> None:
     x = torch.randn(2, 4)
     model(x)  # warm
 
-    with tl.debug.count_compiles() as during:
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            tl.trace(model, x)
+    with tl.debug.count_compiles() as during, warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        tl.trace(model, x)
     assert during.frames_compiled == 0
 
     with tl.debug.count_compiles() as after:

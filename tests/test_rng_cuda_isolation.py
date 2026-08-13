@@ -28,8 +28,7 @@ import textwrap
 import pytest
 import torch
 
-from torchlens.utils import rng as tl_rng
-from torchlens.utils import tensor_utils
+from torchlens.utils import rng as tl_rng, tensor_utils
 
 pytestmark = pytest.mark.smoke
 

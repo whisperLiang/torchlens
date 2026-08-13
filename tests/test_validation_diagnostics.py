@@ -235,7 +235,7 @@ def test_regression_replay_diagnostic_carries_real_mismatch() -> None:
         assert failure.recomputed_shape == (2, 8)
         assert failure.max_abs_diff is not None and failure.max_abs_diff >= 1.0 - 1e-6
         summary = failure.summary()
-        assert "False" != summary
+        assert summary != "False"
         assert "max_abs_diff" in summary
     finally:
         trace.cleanup()

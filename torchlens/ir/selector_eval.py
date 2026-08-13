@@ -1094,9 +1094,7 @@ def _evaluate_grad_fn_site(selector: BaseSelector, site: Any) -> bool:
             return False
         if label_pattern is not None and str(label_pattern) not in site.label:
             return False
-        if is_custom is not None and bool(site.is_custom) is not bool(is_custom):
-            return False
-        return True
+        return not (is_custom is not None and bool(site.is_custom) is not bool(is_custom))
     if kind == "grad_kind":
         grad_kind = str(selector.selector_value)
         field_name = "grad_inputs" if grad_kind == "grad_input" else "grad_outputs"

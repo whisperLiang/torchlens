@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
@@ -26,8 +26,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from ..capture.session import CapturedRunCore
     from ..capture.projections import RecordingState
+    from ..capture.session import CapturedRunCore
     from ..data_classes.trace import Trace
 
 
@@ -270,7 +270,7 @@ class RecordingTrace:
     def repredicate(
         self,
         other_keep_op: Callable[[RecordContext], PredicateDecision] | None = None,
-    ) -> "RecordingTrace":
+    ) -> RecordingTrace:
         """Return a new trace with decisions from a new op predicate.
 
         Parameters
@@ -360,9 +360,7 @@ class Recording(CapturedRun):
     _records_built: bool = field(default=True, repr=False, compare=False)
     _recording_trace: RecordingTrace | None = field(default=None, repr=False, compare=False)
     _recording_state: Any | None = field(default=None, repr=False, compare=False)
-    _captured_run_cores: tuple["CapturedRunCore", ...] = field(
-        default=(), repr=False, compare=False
-    )
+    _captured_run_cores: tuple[CapturedRunCore, ...] = field(default=(), repr=False, compare=False)
     # Settled capture outcome stamped by the recorder settlement adapter
     # (torchlens/capture/outcome.py); ``outcome`` below derives conservatively
     # for unstamped legacy/recovered recordings.
@@ -434,7 +432,7 @@ class Recording(CapturedRun):
         return object.__getattribute__(self, name)
 
     @classmethod
-    def from_capture_events(cls: type["Recording"], session: Any) -> "Recording":
+    def from_capture_events(cls: type[Recording], session: Any) -> Recording:
         """Build a lazy Recording projection from a predicate capture session.
 
         Parameters
@@ -590,7 +588,7 @@ class Recording(CapturedRun):
         default_grad: bool | CaptureSpec | None = None,
         retain_graph: bool | None = None,
         create_graph: bool = False,
-    ) -> "Recording":
+    ) -> Recording:
         """Run ``loss.backward`` while capturing selected fastlog gradients.
 
         Parameters
@@ -707,7 +705,7 @@ class Recording(CapturedRun):
             f"n_grad_records={len(self.grad_records)})"
         )
 
-    def enrich(self, steps: list[str] | str) -> "Recording":
+    def enrich(self, steps: list[str] | str) -> Recording:
         """Return a new recording with requested incremental enrichments.
 
         Parameters
@@ -726,7 +724,7 @@ class Recording(CapturedRun):
 
         return enrich_recording(self, steps)
 
-    def to_trace(self) -> "Trace":
+    def to_trace(self) -> Trace:
         """Cook this recording's event stream into a full ``Trace``.
 
         Returns
@@ -789,8 +787,8 @@ class Recording(CapturedRun):
                 "replaying multiple Recorder.log() passes into one Trace is not yet "
                 "structurally defined."
             )
-        from ..data_classes.trace import Trace
         from ..capture.projectors import RecordingProjector
+        from ..data_classes.trace import Trace
         from .options import RecordingOptions
 
         projection = RecordingProjector().project(self._captured_run_cores)
@@ -869,7 +867,7 @@ class Recording(CapturedRun):
         )
         return trace
 
-    def _recover_halt_frontier(self) -> "tuple[str, torch.Tensor]":
+    def _recover_halt_frontier(self) -> tuple[str, torch.Tensor]:
         """Recover the frontier (output-parent label, tensor) for a halted recording.
 
         Mirrors ``_finalize_halted_trace``'s frontier recovery
@@ -944,7 +942,7 @@ def _mark_recording_halted(recording: Recording, pass_index: int, reason: str) -
 
 
 def build_grad_record_context(
-    recording_state: "RecordingState",
+    recording_state: RecordingState,
     grad_fn_handle: Any,
     grad: torch.Tensor | None,
     *,

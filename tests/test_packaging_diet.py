@@ -1,12 +1,12 @@
 """Packaging-diet tests for lazy pandas and IPython imports."""
 
-from pathlib import Path
 import importlib.util
 import re
 import subprocess
 import sys
-from unittest.mock import patch
 import zipfile
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -210,8 +210,12 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
         assert "uv pip check" in workflow_text
         assert 'assert torch.__version__.startswith("2.7.")' in workflow_text
 
-    assert "ruff format --check torchlens tests scripts" in lint_text
-    assert "ruff check torchlens tests scripts" in lint_text
+    # Pin the FULL widened scope (grind r3, R70 / OL#41), not a prefix of it: a
+    # prefix assertion still passes when the contributor-facing trees are dropped
+    # back off the gate, which is exactly the regression worth catching.
+    lint_scope = "torchlens tests scripts tools benchmarks examples notebooks"
+    assert f"ruff format --check {lint_scope}" in lint_text
+    assert f"ruff check {lint_scope}" in lint_text
 
     # The excluded set moved from lint.yml CLI flags into pyproject's
     # `[tool.ruff] extend-exclude` so that pre-commit -- which passes explicit
@@ -224,7 +228,18 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
     )
     assert extend_exclude is not None, "pyproject [tool.ruff] must declare extend-exclude"
     excluded = set(re.findall(r'"([^"]+)"', extend_exclude.group(1)))
-    assert excluded == {"menagerie", "tests/crawler", "tests/test_menagerie_*.py"}
+    # The two generated artifacts are excluded because their generator is the
+    # authority and tests/test_schema_lockstep.py compares them byte-for-byte, so
+    # a ruff rewrite would make that gate permanently red. That half is pinned to
+    # the self-declaring generated set by
+    # test_schema_lockstep.py::test_ruff_excludes_every_generated_artifact.
+    assert excluded == {
+        "menagerie",
+        "tests/crawler",
+        "tests/test_menagerie_*.py",
+        "torchlens/data_classes/_schema_bindings.py",
+        "torchlens/ir/op_record_manifest.py",
+    }
     assert "--exclude" not in lint_text
 
 

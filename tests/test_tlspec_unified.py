@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import re
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch

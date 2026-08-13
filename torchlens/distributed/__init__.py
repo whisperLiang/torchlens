@@ -44,8 +44,8 @@ from ._lifecycle import (
 )
 from ._recognizer import (
     COLLECTIVE_NAMESPACES,
-    CollectiveRecognizer,
     UNCAPTURED_COLLECTIVE_OP,
+    CollectiveRecognizer,
     UncapturedCollectiveOpError,
     derive_collective_recognizer,
 )

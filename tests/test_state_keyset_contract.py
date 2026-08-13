@@ -20,13 +20,11 @@ from typing import Any
 
 import pytest
 import torch
+from godobject_oracle.test_aliases import _SEED, _AliasCNN, _RecurrentCell
 
 import torchlens as tl
 from torchlens.data_classes._state_adapter import state_items
-from torchlens.data_classes.op import _OP_SLOT_NAMES
-from torchlens.data_classes.op import Op
-
-from godobject_oracle.test_aliases import _SEED, _AliasCNN, _RecurrentCell
+from torchlens.data_classes.op import _OP_SLOT_NAMES, Op
 
 _GOLDEN_PATH = (
     Path(__file__).resolve().parent / "godobject_oracle" / "goldens" / "state_keysets.json"

@@ -16,6 +16,8 @@ import torch
 import torchlens as tl
 import torchlens.visualization.auto_collapse as auto_collapse
 import torchlens.visualization.collapse_optimizer as collapse_optimizer
+from torchlens.visualization._render_common import format_collapsed_module_contents
+from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
 from torchlens.visualization.auto_collapse import (
     _assert_plan_count,
     _child_condensed_flow_graphs,
@@ -36,8 +38,6 @@ from torchlens.visualization.collapse_plan import (
     collapse_plan_for_trace,
     count,
 )
-from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
-from torchlens.visualization._render_common import format_collapsed_module_contents
 
 tvm = pytest.importorskip("torchvision.models")
 tvs = pytest.importorskip("torchvision.models.segmentation")

@@ -103,7 +103,7 @@ class RunnableTraceState:
     input_label_layouts: Mapping[str, Any] | None = None
     module_training_modes: Mapping[str, bool] | None = None
 
-    def pickle_safe_copy(self) -> "RunnableTraceState":
+    def pickle_safe_copy(self) -> RunnableTraceState:
         """Return a shallow copy with mapping-proxy bindings made picklable.
 
         Returns

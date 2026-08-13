@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import gc
+from collections.abc import Iterable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from .ir import CaptureEvents

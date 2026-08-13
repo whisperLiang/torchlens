@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from ...ir.events import JaxEquationKind
 from .modules import decode_module_call_scope, decode_module_scope

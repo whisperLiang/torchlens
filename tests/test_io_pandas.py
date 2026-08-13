@@ -367,7 +367,7 @@ def test_trace_to_pandas_covers_all_op_fields() -> None:
         assert not (_TO_PANDAS_EXCLUDED_OP_FIELDS & set(columns))
 
         # Excluded fields are real Op fields (no stale exclusion entries).
-        assert _TO_PANDAS_EXCLUDED_OP_FIELDS <= set(LAYER_PASS_LOG_FIELD_ORDER)
+        assert set(LAYER_PASS_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_OP_FIELDS
     finally:
         log.cleanup()
 

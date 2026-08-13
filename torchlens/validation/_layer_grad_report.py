@@ -80,7 +80,7 @@ class LayerGradReport:
 
 
 def _compare_module_output_grads(
-    trace: "Trace",
+    trace: Trace,
     stock_module_grads: Mapping[ModuleOutputGradKey, torch.Tensor],
     stock_identity_addresses: set[ModuleOutputGradKey],
     *,

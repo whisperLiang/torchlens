@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-import inspect
-import re
 from typing import Any, ClassVar
 
 import torch

@@ -404,7 +404,7 @@ def _copy_record_extras(
     declared = getattr(type(parent_record), "_TL_LAYOUT", None)
     declared_names = declared.fid_by_name if declared is not None else ()
     for key, value in parent_record.__dict__.items():
-        if key == CORE_KEY or key == ROW_KEY or key == "_facets_cache":
+        if key in (CORE_KEY, ROW_KEY) or key == "_facets_cache":
             continue
         if key in declared_names:
             continue

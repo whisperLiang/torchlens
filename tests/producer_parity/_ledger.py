@@ -29,8 +29,9 @@ import contextlib
 import dataclasses
 import importlib
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from torchlens.ir.events import OpEvent
 

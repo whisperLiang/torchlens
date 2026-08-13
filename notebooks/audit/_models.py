@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Models copied from notebooks/_demo_models.py
 # ---------------------------------------------------------------------------
@@ -334,7 +333,7 @@ class DeepBlockNet(nn.Module):
         return self.head(self.blocks(self.stem(x)))
 
 
-ZOO: dict[str, "callable[[], tuple[nn.Module, torch.Tensor]]"] = {
+ZOO: dict[str, callable[[], tuple[nn.Module, torch.Tensor]]] = {
     "tiny_mlp": lambda: (TinyMLP(), torch.randn(2, 8)),
     # exercises: linear chain, relu, module accessors, intervention
     "tiny_branch_cnn": lambda: (TinyBranchCNN(), torch.ones(1, 1, 8, 8)),

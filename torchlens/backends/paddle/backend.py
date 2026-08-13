@@ -13,6 +13,7 @@ from ... import _state
 from ..._deprecations import MISSING, MissingType
 from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -24,7 +25,6 @@ from ...data_classes.trace import Trace
 from ...fastlog._halt import HaltSignal
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -35,12 +35,12 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
+from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
-from ...capture.outcome import stamp_backend_finalized
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
 from .._finalize import (
     attach_function_root_module,
@@ -674,7 +674,7 @@ class PaddleBackend:
         *,
         trace: Trace,
         loss: Any,
-        observer: "_PaddleIntermediateTapObserver",
+        observer: _PaddleIntermediateTapObserver,
         grad_options: GradOptions,
     ) -> IntermediateDerivedGradAccessor:
         """Build exact Paddle op-level derived-gradient records.
@@ -844,9 +844,11 @@ class PaddleBackend:
             from ...validation.status import count_importer_region_annotations
             from .validation import _coverage_oracle
 
-            if not _coverage_oracle(trace):
-                failed_count = 1
-            elif kwargs.get("validate_metadata", True) and not check_metadata_invariants(trace):
+            if (
+                not _coverage_oracle(trace)
+                or kwargs.get("validate_metadata", True)
+                and not check_metadata_invariants(trace)
+            ):
                 failed_count = 1
             else:
                 replayed_count, failed_count = self._validate_paddle_captures(trace)
@@ -889,10 +891,10 @@ class PaddleBackend:
         """
 
         from .validation import (
+            _coverage_oracle,
             _parent_perturbations_change_output,
             _payloads_close,
             _rebuild_inputs,
-            _coverage_oracle,
         )
 
         if not _coverage_oracle(trace):

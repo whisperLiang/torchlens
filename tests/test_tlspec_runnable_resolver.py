@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import replace
 import importlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 import pytest
 import torch

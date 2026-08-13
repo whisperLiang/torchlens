@@ -10,17 +10,20 @@ import sys
 import tempfile
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import (
+
+# noqa UP035: `Dict`/`List`/`Set`/`Tuple` are deliberately re-exported through
+# this module's __all__ for the sibling renderers that do
+# `from ._render_common import *`, which still annotate with them. Modernizing
+# the alias here means modernizing every star-import consumer first.
+from typing import (  # noqa: UP035
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
-    Literal,
     List,
-    Mapping,
+    Literal,
     Optional,
     Set,
     Tuple,
@@ -44,6 +47,9 @@ from .._literals import (
     VisNodePlacementLiteral,
     VisRendererLiteral,
 )
+from ..data_classes.internal_types import VisualizationOverrides
+from ..data_classes.layer import Layer
+from ..data_classes.op import Op
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -54,13 +60,9 @@ from ..ir.container import (
     TupleIndex,
 )
 from ..ir.container_registry import ContainerRecord, ContainerSnapshot, Role
-from ..data_classes.internal_types import VisualizationOverrides
-from ..data_classes.layer import Layer
-from ..data_classes.op import Op
 from ..quantities import Duration
 from ..utils.display import _timed_phase, _vprint, in_notebook, int_list_to_compact_str
 from ..viz import batch_summary
-from .modes import COLLAPSED_MODE_REGISTRY, DOMAIN_NODE_MODES, MODE_REGISTRY
 from ._label_format import (
     format_memory,
     format_module_kwargs,
@@ -68,10 +70,24 @@ from ._label_format import (
     format_param_list,
     format_shape,
 )
+from ._render_utils import (
+    _open_file_quietly,
+    compute_module_penwidth,
+    direction_to_rankdir,
+    make_module_cluster_attrs,
+)
+from .code_panel import (
+    CodePanelOption,
+    compose_graph_with_code_panel,
+    render_code_panel_subgraph,
+    resolve_code_panel_source,
+)
+from .collapse_plan import CollapsePlan, RawOp, SegmentDescriptor
+from .modes import COLLAPSED_MODE_REGISTRY, DOMAIN_NODE_MODES, MODE_REGISTRY
 from .node_spec import (
+    INTERVENTION_CONE_COLOR,
     INTERVENTION_HOOK_BORDER_COLOR,
     INTERVENTION_HOOK_FILL_COLOR,
-    INTERVENTION_CONE_COLOR,
     INTERVENTION_SITE_COLOR,
     NodeSpec,
     graphviz_graph_overrides,
@@ -81,23 +97,6 @@ from .node_spec import (
     render_lines_to_html,
 )
 from .overlays import OverlayScores, overlay_border_attrs, overlay_line
-from ._render_utils import _open_file_quietly
-from .themes import (
-    VisualizationTheme,
-    apply_theme_to_spec,
-    resolve_theme,
-    theme_edge_attrs,
-    theme_graph_attrs,
-    theme_node_attrs,
-)
-from .code_panel import (
-    CodePanelOption,
-    compose_graph_with_code_panel,
-    render_code_panel_subgraph,
-    resolve_code_panel_source,
-)
-from .collapse_plan import CollapsePlan, RawOp, SegmentDescriptor
-from .request import RenderContext
 from .render_ir import (
     RenderIRDotStatement,
     RenderIROrderingConstraint,
@@ -105,10 +104,14 @@ from .render_ir import (
     finalize_forward_regions,
     projected_antiparallel_endpoint_pairs,
 )
-from ._render_utils import (
-    compute_module_penwidth,
-    direction_to_rankdir,
-    make_module_cluster_attrs,
+from .request import RenderContext
+from .themes import (
+    VisualizationTheme,
+    apply_theme_to_spec,
+    resolve_theme,
+    theme_edge_attrs,
+    theme_graph_attrs,
+    theme_node_attrs,
 )
 
 
@@ -245,7 +248,7 @@ class BoundaryNode:
         self.io_role = self.boundary_kind
 
 
-GraphNode = Union[BaseGraphNode, BoundaryNode, FocusNode]
+GraphNode = BaseGraphNode | BoundaryNode | FocusNode
 NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
 BackwardNodeSpecFn = Callable[["GradFn", NodeSpec], NodeSpec | None]
 CollapsedNodeSpecFn = Callable[["Module", NodeSpec], NodeSpec | None]
@@ -323,7 +326,7 @@ class RenderEdge:
     """
 
     target: GraphNode
-    metadata_child: Optional[GraphNode]
+    metadata_child: GraphNode | None
     occurrence_key: tuple[Any, ...]
     argument_label: str | None = None
 

@@ -22,8 +22,9 @@ can never be claimed as recurrent passes of anything.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import replace as _dataclass_replace
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ..ir.events import is_control_edge_use
 from ..postprocess.loop_detection import _module_site, _structural_arg_signature
@@ -44,7 +45,7 @@ _PSEUDO_FUNC_NAME = "none"
 
 
 def compute_preview_recurrence_assignments(
-    trace: "Trace",
+    trace: Trace,
     *,
     backend_name: str,
 ) -> dict[str, RecurrenceAssignment]:
@@ -84,7 +85,7 @@ def compute_preview_recurrence_assignments(
 
 
 def _build_preview_recurrence_graph(
-    trace: "Trace",
+    trace: Trace,
     *,
     backend_name: str,
 ) -> RecurrenceGroupingGraph:

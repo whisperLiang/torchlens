@@ -26,18 +26,17 @@ from collections import defaultdict, deque
 from dataclasses import replace
 from itertools import zip_longest
 from pathlib import Path
-from typing import Any, Dict, List, Literal, NamedTuple, TYPE_CHECKING, Tuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import torch
 
-from ..backends.torch._tl import clear_meta
 from .._io import BlobRef, TorchLensIOError
 from .._io.accessor_rebuild import rebuild_trace_accessors
 from .._io.lazy import LazyActivationRef
 from .._io.manifest import sha256_of_file
 from .._io.scrub import BlobSpec
 from .._io.streaming import BundleStreamWriter
-from ..quantities import Bytes, Duration, Flops
+from ..backends.torch._tl import clear_meta
 from ..data_classes._module_role_hints import (
     multi_output_role_from_path,
     role_hints_for_module_class,
@@ -47,6 +46,7 @@ from ..data_classes._summary import format_call_arg
 from ..data_classes.module import Module, ModuleCall
 from ..data_classes.prehook import ModuleInputSnapshot, PreHookEffect
 from ..ir.container_registry import _iter_tensor_leaves
+from ..quantities import Bytes, Duration, Flops
 from ..utils._torch_symbols import torch_attr
 
 if TYPE_CHECKING:
@@ -383,7 +383,7 @@ def _compute_call_depths(module_dict: dict[str, "Module"], root_module: "Module"
                 queue.append(child_addr)
 
 
-def _append_unique_child_label(child_labels: List[str], child_label: str) -> None:
+def _append_unique_child_label(child_labels: list[str], child_label: str) -> None:
     """Append a child label if it has not been seen yet.
 
     Parameters
@@ -553,7 +553,7 @@ def _rebuild_layer_log_conditional_views(layer_log: "Layer") -> None:
         len(branch_stack) > 0 for branch_stack in layer_log.conditional_role_stacks
     )
 
-    conditional_entry_children: List[str] = []
+    conditional_entry_children: list[str] = []
     for _, pass_log in sorted(layer_log.ops.items()):
         for child_label in pass_log.conditional_entry_children:
             _append_unique_child_label(
@@ -562,9 +562,9 @@ def _rebuild_layer_log_conditional_views(layer_log: "Layer") -> None:
             )
     layer_log.conditional_entry_children = conditional_entry_children
 
-    conditional_then_children: List[str] = []
-    conditional_elif_children: Dict[int, List[str]] = {}
-    conditional_else_children: List[str] = []
+    conditional_then_children: list[str] = []
+    conditional_elif_children: dict[int, list[str]] = {}
+    conditional_else_children: list[str] = []
     for branch_children in layer_log.conditional_arm_children.values():
         for child_label in branch_children.get("then", []):
             _append_unique_child_label(conditional_then_children, child_label)
@@ -598,7 +598,7 @@ def _rebuild_conditional_edge_call_indices(self: "Trace") -> None:
         }
         return
 
-    conditional_edge_call_indices: Dict[Tuple[str, str, int, str], List[int]] = defaultdict(list)
+    conditional_edge_call_indices: dict[tuple[str, str, int, str], list[int]] = defaultdict(list)
     for (conditional_id, branch_kind), edge_list in self.conditional_arm_entry_edges.items():
         for parent_label, child_label in edge_list:
             parent_no_pass = _strip_pass_suffix(parent_label)
@@ -844,7 +844,7 @@ def _build_module_logs(self: "Trace") -> None:
     """
     mbd = self._module_capture_ws.module_build_data
     module_dict = {}  # address -> Module
-    pass_dict: Dict[str, ModuleCall] = {}  # "addr:pass" -> ModuleCall
+    pass_dict: dict[str, ModuleCall] = {}  # "addr:pass" -> ModuleCall
     module_order = []  # ordered by first appearance
 
     # --- Build root Module ("self") ---
@@ -1045,7 +1045,7 @@ _MULTIPASS_FLOPS_FIELDS = ("flops_forward", "flops_backward")
 _MULTIPASS_MARKER_ONLY_FIELDS = ("dtype", "transformed_out_dtype", "device_ref")
 
 
-def _honest_multipass_shape(values: List[Any]) -> tuple:
+def _honest_multipass_shape(values: list[Any]) -> tuple:
     """Return an honest aggregate shape for divergent per-pass shapes.
 
     Constant dimensions keep their integer; divergent dimensions become an
@@ -1066,7 +1066,7 @@ def _honest_multipass_shape(values: List[Any]) -> tuple:
     tuples = [tuple(value) for value in values if isinstance(value, (tuple, list))]
     if len(tuples) != len(values) or len({len(t) for t in tuples}) != 1:
         return ("varies",)
-    dims: List[Any] = []
+    dims: list[Any] = []
     # The guard above already returned ("varies",) unless every tuple has the
     # same length, so this transpose is exact rather than truncating.
     for dim_values in zip(*tuples, strict=True):
@@ -1116,9 +1116,9 @@ def _reconcile_multipass_layer_fields(layer_log: "Layer") -> None:
     # OpAccessor iterates 1-based pass-index keys; ``get`` is the dict lookup
     # (``[]`` is 0-based positional access).
     pass_ops = [layer_log.ops.get(index) for index in sorted(layer_log.ops)]
-    varying: Dict[str, List[Any]] = {}
+    varying: dict[str, list[Any]] = {}
 
-    def record_if_varying(field_name: str, values: List[Any]) -> bool:
+    def record_if_varying(field_name: str, values: list[Any]) -> bool:
         """Record ``field_name`` as varying when its per-pass values are not all equal.
 
         Returns ``True`` when the values differ, so the caller replaces the

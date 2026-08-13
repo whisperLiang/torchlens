@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field, replace
 import itertools
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Iterable
+from typing import Any
 
 from .events import (
     BackwardCoverageGap,
@@ -19,10 +20,10 @@ from .events import (
     ModuleEnterEvent,
     ModuleExitEvent,
     ModulePrepEvent,
-    OpGradObserved,
-    ParamGradObserved,
     OpEvent,
+    OpGradObserved,
     OutputVersionEvent,
+    ParamGradObserved,
     PreHookProvenanceEvent,
 )
 from .live_index import LiveIndex
@@ -285,7 +286,7 @@ class CaptureEvents:
     base_root_grad_fn_object_ids: tuple[int, ...] = ()
 
     @classmethod
-    def detached_from(cls, trace: Any) -> "CaptureEvents":
+    def detached_from(cls, trace: Any) -> CaptureEvents:
         """Return a fresh stream extending ``trace``'s materialized projection.
 
         Used when a trace keeps its portable backward projection but must
@@ -347,7 +348,7 @@ class CaptureEvents:
         self,
         *,
         projected_op_events: Iterable[OpEvent] | None = None,
-    ) -> "CaptureEvents":
+    ) -> CaptureEvents:
         """Return a structural working projection for postprocess mutation.
 
         Later postprocess steps replace entries in ``op_events`` and
@@ -786,7 +787,7 @@ class CaptureEvents:
         object.__setattr__(event, "seq", self.next_seq())
         self.intervention_events.append(event)
 
-    def concat(self, other: "CaptureEvents", *, lanes: Iterable[str] | None = None) -> None:
+    def concat(self, other: CaptureEvents, *, lanes: Iterable[str] | None = None) -> None:
         """Merge another stream's lanes into this journal under the merge law.
 
         This is the ONLY sanctioned way to combine two capture streams. Each

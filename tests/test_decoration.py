@@ -17,17 +17,16 @@ import pytest
 import torch
 from torch import nn
 
-from torchlens.backends.torch._tl import get_module_meta, get_tensor_label, is_decorated_function
 import torchlens.backends.torch.wrappers as torch_funcs_module
 from torchlens import _state, trace as trace_fn
+from torchlens.backends.torch._tl import get_module_meta, get_tensor_label, is_decorated_function
 from torchlens.backends.torch.wrappers import (
     decorate_all_once,
     get_arg_names,
-    wrap_torch,
     unwrap_torch,
+    wrap_torch,
     wrapped,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -242,10 +241,9 @@ class TestLazyDecoration:
     def test_wrapped_context_manager_exception_safety(self):
         """wrapped() must unwrap even if body raises."""
         assert _state._is_decorated is False
-        with pytest.raises(RuntimeError):
-            with wrapped():
-                assert _state._is_decorated is True
-                raise RuntimeError("test error")
+        with pytest.raises(RuntimeError), wrapped():
+            assert _state._is_decorated is True
+            raise RuntimeError("test error")
         assert _state._is_decorated is False
 
     @pytest.mark.heavy
@@ -673,10 +671,9 @@ class TestPauseLogging:
         """pause_logging must restore state even if body raises."""
         _state._logging_enabled = True
         try:
-            with pytest.raises(ValueError):
-                with _state.pause_logging():
-                    assert _state._logging_enabled is False
-                    raise ValueError("test")
+            with pytest.raises(ValueError), _state.pause_logging():
+                assert _state._logging_enabled is False
+                raise ValueError("test")
             assert _state._logging_enabled is True
         finally:
             _state._logging_enabled = False
@@ -916,7 +913,7 @@ class TestDecorationConsistency:
 
     def test_bidirectional_mapper(self):
         """_decorated_func_mapper should have dec->orig for every wrapper."""
-        for orig_id, dec in _state._orig_to_decorated.items():
+        for _orig_id, dec in _state._orig_to_decorated.items():
             if isinstance(dec, property):
                 continue
             orig = _state._decorated_to_orig.get(id(dec))

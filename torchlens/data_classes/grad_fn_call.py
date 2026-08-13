@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
-import weakref
 
 if TYPE_CHECKING:
     import pandas as pd
 
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
@@ -201,7 +201,7 @@ class GradFnCall:
             return Duration(0)
         return Duration(max(0.0, self._time_finished - self._time_started))
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export this pass as a one-row DataFrame.
 
         Returns

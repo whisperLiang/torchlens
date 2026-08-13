@@ -8,18 +8,18 @@ import copy
 import linecache
 import pickle
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 import torchlens
 from torchlens import trace as trace_fn
-from torchlens.data_classes import FuncCallLocation
 from torchlens.capture.flops import (
     compute_backward_flops,
     compute_forward_flops,
 )
+from torchlens.data_classes import FuncCallLocation
 
 
 class _SharedMultiOutputModel(nn.Module):
@@ -866,7 +866,7 @@ def test_flops_by_type():
     fbt = mh.flops_by_op_type()
     assert isinstance(fbt, dict)
     assert len(fbt) > 0
-    for layer_type, info in fbt.items():
+    for _layer_type, info in fbt.items():
         assert "forward" in info
         assert "backward" in info
         assert "count" in info
@@ -1666,9 +1666,10 @@ class TestConditionalBranchDetection:
 
     def test_if_label_in_visualization(self):
         """Rendered graph contains 'IF' edge label."""
-        from torchlens.visualization import show_model_graph
-        import tempfile
         import os
+        import tempfile
+
+        from torchlens.visualization import show_model_graph
 
         model = example_models.ConditionalBranching()
         x = self._cond_input()
@@ -1690,8 +1691,8 @@ class TestConditionalBranchDetection:
 
     def test_then_label_in_visualization(self):
         """Rendered graph contains 'THEN' edge label with save_code_context."""
-        import tempfile
         import os
+        import tempfile
 
         model = example_models.ConditionalBranching()
         x = self._pos_input()
@@ -1714,9 +1715,10 @@ class TestConditionalBranchDetection:
 
     def test_rolled_graph_conditional_edges(self):
         """Rolled view preserves IF/THEN labels."""
-        from torchlens.visualization import show_model_graph
-        import tempfile
         import os
+        import tempfile
+
+        from torchlens.visualization import show_model_graph
 
         model = example_models.ConditionalBranching()
         x = self._cond_input()

@@ -9,91 +9,90 @@ import dataclasses
 import time
 import warnings
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
-
-from ... import _state as _st
-from ..._state import pause_logging
 from torch.utils.weak import WeakIdKeyDictionary
 
-from ._tl import (
-    active_label_session_token,
-    get_label_list,
-    get_live_label_list,
-    get_live_tensor_label,
-    get_param_meta,
-    get_tensor_label,
-    get_tensor_meta,
-    is_tensor_data_alias,
-    mark_detached_saved_activation,
-    session_label_storage_intact,
-    session_meta_is_anchored,
-    set_tensor_label,
+from ... import _state as _st
+from ..._errors import TorchLensPostfuncError
+from ..._io import BlobRef
+from ..._state import pause_logging
+from ..._training_validation import TrainingModeConfigError
+from ...capture.arg_positions import (
+    DYNAMIC_SPEC_UNCACHEABLE,
+    FUNC_ARG_SPECS,
+    VARIADIC_TENSOR_ARG_FUNCS,
+    ArgSpec,
+    _cache_dynamic_spec,
+    _normalize_func_name,
+    dynamic_spec_covers_call,
+    extract_tensors_and_params,
 )
-from .completeness_witness import internal_scalar_read, record_alias_mutation_candidate
-from .aliasing import (
-    detect_torch_alias_contract,
-    detect_torch_output_alias_contract,
-    get_parent_contents_for_contract_position,
-    parent_label_has_alias_contract,
-)
-from .buffer_writes import resolve_registered_buffer_address, session_validated_buffer_address
-from . import module_stack as _mstack
-from ...fastlog._halt import HaltSignal
-from ...utils._callable_safety import _PURE_TENSOR_PROPERTY_NAMES
-from ...utils._torch_compat import (
-    saved_tensors_default_hooks_active,
-    tensor_version_or_none,
-    torch_structseq_field_names,
-)
-from ...utils.introspection import (
-    _get_code_context,
-    _get_tensors_and_params_from_obj,
-    get_arg_tensors_for_resolution,
-    get_vars_of_type_from_obj,
-)
-from ...utils.display import _timed_phase
-from ...utils.tensor_utils import (
-    fp8_widen_for_numeric_ops,
-    get_memory_amount_from_metadata,
-    is_functorch_wrapped_tensor,
-    safe_copy,
-    safe_to,
-    tensor_nanequal,
-)
-from ...utils.collections import index_nested, ensure_iterable
 from ...capture.flops import compute_backward_flops, compute_forward_flops
-from ...capture.projections import LiveOpView
+from ...capture.plan import EnrichmentLevel
+from ...capture.predicates import (
+    _evaluate_intervene_op,
+    _evaluate_keep_op,
+    _is_halt_only_capture,
+    build_op_record_context,
+)
+from ...capture.projections import (
+    LiveOpView,
+    append_projected_event,
+    commit_op,
+    get_active_recording_state,
+)
+from ...capture.salient_args import extract_salient_args
+from ...capture.session import capture_session_for
+from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
+from ...data_classes.internal_types import FuncExecutionContext
 from ...data_classes.op import (
     Op,
-    register_relation_cell_encoding,
-    _dtype_or_none,
     _dedup_saved_activation_out,
+    _dtype_or_none,
     _effective_activation_save_mode,
     _memory_or_none,
     _recursive_safe_copy,
     _shape_or_none,
     _stamp_reference_out,
     apply_transform,
+    register_relation_cell_encoding,
     validate_streaming_transform_output,
     validate_train_mode_transform_output,
 )
-from .sources import log_source_tensor
-from ...ir.events import (
-    ArgTemplateRef,
-    FunctionCallRef,
-    ModuleFrame,
-    OutputRef,
-    OutputVersionEvent,
-    ParentEdge,
+from ...fastlog._halt import HaltSignal
+from ...fastlog._storage_resolver import _resolve_storage
+from ...fastlog.exceptions import PredicateError
+from ...fastlog.types import (
+    ActivationRecord,
+    CaptureSpec,
+    ModuleStackFrame,
+    RecordContext,
+    StorageIntent,
 )
-from ...ir.op_record import amend_lookback_retention
-from ...ir.intervention import FireResult, FunctionEventInput
+from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
+from ...intervention.runtime import active_intervention_context
+from ...intervention.selectors import (
+    BaseSelector,
+    label as make_label_selector,
+)
+from ...intervention.types import (
+    ArgComponent,
+    CapturedArgTemplate,
+    EdgeUseRecord,
+    FunctionRegistryKey,
+    InterventionDecision,
+    LiteralTensor,
+    LiteralValue,
+    ParentRef,
+    TargetSpec,
+    Unsupported,
+)
 from ...ir.container import (
     ContainerSpec,
     DataclassField,
@@ -115,39 +114,65 @@ from ...ir.container_registry import (
     Role,
     walk_container,
 )
-from ...ir.refs import ParamRef, TensorRef
+from ...ir.events import (
+    ArgTemplateRef,
+    FunctionCallRef,
+    ModuleFrame,
+    OutputRef,
+    OutputVersionEvent,
+    ParentEdge,
+)
+from ...ir.intervention import FireResult, FunctionEventInput
+from ...ir.op_record import amend_lookback_retention
 from ...ir.predicate import RetroactiveCaptureDecision
+from ...ir.refs import ParamRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ...intervention.selectors import (
-    BaseSelector,
-    label as make_label_selector,
+from ...utils._callable_safety import _PURE_TENSOR_PROPERTY_NAMES
+from ...utils._torch_compat import (
+    saved_tensors_default_hooks_active,
+    tensor_version_or_none,
+    torch_structseq_field_names,
 )
-from ...intervention.types import (
-    ArgComponent,
-    CapturedArgTemplate,
-    EdgeUseRecord,
-    FunctionRegistryKey,
-    InterventionDecision,
-    LiteralTensor,
-    LiteralValue,
-    ParentRef,
-    TargetSpec,
-    Unsupported,
+from ...utils.collections import ensure_iterable, index_nested
+from ...utils.display import _timed_phase
+from ...utils.introspection import (
+    _get_code_context,
+    _get_tensors_and_params_from_obj,
+    get_arg_tensors_for_resolution,
+    get_vars_of_type_from_obj,
 )
-from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
-from ...intervention.runtime import active_intervention_context
-from ...capture.arg_positions import (
-    DYNAMIC_SPEC_UNCACHEABLE,
-    FUNC_ARG_SPECS,
-    VARIADIC_TENSOR_ARG_FUNCS,
-    ArgSpec,
-    dynamic_spec_covers_call,
-    extract_tensors_and_params,
-    _cache_dynamic_spec,
-    _normalize_func_name,
+from ...utils.tensor_utils import (
+    fp8_widen_for_numeric_ops,
+    get_memory_amount_from_metadata,
+    is_functorch_wrapped_tensor,
+    safe_copy,
+    safe_to,
+    tensor_nanequal,
 )
-from ...capture.session import capture_session_for
-
+from . import module_stack as _mstack
+from ._tl import (
+    active_label_session_token,
+    get_label_list,
+    get_live_label_list,
+    get_live_tensor_label,
+    get_param_meta,
+    get_tensor_label,
+    get_tensor_meta,
+    is_tensor_data_alias,
+    mark_detached_saved_activation,
+    session_label_storage_intact,
+    session_meta_is_anchored,
+    set_tensor_label,
+)
+from .aliasing import (
+    detect_torch_alias_contract,
+    detect_torch_output_alias_contract,
+    get_parent_contents_for_contract_position,
+    parent_label_has_alias_contract,
+)
+from .buffer_writes import resolve_registered_buffer_address, session_validated_buffer_address
+from .completeness_witness import internal_scalar_read, record_alias_mutation_candidate
+from .sources import log_source_tensor
 from .tensor_tracking import (
     _add_tensor_backward_hook,
     _append_module_suffix_to_equivalence_class,
@@ -157,35 +182,6 @@ from .tensor_tracking import (
     _make_raw_param_group_barcode,
     _process_parent_param_ops,
 )
-
-from ..._errors import TorchLensPostfuncError
-from ..._io import BlobRef
-from ...fastlog._storage_resolver import _resolve_storage
-from ..._training_validation import TrainingModeConfigError
-from ...data_classes.internal_types import FuncExecutionContext
-from ...capture.predicates import (
-    _evaluate_intervene_op,
-    _evaluate_keep_op,
-    _is_halt_only_capture,
-    build_op_record_context,
-)
-from ...capture.plan import EnrichmentLevel
-from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
-
-from ...capture.projections import (
-    append_projected_event,
-    commit_op,
-    get_active_recording_state,
-)
-from ...fastlog.exceptions import PredicateError
-from ...fastlog.types import (
-    ActivationRecord,
-    CaptureSpec,
-    ModuleStackFrame,
-    RecordContext,
-    StorageIntent,
-)
-from ...capture.salient_args import extract_salient_args
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -2370,13 +2366,11 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
         return True
     if meta.address is not None and session_validated_buffer_address(trace, value) is not None:
         return True
-    if (
+    return bool(
         label_storage_intact
         and meta.buffer_source is not None
         and meta.buffer_source in live_labels
-    ):
-        return True
-    return False
+    )
 
 
 def _unattributed_tensor_arg_positions(
@@ -4748,10 +4742,7 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     if not isinstance(out, torch.Tensor) or isinstance(out, torch.nn.Parameter):
         return False
 
-    if (get_tensor_label(out) is None) or is_bottom_level_func:
-        return True
-    else:
-        return False
+    return bool(get_tensor_label(out) is None or is_bottom_level_func)
 
 
 def _check_if_tensor_arg(arg: Any) -> bool:
@@ -4766,15 +4757,9 @@ def _check_if_tensor_arg(arg: Any) -> bool:
     if issubclass(type(arg), torch.Tensor):
         return True
     elif type(arg) in [list, tuple]:
-        for elt in arg:
-            if issubclass(type(elt), torch.Tensor):
-                return True
-        return False
+        return any(issubclass(type(elt), torch.Tensor) for elt in arg)
     elif type(arg) is dict:
-        for val in arg.values():
-            if issubclass(type(val), torch.Tensor):
-                return True
-        return False
+        return any(issubclass(type(val), torch.Tensor) for val in arg.values())
     else:
         return False
 

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter
 import gc
 import json
-from pathlib import Path
 import runpy
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,7 +19,6 @@ from torchlens._io.runnable import build_sparse_run_descriptor, preflight_sparse
 from torchlens.intervention.types import FunctionRegistryKey
 from torchlens.options import CaptureOptions
 from torchlens.runnable import ResolverRecord, ResolverStatus, RunnableErrorCode
-
 
 RELEASE_MAX_UNRESOLVED_TORCH_KEYS = 0
 """Release threshold for the representative corpus's unique torch registry keys."""

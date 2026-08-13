@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 import math
+import struct
 import sys
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from itertools import count
-import struct
 from typing import Any, cast
 
 import numpy as np
@@ -47,28 +47,16 @@ from .ir.container import (
     reconstruction_is_lossy_by_type,
     resolve_container_type,
 )
-from .utils.rng import (
-    aten_qualname_is_seeded_rng,
-    deterministic_fill_governs,
-    qualname_is_uninit_growth_resize,
-    qualname_is_uninit_size_gated_alloc,
-    qualname_is_uninit_total_writer,
-    qualname_is_uninitialized_alloc,
-    restore_host_rng,
-    snapshot_host_rng,
-    uninit_new_call_is_size_form,
-)
-from .utils._torch_compat import tensor_has_named_dims, tensor_version_or_none
-from .utils.tensor_utils import touched_bytes_relation
 from .runnable import (
+    NONDETERMINISTIC_SOURCE_VOCABULARY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     CallableRegistryEntry,
     ContractCheck,
-    InputAttestationFingerprint,
     ControlWitness,
     ControlWitnessKind,
     DivergencePolicy,
+    InputAttestationFingerprint,
     LiteralAtom,
     LiteralAtomKind,
     LiteralMapping,
@@ -77,18 +65,17 @@ from .runnable import (
     LiteralSlice,
     LiteralTorchSymbol,
     LiteralTupleKey,
-    NONDETERMINISTIC_SOURCE_VOCABULARY,
     NonTensorLiteral,
     NumericAttestationStatus,
     PathFaithfulness,
     ReadinessReport,
     ReadinessStatus,
-    RunProvider,
-    RunReport,
-    RunResult,
     RunnableCallDescriptor,
     RunnableDiagnostic,
     RunnableErrorCode,
+    RunProvider,
+    RunReport,
+    RunResult,
     SparseRunDescriptor,
     StateSlotRole,
     StateSource,
@@ -100,6 +87,19 @@ from .runnable import (
     is_mode_sensitive_qualname,
     mark_trace_path_status,
 )
+from .utils._torch_compat import tensor_has_named_dims, tensor_version_or_none
+from .utils.rng import (
+    aten_qualname_is_seeded_rng,
+    deterministic_fill_governs,
+    qualname_is_uninit_growth_resize,
+    qualname_is_uninit_size_gated_alloc,
+    qualname_is_uninit_total_writer,
+    qualname_is_uninitialized_alloc,
+    restore_host_rng,
+    snapshot_host_rng,
+    uninit_new_call_is_size_form,
+)
+from .utils.tensor_utils import touched_bytes_relation
 
 _RUN_FORK_COUNTER = count(1)
 
@@ -1079,7 +1079,7 @@ def _runtime_input_metadata_value(value: torch.Tensor, name: str) -> Any:
     return None
 
 
-def _fact_path_tuple_or_none(fact: Mapping[str, Any]) -> "tuple[Any, ...] | None":
+def _fact_path_tuple_or_none(fact: Mapping[str, Any]) -> tuple[Any, ...] | None:
     """Belt twin of the parse-side path validator (r75 L1): ``None`` means fail closed.
 
     Parse refuses a non-sequence fact ``path`` as ``context_field_invalid`` before any
@@ -4118,7 +4118,7 @@ def _post_execution_contract_checks(
     # it at most once per transaction (at the FIRST input-structure witness, so the
     # inventory belt still raises at exactly the point the per-witness computation
     # did) instead of rescanning and re-decoding every witness per witness.
-    input_structure_positions: "set[Any] | None" = None
+    input_structure_positions: set[Any] | None = None
     for call in descriptor.calls:
         missing = tuple(slot_id for slot_id in call.output_slot_ids if slot_id not in slot_values)
         checks.append(
@@ -4247,7 +4247,7 @@ def _conditional_arm_check(witness: ControlWitness, fork: Any) -> ContractCheck:
     )
 
 
-def _input_structure_positions(descriptor: SparseRunDescriptor) -> "set[Any]":
+def _input_structure_positions(descriptor: SparseRunDescriptor) -> set[Any]:
     """Return the required input-site set for structure-check site selection (r69 A).
 
     Consumes the parse-validated descriptor-native inventory -- NEVER the surviving
@@ -4280,7 +4280,7 @@ def _input_structure_positions(descriptor: SparseRunDescriptor) -> "set[Any]":
 
 
 def _input_structure_witness_check(
-    witness: ControlWitness, *, inputs: Any, all_positions: "set[Any]"
+    witness: ControlWitness, *, inputs: Any, all_positions: set[Any]
 ) -> ContractCheck:
     """Compare one persisted input-boundary structure fact with the runtime site (r67 C2).
 
@@ -6042,9 +6042,9 @@ def _dropout_call_draws_rng(call: RunnableCallDescriptor) -> bool:
     p_value = named.get("p")
     if training is False:
         return False
-    if isinstance(p_value, (int, float)) and not isinstance(p_value, bool) and p_value == 0:
-        return False
-    return True
+    return not (
+        isinstance(p_value, (int, float)) and not isinstance(p_value, bool) and p_value == 0
+    )
 
 
 def _named_literal_values(call: RunnableCallDescriptor) -> dict[str, Any]:

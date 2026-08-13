@@ -2,8 +2,7 @@
 
 from collections import OrderedDict
 from collections.abc import Collection, Iterator, Mapping
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, TextIO, Tuple, cast
-
+from typing import TYPE_CHECKING, Any, Literal, TextIO, cast
 
 if TYPE_CHECKING:
     from ..receptive_field._types import (
@@ -26,20 +25,20 @@ from .._deprecations import warn_deprecated_alias
 from ..quantities import Duration, Flops, Macs, as_duration
 from ._accessor_base import Accessor
 from ._backend_capability_guards import raise_if_no_backward_capture
+from ._trace_accessors import (
+    _TRACE_LAYER_ACCESSOR_CACHE,
+    _TRACE_MODULE_CALL_ACCESSOR_ATTR,
+    _TRACE_OP_ACCESSOR_CACHE,
+    OrphanAccessor,
+    TraceGradFnCallAccessor,
+    TraceModuleCallAccessor,
+    TraceOpAccessor,
+)
 from ._trace_profile import (
     ModelProfile,
     _infer_input_modality,
     _raw_input_contains_images,
     _raw_input_num_stimuli,
-)
-from ._trace_accessors import (
-    OrphanAccessor,
-    TraceGradFnCallAccessor,
-    TraceModuleCallAccessor,
-    TraceOpAccessor,
-    _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_MODULE_CALL_ACCESSOR_ATTR,
-    _TRACE_OP_ACCESSOR_CACHE,
 )
 from .backward_pass import BackwardPass, BackwardPassAccessor
 from .derived_grad import IntermediateDerivedGradAccessor
@@ -70,8 +69,8 @@ class _CallableDict(dict[Any, Any]):
 
 
 def _legacy_conditional_then_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[str, str]]:
     """Return the legacy THEN-edge view from canonical conditional arm edges.
 
     Parameters
@@ -94,8 +93,8 @@ def _legacy_conditional_then_entry_edges(
 
 
 def _legacy_conditional_elif_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[int, int, str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[int, int, str, str]]:
     """Return the legacy ELIF-edge view from canonical conditional arm edges.
 
     Parameters
@@ -118,8 +117,8 @@ def _legacy_conditional_elif_entry_edges(
 
 
 def _legacy_conditional_else_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[int, str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[int, str, str]]:
     """Return the legacy ELSE-edge view from canonical conditional arm edges.
 
     Parameters
@@ -149,7 +148,7 @@ class TraceStatsMixin(_TraceMixinBase):
     # ********************************************
 
     @property
-    def conditional_then_entry_edges(self: "Trace") -> List[Tuple[str, str]]:
+    def conditional_then_entry_edges(self: "Trace") -> list[tuple[str, str]]:
         """Deprecated THEN-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -162,7 +161,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_then_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_then_entry_edges.setter
-    def conditional_then_entry_edges(self: "Trace", value: List[Tuple[str, str]]) -> None:
+    def conditional_then_entry_edges(self: "Trace", value: list[tuple[str, str]]) -> None:
         """Set the deprecated THEN-edge view by updating canonical arm edges.
 
         Parameters
@@ -182,7 +181,7 @@ class TraceStatsMixin(_TraceMixinBase):
             self.conditional_arm_entry_edges[(0, "then")] = list(value)
 
     @property
-    def conditional_elif_entry_edges(self: "Trace") -> List[Tuple[int, int, str, str]]:
+    def conditional_elif_entry_edges(self: "Trace") -> list[tuple[int, int, str, str]]:
         """Deprecated ELIF-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -195,7 +194,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_elif_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_elif_entry_edges.setter
-    def conditional_elif_entry_edges(self: "Trace", value: List[Tuple[int, int, str, str]]) -> None:
+    def conditional_elif_entry_edges(self: "Trace", value: list[tuple[int, int, str, str]]) -> None:
         """Set the deprecated ELIF-edge view by updating canonical arm edges.
 
         Parameters
@@ -216,7 +215,7 @@ class TraceStatsMixin(_TraceMixinBase):
             ).append((parent, child))
 
     @property
-    def conditional_else_entry_edges(self: "Trace") -> List[Tuple[int, str, str]]:
+    def conditional_else_entry_edges(self: "Trace") -> list[tuple[int, str, str]]:
         """Deprecated ELSE-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -229,7 +228,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_else_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_else_entry_edges.setter
-    def conditional_else_entry_edges(self: "Trace", value: List[Tuple[int, str, str]]) -> None:
+    def conditional_else_entry_edges(self: "Trace", value: list[tuple[int, str, str]]) -> None:
         """Set the deprecated ELSE-edge view by updating canonical arm edges.
 
         Parameters
@@ -408,7 +407,7 @@ class TraceStatsMixin(_TraceMixinBase):
         Returns:
             Callable dict mapping layer_type to forward/backward/count totals.
         """
-        result: Dict[str, Dict[str, int | Flops]] = {}
+        result: dict[str, dict[str, int | Flops]] = {}
         for entry in self.layer_list:
             lt = entry.layer_type
             if lt not in result:
@@ -447,7 +446,7 @@ class TraceStatsMixin(_TraceMixinBase):
         Returns:
             Callable dict mapping layer_type to forward/backward/count totals.
         """
-        result: Dict[str, Dict[str, int | Macs]] = {}
+        result: dict[str, dict[str, int | Macs]] = {}
         for entry in self.layer_list:
             lt = entry.layer_type
             if lt not in result:

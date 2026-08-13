@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import tempfile
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-import tempfile
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping
-import warnings
+from typing import Any, Literal
 from weakref import ref
 
 from .. import _state

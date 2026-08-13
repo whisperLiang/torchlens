@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 import torchlens as tl  # noqa: E402
+from torchlens._io import TorchLensIOError  # noqa: E402
 from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
 from torchlens.merged import (  # noqa: E402
     MergeConflictError,
@@ -260,7 +261,11 @@ class TestTamperMatrix:
         manifest = json.loads(manifest_path.read_text())
         manifest["bundle_format"] = "merged-directory-v2"
         manifest_path.write_text(json.dumps(manifest))
-        with pytest.raises(Exception):
+        # Narrowed from a blind `Exception` (B017): the closed-vocabulary claim in
+        # this test's NAME is only actually tested when the refusal type is pinned.
+        # A foreign bundle_format never enters the merged branch, so the trace-bundle
+        # loader refuses it as an unrecognized directory artifact.
+        with pytest.raises(TorchLensIOError):
             tl.load(art)
 
 

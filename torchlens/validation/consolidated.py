@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -11,7 +12,6 @@ from torch import nn
 from ..backends import BackendName, BackendUnsupportedError, resolve_backend_spec
 from ..options import CaptureOptions
 from .backward import validate_backward_pass
-
 
 if TYPE_CHECKING:
     from ..receptive_field._types import ReceptiveFieldValidation
@@ -248,7 +248,7 @@ def _validate_receptive_field_scope(
     random_seed: int | None,
     validate_metadata: bool,
     backend: BackendName | None,
-) -> list["ReceptiveFieldValidation"]:
+) -> list[ReceptiveFieldValidation]:
     """Capture and sample both RF containment directions at layer centers.
 
     Parameters
@@ -270,8 +270,8 @@ def _validate_receptive_field_scope(
         Sampled receptive and projective tri-state results.
     """
 
-    from ..user_funcs import trace
     from ..receptive_field._validation import validate_receptive_field_trace
+    from ..user_funcs import trace
     from .invariants import check_metadata_invariants
 
     ready_args = _gradient_ready_value(input_args)
@@ -312,7 +312,7 @@ def validate(
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
     backend: BackendName | None = None,
-) -> bool | InterventionValidationReport | list["ReceptiveFieldValidation"]:
+) -> bool | InterventionValidationReport | list[ReceptiveFieldValidation]:
     """Validate a model/input pair for a requested TorchLens scope.
 
     Parameters

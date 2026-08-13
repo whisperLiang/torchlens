@@ -42,7 +42,7 @@ class _LoopCell(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def loop_trace() -> "tl.Trace":
+def loop_trace() -> tl.Trace:
     """Trace of the recurrent cell, shared across tests (read-only)."""
 
     torch.manual_seed(0)
@@ -51,7 +51,7 @@ def loop_trace() -> "tl.Trace":
     return tl.trace(model, x)
 
 
-def _multi_pass_groups(trace: "tl.Trace") -> dict[str, list]:
+def _multi_pass_groups(trace: tl.Trace) -> dict[str, list]:
     """Return ``layer_label -> member ops`` for every multi-pass group."""
 
     groups: dict[str, list] = {}

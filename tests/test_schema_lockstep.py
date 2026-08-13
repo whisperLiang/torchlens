@@ -34,9 +34,10 @@ one small capture.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -529,6 +530,43 @@ def test_every_generated_module_is_registered() -> None:
     assert not phantom, f"registered generated modules that no longer exist: {sorted(phantom)}"
 
 
+def test_ruff_excludes_every_generated_artifact() -> None:
+    """Ruff must not touch a generated module, and must not exclude a hand-written one.
+
+    ``test_generated_artifact_is_current`` compares each artifact BYTE-FOR-BYTE
+    against fresh generator output, so any ruff rewrite (format, isort, ``UP*``)
+    makes it permanently red. Ruff's ``extend-exclude`` is therefore the matching
+    half of this lockstep, and it is pinned here in BOTH directions: adding a
+    generated module without its exclusion fails, and leaving an exclusion behind
+    after a module stops being generated fails too.
+
+    Regression: the grind r3 lint ratchet reformatted both artifacts and turned
+    this gate red until the generators were re-run.
+    """
+
+    # Regex, not tomllib: the declared floor is python 3.10, where tomllib is absent.
+    pyproject_text = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(
+        r"^\s*extend-exclude\s*=\s*\[(.*?)\]", pyproject_text, re.DOTALL | re.MULTILINE
+    )
+    assert block is not None, "pyproject [tool.ruff] must declare extend-exclude"
+    excluded = set(re.findall(r'"([^"]+)"', block.group(1)))
+
+    generated = generated_module_paths()
+    missing = sorted(generated - excluded)
+    assert not missing, (
+        f"generated modules ruff would rewrite (add to [tool.ruff] extend-exclude): {missing}"
+    )
+
+    # Only the generated half is pinned; the menagerie/crawler entries are excluded
+    # for unrelated provenance reasons and are legitimately extra.
+    py_excludes = {path for path in excluded if path.endswith(".py") and "menagerie" not in path}
+    assert py_excludes <= generated, (
+        "extend-exclude names a .py file that is no longer a generated artifact: "
+        f"{sorted(py_excludes - generated)}"
+    )
+
+
 @pytest.mark.parametrize("artifact", GENERATED_ARTIFACTS, ids=lambda a: a.path)
 def test_generated_artifact_is_current(artifact: GeneratedArtifact) -> None:
     """The checked-in generated module matches a fresh in-process generation.
@@ -700,7 +738,7 @@ def test_facade_plumbing_allowance_stays_minimal() -> None:
     itself is pinned.
     """
 
-    assert FACADE_PLUMBING_ATTRS == {"_tl_core", "_tl_row"}
+    assert {"_tl_core", "_tl_row"} == FACADE_PLUMBING_ATTRS
 
 
 # ---------------------------------------------------------------------------

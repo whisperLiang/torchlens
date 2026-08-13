@@ -5,17 +5,14 @@ from __future__ import annotations
 import traceback
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import torch
-
-from ..utils._torch_compat import tensor_version_or_none
-from ..utils._torch_symbols import torch_attr
 
 from ..fastlog.exceptions import PredicateError
 from ..fastlog.types import (
@@ -36,17 +33,19 @@ from ..ir.events import (
     OutputRef,
     ParentEdge,
 )
-from ..ir.refs import DeviceRef, DtypeRef, TensorRef
 from ..ir.predicate import EventKind, coerce_deferred_value
+from ..ir.refs import DeviceRef, DtypeRef, TensorRef
 from ..ir.semantics import BackendSemantics, CapturePolicy
+from ..utils._torch_compat import tensor_version_or_none
+from ..utils._torch_symbols import torch_attr
 from ..utils.tensor_utils import get_memory_amount_from_metadata
 
 if TYPE_CHECKING:
-    from ..fastlog.options import RecordingOptions
     from ..data_classes.trace import Trace
+    from ..fastlog.options import RecordingOptions
     from ..ir.op_record import OpRecord
 
-_active_recording_state: "RecordingState | None" = None
+_active_recording_state: RecordingState | None = None
 
 _EMPTY_ARG_TEMPLATE_REF = ArgTemplateRef(
     saved_args=None,
@@ -110,7 +109,7 @@ class _StorageBackend(Protocol):
         spec: CaptureSpec,
         intent: StorageIntent,
         *,
-        options: "RecordingOptions",
+        options: RecordingOptions,
         ctx: RecordContext | GradRecordContext | None,
         kind: str = "activation",
     ) -> tuple[
@@ -128,7 +127,7 @@ class _StorageBackend(Protocol):
         """Abort storage."""
 
 
-def _resolve_storage_intent(options: "RecordingOptions") -> StorageIntent:
+def _resolve_storage_intent(options: RecordingOptions) -> StorageIntent:
     """Resolve storage destinations from StreamingOptions."""
 
     if options.streaming is None or options.streaming.bundle_path is None:
@@ -139,7 +138,7 @@ def _resolve_storage_intent(options: "RecordingOptions") -> StorageIntent:
     )
 
 
-def _empty_recording(options: "RecordingOptions") -> Recording:
+def _empty_recording(options: RecordingOptions) -> Recording:
     """Create an empty lazy Recording for a predicate capture session."""
 
     return Recording(
@@ -177,7 +176,7 @@ def _empty_recording(options: "RecordingOptions") -> Recording:
 class RecordingState:
     """Mutable state for one active predicate recording pass."""
 
-    options: "RecordingOptions"
+    options: RecordingOptions
     recording: Recording
     history: deque[RecordContext] = field(default_factory=deque)
     op_counts: dict[str, int] = field(default_factory=dict)
@@ -194,7 +193,7 @@ class RecordingState:
     storage_intent: StorageIntent = field(init=False)
     storage_backend: _StorageBackend = field(init=False)
     grad_fn_to_context: _GradFnContextMap = field(default_factory=_GradFnContextMap)
-    runtime_trace: "Trace | None" = None
+    runtime_trace: Trace | None = None
     active_save_grads_record_policy: Any | None = None
     intervene_selector_fire_count: int = 0
     module_event_fields: dict[
@@ -739,7 +738,7 @@ def _record_from_record_context(
         tuple[tuple[str, int], ...],
     ]
     | None = None,
-) -> "OpRecord":
+) -> OpRecord:
     """Sparse-pipeline decomposed freeze: ``OpCore`` + facets, no ``OpEvent``.
 
     Value computation routes through ``_sparse_freeze_values``; facet PRESENCE mirrors ``op_record_from_event``
@@ -911,7 +910,7 @@ class SparseOpDraft:
         )
 
 
-def commit_op(trace: Any, draft: OpDraft) -> "LiveOpView | None":
+def commit_op(trace: Any, draft: OpDraft) -> LiveOpView | None:
     """The ONE commit tail: freeze -> atomic append (+ exhaustive stages).
 
     Freeze constructs the journal record ONCE from the final draft (the
@@ -989,13 +988,11 @@ _OPLOG_FIELDS_KNOWN_LATE = frozenset(
         "layer_label_short",
         "label",
         "label_short",
-        "layer_label",
-        "layer_label_short",
     }
 )
 
 
-def _grad_fn_handle_from_index(trace: "Trace", event: OpEvent) -> Any:
+def _grad_fn_handle_from_index(trace: Trace, event: OpEvent) -> Any:
     """Read the live autograd handle from its single owner, the journal index.
 
     grad_fn single ownership (producer unification P2): the journal's
@@ -1014,7 +1011,7 @@ def _grad_fn_handle_from_index(trace: "Trace", event: OpEvent) -> Any:
     return getattr(event, "grad_fn_handle", None)
 
 
-def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
+def _event_live_field(trace: Trace, event: OpEvent, name: str) -> Any:
     """Return a forward-time field projected from an operation event.
 
     Parameters
@@ -1294,7 +1291,7 @@ class LiveOpView:
 
     __slots__ = ("_trace_ref", "_record")
 
-    def __init__(self, trace: "Trace", record: OpEvent) -> None:
+    def __init__(self, trace: Trace, record: OpEvent) -> None:
         """Initialize the live view.
 
         Parameters
@@ -1309,7 +1306,7 @@ class LiveOpView:
         object.__setattr__(self, "_record", record)
 
     @property
-    def _trace(self) -> "Trace":
+    def _trace(self) -> Trace:
         """Return the owning trace while it is still alive.
 
         Returns
@@ -1453,7 +1450,7 @@ def sync_recording_grad_records_from_sidecar(state: RecordingState) -> None:
 
 
 def _maybe_add_grad_fn_metadata_record(
-    state: RecordingState, trace: "Trace", event: Any, ordinal: int
+    state: RecordingState, trace: Trace, event: Any, ordinal: int
 ) -> None:
     """Append a metadata-only grad-fn record when the active policy selects it."""
 
@@ -1490,7 +1487,7 @@ def _maybe_add_grad_fn_metadata_record(
 
 
 def _grad_record_context_from_op_grad_event(
-    trace: "Trace",
+    trace: Trace,
     event: Any,
     backward_passes: Mapping[int, Any],
     ordinal: int,

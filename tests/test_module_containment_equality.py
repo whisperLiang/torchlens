@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 import torch.nn.functional
-import torchlens as tl
-
 from _module_containment_snapshot import build_snapshot
-from torchlens.backends.torch._tl import get_module_meta
 from fixtures.module_containment_models import ALL_FIXTURES, FixtureBuilder
+
+import torchlens as tl
+from torchlens.backends.torch._tl import get_module_meta
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "module_containment"
 # Synthetic hook replacement is intentionally snapshotted with hook-stack semantics:

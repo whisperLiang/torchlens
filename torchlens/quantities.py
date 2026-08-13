@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 from typing_extensions import Self
 
 
-class Quantity(ABC):
+class Quantity(ABC):  # noqa: B024 - deliberate marker ABC, see the docstring
     """Marker base class for TorchLens numeric quantity wrappers.
 
     Quantity subclasses also subclass a concrete numeric type such as ``int`` or

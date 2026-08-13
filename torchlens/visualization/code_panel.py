@@ -76,7 +76,7 @@ class SourceText(str):
         *,
         file_path: str | None = None,
         line_number: int | None = None,
-    ) -> "SourceText":
+    ) -> SourceText:
         """Create a source string carrying optional file-line metadata.
 
         Parameters

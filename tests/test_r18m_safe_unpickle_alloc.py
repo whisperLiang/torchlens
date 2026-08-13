@@ -36,8 +36,8 @@ import pytest
 import torch
 
 from torchlens._io._safe_unpickle import (
-    SafeBundleUnpickler,
     _NUMPY_RECONSTRUCT_FUNCS,
+    SafeBundleUnpickler,
 )
 
 # 1,000,000-element float64 ndarray == 8 MB; the same stream scales LINEARLY (an attacker

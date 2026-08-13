@@ -19,7 +19,7 @@ decided on.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -51,18 +51,18 @@ class ValidationFailure:
     """
 
     check: str
-    op_label: Optional[str] = None
-    func_name: Optional[str] = None
+    op_label: str | None = None
+    func_name: str | None = None
     message: str = ""
-    saved_shape: Optional[tuple[int, ...]] = None
-    recomputed_shape: Optional[tuple[int, ...]] = None
-    saved_dtype: Optional[str] = None
-    recomputed_dtype: Optional[str] = None
-    max_abs_diff: Optional[float] = None
-    max_rel_diff: Optional[float] = None
-    nan_mismatch: Optional[bool] = None
-    inf_mismatch: Optional[bool] = None
-    reduction_depth: Optional[int] = None
+    saved_shape: tuple[int, ...] | None = None
+    recomputed_shape: tuple[int, ...] | None = None
+    saved_dtype: str | None = None
+    recomputed_dtype: str | None = None
+    max_abs_diff: float | None = None
+    max_rel_diff: float | None = None
+    nan_mismatch: bool | None = None
+    inf_mismatch: bool | None = None
+    reduction_depth: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> str:
@@ -193,7 +193,7 @@ def record_validation_failure(trace: Any, failure: ValidationFailure) -> None:
         pass
 
 
-def get_validation_failure(trace: Any) -> Optional[ValidationFailure]:
+def get_validation_failure(trace: Any) -> ValidationFailure | None:
     """Return the recorded structured failure on a Trace, if any."""
 
     try:
@@ -251,7 +251,7 @@ def get_validation_diagnostics(trace: Any) -> tuple[ValidationDiagnostic, ...]:
     return tuple(item for item in diagnostics if isinstance(item, ValidationDiagnostic))
 
 
-def _short_dtype(dtype: Any) -> Optional[str]:
+def _short_dtype(dtype: Any) -> str | None:
     """Return a compact dtype string such as ``f32`` / ``i64`` (best-effort)."""
 
     if dtype is None:
@@ -278,9 +278,9 @@ def describe_tensor_mismatch(
     recomputed: Any,
     *,
     check: str,
-    op_label: Optional[str] = None,
-    func_name: Optional[str] = None,
-    reduction_depth: Optional[int] = None,
+    op_label: str | None = None,
+    func_name: str | None = None,
+    reduction_depth: int | None = None,
     message: str = "",
 ) -> ValidationFailure:
     """Build a :class:`ValidationFailure` describing a saved-vs-recomputed mismatch.

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 import torch
-import torchlens as tl
 
+import torchlens as tl
 from torchlens._io import MIN_TLSPEC_VERSION, TLSPEC_VERSION, ArtifactVersionBelowFloorError
 
 

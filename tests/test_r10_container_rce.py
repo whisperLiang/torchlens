@@ -131,15 +131,15 @@ def _tamper_output_container_type(
     with open(bundle / "metadata.pkl", "rb") as handle:
         obj = pickle.load(handle)
     child = ContainerSpec(kind="literal", literal_value=["/bin/sh", "-c", f"touch {sentinel}"])
-    tampered = dict(
-        kind="namedtuple",
-        type_module=type_module,
-        type_qualname=type_qualname,
-        fields=("args",),
-        length=None,
-        keys=(),
-        child_specs=((NamedField("args"), child),),
-    )
+    tampered = {
+        "kind": "namedtuple",
+        "type_module": type_module,
+        "type_qualname": type_qualname,
+        "fields": ("args",),
+        "length": None,
+        "keys": (),
+        "child_specs": ((NamedField("args"), child),),
+    }
     for spec in _find_container_specs(obj):
         for key, value in tampered.items():
             object.__setattr__(spec, key, value)

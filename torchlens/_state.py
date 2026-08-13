@@ -22,9 +22,9 @@ Design rationale:
 
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 # TYPE_CHECKING is False at runtime, so this import only exists for static
 # analysis / IDE support — it will never trigger the circular-import problem.

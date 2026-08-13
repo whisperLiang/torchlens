@@ -40,24 +40,46 @@ outside the pipeline and its windows.
 """
 
 import os
-from typing import TYPE_CHECKING, List
-
 import time
-import torch
 import warnings
+from typing import TYPE_CHECKING
 
-from ..capture.session import capture_session_for_events
-from ..ir.capture_events import _clone_op_event_for_replay
-from ..backends.torch.ops import _compact_ancestor_sets
-from ..data_classes._compaction import compact_op_metadata as _compact_op_metadata
+import torch
+
 from .._trace_core.relation_views import freeze_trace_relation_views as _freeze_relation_views
-from ..utils.tensor_utils import _is_cuda_available
+from ..backends.torch.ops import _compact_ancestor_sets
+from ..capture.session import capture_session_for_events
+from ..data_classes._compaction import compact_op_metadata as _compact_op_metadata
+from ..ir.capture_events import _clone_op_event_for_replay
 from ..utils.hashing import (
     compute_graph_shape_hash,
     compute_raw_event_shape_hash,
     populate_normalized_layer_addresses,
 )
+from ..utils.tensor_utils import _is_cuda_available
+from . import ast_branches
 
+# Historical import surface: the contract artifacts live in _contracts.py
+# and the derivation in _executor.py (import-cycle hygiene);
+# torchlens.postprocess remains their public address. Importing _executor
+# here runs the 7.1-family structural checks on every torchlens import.
+from ._contracts import (
+    CAPTURE_BASELINE_TOKENS as CAPTURE_BASELINE_TOKENS,
+    LEGACY_STEP_RANK as LEGACY_STEP_RANK,
+    PINNED_ORDER_PAIRS as PINNED_ORDER_PAIRS,
+    POSTPROCESS_STEP_CONTRACTS as POSTPROCESS_STEP_CONTRACTS,
+    PinnedPair as PinnedPair,
+    PostprocessStepContract as PostprocessStepContract,
+    tokens as tokens,
+)
+from ._executor import (
+    REGISTRY_ORDER as REGISTRY_ORDER,
+    StepContext,
+    execution_order as execution_order,
+    run_pipeline,
+)
+from ._materialize import materialize_from_events
+from .ast_branches import resolve_var_names
 from .control_flow import (
     _fix_buffer_layers,
     _mark_conditional_branches,
@@ -66,8 +88,8 @@ from .finalization import (
     _build_layer_logs,
     _build_module_logs,
     _evict_streamed_outs,
-    _finalize_streamed_bundle,
     _finalize_param_logs,
+    _finalize_streamed_bundle,
     _log_time_elapsed,
     _set_tracing_finished,
     _undecorate_all_saved_tensors,
@@ -80,9 +102,9 @@ from .graph_traversal import (
     _resolve_output_parent_labels,
 )
 from .labeling import (
+    _build_lookup_keys_and_finalize_retained_layers,
     _log_final_info_for_layers,
     _map_raw_labels_to_final_labels,
-    _build_lookup_keys_and_finalize_retained_layers,
     _rename_model_history_layer_names,
 )
 from .loop_detection import _detect_and_label_loops, _group_by_shared_params
@@ -93,34 +115,10 @@ from .loop_grouping_adapter import (
     group_recurrent_nodes,
 )
 from .saved_summary import refresh_saved_module_call_count
-from ._materialize import materialize_from_events
-from . import ast_branches
-from .ast_branches import resolve_var_names
-
-# Historical import surface: the contract artifacts live in _contracts.py
-# and the derivation in _executor.py (import-cycle hygiene);
-# torchlens.postprocess remains their public address. Importing _executor
-# here runs the 7.1-family structural checks on every torchlens import.
-from ._contracts import (
-    CAPTURE_BASELINE_TOKENS as CAPTURE_BASELINE_TOKENS,
-    LEGACY_STEP_RANK as LEGACY_STEP_RANK,
-    PINNED_ORDER_PAIRS as PINNED_ORDER_PAIRS,
-    PinnedPair as PinnedPair,
-    POSTPROCESS_STEP_CONTRACTS as POSTPROCESS_STEP_CONTRACTS,
-    PostprocessStepContract as PostprocessStepContract,
-    tokens as tokens,
-)
-from ._executor import (
-    REGISTRY_ORDER as REGISTRY_ORDER,
-    StepContext,
-    execution_order as execution_order,
-    run_pipeline,
-)
-
 
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
     from .._trace_core.op_store import StepAuditResult
+    from ..data_classes.trace import Trace
 
 from ..quantities import Bytes
 
@@ -516,7 +514,7 @@ def _refresh_fast_saved_summary(self: "Trace") -> None:
 
 
 def postprocess(
-    self: "Trace", output_tensors: List[torch.Tensor], output_tensor_addresses: List[str]
+    self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
 ) -> None:
     """Run the full postprocessing pipeline in exhaustive mode.
 

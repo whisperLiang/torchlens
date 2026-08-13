@@ -30,7 +30,6 @@ import torchlens.utils.hashing as hashing
 import torchlens.utils.introspection as introspection
 from torchlens import _state
 
-
 # ---------------------------------------------------------------------------
 # H5 -- per-instance dir() cache soundness (order-dependent capture gap)
 # ---------------------------------------------------------------------------

@@ -192,7 +192,7 @@ def test_tinygrad_nested_modules_preserve_address_tree_and_selectors() -> None:
     trace = tl.trace(model, Tensor.ones(1, 3), backend="tinygrad")
 
     assert trace.module_identity_mode == "object_module"
-    assert set(module.address for module in trace.modules) == {
+    assert {module.address for module in trace.modules} == {
         "self",
         "encoder",
         "encoder.proj",

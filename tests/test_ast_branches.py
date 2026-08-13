@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ast
 import os
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from textwrap import dedent
-from typing import Iterator, Optional, Tuple
 
 import pytest
 
@@ -54,7 +54,7 @@ def _write_source(tmp_path: Path, filename: str, source: str) -> Path:
     return path
 
 
-def _find_token(source: str, token: str, occurrence: int = 1) -> Tuple[int, int]:
+def _find_token(source: str, token: str, occurrence: int = 1) -> tuple[int, int]:
     """Return the line and column for a token occurrence.
 
     Parameters
@@ -106,10 +106,10 @@ def _load_source(path: Path) -> str:
 def _make_frame(
     path: Path,
     line: int,
-    col: Optional[int],
+    col: int | None,
     func_name: str,
     code_firstlineno: int,
-    func_qualname: Optional[str],
+    func_qualname: str | None,
 ) -> FuncCallLocation:
     """Build a manual ``FuncCallLocation`` for attribution tests.
 
@@ -711,7 +711,7 @@ def test_invalidate_cache_clears_specific_file_and_global_cache(tmp_path: Path) 
 
 
 def _naive_candidate_calls(
-    scope_node: ast.AST, line: int, col: Optional[int], func_name: Optional[str]
+    scope_node: ast.AST, line: int, col: int | None, func_name: str | None
 ) -> list[ast.Call]:
     """Resolve candidate calls by re-walking the scope, as a reference oracle.
 
@@ -895,7 +895,7 @@ def test_scope_call_index_matches_naive_rewalk_at_every_call_site(tmp_path: Path
     for scope in index.scopes:
         reference_node = _reference_scope_node(path, scope.qualname)
         call_nodes = [node for node in ast.walk(reference_node) if isinstance(node, ast.Call)]
-        queries: list[Tuple[int, Optional[int], Optional[str]]] = []
+        queries: list[tuple[int, int | None, str | None]] = []
         for call_node in call_nodes:
             visible_name = ast_branches._call_visible_name(call_node)
             queries.append((call_node.lineno, call_node.col_offset, visible_name))
@@ -1103,7 +1103,7 @@ def test_released_index_reprojects_new_scope_from_retained_source_not_disk(
     ast_branches.release_parsed_asts()
     assert index._heavy is None
 
-    def _no_disk_read(filename: str) -> Optional[str]:
+    def _no_disk_read(filename: str) -> str | None:
         raise AssertionError("hot-tier rebuild must not read the file from disk")
 
     monkeypatch.setattr(ast_branches, "_read_source_file", _no_disk_read)

@@ -7,9 +7,9 @@ from typing import Any
 
 import numpy as np
 import pytest
+from conftest import tensorflow_backend_modules
 
 import torchlens as tl
-from conftest import tensorflow_backend_modules
 from torchlens.backends.tf import TFBackend
 
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()

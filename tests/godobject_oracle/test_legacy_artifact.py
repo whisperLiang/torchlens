@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 import torch
+from surface_oracle._snapshot import canonical_dump, snapshot_trace_surface
 
 import torchlens as tl
-from surface_oracle._snapshot import canonical_dump, snapshot_trace_surface
 
 from .test_aliases import _SEED
 

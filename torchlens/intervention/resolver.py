@@ -2,29 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterator, Sequence
-from dataclasses import dataclass
 import importlib
 import operator
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 import warnings
+from collections.abc import Callable, Collection, Iterator, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import torch
 
-from .errors import (
-    MultiMatchWarning,
-    ReplayPreconditionError,
-    SiteAmbiguityError,
-    SiteResolutionError,
-    UntrustedCallableError,
-)
-from .selectors import (
-    BaseSelector,
-    CompositeSelector,
-    NotSelector,
-    _classify_selector_direction,
-)
-from .types import FrozenTargetSpec, FunctionRegistryKey, TargetSpec
 from ..ir.selector_eval import (
     ensure_supported,
     evaluate,
@@ -43,6 +29,20 @@ from ..utils._callable_safety import (
 )
 from ..utils._torch_compat import resolve_runnable_torch_alias
 from ..utils._torch_symbols import torch_attr
+from .errors import (
+    MultiMatchWarning,
+    ReplayPreconditionError,
+    SiteAmbiguityError,
+    SiteResolutionError,
+    UntrustedCallableError,
+)
+from .selectors import (
+    BaseSelector,
+    CompositeSelector,
+    NotSelector,
+    _classify_selector_direction,
+)
+from .types import FrozenTargetSpec, FunctionRegistryKey, TargetSpec
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -686,7 +686,7 @@ class SiteTable:
 
         return iter(self._sites)
 
-    def __getitem__(self, idx: int | slice) -> "Site | SiteTable":
+    def __getitem__(self, idx: int | slice) -> Site | SiteTable:
         """Return one site or a sliced site table.
 
         Parameters
@@ -724,7 +724,7 @@ class SiteTable:
         prefix = ", ".join(labels[:3])
         return f"SiteTable({count} sites: {prefix}, ... {labels[-1]})"
 
-    def where(self, predicate: Callable[[Site], bool]) -> "SiteTable":
+    def where(self, predicate: Callable[[Site], bool]) -> SiteTable:
         """Filter the table with a predicate.
 
         Parameters
@@ -778,7 +778,7 @@ class SiteTable:
             for site in self._sites
         )
 
-    def to_dataframe(self) -> "pd.DataFrame":
+    def to_dataframe(self) -> pd.DataFrame:
         """Return a pandas table describing resolved sites.
 
         Returns
@@ -811,7 +811,7 @@ class SiteTable:
 
 
 def resolve_sites(
-    log: "Trace",
+    log: Trace,
     query: SelectorInput,
     *,
     strict: bool = False,
@@ -876,7 +876,7 @@ def resolve_sites(
 
 
 def find_sites(
-    log: "Trace",
+    log: Trace,
     query: SelectorInput,
     *,
     strict: bool = False,
@@ -923,7 +923,7 @@ def find_sites(
     return SiteTable(matched, query=query)
 
 
-def _iter_layer_ops(log: "Trace") -> Sequence["Op"]:
+def _iter_layer_ops(log: Trace) -> Sequence[Op]:
     """Return final layer ops from a completed model log.
 
     Parameters
@@ -947,7 +947,7 @@ def _iter_layer_ops(log: "Trace") -> Sequence["Op"]:
     return log.layer_list
 
 
-def _iter_sites(log: "Trace", direction: Literal["forward", "backward"]) -> Sequence[Site]:
+def _iter_sites(log: Trace, direction: Literal["forward", "backward"]) -> Sequence[Site]:
     """Return candidate sites for the requested graph direction.
 
     Parameters

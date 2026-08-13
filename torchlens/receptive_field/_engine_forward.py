@@ -22,21 +22,20 @@ from ._engine import (
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
+    _as_tuple,
     _AxisState,
+    _compose,
     _Dissolved,
     _Full,
+    _identity_map,
     _InputState,
     _Mapped,
-    _as_tuple,
-    _compose,
-    _identity_map,
     _select_full_axes,
     _transpose_mapped,
 )
 from ._path import ancestor_labels, resolve_graph_point
-from ._rules import _RuleResult, _rf_rules_epoch
+from ._rules import _rf_rules_epoch, _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldDirection, ReceptiveFieldStatus
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -615,9 +614,7 @@ def _transpose_full(
         if child_rank == parent_rank:
             child_to_parent = {axis: axis for axis in range(child_rank)}
         elif child_rank == len(surviving_axes):
-            child_to_parent = {
-                child_axis: parent_axis for child_axis, parent_axis in enumerate(surviving_axes)
-            }
+            child_to_parent = dict(enumerate(surviving_axes))
     passthrough = _transpose_passthrough(
         child,
         parent,

@@ -33,9 +33,9 @@ parallel hooks/styles, and pipeline-stage fragments refuse.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-import sys
 from typing import Any
 
 import torch
@@ -359,10 +359,7 @@ def _dtensor_is_sharded(value: Any) -> bool:
     placements = getattr(value, "placements", None)
     if not placements:
         return False
-    for placement in placements:
-        if type(placement).__name__ != "Replicate":
-            return True
-    return False
+    return any(type(placement).__name__ != "Replicate" for placement in placements)
 
 
 def _describe_mesh(mesh: Any) -> str:

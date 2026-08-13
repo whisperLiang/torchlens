@@ -46,9 +46,9 @@ import warnings
 import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from types import MappingProxyType
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, cast
 
 import torch
@@ -56,12 +56,12 @@ import torch._ops as _torch_ops  # r47 hon2_1: enumerate the ``torch.ops.*`` __c
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER, tensor_version_or_none
-from ...utils._torch_symbols import torch_attr
-from ...utils._callable_safety import private_c_forward_op_module_names
 from ... import _state
 from ..._errors import TorchLensCaptureGapWarning
 from ...errors import ScalarEscapeWarning
+from ...utils._callable_safety import private_c_forward_op_module_names
+from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER, tensor_version_or_none
+from ...utils._torch_symbols import torch_attr
 from ._tl import (
     get_buffer_address,
     get_tensor_label,
@@ -306,10 +306,10 @@ class _WitnessState:
     # actual reads. Uses weak keys when torch retains safe untyped-storage wrappers and
     # identity-keyed strong entries on older torch whose ephemeral storage weakrefs can dangle.
     # ``None`` until the wrappers arm.
-    storage_origins: "_StorageOriginRegistry | None" = None
+    storage_origins: _StorageOriginRegistry | None = None
     # r67 C3: lazy ptr -> full state-name-set index (params + buffers, alias groups merged)
     # backing the origin resolver's pointer fallback. Built once per forward on first use.
-    storage_state_ptr_names: "dict[int, frozenset[str]] | None" = None
+    storage_state_ptr_names: dict[int, frozenset[str]] | None = None
 
 
 class _StorageOriginRegistry:
@@ -332,12 +332,12 @@ class _StorageOriginRegistry:
             Whether storage handles are safe to hold through weak references.
         """
 
-        self._weak: "weakref.WeakKeyDictionary[Any, tuple[str, Any]] | None" = (
+        self._weak: weakref.WeakKeyDictionary[Any, tuple[str, Any]] | None = (
             weakref.WeakKeyDictionary() if weak_keys else None
         )
-        self._strong: "dict[int, tuple[Any, tuple[str, Any]]]" = {}
+        self._strong: dict[int, tuple[Any, tuple[str, Any]]] = {}
 
-    def get(self, handle: Any) -> "tuple[str, Any] | None":
+    def get(self, handle: Any) -> tuple[str, Any] | None:
         """Return the origin registered for ``handle`` by object identity.
 
         Parameters
@@ -358,7 +358,7 @@ class _StorageOriginRegistry:
             return None
         return entry[1]
 
-    def register(self, handle: Any, origin: "tuple[str, Any]") -> None:
+    def register(self, handle: Any, origin: tuple[str, Any]) -> None:
         """Register ``handle`` once without weakening identity guarantees.
 
         Parameters
@@ -411,7 +411,7 @@ and are handled by the scoped method/property patch plus the descriptor's comple
 value-equality net.
 """
 
-_HOST_ESCAPE_SOURCE_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = weakref.WeakKeyDictionary()
+_HOST_ESCAPE_SOURCE_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
 """Per-trace raw producing-op labels of tensor->host escape sources.
 
 Kept off the Trace ``__dict__`` (and therefore out of portable-state scrub) in a
@@ -420,7 +420,7 @@ registering a new serialized Trace field. Entries are dropped automatically when
 Trace is garbage collected.
 """
 
-_HOST_ESCAPE_STATE_SOURCE_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_HOST_ESCAPE_STATE_SOURCE_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace subset of escape-source labels whose source is a registered param/buffer.
@@ -435,7 +435,7 @@ side set lets the producer tell an unresolved STATE label (defer to the unbound 
 from an unresolved TENSOR-OP label (a genuinely unwitnessable pruned host chain).
 """
 
-_HOST_ESCAPE_BOOL_SOURCE_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_HOST_ESCAPE_BOOL_SOURCE_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace subset of escape-source labels whose source is a BOOL tensor.
@@ -448,7 +448,9 @@ an unresolved (orphan-pruned) BOOL predicate from the tensor-op INCOMPLETE gate 
 pruned bool predicate is honestly witnessed (or downgraded) by those other nets.
 """
 
-_HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS: "weakref.WeakKeyDictionary[Any, dict[str, list[tuple[str, int]]]]" = weakref.WeakKeyDictionary()
+_HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS: weakref.WeakKeyDictionary[
+    Any, dict[str, list[tuple[str, int]]]
+] = weakref.WeakKeyDictionary()
 """Per-trace user source locations where labelled bool tensors reached ``__bool__``."""
 
 # r37 INV-1 (hon2_2): the former ``_HOST_ESCAPE_UNATTRIBUTABLE_VALUES`` table -- scalar
@@ -820,7 +822,7 @@ residual, never a leaf-attributed record."""
 # ``(site, size, stride, storage_offset)`` geometries of the model-input leaves that own it.
 # Kept in a weak-keyed module table (NOT ``trace.__dict__``) so it never enters the portable
 # schema and needs no scrub allow-list entry (r31); dropped when the Trace is GC'd.
-_RUNNABLE_INPUT_STORAGE_SITES: "weakref.WeakKeyDictionary[Any, dict[int, list[Any]]]" = (
+_RUNNABLE_INPUT_STORAGE_SITES: weakref.WeakKeyDictionary[Any, dict[int, list[Any]]] = (
     weakref.WeakKeyDictionary()
 )
 
@@ -834,7 +836,7 @@ _ALIAS_DERIVED_VIEW = "derived_view"
 
 
 def record_runnable_input_storage_sites(
-    trace: Any, tensor_leaves: "list[tuple[torch.Tensor, Any]]"
+    trace: Any, tensor_leaves: list[tuple[torch.Tensor, Any]]
 ) -> None:
     """Index model-input TENSOR leaves by BASE-storage identity for alias-read witnessing (r31).
 
@@ -894,7 +896,7 @@ def record_runnable_input_storage_sites(
 
 def _classify_input_storage_alias(
     trace: Any, source: torch.Tensor
-) -> "tuple[str | None, Any, tuple[bool, bool] | None]":
+) -> tuple[str | None, Any, tuple[bool, bool] | None]:
     """Classify ``source`` against the input-leaf storage map (r31, holes A/C).
 
     Returns ``(_ALIAS_EQUIVALENT, site, leaf_conj_neg)`` when ``source`` shares an input leaf's
@@ -935,7 +937,7 @@ def _classify_input_storage_alias(
     return (_ALIAS_DERIVED_VIEW, candidates[0][0], None)
 
 
-def _input_base_tensor(source: torch.Tensor) -> "torch.Tensor | None":
+def _input_base_tensor(source: torch.Tensor) -> torch.Tensor | None:
     """Return ``source._base`` read under the internal marker (r31).
 
     ``_base`` is a witnessed getset PROPERTY replaced by a recording descriptor during a
@@ -1128,8 +1130,8 @@ def _observe_input_derived_layout_read(trace: Any, source: torch.Tensor) -> None
 
 
 def _resolve_layout_rooting_labels(
-    trace: Any, by_raw_label: "Mapping[str, Any]", source: torch.Tensor
-) -> "set[str] | None":
+    trace: Any, by_raw_label: Mapping[str, Any], source: torch.Tensor
+) -> set[str] | None:
     """Resolve a layout-read receiver to the raw labels its VALUE roots through (r75 F1).
 
     Ladder, first positive resolution wins; ``None`` means the caller MUST fail closed:
@@ -1186,7 +1188,7 @@ def _resolve_layout_rooting_labels(
     return None
 
 
-def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> "set[str] | None":
+def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> set[str] | None:
     """Resolve an unlabeled receiver to live captured producers by STORAGE IDENTITY (r75 F1).
 
     Liveness-verified exactly like the r43 cross-thread belt: a pointer matches only while
@@ -1214,7 +1216,7 @@ def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> "set[str
     return labels or None
 
 
-_LAYOUT_ANCESTRY_CLEAN: "weakref.WeakKeyDictionary[Any, set[str]]" = weakref.WeakKeyDictionary()
+_LAYOUT_ANCESTRY_CLEAN: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
 """Per-trace memo of raw labels whose ENTIRE traced ancestry is attribution-intact (r75 F1).
 
 A label enters only after a full parent-chain walk found no op with
@@ -1223,7 +1225,7 @@ on deep chains stay O(1). Taint is never cached: it fails the read closed immedi
 is rare by construction. Weak-keyed off the schema; dropped with the Trace."""
 
 
-_STORAGE_REBIND_BARRIER_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_STORAGE_REBIND_BARRIER_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace raw labels of storage-SWAPPING ``.data=`` rebind ops (r28 reconcile).
@@ -1267,7 +1269,7 @@ def storage_rebind_barrier_labels(trace: Any) -> frozenset[str]:
     return frozenset(labels) if labels else frozenset()
 
 
-def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", label: str) -> bool:
+def _layout_ancestry_tainted(trace: Any, by_raw_label: Mapping[str, Any], label: str) -> bool:
     """Return whether a logged event's transitive traced ancestry is BROKEN (r75 F1).
 
     ``OpEvent.input_ancestors`` unions only LABELED parents, so an op that consumed an
@@ -1410,7 +1412,7 @@ that bit, and nothing ever refuses or diverges from it."""
 _STATE_ROUTE_STRUCTURAL = "structural"
 """Disposition: provably covered by another gate; the wrapper records nothing for state."""
 
-STATE_METADATA_MIRROR: "Mapping[str, tuple[str, str]]" = MappingProxyType(
+STATE_METADATA_MIRROR: Mapping[str, tuple[str, str]] = MappingProxyType(
     {
         # -- layout trio (r63, unchanged; ``is_contiguous`` probed with an explicit
         #    memory_format resolves to the ``stride`` row's kind at the wrapper) --
@@ -1507,7 +1509,7 @@ placement (a view of a pinned/shared/inference tensor is itself pinned/shared/in
 the replay re-derives every view from the canonical staged slot through the recorded DAG, so a
 slot-attributed alias read is provably reproducible iff the slot dim was canonical."""
 
-_STATE_METADATA_FACTS: "weakref.WeakKeyDictionary[Any, dict[str, dict[str, bool]]]" = (
+_STATE_METADATA_FACTS: weakref.WeakKeyDictionary[Any, dict[str, dict[str, bool]]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace DECLARED-STATE fact ledger: state name -> {fact name -> observed bool} (r65 F-1).
@@ -1521,7 +1523,7 @@ recorded ``requires_grad`` bit (``grad_fn`` presence True refuses at save: no st
 carry a grad_fn). Kept weak-keyed off the schema."""
 
 
-def _state_direct_address(trace: Any, source: torch.Tensor) -> "str | None":
+def _state_direct_address(trace: Any, source: torch.Tensor) -> str | None:
     """Resolve ``source`` to a state address ONLY when it IS the registered object (r65).
 
     The DIRECT-receiver discriminator for the autograd/structural family
@@ -1569,7 +1571,7 @@ def _observe_state_metadata_read_direct(trace: Any, source: torch.Tensor, read_k
     _record_state_metadata_read(trace, {address}, read_kind)
 
 
-def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str]":
+def _expand_state_alias_addresses(trace: Any, addresses: set[str]) -> set[str]:
     """Fan resolved state addresses out to their COMPLETE r37 alias groups (r67 C6).
 
     A direct read on ONE canonical name of a tied parameter / double-registered buffer is a
@@ -1591,7 +1593,7 @@ def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str
     return addresses | {str(name) for name, group_id in groups.items() if group_id in group_ids}
 
 
-def _record_state_metadata_read(trace: Any, addresses: "set[str]", read_kind: str) -> None:
+def _record_state_metadata_read(trace: Any, addresses: set[str], read_kind: str) -> None:
     """Join resolved state addresses into the escape-source + read-kind ledgers (r63/r65).
 
     r67 C6: fans out to the complete alias group -- a tied-parameter direct read marks
@@ -1612,7 +1614,9 @@ def _record_state_metadata_read(trace: Any, addresses: "set[str]", read_kind: st
         reads.setdefault(address, set()).add(read_kind)
 
 
-_HOST_ESCAPE_STATE_METADATA_OBSERVATIONS: "weakref.WeakKeyDictionary[Any, dict[str, dict[str, bool | None]]]" = weakref.WeakKeyDictionary()
+_HOST_ESCAPE_STATE_METADATA_OBSERVATIONS: weakref.WeakKeyDictionary[
+    Any, dict[str, dict[str, bool | None]]
+] = weakref.WeakKeyDictionary()
 """Per-trace ledger of the ACTUAL values returned by placement accessor calls on state (r67 C3).
 
 ``is_pinned`` / ``is_shared`` are OBSERVED-VALUE read kinds: the honest producer predicate is
@@ -1626,7 +1630,7 @@ off the schema like its read-kind sibling.
 
 
 def _record_state_metadata_observation(
-    trace: Any, addresses: "set[str]", read_kind: str, observed: "bool | None"
+    trace: Any, addresses: set[str], read_kind: str, observed: bool | None
 ) -> None:
     """Record one placement accessor's ACTUAL return against its state alias group (r67 C3)."""
 
@@ -1644,7 +1648,7 @@ def _record_state_metadata_observation(
             slot[read_kind] = observed
 
 
-def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, "bool | None"]]:
+def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, bool | None]]:
     """Return the per-state-name OBSERVED placement accessor returns for one trace (r67 C3)."""
 
     observations = _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS.get(trace)
@@ -1662,7 +1666,7 @@ pinned XPU/MPS/externally-registered memory)."""
 
 
 def _observe_state_placement_read(
-    trace: Any, source: torch.Tensor, name: str, observed: "bool | None"
+    trace: Any, source: torch.Tensor, name: str, observed: bool | None
 ) -> None:
     """Attribute one placement accessor's ACTUAL return on a state receiver (r67 C3).
 
@@ -1700,7 +1704,7 @@ def _placement_read_witnessed(trace: Any, source: torch.Tensor) -> bool:
     return kind is not None
 
 
-def _discharge_placement_dispatch(state: "_WitnessState", base_operator: str) -> None:
+def _discharge_placement_dispatch(state: _WitnessState, base_operator: str) -> None:
     """Mark the most recent matching host-return census event as metadata-witnessed."""
 
     for event in reversed(state.events):
@@ -1773,7 +1777,7 @@ def _observe_state_property_read(trace: Any, source: torch.Tensor, name: str, va
         _observe_state_metadata_read_direct(trace, source, detail)
 
 
-def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any]":
+def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> tuple[str, Any]:
     """Classify a storage-bridge RECEIVER tensor as input-site / state-group / other (r67 C3).
 
     Storage-level facts (byte count, sharing, pinning) are pure functions of the BASE storage,
@@ -1799,7 +1803,7 @@ def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any
 
 
 def _register_storage_handle_origin(
-    state: "_WitnessState", storage: Any, origin: "tuple[str, Any]"
+    state: _WitnessState, storage: Any, origin: tuple[str, Any]
 ) -> None:
     """Register one storage handle (and a typed handle's untyped backing) in the origin map."""
 
@@ -1817,7 +1821,7 @@ def _register_storage_handle_origin(
             continue
 
 
-def _register_storage_origin(state: "_WitnessState", source: torch.Tensor, storage: Any) -> None:
+def _register_storage_origin(state: _WitnessState, source: torch.Tensor, storage: Any) -> None:
     """Attribute one bridge-returned storage handle at ACQUISITION time (r67 C3/C6).
 
     Acquisition records ORIGIN (+ the caller's existing writeback watch) ONLY -- no read
@@ -1832,7 +1836,7 @@ def _register_storage_origin(state: "_WitnessState", source: torch.Tensor, stora
         )
 
 
-def _lazy_storage_state_ptr_names(state: "_WitnessState") -> "dict[int, frozenset[str]]":
+def _lazy_storage_state_ptr_names(state: _WitnessState) -> dict[int, frozenset[str]]:
     """Build (once per forward) the ptr -> full state-name-set fallback index (r67 C3).
 
     Covers handles acquired BEFORE the accessor wrappers armed (a pre-forward
@@ -1862,7 +1866,7 @@ def _lazy_storage_state_ptr_names(state: "_WitnessState") -> "dict[int, frozense
     return index
 
 
-def _resolve_storage_origin(state: "_WitnessState", storage: Any) -> "tuple[str, Any] | None":
+def _resolve_storage_origin(state: _WitnessState, storage: Any) -> tuple[str, Any] | None:
     """Resolve a storage RECEIVER to its origin, or ``None`` when unattributable (r67 C3).
 
     Ladder: the capture-scoped weak origin map (the handle itself, then a typed handle's
@@ -1933,7 +1937,7 @@ def _record_input_storage_nbytes(trace: Any, site: Any, storage: Any) -> None:
     _record_input_metadata_read_at_site(trace, site, "storage_nbytes", nbytes)
 
 
-_HOST_ESCAPE_STATE_SOURCE_NAMES: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_HOST_ESCAPE_STATE_SOURCE_NAMES: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace ``state_dict`` names (addresses) of every escape source that is a registered
@@ -1948,7 +1952,7 @@ VERIFIED. bound-ness exempts a state slot from the UNBOUND-state net, never from
 witness.
 """
 
-_HOST_ESCAPE_STATE_METADATA_READS: "weakref.WeakKeyDictionary[Any, dict[str, set[str]]]" = (
+_HOST_ESCAPE_STATE_METADATA_READS: weakref.WeakKeyDictionary[Any, dict[str, set[str]]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace ledger of METADATA reads on registered state: state name -> read kinds (r63 C1).
@@ -1965,7 +1969,7 @@ stays saveable and ``verified``. Kept weak-keyed off the schema; read kinds are 
 ``_STATE_METADATA_READ_REQUIRED_DIMS`` vocabulary in ``torchlens._runnable_state``.
 """
 
-_HOST_ESCAPE_UNATTRIBUTABLE_BOOL: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_UNATTRIBUTABLE_BOOL: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces that observed an UNATTRIBUTABLE (unlabelled-source) BOOL escape.
 
 ``bool(self.gate.data > 0.5)`` truth-tests a bool tensor produced on a ``.data`` alias;
@@ -1976,7 +1980,7 @@ producer downgrades witness completeness to keep the model honestly UNVERIFIABLE
 falsely VERIFIED, exactly like a pruned-RNG control escape. Membership is presence-only.
 """
 
-_HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces that observed an UNATTRIBUTABLE census-INVISIBLE escape (``.tolist()`` /
 ``.numpy()`` on an unlabelled tensor, e.g. a ``.data`` alias).
 
@@ -1986,7 +1990,7 @@ cannot be witnessed, so the runnable producer fails closed (UNVERIFIABLE). Prese
 """
 
 
-_INPUT_METADATA_VIEW_READ: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_INPUT_METADATA_VIEW_READ: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces that read a metadata predicate on a DERIVED VIEW of a model input (r29-C1, F5).
 
 ``x.t().is_contiguous()`` reads layout metadata on a pure view of an input leaf. The view is
@@ -2053,7 +2057,9 @@ def host_escape_bool_consumer_locations(trace: Any) -> dict[str, tuple[tuple[str
     return {label: tuple(entries) for label, entries in locations.items()}
 
 
-_HOST_ESCAPE_LABEL_LEAF_ORIGINS: "weakref.WeakKeyDictionary[Any, dict[str, tuple[frozenset[str], frozenset[str]] | None]]" = weakref.WeakKeyDictionary()
+_HOST_ESCAPE_LABEL_LEAF_ORIGINS: weakref.WeakKeyDictionary[
+    Any, dict[str, tuple[frozenset[str], frozenset[str]] | None]
+] = weakref.WeakKeyDictionary()
 """Per-trace fallback witness basis for escape-source labels (r37 mechanism A).
 
 Maps each recorded escape-source RAW label to the escape source's propagated LEAF
@@ -2116,7 +2122,7 @@ def _record_escape_label_fallback(trace: Any, raw_label: str, source: torch.Tens
         table[raw_label] = (previous[0] | entry[0], previous[1] | entry[1])
 
 
-_PRUNED_RNG_CONTROL_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = weakref.WeakKeyDictionary()
+_PRUNED_RNG_CONTROL_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
 """Per-trace raw labels of pruned torch-RNG ops that DROVE control flow.
 
 A torch-RNG op (``torch.rand``/``randn``/... -- any ATen ``nondeterministic_seeded``
@@ -2149,7 +2155,7 @@ def record_pruned_rng_control_source(trace: Any, label: str) -> None:
     labels.add(label)
 
 
-_ALIAS_MUTATION_CANDIDATE_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_ALIAS_MUTATION_CANDIDATE_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace raw labels of genuine in-place ops whose mutation TARGET carries NO resolvable
@@ -2184,7 +2190,7 @@ def record_alias_mutation_candidate(trace: Any, label: str) -> None:
     labels.add(label)
 
 
-_PRUNED_ALIAS_MUTATION_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+_PRUNED_ALIAS_MUTATION_LABELS: weakref.WeakKeyDictionary[Any, set[str]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace raw labels of unlabelled-alias in-place ops that were ORPHAN-PRUNED.
@@ -2215,7 +2221,7 @@ def record_pruned_alias_mutation_source(trace: Any, label: str) -> None:
     labels.add(label)
 
 
-_DATA_ALIAS_MUTATION_TRACES: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_DATA_ALIAS_MUTATION_TRACES: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces containing a successful write through a ``Tensor.data`` alias lineage.
 
 The ``Tensor.data`` getter is captured as a canonical detach op so read-only consumers retain
@@ -2255,7 +2261,7 @@ def record_data_alias_mutation(trace: Any) -> None:
     _DATA_ALIAS_MUTATION_TRACES.add(trace)
 
 
-_HOST_ESCAPE_MUTABLE_WRITEBACK: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_MUTABLE_WRITEBACK: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces where a host WRITE-BACK through a mutable zero-copy alias was detected.
 
 ``y.detach().numpy()[0] = 99`` hands the host a NumPy array that shares ``y``'s storage; the write
@@ -2274,7 +2280,7 @@ def host_escape_has_mutable_writeback(trace: Any) -> bool:
     return trace in _HOST_ESCAPE_MUTABLE_WRITEBACK
 
 
-_HOST_ESCAPE_RAW_POINTER: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_RAW_POINTER: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces where a raw ``Tensor.data_ptr()`` pointer escaped to the host (r15-H1).
 
 ``tensor.data_ptr()`` hands out the raw integer data pointer that ``ctypes`` / a foreign kernel
@@ -2308,7 +2314,7 @@ def host_escape_has_raw_pointer(trace: Any) -> bool:
 # :func:`_nonowner_touch_is_captured`; the storage-identity catch-all uses the true-original
 # accessors captured at import (below), which bypass every torchlens wrapper.
 
-_HOST_ESCAPE_CROSS_THREAD_CAPTURED: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_CROSS_THREAD_CAPTURED: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces where a NON-OWNER thread touched a CAPTURED tensor during the armed window (r43).
 
 The single JMT-locked concurrency ceiling: a captured tensor's Python-visible value/pointer/
@@ -2325,7 +2331,9 @@ def host_escape_has_cross_thread_captured_tensor(trace: Any) -> bool:
     return trace in _HOST_ESCAPE_CROSS_THREAD_CAPTURED
 
 
-_CAPTURED_STORAGE_PTRS: "weakref.WeakKeyDictionary[Any, dict[int, tuple[weakref.ref[Any], ...]]]" = weakref.WeakKeyDictionary()
+_CAPTURED_STORAGE_PTRS: weakref.WeakKeyDictionary[Any, dict[int, tuple[weakref.ref[Any], ...]]] = (
+    weakref.WeakKeyDictionary()
+)
 """Per-trace ptr -> LIVE producing-tensor weakrefs for the activation storage-identity catch-all (r43).
 
 Populated by :func:`_register_dispatch_result_origins` (owner thread) so the storage-identity
@@ -2503,7 +2511,7 @@ def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
     return int(ptr) if ptr else None
 
 
-def _nonowner_ptr_is_captured(state: "_WitnessState", ptr: int) -> bool:
+def _nonowner_ptr_is_captured(state: _WitnessState, ptr: int) -> bool:
     """Return whether a storage pointer belongs to a captured input / param / activation (r43)."""
 
     trace = state.trace
@@ -2526,7 +2534,7 @@ def _nonowner_ptr_is_captured(state: "_WitnessState", ptr: int) -> bool:
     return False
 
 
-def _nonowner_touch_is_captured(state: "_WitnessState", tensor: Any) -> bool:
+def _nonowner_touch_is_captured(state: _WitnessState, tensor: Any) -> bool:
     """Return whether a non-owner thread's touched tensor is a CAPTURED tensor (r43).
 
     Captured membership (all reads GIL-atomic; NO torch op, NO ``pause_logging``, NO observer
@@ -2557,12 +2565,10 @@ def _nonowner_touch_is_captured(state: "_WitnessState", tensor: Any) -> bool:
     if registry is not None and registry.get(tensor) is not None:
         return True
     ptr = _raw_storage_ptr_no_observe(tensor)
-    if ptr is not None and _nonowner_ptr_is_captured(state, ptr):
-        return True
-    return False
+    return bool(ptr is not None and _nonowner_ptr_is_captured(state, ptr))
 
 
-def _nonowner_escape_observe(state: "_WitnessState", tensor: Any) -> None:
+def _nonowner_escape_observe(state: _WitnessState, tensor: Any) -> None:
     """Ceiling the capture if a non-owner thread touched a captured tensor (r43).
 
     The ONE non-owner belt action: NO origin resolution, NO ``pause_logging``, NO precise
@@ -2799,7 +2805,7 @@ def _make_nonowner_private_c_callable(original: Any) -> Any:
     return _patched
 
 
-_ACTIVE_WITNESS_STATE: "_WitnessState | None" = None
+_ACTIVE_WITNESS_STATE: _WitnessState | None = None
 """The runnable-capture witness state currently installed, or ``None`` (r43).
 
 Published as the LAST step of ``capture_completeness_witness`` armation and cleared on exit so
@@ -2824,7 +2830,7 @@ def string_escape_is_owner_thread(trace: Any) -> bool:
     return threading.get_ident() == state.owner_thread_id
 
 
-_HOST_ESCAPE_OBSERVER_FAILED: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_HOST_ESCAPE_OBSERVER_FAILED: weakref.WeakSet[Any] = weakref.WeakSet()
 """Traces where a REQUIRED tensor->host value observer could not be installed/restored (r39).
 
 The mode-independent method/module observers (:data:`HOST_VALUE_ESCAPE_METHODS` /
@@ -3221,7 +3227,7 @@ class _TensorOriginRegistry:
         entries[key] = (ref, display, leaf)
 
 
-_DISPATCH_TENSOR_ORIGINS: "weakref.WeakKeyDictionary[Any, _TensorOriginRegistry]" = (
+_DISPATCH_TENSOR_ORIGINS: weakref.WeakKeyDictionary[Any, _TensorOriginRegistry] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace dispatch-origin ledger: unlabelled tensor -> propagated value origins.
@@ -3487,7 +3493,7 @@ def _live_deterministic_fill_governs() -> bool:
 
 
 def _register_dispatch_result_origins(
-    state: "_WitnessState",
+    state: _WitnessState,
     func: Any,
     args: tuple[Any, ...],
     kwargs: dict[str, Any] | None,
@@ -3927,7 +3933,7 @@ _BUFFER_STATE_VIEW_OPERATORS = frozenset({"aten.detach", "aten.alias"})
 def _is_buffer_state_view_dispatch(
     trace: Any,
     func: Any,
-    owner: "ExpectedOriginalToken | None",
+    owner: ExpectedOriginalToken | None,
     mutates: bool,
     args: tuple[Any, ...],
 ) -> bool:
@@ -4221,7 +4227,7 @@ def _event_is_capture_accounted(event: _DispatchEvent) -> bool:
     return not event.mutates
 
 
-_RUNNABLE_LEDGER_FACTS: "weakref.WeakKeyDictionary[Any, list[dict[str, Any]]]" = (
+_RUNNABLE_LEDGER_FACTS: weakref.WeakKeyDictionary[Any, list[dict[str, Any]]] = (
     weakref.WeakKeyDictionary()
 )
 """Per-trace undischarged event-lifecycle facts (r35 I2, hon2_1).
@@ -4952,7 +4958,7 @@ _STORAGE_WRAPPED_DISPOSITIONS = frozenset(
 wrapper; ``inert``/``structural`` rows are classification-only)."""
 
 
-def _storage_disposition_rows(class_name: str) -> "dict[str, tuple[str, str]]":
+def _storage_disposition_rows(class_name: str) -> dict[str, tuple[str, str]]:
     """Build one class's accessor->(disposition, why) rows (shared core + per-class extras)."""
 
     rows: dict[str, tuple[str, str]] = {}
@@ -5033,7 +5039,7 @@ def _storage_disposition_rows(class_name: str) -> "dict[str, tuple[str, str]]":
     return rows
 
 
-STORAGE_METADATA_ACCESSOR_DISPOSITIONS: "Mapping[str, Mapping[str, tuple[str, str]]]" = (
+STORAGE_METADATA_ACCESSOR_DISPOSITIONS: Mapping[str, Mapping[str, tuple[str, str]]] = (
     MappingProxyType(
         {
             "UntypedStorage": MappingProxyType(_storage_disposition_rows("UntypedStorage")),
@@ -5051,7 +5057,7 @@ absent on a given torch build (feature-gated members) are skipped at install.
 """
 
 
-def _nonowner_storage_observe(state: "_WitnessState", storage: Any) -> None:
+def _nonowner_storage_observe(state: _WitnessState, storage: Any) -> None:
     """Ceiling the capture when a NON-owner thread touches a CAPTURED storage handle (r67)."""
 
     try:
@@ -5067,7 +5073,7 @@ def _nonowner_storage_observe(state: "_WitnessState", storage: Any) -> None:
         _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
 
 
-def _record_state_value_escape(trace: Any, addresses: "set[str]") -> None:
+def _record_state_value_escape(trace: Any, addresses: set[str]) -> None:
     """Join a storage-spelling VALUE read into the state digest witness (r67 C3)."""
 
     addresses = _expand_state_alias_addresses(trace, addresses)
@@ -5079,10 +5085,10 @@ def _record_state_value_escape(trace: Any, addresses: "set[str]") -> None:
 
 
 def _attribute_storage_placement(
-    state: "_WitnessState",
+    state: _WitnessState,
     storage: Any,
     name: str,
-    observed: "bool | None",
+    observed: bool | None,
     had_args: bool,
 ) -> None:
     """Attribute one storage-handle placement accessor call, tensor-spelling-identically."""
@@ -5106,7 +5112,7 @@ def _attribute_storage_placement(
 
 
 def _make_storage_metadata_wrapper(
-    original: Any, state: "_WitnessState", name: str, disposition: str
+    original: Any, state: _WitnessState, name: str, disposition: str
 ) -> Any:
     """Wrap one storage-class accessor: call through ONCE, then record the real result."""
 
@@ -5190,7 +5196,7 @@ def _make_storage_metadata_wrapper(
 
 
 def _make_storage_property_wrapper(
-    descriptor: Any, state: "_WitnessState", name: str, disposition: str
+    descriptor: Any, state: _WitnessState, name: str, disposition: str
 ) -> property:
     """Wrap a storage-class PROPERTY row (``filename`` / ``_cdata``) read-through."""
 

@@ -13,7 +13,6 @@ from ._types import (
     ReceptiveFieldStatus,
 )
 
-
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
@@ -42,7 +41,7 @@ def _require_pandas() -> Any:
     return pd
 
 
-def _require_input_role(trace: "Trace", input_op: "Op | None") -> str | None:
+def _require_input_role(trace: Trace, input_op: Op | None) -> str | None:
     """Validate a bulk-table input handle and return its IO role.
 
     Accepts either the canonical ``layer_list`` operation or a public trace
@@ -107,7 +106,7 @@ def _require_input_role(trace: "Trace", input_op: "Op | None") -> str | None:
     )
 
 
-def _resolved_output_label(trace: "Trace", output_label: str) -> str:
+def _resolved_output_label(trace: Trace, output_label: str) -> str:
     """Resolve a boundary label to its pass-qualified operation label.
 
     Parameters
@@ -130,7 +129,7 @@ def _resolved_output_label(trace: "Trace", output_label: str) -> str:
 
 
 def _entity_outputs(
-    trace: "Trace", level: ReceptiveFieldProfileLevel
+    trace: Trace, level: ReceptiveFieldProfileLevel
 ) -> Iterable[tuple[str, str, int, str]]:
     """Yield profile entity labels and their represented boundary outputs.
 
@@ -249,10 +248,10 @@ def _row(
 
 
 def build_rf_profile(
-    trace: "Trace",
+    trace: Trace,
     *,
     level: ReceptiveFieldProfileLevel = "op",
-    input: "Op | None" = None,
+    input: Op | None = None,
     statuses: Collection[ReceptiveFieldStatus] | None = None,
     sort_by: str | None = None,
     ascending: bool = True,

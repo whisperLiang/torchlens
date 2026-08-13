@@ -9,10 +9,10 @@ import torch
 
 import torchlens as tl
 from torchlens.data_classes.cleanup import _scrub_intervention_fields_after_removal
-from torchlens.io import TraceState
 from torchlens.intervention.errors import SpecMutationError
 from torchlens.intervention.handles import HookHandle
 from torchlens.intervention.types import FireRecord, TargetSpec
+from torchlens.io import TraceState
 from torchlens.options import CaptureOptions
 
 

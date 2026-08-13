@@ -42,7 +42,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
 
-def _capture(model: nn.Module, x: torch.Tensor) -> "tl.Trace":
+def _capture(model: nn.Module, x: torch.Tensor) -> tl.Trace:
     """Capture one runnable-ready trace."""
 
     return tl.trace(

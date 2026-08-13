@@ -9,11 +9,11 @@ from typing import Any
 import torch
 from PIL import Image, ImageDraw
 
+from ..visualization.bundle_diff import bundle_diff
 from . import batch_summary as _batch_summary
 from .batch_summary import montage, text_table
 from .feature_maps import feature_map_evolution, feature_map_node_spec
 from .node_plots import render_heatmap, render_image_scatter, render_lineplot
-from ..visualization.bundle_diff import bundle_diff
 
 __all__ = [
     "bundle_diff",

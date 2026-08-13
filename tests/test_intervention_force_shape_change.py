@@ -12,7 +12,7 @@ the exact hop that dropped the flag) and pin the default-False guard.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 import torch

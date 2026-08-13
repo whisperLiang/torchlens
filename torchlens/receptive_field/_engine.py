@@ -25,26 +25,25 @@ from ..capture.arg_positions import (
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
-    _AxisState,
-    _Dissolved,
-    _Full,
-    _InputState,
-    _Mapped,
     _as_tuple,
+    _AxisState,
     _compose,
     _constant_map,
+    _Dissolved,
     _endpoint_chord,
+    _Full,
     _identity_map,
+    _InputState,
     _join_axis_kinds,
+    _Mapped,
     _select_full_axes,
     _unique_notes,
 )
-from ._rules import ReceptiveFieldRuleContext, _RF_RULES, _RuleResult, _rf_rules_epoch
+from ._rules import _RF_RULES, ReceptiveFieldRuleContext, _rf_rules_epoch, _RuleResult
 from ._types import (
     ReceptiveField,
     ReceptiveFieldStatus,
 )
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op

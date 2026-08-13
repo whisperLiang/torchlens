@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 import inspect
+import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -11,7 +11,9 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ..._deprecations import MISSING, MissingType
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -22,7 +24,6 @@ from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
-from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -31,6 +32,7 @@ from ...ir.events import (
     OutputRef,
     ParentEdge,
 )
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ParamRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -41,18 +43,22 @@ from ...validation.status import (
     ValidationReplayStatus,
     count_importer_region_annotations,
 )
-from .._finalize import attach_function_root_module, attach_object_module_logs
-from .._finalize import finalize_single_pass_trace
-from .._options import TINYGRAD_EXTRA_KWARG_POLICY, TINYGRAD_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing as _default_if_missing
-from .._options import is_missing as _is_missing
-from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
-from ..._trace_core.relation_views import freeze_trace_relation_views
-from ...capture.outcome import stamp_backend_finalized
-from .._selective_save import apply_static_label_save_policy
-from .._selective_save import pop_static_label_save_predicate
+from .._finalize import (
+    attach_function_root_module,
+    attach_object_module_logs,
+    finalize_single_pass_trace,
+)
+from .._options import (
+    TINYGRAD_EXTRA_KWARG_POLICY,
+    TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+    default_if_missing as _default_if_missing,
+    is_missing as _is_missing,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
+from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 
-_ACTIVE_TINYGRAD_MODULE_STACK: list["TinygradModuleFrame"] = []
+_ACTIVE_TINYGRAD_MODULE_STACK: list[TinygradModuleFrame] = []
 
 
 @dataclass(frozen=True)
@@ -414,12 +420,12 @@ class TinygradBackend:
             if use_object_module and module_tree is not None
             else _null_context()
         )
-        with module_call_context:
-            with (
-                _observe_tensor_ops(observed_ops, observed_module_stacks),
-                _reject_mid_capture_execution(),
-            ):
-                output = model(*args)
+        with (
+            module_call_context,
+            _observe_tensor_ops(observed_ops, observed_module_stacks),
+            _reject_mid_capture_execution(),
+        ):
+            output = model(*args)
         if self._input_identities(args) != input_identities:
             raise BackendUnsupportedError(
                 "tinygrad backend preview cannot capture Tensor.assign(), Tensor.replace(), "
@@ -1768,7 +1774,7 @@ def scoped_tinygrad_module_calls(
     del observed_module_stacks
     originals: dict[type[Any], Any] = {}
     for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
+        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
         originals[module_class] = original_call
 
         def wrapper(
@@ -2098,7 +2104,7 @@ def _module_source_metadata(module: Any) -> dict[str, Any]:
 
     cls = type(module)
     init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)
+    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
     return {
         "class_source_file": _safe_source_file(cls),
         "class_source_line": _source_line(cls),
@@ -2574,7 +2580,7 @@ class _observe_tensor_ops:
         self.observed_tensors = observed_tensors
         self.original: Any = None
 
-    def __enter__(self) -> "_observe_tensor_ops":
+    def __enter__(self) -> _observe_tensor_ops:
         """Install the Tensor._apply_uop observer.
 
         Returns
@@ -2638,7 +2644,7 @@ class _reject_mid_capture_execution:
         self.original_tensor_run_linear: Any = None
         self.original_jit_run_linear: Any = None
 
-    def __enter__(self) -> "_reject_mid_capture_execution":
+    def __enter__(self) -> _reject_mid_capture_execution:
         """Install guarded tinygrad realization hooks.
 
         Returns
@@ -3099,7 +3105,7 @@ def _parent_perturbations_change_output(
             continue
         for candidate in _perturb_candidates(parent_value):
             attempted = True
-            replacements = {position: candidate for position in value_positions}
+            replacements = dict.fromkeys(value_positions, candidate)
             try:
                 perturbed_output = backend._replay_uop_from_trace_graph(
                     capture,

@@ -40,7 +40,7 @@ class RawOp:
         Operation represented by the rendered node.
     """
 
-    op: "Op | str"
+    op: Op | str
 
 
 @dataclass(frozen=True)
@@ -325,9 +325,9 @@ def count(plan: CollapsePlan) -> int:
 
 
 def collapse_plan_for_trace(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
-    repeat_folds: Mapping[str, "ModuleRepeatFold"] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext | None = None,
 ) -> CollapsePlan:
     """Build a collapse plan through the shared node-universe entry point.
@@ -358,9 +358,9 @@ def collapse_plan_for_trace(
 
 
 def collapse_plan_for_source_graph(
-    source_graph: "SourceGraph",
-    collapse_fn: Callable[["Module"], bool] | None,
-    repeat_folds: Mapping[str, "ModuleRepeatFold"] | None,
+    source_graph: SourceGraph,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     node_pool: dict[PlanNode, PlanNode] | None = None,
 ) -> CollapsePlan:
     """Build a collapse plan from one normalized source graph.

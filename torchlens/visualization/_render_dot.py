@@ -7,13 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ._render_common import *
-from ._render_leaf import *
 from ._render_edges import *
-from ._render_nodes import *
 from ._render_flow import *
+from ._render_leaf import *
+from ._render_nodes import *
 from ._render_utils import html_escape
-from .request import RenderTarget, ResolvedRenderRequest
 from .renderers.graphviz import GraphvizRenderer
+from .request import RenderTarget, ResolvedRenderRequest
 from .source_graph import _resolve_focus_module, build_source_graph
 
 
@@ -239,10 +239,10 @@ def _resolve_draw_request(
     show_buffer_layers = _normalize_buffer_visibility(request.show_buffer_layers)
     theme = resolve_theme(request.theme, for_paper=request.for_paper)
     node_overlay = request.node_overlay
-    if node_overlay is None:
-        node_overlay = getattr(trace, "_node_overlay_scores", None)
-    elif isinstance(node_overlay, str) and node_overlay == getattr(
-        trace, "_node_overlay_name", None
+    if (
+        node_overlay is None
+        or isinstance(node_overlay, str)
+        and node_overlay == getattr(trace, "_node_overlay_name", None)
     ):
         node_overlay = getattr(trace, "_node_overlay_scores", None)
     overrides = VisualizationOverrides(
@@ -1418,10 +1418,7 @@ def _is_collapsed_module(
     if getattr(node, "is_atomic_module", False) and node_call_depth > 1:
         node_call_depth -= 1
 
-    if node_call_depth >= vis_call_depth:
-        return True
-    else:
-        return False
+    return node_call_depth >= vis_call_depth
 
 
 def _run_fold_for_graph_node_name(

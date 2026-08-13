@@ -23,6 +23,7 @@ from .container_registry import (
 )
 from .events import (
     ArgTemplateRef,
+    BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
     BlobRef,
@@ -32,6 +33,7 @@ from .events import (
     FunctionCallRef,
     GradFnDiscovered,
     GradFnFired,
+    InterventionAppliedEvent,
     InterventionState,
     ModuleEnterEvent,
     ModuleExitEvent,
@@ -43,8 +45,6 @@ from .events import (
     OutputRef,
     OutputVersionEvent,
     ParamGradObserved,
-    BackwardCoverageGap,
-    InterventionAppliedEvent,
     ParentEdge,
     PreHookProvenanceEvent,
     edge_use_kind,
@@ -54,9 +54,9 @@ from .events import (
 from .intervention import FireResult, FunctionEventInput, InterventionTemplateRef
 from .live_index import LiveIndex, LiveIndexWindowError
 from .predicate import (
+    _DEFERRED_VALUE,
     MLXValueUnavailableError,
     RecordContext,
-    _DEFERRED_VALUE,
     coerce_deferred_value,
     is_deferred_value,
 )

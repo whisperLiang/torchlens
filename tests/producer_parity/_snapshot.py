@@ -29,9 +29,10 @@ import hashlib
 import importlib
 import json
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import torch
 

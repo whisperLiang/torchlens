@@ -19,13 +19,12 @@ from torchlens.distributed import (  # noqa: E402
     GroupLifecycleEvent,
     GroupLifecycleLedger,
     UncapturedCollectiveOpError,
+    _lifecycle as lifecycle,  # noqa: E402
+    _recognizer as recognizer_mod,  # noqa: E402
     audit_membership_lineages,
     derive_collective_recognizer,
     membership_digest_for_ranks,
 )
-from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
-from torchlens.distributed import _recognizer as recognizer_mod  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # ledger helpers

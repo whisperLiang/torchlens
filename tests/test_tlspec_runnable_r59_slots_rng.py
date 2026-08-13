@@ -50,7 +50,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 from torchlens.utils.rng import _rng_exempt_instances, host_nondeterminism_monitor
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _make_monitor(model: nn.Module) -> host_nondeterminism_monitor:
@@ -80,8 +80,8 @@ class _PreexistingWorker:
     """A worker thread started BEFORE any capture window (a non-hooked, foreign thread)."""
 
     def __init__(self) -> None:
-        self.jobs: "queue.Queue[Any]" = queue.Queue()
-        self.results: "queue.Queue[Any]" = queue.Queue()
+        self.jobs: queue.Queue[Any] = queue.Queue()
+        self.results: queue.Queue[Any] = queue.Queue()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 

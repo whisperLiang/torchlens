@@ -31,8 +31,8 @@ from typing import Any, Literal
 import pytest
 import torch
 import torch.nn as nn
-import torchlens as tl
 
+import torchlens as tl
 import torchlens.utils.hashing as tl_hashing
 from torchlens.data_classes.func_call_location import FuncCallLocation
 from torchlens.utils.hashing import compute_graph_shape_hash, make_short_barcode_from_input
@@ -317,7 +317,7 @@ class _BufferMutatingFailModel(nn.Module):
         self.num_calls = 0
         self._is_ground_truth_copy = False
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> "_BufferMutatingFailModel":
+    def __deepcopy__(self, memo: dict[int, Any]) -> _BufferMutatingFailModel:
         """Return a validation copy marked as the ground-truth runner.
 
         Parameters

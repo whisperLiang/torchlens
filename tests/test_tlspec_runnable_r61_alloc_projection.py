@@ -41,9 +41,10 @@ import inspect
 import json
 import resource
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -64,7 +65,7 @@ from torchlens.runnable import StateSource
 
 pytestmark = pytest.mark.smoke
 
-_CAPTURE = dict(intervention_ready=True)
+_CAPTURE = {"intervention_ready": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -211,9 +212,8 @@ def test_no_literal_amplifier_families_refused_typed(
 
     monkeypatch.setattr(rex, "_allocation_budget_bytes", lambda device: 8 << 20)
     operands = args()
-    with _rlimit_cap():
-        with pytest.raises(RunCapabilityUnavailableError) as caught:
-            _preflight_call_allocation(None, func, list(operands), {}, _stub_call())
+    with _rlimit_cap(), pytest.raises(RunCapabilityUnavailableError) as caught:
+        _preflight_call_allocation(None, func, list(operands), {}, _stub_call())
     assert caught.value.fields.get("detection_stage") == "op_allocation_preflight"
     assert int(caught.value.fields["required_bytes"]) > int(caught.value.fields["available_bytes"])
 

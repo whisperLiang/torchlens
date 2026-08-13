@@ -146,7 +146,7 @@ class TestFreezeOpRelationViews:
         freeze_op_relation_views(core, store, _resolver(store).get)
         edges = core.edge_table(DATAFLOW_FAMILY)
         # One occurrence per attributed argument position: x feeds y twice.
-        occurrences = [edge for edge in edges.in_edges(1)]
+        occurrences = list(edges.in_edges(1))
         assert len(occurrences) == 2
         assert {edge.arg_position for edge in occurrences} == {
             ("args", 0),

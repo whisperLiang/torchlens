@@ -31,8 +31,8 @@ from torchlens._robustness import (
     _iter_tensors,
     check_model_and_input_variants,
 )
-from torchlens.options import CaptureOptions
 from torchlens.backends.torch.wrappers import unwrap_torch
+from torchlens.options import CaptureOptions
 from torchlens.utils.tensor_utils import safe_copy
 
 

@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from torch import nn
 
-
 # TODO:
 #  1) add tests for
 #       a) different uber models that combines everything (branching, looping, conditional, etc.),
@@ -1213,11 +1212,11 @@ class UberModel4(nn.Module):
         x = x + 1
         x = x * 2
         x = x - 1
-        for i in range(3):
+        for _i in range(3):
             x = torch.cos(x)
             x = self.fc1(x)
             x = torch.sin(x)
-            for j in range(2):
+            for _j in range(2):
                 x = x - 4
                 x = x * 2
                 x = self.fc2(x)
@@ -4883,7 +4882,7 @@ class ChebGCN(nn.Module):
         T = [x]  # T0(adj) @ x = x
         if self.K > 1:
             T.append(adj @ x)  # T1(adj) @ x
-        for k in range(2, self.K):
+        for _k in range(2, self.K):
             T.append(2 * adj @ T[-1] - T[-2])
         out = sum(T[k] @ self.theta[k] for k in range(self.K))
         return self.fc(torch.relu(out))

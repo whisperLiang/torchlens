@@ -8,24 +8,24 @@ from typing import Any
 
 import pytest
 import torch
-from torch import nn
 from PIL import Image
+from torch import nn
 
 import torchlens as tl
+from torchlens.receptive_field import _rules, node_spec
 from torchlens.receptive_field._errors import AmbiguousInputError, ReceptiveFieldError
+from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
 from torchlens.receptive_field._types import (
     GradientReceptiveField,
     GridLayout,
     ReceptiveField,
-    ReceptiveFieldAxis,
     ReceptiveFieldAlignment,
+    ReceptiveFieldAxis,
     ReceptiveFieldBox,
     ReceptiveFieldBoxAxis,
     ReceptiveFieldStatus,
 )
 from torchlens.receptive_field._viz import show
-from torchlens.receptive_field import _rules, node_spec
-from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
 
 
 def _descriptor(

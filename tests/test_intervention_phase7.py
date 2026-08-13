@@ -10,13 +10,13 @@ import torch
 
 import torchlens as tl
 from torchlens._capture_state_helpers import reset_compiled_model_unwrap_warning_state
-from torchlens.io import TraceState
 from torchlens.intervention.errors import (
     ControlFlowDivergenceError,
     ControlFlowDivergenceWarning,
 )
 from torchlens.intervention.rerun import rerun
 from torchlens.intervention.types import InterventionSpec, Relationship, TargetSpec
+from torchlens.io import TraceState
 from torchlens.options import CaptureOptions
 
 

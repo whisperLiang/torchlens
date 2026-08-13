@@ -24,14 +24,14 @@ from __future__ import annotations
 # matplotlib.use("Agg") and the sys.path shim must precede zoo/torchlens
 # imports, so module-level imports legitimately follow code (E402).
 # ruff: noqa: E402
-
 import gc
 import pathlib
 import shutil
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 _VISUAL_DIR = pathlib.Path(__file__).resolve().parent
 _AUDIT_DIR = _VISUAL_DIR.parent  # notebooks/audit/
@@ -2507,7 +2507,9 @@ def _write_coverage_matrix(plan: list[tuple[str, object]]) -> None:
     lines.append("Coverage axes are enumerated from the renderer/option source")
     lines.append("(`torchlens/_literals.py`, `Trace.draw()` in `_trace_viz.py`,")
     lines.append("`visualization/themes.py`, `visualization/modes.py`, node/edge kinds in")
-    lines.append("`visualization/_render_nodes.py` and `visualization/_render_edges.py`). Each axis must be demonstrated by at least")
+    lines.append(
+        "`visualization/_render_nodes.py` and `visualization/_render_edges.py`). Each axis must be demonstrated by at least"
+    )
     lines.append("one page or carry an explicit N/A rationale; anything else is a defect.")
     lines.append("")
     lines.append("## Axis coverage")

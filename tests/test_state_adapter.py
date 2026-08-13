@@ -9,7 +9,7 @@ import torch
 
 from torchlens._io import FieldPolicy, TorchLensIOError
 from torchlens._io.runnable import assert_sparse_core_has_no_tensor_payload
-from torchlens._io.scrub import _ScrubOptions, _scrub_value
+from torchlens._io.scrub import _scrub_value, _ScrubOptions
 from torchlens.data_classes._state_adapter import state_items, state_new, state_restore
 
 
@@ -170,7 +170,7 @@ class _ColumnarBackedState:
         self._core = core
         self._row_id = row_id
 
-    def __tl_state_items__(self) -> "list[tuple[str, object]]":
+    def __tl_state_items__(self) -> list[tuple[str, object]]:
         """Materialize the full row as adapter state."""
 
         return [
@@ -178,7 +178,7 @@ class _ColumnarBackedState:
             for column_name, column in sorted(self._core.items())
         ]
 
-    def __tl_state_restore__(self, mapping: "dict[str, object]") -> None:
+    def __tl_state_restore__(self, mapping: dict[str, object]) -> None:
         """Install restored state into a fresh single-row core."""
 
         self._core = {name: [value] for name, value in mapping.items()}

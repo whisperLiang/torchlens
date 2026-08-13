@@ -46,8 +46,8 @@ import pytest
 import torch
 
 from torchlens._io._safe_unpickle import (
-    SafeBundleUnpickler,
     _DENIED_FOREIGN_MODULES,
+    SafeBundleUnpickler,
     _module_denied,
     _name_has_dunder_walk,
 )

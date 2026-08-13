@@ -4,10 +4,10 @@ Covers: import paths, registry consistency, perturbation unit tests,
 deep clone helpers, and integration tests through specific exemption paths.
 """
 
-from collections import defaultdict, deque, namedtuple
-from dataclasses import replace
 import threading
 import warnings
+from collections import defaultdict, deque, namedtuple
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,53 +15,55 @@ import pytest
 import torch
 import torch.nn as nn
 
+import torchlens as tl
+import torchlens._user_public_impls as user_public_impls
+
 # Import the implementation entry point first: it breaks the standalone
 # collection cycle between torchlens and torchlens._user_public_impls.
 import torchlens.user_funcs as user_funcs
-import torchlens as tl
-import torchlens._user_public_impls as user_public_impls
 from torchlens import Trace, trace as trace_fn
-from torchlens.validation import (
-    ValidationDiagnostic,
-    get_validation_diagnostics,
-    validate_forward_pass,
-)
 from torchlens.errors import (
     MetadataInvariantError,
     TorchLensCaptureGapWarning,
     TraceNotReproducibleWarning,
 )
 from torchlens.fastlog import RecordContext
-from torchlens.options import SaveOptions
-from torchlens.validation import check_metadata_invariants
 from torchlens.intervention.types import DictKey
+from torchlens.options import SaveOptions
+from torchlens.utils.tensor_utils import tensor_nanequal
+from torchlens.validation import (
+    ValidationDiagnostic,
+    check_metadata_invariants,
+    get_validation_diagnostics,
+    validate_forward_pass,
+    validate_saved_outs as validate_from_subpkg,
+)
+from torchlens.validation.core import (
+    DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH,
+    ValidationDecisionRecorder,
+    _check_perturbation_exemptions,
+    _check_whether_func_on_saved_parents_yields_saved_tensor,
+    _copy_validation_args,
+    _deep_clone_tensors,
+    _deep_numeric_replay_matches_saved,
+    _dispatch_op_count_matches_capture,
+    _execute_func_with_restored_state,
+    _op_reduction_depth,
+    _perturb_layer_outs,
+    _restore_live_parameter_args_for_replay,
+    completeness_backstop_counts,
+    validate_parents_of_saved_layer,
+)
+from torchlens.validation.exemptions import (
+    CUSTOM_EXEMPTION_CHECKS,
+    SKIP_PERTURBATION_ENTIRELY,
+    SKIP_VALIDATION_ENTIRELY,
+    STRUCTURAL_ARG_POSITIONS,
+    posthoc_perturb_check,
+)
 from torchlens.validation.invariants import (
     _check_graph_connectivity,
     check_func_call_id_invariant,
-)
-from torchlens.validation import validate_saved_outs as validate_from_subpkg
-from torchlens.validation.exemptions import (
-    SKIP_VALIDATION_ENTIRELY,
-    SKIP_PERTURBATION_ENTIRELY,
-    STRUCTURAL_ARG_POSITIONS,
-    CUSTOM_EXEMPTION_CHECKS,
-    posthoc_perturb_check,
-)
-from torchlens.validation.core import (
-    _perturb_layer_outs,
-    _deep_clone_tensors,
-    _copy_validation_args,
-    _execute_func_with_restored_state,
-    _check_perturbation_exemptions,
-    _restore_live_parameter_args_for_replay,
-    _op_reduction_depth,
-    _deep_numeric_replay_matches_saved,
-    _dispatch_op_count_matches_capture,
-    completeness_backstop_counts,
-    DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH,
-    ValidationDecisionRecorder,
-    _check_whether_func_on_saved_parents_yields_saved_tensor,
-    validate_parents_of_saved_layer,
 )
 from torchlens.validation.status import (
     REGION_REPLAY_CLASS,
@@ -70,7 +72,6 @@ from torchlens.validation.status import (
     REGION_REPLAY_PROVENANCE_KEY,
     ValidationReplayStatus,
 )
-from torchlens.utils.tensor_utils import tensor_nanequal
 
 _TEST_FORWARD_GLOBAL_TENSOR: torch.Tensor | None = None
 _TEST_FORWARD_GLOBAL_PAYLOAD: dict[str, torch.Tensor] | None = None
@@ -7423,7 +7424,7 @@ def test_func_call_id_exemption_is_scoped_to_genuine_replacement() -> None:
 
     from torchlens.validation.invariants import _is_func_call_id_exempt
 
-    base = dict(is_input=False, is_output=False, is_buffer=False, func=None)
+    base = {"is_input": False, "is_output": False, "is_buffer": False, "func": None}
     genuine = SimpleNamespace(
         func_name="intervention_replacement",
         intervention_replaced=True,

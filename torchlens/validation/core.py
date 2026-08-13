@@ -15,23 +15,18 @@ delegated to the registries in ``exemptions.py``.
 """
 
 from collections import Counter, defaultdict, deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import (
-    Optional,
-    Any,
-    Dict,
-    List,
-    Literal,
-    Sequence,
-    Set,
     TYPE_CHECKING,
+    Any,
+    Literal,
     cast,
 )
 
 import torch
 
 from ..data_classes.op import Op
-from ..ir.events import is_control_edge_use
 from ..ir.container import (
     DataclassField,
     DictKey,
@@ -40,18 +35,19 @@ from ..ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
+from ..ir.events import is_control_edge_use
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
-from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.collections import assign_to_sequence_or_dict
-from ..utils.tensor_utils import fp8_safe_comparison_pair, tensor_nanequal, tensor_all_nan
+from ..utils.rng import execute_with_restored_rng_autocast
+from ..utils.tensor_utils import fp8_safe_comparison_pair, tensor_all_nan, tensor_nanequal
 from .exemptions import (
-    SKIP_VALIDATION_ENTIRELY,
-    SKIP_PERTURBATION_ENTIRELY,
-    STRUCTURAL_ARG_POSITIONS,
     CUSTOM_EXEMPTION_CHECKS,
+    SKIP_PERTURBATION_ENTIRELY,
+    SKIP_VALIDATION_ENTIRELY,
+    STRUCTURAL_ARG_POSITIONS,
     index_domain_rotation_values,
     perturbed_layer_at_structural_position,
     posthoc_perturb_check,
@@ -508,7 +504,7 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     decompositions = getattr(trace, "completeness_decompositions", ())
     diagnostics = getattr(trace, "completeness_diagnostics", ())
 
-    accounted_owner_fcids: Set[int] = {
+    accounted_owner_fcids: set[int] = {
         entry.get("owner_func_call_id")
         for entry in decompositions
         if entry.get("capture_accounted") is True
@@ -518,13 +514,13 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     # replacement hook: their op was orphaned out of the final trace ON PURPOSE
     # (its only consumer is the untraceable replacement tensor). Only these are
     # excused; an orphaned owner outside a replacement hook is a real silent drop.
-    replacement_hook_owner_fcids: Set[int] = {
+    replacement_hook_owner_fcids: set[int] = {
         entry.get("owner_func_call_id")
         for entry in decompositions
         if entry.get("in_replacement_hook") is True
         and isinstance(entry.get("owner_func_call_id"), int)
     }
-    captured_fcids: Set[int] = {
+    captured_fcids: set[int] = {
         op.func_call_id for op in layer_list if isinstance(getattr(op, "func_call_id", None), int)
     }
 
@@ -575,7 +571,7 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     # census above so they are not double-counted. An accounted owner missing from
     # the final trace that was NOT recorded as orphan-pruned stays unaccounted and
     # still trips the backstop -- a genuine silent drop is not masked.
-    orphan_pruned_fcids: Set[int] = {
+    orphan_pruned_fcids: set[int] = {
         fcid
         for fcid in getattr(trace, "_orphan_pruned_func_call_ids", ()) or ()
         if isinstance(fcid, int)
@@ -759,7 +755,7 @@ def _ground_truth_output_matches_saved(
 
 def validate_saved_outs(
     self: "Trace",
-    ground_truth_output_tensors: List[torch.Tensor],
+    ground_truth_output_tensors: list[torch.Tensor],
     verbose: bool = False,
     validate_metadata: bool = True,
 ) -> ValidationReplayStatus:
@@ -995,7 +991,7 @@ def validate_saved_outs(
     # enqueued once at least one validated child proves a path to the boundary;
     # validated_child_edges_for_each_layer records all proved child edges for
     # diagnostics and later completeness checks.
-    validated_child_edges_for_each_layer: Dict[str, Set[str]] = defaultdict(set)
+    validated_child_edges_for_each_layer: dict[str, set[str]] = defaultdict(set)
     seed_ops: dict[str, Op] = {}
     seed_output_label_counts: dict[str, int] = defaultdict(int)
     for output_layer_label in self.output_layers:
@@ -1100,9 +1096,9 @@ def validate_saved_outs(
 def validate_parents_of_saved_layer(
     self: "Trace",
     layer_to_validate_parents_for_label: str,
-    validated_layers: Set[str],
-    validated_op_labels: Set[str],
-    validated_child_edges_for_each_layer: Dict[str, Set[str]],
+    validated_layers: set[str],
+    validated_op_labels: set[str],
+    validated_child_edges_for_each_layer: dict[str, set[str]],
     layers_to_validate_parents_for: deque[str],
     verbose: bool = False,
     decision_recorder: ValidationDecisionRecorder | None = None,
@@ -1550,7 +1546,7 @@ def _op_for_validation_label(self: "Trace", label: str) -> Op:
     return op_list[0]
 
 
-def _all_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> List[Op]:
+def _all_ops_for_replay(self: "Trace", ops_to_validate: list[Op]) -> list[Op]:
     """Return every concrete child op for forward replay validation.
 
     Parameters
@@ -1569,8 +1565,8 @@ def _all_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> List[Op]:
 
 
 def _all_data_parent_edges_for_replay(
-    self: "Trace", ops_to_validate: List[Op]
-) -> List[tuple[Op, str]]:
+    self: "Trace", ops_to_validate: list[Op]
+) -> list[tuple[Op, str]]:
     """Return every concrete parent edge for perturbation validation.
 
     Parameters
@@ -1616,7 +1612,7 @@ def _data_parent_labels(op: Op) -> set[str]:
     return parents - control_parents
 
 
-def _validation_ops_for_entry(entry: Any) -> List[Op]:
+def _validation_ops_for_entry(entry: Any) -> list[Op]:
     """Return pass-specific ops that should be used for validation.
 
     Parameters
@@ -1936,17 +1932,13 @@ def _check_arglocs_correct_for_arg(
         and (not torch.all(parent_outs == 0))
         and (not torch.all(torch.abs(parent_outs) == 1))
         and not any(
-            [
-                torch.equal(parent_outs, other_parent_out)
-                for other_parent in target_layer.parents
-                if other_parent != parent_layer_label
-                and (
-                    other_parent_out := _saved_out_payload(
-                        _op_for_validation_label(self, other_parent)
-                    )
-                )
-                is not None
-            ]
+            torch.equal(parent_outs, other_parent_out)
+            for other_parent in target_layer.parents
+            if other_parent != parent_layer_label
+            and (
+                other_parent_out := _saved_out_payload(_op_for_validation_label(self, other_parent))
+            )
+            is not None
         )
     ):
         print(
@@ -2037,7 +2029,7 @@ def _matches_own_parameter(target_layer: Op, value: torch.Tensor) -> bool:
     return False
 
 
-def _orphan_candidate_index(self: "Trace") -> Dict[tuple[Any, Any], List[Op]]:
+def _orphan_candidate_index(self: "Trace") -> dict[tuple[Any, Any], list[Op]]:
     """Return a (shape, dtype)-keyed index of candidate producer ops.
 
     Built lazily once per validation run (``validate_saved_outs`` clears it at
@@ -2057,8 +2049,8 @@ def _orphan_candidate_index(self: "Trace") -> Dict[tuple[Any, Any], List[Op]]:
 
     cached = self.__dict__.get("_validation_orphan_candidate_index")
     if cached is not None:
-        return cast(Dict[tuple[Any, Any], List[Op]], cached)
-    index: Dict[tuple[Any, Any], List[Op]] = {}
+        return cast(dict[tuple[Any, Any], list[Op]], cached)
+    index: dict[tuple[Any, Any], list[Op]] = {}
     for candidate in self.layer_list:
         if getattr(candidate, "is_output", False):
             # Output boundary ops duplicate their producer's value; the
@@ -2266,7 +2258,7 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
     func_name = str(getattr(target_layer, "func_name", ""))
     for arg_type, container in argtype_sources:
         positions_map = parent_arg_positions.get(arg_type, {}) or {}
-        for argloc_key, witness_path, value in leaf_slots(arg_type, container):
+        for argloc_key, _witness_path, value in leaf_slots(arg_type, container):
             if argloc_key in positions_map:
                 continue
             if _tensor_arg_value_is_trivial(value):
@@ -2358,7 +2350,7 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
 def _check_perturbation_exemptions(
     self: "Trace",
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Check whether a perturbation check should be skipped for registry-based reasons.
 
@@ -2410,7 +2402,7 @@ def _check_perturbation_exemptions(
     return False
 
 
-def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[str]) -> bool:
+def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: list[str]) -> bool:
     """Return whether every perturbed parent is purely an ``out=`` destination.
 
     Parameters
@@ -2460,7 +2452,7 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
 def _execute_func_with_restored_state(
     layer: Op,
     input_args: dict[str, Any],
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     layer_label: str,
     verbose: bool,
 ) -> Any:
@@ -2661,7 +2653,7 @@ def _op_reduction_depth(layer: Op) -> int:
     """
 
     saved_args: Sequence[Any] = getattr(layer, "saved_args", None) or ()
-    saved_kwargs: Dict[str, Any] = getattr(layer, "saved_kwargs", None) or {}
+    saved_kwargs: dict[str, Any] = getattr(layer, "saved_kwargs", None) or {}
     func_name = layer.func_name
 
     def _operand(index: int, *kwarg_names: str) -> Any:
@@ -2735,7 +2727,7 @@ def _op_reduction_depth(layer: Op) -> int:
             # scatter_reduce(input, dim, index, src, reduce, *, include_self): the
             # reduce mode arrives as kwarg "reduce" (TorchLens-captured form) or as
             # positional arg 4 (free-function torch.scatter_reduce(..., reduce)).
-            reduce_mode = saved_kwargs.get("reduce", None)
+            reduce_mode = saved_kwargs.get("reduce")
             if reduce_mode is None and len(saved_args) > 4:
                 reduce_mode = saved_args[4]
             if reduce_mode not in _ADDITIVE_SCATTER_REDUCE_MODES:
@@ -2747,7 +2739,7 @@ def _op_reduction_depth(layer: Op) -> int:
         tensor = _operand(0, "input")
         if not isinstance(tensor, torch.Tensor):
             return 0
-        dim = saved_kwargs.get("dim", None)
+        dim = saved_kwargs.get("dim")
         if dim is None:
             dim = _operand(1, "dim")
         # sum/mean/prod with no dim reduce over all elements; var/std/norm too.
@@ -2761,7 +2753,7 @@ def _op_reduction_depth(layer: Op) -> int:
 def _scatter_fan_in_depth(
     func_name: str,
     saved_args: Any,
-    saved_kwargs: Dict[str, Any],
+    saved_kwargs: dict[str, Any],
 ) -> int:
     """Return the max number of source elements aggregated per destination slot.
 
@@ -2800,7 +2792,7 @@ def _scatter_fan_in_depth(
         return _max_raw_index_multiplicity(index)
     if func_name == "segment_reduce":
         # segment_reduce(data, reduce, lengths=...): fan-in = max segment length.
-        lengths = saved_kwargs.get("lengths", None)
+        lengths = saved_kwargs.get("lengths")
         if isinstance(lengths, torch.Tensor) and lengths.numel() > 0:
             return int(lengths.max().item())
         return 0
@@ -2955,7 +2947,7 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
     self: "Trace",
     layer_to_validate_parents_for_label: str,
     perturb: bool = False,
-    layers_to_perturb: Optional[List[str]] = None,
+    layers_to_perturb: list[str] | None = None,
     verbose: bool = False,
 ) -> ValidationCheckResult:
     """Check whether replaying a layer from saved parents reproduces its output.
@@ -3484,7 +3476,7 @@ def _write_nested_replay_arg_value(
 def _prepare_input_args_for_validating_layer(
     self: "Trace",
     layer_to_validate_parents_for: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     perturb_strategy: str = "default",
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Build the input argument dict for replaying a layer's function.

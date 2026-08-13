@@ -145,14 +145,9 @@ def probe_scale(target_ops: int) -> None:
     from torchlens.ir.predicate import RecordContext
 
     gc.collect()
-    contexts = sum(
-        1 for obj in gc.get_objects() if isinstance(obj, RecordContext)
-    )
+    contexts = sum(1 for obj in gc.get_objects() if isinstance(obj, RecordContext))
     n_events = getattr(events, "event_seq", None)
-    print(
-        f"[scale {target_ops}] A3 RecordContext retained: {contexts} "
-        f"(events={n_events})"
-    )
+    print(f"[scale {target_ops}] A3 RecordContext retained: {contexts} (events={n_events})")
     del trace
     gc.collect()
 

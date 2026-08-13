@@ -58,9 +58,9 @@ class PredicateError(CaptureError, RuntimeError):
         self,
         message: str,
         *,
-        ctx: "RecordContext | None" = None,
+        ctx: RecordContext | None = None,
         result: Any = None,
-        failures: list["PredicateFailure"] | None = None,
+        failures: list[PredicateFailure] | None = None,
         total_count: int | None = None,
         overflow: int = 0,
     ) -> None:

@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
-import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 
@@ -34,13 +35,13 @@ class ReferenceSpec:
     title: str
     structural_role: str
     description: str
-    substitution_note: Optional[str]
+    substitution_note: str | None
     vis_mode: str
     vis_direction: str
     vis_nesting_depth: int
     builder_name: str
     input_description: str
-    build: Callable[[], Tuple[Any, Any]]
+    build: Callable[[], tuple[Any, Any]]
 
 
 def _simple_ff():
@@ -98,7 +99,7 @@ def _monster():
     ).eval(), torch.rand(2, 64)
 
 
-REFERENCE_SPECS: List[ReferenceSpec] = [
+REFERENCE_SPECS: list[ReferenceSpec] = [
     ReferenceSpec(
         key="simple_ff",
         title="Simple feedforward",
@@ -232,7 +233,7 @@ REFERENCE_SPECS: List[ReferenceSpec] = [
 ]
 
 
-def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> Dict[str, Any]:
+def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> dict[str, Any]:
     model, input_args = spec.build()
     log = log_forward_pass(model, input_args, layers_to_save=None)
     outpath = gallery_dir / f"{spec.key}.png"
@@ -289,7 +290,7 @@ def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> Dict[str, Any]:
 def build_gallery(
     gallery_dir: Path = DEFAULT_GALLERY_DIR,
     report_dir: Path = DEFAULT_REPORT_DIR,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     gallery_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
 

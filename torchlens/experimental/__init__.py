@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import importlib
-import re
 import os
+import re
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from collections.abc import Callable
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 from torch import nn
 

@@ -20,7 +20,6 @@ import torch
 from .. import _state
 from ..constants import get_orig_torch_funcs
 
-
 # COMMUTATIVE reflected operator dunders (invoked when a non-tensor is on the LEFT, e.g.
 # ``int & tensor`` routes to ``tensor.__rand__(int)``). For a COMMUTATIVE op the swapped operand
 # order is irrelevant (``a & b == b & a``), so the reflected form is the SAME operation as its
@@ -508,9 +507,11 @@ def _cache_dynamic_spec(
     for key, val in kwargs.items():
         if val is None:
             continue
-        if id(val) in all_found_ids:
-            tensor_kwargs_found.append(key)
-        elif isinstance(val, (list, tuple)) and any(id(item) in all_found_ids for item in val):
+        if (
+            id(val) in all_found_ids
+            or isinstance(val, (list, tuple))
+            and any(id(item) in all_found_ids for item in val)
+        ):
             tensor_kwargs_found.append(key)
 
     if isinstance(existing, ArgSpec):

@@ -13,12 +13,9 @@ import pytest
 import torch
 
 import torchlens as tl
-from torchlens.io import load_intervention_spec
-from torchlens.io import list_logs
-from torchlens.io import TraceState
 from torchlens.intervention import errors as terrors
+from torchlens.io import TraceState, list_logs, load_intervention_spec
 from torchlens.validation import check_spec_compat
-
 
 SeverityClass = type[BaseException]
 WarningClass = type[Warning]

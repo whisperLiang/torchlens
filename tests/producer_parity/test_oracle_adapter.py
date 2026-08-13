@@ -23,7 +23,6 @@ def test_adapter_is_identity_on_op_events(monkeypatch: pytest.MonkeyPatch) -> No
 
     import torchlens.postprocess as postprocess_module
     import torchlens.postprocess._materialize as materialize_module
-
     from torchlens.ir.events import OpEvent
     from torchlens.ir.op_record import OpRecord
 

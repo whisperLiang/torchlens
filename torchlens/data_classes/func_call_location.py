@@ -26,9 +26,9 @@ actual ``None`` value in the lazy-loading placeholders.
 
 import inspect
 import linecache
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
+from .._io import TLSPEC_VERSION, FieldPolicy, default_fill_state, read_tlspec_version
 from .._source_links import vscode_file_line_link
 from ..constants import FUNC_CALL_LOCATION_FIELD_ORDER
 from .field_policy import build_record_field_policy_table
@@ -40,7 +40,7 @@ from .field_policy import build_record_field_policy_table
 _SENTINEL: Any = object()
 
 
-def _snapshot_func_metadata(func_obj: Any) -> tuple[Optional[str], Optional[str]]:
+def _snapshot_func_metadata(func_obj: Any) -> tuple[str | None, str | None]:
     """Return signature/docstring metadata without retaining ``func_obj``.
 
     Parameters
@@ -115,16 +115,16 @@ class FuncCallLocation:
         num_context_lines_requested: int = _SENTINEL,
         _frame_func_obj: Any = _SENTINEL,
         # Legacy-path args (all default to sentinel)
-        func_signature: Optional[str] = _SENTINEL,
-        func_docstring: Optional[str] = _SENTINEL,
+        func_signature: str | None = _SENTINEL,
+        func_docstring: str | None = _SENTINEL,
         call_line: str = _SENTINEL,
-        code_context: Optional[List[str]] = _SENTINEL,
+        code_context: list[str] | None = _SENTINEL,
         source_context: str = _SENTINEL,
         code_context_labeled: str = _SENTINEL,
         num_context_lines: int = _SENTINEL,
         code_firstlineno: int = _SENTINEL,
-        func_qualname: Optional[str] = None,
-        col_offset: Optional[int] = None,
+        func_qualname: str | None = None,
+        col_offset: int | None = None,
         source_loading_enabled: bool = True,
     ) -> None:
         """Initialize source-location metadata for a captured function call.
@@ -283,7 +283,7 @@ class FuncCallLocation:
     # The setters allow direct assignment (used by legacy path and tests).
 
     @property
-    def code_context(self) -> Optional[List[str]]:
+    def code_context(self) -> list[str] | None:
         """Return source lines around this call site.
 
         Returns
@@ -295,7 +295,7 @@ class FuncCallLocation:
         return self._code_context
 
     @code_context.setter
-    def code_context(self, value: Optional[List[str]]) -> None:
+    def code_context(self, value: list[str] | None) -> None:
         """Set source lines around this call site.
 
         Parameters
@@ -398,7 +398,7 @@ class FuncCallLocation:
         self._num_context_lines = value
 
     @property
-    def func_signature(self) -> Optional[str]:
+    def func_signature(self) -> str | None:
         """Return the captured function signature string.
 
         Returns
@@ -410,7 +410,7 @@ class FuncCallLocation:
         return self._func_signature
 
     @func_signature.setter
-    def func_signature(self, value: Optional[str]) -> None:
+    def func_signature(self, value: str | None) -> None:
         """Set the captured function signature string.
 
         Parameters
@@ -421,7 +421,7 @@ class FuncCallLocation:
         self._func_signature = value
 
     @property
-    def func_docstring(self) -> Optional[str]:
+    def func_docstring(self) -> str | None:
         """Return the captured function docstring.
 
         Returns
@@ -433,7 +433,7 @@ class FuncCallLocation:
         return self._func_docstring
 
     @func_docstring.setter
-    def func_docstring(self, value: Optional[str]) -> None:
+    def func_docstring(self, value: str | None) -> None:
         """Set the captured function docstring.
 
         Parameters
@@ -469,7 +469,7 @@ class FuncCallLocation:
 
         return vscode_file_line_link(self.file, self.line_number)
 
-    def __getitem__(self, i: Union[int, slice]) -> Union[str, List[str]]:
+    def __getitem__(self, i: int | slice) -> str | list[str]:
         """Index into the source context lines."""
         if self.code_context is None:
             raise IndexError("code_context is None (source unavailable)")
@@ -488,14 +488,14 @@ class FuncCallLocation:
 
         return record_state_items(self)
 
-    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
         """Install a state mapping through the cell descriptors (M8 hook)."""
 
         from .._trace_core.record_rows import record_state_restore
 
         record_state_restore(self, mapping)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with live frame references stripped."""
         from ._state_adapter import state_items
 
@@ -504,7 +504,7 @@ class FuncCallLocation:
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state without reviving frame references."""
         read_tlspec_version(state, cls_name=type(self).__name__)
         default_fill_state(state, defaults={"_frame_func_obj": None})

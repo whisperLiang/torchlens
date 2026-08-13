@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-
 if TYPE_CHECKING:
     from torchlens.data_classes.op import Op
     from torchlens.data_classes.trace import Trace

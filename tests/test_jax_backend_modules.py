@@ -374,7 +374,7 @@ def test_jax_equinox_nested_modules_preserve_address_tree_and_selectors() -> Non
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
     assert trace.module_identity_mode == "pytree_module"
-    assert set(module.address for module in trace.modules) == {
+    assert {module.address for module in trace.modules} == {
         "self",
         "encoder",
         "encoder.proj",
@@ -403,7 +403,7 @@ def test_jax_nnx_nested_modules_preserve_address_tree_and_selectors() -> None:
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
     assert trace.module_identity_mode == "pytree_module"
-    assert set(module.address for module in trace.modules) == {
+    assert {module.address for module in trace.modules} == {
         "self",
         "encoder",
         "encoder.proj",

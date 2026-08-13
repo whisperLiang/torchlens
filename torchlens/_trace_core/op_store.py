@@ -484,7 +484,7 @@ def _needs_eager_isolation(value: Any) -> bool:
     return False
 
 
-def _build_mutable_key_index(store: "OpRowStore") -> dict[int, Any]:
+def _build_mutable_key_index(store: OpRowStore) -> dict[int, Any]:
     """Scan a sealed base store once for its fork-isolation candidate cells.
 
     Returns ``fid -> rows`` (field-grouped so the per-fork sweep reads
@@ -532,7 +532,7 @@ def _build_mutable_key_index(store: "OpRowStore") -> dict[int, Any]:
     return index
 
 
-def _build_sweep_plan(store: "OpRowStore") -> tuple[Any, ...]:
+def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
     """Flatten the mutable-cell index into pre-resolved per-fork sweep work.
 
     Returns ``(alloc_keys, alloc_classes, alloc_values, copy_keys,
@@ -685,7 +685,7 @@ class PooledCell:
         return _detached_container_copy(self.prototype)
 
     @classmethod
-    def from_value(cls, value: Any) -> "PooledCell":
+    def from_value(cls, value: Any) -> PooledCell:
         """Build a pooled cell around a DETACHED copy of ``value``."""
 
         return cls(_detached_container_copy(value))
@@ -1354,7 +1354,7 @@ class OpStoreView:
 
     def __init__(
         self,
-        base: "OpRowStore | OpStoreView",
+        base: OpRowStore | OpStoreView,
         group_tables: dict[int, MembershipGroups] | None = None,
     ) -> None:
         """Snapshot ``base`` (which must be sealed) into a COW view.

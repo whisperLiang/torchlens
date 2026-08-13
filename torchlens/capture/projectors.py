@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, cast
 import warnings
 import weakref
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 from weakref import WeakKeyDictionary
 
 from ..ir.capture_events import _clone_op_event_for_replay
@@ -404,7 +405,7 @@ class RefreshProjector:
 class RecordingProjection:
     """Sparse activation records and lookup indexes projected from sealed facts."""
 
-    records: tuple["ActivationRecord", ...]
+    records: tuple[ActivationRecord, ...]
     by_pass: dict[int, list[int]]
     by_label: dict[str, list[tuple[int, int]]]
     by_address: dict[str, list[int]]

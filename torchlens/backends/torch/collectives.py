@@ -31,13 +31,14 @@ the OUTER user-level call is the correlating boundary (design v5, 1.2).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import partial, wraps
 import hashlib
 import inspect
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial, wraps
+from typing import Any
 
 import torch
 
@@ -101,8 +102,8 @@ class CollectiveSite:
     attr: str
     kind: str
     func_name: str
-    inputs: Callable[[dict[str, Any], "_RankRole"], list[torch.Tensor]]
-    outputs: Callable[[dict[str, Any], "_RankRole"], list[torch.Tensor]]
+    inputs: Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]
+    outputs: Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]
     p2p: str | None = None
     has_reduce_op: bool = False
     tensorless: bool = False

@@ -34,8 +34,12 @@ jobs:
       # NOT in CLI flags, so pre-commit (explicit staged filenames) and this gate
       # judge the same files. Verdicts were proven identical to the previous
       # CLI-flag form when the excludes moved.
+      # SCOPE (grind r3, R70 / OL#41): widened from `torchlens tests scripts` to
+      # cover the contributor-facing trees too. `menagerie` stays out through
+      # pyproject's extend-exclude (vendored/ported real model source), and so do
+      # the two generated artifacts, whose generator is the authority.
       - name: Ruff format check
-        run: ruff format --check torchlens tests scripts
+        run: ruff format --check torchlens tests scripts tools benchmarks examples notebooks
 
       - name: Ruff check
-        run: ruff check torchlens tests scripts
+        run: ruff check torchlens tests scripts tools benchmarks examples notebooks

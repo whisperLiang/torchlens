@@ -2,30 +2,30 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import time
 import traceback as traceback_module
+import warnings
+from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
-import warnings
 
 import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
+from ..capture.config import InternalCaptureConfig
+from ..capture.predicates import validate_followed_by_capability
 from ..capture.projections import (
     RecordingState,
     _empty_recording,
     active_recording_state,
 )
-from ..capture.predicates import validate_followed_by_capability
-from ..capture.config import InternalCaptureConfig
 from ..capture.stop import StopDirective, stop_directive_for_trace
 from ..capture.trace import _extract_and_mark_outputs
 from ..data_classes.trace import Trace
-from ..ir import CaptureEvents
 from ..intervention.predicates import InterventionPredicate
+from ..ir import CaptureEvents
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
 from ..utils._torch_compat import get_fsdp_wrapper_type
@@ -33,12 +33,12 @@ from ._halt import HaltSignal
 from ._validation import validate_recording_options
 from .exceptions import RecorderStateError
 from .options import (
+    ForwardErrorMode,
     GradPredicateFn,
     HaltPredicateFn,
     LookbackPayloadPolicy,
     PredicateErrorMode,
     PredicateFn,
-    ForwardErrorMode,
     merge_recording_options,
 )
 from .types import CaptureSpec, Recording, _mark_recording_halted
@@ -300,7 +300,7 @@ class Recorder:
         self._failed = False
         self._next_pass_index = 1
 
-    def __enter__(self) -> "Recorder":
+    def __enter__(self) -> Recorder:
         """Enter the recorder resource scope."""
 
         if self._entered or self._exited:

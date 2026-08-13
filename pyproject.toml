@@ -273,16 +273,114 @@ line-length = 100
 #                           (see the per-file-ignores rationale below)
 #   tests/crawler/        - menagerie crawler harness, same provenance
 #   tests/test_menagerie_*- menagerie-only test surface
+#
+# GENERATED ARTIFACTS are excluded too: their GENERATOR is the authority and
+# tests/test_schema_lockstep.py compares them BYTE-FOR-BYTE to fresh generator
+# output, so any ruff rewrite (format, isort, UP*) would make the lockstep gate
+# permanently red. They declare themselves with a `GENERATED` marker on their
+# docstring's first line, and
+# test_schema_lockstep.py::test_ruff_excludes_every_generated_artifact keeps this
+# list equal to that self-declaring set -- a new generated module cannot land
+# without its exclusion, and a stale exclusion cannot outlive its generator.
 extend-exclude = [
     "menagerie",
     "tests/crawler",
     "tests/test_menagerie_*.py",
+    "torchlens/data_classes/_schema_bindings.py",
+    "torchlens/ir/op_record_manifest.py",
 ]
 
 [tool.ruff.lint]
-ignore = []
+# RULE-FAMILY RATCHET. `select` grows MONOTONICALLY, one bounded wave per grind
+# round; it is never narrowed. Naming `select` replaces ruff's implicit default,
+# so the four default groups (E4/E7/E9/F) are restated here and stay enforced.
+#
+# grind round 3 wave: I (import order), B (bugbear), SIM (simplify),
+# UP (pyupgrade), C4 (comprehensions). 3748 violations found, 3203 fixed.
+select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP", "C4"]
+
+# DEFERRAL LEDGER. Each entry is a code inside an ENABLED family that is not yet
+# clean, with its reason and (where applicable) its owning grind row. This is the
+# honest alternative to leaving a whole family out of `select`: the family is ON,
+# so no new site of any OTHER code in it can land, and every exception is named.
+# Entries leave this list; nothing joins it without a reason.
+ignore = [
+    # --- proven harmful HERE, not merely deferred -------------------------------
+    # B009/B010 rewrite `getattr(o, "x")` / `setattr(o, "x", v)` into attribute
+    # access. TorchLens deliberately writes and reads OUT-OF-TYPE metadata on
+    # FOREIGN objects (torch.Tensor, nn.Module, wrapped callables), and the
+    # getattr/setattr spelling is load-bearing there: it is what tells the reader
+    # AND mypy that the attribute is not part of the object's declared type.
+    # Enabling them traded 214 cosmetic rewrites for 59 NEW mypy
+    # `[attr-defined]` errors (measured: 1 -> 60), and it also broke
+    # tests/test_no_legacy_tl_attrs.py, whose whole job is to ban direct `tl_*`
+    # attribute access in source. Not a ratchet candidate without a typed
+    # host-metadata accessor to route these through first.
+    "B009",
+    "B010",
+
+    # SIM118 (`x in d.keys()` -> `x in d`) is WRONG on TorchLens accessors, which
+    # are dict-LIKE enough to fool the rule but whose `__iter__` yields RECORDS
+    # while `.keys()` yields LABELS. Applying it turned `for label in
+    # trace.saved_grad_ops.keys()` into a loop over `Op` objects and
+    # `trace.layers[label]` into a `Layer`-keyed lookup: 11 smoke failures, all
+    # silent type confusion rather than an obvious break. Reverted at 55 sites.
+    # Re-enabling needs the accessor iteration contract settled first (a public
+    # API question, not a lint one).
+    "SIM118",
+    # SIM401 (`d[k] if k in d else default` -> `d.get(k, default)`) fails for the
+    # same reason: the accessors implement `__getitem__`/`__contains__` but NOT
+    # `Mapping`, so `.get` does not exist and the rewrite raises AttributeError at
+    # render time (`ModuleAccessor` in collapse_optimizer.py). Reverted at 2 sites;
+    # blocked behind the same accessor-protocol decision as SIM118.
+    "SIM401",
+
+    # --- owned by another grind row: do NOT double-fix here ---------------------
+    "B905",  # zip-without-explicit-strict -> row R23 (105 sites)
+    "B028",  # no-explicit-stacklevel -> row R66, warnings hygiene (9 sites)
+
+    # --- judgment calls, later rounds ------------------------------------------
+    # 102 sites. if/else -> ternary is a readability call, and several sit in
+    # invariant-heavy code where the explicit branch carries a per-arm comment.
+    "SIM108",
+    # 74 sites. `contextlib.suppress` is measurably slower than bare
+    # try/except/pass, and several of these sit on capture hot paths the
+    # SPEEDENING sprint tuned. Needs a per-site perf verdict, not a sweep.
+    "SIM105",
+    # 37 sites. Collapsing the two `if`s orphans the per-branch comments that
+    # explain why the second condition is separate.
+    "SIM102",
+    # 27 sites, no ruff fix. Combining `with` statements changes teardown ORDER
+    # on failure, which is load-bearing for the capture/restore transactions.
+    "SIM117",
+    # 8 sites. Each needs a real handle-lifetime decision, not a mechanical
+    # context-manager wrap.
+    "SIM115",
+    # 16 sites. printf -> format changes message TEXT, and error-message tests
+    # match on it.
+    "UP031",
+    # 16 sites. `raise ... from` changes traceback chaining and several sites
+    # deliberately drop the context; each needs a verdict.
+    "B904",
+    # 13 sites. Several are intentional "this attribute access must not raise"
+    # probes in tests, where the bare expression IS the assertion.
+    "B018",
+    # 15 sites. This is a REAL bug class (late-binding closure over a loop
+    # variable), so every site needs a correctness verdict AND a regression test
+    # -- exactly what a mechanical rewrite would paper over. Highest-value item
+    # left in this ledger.
+    "B023",
+    # 13 sites with no ruff fix (the name is referenced, or is a tuple unpack).
+    "B007",
+    # 3 sites. A call in a default argument is sometimes load-bearing for a
+    # captured closure; needs a per-site read.
+    "B008",
+]
 
 [tool.ruff.lint.isort]
+# Match the style already in the tree: keep aliased imports combined on one line
+# (`from x import a as b, c as d`) rather than exploding each into its own
+# statement, which would rewrite hundreds of import blocks for no gain.
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]

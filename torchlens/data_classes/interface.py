@@ -18,19 +18,19 @@ For integer keys: direct index into ``layer_list`` (supports negative indexing).
 For slice keys: returns a list slice of ``layer_list``.
 """
 
-from typing import TYPE_CHECKING, Any, List, Tuple, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from .trace import Trace
     from ..capture.projections import LiveOpView
+    from .trace import Trace
 
-from ._lookup_keys import _give_user_feedback_about_lookup_key
-from .op import Op
 from .._errors import AmbiguousOpLookupError
 from ..capture.projections import LiveOpView
 from ..intervention.errors import SiteAmbiguityError
 from ..intervention.selectors import BaseSelector
 from ..intervention.types import FrozenTargetSpec, TargetSpec
+from ._lookup_keys import _give_user_feedback_about_lookup_key
+from .op import Op
 
 
 def _ambiguous_lookup_match_labels(self: "Trace", key: str) -> list[str]:
@@ -377,10 +377,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
     module_call_log = self.module_calls[module_pass]
     children = module_call_log.call_children
     any_grandchild_modules = any(
-        [
-            len(self.module_calls[child_call_label].call_children) > 0
-            for child_call_label in children
-        ]
+        len(self.module_calls[child_call_label].call_children) > 0 for child_call_label in children
     )
     if any_grandchild_modules or len(children) == 0:
         for submodule_pass in children:
@@ -403,7 +400,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
     return s
 
 
-def _format_conditional_branch_stack(conditional_branch_stack: List[Tuple[int, str]]) -> str:
+def _format_conditional_branch_stack(conditional_branch_stack: list[tuple[int, str]]) -> str:
     """Render a compact string form for a conditional branch stack.
 
     Args:

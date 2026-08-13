@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
 import runpy
 import warnings
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
-
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "intervention"
 EXAMPLE_FILES = tuple(sorted(EXAMPLE_DIR.glob("[0-9][0-9]_*.py")))

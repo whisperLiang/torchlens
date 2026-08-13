@@ -41,7 +41,7 @@ class MembershipGroups:
         # a GroupRef bound to ANY ancestor — the root refs live in shared
         # base storage — translates to this fork's clone by identity, and no
         # recycled id can mistranslate.
-        self._source_tables: tuple["MembershipGroups", ...] = ()
+        self._source_tables: tuple[MembershipGroups, ...] = ()
 
     def __len__(self) -> int:
         """Return the number of group rows."""

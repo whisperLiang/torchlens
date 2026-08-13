@@ -98,7 +98,7 @@ class TargetSpec:
     slice_spec: TensorSliceSpec | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenTargetSpec":
+    def freeze(self) -> FrozenTargetSpec:
         """Return an immutable view of this target spec.
 
         Returns
@@ -296,7 +296,7 @@ class LiteralTensor:
     """
 
     value: Any
-    param_barcode: "str | None" = None
+    param_barcode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -394,7 +394,7 @@ class TargetValueSpec:
     value: Any
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenTargetValueSpec":
+    def freeze(self) -> FrozenTargetValueSpec:
         """Return an immutable view of this value replacement.
 
         Returns
@@ -429,7 +429,7 @@ class HookSpec:
     handle: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenHookSpec":
+    def freeze(self) -> FrozenHookSpec:
         """Return an immutable view of this sticky hook spec.
 
         Returns
@@ -587,7 +587,7 @@ class InterventionSpec:
 
         self.hook_specs.clear()
 
-    def freeze(self) -> "FrozenInterventionSpec":
+    def freeze(self) -> FrozenInterventionSpec:
         """Return an immutable public view of this intervention spec.
 
         Returns

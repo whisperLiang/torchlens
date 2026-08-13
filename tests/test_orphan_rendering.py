@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import example_models
 import graphviz
 import pytest
 import torch
 from torch import nn
 
-import example_models
 import torchlens as tl
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import MetadataInvariantError

@@ -45,7 +45,7 @@ class BaseSelector:
     selector_kind: SelectorKind
     selector_value: Any
 
-    def __and__(self, other: SelectorLike) -> "CompositeSelector":
+    def __and__(self, other: SelectorLike) -> CompositeSelector:
         """Return a selector that matches the intersection of two selectors.
 
         Parameters
@@ -62,7 +62,7 @@ class BaseSelector:
         _check_composition(self, other)
         return CompositeSelector("and", (self, other))
 
-    def __or__(self, other: SelectorLike) -> "CompositeSelector":
+    def __or__(self, other: SelectorLike) -> CompositeSelector:
         """Return a selector that matches the union of two selectors.
 
         Parameters
@@ -88,7 +88,7 @@ class BaseSelector:
         _check_composition(self, other)
         return CompositeSelector("or", (self, other))
 
-    def __invert__(self) -> "NotSelector":
+    def __invert__(self) -> NotSelector:
         """Return a selector that matches the complement of this selector.
 
         Returns
@@ -514,9 +514,9 @@ class FollowedBySelector(BaseSelector):
         Successor predicate that must match the current operation.
     """
 
-    inner: "SelectorLike"
+    inner: SelectorLike
 
-    def __init__(self, inner: "SelectorLike") -> None:
+    def __init__(self, inner: SelectorLike) -> None:
         """Create a retroactive successor selector."""
 
         object.__setattr__(self, "selector_kind", "followed_by")
@@ -552,9 +552,9 @@ class PrecededBySelector(BaseSelector):
         Predecessor predicate evaluated over the retained lookback window.
     """
 
-    inner: "SelectorLike"
+    inner: SelectorLike
 
-    def __init__(self, inner: "SelectorLike") -> None:
+    def __init__(self, inner: SelectorLike) -> None:
         """Create a predecessor selector."""
 
         object.__setattr__(self, "selector_kind", "preceded_by")
@@ -685,7 +685,7 @@ class FacetSelector(BaseSelector):
         object.__setattr__(self, "head_index", head_index)
         object.__setattr__(self, "module_address", module_address)
 
-    def head(self, head_index: int) -> "FacetSelector":
+    def head(self, head_index: int) -> FacetSelector:
         """Return a copy scoped to one attention head.
 
         Parameters
@@ -701,7 +701,7 @@ class FacetSelector(BaseSelector):
 
         return FacetSelector(self.name, head_index=head_index, module_address=self.module_address)
 
-    def in_module(self, address: str) -> "FacetSelector":
+    def in_module(self, address: str) -> FacetSelector:
         """Return a copy scoped to one module address.
 
         Parameters

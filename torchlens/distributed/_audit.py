@@ -24,8 +24,9 @@ call the SAME function at merge time and at load rederivation.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from typing import Literal
 
 from ._ledger import GroupLifecycleLedger, InstallEpoch, LineageVector
 

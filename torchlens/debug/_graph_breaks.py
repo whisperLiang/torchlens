@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
 import os
-from typing import Any, Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn

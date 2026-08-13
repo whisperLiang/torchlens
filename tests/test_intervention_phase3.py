@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import torchlens as tl
+from torchlens.intervention import runtime as intervention_runtime
 from torchlens.intervention.errors import (
     HelperMountError,
     HookSignatureError,
@@ -18,7 +19,6 @@ from torchlens.intervention.errors import (
     SpliceModuleDtypeError,
 )
 from torchlens.intervention.hooks import HookContext, make_hook_context, normalize_hook_plan
-from torchlens.intervention import runtime as intervention_runtime
 from torchlens.intervention.runtime import _execute_hook
 from torchlens.intervention.sites import sites
 from torchlens.intervention.types import HelperSpec

@@ -127,7 +127,7 @@ def _discover_rng_bearing_modules() -> dict[str, dict[str, Any]]:
     """
 
     found: dict[str, dict[str, Any]] = {}
-    for module_name, module in sorted(list(sys.modules.items())):
+    for module_name, module in sorted(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
             continue
         if module_name != "torch" and not module_name.startswith("torch."):
@@ -645,9 +645,8 @@ def test_monitor_get_only_reads_mark_nothing(_torch_rng_state_guard) -> None:
 def test_monitor_fork_rng_ceilings_transitively(_torch_rng_state_guard) -> None:
     """``fork_rng`` needs no direct row: its restore transits the set_rng_state patch."""
 
-    with host_nondeterminism_monitor(None) as result:
-        with torch.random.fork_rng(devices=[]):
-            pass
+    with host_nondeterminism_monitor(None) as result, torch.random.fork_rng(devices=[]):
+        pass
     assert "torch.set_rng_state" in result.channels
 
 

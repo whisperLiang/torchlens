@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
 
 from .._literals import (
     BufferVisibilityLiteral,
@@ -113,7 +114,7 @@ class ResolvedRenderRequest:
     def with_resolved_collapse(
         self,
         collapse_fn: Callable[[Any], bool] | None,
-    ) -> "ResolvedRenderRequest":
+    ) -> ResolvedRenderRequest:
         """Return this request with its resolved collapse predicate.
 
         Parameters

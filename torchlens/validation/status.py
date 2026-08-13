@@ -6,7 +6,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 ValidationReplayState = Literal["available", "passed", "failed", "unavailable", "unverified"]
 ValidationReplaySource = Literal["live", "loaded", "unknown"]
 
@@ -88,7 +87,7 @@ class ValidationReplayStatus:
         return self.state == "passed"
 
     @classmethod
-    def available_live(cls, *, backend: str) -> "ValidationReplayStatus":
+    def available_live(cls, *, backend: str) -> ValidationReplayStatus:
         """Build the default status for a live trace with validation support.
 
         Parameters
@@ -127,7 +126,7 @@ class ValidationReplayStatus:
         unverified_reason_counts: Mapping[str, int] | None = None,
         exempted_reason_counts: Mapping[str, int] | None = None,
         decisions: Sequence[Mapping[str, Any]] | None = None,
-    ) -> "ValidationReplayStatus":
+    ) -> ValidationReplayStatus:
         """Build a completed replay-validation result.
 
         Parameters
@@ -202,7 +201,7 @@ class ValidationReplayStatus:
         unverified_reason_counts: Mapping[str, int] | None = None,
         exempted_reason_counts: Mapping[str, int] | None = None,
         decisions: Sequence[Mapping[str, Any]] | None = None,
-    ) -> "ValidationReplayStatus":
+    ) -> ValidationReplayStatus:
         """Build a partial replay-validation status for importer-owned regions.
 
         Parameters
@@ -276,7 +275,7 @@ class ValidationReplayStatus:
         unverified_reason_counts: Mapping[str, int] | None = None,
         exempted_reason_counts: Mapping[str, int] | None = None,
         decisions: Sequence[Mapping[str, Any]] | None = None,
-    ) -> "ValidationReplayStatus":
+    ) -> ValidationReplayStatus:
         """Fold replay outcome counts into a trace-level status.
 
         Parameters
@@ -400,7 +399,7 @@ class ValidationReplayStatus:
         *,
         backend: str,
         payload_load_status: str | None = None,
-    ) -> "ValidationReplayStatus":
+    ) -> ValidationReplayStatus:
         """Build the loaded non-torch unavailable status.
 
         Parameters
@@ -431,7 +430,7 @@ class ValidationReplayStatus:
         )
 
     @classmethod
-    def unavailable_unsupported(cls, *, backend: str) -> "ValidationReplayStatus":
+    def unavailable_unsupported(cls, *, backend: str) -> ValidationReplayStatus:
         """Build an unavailable status for a backend without replay validation.
 
         Parameters

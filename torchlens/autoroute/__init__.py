@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from torchlens.autoroute import input as input
-from torchlens.autoroute import output as output
+from torchlens.autoroute import input as input, output as output
 
 __all__ = ["input", "output"]

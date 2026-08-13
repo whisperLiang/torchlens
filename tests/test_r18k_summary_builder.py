@@ -62,7 +62,7 @@ class _Branch(nn.Module):
         return self.c(self.a(x) + self.b(x))
 
 
-def _recurrent_trace() -> "tl.Trace":
+def _recurrent_trace() -> tl.Trace:
     return tl.trace(_Reused(), torch.ones(1024))
 
 
@@ -98,7 +98,7 @@ def test_h2_rolled_time_is_honest_aggregate() -> None:
 # --------------------------------------------------------------------------- H8
 
 
-def _connected_to(trace: "tl.Trace", module_address: str) -> str:
+def _connected_to(trace: tl.Trace, module_address: str) -> str:
     row = None
     for line in trace.summary(level="graph").splitlines():
         cells = [c.strip() for c in line.split("|") if c.strip()]
@@ -148,7 +148,7 @@ def test_control_flow_honest_when_no_recurrence() -> None:
 # --------------------------------------------------------------------------- xN
 
 
-def _memory_row_names(trace: "tl.Trace", mode: str, needle: str) -> list[str]:
+def _memory_row_names(trace: tl.Trace, mode: str, needle: str) -> list[str]:
     names = []
     for line in trace.summary(level="memory", mode=mode).splitlines():
         cells = [c.strip() for c in line.split("|") if c.strip()]

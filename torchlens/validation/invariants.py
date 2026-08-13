@@ -30,21 +30,21 @@ and raises ``MetadataInvariantError`` on the first failure.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 from ..errors._base import ValidationError
+from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 from .status import has_importer_region_provenance, is_region_replay_annotation
 
 if TYPE_CHECKING:
-    from ..data_classes.layer import Layer
     from ..backends import BackendSpec
+    from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
-    from ..data_classes.module import Module
 
 InvariantApplicability = Literal["torch", "non_torch", "all"]
 MetadataInvariantFunc = Callable[["Trace"], object]
@@ -118,7 +118,7 @@ class MetadataInvariantContract:
 # ---------------------------------------------------------------------------
 
 
-def check_metadata_invariants(trace: "Trace") -> bool:
+def check_metadata_invariants(trace: Trace) -> bool:
     """Run all metadata invariant checks on a completed ``Trace``.
 
     Checks run in dependency order: Phase 1 structural checks first, then
@@ -140,7 +140,7 @@ def check_metadata_invariants(trace: "Trace") -> bool:
     return True
 
 
-def _check_receptive_field_metadata_invariants(trace: "Trace") -> None:
+def _check_receptive_field_metadata_invariants(trace: Trace) -> None:
     """Check autograd-free receptive-field descriptor and box invariants.
 
     Parameters
@@ -163,7 +163,7 @@ def _check_receptive_field_metadata_invariants(trace: "Trace") -> None:
         raise MetadataInvariantError("receptive_field_metadata", str(exc)) from exc
 
 
-def _check_backend_neutral_module_mode_invariants(trace: "Trace") -> None:
+def _check_backend_neutral_module_mode_invariants(trace: Trace) -> None:
     """Run module invariants appropriate to the trace's module identity mode.
 
     Parameters
@@ -188,7 +188,7 @@ def _check_backend_neutral_module_mode_invariants(trace: "Trace") -> None:
     _check_module_containment_logic(trace)  # Q
 
 
-def _check_region_replay_provenance(trace: "Trace") -> None:
+def _check_region_replay_provenance(trace: Trace) -> None:
     """Check region replay annotations have importer-owned provenance.
 
     Parameters
@@ -222,7 +222,7 @@ def _check_region_replay_provenance(trace: "Trace") -> None:
         )
 
 
-def _check_function_root_module_invariants(trace: "Trace") -> None:
+def _check_function_root_module_invariants(trace: Trace) -> None:
     """Check minimal module metadata required for ``function_root`` traces.
 
     Parameters
@@ -290,7 +290,7 @@ def _check_function_root_module_invariants(trace: "Trace") -> None:
             )
 
 
-def _check_compute_op_module_attribution(trace: "Trace") -> None:
+def _check_compute_op_module_attribution(trace: Trace) -> None:
     """Check compute ops resolve to a containing module in non-root modes.
 
     Parameters
@@ -335,7 +335,7 @@ def _check_compute_op_module_attribution(trace: "Trace") -> None:
             )
 
 
-def _compute_ops(trace: "Trace") -> list["Op"]:
+def _compute_ops(trace: Trace) -> list[Op]:
     """Return non-bookkeeping compute ops from ``trace``.
 
     Parameters
@@ -356,7 +356,7 @@ def _compute_ops(trace: "Trace") -> list["Op"]:
     ]
 
 
-def _module_claims(layer: "Op") -> list[str]:
+def _module_claims(layer: Op) -> list[str]:
     """Return module/module-call attribution claims from an op.
 
     Parameters
@@ -409,7 +409,7 @@ def _module_claim_address(claim: str) -> str | None:
     return claim.rsplit(":", 1)[0]
 
 
-def _check_backend_identity_invariants(trace: "Trace") -> None:
+def _check_backend_identity_invariants(trace: Trace) -> None:
     """Check backend identity and declared mode fields.
 
     Precondition contract: every completed trace, including torch traces, must
@@ -460,7 +460,7 @@ def _check_backend_identity_invariants(trace: "Trace") -> None:
         )
 
 
-def _check_non_torch_backward_inert(trace: "Trace") -> None:
+def _check_non_torch_backward_inert(trace: Trace) -> None:
     """Check that non-torch traces do not fake true backward graph metadata.
 
     Parameters
@@ -492,7 +492,7 @@ def _check_non_torch_backward_inert(trace: "Trace") -> None:
         raise MetadataInvariantError(name, "non-torch traces must have num_backward_passes=0")
 
 
-def _check_backend_neutral_accessor_refs(trace: "Trace") -> None:
+def _check_backend_neutral_accessor_refs(trace: Trace) -> None:
     """Check structural backend-neutral dtype/device/address resolver fields.
 
     Precondition contract: Op, Layer, and Param records may carry neutral mirror
@@ -568,7 +568,7 @@ def _record_has_backend_neutral_accessor_metadata(record: object) -> bool:
     )
 
 
-def check_func_call_id_invariant(trace: "Trace") -> InvariantResult:
+def check_func_call_id_invariant(trace: Trace) -> InvariantResult:
     """Invariant S: func_call_id consistency.
 
     Precondition contract: torch exhaustive and predicate captures populate
@@ -594,7 +594,7 @@ def check_func_call_id_invariant(trace: "Trace") -> InvariantResult:
     """
 
     name = "func_call_id_consistency"
-    groups: dict[int, list["Op"]] = defaultdict(list)
+    groups: dict[int, list[Op]] = defaultdict(list)
     for layer in trace.layer_list:
         if _is_func_call_id_exempt(layer):
             continue
@@ -632,7 +632,7 @@ def check_func_call_id_invariant(trace: "Trace") -> InvariantResult:
     return InvariantResult(name=name, passed=True)
 
 
-def _check_backward_graph_invariants(trace: "Trace") -> None:
+def _check_backward_graph_invariants(trace: Trace) -> None:
     """Check T: backward grad-fn metadata consistency.
 
     A forward layer with a recorded ``grad_fn_object_id`` must retain a
@@ -675,7 +675,7 @@ def _check_backward_graph_invariants(trace: "Trace") -> None:
     _check_backward_pass_record_consistency(trace, name, valid_pass_indices)
 
 
-def _check_backward_grad_fn_registry(trace: "Trace", name: str) -> set[int]:
+def _check_backward_grad_fn_registry(trace: Trace, name: str) -> set[int]:
     """Check backward GradFn registry and root references.
 
     Parameters
@@ -719,7 +719,7 @@ def _check_backward_grad_fn_registry(trace: "Trace", name: str) -> set[int]:
 
 
 def _check_backward_grad_fn_handle_records(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -835,7 +835,7 @@ def _check_backward_grad_fn_handle_records(
                 )
 
 
-def _check_backward_layer_backpointers(trace: "Trace", name: str) -> None:
+def _check_backward_layer_backpointers(trace: Trace, name: str) -> None:
     """Check forward-layer backpointers into backward GradFn handles.
 
     Parameters
@@ -871,7 +871,7 @@ def _check_backward_layer_backpointers(trace: "Trace", name: str) -> None:
             )
 
 
-def _check_backward_saved_grad_records(trace: "Trace", name: str) -> None:
+def _check_backward_saved_grad_records(trace: Trace, name: str) -> None:
     """Check saved gradient-op records match layers that have gradients.
 
     Parameters
@@ -897,7 +897,7 @@ def _check_backward_saved_grad_records(trace: "Trace", name: str) -> None:
 
 
 def _check_backward_pass_record_consistency(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -941,7 +941,7 @@ def _check_backward_pass_record_consistency(
                 )
 
 
-def _check_backward_pass_index_density(trace: "Trace", name: str) -> None:
+def _check_backward_pass_index_density(trace: Trace, name: str) -> None:
     """Check backward pass log keys are dense.
 
     Parameters
@@ -967,7 +967,7 @@ def _check_backward_pass_index_density(trace: "Trace", name: str) -> None:
         )
 
 
-def _check_grad_fn_topology_invariants(trace: "Trace", name: str) -> None:
+def _check_grad_fn_topology_invariants(trace: Trace, name: str) -> None:
     """Check backward GradFn relation lists for reciprocal, resolvable links.
 
     The precondition contract is backward-capture only: callers invoke this
@@ -1098,7 +1098,7 @@ def _check_grad_fn_relation_list(
 
 
 def _check_backward_pass_domain_invariants(
-    trace: "Trace",
+    trace: Trace,
     name: str,
     valid_pass_indices: set[int],
 ) -> None:
@@ -1209,7 +1209,7 @@ def _check_backward_pass_domain_invariants(
         )
 
 
-def _layer_postdates_all_backward_triggers(trace: "Trace", layer: "Layer | Op") -> bool:
+def _layer_postdates_all_backward_triggers(trace: Trace, layer: Layer | Op) -> bool:
     """Return whether a layer was created after every recorded backward trigger.
 
     Parameters
@@ -1233,7 +1233,7 @@ def _layer_postdates_all_backward_triggers(trace: "Trace", layer: "Layer | Op") 
     return bool(trigger_positions) and layer_step_index > max(trigger_positions)
 
 
-def _backward_trigger_forward_positions(trace: "Trace") -> list[int]:
+def _backward_trigger_forward_positions(trace: Trace) -> list[int]:
     """Return strict forward boundaries for recorded backward triggers.
 
     Parameters
@@ -1274,7 +1274,7 @@ def _backward_trigger_forward_positions(trace: "Trace") -> list[int]:
     return positions
 
 
-def _backward_pass_root_forward_position(trace: "Trace", pass_index: int) -> int | None:
+def _backward_pass_root_forward_position(trace: Trace, pass_index: int) -> int | None:
     """Return the highest paired forward position among a backward pass's roots.
 
     Parameters
@@ -1310,7 +1310,7 @@ def _backward_pass_root_forward_position(trace: "Trace", pass_index: int) -> int
     return max(root_steps) if root_steps else None
 
 
-def _backward_pass_observed_forward_position(trace: "Trace", pass_index: int) -> int | None:
+def _backward_pass_observed_forward_position(trace: Trace, pass_index: int) -> int | None:
     """Return the highest forward position with an observed gradient in a pass.
 
     Parameters
@@ -1341,7 +1341,7 @@ def _backward_pass_observed_forward_position(trace: "Trace", pass_index: int) ->
     return max(observed_steps) if observed_steps else None
 
 
-def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
+def _resolve_op_grad_event_label(trace: Trace, op_label: str) -> str:
     """Return the final lookup label for an ``OpGradObserved`` label.
 
     Delegates to the single implementation next to the event emitter so the
@@ -1353,7 +1353,7 @@ def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
     return _impl(trace, op_label)
 
 
-def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
+def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
     """Check one-journal sequencing across every retained event lane.
 
     The event writer stamps ONE run-monotonic ``seq`` on every event of every
@@ -1426,7 +1426,7 @@ def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
             )
 
 
-def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
+def _check_backward_event_flow_invariants(trace: Trace, name: str) -> None:
     """Check runtime backward event stream consistency against projections.
 
     Parameters
@@ -1727,7 +1727,7 @@ def _intervention_spec_is_armed(spec: object | None) -> bool:
     )
 
 
-def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = None) -> bool:
+def op_has_genuine_replacement_evidence(layer: Op, trace: Trace | None = None) -> bool:
     """Return whether trace-level evidence corroborates a replacement stamp.
 
     Every ``intervention_replacement`` exemption used to trust per-op
@@ -1841,7 +1841,7 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     return False
 
 
-def _is_func_call_id_exempt(layer: "Op") -> bool:
+def _is_func_call_id_exempt(layer: Op) -> bool:
     """Return whether a layer is exempt from Invariant S.
 
     Parameters
@@ -1884,7 +1884,7 @@ def _is_func_call_id_exempt(layer: "Op") -> bool:
     }
 
 
-def _plain_func_call_group_signature(layer: "Op") -> tuple[object, ...]:
+def _plain_func_call_group_signature(layer: Op) -> tuple[object, ...]:
     """Return plain-capture-stable same-call metadata.
 
     Parameters
@@ -1909,7 +1909,7 @@ def _plain_func_call_group_signature(layer: "Op") -> tuple[object, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _check_trace_self_consistency(ml: "Trace") -> None:
+def _check_trace_self_consistency(ml: Trace) -> None:
     """Check A: Trace aggregate counts and metadata are internally consistent.
 
     Validates:
@@ -2001,7 +2001,7 @@ def _check_trace_self_consistency(ml: "Trace") -> None:
         )
 
 
-def _retained_orphan_computational_count(ml: "Trace", name: str) -> int:
+def _retained_orphan_computational_count(ml: Trace, name: str) -> int:
     """Return retained orphan ops after proving their narrow island contract.
 
     Parameters
@@ -2063,7 +2063,7 @@ def _retained_orphan_computational_count(ml: "Trace", name: str) -> int:
     )
 
 
-def _retained_orphan_op_labels(ml: "Trace") -> set[str]:
+def _retained_orphan_op_labels(ml: Trace) -> set[str]:
     """Return final labels belonging to explicitly retained orphan operations.
 
     Parameters
@@ -2084,7 +2084,7 @@ def _retained_orphan_op_labels(ml: "Trace") -> set[str]:
     }
 
 
-def _retained_orphan_layer_labels(ml: "Trace") -> set[str]:
+def _retained_orphan_layer_labels(ml: Trace) -> set[str]:
     """Return no-pass labels belonging to explicitly retained orphan operations.
 
     Parameters
@@ -2118,7 +2118,7 @@ _SPECIAL_LIST_FLAG_PAIRS = [
 ]
 
 
-def _check_special_layer_lists(ml: "Trace") -> None:
+def _check_special_layer_lists(ml: Trace) -> None:
     """Check B: special layer lists (input, output, buffer, etc.) match per-layer boolean flags.
 
     For each (list_attr, flag_attr) pair, verifies bidirectional consistency:
@@ -2178,7 +2178,7 @@ def _check_special_layer_lists(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_capture_edge_survival(trace: "Trace") -> None:
+def _check_capture_edge_survival(trace: Trace) -> None:
     """Reconcile the final graph against the sealed capture-time edge truth (r29 F3b).
 
     The per-op identity witness (``dropped_edge_tensor_args``) is stamped at
@@ -2278,7 +2278,7 @@ def _check_capture_edge_survival(trace: "Trace") -> None:
             )
 
 
-def _check_graph_topology(ml: "Trace") -> None:
+def _check_graph_topology(ml: Trace) -> None:
     """Check C: parent-child edge bidirectionality and stored-flag consistency.
 
     Validates:
@@ -2429,7 +2429,7 @@ def _check_graph_topology(ml: "Trace") -> None:
             )
 
 
-def _check_backend_neutral_graph_topology(ml: "Trace") -> None:
+def _check_backend_neutral_graph_topology(ml: Trace) -> None:
     """Check parent/child symmetry for non-torch traces where fields exist.
 
     Parameters
@@ -2487,7 +2487,7 @@ def _check_backend_neutral_graph_topology(ml: "Trace") -> None:
                 )
 
 
-def _check_edge_use_parent_arg_invariants(ml: "Trace") -> None:
+def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     """Check existing edge-use records and parent-arg references.
 
     Precondition contract: edge-use metadata is optional on torch graph edges.
@@ -2577,7 +2577,7 @@ def _check_edge_use_parent_arg_invariants(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_op_log_fields(ml: "Trace") -> None:
+def _check_op_log_fields(ml: Trace) -> None:
     """Check D: per-layer field consistency (shape, dtype, pass numbering, func, nesting).
 
     Validates:
@@ -2691,7 +2691,7 @@ def _check_op_log_fields(ml: "Trace") -> None:
             )
 
 
-def _check_payload_metadata_invariants(ml: "Trace") -> None:
+def _check_payload_metadata_invariants(ml: Trace) -> None:
     """Check saved and transformed live payload metadata.
 
     Precondition contract: tensor payload fields may be legitimately absent
@@ -2977,7 +2977,7 @@ def _dtype_values_match(left: object, right: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _check_recurrence_invariants(ml: "Trace") -> None:
+def _check_recurrence_invariants(ml: Trace) -> None:
     """Check E: recurrence / loop invariants.
 
     Validates:
@@ -3038,7 +3038,7 @@ def _check_recurrence_invariants(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_branching_invariants(ml: "Trace") -> None:
+def _check_branching_invariants(ml: Trace) -> None:
     """Check F: is_branching matches whether any layer has >1 child."""
     name = "branching_invariants"
     any_branching = any(len(lpl.children) > 1 for lpl in ml.layer_list)
@@ -3206,7 +3206,7 @@ def _expected_layer_log_child_views(
 
 
 def _expected_layer_log_child_union(
-    layer_log: "Layer",
+    layer_log: Layer,
 ) -> dict[int, dict[str, list[str]]]:
     """Build the expected aggregate ``conditional_arm_children`` for a ``Layer``.
 
@@ -3222,7 +3222,7 @@ def _expected_layer_log_child_union(
     """
 
     expected_children_by_cond: dict[int, dict[str, list[str]]] = {}
-    for call_index, pass_log in sorted(layer_log.ops.items()):
+    for _call_index, pass_log in sorted(layer_log.ops.items()):
         for conditional_id, branch_children in pass_log.conditional_arm_children.items():
             merged_branch_children = expected_children_by_cond.setdefault(conditional_id, {})
             for branch_kind, child_labels in branch_children.items():
@@ -3232,7 +3232,7 @@ def _expected_layer_log_child_union(
     return expected_children_by_cond
 
 
-def _valid_conditional_child_labels(ml: "Trace") -> set[str]:
+def _valid_conditional_child_labels(ml: Trace) -> set[str]:
     """Return the set of valid labels for conditional child references.
 
     Parameters
@@ -3249,7 +3249,7 @@ def _valid_conditional_child_labels(ml: "Trace") -> set[str]:
     return set(ml.layer_labels) | set(ml.layer_logs)
 
 
-def _check_conditional_invariants(ml: "Trace") -> None:
+def _check_conditional_invariants(ml: Trace) -> None:
     """Check F2 conditional metadata invariants.
 
     Parameters
@@ -3289,7 +3289,7 @@ def _check_conditional_invariants(ml: "Trace") -> None:
 
 
 def _check_conditional_arm_entry_child_symmetry(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:
@@ -3343,7 +3343,7 @@ def _check_conditional_arm_entry_child_symmetry(
 
 
 def _check_conditional_derived_child_views(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check derived conditional child views match primary structures.
@@ -3414,7 +3414,7 @@ def _check_conditional_derived_child_views(
 
 
 def _check_conditional_child_labels_resolve(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     valid_child_labels: set[str],
 ) -> None:
@@ -3497,7 +3497,7 @@ def _check_conditional_child_labels_resolve(
 
 
 def _check_conditional_bool_classification(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     branch_context_kinds: set[str],
     wrapped_context_kinds: set[str],
@@ -3548,7 +3548,7 @@ def _check_conditional_bool_classification(
 
 
 def _check_conditional_event_references(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     event_id_set: set[int],
 ) -> None:
@@ -3593,7 +3593,7 @@ def _check_conditional_event_references(
 
 
 def _check_conditional_branch_stack_monotonicity(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check parent-child conditional stacks are monotone by prefix.
@@ -3632,7 +3632,7 @@ def _check_conditional_branch_stack_monotonicity(
 
 
 def _check_conditional_elif_key_contiguity(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check elif branch keys are contiguous on conditional events.
@@ -3664,7 +3664,7 @@ def _check_conditional_elif_key_contiguity(
 
 
 def _check_conditional_bool_event_backrefs(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:
@@ -3714,7 +3714,7 @@ def _check_conditional_bool_event_backrefs(
 
 
 def _check_conditional_layer_aggregate_views(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check layer conditional aggregate views match pass-level data.
@@ -3756,7 +3756,7 @@ def _check_conditional_layer_aggregate_views(
 
 
 def _check_conditional_rolled_edge_call_indices(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check rolled conditional edge call indices.
@@ -3827,7 +3827,7 @@ def _check_conditional_rolled_edge_call_indices(
 
 
 def _check_conditional_transient_bool_keys_removed(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check transient bool conditional keys were removed.
@@ -3851,7 +3851,7 @@ def _check_conditional_transient_bool_keys_removed(
 
 
 def _check_conditional_arm_child_pass_union(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check layer conditional arm children are exact pass unions.
@@ -3878,7 +3878,7 @@ def _check_conditional_arm_child_pass_union(
 
 
 def _check_conditional_branch_entry_edges(
-    ml: "Trace",
+    ml: Trace,
     name: str,
     layer_label_set: set[str],
 ) -> None:
@@ -3921,7 +3921,7 @@ def _check_conditional_branch_entry_edges(
 
 
 def _check_conditional_arm_edges_match_graph(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check conditional arm-entry edges correspond to graph edges.
@@ -3960,7 +3960,7 @@ def _check_conditional_arm_edges_match_graph(
 
 
 def _check_conditional_branch_membership_records(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check per-op conditional branch membership records agree.
@@ -4049,7 +4049,7 @@ def _check_conditional_branch_membership_records(
 
 
 def _check_conditional_public_accessor_summary(
-    ml: "Trace",
+    ml: Trace,
     name: str,
 ) -> None:
     """Check public conditional ids and fired-arm summaries are honest.
@@ -4107,7 +4107,7 @@ def _check_conditional_public_accessor_summary(
 # ---------------------------------------------------------------------------
 
 
-def _check_layer_pass_to_layer_log_xrefs(ml: "Trace") -> None:
+def _check_layer_pass_to_layer_log_xrefs(ml: Trace) -> None:
     """Check G: Op <-> Layer cross-references.
 
     Validates:
@@ -4148,7 +4148,7 @@ def _check_layer_pass_to_layer_log_xrefs(ml: "Trace") -> None:
                 )
 
 
-def _check_pass_count_consistency(ml: "Trace") -> None:
+def _check_pass_count_consistency(ml: Trace) -> None:
     """Check pass-count consistency across multi-pass layer records.
 
     Parameters
@@ -4201,7 +4201,7 @@ def _check_pass_count_consistency(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_module_layer_containment(ml: "Trace") -> None:
+def _check_module_layer_containment(ml: Trace) -> None:
     """Check H: Module <-> Layer containment consistency.
 
     Validates forward and reverse directions:
@@ -4297,7 +4297,7 @@ def _check_module_layer_containment(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_module_hierarchy(ml: "Trace") -> None:
+def _check_module_hierarchy(ml: Trace) -> None:
     """Check I: module address tree consistency and pass structure.
 
     Precondition contract: rich ModuleCall checks run only for materialized
@@ -4410,7 +4410,7 @@ def _check_module_hierarchy(ml: "Trace") -> None:
 
 
 def _check_module_call_boundary_and_tree(
-    ml: "Trace",
+    ml: Trace,
     module_call: object,
     name: str,
 ) -> None:
@@ -4471,7 +4471,7 @@ def _check_module_call_boundary_and_tree(
     _check_module_call_output_structure_paths(ml, module_call, name)
 
 
-def _check_module_call_tree_links(ml: "Trace", module_call: object, name: str) -> None:
+def _check_module_call_tree_links(ml: Trace, module_call: object, name: str) -> None:
     """Check ModuleCall parent/child links and stack prefixes.
 
     Parameters
@@ -4534,7 +4534,7 @@ def _check_module_call_tree_links(ml: "Trace", module_call: object, name: str) -
 
 
 def _check_module_call_output_structure_paths(
-    ml: "Trace",
+    ml: Trace,
     module_call: object,
     name: str,
 ) -> None:
@@ -4661,7 +4661,7 @@ def _container_tensor_components(spec: object) -> tuple[object, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _check_param_xrefs(ml: "Trace") -> None:
+def _check_param_xrefs(ml: Trace) -> None:
     """Check J: Param <-> Layer <-> Module cross-references.
 
     Precondition contract: this torch-native check asserts deep reciprocal
@@ -4760,7 +4760,7 @@ def _check_param_xrefs(ml: "Trace") -> None:
     _check_layer_param_aggregate_dedup(ml, name)
 
 
-def _check_param_usage_reciprocal_links(ml: "Trace", param: object, name: str) -> None:
+def _check_param_usage_reciprocal_links(ml: Trace, param: object, name: str) -> None:
     """Check Param usage lists have reciprocal Op and Layer references.
 
     Parameters
@@ -4833,7 +4833,7 @@ def _check_param_co_parent_links(
             )
 
 
-def _check_layers_with_params_matches_param_usage(ml: "Trace", name: str) -> None:
+def _check_layers_with_params_matches_param_usage(ml: Trace, name: str) -> None:
     """Check ``layers_with_params`` matches Param usage at the layer boundary.
 
     Parameters
@@ -4873,7 +4873,7 @@ def _check_layers_with_params_matches_param_usage(ml: "Trace", name: str) -> Non
         )
 
 
-def _check_layer_param_aggregate_dedup(ml: "Trace", name: str) -> None:
+def _check_layer_param_aggregate_dedup(ml: Trace, name: str) -> None:
     """Check trace param aggregate counts with layer-label deduplication.
 
     Parameters
@@ -4961,7 +4961,7 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
     )
 
 
-def _param_address_index(ml: "Trace") -> dict[object, object]:
+def _param_address_index(ml: Trace) -> dict[object, object]:
     """Build a one-pass primary/alias address -> Param index.
 
     Replaces a per-lookup linear scan over ``ml.param_logs``. Co-parent
@@ -5017,7 +5017,7 @@ def _param_address_index(ml: "Trace") -> dict[object, object]:
 # ---------------------------------------------------------------------------
 
 
-def _check_buffer_xrefs(ml: "Trace") -> None:
+def _check_buffer_xrefs(ml: Trace) -> None:
     """Check K: buffer layer and Buffer cross-references.
 
     Precondition contract: torch registered buffers are represented by
@@ -5057,7 +5057,7 @@ def _check_buffer_xrefs(ml: "Trace") -> None:
             _check_buffer_replay_validated_versions(ml, buf, name)
 
 
-def _check_buffer_static_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_static_versions(ml: Trace, buf: object, name: str) -> None:
     """Check static Buffer entity/version structure.
 
     Parameters
@@ -5115,7 +5115,7 @@ def _check_buffer_static_versions(ml: "Trace", buf: object, name: str) -> None:
         )
 
 
-def _buffer_address_has_module_ancestor(ml: "Trace", address: str) -> bool:
+def _buffer_address_has_module_ancestor(ml: Trace, address: str) -> bool:
     """Return whether ``address`` or an ancestor is in the module accessor.
 
     Parameters
@@ -5139,7 +5139,7 @@ def _buffer_address_has_module_ancestor(ml: "Trace", address: str) -> bool:
     return found_ancestor or "" in ml.modules
 
 
-def _check_buffer_semantic_ownership(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_semantic_ownership(ml: Trace, buf: object, name: str) -> None:
     """Check buffer source versions are owned by their module or a consumer.
 
     Parameters
@@ -5219,7 +5219,7 @@ def _module_addresses_for_buffer_version(version: object) -> set[str]:
     return claims
 
 
-def _active_buffer_consumer_module_addresses(ml: "Trace", version: object) -> set[str]:
+def _active_buffer_consumer_module_addresses(ml: Trace, version: object) -> set[str]:
     """Return module addresses for real active consumers of a buffer version.
 
     Parameters
@@ -5251,7 +5251,7 @@ def _active_buffer_consumer_module_addresses(ml: "Trace", version: object) -> se
     return addresses
 
 
-def _check_buffer_write_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_write_versions(ml: Trace, buf: object, name: str) -> None:
     """Check write-version buffer metadata domains and resolvable populated fields.
 
     Parameters
@@ -5316,7 +5316,7 @@ def _check_buffer_write_versions(ml: "Trace", buf: object, name: str) -> None:
         )
 
 
-def _resolve_trace_label(ml: "Trace", label: str) -> str | None:
+def _resolve_trace_label(ml: Trace, label: str) -> str | None:
     """Resolve a final or raw layer label to a known trace label.
 
     Parameters
@@ -5359,7 +5359,7 @@ def _resolve_trace_label(ml: "Trace", label: str) -> str | None:
     return None
 
 
-def _check_buffer_replay_validated_versions(ml: "Trace", buf: object, name: str) -> None:
+def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -> None:
     """Check explicit successful buffer replay claims have identity-replay evidence.
 
     Parameters
@@ -5440,7 +5440,7 @@ def _check_buffer_replay_validated_versions(ml: "Trace", buf: object, name: str)
 _EQUIVALENT_OPS_UNAVAILABLE = object()
 
 
-def _canonical_equivalent_ops(owner: "object") -> object:
+def _canonical_equivalent_ops(owner: object) -> object:
     """Return the shared ``equivalent_ops`` object, skipping the copy-on-read copy.
 
     ``Op.equivalent_ops`` (through ``Op.__getattribute__``) and
@@ -5483,7 +5483,7 @@ def _canonical_equivalent_ops(owner: "object") -> object:
     return _EQUIVALENT_OPS_UNAVAILABLE
 
 
-def _check_equivalence_symmetry(ml: "Trace") -> None:
+def _check_equivalence_symmetry(ml: Trace) -> None:
     """Check L: op_equivalence_classes groups reference valid Op labels.
 
     Validates:
@@ -5627,7 +5627,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
 _RAW_LABEL_PATTERN = re.compile(r"^l_\d+$")
 
 
-def _check_graph_ordering(ml: "Trace") -> None:
+def _check_graph_ordering(ml: Trace) -> None:
     """Check M: graph ordering invariants.
 
     Validates:
@@ -5700,7 +5700,7 @@ def _check_graph_ordering(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_loop_detection_invariants(ml: "Trace") -> None:
+def _check_loop_detection_invariants(ml: Trace) -> None:
     """Check N: loop detection / recurrent_ops invariants.
 
     Validates per-layer:
@@ -5732,7 +5732,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
     all_keys = ml.layer_dict_all_keys
     ambiguous_keys = getattr(ml, "_ambiguous_lookup_keys", {})
 
-    def _resolve(member_label: str) -> "Op":
+    def _resolve(member_label: str) -> Op:
         hit = layer_logs.get(member_label, _MISS)
         if hit is not _MISS:
             return cast("Op", hit)
@@ -5809,7 +5809,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
 
         # Symmetry: all members agree on the group
         slo_set = set(slo)
-        members: list[tuple[str, "Op"]] = []
+        members: list[tuple[str, Op]] = []
         for member_label in slo:
             member = _resolve(member_label)
             members.append((member_label, member))
@@ -5943,7 +5943,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_distance_invariants(ml: "Trace") -> None:
+def _check_distance_invariants(ml: Trace) -> None:
     """Check O: distance and reachability invariants.
 
     Only runs when ``mark_layer_depths`` was enabled during logging.
@@ -6045,7 +6045,7 @@ def _check_distance_invariants(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _op_follows_recorded_backward_trigger(ml: "Trace", layer: "Op") -> bool:
+def _op_follows_recorded_backward_trigger(ml: Trace, layer: Op) -> bool:
     """Return whether an op ran after a RECORDED mid-forward backward trigger.
 
     ``torch.autograd.grad`` / ``loss.backward()`` fired mid-forward produce
@@ -6085,7 +6085,7 @@ def _op_follows_recorded_backward_trigger(ml: "Trace", layer: "Op") -> bool:
     return step_index is not None and step_index > min(trigger_positions)
 
 
-def _consumed_unattributed_data_operand(layer: "Op") -> bool:
+def _consumed_unattributed_data_operand(layer: Op) -> bool:
     """Return whether the capture witness flagged a DATA-operand consumption.
 
     Parameters
@@ -6106,7 +6106,7 @@ def _consumed_unattributed_data_operand(layer: "Op") -> bool:
     return bool(tuple(getattr(layer, "unattributed_tensor_args", ()) or ()))
 
 
-def _check_graph_connectivity(ml: "Trace") -> None:
+def _check_graph_connectivity(ml: Trace) -> None:
     """Check P: graph connectivity invariants.
 
     Validates:
@@ -6242,7 +6242,7 @@ def _check_graph_connectivity(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_module_containment_logic(ml: "Trace") -> None:
+def _check_module_containment_logic(ml: Trace) -> None:
     """Check Q: module containment logical consistency.
 
     Validates:
@@ -6346,7 +6346,7 @@ def _check_module_containment_logic(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_lookup_key_consistency(ml: "Trace") -> None:
+def _check_lookup_key_consistency(ml: Trace) -> None:
     """Check R: lookup key bidirectional consistency.
 
     Validates:
@@ -6548,7 +6548,7 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
 
 
 def _metadata_invariant_contracts_for_trace(
-    trace: "Trace",
+    trace: Trace,
 ) -> tuple[MetadataInvariantContract, ...]:
     """Return metadata invariant contracts applicable to ``trace``.
 
@@ -6575,7 +6575,7 @@ def _metadata_invariant_contracts_for_trace(
 def _metadata_invariant_contracts_for_backend(
     backend_family: Literal["torch", "non_torch"],
     *,
-    spec: "BackendSpec | None" = None,
+    spec: BackendSpec | None = None,
 ) -> tuple[MetadataInvariantContract, ...]:
     """Return ordered metadata invariant contracts for a backend family.
 
@@ -6602,7 +6602,7 @@ def _metadata_invariant_contracts_for_backend(
 def _metadata_invariant_applies(
     contract: MetadataInvariantContract,
     backend_family: Literal["torch", "non_torch"],
-    spec: "BackendSpec | None",
+    spec: BackendSpec | None,
 ) -> bool:
     """Return whether ``contract`` applies to a backend family and spec.
 

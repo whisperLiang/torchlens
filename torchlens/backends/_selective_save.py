@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from .registry import BackendUnsupportedError
 from ..intervention.selectors import BaseSelector
 from ..ir.selector_eval import first_selector_kind_outside
 from ..postprocess.saved_summary import refresh_saved_module_call_count
 from ..quantities import Bytes
+from .registry import BackendUnsupportedError
 
 _STATIC_SELECTOR_KINDS = frozenset(
     {

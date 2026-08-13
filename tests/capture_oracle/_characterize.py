@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import importlib
 import random
@@ -11,6 +9,8 @@ import statistics
 import tempfile
 import time
 import tracemalloc
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 

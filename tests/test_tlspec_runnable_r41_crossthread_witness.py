@@ -89,7 +89,7 @@ try:  # POSIX-only; the getrusage recipe skips on platforms without it.
 except ImportError:  # pragma: no cover - non-POSIX platforms
     _resource = None  # type: ignore[assignment]
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 # Pre-window held references (module import time == before any monitor window).
 _HELD_TIME = _time.time
@@ -130,8 +130,8 @@ class _PreexistingWorker:
     """A worker thread started BEFORE any capture window (a foreign thread)."""
 
     def __init__(self) -> None:
-        self.jobs: "queue.Queue[Any]" = queue.Queue()
-        self.results: "queue.Queue[Any]" = queue.Queue()
+        self.jobs: queue.Queue[Any] = queue.Queue()
+        self.results: queue.Queue[Any] = queue.Queue()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 

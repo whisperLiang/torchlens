@@ -32,13 +32,13 @@ All other 78+ fields use the first pass's values only.
 
 import weakref
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from .._deprecations import MISSING
 from .._errors import AmbiguousOpLookupError
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
@@ -47,15 +47,15 @@ from ..constants import LAYER_LOG_FIELD_ORDER, LAYER_PASS_LOG_FIELD_ORDER
 from ..ir.refs import DtypeRef
 from ..quantities import Bytes, Duration, Flops, Macs, as_bytes, as_flops, as_macs
 from ._accessor_base import Accessor
-from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 from ._repr import format_config_items, format_shape_list
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from ..receptive_field._view import ReceptiveFieldView
     from .op import Op
     from .trace import Trace
-    from ..receptive_field._view import ReceptiveFieldView
 
 
 _LAYER_DELEGATED_PASS_FIELDS = frozenset((*LAYER_PASS_LOG_FIELD_ORDER, "out_ref", "grad_ref"))
@@ -356,8 +356,8 @@ def _build_layer_view_types() -> dict[str, type]:
         LAYER_TUPLE_VIEW_FIELDS,
     )
 
-    view_types: dict[str, type] = {name: tuple for name in LAYER_TUPLE_VIEW_FIELDS}
-    view_types.update({name: frozenset for name in LAYER_FROZENSET_VIEW_FIELDS})
+    view_types: dict[str, type] = dict.fromkeys(LAYER_TUPLE_VIEW_FIELDS, tuple)
+    view_types.update(dict.fromkeys(LAYER_FROZENSET_VIEW_FIELDS, frozenset))
     view_types["equivalent_ops"] = frozenset
     return view_types
 
@@ -535,7 +535,7 @@ def materialize_layer_mirrors(layer_log: "Layer") -> None:
                 pass
 
 
-def _layer_log_to_row(layer_log: "Layer") -> Dict[str, Any]:
+def _layer_log_to_row(layer_log: "Layer") -> dict[str, Any]:
     """Convert a Layer into one DataFrame row.
 
     Parameters
@@ -553,7 +553,7 @@ def _layer_log_to_row(layer_log: "Layer") -> Dict[str, Any]:
     """
 
     multi_pass = layer_log.num_passes > 1
-    row: Dict[str, Any] = {}
+    row: dict[str, Any] = {}
     for field_name in LAYER_LOG_FIELD_ORDER:
         if multi_pass and field_name in _MULTI_PASS_PER_CALL_LAYER_FIELDS:
             row[field_name] = None
@@ -571,7 +571,7 @@ class OpAccessor(Accessor["Op"]):
         "_source_ref": FieldPolicy.WEAKREF_STRIP,
     }
 
-    def __init__(self, ops: Dict[int, "Op"] | None = None) -> None:
+    def __init__(self, ops: dict[int, "Op"] | None = None) -> None:
         """Initialize the accessor.
 
         Parameters
@@ -887,10 +887,10 @@ class Layer:
         """
         # Store as weakref to break circular reference (Trace -> layer_logs -> Layer -> Trace).
         _sml = first_pass.source_trace
-        self._source_trace_ref: weakref.ReferenceType["Trace"] | None = (
+        self._source_trace_ref: weakref.ReferenceType[Trace] | None = (
             weakref.ref(_sml) if _sml is not None else None
         )
-        self.annotations: Dict[str, Any] = {}
+        self.annotations: dict[str, Any] = {}
         # Build-time SNAPSHOTS, not mirrors: ``_build_conditional_records``
         # (end of step 15.5) rebinds these two fields on the OPS after the
         # aggregate Layers are built, and the public Layer contract keeps the
@@ -905,23 +905,23 @@ class Layer:
         # never pass through the finished-layer view normalization (a
         # refresh-built Layer over detached-backed ops would otherwise
         # freeze them at construction).
-        self.__dict__["conditional_role_stacks"] = cast("List[List[Tuple[int, str]]]", [])
+        self.__dict__["conditional_role_stacks"] = cast("list[list[tuple[int, str]]]", [])
         self.__dict__["conditional_branch_stack_ops"] = cast(
-            "Dict[Tuple[Tuple[int, str], ...], List[int]]", {}
+            "dict[tuple[tuple[int, str], ...], list[int]]", {}
         )
-        self.conditional_arm_children: Dict[int, Dict[str, List[str]]] = {}
+        self.conditional_arm_children: dict[int, dict[str, list[str]]] = {}
 
         # Pass management
         self.ops = OpAccessor()
-        self.call_labels: List[str] = []
+        self.call_labels: list[str] = []
 
     @property
-    def macs_forward(self) -> Optional[Macs]:
+    def macs_forward(self) -> Macs | None:
         """Forward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_forward // 2 if self.flops_forward is not None else None)
 
     @property
-    def macs_backward(self) -> Optional[Macs]:
+    def macs_backward(self) -> Macs | None:
         """Backward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_backward // 2 if self.flops_backward is not None else None)
 
@@ -1078,7 +1078,7 @@ class Layer:
         return len(self.modules)
 
     @property
-    def op_labels(self) -> List[str]:
+    def op_labels(self) -> list[str]:
         """Op labels belonging to this Layer (glossary name for ``call_labels``)."""
 
         return self.call_labels
@@ -1230,7 +1230,7 @@ class Layer:
             if name not in _LAYER_STATE_ORDER_SET and value is not _LAYER_DELETED:
                 yield name, value
 
-    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
         """Install a state mapping as per-layer ``__dict__`` shadows.
 
         The explicit counterpart of ``__tl_state_items__`` (M11: no record
@@ -1242,7 +1242,7 @@ class Layer:
 
         self.__dict__.update(mapping)
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with weakrefs and raw autograd handles stripped."""
         from ._state_adapter import state_items
 
@@ -1258,7 +1258,7 @@ class Layer:
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
         read_tlspec_version(state, cls_name=type(self).__name__)
         layer_setstate_defaults: dict[str, Any] = {
@@ -2185,7 +2185,7 @@ class LayerAccessor(Accessor["Layer"]):
 
     def __init__(
         self,
-        layer_logs: Dict[str, "Layer"],
+        layer_logs: dict[str, "Layer"],
         source_trace: Optional["Trace"] = None,
     ) -> None:
         """Initialize an accessor over aggregate layer logs.
@@ -2236,7 +2236,7 @@ class LayerAccessor(Accessor["Layer"]):
             return source.find_layers(str(key))
         return []
 
-    def by_operator(self, operator: str | None = None) -> Dict[str, int] | List[str]:
+    def by_operator(self, operator: str | None = None) -> dict[str, int] | list[str]:
         """Group layers by Torch operator name.
 
         Parameters
@@ -2256,13 +2256,13 @@ class LayerAccessor(Accessor["Layer"]):
                 for layer in self._list
                 if (layer.func_name or layer.layer_type) == operator
             ]
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         for layer in self._list:
             key = str(layer.func_name or layer.layer_type)
             counts[key] = counts.get(key, 0) + 1
         return counts
 
-    def by_module(self, module: str | None = None) -> Dict[str, int] | List[str]:
+    def by_module(self, module: str | None = None) -> dict[str, int] | list[str]:
         """Group layers by containing module address.
 
         Parameters
@@ -2282,7 +2282,7 @@ class LayerAccessor(Accessor["Layer"]):
                 for layer in self._list
                 if layer.module == module or module in getattr(layer, "modules", [])
             ]
-        counts: Dict[str, int] = {}
+        counts: dict[str, int] = {}
         for layer in self._list:
             key = str(layer.module or "self")
             counts[key] = counts.get(key, 0) + 1
@@ -2292,7 +2292,7 @@ class LayerAccessor(Accessor["Layer"]):
         self,
         module: str | None = None,
         operator: str | None = None,
-    ) -> Dict[Tuple[str, str], int] | List[str]:
+    ) -> dict[tuple[str, str], int] | list[str]:
         """Group layers by module and operator.
 
         Parameters
@@ -2315,7 +2315,7 @@ class LayerAccessor(Accessor["Layer"]):
                 if (layer.module == module or module in getattr(layer, "modules", []))
                 and (layer.func_name or layer.layer_type) == operator
             ]
-        counts: Dict[Tuple[str, str], int] = {}
+        counts: dict[tuple[str, str], int] = {}
         for layer in self._list:
             key = (str(layer.module or "self"), str(layer.func_name or layer.layer_type))
             counts[key] = counts.get(key, 0) + 1

@@ -94,7 +94,7 @@ def encode_input_site_position(position: Any) -> str:
     raise ValueError(f"Model-input site position {position!r} is outside the root grammar.")
 
 
-def decode_input_site_position(member: str) -> "tuple[str, str | int]":
+def decode_input_site_position(member: str) -> tuple[str, str | int]:
     """Decode one canonical site member ID back to its ``(kind, key)`` position."""
 
     kind, separator, key = member.partition(":")
@@ -331,7 +331,7 @@ class LiteralTorchSymbol:
 class LiteralTupleKey:
     """One recursively safe tuple used as a literal mapping key."""
 
-    items: tuple[LiteralAtom | "LiteralTupleKey", ...]
+    items: tuple[LiteralAtom | LiteralTupleKey, ...]
 
 
 LiteralDictKey: TypeAlias = LiteralAtom | LiteralTupleKey
@@ -342,7 +342,7 @@ class LiteralSequence:
     """One list or tuple node in a sparse non-tensor argument tree."""
 
     kind: LiteralSequenceKind
-    items: tuple["NonTensorLiteral", ...]
+    items: tuple[NonTensorLiteral, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,7 +350,7 @@ class LiteralMappingEntry:
     """One ordered key/value entry in a sparse literal mapping."""
 
     key: LiteralDictKey
-    value: "NonTensorLiteral"
+    value: NonTensorLiteral
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +494,7 @@ class RunnableCallDescriptor:
     parent_call_ids: tuple[str, ...]
     is_inplace: bool
     runtime_fingerprint: str
-    execution_context: "CallExecutionContext"
+    execution_context: CallExecutionContext
     control_obligations: tuple[CallControlObligation, ...]
     control_dependencies: tuple[ControlDependencyEdge, ...]
 
@@ -839,7 +839,7 @@ class GapSpec:
     """Closed gap-registry row: the structural source and resulting floor per cause."""
 
     source_family: str
-    resulting_completeness: "WitnessCompleteness"
+    resulting_completeness: WitnessCompleteness
 
 
 WITNESS_GAP_REGISTRY: Final[Mapping[WitnessGapKind, GapSpec]] = MappingProxyType(
@@ -939,7 +939,7 @@ class WitnessCoverageGap:
 
 
 def derived_witness_completeness(
-    gaps: "tuple[WitnessCoverageGap, ...]",
+    gaps: tuple[WitnessCoverageGap, ...],
 ) -> WitnessCompleteness:
     """Derive the completeness FLOOR from the ordered gap ledger (r71 A3).
 
@@ -1268,10 +1268,10 @@ class ReplayWitnessStructure:
     @classmethod
     def from_descriptor(
         cls,
-        descriptor: "SparseRunDescriptor",
+        descriptor: SparseRunDescriptor,
         *,
-        container_members: "tuple[str, ...] | None" = None,
-    ) -> "ReplayWitnessStructure":
+        container_members: tuple[str, ...] | None = None,
+    ) -> ReplayWitnessStructure:
         """Project a descriptor onto its witness-free replay structure."""
 
         return cls(
@@ -1285,7 +1285,7 @@ class ReplayWitnessStructure:
 
 def derive_required_witness_members(
     structure: ReplayWitnessStructure,
-) -> "dict[str, list[str]]":
+) -> dict[str, list[str]]:
     """Derive every family's REQUIRED member identities from replay structure (r71 A2).
 
     THE independent required-coverage authority: iterates the closed
@@ -1509,9 +1509,7 @@ def mark_trace_path_status(
 
     previous = trace._runnable.path_faithfulness
     previous_mismatch = trace._runnable.first_mismatch
-    if previous is PathFaithfulness.DIVERGED:
-        effective = PathFaithfulness.DIVERGED
-    elif status is PathFaithfulness.DIVERGED:
+    if previous is PathFaithfulness.DIVERGED or status is PathFaithfulness.DIVERGED:
         effective = PathFaithfulness.DIVERGED
     elif previous is PathFaithfulness.UNVERIFIABLE or status is PathFaithfulness.UNVERIFIABLE:
         effective = PathFaithfulness.UNVERIFIABLE

@@ -601,7 +601,7 @@ PATH_TO_FLAT: dict[str, str] = {
 }
 
 
-def record_with_path_updates(record: "OpRecord", items: Iterable[tuple[str, Any]]) -> "OpRecord":
+def record_with_path_updates(record: OpRecord, items: Iterable[tuple[str, Any]]) -> OpRecord:
     """Return a new record with ordered ``(facet path, value)`` pairs applied.
 
     Each path names its owning core field or facet slot directly; an absent

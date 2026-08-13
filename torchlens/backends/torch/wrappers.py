@@ -8,13 +8,13 @@ import inspect
 import threading
 import time
 import types
-import weakref
 import warnings
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial, wraps
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -28,40 +28,28 @@ import torch
 from torch.overrides import handle_torch_function, has_torch_function_unary  # noqa: F401
 
 from ... import _state
+from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
 from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
-from ._tl import (
-    _DETACHED_ACTIVATION_PROPAGATION_FUNCS,
-    get_param_meta,
-    get_tensor_label,
-    has_detached_saved_activations,
-    is_tensor_data_alias,
-    is_decorated_function,
-    mark_decorated_function,
-    mark_tensor_data_alias,
-    propagate_detached_saved_activation,
-    set_tensor_label,
-)
 from ...data_classes.internal_types import FuncExecutionContext
-from ...utils.introspection import get_vars_of_type_from_obj, nested_getattr
 from ...utils._torch_compat import (
     HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE,
+    dynamo_is_compiling,
+    fix_tensor_sequence_slot,
     get_current_function_mode_stack,
     get_device_constructors,
     get_device_context_type,
-    fix_tensor_sequence_slot,
-    dynamo_is_compiling,
     get_functorch_maybe_current_level,
     get_jit_builtin_table,
     get_optional_torch_namespace,
     get_torch_function_mode_stack_length,
     mark_torch_capability_missing,
 )
-from ...utils.display import identity
-from ...utils.rng import log_current_autocast_state, log_current_rng_states
-from ...utils.hashing import make_random_barcode
 from ...utils.arg_handling import copy_arg_tree
-from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
+from ...utils.display import identity
+from ...utils.hashing import make_random_barcode
+from ...utils.introspection import get_vars_of_type_from_obj, nested_getattr
+from ...utils.rng import log_current_autocast_state, log_current_rng_states
 from ...utils.tensor_utils import (
     _DEFER_ENABLED as _COW_ENABLED,
     _DEFER_PENDING as _COW_PENDING,
@@ -71,25 +59,24 @@ from ...utils.tensor_utils import (
     print_override,
     safe_copy,
 )
-from .ops import (
-    _is_inplace_augmented_assignment_dunder,
-    _record_label_version_snapshot,
-    _walk_output_tensors_with_paths,
-    apply_live_hooks_to_outputs,
-    log_function_output_tensors,
-    register_call_input_container_snapshots,
+from ._tl import (
+    _DETACHED_ACTIVATION_PROPAGATION_FUNCS,
+    get_param_meta,
+    get_tensor_label,
+    has_detached_saved_activations,
+    is_decorated_function,
+    is_tensor_data_alias,
+    mark_decorated_function,
+    mark_tensor_data_alias,
+    propagate_detached_saved_activation,
+    set_tensor_label,
 )
+from .aliasing import _tensors_alias
 from .buffer_writes import (
     record_op_buffer_writes,
     resolve_registered_buffer_address,
     session_validated_buffer_address,
     snapshot_buffer_args,
-)
-from .escape_detection import (
-    EscapeDetectorMode,
-    expected_original_call,
-    mark_expected_original_accounted,
-    reset_detector_tables,
 )
 from .completeness_witness import (
     CompletenessWitnessMode,
@@ -101,7 +88,20 @@ from .completeness_witness import (
     record_uncaptured_owner_callsite,
     string_escape_is_owner_thread,
 )
-from .aliasing import _tensors_alias
+from .escape_detection import (
+    EscapeDetectorMode,
+    expected_original_call,
+    mark_expected_original_accounted,
+    reset_detector_tables,
+)
+from .ops import (
+    _is_inplace_augmented_assignment_dunder,
+    _record_label_version_snapshot,
+    _walk_output_tensors_with_paths,
+    apply_live_hooks_to_outputs,
+    log_function_output_tensors,
+    register_call_input_container_snapshots,
+)
 from .sources import log_source_tensor
 
 if TYPE_CHECKING:

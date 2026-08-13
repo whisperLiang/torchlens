@@ -11,9 +11,9 @@ from ..data_classes._nonfinite import first_nonfinite_layer
 from ..errors import TorchLensError
 
 if TYPE_CHECKING:
-    from torchlens.debug._audit import TraceAudit
     from torchlens.data_classes.op import Op
     from torchlens.data_classes.trace import Trace
+    from torchlens.debug._audit import TraceAudit
 
 
 class PartialCaptureLookupError(TorchLensError, ValueError):
@@ -25,7 +25,7 @@ class PartialCaptureLookupError(TorchLensError, ValueError):
 
 
 _FAILED_CAPTURE_REGISTRY_LIMIT = 128
-_FAILED_CAPTURE_REGISTRY: OrderedDict[int, tuple[BaseException, "PartialTrace"]] = OrderedDict()
+_FAILED_CAPTURE_REGISTRY: OrderedDict[int, tuple[BaseException, PartialTrace]] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class PartialTrace:
         return outcome_for(self.trace)
 
     @classmethod
-    def from_trace(cls, trace: Trace, exception: BaseException) -> "PartialTrace":
+    def from_trace(cls, trace: Trace, exception: BaseException) -> PartialTrace:
         """Build a partial log wrapper from a failed capture's internal state.
 
         Parameters
@@ -114,7 +114,7 @@ class PartialTrace:
             )
         return "No non-finite tensor values found in partial capture."
 
-    def audit(self) -> "TraceAudit":
+    def audit(self) -> TraceAudit:
         """Return an evidence-backed health report for this partial capture.
 
         Returns

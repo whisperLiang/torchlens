@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
+import math
+import sys
+import warnings
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
-import math
-import sys
 from types import MappingProxyType
 from typing import Any
-import warnings
 
 import torch
 
 from . import _state
 from .errors import RunCapabilityUnavailableError, RunPreconditionError, StateBindingError
-from .utils._torch_compat import tensor_has_named_dims
-from .utils._torch_symbols import torch_attr
 from .runnable import (
     CANONICAL_INITIALIZER_BY_ROLE,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
@@ -33,6 +31,8 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
+from .utils._torch_compat import tensor_has_named_dims
+from .utils._torch_symbols import torch_attr
 
 
 @dataclass(frozen=True, slots=True)
@@ -2567,7 +2567,7 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
     with _state.pause_logging():
         cpu_value = value.detach().cpu().contiguous()
         payload = cpu_value.reshape(-1).view(torch.uint8).numpy().tobytes()
-        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode("utf-8")
+        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode()
     return sha256(logical_prefix + payload).hexdigest()
 
 

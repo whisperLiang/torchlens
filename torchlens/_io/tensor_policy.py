@@ -9,7 +9,6 @@ hard ``TorchLensIOError`` under the default strict policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union
 
 import torch
 
@@ -33,7 +32,7 @@ class FailReason:
     text: str
 
 
-TensorPolicyDecision = Union[Ok, SkipReason, FailReason]
+TensorPolicyDecision = Ok | SkipReason | FailReason
 
 _SPARSE_LAYOUTS = {
     torch.sparse_coo,

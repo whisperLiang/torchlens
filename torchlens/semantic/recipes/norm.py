@@ -13,7 +13,6 @@ from ._helpers import (
     structural,
 )
 
-
 _NORM_FACETS = ("normalized", "gamma", "beta", "input")
 
 

@@ -37,17 +37,17 @@ keeps the modern signature but changes its version string.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
 import contextlib
 import ctypes
-from dataclasses import dataclass
 import importlib
 import inspect
 import os
 import sys
 import types
-from typing import Any
 import warnings
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode

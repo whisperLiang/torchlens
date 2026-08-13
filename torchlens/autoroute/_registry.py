@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fnmatch
 from typing import Any
 
 

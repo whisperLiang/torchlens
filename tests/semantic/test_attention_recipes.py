@@ -9,7 +9,6 @@ from torch import nn
 from torchlens import trace as trace_fn
 from torchlens.semantic import MissingFacetError
 
-
 pytest.importorskip("transformers")
 
 

@@ -37,8 +37,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import runnable as io_runnable
-from torchlens._io import runnable_load
+from torchlens._io import runnable as io_runnable, runnable_load
 from torchlens._runnable_state import (
     _ORACLE_POLICY_CLASSES,
     _STATE_METADATA_BIND_SCOPE,
@@ -58,15 +57,15 @@ from torchlens._runnable_state import (
     state_metadata_read_violations,
 )
 from torchlens.backends.torch.completeness_witness import (
-    INPUT_METADATA_BOOL_METHODS,
-    INPUT_METADATA_PREDICATE_FUNCS,
-    INPUT_METADATA_PROPERTY_NAMES,
-    STATE_METADATA_MIRROR,
     _STATE_METADATA_ALIAS_SAFE_STATE_NAMES,
     _STATE_METADATA_DIRECT_ONLY_NAMES,
     _STATE_ROUTE_DECLARED_FACT,
     _STATE_ROUTE_READ_KIND,
     _STATE_ROUTE_STRUCTURAL,
+    INPUT_METADATA_BOOL_METHODS,
+    INPUT_METADATA_PREDICATE_FUNCS,
+    INPUT_METADATA_PROPERTY_NAMES,
+    STATE_METADATA_MIRROR,
     host_escape_state_metadata_facts,
     host_escape_state_metadata_reads,
 )
@@ -131,7 +130,7 @@ def test_r65_mirror_keys_equal_input_constant_union_and_fact_vocabulary() -> Non
     # owes no state-mirror row (its state-rooted twin is contract residual (3), deliberately
     # unwitnessed). The subtraction uses the NAMED constant so a future synthetic fact still
     # REDs this test until its state-side decision is made explicit there.
-    assert io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES == {"derived_layout_read"}
+    assert {"derived_layout_read"} == io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES
     assert input_union == (
         io_runnable._INPUT_METADATA_FACT_NAMES - io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES
     )
@@ -199,19 +198,22 @@ def test_r65_named_residual_set_is_exactly_the_autograd_family() -> None:
     state twin of the input net's leaf-only residual (contract residual note).
     """
 
-    assert _STATE_METADATA_DIRECT_ONLY_NAMES == frozenset(
-        {
-            "requires_grad",
-            "grad_fn",
-            "is_leaf",
-            "retains_grad",
-            "_base",
-            "_is_view",
-            "output_nr",
-            "grad",
-            "_grad",
-            "_version",
-        }
+    assert (
+        frozenset(
+            {
+                "requires_grad",
+                "grad_fn",
+                "is_leaf",
+                "retains_grad",
+                "_base",
+                "_is_view",
+                "output_nr",
+                "grad",
+                "_grad",
+                "_version",
+            }
+        )
+        == _STATE_METADATA_DIRECT_ONLY_NAMES
     )
     # Together with the alias-safe family, the layout trio, the storage-geometry fact, and
     # the single structural row, the two attribution families tile the mirror exactly.

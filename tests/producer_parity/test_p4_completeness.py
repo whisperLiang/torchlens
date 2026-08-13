@@ -36,10 +36,11 @@ from __future__ import annotations
 import ast
 import importlib
 import sys
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields as dataclass_fields, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -49,9 +50,9 @@ import torchlens as tl
 from torchlens.ir.capture_events import CaptureEvents
 from torchlens.ir.events import OpEvent
 from torchlens.ir.op_record import (
+    _FACET_ATTRIBUTES,
     AMENDMENT_FAMILIES,
     PATH_TO_FLAT,
-    _FACET_ATTRIBUTES,
     OpRecord,
     apply_patch_items,
 )

@@ -46,8 +46,9 @@ so a newly-added sibling is covered automatically.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch
@@ -59,7 +60,6 @@ from torchlens.utils._callable_safety import (
     _unwrap_capture_wrapper,  # mechanical capture-unwrap only; NOT the gate decision
     is_pure_forward_callable,
 )
-
 
 # --------------------------------------------------------------------------- #
 # INDEPENDENT recognized-operator check (re-derived from torch's authorities, NOT

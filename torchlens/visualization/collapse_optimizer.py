@@ -51,9 +51,10 @@ from .auto_collapse import (
 )
 from .collapse_plan import (
     ChildSegment,
+    CollapsePlan,
     CollapseSchedule,
     CollapseScheduleStep,
-    CollapsePlan,
+    EllipsisNode,
     ModuleBox,
     OpSegment,
     PlanNode,
@@ -61,11 +62,10 @@ from .collapse_plan import (
     RenderContext,
     RepeatFold,
     SegmentDescriptor,
-    count,
     collapse_plan_for_source_graph,
     collapse_plan_for_trace,
+    count,
 )
-from .collapse_plan import EllipsisNode
 
 if TYPE_CHECKING:
     from ..data_classes.module import Module
@@ -222,14 +222,14 @@ class _ModuleDecision:
     """Memoized module-level choice."""
 
     kind: Literal["box", "expand"]
-    segments: tuple["_SegmentDecision", ...] = ()
+    segments: tuple[_SegmentDecision, ...] = ()
 
 
 @dataclass(frozen=True)
 class _SegmentDecision:
     """Memoized choices for one segmented child sequence."""
 
-    components: tuple["_ComponentDecision", ...]
+    components: tuple[_ComponentDecision, ...]
 
 
 @dataclass(frozen=True)
@@ -245,7 +245,7 @@ class _ComponentDecision:
 class _OptimizerState:
     """Immutable shared state for one g-star DP run."""
 
-    trace: "Trace"
+    trace: Trace
     context: RenderContext
     analysis: CollapseAnalysis
     child_addresses: Mapping[str, tuple[str, ...]]
@@ -253,7 +253,7 @@ class _OptimizerState:
     structural_digests: Mapping[str, str]
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ]
     role_components_cache: dict[tuple[str, tuple[str, ...]], tuple[RoleComponent, ...]]
     child_segments_cache: dict[tuple[str, ...], tuple[tuple[str, ...], ...]]
@@ -293,11 +293,11 @@ _BOX_UNITS_CACHE: weakref.WeakKeyDictionary[
 
 
 def select_collapse_plan(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None = None,
     mode: Literal["auto", "max"] = "auto",
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> OptimizerResult:
     """Return the v2 auto-collapse plan for ``trace``.
 
@@ -339,7 +339,7 @@ def select_collapse_plan(
     structural_digests = _structural_digest_map(trace, child_addresses, analysis)
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ] = {}
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     best = _select_best_decision(
@@ -473,7 +473,7 @@ def select_collapse_plan(
 
 
 def select_collapse_level(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     t: float,
     weights: OptimizerWeights | None = None,
@@ -529,7 +529,7 @@ def select_collapse_level(
 
 
 def collapse_schedule(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None = None,
 ) -> CollapseSchedule:
@@ -722,7 +722,7 @@ def _reported_collapsed_addresses(result: OptimizerResult) -> frozenset[str]:
 
 
 def _schedule_ordered_addresses(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     max_result: OptimizerResult,
 ) -> tuple[str, ...]:
@@ -783,10 +783,10 @@ def _schedule_ordered_addresses(
 
 
 def _select_max_plan(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None,
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> OptimizerResult:
     """Return the max-mode v2 plan by condensing legal auto-plan intervals.
 
@@ -822,7 +822,7 @@ def _select_max_plan(
     structural_digests = _structural_digest_map(trace, child_addresses, analysis)
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ] = {}
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     total_ops = _optimizer_total_units(trace, context)
@@ -962,7 +962,7 @@ def _select_max_plan(
 
 
 def _repair_max_salience_floor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -972,7 +972,7 @@ def _repair_max_salience_floor(
     weights: OptimizerWeights,
     g_star: float,
     point: _FrontierPoint,
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
     """Expand selected max boxes that hide unique wide parallel fans.
 
@@ -1114,7 +1114,7 @@ def _max_salience_floor_replacement(
 
 
 def _condense_plan_with_child_segments(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
@@ -1226,7 +1226,7 @@ def _condense_plan_with_child_segments(
 
 
 def _segments_from_plan_nodes(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
@@ -1266,7 +1266,7 @@ def _segments_from_plan_nodes(
 
 
 def _plan_respects_max_dominance(
-    trace: "Trace",
+    trace: Trace,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
     segments: Mapping[str, SegmentDescriptor],
@@ -1297,7 +1297,7 @@ def _plan_respects_max_dominance(
 
 
 def _concrete_plan_op_labels(
-    trace: "Trace",
+    trace: Trace,
     nodes: Sequence[PlanNode],
 ) -> tuple[dict[int, str], dict[int, tuple[str, ...]]]:
     """Attribute pass-qualified op identity to plan nodes by occurrence order.
@@ -1362,7 +1362,7 @@ def _assert_segment_descriptor_parity(
 
 
 def _legal_plan_op_segment_run(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     nodes: Sequence[PlanNode],
     start: int,
@@ -1458,7 +1458,7 @@ def _legal_plan_op_segment_run(
 
 
 def _plan_box_owned_surfaced_labels(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     nodes: Sequence[PlanNode],
 ) -> frozenset[str]:
@@ -1505,7 +1505,7 @@ def _plan_box_owned_surfaced_labels(
 
 
 def _legal_plan_child_segment_run(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     nodes: Sequence[PlanNode],
@@ -1589,7 +1589,7 @@ def _plan_module_address(node: PlanNode) -> str | None:
 
 def _segment_is_legal(
     addresses: tuple[str, ...],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
 ) -> bool:
     """Return whether ``addresses`` satisfy chain-interval segment legality."""
 
@@ -1600,7 +1600,7 @@ def _segment_is_legal(
 
 def _longest_legal_segment_prefix(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     analysis: CollapseAnalysis,
     hidden_counts: Mapping[str, int],
     total_ops: int,
@@ -1715,7 +1715,7 @@ def _longest_legal_segment_prefix(
 
 def _segment_prefix_candidate_ends(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph",
+    graph: ChildCondensedFlowGraph,
     limit: int,
 ) -> list[int]:
     """Return candidate prefix lengths not excluded by prefix-independent facts.
@@ -1826,7 +1826,7 @@ def _encode_segment_address(address: str) -> str:
 
 
 def _make_child_segment_descriptor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     addresses: tuple[str, ...],
     covered_ops: tuple[str, ...],
@@ -1898,7 +1898,7 @@ def _child_segment_covered_ops(
 
 
 def _make_op_segment_descriptor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     labels: tuple[str, ...],
     concrete: tuple[str, ...] | None = None,
@@ -1933,7 +1933,7 @@ def _make_op_segment_descriptor(
     )
 
 
-def _effective_render_module_stack(op: "Op") -> tuple[str, ...]:
+def _effective_render_module_stack(op: Op) -> tuple[str, ...]:
     """Return the call-qualified module stack that clusters a visible op.
 
     Mirrors the renderer's ``_raw_render_node_owner_key``: an atomic module's
@@ -1969,7 +1969,7 @@ def _crosses_module_call_boundary(
 
 
 def _op_segment_owner_key(
-    trace: "Trace",
+    trace: Trace,
     labels: tuple[str, ...],
     vis_mode: str = "unrolled",
 ) -> str | None:
@@ -2005,7 +2005,7 @@ def _op_segment_owner_key(
     return common
 
 
-def _trace_op_for_render_label(trace: "Trace", label: str) -> "Op":
+def _trace_op_for_render_label(trace: Trace, label: str) -> Op:
     """Return the trace op for a pass-free rendered label."""
 
     try:
@@ -2014,7 +2014,7 @@ def _trace_op_for_render_label(trace: "Trace", label: str) -> "Op":
         return trace.ops[label]
 
 
-def _trace_op_for_concrete_label(trace: "Trace", label: str) -> "Op":
+def _trace_op_for_concrete_label(trace: Trace, label: str) -> Op:
     """Return the trace op for a concrete or legacy pass-free label.
 
     Pass-qualified labels are exact accessor keys and resolve without any
@@ -2028,7 +2028,7 @@ def _trace_op_for_concrete_label(trace: "Trace", label: str) -> "Op":
 
 
 def _op_segment_label(
-    trace: "Trace",
+    trace: Trace,
     labels: tuple[str, ...],
     concrete: tuple[str, ...],
 ) -> str:
@@ -2057,7 +2057,7 @@ def _op_segment_label(
 
 
 def _segment_owner_key(
-    trace: "Trace",
+    trace: Trace,
     addresses: tuple[str, ...],
     vis_mode: str = "unrolled",
 ) -> str | None:
@@ -2164,7 +2164,7 @@ def _format_param_count(value: int) -> str:
 
 
 def _instantiate_best_point(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -2172,7 +2172,7 @@ def _instantiate_best_point(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     best: tuple[
@@ -2185,7 +2185,7 @@ def _instantiate_best_point(
         bool,
     ],
     prefer_instantiated_nodes: bool = False,
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
     """Instantiate a winning DP point and its renderer-faithful plan.
 
@@ -2261,11 +2261,11 @@ def _instantiate_best_point(
 
 
 def _collapse_plan_for_source_or_trace(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
     repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext,
-    source_graph: "SourceGraph | None",
+    source_graph: SourceGraph | None,
 ) -> CollapsePlan:
     """Build a plan from a shared source graph when one is available.
 
@@ -2293,10 +2293,10 @@ def _collapse_plan_for_source_or_trace(
     return collapse_plan_for_source_graph(source_graph, collapse_fn, repeat_folds)
 
 
-def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[["Module"], bool]:
+def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[[Module], bool]:
     """Return a module-collapse predicate for selected addresses."""
 
-    def collapse_fn(module: "Module") -> bool:
+    def collapse_fn(module: Module) -> bool:
         """Return whether ``module`` is selected."""
 
         return module.address in selected
@@ -2305,7 +2305,7 @@ def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[["Module"],
 
 
 def _select_best_decision(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -2313,7 +2313,7 @@ def _select_best_decision(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
@@ -2429,7 +2429,7 @@ def _select_best_decision(
 
 
 def _frontier_can_reach_band(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -2437,12 +2437,12 @@ def _frontier_can_reach_band(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     band_high: int,
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> bool:
     """Return whether module boxes or run folds can reach the readable band.
 
@@ -2521,7 +2521,7 @@ def _frontier_can_reach_band(
 
 
 def build_role_components(
-    trace: "Trace",
+    trace: Trace,
     parent_address: str,
     child_addresses: Sequence[str],
     analysis: CollapseAnalysis | None = None,
@@ -2607,9 +2607,9 @@ def _role_components_for_children(
 
 
 def _floor_fallback_selection(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
-    source_graph: "SourceGraph | None" = None,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[frozenset[str], CollapsePlan]:
     """Return the conservative visible plan used when the DP frontier is empty.
 
@@ -2647,7 +2647,7 @@ def _floor_fallback_selection(
     return frozenset(), full_plan
 
 
-def _top_level_fallback_addresses(trace: "Trace") -> tuple[str, ...]:
+def _top_level_fallback_addresses(trace: Trace) -> tuple[str, ...]:
     """Return direct child module addresses suitable for floor fallback boxes.
 
     Parameters
@@ -2743,7 +2743,7 @@ def _expanded_points(
 def _expanded_structure(
     address: str,
     state: _OptimizerState,
-) -> tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]]:
+) -> tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]]:
     """Return child-flow graph, ordered children, and own ops for expansion."""
 
     cached = state.expanded_cache.get(address)
@@ -2877,7 +2877,7 @@ def _external_endpoint_counts(
 def _sequence_points(
     parent_address: str,
     child_addresses: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
 ) -> tuple[_DecisionPoint, ...]:
@@ -2903,7 +2903,7 @@ def _sequence_points(
 
 def _component_treatment_points(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
 ) -> tuple[_DecisionPoint, ...]:
@@ -2962,7 +2962,7 @@ def _own_ops_segment_is_legal(state: _OptimizerState, own_ops: tuple[str, ...]) 
 
 def _component_segmented(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> _DecisionPoint | None:
     """Return a first-class child segment treatment for one role component."""
@@ -3004,7 +3004,7 @@ def _segment_run_cost(run: tuple[str, ...], state: _OptimizerState) -> float:
 
 def _legal_component_segment_run(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> tuple[str, ...] | None:
     """Return the longest legal component segment run."""
@@ -3115,7 +3115,7 @@ def _single_member_expanded(
 
 def _component_folded(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> _DecisionPoint | None:
     """Return the maximal-run folded treatment for a component when useful."""
@@ -3162,7 +3162,7 @@ def _component_folded(
 
 def _maximal_legal_runs(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph",
+    graph: ChildCondensedFlowGraph,
     state: _OptimizerState,
 ) -> tuple[tuple[str, ...], ...]:
     """Partition component members into maximal legal fold repeats."""
@@ -3196,7 +3196,7 @@ def _maximal_legal_runs(
 
 
 def _module_render_box_units(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
 ) -> Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]:
     """Return per-call rendered collapse units for every module address.
@@ -3265,7 +3265,7 @@ def _module_render_box_units(
 
 
 def _module_box_plan_nodes(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     address: str,
 ) -> tuple[PlanNode, ...]:
@@ -3376,7 +3376,7 @@ def _decision_point_for_k(
 def _instantiate_segment(
     parent_address: str,
     child_addresses: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _SegmentDecision,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
@@ -3410,7 +3410,7 @@ def _instantiate_segment(
 
 def _instantiate_component(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _ComponentDecision,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
@@ -3521,7 +3521,7 @@ def _instantiate_component_expanded(
 
 def _instantiate_component_folded(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _ComponentDecision,
     state: _OptimizerState,
 ) -> _FrontierPoint:
@@ -3763,7 +3763,7 @@ def _point_sort_key(point: Any) -> tuple[float, int, tuple[Any, ...], tuple[Any,
     return (point.cost, point.k, tuple(sorted(point.selected)), fold_addresses)
 
 
-def _eligible_box(trace: "Trace", address: str, signal: ModuleCollapseSignals) -> bool:
+def _eligible_box(trace: Trace, address: str, signal: ModuleCollapseSignals) -> bool:
     """Return whether a module may render as a collapsed box."""
 
     _ = trace, address
@@ -3797,7 +3797,7 @@ def _max_box_salience_score(
     return round(salience * uniqueness, 6)
 
 
-def _box_cost(trace: "Trace", signal: ModuleCollapseSignals, state: _OptimizerState) -> float:
+def _box_cost(trace: Trace, signal: ModuleCollapseSignals, state: _OptimizerState) -> float:
     """Return normalized v2 box cost for one module."""
 
     n = _faithful_hidden_count(signal, state.hidden_counts)
@@ -3822,7 +3822,7 @@ def _box_cost(trace: "Trace", signal: ModuleCollapseSignals, state: _OptimizerSt
 
 
 def _cached_box_cost(
-    trace: "Trace",
+    trace: Trace,
     signal: ModuleCollapseSignals,
     state: _OptimizerState,
 ) -> float:
@@ -3949,7 +3949,7 @@ def _faithful_hidden_count(
 
 
 def _global_q(
-    point: _DecisionPoint | _FrontierPoint, trace: "Trace", weights: OptimizerWeights
+    point: _DecisionPoint | _FrontierPoint, trace: Trace, weights: OptimizerWeights
 ) -> float:
     """Return global selection objective for one realized cut."""
 
@@ -3986,7 +3986,7 @@ def _global_max_q(point: _DecisionPoint | _FrontierPoint, weights: OptimizerWeig
     return round(mean_cost + weights.w_max * max_cost + 0.01 * point.k, 6)
 
 
-def _k_preference(k: int, trace: "Trace") -> float:
+def _k_preference(k: int, trace: Trace) -> float:
     """Return linear node-count preference normalized to the readable band."""
 
     lo = 8
@@ -3994,7 +3994,7 @@ def _k_preference(k: int, trace: "Trace") -> float:
     return (k - lo) / max(hi - lo, 1)
 
 
-def _band_cost(k: int, trace: "Trace") -> float:
+def _band_cost(k: int, trace: Trace) -> float:
     """Return quadratic node-band cost for auto mode."""
 
     lo = 8
@@ -4006,7 +4006,7 @@ def _band_cost(k: int, trace: "Trace") -> float:
 
 
 def _g_star_candidates(
-    trace: "Trace",
+    trace: Trace,
     analysis: CollapseAnalysis,
     context: RenderContext,
     hidden_counts: Mapping[str, int],
@@ -4051,7 +4051,7 @@ def _g_star_candidates(
 
 
 def _same_role(
-    trace: "Trace",
+    trace: Trace,
     left: str,
     right: str,
     analysis: CollapseAnalysis,
@@ -4068,7 +4068,7 @@ def _same_role(
     return abs(math.log2(1 + left_n) - math.log2(1 + right_n)) <= 1.5
 
 
-def _optimizer_total_units(trace: "Trace", context: RenderContext) -> int:
+def _optimizer_total_units(trace: Trace, context: RenderContext) -> int:
     """Return the raw rendered universe size used for optimizer normalization."""
 
     if context.vis_mode != "rolled":
@@ -4076,7 +4076,7 @@ def _optimizer_total_units(trace: "Trace", context: RenderContext) -> int:
     return max(count(collapse_plan_for_trace(trace, None, None, context)), 1)
 
 
-def _child_address_map(trace: "Trace") -> dict[str, tuple[str, ...]]:
+def _child_address_map(trace: Trace) -> dict[str, tuple[str, ...]]:
     """Return optimizer child addresses for every recorded module."""
 
     children_by_parent: dict[str, list[str]] = {
@@ -4100,7 +4100,7 @@ def _child_address_map(trace: "Trace") -> dict[str, tuple[str, ...]]:
     }
 
 
-def _rendered_own_unit_map(trace: "Trace", context: RenderContext) -> dict[str, tuple[str, ...]]:
+def _rendered_own_unit_map(trace: Trace, context: RenderContext) -> dict[str, tuple[str, ...]]:
     """Return rendered raw units owned directly by each optimizer module.
 
     Parameters
@@ -4137,7 +4137,7 @@ def _rendered_own_unit_map(trace: "Trace", context: RenderContext) -> dict[str, 
 
 
 def _structural_digest_map(
-    trace: "Trace",
+    trace: Trace,
     child_addresses: Mapping[str, tuple[str, ...]],
     analysis: CollapseAnalysis,
 ) -> dict[str, str]:
@@ -4163,7 +4163,7 @@ def _structural_digest_map(
     return digests
 
 
-def _nearest_recorded_parent(trace: "Trace", address: str) -> str | None:
+def _nearest_recorded_parent(trace: Trace, address: str) -> str | None:
     """Return the nearest recorded ancestor for ``address``."""
 
     parent = getattr(trace.modules[address], "address_parent", None)
@@ -4320,7 +4320,7 @@ def _boundary_cliff(state: _OptimizerState, left: str, right: str) -> bool:
     return smaller <= 0 or larger / smaller >= 2.0
 
 
-def _output_shape_tuple_for_address(trace: "Trace", address: str) -> tuple[int, ...] | None:
+def _output_shape_tuple_for_address(trace: Trace, address: str) -> tuple[int, ...] | None:
     """Return module output shape tuple for long-parent boundary splitting."""
 
     pass_address = f"{address}:1"
@@ -4339,7 +4339,7 @@ def _output_shape_tuple_for_address(trace: "Trace", address: str) -> tuple[int, 
 def _flow_adjacent(
     left: str,
     right: str,
-    graph: "ChildCondensedFlowGraph",
+    graph: ChildCondensedFlowGraph,
 ) -> bool:
     """Return whether two addresses are adjacent in parent flow order."""
 

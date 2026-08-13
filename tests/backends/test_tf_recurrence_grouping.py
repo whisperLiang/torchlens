@@ -219,10 +219,8 @@ def test_tf_intermediate_derived_grads_survive_grouping() -> None:
         grad_options=grad_options,
     )
 
-    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()}
-    ungrouped_raw = {
-        ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads.keys()
-    }
+    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads}
+    ungrouped_raw = {ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads}
     assert ungrouped_raw, "reference ungrouped trace produced no records"
     assert grouped_raw == ungrouped_raw
     grouped_relu = _grouped_ops(grouped, "Relu")

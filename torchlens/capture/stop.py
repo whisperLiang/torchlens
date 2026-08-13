@@ -103,9 +103,9 @@ class StopDirective:
         Explicit backward-related options that conflict with ``inference_only``.
     """
 
-    halt_options: "RecordingOptions | None" = None
+    halt_options: RecordingOptions | None = None
     raise_on_nan: bool = False
-    forward_error_mode: "ForwardErrorMode" = "raise"
+    forward_error_mode: ForwardErrorMode = "raise"
     inference_only: bool = False
     inference_only_conflicts: tuple[str, ...] = ()
 
@@ -117,7 +117,7 @@ class StopDirective:
 
     def evaluate_halt(
         self,
-        ctx: "RecordContext",
+        ctx: RecordContext,
         frontier_output: Any | None = None,
     ) -> None:
         """Evaluate the compiled halt predicate for one capture event.
@@ -278,8 +278,8 @@ def stop_directive_for_trace(trace: object) -> StopDirective:
 
 def evaluate_halt_stop(
     trace: object,
-    ctx: "RecordContext",
-    options: "RecordingOptions",
+    ctx: RecordContext,
+    options: RecordingOptions,
     frontier_output: Any | None = None,
 ) -> None:
     """Evaluate the halt portion of the active stop directive.

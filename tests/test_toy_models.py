@@ -6,17 +6,15 @@ plus new API coverage tests.
 
 from os.path import join as opj
 
+import example_models
 import pytest
 import torch
-
 from conftest import VIS_OUTPUT_DIR
 
-import example_models
 from torchlens import trace
 from torchlens.io import get_model_metadata
 from torchlens.validation import validate_forward_pass
 from torchlens.visualization import show_model_graph
-
 
 # =============================================================================
 # Simple operations

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import importlib.metadata
 
-from packaging.requirements import Requirement
 import pytest
+from packaging.requirements import Requirement
 
 import torchlens as tl
 from torchlens import _state
-from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.utils import _DOCTOR_EXCLUDED_EXTRAS
 from torchlens.utils._torch_compat import get_torch_capability_snapshot
 

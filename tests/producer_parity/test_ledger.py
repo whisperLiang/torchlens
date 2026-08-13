@@ -105,13 +105,12 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     # ---- step-0 trace-read recorder (feeds the IngestInputs v1 freeze) -----
     from ._models import scenario_by_name
 
-    with step0_trace_read_recorder() as observed:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_scenario(
-                scenario_by_name("cnn_exhaustive"),
-                Path(tmp),
-                with_artifact=False,
-            )
+    with step0_trace_read_recorder() as observed, tempfile.TemporaryDirectory() as tmp:
+        run_scenario(
+            scenario_by_name("cnn_exhaustive"),
+            Path(tmp),
+            with_artifact=False,
+        )
     assert observed, "step-0 recorder observed nothing (hook broken)"
     (_LEDGER_DIR / "step0_trace_reads.json").write_text(json.dumps(sorted(observed), indent=0))
 

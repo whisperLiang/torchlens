@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
-import torchlens as tl
 from torch import nn
+
+import torchlens as tl
 
 pytest.importorskip("safetensors")
 

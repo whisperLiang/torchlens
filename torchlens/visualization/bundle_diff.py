@@ -14,8 +14,8 @@ from ._render_utils import html_escape, render_dot_to_file, strip_known_extensio
 from .themes import resolve_theme, theme_edge_attrs, theme_graph_attrs, theme_node_attrs
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
-    from ..data_classes.trace import Trace
     from ..bundle import Bundle
+    from ..data_classes.trace import Trace
 
 
 DiffLayout = Literal["paired"]
@@ -23,13 +23,13 @@ DiffTensorField = Literal["out", "grad"]
 
 
 def bundle_diff(
-    bundle: "Bundle",
+    bundle: Bundle,
     *,
     metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
     layout: DiffLayout = "paired",
-    left: str | "Trace" | None = None,
-    right: str | "Trace" | None = None,
-    baseline: str | "Trace" | None = None,
+    left: str | Trace | None = None,
+    right: str | Trace | None = None,
+    baseline: str | Trace | None = None,
     on: DiffTensorField = "out",
     vis_outpath: str = "bundle_diff",
     vis_save_only: bool = False,
@@ -115,10 +115,10 @@ def bundle_diff(
 
 
 def _resolve_side_names(
-    bundle: "Bundle",
+    bundle: Bundle,
     *,
-    left: str | "Trace" | None,
-    right: str | "Trace" | None,
+    left: str | Trace | None,
+    right: str | Trace | None,
 ) -> tuple[str, str]:
     """Resolve the left and right bundle member names.
 
@@ -147,7 +147,7 @@ def _resolve_side_names(
     return left_name, right_name
 
 
-def _resolve_member_name(bundle: "Bundle", member: str | "Trace") -> str:
+def _resolve_member_name(bundle: Bundle, member: str | Trace) -> str:
     """Resolve a member reference inside a bundle.
 
     Parameters
@@ -173,7 +173,7 @@ def _resolve_member_name(bundle: "Bundle", member: str | "Trace") -> str:
     raise KeyError("Trace is not a member of this Bundle.")
 
 
-def _layer_to_supergraph_node(bundle: "Bundle") -> dict[str, str]:
+def _layer_to_supergraph_node(bundle: Bundle) -> dict[str, str]:
     """Map layer labels to their supergraph node names.
 
     Parameters
@@ -203,7 +203,7 @@ def _layer_to_supergraph_node(bundle: "Bundle") -> dict[str, str]:
 def _build_dot(
     *,
     pairs: list[tuple[Any, Any]],
-    bundle: "Bundle",
+    bundle: Bundle,
     left_name: str,
     right_name: str,
     metric_name: str,

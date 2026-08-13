@@ -35,7 +35,7 @@ class Container:
     """Computed view over a captured Python output container."""
 
     spec: ContainerSpec | None
-    leaves: tuple["Op", ...]
+    leaves: tuple[Op, ...]
     root_kind: ContainerRootKind
     root_id: tuple[str, Any]
     path: tuple[OutputPathComponent, ...] = ()
@@ -245,7 +245,7 @@ class Container:
 
         return repr(self)
 
-    def _leaf_ops(self) -> tuple["Op", ...]:
+    def _leaf_ops(self) -> tuple[Op, ...]:
         """Return leaf ops under this view in spec traversal order.
 
         Returns
@@ -271,7 +271,7 @@ class Container:
             by_path[path] for path in _leaf_paths(self.spec, prefix=self.path) if path in by_path
         )
 
-    def _leaf_by_path(self, path: tuple[OutputPathComponent, ...]) -> "Op" | None:
+    def _leaf_by_path(self, path: tuple[OutputPathComponent, ...]) -> Op | None:
         """Return the leaf operation at ``path``.
 
         Parameters
@@ -351,7 +351,7 @@ class Container:
                 lines.append(f"{' ' * indent}{label}: -> {_leaf_reference(value)}")
 
 
-def container_from_op(op: "Op") -> Container | None:
+def container_from_op(op: Op) -> Container | None:
     """Build a container view rooted at an op's captured output container.
 
     Parameters
@@ -386,7 +386,7 @@ def container_from_op(op: "Op") -> Container | None:
     )
 
 
-def output_containers_from_op(op: "Op") -> tuple[Container, ...]:
+def output_containers_from_op(op: Op) -> tuple[Container, ...]:
     """Return output container views associated with an op.
 
     Parameters
@@ -421,7 +421,7 @@ def output_containers_from_op(op: "Op") -> tuple[Container, ...]:
     return tuple(container for container in containers if container is not None)
 
 
-def containers_from_op(op: "Op") -> tuple[Container, ...]:
+def containers_from_op(op: Op) -> tuple[Container, ...]:
     """Return all input and output container views associated with an op.
 
     Parameters
@@ -447,7 +447,7 @@ def containers_from_op(op: "Op") -> tuple[Container, ...]:
     return tuple(unique)
 
 
-def input_containers_from_op(op: "Op") -> tuple[Container, ...]:
+def input_containers_from_op(op: Op) -> tuple[Container, ...]:
     """Return input container views consumed by an op call site.
 
     Parameters
@@ -476,7 +476,7 @@ def input_containers_from_op(op: "Op") -> tuple[Container, ...]:
     return tuple(container for container in containers if container is not None)
 
 
-def _container_from_registry(op: "Op") -> Container | None:
+def _container_from_registry(op: Op) -> Container | None:
     """Build the primary output container view from registry records when available."""
 
     trace = getattr(op, "source_trace", None)
@@ -499,7 +499,7 @@ def _container_from_registry(op: "Op") -> Container | None:
     return None
 
 
-def _output_roles_for_op(op: "Op") -> set[Role]:
+def _output_roles_for_op(op: Op) -> set[Role]:
     """Return output-container roles that should back ``op`` views.
 
     Parameters
@@ -571,7 +571,7 @@ def _input_registry_index(trace: Any) -> dict[int, tuple[int, ...]]:
 
 
 def _container_from_record(
-    op: "Op",
+    op: Op,
     record: ContainerRecord,
     *,
     roles: set[Role] | None = None,
@@ -652,7 +652,7 @@ def _root_kind_for_role(role: Role) -> ContainerRootKind:
     return "call"
 
 
-def _registry_sibling_leaves(op: "Op", snapshot: ContainerSnapshot) -> tuple["Op", ...]:
+def _registry_sibling_leaves(op: Op, snapshot: ContainerSnapshot) -> tuple[Op, ...]:
     """Return leaf ops named by a registry snapshot."""
 
     trace = getattr(op, "source_trace", None)
@@ -664,7 +664,7 @@ def _registry_sibling_leaves(op: "Op", snapshot: ContainerSnapshot) -> tuple["Op
 def _registry_sibling_leaves_from_trace(
     trace: Any,
     snapshot: ContainerSnapshot,
-) -> tuple["Op", ...]:
+) -> tuple[Op, ...]:
     """Return leaf ops named by a registry snapshot in a trace.
 
     Parameters
@@ -699,7 +699,7 @@ def _registry_sibling_leaves_from_trace(
     return tuple(leaves)
 
 
-def _op_from_raw_label(trace: Any, raw_label: str) -> "Op" | None:
+def _op_from_raw_label(trace: Any, raw_label: str) -> Op | None:
     """Return the op whose raw label matches ``raw_label``."""
 
     for candidate in trace.ops:
@@ -711,7 +711,7 @@ def _op_from_raw_label(trace: Any, raw_label: str) -> "Op" | None:
     return None
 
 
-def _container_structure_capability(op: "Op", role: Role) -> str:
+def _container_structure_capability(op: Op, role: Role) -> str:
     """Return the owning backend's declared role-specific container capability.
 
     Parameters
@@ -731,7 +731,7 @@ def _container_structure_capability(op: "Op", role: Role) -> str:
     return _trace_container_capability(getattr(op, "source_trace", None), role)
 
 
-def _input_container_structure_capability(op: "Op") -> str:
+def _input_container_structure_capability(op: Op) -> str:
     """Return the owning backend's declared input-container capability.
 
     Parameters
@@ -749,7 +749,7 @@ def _input_container_structure_capability(op: "Op") -> str:
     return _container_structure_capability(op, Role.CALL_INPUT)
 
 
-def _output_container_structure_capability(op: "Op") -> str:
+def _output_container_structure_capability(op: Op) -> str:
     """Return the owning backend's declared output-container capability.
 
     Parameters
@@ -887,7 +887,7 @@ def reconstruct_container(
     return _container_from_snapshot(trace, record, snapshot).reconstruct(values=values)
 
 
-def _root_identity(op: "Op") -> tuple[ContainerRootKind, tuple[str, Any]]:
+def _root_identity(op: Op) -> tuple[ContainerRootKind, tuple[str, Any]]:
     """Return the public root identity for an op container view.
 
     Parameters
@@ -910,11 +910,11 @@ def _root_identity(op: "Op") -> tuple[ContainerRootKind, tuple[str, Any]]:
 
 
 def _sibling_leaves(
-    op: "Op",
+    op: Op,
     *,
     spec: ContainerSpec | None,
     root_kind: ContainerRootKind,
-) -> tuple["Op", ...]:
+) -> tuple[Op, ...]:
     """Return sibling leaf ops for a container root.
 
     Parameters
@@ -950,7 +950,7 @@ def _sibling_leaves(
     return tuple(leaves) or (op,)
 
 
-def _op_is_final_output(op: "Op") -> bool:
+def _op_is_final_output(op: Op) -> bool:
     """Return whether an op belongs to the trace final-output layer set.
 
     Parameters
@@ -997,7 +997,7 @@ def _same_container_spec(left: ContainerSpec | None, right: ContainerSpec | None
     return left is right or (left is not None and right is not None and left == right)
 
 
-def _value_for_op(op: "Op", source: str) -> Any:
+def _value_for_op(op: Op, source: str) -> Any:
     """Return a leaf value from an op.
 
     Parameters

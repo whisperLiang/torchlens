@@ -19,19 +19,20 @@ only DEMOTE a verdict, never rescue or repair one.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, cast
+from typing import Any, cast
 
 from ..distributed._audit import MembershipLineageVerdict, audit_membership_lineages
 from ..distributed._ledger import InstallEpoch
 from ._enums import (
+    WITNESS_IDENTITY_KINDS,
+    WITNESS_NOT_APPLICABLE_KINDS,
+    WITNESS_VERDICT_BACKENDS,
     BoundaryConsistency,
     MergeAlignment,
     MergedErrorCode,
     MergeValueStatus,
-    WITNESS_IDENTITY_KINDS,
-    WITNESS_NOT_APPLICABLE_KINDS,
-    WITNESS_VERDICT_BACKENDS,
 )
 from ._errors import MergedFinding, MergeInputError
 from ._evidence import P2P_KINDS, RankEvidence
@@ -512,9 +513,7 @@ def derive_merge(
 
     _guard_scope(evidence)
     input_ranks = tuple(sorted(evidence))
-    declared = (
-        None if expected_ranks is None else tuple(sorted(set(int(r) for r in expected_ranks)))
-    )
+    declared = None if expected_ranks is None else tuple(sorted({int(r) for r in expected_ranks}))
     findings: list[MergedFinding] = []
 
     # 1. PRE-JOIN membership-lineage audit, before ANY joining or gaps (1.3).

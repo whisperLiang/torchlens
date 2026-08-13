@@ -233,7 +233,7 @@ def scoped_equinox_module_calls(tree: EquinoxModuleTree) -> Iterator[None]:
 
     originals: dict[type[Any], Any] = {}
     for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
+        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
         originals[module_class] = original_call
 
         def wrapper(
@@ -282,7 +282,7 @@ def scoped_nnx_module_calls(tree: NnxModuleTree) -> Iterator[None]:
 
     originals: dict[type[Any], Any] = {}
     for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
+        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
         originals[module_class] = original_call
 
         def wrapper(
@@ -908,7 +908,7 @@ def _module_source_metadata(module: Any) -> dict[str, Any]:
 
     cls = type(module)
     init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)
+    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
     return {
         "class_source_file": _safe_source_file(cls),
         "class_source_line": _source_line(cls),

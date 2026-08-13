@@ -21,8 +21,9 @@ never be vacuous about which criteria actually ran.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode

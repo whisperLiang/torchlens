@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -184,7 +185,7 @@ class TFEagerCaptureSession:
         module_tree: TFModuleTree | None,
         save_payloads: bool = True,
         save_predicate: Callable[[Any], Any] | None = None,
-        output_tap: Callable[["TFOpCapture", tuple[str, ...]], None] | None = None,
+        output_tap: Callable[[TFOpCapture, tuple[str, ...]], None] | None = None,
         module_exit_hook: Any | None = None,
     ) -> None:
         """Initialize a TensorFlow eager capture session.

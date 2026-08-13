@@ -5,11 +5,11 @@
 from dataclasses import replace
 
 from ._render_common import *
-from ._render_leaf import *
-from ._render_edges import *
-from ._render_nodes import *
-from ._render_flow import *
 from ._render_dot import *
+from ._render_edges import *
+from ._render_flow import *
+from ._render_leaf import *
+from ._render_nodes import *
 from ._render_utils import html_escape
 from .render_ir import build_backward_render_ir, build_combined_render_ir
 from .renderers.graphviz import GraphvizRenderer

@@ -2,28 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
     Literal,
-    Mapping,
-    Optional,
-    Sequence,
     cast,
 )
 
-from ...utils.display import format_flops, human_readable_size
 from ..._source_links import terminal_file_line_link
+from ...utils.display import format_flops, human_readable_size
 
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import ConditionalEvent, Trace
-    from ..data_classes.module import Module
 
 
 SummaryLevel = Literal[
@@ -31,9 +25,9 @@ SummaryLevel = Literal[
 ]
 SummaryMode = Literal["auto", "rolled", "unrolled"]
 
-_LEVEL_ALIASES: Dict[str, str] = {"cost": "compute"}
+_LEVEL_ALIASES: dict[str, str] = {"cost": "compute"}
 
-_COLUMN_LABELS: Dict[str, str] = {
+_COLUMN_LABELS: dict[str, str] = {
     "name": "Layer",
     "shape": "Output Shape",
     "params": "Params",
@@ -61,7 +55,7 @@ _COLUMN_LABELS: Dict[str, str] = {
     "prob": "Prob",
 }
 
-_LEVEL_DEFAULT_FIELDS: Dict[str, List[str]] = {
+_LEVEL_DEFAULT_FIELDS: dict[str, list[str]] = {
     "overview": ["name", "shape", "params", "train"],
     "graph": ["name", "shape", "params", "parents"],
     "memory": ["name", "shape", "dtype", "tensor_mb", "running_mb"],
@@ -73,17 +67,17 @@ _LEVEL_DEFAULT_FIELDS: Dict[str, List[str]] = {
 
 
 def render_model_summary(
-    trace: "Trace",
+    trace: Trace,
     *,
     level: SummaryLevel = "overview",
     preset: SummaryLevel | None = None,
-    fields: Optional[List[str]] = None,
-    columns: Optional[List[str]] = None,
+    fields: list[str] | None = None,
+    columns: list[str] | None = None,
     mode: SummaryMode = "auto",
     show_ops: bool = False,
-    include_ops: Optional[bool] = None,
-    max_rows: Optional[int] = 200,
-    print_to: Optional[Callable[[str], None]] = None,
+    include_ops: bool | None = None,
+    max_rows: int | None = 200,
+    print_to: Callable[[str], None] | None = None,
     show_input_preprocessing_details: bool = False,
 ) -> str:
     """Render a textual summary for a ``Trace``.
@@ -151,7 +145,7 @@ def render_model_summary(
     return text
 
 
-def format_model_repr(trace: "Trace") -> str:
+def format_model_repr(trace: Trace) -> str:
     """Return a short ``repr`` string for a ``Trace``.
 
     Parameters
@@ -182,7 +176,7 @@ def format_model_repr(trace: "Trace") -> str:
     )
 
 
-def _live_op_count(trace: "Trace") -> int:
+def _live_op_count(trace: Trace) -> int:
     """Return live op-event count when capture events are present.
 
     Parameters
@@ -203,7 +197,7 @@ def _live_op_count(trace: "Trace") -> int:
 
 
 def format_discoverability_summary(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_input_preprocessing_details: bool = False,
 ) -> str:
@@ -269,7 +263,7 @@ def format_discoverability_summary(
 
 
 def _input_preprocessing_lines(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_details: bool = False,
 ) -> list[str]:
@@ -306,7 +300,7 @@ def _input_preprocessing_lines(
     return lines
 
 
-def _output_postprocessing_lines(trace: "Trace") -> list[str]:
+def _output_postprocessing_lines(trace: Trace) -> list[str]:
     """Return output-postprocessing summary lines.
 
     Parameters
@@ -340,7 +334,7 @@ def _output_postprocessing_lines(trace: "Trace") -> list[str]:
     return lines
 
 
-def _decoded_output_preview(trace: "Trace") -> str | None:
+def _decoded_output_preview(trace: Trace) -> str | None:
     """Return a compact decoded-output preview for discoverability summary.
 
     Parameters
@@ -395,7 +389,7 @@ def _decoded_batch_topk_rows(value: Any) -> list[Mapping[str, Any]] | None:
     return None
 
 
-def _input_shape_summary(trace: "Trace") -> str:
+def _input_shape_summary(trace: Trace) -> str:
     """Return a compact input-shape summary.
 
     Parameters
@@ -419,7 +413,7 @@ def _input_shape_summary(trace: "Trace") -> str:
     return "unknown"
 
 
-def _capture_timestamp(trace: "Trace") -> str:
+def _capture_timestamp(trace: Trace) -> str:
     """Return a readable capture timestamp surrogate.
 
     Parameters
@@ -442,7 +436,7 @@ def _capture_timestamp(trace: "Trace") -> str:
     return f"start={pass_start:.6f}"
 
 
-def _run_state_name(trace: "Trace") -> str:
+def _run_state_name(trace: Trace) -> str:
     """Return the run-state enum name.
 
     Parameters
@@ -460,7 +454,7 @@ def _run_state_name(trace: "Trace") -> str:
     return str(getattr(state, "name", state))
 
 
-def _stale_spec_status(trace: "Trace") -> str:
+def _stale_spec_status(trace: Trace) -> str:
     """Return whether the out recipe is stale.
 
     Parameters
@@ -480,7 +474,7 @@ def _stale_spec_status(trace: "Trace") -> str:
     return f"{stale} (spec={spec_revision}, out_recipe={recipe_revision})"
 
 
-def _last_run_summary(trace: "Trace") -> str:
+def _last_run_summary(trace: Trace) -> str:
     """Return a compact last-run context summary.
 
     Parameters
@@ -586,7 +580,7 @@ def _portability_status(target_specs: Sequence[Any], hook_specs: Sequence[Any]) 
     return "all helpers builtin -> portable"
 
 
-def _recent_operation_lines(trace: "Trace") -> list[str]:
+def _recent_operation_lines(trace: Trace) -> list[str]:
     """Return recent operation-history lines.
 
     Parameters
@@ -637,7 +631,7 @@ def _operation_detail(record: Mapping[str, Any]) -> str:
     return f": {', '.join(parts)}" if parts else ""
 
 
-def _parent_run_summary(trace: "Trace") -> str:
+def _parent_run_summary(trace: Trace) -> str:
     """Return parent-run status.
 
     Parameters
@@ -660,7 +654,7 @@ def _parent_run_summary(trace: "Trace") -> str:
     return f"{getattr(parent, 'trace_label', None)!r} ({getattr(parent, 'model_class_name', None)})"
 
 
-def _fork_chain_summary(trace: "Trace") -> str:
+def _fork_chain_summary(trace: Trace) -> str:
     """Return a compact fork lineage chain.
 
     Parameters
@@ -712,7 +706,7 @@ def _truncated(value: Any, *, length: int = 8) -> str:
     return text[:length]
 
 
-def _relationship_evidence_summary(trace: "Trace") -> str:
+def _relationship_evidence_summary(trace: Trace) -> str:
     """Return relationship evidence enum names.
 
     Parameters
@@ -736,7 +730,7 @@ def _relationship_evidence_summary(trace: "Trace") -> str:
     return ", ".join(parts)
 
 
-def _next_operation_hint(trace: "Trace") -> str:
+def _next_operation_hint(trace: Trace) -> str:
     """Return available next-operation guidance.
 
     Parameters
@@ -759,7 +753,7 @@ def _next_operation_hint(trace: "Trace") -> str:
     return "ready for set(), attach_hooks(), do(), replay(), rerun(), or fork()"
 
 
-def _rng_note_summary(trace: "Trace") -> str:
+def _rng_note_summary(trace: Trace) -> str:
     """Return helper RNG and non-determinism notes.
 
     Parameters
@@ -836,7 +830,7 @@ def _resolve_level(*, level: SummaryLevel, preset: SummaryLevel | None) -> str:
     return selected_name
 
 
-def _resolve_show_ops(*, show_ops: bool, include_ops: Optional[bool]) -> bool:
+def _resolve_show_ops(*, show_ops: bool, include_ops: bool | None) -> bool:
     """Resolve the operation-dump toggle.
 
     Parameters
@@ -867,9 +861,9 @@ def _resolve_show_ops(*, show_ops: bool, include_ops: Optional[bool]) -> bool:
 def _resolve_fields(
     level: str,
     *,
-    fields: Optional[List[str]],
-    columns: Optional[List[str]],
-) -> List[str]:
+    fields: list[str] | None,
+    columns: list[str] | None,
+) -> list[str]:
     """Resolve the primary-table field selection.
 
     Parameters
@@ -904,11 +898,11 @@ def _resolve_fields(
 
 def _render_in_progress_summary(
     *,
-    trace: "Trace",
+    trace: Trace,
     fields: Sequence[str],
     mode: SummaryMode,
     show_ops: bool,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render a truthful summary while the pass is still in progress.
 
@@ -952,7 +946,7 @@ def _render_in_progress_summary(
     return "\n".join(lines)
 
 
-def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
+def _live_op_rows(trace: Trace) -> list[dict[str, str]]:
     """Return display rows for live operation records.
 
     Parameters
@@ -1000,12 +994,12 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
 
 def _render_finished_summary(
     *,
-    trace: "Trace",
+    trace: Trace,
     level: str,
     fields: Sequence[str],
     mode: SummaryMode,
     show_ops: bool,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render a summary for a finalized ``Trace``.
 
@@ -1051,7 +1045,7 @@ def _render_finished_summary(
     return "\n".join(lines)
 
 
-def _level_title(*, trace: "Trace", level: str) -> str:
+def _level_title(*, trace: Trace, level: str) -> str:
     """Return the section title for a summary level.
 
     Parameters
@@ -1080,10 +1074,10 @@ def _level_title(*, trace: "Trace", level: str) -> str:
 
 def _build_level_rows(
     *,
-    trace: "Trace",
+    trace: Trace,
     level: str,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build rows and footer lines for one summary level.
 
     Parameters
@@ -1115,7 +1109,7 @@ def _build_level_rows(
     return _build_compute_rows(trace)
 
 
-def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_overview_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build the default overview rows.
 
     Parameters
@@ -1128,7 +1122,7 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
     tuple[list[dict[str, str]], list[str]]
         Overview rows and footer lines.
     """
-    rows: List[Dict[str, str]] = [
+    rows: list[dict[str, str]] = [
         {
             "name": "input",
             "shape": _combined_shape_str(trace, trace.input_layers),
@@ -1163,7 +1157,7 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
     return rows, footer_lines
 
 
-def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_graph_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build graph-summary rows.
 
     Parameters
@@ -1197,10 +1191,10 @@ def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
 
 
 def _build_memory_rows(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build memory-summary rows.
 
     Parameters
@@ -1216,7 +1210,7 @@ def _build_memory_rows(
         Memory rows and footer lines.
     """
     running_total = 0
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
         memory = int(getattr(entry, "activation_memory", 0) or 0)
         running_total += memory
@@ -1237,7 +1231,7 @@ def _build_memory_rows(
     return rows, footer_lines
 
 
-def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_control_flow_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build control-flow rows or an empty state.
 
     Parameters
@@ -1250,7 +1244,7 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
     tuple[list[dict[str, str]], list[str]]
         Control-flow rows and footer lines.
     """
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for event in trace.conditional_records:
         branch_kinds = _event_branch_kinds(trace, event)
         rows.append(
@@ -1278,14 +1272,14 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
     return rows, footer_lines
 
 
-def _recurrent_loop_groups(trace: "Trace") -> List[tuple[str, int]]:
+def _recurrent_loop_groups(trace: Trace) -> list[tuple[str, int]]:
     """Return ``(layer_label, num_passes)`` for every recurrent (multi-pass) layer.
 
     These are the loop groups the control-flow summary claims to detect. Driven
     off the concrete per-layer pass counts rather than only ``trace.is_recurrent``
     so the disclosure names the exact layers that replay.
     """
-    groups: List[tuple[str, int]] = []
+    groups: list[tuple[str, int]] = []
     for layer in trace.layer_logs.values():
         num_passes = int(getattr(layer, "num_passes", 1) or 1)
         if num_passes > 1:
@@ -1294,9 +1288,9 @@ def _recurrent_loop_groups(trace: "Trace") -> List[tuple[str, int]]:
 
 
 def _recurrent_loop_group_lines(
-    loop_groups: List[tuple[str, int]],
+    loop_groups: list[tuple[str, int]],
     recurrent: bool,
-) -> List[str]:
+) -> list[str]:
     """Return honest footer disclosure lines for recurrent loop groups."""
     if not recurrent:
         return []
@@ -1306,7 +1300,7 @@ def _recurrent_loop_group_lines(
     return [f"Recurrent loop groups ({len(loop_groups)}): {detail}"]
 
 
-def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_compute_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build compute-summary rows.
 
     Parameters
@@ -1355,7 +1349,7 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
     return rows, footer_lines
 
 
-def _build_output_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_output_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build decoded output rows for the output summary level.
 
     Parameters
@@ -1386,10 +1380,10 @@ def _build_output_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]
 
 
 def _build_waterfall_rows(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build timing and memory waterfall rows.
 
     Parameters
@@ -1407,7 +1401,7 @@ def _build_waterfall_rows(
 
     elapsed = 0.0
     peak_memory = 0
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
         duration = _entry_func_duration(entry)
         memory = int(getattr(entry, "activation_memory", 0) or 0)
@@ -1431,10 +1425,10 @@ def _build_waterfall_rows(
 
 def _build_operation_rows(
     *,
-    trace: "Trace",
+    trace: Trace,
     mode: SummaryMode,
     level: str,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build operation rows for the optional op dump.
 
     Parameters
@@ -1451,7 +1445,7 @@ def _build_operation_rows(
     tuple[list[dict[str, str]], list[str]]
         Operation rows and footer lines.
     """
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     running_total = 0
     for entry in _iter_operation_entries(trace, mode=mode):
         memory = int(getattr(entry, "activation_memory", 0) or 0)
@@ -1476,7 +1470,7 @@ def _build_operation_rows(
     return rows, footer_lines
 
 
-def _default_op_fields(level: str) -> List[str]:
+def _default_op_fields(level: str) -> list[str]:
     """Return the default operation columns for the active level.
 
     Parameters
@@ -1496,7 +1490,7 @@ def _default_op_fields(level: str) -> List[str]:
     return ["name", "shape", "params", "parents"]
 
 
-def _iter_summary_modules(trace: "Trace") -> List["Module"]:
+def _iter_summary_modules(trace: Trace) -> list[Module]:
     """Return top-level module rows for summary tables.
 
     Parameters
@@ -1519,11 +1513,11 @@ def _iter_summary_modules(trace: "Trace") -> List["Module"]:
 
 
 def _module_overview_row(
-    trace: "Trace",
-    module: "Module",
-    origin_by_label: Dict[str, str],
+    trace: Trace,
+    module: Module,
+    origin_by_label: dict[str, str],
     input_labels: set[str],
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Build one overview row for a module.
 
     Parameters
@@ -1555,7 +1549,7 @@ def _module_overview_row(
     }
 
 
-def _module_shape(trace: "Trace", module: "Module") -> str:
+def _module_shape(trace: Trace, module: Module) -> str:
     """Return a representative output shape for a module.
 
     Parameters
@@ -1585,7 +1579,7 @@ def _strip_pass_suffix(label: str) -> str:
     return str(label).split(":", 1)[0]
 
 
-def _module_dataflow_origins(trace: "Trace") -> tuple[Dict[str, str], set[str]]:
+def _module_dataflow_origins(trace: Trace) -> tuple[dict[str, str], set[str]]:
     """Build a reverse index for module-level dataflow connectivity.
 
     Returns ``(origin_by_label, input_labels)`` where ``origin_by_label`` maps
@@ -1593,7 +1587,7 @@ def _module_dataflow_origins(trace: "Trace") -> tuple[Dict[str, str], set[str]]:
     that owns it, and ``input_labels`` is the set of graph-input op labels. Both
     are keyed by pass-stripped labels so pass-qualified producers resolve.
     """
-    origin_by_label: Dict[str, str] = {}
+    origin_by_label: dict[str, str] = {}
     for module in _iter_summary_modules(trace):
         for label in module.layer_labels:
             origin_by_label[_strip_pass_suffix(label)] = module.address
@@ -1602,8 +1596,8 @@ def _module_dataflow_origins(trace: "Trace") -> tuple[Dict[str, str], set[str]]:
 
 
 def _module_parent_summary(
-    module: "Module",
-    origin_by_label: Dict[str, str],
+    module: Module,
+    origin_by_label: dict[str, str],
     input_labels: set[str],
 ) -> str:
     """Return the REAL upstream dataflow producers feeding a module.
@@ -1621,7 +1615,7 @@ def _module_parent_summary(
     input_ops = getattr(module, "input_ops", None)
     if not input_ops:
         return "-"
-    upstream: List[str] = []
+    upstream: list[str] = []
     for op_label in input_ops:
         normalized = _strip_pass_suffix(op_label)
         if normalized in input_labels:
@@ -1633,7 +1627,7 @@ def _module_parent_summary(
     return ", ".join(upstream) if upstream else "-"
 
 
-def _module_dtype(trace: "Trace", module: "Module") -> str:
+def _module_dtype(trace: Trace, module: Module) -> str:
     """Return a representative dtype for a module.
 
     Parameters
@@ -1654,7 +1648,7 @@ def _module_dtype(trace: "Trace", module: "Module") -> str:
     return _dtype_str(getattr(layer, "dtype", None))
 
 
-def _module_output_layer(trace: "Trace", module: "Module") -> Any | None:
+def _module_output_layer(trace: Trace, module: Module) -> Any | None:
     """Return the representative output layer for a module.
 
     Parameters
@@ -1685,7 +1679,7 @@ def _module_output_layer(trace: "Trace", module: "Module") -> Any | None:
         return None
 
 
-def _module_time_ms(trace: "Trace", module: "Module") -> float:
+def _module_time_ms(trace: Trace, module: Module) -> float:
     """Return the summed forward time for a module.
 
     Parameters
@@ -1733,10 +1727,10 @@ def _entry_func_duration(entry: Any) -> float:
 
 
 def _iter_operation_entries(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> Iterable["Layer | Op"]:
+) -> Iterable[Layer | Op]:
     """Iterate operation-like entries according to the requested mode.
 
     Parameters
@@ -1757,7 +1751,7 @@ def _iter_operation_entries(
     return cast(Iterable["Layer | Op"], trace.layer_list)
 
 
-def _effective_mode(trace: "Trace", mode: SummaryMode) -> Literal["rolled", "unrolled"]:
+def _effective_mode(trace: Trace, mode: SummaryMode) -> Literal["rolled", "unrolled"]:
     """Resolve the effective operation mode.
 
     Parameters
@@ -1825,7 +1819,7 @@ def _is_pass_op(entry: Any) -> bool:
     return isinstance(entry, Op)
 
 
-def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
+def _combined_shape_str(trace: Trace, labels: Sequence[str]) -> str:
     """Return a compact combined shape string for one or more labels.
 
     Parameters
@@ -1855,7 +1849,7 @@ def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
     return f"{len(shapes)} tensors"
 
 
-def _event_branch_kinds(trace: "Trace", event: "ConditionalEvent") -> List[str]:
+def _event_branch_kinds(trace: Trace, event: ConditionalEvent) -> list[str]:
     """Return the taken branch kinds for one conditional event.
 
     Parameters
@@ -1878,7 +1872,7 @@ def _event_branch_kinds(trace: "Trace", event: "ConditionalEvent") -> List[str]:
     return sorted(branch_kinds)
 
 
-def _event_source(event: "ConditionalEvent") -> str:
+def _event_source(event: ConditionalEvent) -> str:
     """Return a short source locator for a conditional event.
 
     Parameters
@@ -1894,7 +1888,7 @@ def _event_source(event: "ConditionalEvent") -> str:
     return terminal_file_line_link(event.source_file, event.if_stmt_span[0])
 
 
-def _event_bool_layer(event: "ConditionalEvent") -> str:
+def _event_bool_layer(event: ConditionalEvent) -> str:
     """Return a compact bool-layer summary for a conditional event.
 
     Parameters
@@ -1914,7 +1908,7 @@ def _event_bool_layer(event: "ConditionalEvent") -> str:
     return f"{event.bool_layers[0]} +{len(event.bool_layers) - 1}"
 
 
-def _event_branch_op_count(trace: "Trace", event: "ConditionalEvent") -> int:
+def _event_branch_op_count(trace: Trace, event: ConditionalEvent) -> int:
     """Return the number of operation edges attributed to a conditional event.
 
     Parameters
@@ -2031,7 +2025,7 @@ def _human_count(value: int) -> str:
     return str(value)
 
 
-def _unknown_flops_footer(trace: "Trace") -> str:
+def _unknown_flops_footer(trace: Trace) -> str:
     """Return the summary disclosure for operations with unknown FLOPs.
 
     Parameters
@@ -2087,9 +2081,9 @@ def _int_with_commas(value: int) -> str:
 
 def _render_table(
     fields: Sequence[str],
-    rows: Sequence[Dict[str, str]],
+    rows: Sequence[dict[str, str]],
     *,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render an ASCII table.
 

@@ -77,7 +77,7 @@ from torchlens.runnable import PathFaithfulness
 _CAPTURE = CaptureOptions(intervention_ready=True, capture_container_structure=True, cache=False)
 
 
-def _capture(model: nn.Module, x: torch.Tensor) -> "tl.Trace":
+def _capture(model: nn.Module, x: torch.Tensor) -> tl.Trace:
     """Capture one runnable-ready trace."""
 
     return tl.trace(model, x, capture=_CAPTURE)

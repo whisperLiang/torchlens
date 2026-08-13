@@ -17,7 +17,6 @@ from torchlens.options import (
     merge_streaming_options,
 )
 
-
 _OPTION_CLASSES = [
     CaptureOptions,
     SaveOptions,

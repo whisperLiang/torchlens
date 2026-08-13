@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import builtins
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterator
 import weakref
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
 from .._errors import AmbiguousOpLookupError
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
@@ -20,9 +21,9 @@ from .._io import (
 from ..constants import GRAD_FN_LOG_FIELD_ORDER
 from ..quantities import Duration
 from ._accessor_base import Accessor
+from ._runtime_handles import runtime_handle_from_owner
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 from .grad_fn_call import GradFnCall
-from ._runtime_handles import runtime_handle_from_owner
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -433,7 +434,7 @@ class GradFn:
         return self.source_trace
 
     @property
-    def op(self) -> "Layer | None":
+    def op(self) -> Layer | None:
         """Return the forward Op or Layer associated with this GradFn.
 
         Returns
@@ -623,7 +624,7 @@ class GradFn:
             _time_finished=timestamp,
         )
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export this grad_fn_handle as a one-row DataFrame.
 
         Returns
@@ -708,7 +709,7 @@ class GradFnAccessor(Accessor[GradFn]):
     substring match against labels.
     """
 
-    def __init__(self, grad_fn_logs: Dict[int, GradFn], grad_fn_order: list[int]) -> None:
+    def __init__(self, grad_fn_logs: dict[int, GradFn], grad_fn_order: list[int]) -> None:
         """Initialize an accessor from Trace's flat grad_fn_handle fields.
 
         Parameters

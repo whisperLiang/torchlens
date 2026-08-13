@@ -21,13 +21,13 @@ from typing import Any
 import torch
 from safetensors.torch import save_file
 
+from .. import __version__ as TORCHLENS_VERSION
+from .._state import pause_logging
 from . import TLSPEC_VERSION, TorchLensIOError
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .scrub import BlobSpec
 from .tensor_policy import FailReason, Ok, SkipReason, is_supported_for_save
 from .tlspec import _TlSpecWriter
-from .._state import pause_logging
-from .. import __version__ as TORCHLENS_VERSION
 
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"

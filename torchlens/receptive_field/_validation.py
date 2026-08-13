@@ -11,27 +11,26 @@ import torch
 
 from ..backends import BackendUnsupportedError
 from . import _engine
+from ._engine_forward import solve_projective
 from ._errors import ReceptiveFieldError, ReceptiveFieldUnavailableError
+from ._forward_query import box_for_source_unit
 from ._gradient import gradient_for_unit
 from ._gradient_forward import _select_targets, projective_gradient_for_unit
 from ._path import resolve_graph_point
 from ._query import box_for_unit
-from ._forward_query import box_for_source_unit
-from ._engine_forward import solve_projective
 from ._types import (
     GradientReceptiveField,
     ReceptiveField,
     ReceptiveFieldAlignment,
     ReceptiveFieldBox,
     ReceptiveFieldBoxAxis,
-    ReceptiveFieldStatus,
     ReceptiveFieldDirection,
+    ReceptiveFieldStatus,
     ReceptiveFieldValidation,
     ReceptiveFieldValidationStatus,
     ReceptiveFieldViolation,
 )
 from ._view import ReceptiveFieldView
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op

@@ -48,7 +48,8 @@ resolvable.
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 import torch
@@ -119,9 +120,7 @@ def _is_global_mutator_verb(name: str) -> bool:
         return True
     if "clear" in low and "cache" in low:
         return True
-    if "set_plan_cache" in low:
-        return True
-    return False
+    return "set_plan_cache" in low
 
 
 def _iter_fixed_root_callables() -> list[tuple[str, str, Callable[..., Any]]]:

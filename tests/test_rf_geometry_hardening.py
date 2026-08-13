@@ -11,7 +11,6 @@ projective lattice loss, the line-637 bare assert, empty-box ``slices()``).
 
 from __future__ import annotations
 
-
 import pytest
 import torch
 import torch.nn as nn
@@ -19,7 +18,6 @@ import torch.nn.functional as F
 
 import torchlens as tl
 from torchlens.receptive_field import ReceptiveFieldStatus, ReceptiveFieldValidationStatus
-
 
 torch.manual_seed(0)
 

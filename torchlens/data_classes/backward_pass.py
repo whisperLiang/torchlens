@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
-import weakref
 
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
@@ -199,7 +199,7 @@ class BackwardPass:
 
         return self.pass_index - 1
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export this backward pass as a one-row DataFrame.
 
         Driven by ``BACKWARD_PASS_FIELD_ORDER``: every field is exported

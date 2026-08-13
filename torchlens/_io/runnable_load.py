@@ -6,47 +6,43 @@ modules, binds state, constructs runtime calls, or executes a recorded graph.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from functools import lru_cache
 import inspect
 import operator
 import platform
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, cast
 
 import torch
 
 from .. import _state
-from ._torch_symbols import torch_attr
 from ..constants import get_orig_torch_funcs
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
     LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS,
     RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
-    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_CALL_RECIPE_VERSION,
+    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
     RUNNABLE_TLSPEC_SCHEMA_VERSION,
+    WITNESS_FAMILY_REGISTRY,
+    WITNESS_FAMILY_REGISTRY_VERSION,
+    WITNESS_GAP_REGISTRY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     AmbientExecutionContext,
     AutocastDeviceContext,
+    CallableRegistryEntry,
     CallControlObligation,
     CallExecutionContext,
-    CallableRegistryEntry,
     ControlDependencyEdge,
+    ControlWitness,
+    ControlWitnessKind,
     InputAttestationFingerprint,
     InputBoundarySite,
     InputBoundaryTensorSite,
-    ControlWitness,
-    ControlWitnessKind,
     InputSlotBinding,
-    ReplayWitnessStructure,
-    WITNESS_GAP_REGISTRY,
-    WitnessCoverageGap,
-    WitnessGapKind,
-    derive_required_witness_members,
-    derived_witness_completeness,
     LiteralArgumentRef,
     LiteralAtom,
     LiteralAtomKind,
@@ -63,18 +59,19 @@ from ..runnable import (
     ProducerPreflight,
     ReadinessReport,
     ReadinessStatus,
+    ReplayWitnessStructure,
     RequiredWitnessFamily,
     RequiredWitnessInventory,
     ResolverRecord,
     ResolverStatus,
-    RunProvider,
     RunnableCallDescriptor,
     RunnableCompatibility,
     RunnableDiagnostic,
     RunnableErrorCode,
     RunnableRngProfile,
-    SparseRunDescriptor,
+    RunProvider,
     SlotByteDigest,
+    SparseRunDescriptor,
     StateByteDigest,
     StateSlotBinding,
     StateSlotRole,
@@ -83,10 +80,12 @@ from ..runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
     TensorUseSite,
-    WITNESS_FAMILY_REGISTRY,
-    WITNESS_FAMILY_REGISTRY_VERSION,
     WitnessCompleteness,
+    WitnessCoverageGap,
+    WitnessGapKind,
     decode_input_site_position,
+    derive_required_witness_members,
+    derived_witness_completeness,
 )
 from ..utils._callable_safety import (
     _PURE_TENSOR_PROPERTY_NAMES,
@@ -94,7 +93,7 @@ from ..utils._callable_safety import (
     unsafe_callable_reason,
 )
 from ..utils._torch_compat import resolve_runnable_torch_alias
-
+from ._torch_symbols import torch_attr
 
 _ALLOWED_EXACT_ROOTS: Mapping[str, Any] = {
     "torch": torch,
@@ -276,7 +275,7 @@ _INPUT_STRUCTURE_NODE_KINDS = frozenset(
 """Closed node-kind vocabulary accepted from a persisted input-structure fact."""
 
 
-def _validate_input_structure_witnesses(witnesses: "Sequence[ControlWitness]") -> None:
+def _validate_input_structure_witnesses(witnesses: Sequence[ControlWitness]) -> None:
     """Validate the REQUIRED input-boundary structure facts at PARSE time (r67 C2).
 
     The complete structure block is required and parse-validated inside existing v2:
@@ -363,7 +362,7 @@ def _validate_input_structure_witnesses(witnesses: "Sequence[ControlWitness]") -
             raise ContextFieldInvalidError(field, f"site {position!r} lacks a root node record")
 
 
-def _validate_state_metadata_fact_witnesses(witnesses: "Sequence[ControlWitness]") -> None:
+def _validate_state_metadata_fact_witnesses(witnesses: Sequence[ControlWitness]) -> None:
     """Validate every declared state-metadata fact witness at PARSE time (r65 F-1).
 
     Fact names validate against the closed two-name vocabulary and values must be bools;
@@ -478,8 +477,8 @@ def _parse_required_witness_inventory(value: Any) -> RequiredWitnessInventory:
 
 def _validate_required_witness_inventory(
     inventory: RequiredWitnessInventory,
-    witnesses: "Sequence[ControlWitness]",
-    slots: "Sequence[TensorSlotDescriptor]",
+    witnesses: Sequence[ControlWitness],
+    slots: Sequence[TensorSlotDescriptor],
 ) -> None:
     """Require EXACT family+member coverage plus the independent cross-checks (r69 A).
 
@@ -818,7 +817,7 @@ def _parse_coverage_gaps(value: Any) -> tuple[WitnessCoverageGap, ...]:
 def validate_witness_obligations(
     descriptor: SparseRunDescriptor,
     *,
-    container_members: "tuple[str, ...] | None",
+    container_members: tuple[str, ...] | None,
 ) -> None:
     """Enforce the r71 obligation/discharge invariant over one typed descriptor.
 
@@ -1240,8 +1239,8 @@ def validate_witness_obligations(
 
 
 def required_witness_family_members_shared(
-    witnesses: "Sequence[ControlWitness]",
-) -> "dict[str, list[str]]":
+    witnesses: Sequence[ControlWitness],
+) -> dict[str, list[str]]:
     """Resolve the shared witness->present-member derivation (single source)."""
 
     from .runnable import required_witness_family_members
@@ -1251,7 +1250,7 @@ def required_witness_family_members_shared(
 
 def validate_container_witness_anchor(
     descriptor: SparseRunDescriptor,
-    container_members: "tuple[str, ...]",
+    container_members: tuple[str, ...],
 ) -> None:
     """Anchor container witnesses to the rehydrated container records (r71 A).
 
@@ -1317,9 +1316,9 @@ def _normalized_callable_name(name: str | None) -> str | None:
 
 def _callable_registry_contradiction(
     registry_qualname: str,
-    affected_ops: "tuple[str, ...]",
-    recorded_func_names: "Mapping[str, str | None]",
-) -> "tuple[str, str] | None":
+    affected_ops: tuple[str, ...],
+    recorded_func_names: Mapping[str, str | None],
+) -> tuple[str, str] | None:
     """Return the first op whose recorded name contradicts the registry name (r83 S3).
 
     The callable a loaded artifact EXECUTES comes from
@@ -3217,7 +3216,7 @@ def _parse_diagnostic(value: Mapping[str, Any]) -> RunnableDiagnostic:
     )
 
 
-def _validate_literal_atom_value(kind: "LiteralAtomKind", value: Any) -> None:
+def _validate_literal_atom_value(kind: LiteralAtomKind, value: Any) -> None:
     """Enforce that an atom's JSON value matches its declared ``kind``.
 
     ROBUSTNESS (secC informational note). ``LiteralAtom`` is a *scalar* grammar

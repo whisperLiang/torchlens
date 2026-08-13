@@ -11,7 +11,6 @@ from ._common import _compute_ops
 from ._gradients import gradient_flow_audit
 from ._nan import _nonfinite_kind, bisect_nan, find_nan_in_trace
 
-
 if TYPE_CHECKING:
     from torchlens.data_classes.trace import Trace
     from torchlens.partial import PartialTrace
@@ -95,7 +94,7 @@ class TraceAudit:
         return "\n".join(lines)
 
 
-def _has_full_saved_activations(trace: "Trace") -> bool:
+def _has_full_saved_activations(trace: Trace) -> bool:
     """Return whether every compute operation retains an output payload.
 
     Parameters
@@ -112,7 +111,7 @@ def _has_full_saved_activations(trace: "Trace") -> bool:
     return all(bool(getattr(op, "has_saved_activation", False)) for op in _compute_ops(trace))
 
 
-def _has_saved_gradients(trace: "Trace") -> tuple[bool, str | None]:
+def _has_saved_gradients(trace: Trace) -> tuple[bool, str | None]:
     """Determine whether a trace supports a gradient-flow check.
 
     Parameters
@@ -136,7 +135,7 @@ def _has_saved_gradients(trace: "Trace") -> tuple[bool, str | None]:
     return True, None
 
 
-def _audit_partial_trace(partial: "PartialTrace") -> TraceAudit:
+def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
     """Audit a failed partial capture without full-trace assumptions.
 
     Parameters
@@ -228,7 +227,7 @@ def _audit_partial_trace(partial: "PartialTrace") -> TraceAudit:
     return TraceAudit(tuple(findings), tuple(checks_run), skipped)
 
 
-def audit_trace(trace: "Trace | PartialTrace") -> TraceAudit:
+def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
     """Run every trace-local health diagnostic supported by one capture.
 
     Health checks that run and can contribute findings are ``find_nan``,

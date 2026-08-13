@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import ast
+import pickle
 from dataclasses import fields
 from pathlib import Path
-import pickle
 from types import MappingProxyType
 
 from torchlens._runnable_seam import (
@@ -98,14 +98,17 @@ def _direct_runnable_reader_modules() -> frozenset[str]:
 def test_runnable_trace_surface_and_state_are_declared() -> None:
     """Keep the complete public surface and private state schema explicit."""
 
-    assert RUNNABLE_TRACE_PUBLIC_MEMBERS == frozenset(
-        {
-            "readiness",
-            "runnable_descriptor",
-            "archived_activations",
-            "load_state_dict",
-            "run",
-        }
+    assert (
+        frozenset(
+            {
+                "readiness",
+                "runnable_descriptor",
+                "archived_activations",
+                "load_state_dict",
+                "run",
+            }
+        )
+        == RUNNABLE_TRACE_PUBLIC_MEMBERS
     )
     assert all(hasattr(Trace, member) for member in RUNNABLE_TRACE_PUBLIC_MEMBERS)
     assert {field.name for field in fields(RunnableTraceState)} == {

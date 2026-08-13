@@ -22,11 +22,11 @@ reads plus one construction per op so the verdict is conservative.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, make_dataclass
 import json
-from pathlib import Path
 import statistics
 import timeit
+from dataclasses import dataclass, field, make_dataclass
+from pathlib import Path
 from typing import Any
 
 

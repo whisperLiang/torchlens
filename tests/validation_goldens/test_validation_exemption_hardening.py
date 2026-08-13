@@ -11,15 +11,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.validation import core
-from torchlens.validation import backward as backward_validation
+from torchlens.validation import backward as backward_validation, core
 from torchlens.validation.diagnostics import get_validation_failure
-from torchlens.validation.invariants import (
-    MetadataInvariantError,
-    _check_backend_neutral_graph_topology,
-    _check_pass_count_consistency,
-    check_metadata_invariants,
-)
 from torchlens.validation.exemptions import (
     SKIP_VALIDATION_ENTIRELY,
     _binary_extrema_nonperturbed_arg_dominates,
@@ -29,6 +22,12 @@ from torchlens.validation.exemptions import (
     _posthoc_overwrite_decision,
     _scatter_index_fully_overwrites_dim,
     perturbed_layer_at_structural_position,
+)
+from torchlens.validation.invariants import (
+    MetadataInvariantError,
+    _check_backend_neutral_graph_topology,
+    _check_pass_count_consistency,
+    check_metadata_invariants,
 )
 from torchlens.validation.status import ValidationReplayStatus
 

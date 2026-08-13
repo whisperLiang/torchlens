@@ -23,14 +23,12 @@ import traceback
 from os.path import join as opj
 from pathlib import Path
 
+import example_models
 import pytest
 import torch
-
+import torch.nn as nn
 from conftest import REPORTS_DIR, VIS_OUTPUT_DIR
 
-import torch.nn as nn
-
-import example_models
 from torchlens import func, trace as trace_fn
 from torchlens.options import CaptureOptions
 from torchlens.visualization import show_model_graph
@@ -1216,8 +1214,8 @@ def _build_latex_report() -> str:
     for (
         stem,
         caption,
-        model_class_name,
-        input_desc,
+        _model_class_name,
+        _input_desc,
         vis_mode,
         depth,
         direction,
@@ -1252,8 +1250,8 @@ def _build_latex_report() -> str:
     for (
         stem,
         caption,
-        model_class_name,
-        input_desc,
+        _model_class_name,
+        _input_desc,
         vis_mode,
         depth,
         direction,
@@ -1295,7 +1293,7 @@ def _ensure_vis_pdfs_exist():
 
     # Standard gallery
     missing = [g for g in VIS_GALLERY if not os.path.exists(opj(VIS_DIR, f"{g[0]}.pdf"))]
-    for stem, caption, model_class_name, _, vis_mode, depth, direction, buffers in missing:
+    for stem, _caption, model_class_name, _, vis_mode, depth, direction, buffers in missing:
         model, x = model_inputs[model_class_name]
         _vis(
             model,
@@ -1311,7 +1309,7 @@ def _ensure_vis_pdfs_exist():
     grad_missing = [
         g for g in GRADIENT_VIS_GALLERY if not os.path.exists(opj(VIS_DIR, f"{g[0]}.pdf"))
     ]
-    for stem, caption, model_class_name, _, vis_mode, depth, direction in grad_missing:
+    for stem, _caption, model_class_name, _, vis_mode, depth, direction in grad_missing:
         model, x = model_inputs[model_class_name]
         _vis_grad(model, x, stem, vis_mode=vis_mode, depth=depth, direction=direction)
 

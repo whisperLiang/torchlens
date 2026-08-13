@@ -223,8 +223,8 @@ class RecordContext:
     module_type: str | None
     module_pass_index: int | None
     module_stack: tuple[Any, ...]
-    recent_events: tuple["RecordContext", ...]
-    recent_ops: tuple["RecordContext", ...]
+    recent_events: tuple[RecordContext, ...]
+    recent_ops: tuple[RecordContext, ...]
     parent_labels: tuple[str, ...]
     input_output_address: str | None
     shape: tuple[int, ...] | None

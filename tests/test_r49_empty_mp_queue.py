@@ -32,7 +32,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
 from torchlens.utils.rng import host_nondeterminism_monitor
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 class _EmptyMpQueueModel(nn.Module):

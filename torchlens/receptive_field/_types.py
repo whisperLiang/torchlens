@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
-from typing import TYPE_CHECKING, ClassVar, Literal, Mapping, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from ._errors import ReceptiveFieldError, ReceptiveFieldValidationError
-
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -491,10 +491,10 @@ class GradientReceptiveField:
     op_label: str
     io_role: str
     unit: tuple[int, ...]
-    grad: "torch.Tensor"
-    support_mask: "torch.Tensor"
+    grad: torch.Tensor
+    support_mask: torch.Tensor
     support_ranges: tuple[tuple[int, int], ...] | None
-    spatial_support_mask: "torch.Tensor | None"
+    spatial_support_mask: torch.Tensor | None
     batch_support: tuple[int, ...] | None
     cross_batch_influence: bool
     atol: float
@@ -659,10 +659,10 @@ class ReceptiveFieldValidation:
 class ReceptiveFieldProfile:
     """Tabular receptive-field report at one trace granularity."""
 
-    frame: "pd.DataFrame"
+    frame: pd.DataFrame
     level: Literal["op", "layer", "call", "module"]
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying dataframe.
 
         Returns

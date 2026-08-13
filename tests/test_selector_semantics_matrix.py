@@ -32,9 +32,10 @@ from __future__ import annotations
 import json
 import os
 import warnings
-from functools import lru_cache
+from collections.abc import Callable
+from functools import cache, lru_cache
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -165,7 +166,7 @@ def _extra_trace_kwargs(model_key: str) -> dict[str, Any]:
     return {}
 
 
-@lru_cache(maxsize=None)
+@cache
 def _full_trace(model_key: str) -> Any:
     model, x = _model_and_input(model_key)
     with warnings.catch_warnings():
@@ -173,7 +174,7 @@ def _full_trace(model_key: str) -> Any:
         return tl.trace(model, x, **_extra_trace_kwargs(model_key))
 
 
-@lru_cache(maxsize=None)
+@cache
 def _backward_trace(model_key: str) -> Any:
     model, x = _model_and_input(model_key)
     with warnings.catch_warnings():

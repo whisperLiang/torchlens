@@ -34,6 +34,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from torch import get_default_dtype, nn
 
+from .. import _state
+from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
+from .._runnable_seam import runnable_trace_state
 from ..backends import (
     BackendName,
     BackendUnsupportedError,
@@ -44,9 +47,6 @@ from ..backends import (
 from ..fastlog._halt import HaltSignal
 from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
-from .. import _state
-from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
-from .._runnable_seam import runnable_trace_state
 from .config import InternalCaptureConfig
 from .outcome import (
     CapturePhase,
@@ -696,7 +696,7 @@ def _get_op_nums_from_user_labels(
 
         _give_user_feedback_about_lookup_key(self, layer_key, "query_multiple")
 
-    raw_layer_nums_to_save = sorted(list(raw_layer_nums_to_save))  # type: ignore[assignment]
+    raw_layer_nums_to_save = sorted(raw_layer_nums_to_save)  # type: ignore[assignment]
     return raw_layer_nums_to_save  # type: ignore[return-value]
 
 

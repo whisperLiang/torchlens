@@ -20,7 +20,6 @@ from ._types import (
     ReceptiveFieldStatus,
 )
 
-
 if TYPE_CHECKING:
     from ..data_classes.op import Op
 

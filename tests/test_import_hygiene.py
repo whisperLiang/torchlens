@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 import torch
 
-
 _LAZY_MODULE_CASES = (
     ("fastlog", "record"),
     ("intervention", "func"),

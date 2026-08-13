@@ -8,10 +8,9 @@ from typing import Any
 
 import pytest
 import torch
+from test_render_dotid_cert10 import _ModuleDictQuoteKeyModel
 
 import torchlens as tl
-
-from test_render_dotid_cert10 import _ModuleDictQuoteKeyModel
 
 pydot = pytest.importorskip("pydot")
 

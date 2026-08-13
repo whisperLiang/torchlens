@@ -84,7 +84,7 @@ def _iter_op_cell_func_call_locations(store: Any, layout: Any) -> Any:
                     yield item
 
 
-def rehydrate_trace_core(trace: "Trace") -> bool:
+def rehydrate_trace_core(trace: Trace) -> bool:
     """Adopt a coreless trace's detached records into a fresh sealed core.
 
     Returns ``True`` when a core was built and sealed, ``False`` when the

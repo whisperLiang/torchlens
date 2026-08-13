@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -19,11 +20,11 @@ from torchlens.validation._layer_grad_report import (
     _compare_module_output_grads,
 )
 from torchlens.validation._stock_layer_grads import (
-    _StockModuleGradCollector,
     _candidate_module_call_for,
     _candidate_root_module,
     _first_leaf_tensor,
     _pass_index_from_layer_modules,
+    _StockModuleGradCollector,
     _tensor_leaves,
 )
 

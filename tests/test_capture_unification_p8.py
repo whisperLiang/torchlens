@@ -14,10 +14,10 @@ from torchlens.capture.projections import _record_from_record_context
 from torchlens.fastlog.storage_disk import _ctx_from_json, _ctx_to_json
 from torchlens.fastlog.types import CaptureSpec, RecordContext
 from torchlens.ir import (
+    _DEFERRED_VALUE,
     CaptureEvents,
     FunctionEventInput,
     MLXValueUnavailableError,
-    _DEFERRED_VALUE,
 )
 
 
@@ -65,7 +65,7 @@ def test_deferred_value_raises_on_use_but_json_round_trips() -> None:
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
         bool(ctx.tensor_requires_grad)
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
-        ctx.is_scalar_bool == "anything"
+        ctx.is_scalar_bool == "anything"  # noqa: B015 - the comparison IS the assertion
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
         hash(ctx.bool_value)
 

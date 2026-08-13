@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 
 import pytest
 import torch

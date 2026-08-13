@@ -4,8 +4,8 @@
 
 from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
-from ._render_leaf import *
 from ._render_edges import *
+from ._render_leaf import *
 
 
 def _normalize_buffer_visibility(
@@ -124,7 +124,7 @@ def _add_unrolled_backward_pass_clusters(
                 subgraph.node(**node_args)
 
     for pass_index, grad_fn_calls in calls_by_pass.items():
-        calls_for_grad_fn: dict[int, list[tuple["GradFn", Any]]] = defaultdict(list)
+        calls_for_grad_fn: dict[int, list[tuple[GradFn, Any]]] = defaultdict(list)
         for grad_fn_handle, call in grad_fn_calls:
             calls_for_grad_fn[grad_fn_handle.grad_fn_object_id].append((grad_fn_handle, call))
         for grad_fn_handle, call in grad_fn_calls:
@@ -158,7 +158,7 @@ def _visible_backward_calls_by_pass(
         Visible calls keyed by one-based backward pass number.
     """
 
-    calls_by_pass: dict[int, list[tuple["GradFn", Any]]] = defaultdict(list)
+    calls_by_pass: dict[int, list[tuple[GradFn, Any]]] = defaultdict(list)
     for grad_fn_handle in trace.grad_fns:
         for call in grad_fn_handle.calls.values():
             if not _grad_fn_call_matches_backward_filter(call, pass_filter):

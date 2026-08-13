@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
 import multiprocessing
 import os
-from pathlib import Path
 import queue
 import random
 import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -20,6 +20,7 @@ import torchlens.visualization.auto_collapse as auto_collapse
 import torchlens.visualization.collapse_optimizer as collapse_optimizer
 import torchlens.visualization.source_graph as source_graph_module
 from torchlens.data_classes._trace_accessors import TraceOpAccessor
+from torchlens.visualization._render_common import format_collapsed_module_contents
 from torchlens.visualization.auto_collapse import (
     _condensed_owner_for_op,
     _condensed_owner_map,
@@ -29,27 +30,27 @@ from torchlens.visualization.auto_collapse import (
     resolve_repeat_folds,
 )
 from torchlens.visualization.collapse_optimizer import (
+    _RESULT_CACHE,
+    _SCHEDULE_CACHE,
     K_CAP,
     MAX_SALIENCE_FLOOR,
     OptimizerWeights,
-    _FrontierPoint,
-    _OptimizerState,
-    _RESULT_CACHE,
-    _SCHEDULE_CACHE,
+    RoleComponent,
     _branch_salience,
     _child_address_map,
     _child_segment_covered_ops,
     _eligible_module_box,
+    _FrontierPoint,
     _max_box_salience_score,
     _optimizer_total_units,
+    _OptimizerState,
     _plan_respects_max_dominance,
     _prune_frontier,
-    _rendered_own_unit_map,
     _rendered_module_hidden_counts,
+    _rendered_own_unit_map,
     _same_role,
     _segment_is_legal,
     _structural_digest_map,
-    RoleComponent,
     build_role_components,
     collapse_schedule,
     select_collapse_plan,
@@ -64,7 +65,6 @@ from torchlens.visualization.collapse_plan import (
     collapse_plan_for_trace,
     count,
 )
-from torchlens.visualization._render_common import format_collapsed_module_contents
 
 tvm = pytest.importorskip("torchvision.models")
 

@@ -13,7 +13,6 @@ import pytest
 from torchlens import _state
 from torchlens.capture.arg_positions import FUNC_ARG_SPECS, _normalize_func_name
 
-
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_OUTPUTS_DIR = opj(TESTS_DIR, "generated_outputs")
 REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")

@@ -17,13 +17,13 @@ from torchlens.backends.torch.backward import (
     _make_grad_fn_prehook,
 )
 from torchlens.data_classes.grad_fn import GradFn
-from torchlens.ir import CaptureEvents
-from torchlens.intervention.errors import HookValueError, HelperMountError, SelectorCompositionError
+from torchlens.intervention.errors import HelperMountError, HookValueError, SelectorCompositionError
 from torchlens.intervention.helpers import _helper_spec
 from torchlens.intervention.hooks import normalize_hook_plan
 from torchlens.intervention.resolver import _selector_resolution_direction
-from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.intervention.types import FireRecord, InterventionSpec, TargetSpec
+from torchlens.ir import CaptureEvents
+from torchlens.ir.selector_eval import selector_from_spec
 
 
 class _EncoderModel(nn.Module):

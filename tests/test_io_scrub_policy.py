@@ -13,14 +13,14 @@ from torch import nn
 import torchlens as tl
 from torchlens import trace as trace_fn
 from torchlens._io.scrub import _RAW_IMAGE_SENTINEL, _RAW_INPUT_IMAGE_BYTES_LIMIT
-from torchlens.data_classes.buffer import Buffer
 from torchlens.data_classes._state_adapter import state_items
+from torchlens.data_classes.buffer import Buffer
 from torchlens.data_classes.func_call_location import FuncCallLocation
 from torchlens.data_classes.layer import Layer
-from torchlens.data_classes.op import Op
-from torchlens.data_classes.trace import Trace
 from torchlens.data_classes.module import Module, ModuleCall
+from torchlens.data_classes.op import Op
 from torchlens.data_classes.param import Param
+from torchlens.data_classes.trace import Trace
 
 
 class _TinyIOModel(nn.Module):

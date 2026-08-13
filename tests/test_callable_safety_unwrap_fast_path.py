@@ -6,8 +6,8 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
 
-from pytest import MonkeyPatch
 import torch
+from pytest import MonkeyPatch
 
 from torchlens import _state
 from torchlens.utils import _callable_safety

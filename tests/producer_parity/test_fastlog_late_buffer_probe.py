@@ -32,7 +32,7 @@ from ._models import BufferOutputModel, _small_vec_input
 pytestmark = pytest.mark.heavy
 
 
-def _cooked_with_spy() -> "tuple[Any, dict]":
+def _cooked_with_spy() -> tuple[Any, dict]:
     """Cook a recording while observing what step 0 actually consumes."""
 
     import torchlens.postprocess as postprocess_module

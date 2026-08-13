@@ -9,7 +9,6 @@ classifier.
 
 from __future__ import annotations
 
-
 import pytest
 import torch
 from torch import nn
@@ -374,8 +373,7 @@ def test_origin_torchlens_frame_classifies_torchlens() -> None:
 
 
 def test_types_and_errors_exports() -> None:
-    from torchlens import errors as tl_errors
-    from torchlens import types as tl_types
+    from torchlens import errors as tl_errors, types as tl_types
 
     assert tl_types.CaptureOutcome is CaptureOutcome
     assert tl_types.CaptureStatus is CaptureStatus

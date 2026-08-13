@@ -143,7 +143,7 @@ class TraceCore:
         # containers (aliases-v1 row 1b), never by this cache. ``Op`` is
         # deliberately NOT weak-referenceable (aliases-v1 pins the refusal),
         # so non-weakref-able facades fall back to the strong side table.
-        self._facades: "weakref.WeakValueDictionary[tuple[str, int], Any]" = (
+        self._facades: weakref.WeakValueDictionary[tuple[str, int], Any] = (
             weakref.WeakValueDictionary()
         )
         self._strong_facades: dict[tuple[str, int], Any] = {}

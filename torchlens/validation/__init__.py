@@ -8,16 +8,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..intervention.save import check_spec_compat
 from ..intervention.resolver import resolve_sites
+from ..intervention.save import check_spec_compat
 from ..user_funcs import (
     validate_backward_pass,
     validate_batch_of_models_and_inputs,
     validate_forward_pass,
     validate_saved_outs,
 )
-from .core import validate_saved_outs as validate_trace_saved_outs
 from .consolidated import InterventionValidationReport, validate
+from .core import validate_saved_outs as validate_trace_saved_outs
 from .diagnostics import (
     ValidationDiagnostic,
     ValidationFailure,
@@ -87,8 +87,11 @@ def validate_tlspec(
     }:
         return
     if tlspec_format == "v2.16_modellog_portable":
-        from .._io import MIN_TLSPEC_VERSION, MIN_TORCHLENS_VERSION_TEXT
-        from .._io import ArtifactVersionBelowFloorError as _BelowFloor
+        from .._io import (
+            MIN_TLSPEC_VERSION,
+            MIN_TORCHLENS_VERSION_TEXT,
+            ArtifactVersionBelowFloorError as _BelowFloor,
+        )
 
         raise _BelowFloor(
             f"Model-log bundle at {tlspec_path} uses the TorchLens 2.16 portable "
@@ -327,8 +330,8 @@ def _validate_sparse_run_descriptor(
     from ..runnable import (
         LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS,
         RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
-        RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
         RUNNABLE_CALL_RECIPE_VERSION,
+        RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
         RUNNABLE_INITIALIZER_POLICY_VERSION,
         RUNNABLE_TLSPEC_SCHEMA_VERSION,
     )

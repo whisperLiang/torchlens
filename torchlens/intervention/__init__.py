@@ -23,6 +23,48 @@ from ._topology.topology import (
     compare_topology,
 )
 from .bundle import Bundle
+from .errors import (
+    AppendBatchDependenceError,
+    AppendMismatchError,
+    AppendStateValidationWarning,
+    AppendStreamingNotSupportedError,
+    AxisAmbiguityError,
+    BaselineUndeterminedError,
+    BatchNormTrainModeWarning,
+    BundleMemberError,
+    BundleRelationshipError,
+    ControlFlowDivergenceError,
+    ControlFlowDivergenceWarning,
+    DeadParentError,
+    DirectActivationWriteWarning,
+    DirectWriteInExecutableSaveError,
+    EngineDispatchError,
+    GraphShapeMismatchError,
+    HelperMountError,
+    HookSignatureError,
+    HookSiteCoverageError,
+    HookValueError,
+    InterventionReadyConflictError,
+    LiveModeLabelError,
+    ModelMismatchError,
+    MultiMatchWarning,
+    MultiOutputModuleError,
+    MutateInPlaceWarning,
+    NoParentError,
+    OpaqueCallableInExecutableSaveError,
+    RecursiveTracingError,
+    ReplayPreconditionError,
+    SelectorCompositionError,
+    SiteAmbiguityError,
+    SiteResolutionError,
+    SpecMutationError,
+    SpecPortabilityError,
+    SpliceModuleDeviceError,
+    SpliceModuleDtypeError,
+    UnclassifiedSelectorError,
+    UntrustedCallableError,
+)
+from .handles import HookHandle
 from .helpers import (
     bwd_hook,
     clamp,
@@ -42,7 +84,6 @@ from .helpers import (
     swap_with,
     zero_ablate,
 )
-from .predicates import add, replace_with, when
 from .hooks import (
     HookContext,
     NormalizedHookEntry,
@@ -50,10 +91,10 @@ from .hooks import (
     normalize_hook,
     normalize_hook_plan,
 )
-from .handles import HookHandle
+from .predicates import add, replace_with, when
 from .replay import push, push_from, replay, replay_from
+from .rerun import rerun, run
 from .resolver import SiteTable, resolve_sites
-from .rerun import run, rerun
 from .runtime import do
 from .save import (
     SaveLevel,
@@ -66,17 +107,17 @@ from .save import (
 from .selectors import (
     contains,
     facet,
+    followed_by,
     func,
     func_transform,
-    followed_by,
     grad_fn,
     grad_fn_label,
     grad_input,
     grad_output,
     head,
-    input_at,
     in_backward_pass,
     in_module,
+    input_at,
     intervening,
     label,
     module,
@@ -88,47 +129,6 @@ from .selectors import (
     without_op,
 )
 from .sites import SiteCollection, SiteSpec, sites
-from .errors import (
-    AppendBatchDependenceError,
-    AppendMismatchError,
-    AppendStateValidationWarning,
-    AppendStreamingNotSupportedError,
-    AxisAmbiguityError,
-    BaselineUndeterminedError,
-    BatchNormTrainModeWarning,
-    BundleMemberError,
-    BundleRelationshipError,
-    ControlFlowDivergenceError,
-    ControlFlowDivergenceWarning,
-    DeadParentError,
-    DirectActivationWriteWarning,
-    DirectWriteInExecutableSaveError,
-    EngineDispatchError,
-    GraphShapeMismatchError,
-    HookSignatureError,
-    HelperMountError,
-    HookSiteCoverageError,
-    HookValueError,
-    InterventionReadyConflictError,
-    LiveModeLabelError,
-    ModelMismatchError,
-    MultiMatchWarning,
-    MultiOutputModuleError,
-    MutateInPlaceWarning,
-    NoParentError,
-    OpaqueCallableInExecutableSaveError,
-    RecursiveTracingError,
-    ReplayPreconditionError,
-    SiteAmbiguityError,
-    SiteResolutionError,
-    SelectorCompositionError,
-    SpecMutationError,
-    SpecPortabilityError,
-    SpliceModuleDeviceError,
-    SpliceModuleDtypeError,
-    UnclassifiedSelectorError,
-    UntrustedCallableError,
-)
 from .types import (
     ArgComponent,
     CapturedArgTemplate,
@@ -141,8 +141,8 @@ from .types import (
     FrozenInterventionSpec,
     FrozenTargetSpec,
     FunctionRegistryKey,
-    HFKey,
     HelperSpec,
+    HFKey,
     InterventionDecision,
     InterventionSpec,
     LiteralTensor,

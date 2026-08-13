@@ -29,10 +29,10 @@ WITNESS in the merge-time pre-join lineage audit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import threading
-from typing import Any
 import warnings
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 

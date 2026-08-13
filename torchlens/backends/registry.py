@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from ..errors._base import ConfigurationError
 from ._protocol import CaptureBackend

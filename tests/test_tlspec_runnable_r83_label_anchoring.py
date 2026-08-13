@@ -55,9 +55,10 @@ from __future__ import annotations
 
 import types
 import warnings
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import pytest
 import torch

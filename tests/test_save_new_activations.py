@@ -14,7 +14,6 @@ import torch.nn as nn
 from torchlens import trace as trace_fn
 from torchlens.validation import check_metadata_invariants
 
-
 # =============================================================================
 # Test models
 # =============================================================================
@@ -83,7 +82,7 @@ def test_save_new_outs_multiple_calls():
     model = _SimpleFF()
     log = trace_fn(model, torch.randn(2, 5), random_seed=42)
 
-    for i in range(5):
+    for _i in range(5):
         x = torch.randn(2, 5)
         log.save_new_outs(model, x, random_seed=42)
 

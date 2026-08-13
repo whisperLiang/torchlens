@@ -14,8 +14,7 @@ import warnings
 from collections import defaultdict, deque
 from typing import Any
 
-from .._render_utils import _open_file_quietly
-from .._render_utils import compute_module_penwidth
+from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
 
@@ -112,7 +111,7 @@ def _compute_topological_layout(
     tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float, float, float]], float]
         Positions keyed by source layer label, compound module boxes, and maximum y coordinate.
     """
-    all_node_labels = set(nd["node_label"] for nd in node_data.values())
+    all_node_labels = {nd["node_label"] for nd in node_data.values()}
 
     # Build adjacency from DOT-level edges.
     children_of: dict[str, list[str]] = defaultdict(list)
@@ -581,7 +580,7 @@ def render_rank_layout(
 
     # ── Phase 2: Rank layout ──
     node_label_sizes: dict[str, tuple[float, float]] = {}
-    for dot_name, nd in node_data.items():
+    for _dot_name, nd in node_data.items():
         node_label = nd["node_label"]
         label = nd["attrs"].get("label", "")
         node_label_sizes[node_label] = _estimate_node_size(str(label))

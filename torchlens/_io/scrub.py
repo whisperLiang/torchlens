@@ -12,20 +12,20 @@ from __future__ import annotations
 import copy
 import logging
 import pickle
-from io import BytesIO
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any
 
 import numpy as np
 import torch
 
-from . import BlobRef, FieldPolicy, TLSPEC_VERSION, TorchLensIOError
-from .payload_codec import PayloadCodec, get_payload_codec
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..data_classes._state_adapter import state_items, state_new, state_restore
 from ..data_classes.trace import Trace
+from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError
+from .payload_codec import PayloadCodec, get_payload_codec
 
 # Replay-safe literals that must round-trip BYTE-EXACT through scrub/save/load.
 # ``bytes`` and ``slice`` are declared replay-safe output/argument literals
@@ -752,7 +752,6 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "tinygrad_uop_captures",
         "_mlx_op_captures",
         "_mlx_replay_inventory",
-        "_orphan_pruned_func_call_ids",
     }
 
 

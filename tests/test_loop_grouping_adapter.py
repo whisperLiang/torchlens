@@ -7,10 +7,10 @@ import random
 from collections import Counter, defaultdict
 from typing import Any
 
+import example_models
 import pytest
 import torch
 
-import example_models
 import torchlens.postprocess.loop_grouping_adapter as lga
 from torchlens import trace as trace_fn
 from torchlens.postprocess.loop_grouping_adapter import (
@@ -359,13 +359,10 @@ def _unfiltered_pf_partition_class_oracle(
                 and consumers1.keys() != consumers2.keys()
             ):
                 continue
-            if lga._reaches_forward(workspace, member1, member2, reach_memo):
-                union(member1, member2)
-                distinct_roots -= 1
-                if distinct_roots == 1:
-                    break
-            elif invariant_fed and lga._pf_child_route_allows(
-                workspace, member1, member2, class_of, reach_memo
+            if (
+                lga._reaches_forward(workspace, member1, member2, reach_memo)
+                or invariant_fed
+                and lga._pf_child_route_allows(workspace, member1, member2, class_of, reach_memo)
             ):
                 union(member1, member2)
                 distinct_roots -= 1
@@ -544,7 +541,7 @@ def _unrestricted_merge_iso_groups_oracle(
     reach_memo = lga._ReachabilityCache(workspace)
     anchor_ancestry = lga._topology_anchor_ancestry(workspace)
 
-    for iso_group_label, iso_nodes_orig in iso_node_groups.items():
+    for _iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(
             iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
         )

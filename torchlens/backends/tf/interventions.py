@@ -23,17 +23,17 @@ not intervening.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from ...intervention.selectors import BaseSelector
 from ...intervention.types import HelperSpec, InterventionDecision
 from ...ir.intervention import FireResult
 from ...ir.op_record import amend_module_exit_intervention
-from ..registry import BackendUnsupportedError
 from .._selective_save import reject_selector_outside_kinds
+from ..registry import BackendUnsupportedError
 
 _TF_INTERVENTION_SELECTOR_KINDS = frozenset(
     {"label", "func", "module", "contains", "in_module", "and", "or", "not"}

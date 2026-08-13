@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Sequence
 
 import pytest
 import torch

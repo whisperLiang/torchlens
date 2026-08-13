@@ -29,7 +29,6 @@ from ..ir.container import (
 )
 from ..utils._callable_safety import FACET_RECIPE_MARKER_ATTR
 
-
 RecordScope = Literal["op", "module", "any"]
 RecipeFunc = Callable[[Any], Any]
 PredicateFunc = Callable[[Any], bool]
@@ -181,7 +180,7 @@ class FacetCapabilityFlags:
     portable: bool = True
     reconstructed: bool = False
 
-    def intersect(self, other: "FacetCapabilityFlags") -> "FacetCapabilityFlags":
+    def intersect(self, other: FacetCapabilityFlags) -> FacetCapabilityFlags:
         """Return the weakest-link intersection of two flag sets.
 
         Parameters
@@ -400,7 +399,7 @@ class FacetSpec:
         home_kind: HomeKind = "op",
         recipe_id: str | None = None,
         recipe_version: str | None = None,
-    ) -> "FacetSpec":
+    ) -> FacetSpec:
         """Create a spec anchored to a runtime home object.
 
         Parameters
@@ -442,7 +441,7 @@ class FacetSpec:
         *,
         recipe_id: str | None = None,
         recipe_version: str | None = None,
-    ) -> "FacetSpec":
+    ) -> FacetSpec:
         """Create a read-only computed facet spec.
 
         Parameters
@@ -469,19 +468,19 @@ class FacetSpec:
             home=value_func,
         )
 
-    def __getitem__(self, key: Any) -> "FacetSpec":
+    def __getitem__(self, key: Any) -> FacetSpec:
         """Append a ``__getitem__`` selection primitive."""
 
         return self._append(TransformPrimitive("getitem", (key,), capability_class="selection"))
 
-    def heads(self, n_heads: int, d_head: int) -> "FacetSpec":
+    def heads(self, n_heads: int, d_head: int) -> FacetSpec:
         """Append a projection-to-heads reshape primitive."""
 
         return self._append(
             TransformPrimitive("heads", (n_heads, d_head), capability_class="bijective_view")
         )
 
-    def split(self, sections: int, dim: int = -1) -> tuple["FacetSpec", ...]:
+    def split(self, sections: int, dim: int = -1) -> tuple[FacetSpec, ...]:
         """Return specs for equal sections along a dimension."""
 
         return tuple(
@@ -491,19 +490,19 @@ class FacetSpec:
             for index in range(sections)
         )
 
-    def reshape(self, *shape: int) -> "FacetSpec":
+    def reshape(self, *shape: int) -> FacetSpec:
         """Append a reshape primitive."""
 
         return self._append(TransformPrimitive("reshape", shape, capability_class="bijective_view"))
 
-    def transpose(self, dim0: int, dim1: int) -> "FacetSpec":
+    def transpose(self, dim0: int, dim1: int) -> FacetSpec:
         """Append a transpose primitive."""
 
         return self._append(
             TransformPrimitive("transpose", (dim0, dim1), capability_class="bijective_view")
         )
 
-    def select(self, dim: int, index: int, *, aliasing: bool = False) -> "FacetSpec":
+    def select(self, dim: int, index: int, *, aliasing: bool = False) -> FacetSpec:
         """Append a dimension selection primitive."""
 
         capability: CapabilityClass = "aliasing_selection" if aliasing else "selection"
@@ -605,7 +604,7 @@ class FacetSpec:
             )
         return mask
 
-    def _append(self, primitive: TransformPrimitive) -> "FacetSpec":
+    def _append(self, primitive: TransformPrimitive) -> FacetSpec:
         """Return a copy with one additional primitive."""
 
         transforms = (*self.transforms, primitive)
@@ -951,7 +950,7 @@ class Facet:
 class AttentionHeadView:
     """Scoped accessor for one attention head within a parent facet view."""
 
-    def __init__(self, parent: "FacetView", head_index: int) -> None:
+    def __init__(self, parent: FacetView, head_index: int) -> None:
         """Initialize a per-head attention view.
 
         Parameters
@@ -1136,7 +1135,7 @@ class FacetView(Mapping[FacetKey, Any]):
         menu: dict[FacetKey, FacetMenuItem] = {
             key: FacetMenuItem(status="available_now", recipe=None) for key in self._structural
         }
-        facet_tiers: dict[FacetKey, tuple[int, int]] = {key: (-1, -1) for key in self._structural}
+        facet_tiers: dict[FacetKey, tuple[int, int]] = dict.fromkeys(self._structural, (-1, -1))
         for recipe in sorted(self._recipes, key=lambda item: _recipe_sort_key(item, self._record)):
             raw_contribution = recipe.func(self._record)
             contribution = _normalize_contribution(raw_contribution)
@@ -1597,9 +1596,7 @@ def _recipe_matches(recipe: _RegisteredRecipe, record: Any) -> bool:
         return False
     if recipe.public.qualnames and class_qualname not in recipe.public.qualnames:
         return False
-    if recipe.predicate is not None and not recipe.predicate(record):
-        return False
-    return True
+    return not (recipe.predicate is not None and not recipe.predicate(record))
 
 
 def _weakest_capability_class(

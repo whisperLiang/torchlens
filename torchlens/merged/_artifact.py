@@ -19,11 +19,11 @@ descriptor input list (which can only widen them).
 
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import json
-from pathlib import Path
 import shutil
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .._io import _json

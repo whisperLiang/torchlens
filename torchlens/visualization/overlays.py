@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import torch
 
@@ -57,7 +57,7 @@ def normalize_overlay_name(name: str) -> str:
     return normalized
 
 
-def external_overlay_value(node: Any, scores: "OverlayScores | Callable[[Any], Any]") -> Any:
+def external_overlay_value(node: Any, scores: OverlayScores | Callable[[Any], Any]) -> Any:
     """Return an externally supplied overlay value for ``node``.
 
     Parameters
@@ -180,7 +180,7 @@ def format_overlay_value(name: str, value: Any) -> str:
 
 
 def overlay_line(
-    node: Any, overlay: "str | OverlayScores | Callable[[Any], Any] | None"
+    node: Any, overlay: str | OverlayScores | Callable[[Any], Any] | None
 ) -> str | None:
     """Return a rendered overlay line for ``node``.
 
@@ -207,7 +207,7 @@ def overlay_line(
 
 
 def overlay_border_attrs(
-    node: Any, overlay: "str | OverlayScores | Callable[[Any], Any] | None"
+    node: Any, overlay: str | OverlayScores | Callable[[Any], Any] | None
 ) -> dict[str, str]:
     """Return graph node attributes implied by an overlay.
 

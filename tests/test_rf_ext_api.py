@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -11,7 +11,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.receptive_field import ReceptiveFieldDirection, ReceptiveFieldView, _rules
-
 
 _PACK: dict[str, object] | None = None
 

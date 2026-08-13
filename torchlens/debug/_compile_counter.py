@@ -11,7 +11,7 @@ models instead of taking them on faith.
 from __future__ import annotations
 
 import contextlib
-from typing import Iterator
+from collections.abc import Iterator
 
 from ..utils import _torch_compat
 

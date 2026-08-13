@@ -10,10 +10,9 @@ break IDE field preview fails here first.
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
-
-import pytest
 
 import torchlens as tl
 from torchlens import constants as tl_constants

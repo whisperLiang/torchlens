@@ -25,6 +25,16 @@ from __future__ import annotations
 
 from torchlens.fastlog.types import CaptureSpec
 from torchlens.ir.container import ContainerSpec
+from torchlens.ir.events import (
+    ArgTemplateRef,
+    BlobRef,
+    FunctionCallRef,
+    ModuleFrame,
+    OpEvent,
+    OutputRef,
+    ParentEdge,
+)
+from torchlens.ir.intervention import FireResult, InterventionTemplateRef
 from torchlens.ir.op_record import (
     AncestryFacet,
     AnnotationsFacet,
@@ -42,16 +52,6 @@ from torchlens.ir.op_record import (
     RecordingFacet,
     TransformFacet,
 )
-from torchlens.ir.events import (
-    ArgTemplateRef,
-    BlobRef,
-    FunctionCallRef,
-    ModuleFrame,
-    OpEvent,
-    OutputRef,
-    ParentEdge,
-)
-from torchlens.ir.intervention import FireResult, InterventionTemplateRef
 from torchlens.ir.predicate import ModuleStackFrame, RecordContext
 from torchlens.ir.refs import DeferredRef, DeviceRef, DtypeRef, ParamRef, TensorRef
 from torchlens.ir.semantics import BackendSemantics, CapturePolicy

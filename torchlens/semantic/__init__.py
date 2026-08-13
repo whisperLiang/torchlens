@@ -1,5 +1,6 @@
 """Semantic facet views for TorchLens records."""
 
+from . import patching as patching, recipes as recipes
 from .facets import (
     AttentionHeadView,
     Facet,
@@ -9,8 +10,8 @@ from .facets import (
     FacetRegistrySnapshot,
     FacetSpec,
     FacetView,
-    MissingFacetError,
     MissingFacet,
+    MissingFacetError,
     MissingGradient,
     TransformPrimitive,
     enable_transformerlens_aliases,
@@ -22,8 +23,6 @@ from .facets import (
     transformer_lens_aliases_enabled,
     using,
 )
-from . import patching as patching
-from . import recipes as recipes
 
 __all__ = [
     "AttentionHeadView",

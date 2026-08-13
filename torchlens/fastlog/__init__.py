@@ -7,7 +7,6 @@ import sys as _sys
 from types import ModuleType as _ModuleType
 from typing import Any
 
-
 _LAZY_ATTRS = {
     "ActivationRecord": ("torchlens.fastlog.types", "ActivationRecord"),
     "BundleNotFinalizedError": ("torchlens.fastlog.exceptions", "BundleNotFinalizedError"),

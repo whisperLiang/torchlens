@@ -13,7 +13,6 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.validation.status import ValidationReplayStatus
 
-
 GOLDEN_PATH = Path(__file__).with_name("validation_decisions.json")
 
 

@@ -38,9 +38,10 @@ import math
 import resource
 import time
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -50,9 +51,9 @@ import torchlens as tl
 import torchlens._runnable_execution as rex
 import torchlens._runnable_state as rstate
 from torchlens._runnable_execution import (
-    _ProjectionCountExceeded,
     _count_bounded_fake_tensor_mode_class,
     _preflight_call_allocation,
+    _ProjectionCountExceeded,
 )
 from torchlens._runnable_state import (
     _OUTPUT_COUNT_FLOOR,
@@ -62,7 +63,7 @@ from torchlens._runnable_state import (
 )
 from torchlens.errors import RunCapabilityUnavailableError
 
-_CAPTURE = dict(intervention_ready=True)
+_CAPTURE = {"intervention_ready": True}
 
 
 # --------------------------------------------------------------------------- #

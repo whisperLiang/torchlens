@@ -51,7 +51,7 @@ pytestmark = pytest.mark.skipif(
     reason="NumPy build emits c_call for RNG draw methods (digest belt inactive)",
 )
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _branch(x: torch.Tensor, value: float) -> torch.Tensor:
@@ -111,7 +111,7 @@ _PROXY = weakref.proxy(_PROXY_HOLDER)
 _LRU_HIDDEN: dict[str, Any] = {"gen": np.random.default_rng(102)}
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _lru_get_gen() -> Any:
     """Idiomatic memoized singleton factory; warm calls never enter this frame."""
 

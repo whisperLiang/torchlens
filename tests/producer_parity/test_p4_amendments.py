@@ -26,15 +26,15 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.ir.capture_events import (
+    REBINDABLE_TARGET_LANES,
     AmendmentTargetError,
     CaptureEvents,
-    REBINDABLE_TARGET_LANES,
     SealedJournalAmendmentError,
     _clone_op_event_for_replay,
 )
 from torchlens.ir.op_record import (
-    AmendmentValidationError,
     FACET_DEFAULTS,
+    AmendmentValidationError,
     OpAmendment,
     OpRecord,
     amend_graph_edge_insertion,
@@ -388,7 +388,7 @@ def test_merged_multi_pass_journal_binds_amendments_by_seq(
 def test_concat_rebinds_target_seq_and_refolds(
     leg: str, leg_templates: dict[str, list[Any]]
 ) -> None:
-    assert REBINDABLE_TARGET_LANES == {"intervention_events", "op_amendments"}
+    assert {"intervention_events", "op_amendments"} == REBINDABLE_TARGET_LANES
     source = _fresh_journal(leg_templates[leg], count=3)
     target_journal = _fresh_journal(leg_templates[leg], count=0)
     source_target = source.op_events[2]

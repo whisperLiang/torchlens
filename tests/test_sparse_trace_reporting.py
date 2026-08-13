@@ -12,9 +12,9 @@ a whole-capture guarantee.
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 from typing import Any, NoReturn
 
 import pytest
@@ -22,11 +22,11 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io.lazy import LazyActivationRef
 from torchlens.data_classes._nonfinite import (
     first_nonfinite_layer,
     unexamined_payload_count,
 )
-from torchlens._io.lazy import LazyActivationRef
 from torchlens.options import CaptureOptions
 
 

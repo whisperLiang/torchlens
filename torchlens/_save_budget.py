@@ -27,10 +27,10 @@ an absolute limit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
 import warnings
-from typing import Any, Union
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -46,7 +46,7 @@ __all__ = [
     "resolve_save_budget",
 ]
 
-SaveBudgetOption = Union[str, int, float, None]
+SaveBudgetOption = str | int | float | None
 """Accepted ``save_budget`` spellings: ``"auto"``, a fraction, bytes, or ``None``."""
 
 DEFAULT_SAVE_BUDGET_FRACTION = 0.5
@@ -285,7 +285,7 @@ class SaveBudget:
     tripped: bool = False
 
     @classmethod
-    def from_option(cls, value: SaveBudgetOption) -> "SaveBudget | None":
+    def from_option(cls, value: SaveBudgetOption) -> SaveBudget | None:
         """Build a budget from a user-facing option value.
 
         Parameters

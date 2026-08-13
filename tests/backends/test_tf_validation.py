@@ -6,9 +6,9 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
+from conftest import tensorflow_backend_modules
 
 import torchlens as tl
-from conftest import tensorflow_backend_modules
 from torchlens.backends.tf import TFBackend
 from torchlens.backends.tf.validation import replay_allowlist
 from torchlens.validation.invariants import check_metadata_invariants

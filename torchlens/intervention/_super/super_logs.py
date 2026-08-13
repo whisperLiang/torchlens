@@ -12,9 +12,9 @@ from ._base import _TENSOR_FIELD_LITERAL, Super, _TensorBearing
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ...data_classes.buffer import Buffer
-    from ...data_classes.grad_fn_call import GradFnCall
     from ...data_classes.grad_fn import GradFn
-    from ...data_classes.module import ModuleCall, Module
+    from ...data_classes.grad_fn_call import GradFnCall
+    from ...data_classes.module import Module, ModuleCall
     from ...data_classes.param import Param
 
 
@@ -95,7 +95,7 @@ class SuperParam(Super["Param"], _TensorBearing):
         weights = self._tensor_dict("out")
         reference = next((tensor for tensor in weights.values() if tensor is not None), None)
         if reference is None:
-            return {name: math.nan for name in weights}
+            return dict.fromkeys(weights, math.nan)
         diffs: dict[str, float] = {}
         for name, tensor in weights.items():
             if tensor is None:

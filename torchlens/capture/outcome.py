@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import traceback
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from ..errors import CaptureError, TorchLensError
 
@@ -295,7 +296,7 @@ _REFUSAL_HINTS: dict[str, str] = {
 }
 
 
-def outcome_for(trace: object) -> "CaptureOutcome | None":
+def outcome_for(trace: object) -> CaptureOutcome | None:
     """Return the settled outcome sidecar attached to ``trace``, if any."""
 
     outcome = getattr(trace, "__dict__", {}).get("_capture_outcome")

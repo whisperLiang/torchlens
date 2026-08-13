@@ -528,10 +528,9 @@ class TestCorr24StateAliasTopology:
     def test_overlapping_nonpersistent_buffers_refuse_at_save(self, tmp_path: Path) -> None:
         x = torch.tensor([100.0, 200.0])
         trace = tl.trace(_OverlappingBuffers(), x, capture=_CAPTURE)
-        with pytest.raises(RunnablePreflightError) as excinfo:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                trace.save(tmp_path / "overlap.tlspec", level="runnable", include_weights=True)
+        with pytest.raises(RunnablePreflightError) as excinfo, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            trace.save(tmp_path / "overlap.tlspec", level="runnable", include_weights=True)
         assert "state_alias_topology_unsupported" in str(excinfo.value.fields.get("diagnostics"))
 
     def test_disjoint_views_of_one_storage_still_save_and_verify(self, tmp_path: Path) -> None:
@@ -1044,7 +1043,7 @@ _PlainNT = namedtuple("_PlainNT", ["a", "b"])
 
 
 class _StatefulNT(_PlainNT):
-    def __new__(cls, a: torch.Tensor, b: torch.Tensor) -> "_StatefulNT":
+    def __new__(cls, a: torch.Tensor, b: torch.Tensor) -> _StatefulNT:
         self = super().__new__(cls, a, b)
         self.total = a + b
         return self

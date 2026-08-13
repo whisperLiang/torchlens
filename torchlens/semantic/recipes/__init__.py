@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from importlib import metadata
 from typing import Any
-import warnings
 
-from . import attention, embedding, mlp, norm, residual
 from ..facets import mark_current_registry_as_builtins
+from . import attention, embedding, mlp, norm, residual
 
 BUILTIN_FACET_CAPABILITY_INVENTORY: dict[str, dict[str, str]] = {
     "attention": {

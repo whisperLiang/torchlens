@@ -15,8 +15,10 @@ import mlx.nn as nn  # noqa: E402
 
 import torchlens as tl  # noqa: E402
 from torchlens.intervention.errors import MultiMatchWarning  # noqa: E402
-from torchlens.validation import MetadataInvariantError  # noqa: E402
-from torchlens.validation import check_metadata_invariants  # noqa: E402
+from torchlens.validation import (  # noqa: E402
+    MetadataInvariantError,
+    check_metadata_invariants,
+)
 
 
 class MLXParameterless(nn.Module):
@@ -171,7 +173,7 @@ def test_mlx_nested_modules_preserve_object_module_attribution() -> None:
     trace = tl.trace(MLXNested(), _input(), backend="mlx")
 
     assert trace.module_identity_mode == "object_module"
-    assert set(module.address for module in trace.modules) == {"self", "encoder", "head"}
+    assert {module.address for module in trace.modules} == {"self", "encoder", "head"}
     assert set(trace.modules["self"].call_children) == {"encoder", "head"}
     assert {"encoder:1", "head:1"} <= set(trace.module_calls.keys())
     encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=16).labels()

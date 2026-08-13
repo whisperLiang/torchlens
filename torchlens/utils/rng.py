@@ -23,6 +23,8 @@ Autocast state (``torch.amp.autocast``) is captured similarly so that
 mixed-precision ops can be replayed under the same dtype context.
 """
 
+import _random as _c_random_module
+import _thread as _c_thread_module
 import collections as _collections_module
 import contextvars as _contextvars_module
 import datetime as _datetime_module
@@ -36,8 +38,7 @@ import threading as _threading_module
 import time as _time_module
 import warnings as _warnings_module
 import weakref as _weakref_module
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from collections.abc import Set as AbstractSet
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence, Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import (
@@ -54,10 +55,7 @@ from types import (
     SimpleNamespace,
     TracebackType,
 )
-from typing import Any, Dict, List, TypeVar, cast
-
-import _random as _c_random_module
-import _thread as _c_thread_module
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import torch
@@ -498,8 +496,8 @@ def execute_with_restored_rng_autocast(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     *,
-    rng_states: Dict[str, Any] | None,
-    autocast_state: Dict[str, Any] | None,
+    rng_states: dict[str, Any] | None,
+    autocast_state: dict[str, Any] | None,
 ) -> _T:
     """Execute a callable with saved RNG and autocast state in a tight scope.
 
@@ -608,7 +606,7 @@ operation.
 """
 
 
-def _snapshot_cuda_rng_states() -> List[Any]:
+def _snapshot_cuda_rng_states() -> list[Any]:
     """Return per-device CUDA RNG states, or ``[]`` when no CUDA state is live.
 
     ``torch.cuda.get_rng_state_all()`` calls ``torch.cuda._lazy_init()`` and
@@ -661,7 +659,7 @@ def _snapshot_cuda_rng_states() -> List[Any]:
         return []
 
 
-def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
+def log_current_rng_states(torch_only: bool = False) -> dict[str, Any]:
     """Snapshot the current state of all RNG engines.
 
     The returned dict can be passed to :func:`set_rng_from_saved_states`
@@ -691,7 +689,7 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
     # ``get_rng_state`` family carries no registry row TODAY -- this bracket keeps the
     # invariant structural rather than dependent on that vocabulary staying read-free).
     with _suppress_active_monitor_marks():
-        rng_dict: Dict[str, Any] = {"torch": torch.random.get_rng_state()}
+        rng_dict: dict[str, Any] = {"torch": torch.random.get_rng_state()}
         if not torch_only:
             rng_dict["random"] = random.getstate()
             rng_dict["np"] = np.random.get_state()
@@ -702,7 +700,7 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
         return rng_dict
 
 
-def set_rng_from_saved_states(rng_states: Dict[str, Any]) -> None:
+def set_rng_from_saved_states(rng_states: dict[str, Any]) -> None:
     """Restore RNG engines to a previously captured state.
 
     Parameters
@@ -798,7 +796,7 @@ class AutocastRestore:
         """
 
         self._autocast_state = autocast_state
-        self._contexts: List[Any] = []
+        self._contexts: list[Any] = []
 
     def __enter__(self) -> "AutocastRestore":
         """Enter captured autocast contexts.
@@ -2026,7 +2024,7 @@ class host_nondeterminism_monitor:
         # an id collision after GC returned STALE ``co_names`` and snapshotted
         # the wrong RNG receivers -- an under-witness.
         self._numpy_global_name_cache: dict[
-            tuple[int, int], tuple[CodeType, Dict[str, Any], tuple[str, ...]]
+            tuple[int, int], tuple[CodeType, dict[str, Any], tuple[str, ...]]
         ] = {}
         # Code objects compare structurally and ignore ``co_filename``. Key by identity
         # and retain the code object strongly in the value so an id cannot be reused
@@ -3602,7 +3600,7 @@ class host_nondeterminism_monitor:
         raise _NotADigestableRng
 
     @staticmethod
-    def _module_namespace_walk_eligible(module: Any) -> Dict[str, Any] | None:
+    def _module_namespace_walk_eligible(module: Any) -> dict[str, Any] | None:
         """Return a loaded module's raw namespace when the B4 deep inventory may walk it.
 
         Eligibility is decided from RAW reads only (the base ``ModuleType`` getset and
@@ -4005,7 +4003,7 @@ class host_nondeterminism_monitor:
             return True
         if value_type in (dict, list, tuple, set, frozenset):
             return True
-        if isinstance(
+        return not isinstance(
             value,
             (
                 type,
@@ -4019,9 +4017,7 @@ class host_nondeterminism_monitor:
                 property,
                 GetSetDescriptorType,
             ),
-        ):
-            return False
-        return True
+        )
 
     @staticmethod
     def _class_attr_surface(klass: type) -> tuple[Any, ...]:

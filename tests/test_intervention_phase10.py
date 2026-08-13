@@ -14,8 +14,6 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.io import load_intervention_spec
-from torchlens.ir.container import TupleIndex
 from torchlens.intervention.errors import (
     MultiMatchWarning,
     OpaqueCallableInExecutableSaveError,
@@ -25,16 +23,21 @@ from torchlens.intervention.errors import (
 from torchlens.intervention.resolver import (
     function_registry_key_from_callable,
 )
-from torchlens.ir.selector_eval import selector_from_spec
-from torchlens.intervention.save import _write_tlspec_tensor_blob
-from torchlens.intervention.save import _sync_spec_records_from_log
-from torchlens.intervention.save import resolve_function_registry_key, save_intervention
+from torchlens.intervention.save import (
+    _sync_spec_records_from_log,
+    _write_tlspec_tensor_blob,
+    resolve_function_registry_key,
+    save_intervention,
+)
 from torchlens.intervention.types import (
     FireRecord,
     FunctionRegistryKey,
     HelperSpec,
     InterventionSpec,
 )
+from torchlens.io import load_intervention_spec
+from torchlens.ir.container import TupleIndex
+from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.validation import check_spec_compat
 
 _INTERVENTION_RESOLVER = importlib.import_module("torchlens.intervention.resolver")

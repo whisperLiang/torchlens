@@ -615,8 +615,7 @@ def test_r69_key_codec_is_injective_and_round_trips() -> None:
 def test_r69_classifier_choke_points_source_scan() -> None:
     """Snapshot, literal encode, literal compare, and key codec share the classifier."""
 
-    from torchlens import _runnable_execution
-    from torchlens import _input_walk
+    from torchlens import _input_walk, _runnable_execution
     from torchlens._io import runnable as io_runnable
 
     for func in (

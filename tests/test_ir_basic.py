@@ -27,6 +27,7 @@ from torchlens.ir import (
     FunctionEventInput,
     InterventionState,
     InterventionTemplateRef,
+    ModuleCaptureWorkspace,
     ModuleEnterEvent,
     ModuleExitEvent,
     ModuleFrame,
@@ -36,11 +37,10 @@ from torchlens.ir import (
     ParamRef,
     ParentEdge,
     PreHookProvenanceEvent,
+    RawGraphWorkspace,
     RecordContext,
     ReservedLabel,
     TensorRef,
-    ModuleCaptureWorkspace,
-    RawGraphWorkspace,
     WrapperRuntimeWorkspace,
 )
 

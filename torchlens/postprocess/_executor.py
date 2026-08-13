@@ -25,16 +25,17 @@ from __future__ import annotations
 
 import heapq
 import sys
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ..utils.display import _vtimed
 from ._contracts import (
     CAPTURE_BASELINE_TOKENS,
     LEGACY_STEP_RANK,
     POSTPROCESS_STEP_CONTRACTS,
     PostprocessStepContract,
 )
-from ..utils.display import _vtimed
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -57,7 +58,7 @@ def _pp() -> Any:
 class StepContext:
     """Mutable per-run context threaded through the step registry."""
 
-    trace: "Trace"
+    trace: Trace
     output_tensors: list[Any]
     output_tensor_addresses: list[str]
     output_parent_labels: list[Any]
@@ -471,7 +472,7 @@ def _op_touching(contract: PostprocessStepContract) -> bool:
     )
 
 
-def derive_edges(rank_override: "dict[str, int] | None" = None) -> list[DerivedEdge]:
+def derive_edges(rank_override: dict[str, int] | None = None) -> list[DerivedEdge]:
     """Derive every ordering edge from the declared contracts.
 
     All rules orient by ``LEGACY_STEP_RANK`` (design-ppdag-v3 §2.3):
@@ -598,7 +599,7 @@ def derived_pinnable_pairs() -> dict[tuple[str, str], set[str]]:
 
 
 def classify_declared_reads(
-    noop_writers: "Mapping[str, frozenset[str]] | None" = None,
+    noop_writers: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[tuple[str, str], str]:
     """Classify every declared op-column read (design-ppdag-v3 §2.4).
 
@@ -668,7 +669,7 @@ def classify_declared_reads(
     return classified
 
 
-def execution_order(rank: "dict[str, int] | None" = None) -> tuple[str, ...]:
+def execution_order(rank: dict[str, int] | None = None) -> tuple[str, ...]:
     """Derive the execution order: Kahn with a min-heap keyed by rank.
 
     Ranks are unique integers, so no secondary key exists (the historical
@@ -679,7 +680,7 @@ def execution_order(rank: "dict[str, int] | None" = None) -> tuple[str, ...]:
     if rank is None:
         rank = dict(LEGACY_STEP_RANK)
     contracts = _registry_contracts()
-    indegree: dict[str, int] = {step: 0 for step in contracts}
+    indegree: dict[str, int] = dict.fromkeys(contracts, 0)
     successors: dict[str, set[str]] = {step: set() for step in contracts}
     for edge in derive_edges(rank):
         if edge.dst not in successors[edge.src]:
@@ -706,7 +707,7 @@ def execution_order(rank: "dict[str, int] | None" = None) -> tuple[str, ...]:
 
 def _iter_structural_violations(
     registry_order: tuple[str, ...] | None = None,
-    rank: "dict[str, int] | None" = None,
+    rank: dict[str, int] | None = None,
 ) -> Iterator[str]:
     """Yield every 7.1-family structural violation (import checks).
 

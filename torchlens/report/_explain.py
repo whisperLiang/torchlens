@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import traceback
 from collections import Counter
 from typing import Any, Literal
-import traceback
 
 import torch
 
