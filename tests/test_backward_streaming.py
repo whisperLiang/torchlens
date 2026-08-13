@@ -94,6 +94,25 @@ def test_log_backward_streams_grads_to_disk(tmp_path: Path) -> None:
     assert len(trace.saved_grad_ops) > 0
 
 
+def test_streamed_bundle_honors_per_call_save_grads_override(tmp_path: Path) -> None:
+    """Bundle inclusion follows retained pass payloads, not the trace default."""
+    bundle_path = tmp_path / "per_call_backward_stream.tl"
+    model = _TinyStreamingBackwardModel()
+    inputs = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(layers_to_save="all", save_grads=True),
+        storage=tl.to_disk(bundle_path),
+    )
+    trace.save_grads = None
+
+    trace.log_backward(trace[trace.output_layers[0]].out.sum(), save_grads=True)
+
+    manifest = Manifest.read(bundle_path / "manifest.json")
+    assert any(entry.kind == "grad" for entry in manifest.tensors)
+
+
 @pytest.mark.smoke
 def test_lazy_load_grad_from_bundle(tmp_path: Path) -> None:
     """Lazy-loaded grads should materialize on field access."""

@@ -1626,7 +1626,7 @@ def _finalize_streamed_bundle(self: "Trace") -> None:
     scrubbed_state, blob_specs, unsupported_tensor_records = scrub_for_save(
         self,
         include_outs=True,
-        include_grads=self.save_grads not in (None, False),
+        include_grads=_has_retained_gradient_payloads(self),
         include_saved_args=self.save_arg_values,
         include_rng_states=self.save_rng_states,
     )
@@ -1653,6 +1653,37 @@ def _finalize_streamed_bundle(self: "Trace") -> None:
     )
     self._out_writer = None
     self._defer_streaming_bundle_finalization = False
+
+
+def _has_retained_gradient_payloads(self: "Trace") -> bool:
+    """Return whether any completed backward pass retained gradient payloads.
+
+    Parameters
+    ----------
+    self:
+        Trace whose projected operation and parameter gradients should be
+        inspected.
+
+    Returns
+    -------
+    bool
+        Whether portable scrubbing must include gradient payloads.
+
+    Notes
+    -----
+    The projection is the authority here, rather than ``Trace.save_grads``:
+    ``log_backward(save_grads=...)`` may override that capture-time default on
+    each pass.
+    """
+
+    for op in getattr(self, "layer_list", ()):
+        for record in getattr(op, "grads", ()):
+            if record.grad is not None or record.transformed_grad is not None:
+                return True
+    for param in getattr(self, "param_logs", {}).values():
+        if any(record.grad is not None for record in getattr(param, "grads", ())):
+            return True
+    return False
 
 
 def _evict_streamed_outs(self: "Trace") -> None:
