@@ -1034,6 +1034,21 @@ def load(
     invalidate_static_class_attr_cache()
     bundle_path = Path(path)
     if bundle_path.is_dir():
+        # Version-gated merged-directory branch: the merged root manifest is a
+        # different discriminated object from a trace bundle's manifest (it
+        # carries no tensor table), so it routes before Manifest parsing.
+        # Runtimes without this branch refuse the format typed at the closed
+        # bundle_format vocabulary check.
+        merged_manifest_path = bundle_path / "manifest.json"
+        if merged_manifest_path.is_file() and not merged_manifest_path.is_symlink():
+            try:
+                candidate = json.loads(merged_manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                candidate = None
+            if isinstance(candidate, dict) and candidate.get("bundle_format") == "merged-directory":
+                from ..merged._artifact import load_merged
+
+                return load_merged(bundle_path)  # type: ignore[return-value]
         from ..io import detect_tlspec_format
 
         tlspec_format = detect_tlspec_format(bundle_path)

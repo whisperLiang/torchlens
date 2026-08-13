@@ -1011,8 +1011,10 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
                     "are invisible to capture."
                 ),
                 suggestion=(
-                    "Trace the undistributed module. Cross-rank merging is not available "
-                    "in this release."
+                    "Trace the undistributed module. Cross-rank merging "
+                    "(tl.merge_ranks) covers dense-parameter captures with "
+                    "explicit collectives; DTensor/TP capture stays refused "
+                    "until its capture fidelity is proven."
                 ),
                 sites=tp_sites,
                 exact=evidence.tp_module_exact,

@@ -10,7 +10,7 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 
 ```
 import torchlens
-  |- exposes 94 top-level public names in __all__
+  |- exposes 96 top-level public names in __all__
   |- eagerly imports the core capture/intervention surface, fastlog/options, and
   |  the HuggingFace autoroute bridge; compat, export, report, stats,
   |  validation, and viz stay lazy
