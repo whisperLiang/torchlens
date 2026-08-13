@@ -308,6 +308,122 @@ def test_postprocess_write_audit_enforces_declared_columns(
     trace.cleanup()
 
 
+def test_postprocess_write_audit_covers_save_code_context_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 11.5's var_names writes pass enforcement under save_code_context.
+
+    Design-ppdag-v3 defect 3: step 11.5 declared an EMPTY write set, silently
+    wrong under ``save_code_context=True`` (it assigns ``op.var_names`` on
+    every op). No recorded enforcement axis enabled the flag, so the audit
+    never tripped. This axis pins the repaired declaration.
+    """
+
+    class _AssigningModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            hidden = self.linear(x)
+            activated = torch.relu(hidden)
+            return activated
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(
+        _AssigningModel().eval(), torch.randn(2, 3), save_code_context=True, save_grads=False
+    )
+    try:
+        assert any(op.var_names for op in trace.layer_list if op.type != "output")
+    finally:
+        trace.cleanup()
+
+
+def test_postprocess_write_audit_covers_streaming_axis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Steps 18/19 pass enforcement with their hand-derived write sets.
+
+    Design-ppdag-v3 defect 1: steps 18/19 declared ``writes=None``
+    (wildcard), so the streaming finalization/eviction windows were never
+    audited. This axis runs a disk-streamed capture under enforcement and
+    asserts the streamed refs landed (step 18) and outs were evicted
+    (step 19).
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(
+        _PolicyModel().eval(),
+        torch.randn(2, 3),
+        storage=tl.to_disk(tmp_path / "run.tlspec"),
+        save_grads=False,
+    )
+    try:
+        streamed = [op for op in trace.layer_list if getattr(op, "out_ref", None) is not None]
+        assert streamed, "step 18 must attach streamed out refs"
+        assert all(op._slot("out") is None for op in streamed), "step 19 must evict outs"
+    finally:
+        trace.cleanup()
+
+
+class _OrphanEquivalenceModel(nn.Module):
+    """Orphan island sharing an equivalence class with surviving ops.
+
+    The ``z``-side ops are a disconnected component (orphaned by step 3's
+    undirected flood) while ``z + 1``/``z ** 2`` are equivalence-classmates
+    of the surviving ``x + 1``/``x ** 2``, so the removal scrub must rebind
+    the survivors' ``equivalent_ops``.
+    """
+
+    @staticmethod
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        x = x + 1
+        z = torch.ones(5, 5)
+        z = z + 1
+        _dead = z**2
+        return x**2
+
+
+def test_postprocess_write_audit_covers_orphan_keep_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 3 passes enforcement writing is_orphan under keep_orphans=True.
+
+    Design-ppdag-v3 defect 4a: with ``keep_orphans=True`` on an
+    orphan-bearing model, step 3 writes ``is_orphan`` on every retained
+    orphan and returns BEFORE the batch removal — a write set no recorded
+    enforcement axis exercised.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_OrphanEquivalenceModel(), torch.ones(5, 5), keep_orphans=True)
+    try:
+        assert trace.orphans, "the island must be retained as orphans"
+        assert all(op.is_orphan for op in trace.orphans)
+    finally:
+        trace.cleanup()
+
+
+def test_postprocess_write_audit_covers_orphan_removal_scrub_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 3 passes enforcement scrubbing survivors' equivalent_ops.
+
+    Design-ppdag-v3 defect 4b: default orphan REMOVAL rebinds surviving
+    rows' ``equivalent_ops`` when an orphan shared an equivalence class —
+    an undeclared write that tripped the audit the day this axis landed.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_OrphanEquivalenceModel(), torch.ones(5, 5))
+    try:
+        labels = {op.label for op in trace.layer_list}
+        for op in trace.layer_list:
+            assert set(op.equivalent_ops) <= labels, "scrub left a dead equivalence label"
+    finally:
+        trace.cleanup()
+
+
 def test_postprocess_write_audit_trips_on_undeclared_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -322,6 +438,8 @@ def test_postprocess_write_audit_trips_on_undeclared_column(
         original.name,
         original.contract,
         writes=frozenset(),
+        reads=original.reads,
+        trace_state=original.trace_state,
     )
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "4", narrowed)
@@ -389,19 +507,21 @@ def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
     from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
 
     original = POSTPROCESS_STEP_CONTRACTS["3"]
-    assert original.removes_rows, "step 3 must sanction orphan-row removal"
+    assert "deletes" in original.row_effects, "step 3 must sanction orphan-row removal"
     unsanctioned = PostprocessStepContract(
         original.step,
         original.name,
         original.contract,
         writes=original.writes,
-        removes_rows=False,
+        reads=original.reads,
+        row_effects=original.row_effects - {"deletes"},
+        trace_state=original.trace_state,
     )
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "3", unsanctioned)
     model = _PolicyModel().eval()
     recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
-    with pytest.raises(AssertionError, match="without a removes_rows sanction"):
+    with pytest.raises(AssertionError, match="without a 'deletes' row_effects sanction"):
         recording.to_trace()
 
 

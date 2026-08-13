@@ -339,19 +339,25 @@ transient fields live in three named per-phase workspaces
 the transient-cleanup seam, with the backend `finalize_forward_session`
 protocol taking the raw-graph workspace as its ownership token; the three
 dead fields (`grad_fn_strong_refs`, `output_container_specs*`) were deleted
-with the dissolution. The 21 step contracts declare ENFORCED op-store column
-write sets (env-gated zero-cost-when-off audit; recorded over the six
-surface-oracle axes plus backward; the sets are reviewed contract diffs).
-The audit catches BOTH assignment/deletion (write interception) and
-IN-PLACE container mutation (order-canonical content fingerprints of
-mutable-container cells diffed per step window, existing rows only — row
-creation is a step's produces contract, and whole-row REMOVAL is checked
-against the contract's explicit `removes_rows` sanction instead of
-reading as per-column writes). Declared READ sets are the named remaining
-slice of the full read/write contract: reads are not audited yet, so a
-step reading an undeclared column is not caught. Disclosed audit
-residuals: mutables nested in non-builtin custom objects, and kind-table
-(non-op-store) cells.
+with the dissolution. The 26 step contracts (design-ppdag-v3, 2026-08-12) declare ENFORCED
+op-store column write sets AND read sets plus placeholder probes, row
+effects, and trace-state tokens (`postprocess/_contracts.py`); the step
+order is DERIVED from them — rank-keyed Kahn over edges oriented by the
+frozen `LEGACY_STEP_RANK`, semantically pinned by the reason-bearing
+`PINNED_ORDER_PAIRS` corpus (import checks R1/R2/K1, test-side K2). The
+env-gated zero-cost-when-off audit catches assignment/deletion (write
+interception), IN-PLACE container mutation (order-canonical content
+fingerprints of mutable-container cells diffed per step window, existing
+rows only — row creation is a step's produces contract, whole-row REMOVAL
+is checked against the `row_effects` `deletes` sanction, and released-row
+cell accesses are row-lifecycle events), and — under
+`TORCHLENS_POSTPROCESS_READ_AUDIT=enforce` — undeclared column READS
+(recorded and enforced over the axes matrix in
+`tests/support/postprocess_axes.py`; `Op.copy()`'s whole-schema clone loop
+is a tagged row-clone access kind, not per-column reads). Disclosed audit
+residuals: mutables nested in non-builtin custom objects, kind-table
+(non-op-store) cells, and the sealed/fork-view silent skip of the class
+swap (benign in-pipeline: sealing happens after step 20).
 The Trace PHYSICAL component decomposition (components as storage owners
 behind 220 property forwards) is the named remaining slice: the declared
 per-field ownership map (`_trace_components.py`) partitions every field

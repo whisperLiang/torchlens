@@ -27,7 +27,8 @@ value); facade descriptors translate ``_MISSING`` into the exact
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -672,6 +673,36 @@ class _SealedRowMajorOpRowStore(OpRowStore):
 #: contracts). Populated only while a postprocess step audit is active.
 _AUDIT_COLLECTORS: dict[int, set[int]] = {}
 
+#: Per-window read collectors (design-ppdag-v3 combined audit): column ids
+#: observed through ``cell_get`` while a COMBINED (read-recording) audit is
+#: armed. Column-granular by design — never per ``(row, fid)`` (review note
+#: N4: the matrix cost is measured, and row granularity buys nothing the
+#: per-column classification uses).
+_AUDIT_READS: dict[int, set[int]] = {}
+
+#: Reads made inside a ``row_clone_scope`` — the mechanical row-clone access
+#: kind (design-ppdag-v3 §2.4d). ``Op.copy()`` reads every schema column via
+#: ``getattr``; recorded naively those would drown the findings report in
+#: phantom per-column dependencies. Clone reads are legal iff the step's
+#: ``row_effects`` contains ``"creates"`` and generate NO per-column edges
+#: (ordering safety is carried by the two-sided row barrier). Clone WRITES
+#: need no twin: ``Op.__init__`` delivers the cloned row through
+#: ``store.adopt_row``, which bypasses cell interception entirely (verified;
+#: review note N7). Deepcopy recursion into ``__repr__``/``__reduce__``
+#: readers inside the clone loop also lands here, conservatively.
+_AUDIT_CLONE_READS: dict[int, set[int]] = {}
+
+#: Column ids with at least one CONTENT-EFFECTIVE intercepted write this
+#: window (recording mode only): the effective-write evidence guard — a
+#: permanent no-op write (``cell_set(c, old_value)``) cannot discharge a
+#: read-before-write finding. In-place container mutations are judged by the
+#: begin/end fingerprint diff instead (they never pass through ``cell_set``),
+#: and a fingerprint change is content-effective by definition.
+_AUDIT_WRITE_EFFECTS: dict[int, set[int]] = {}
+
+#: Live ``row_clone_scope`` nesting depth per audited store id.
+_CLONE_SCOPE_DEPTH: dict[int, int] = {}
+
 #: Per-store ``(row_count, fingerprints)`` snapshots of mutable-container
 #: cells captured at audit begin, diffed at audit end so IN-PLACE mutations
 #: (invisible to the ``cell_set``/``cell_del`` interception) surface as
@@ -772,6 +803,13 @@ class _AuditedOpRowStore(OpRowStore):
     ``begin_cell_write_audit`` swaps a store's ``__class__`` to this subclass
     (layout-identical: empty ``__slots__``), so the un-audited hot path pays
     ZERO extra cost — no per-write branch exists on ``OpRowStore`` itself.
+    The enforcing CI path keeps this write-only twin so it never pays a
+    ``cell_get`` override; the read-recording combined twin below is armed
+    only in read-audit modes. Swap pairs are disjoint per store; the two
+    named silent-skip kinds (the ``is OpRowStore`` guard) are fork-backed
+    ``OpStoreView``s and post-freeze ``_SealedRowMajorOpRowStore``s — sealing
+    happens after step 20, outside every window, so the sealed skip is
+    benign for the pipeline (disclosed residual, design-ppdag-v3 §1.4).
     """
 
     __slots__ = ()
@@ -800,20 +838,163 @@ class _AuditedOpRowStore(OpRowStore):
         return OpRowStore.cell_del(self, row, fid)
 
 
-def begin_cell_write_audit(store: OpRowStore) -> None:
-    """Start recording column writes on ``store`` (idempotent).
+def _write_is_content_effective(old: Any, new: Any) -> bool:
+    """Classify one intercepted write as content-effective or no-op.
 
-    Besides arming the ``cell_set``/``cell_del`` interception, snapshots a
-    content fingerprint of every mutable-container cell so the audit end can
-    surface IN-PLACE mutations as writes of their column (sol review
-    finding 6: container mutations previously smuggled undeclared writes
-    through the enforcement).
+    FINDING-favoring (design-ppdag-v3 §2.4 guard 2): under guard 2 an
+    EFFECTIVE verdict is the lenient one — effective writes discharge
+    read-before-write findings — so a write counts effective only when that
+    is PROVABLE: first write over the missing placeholder, class change,
+    scalar inequality, or a builtin-container content-fingerprint change.
+    Everything ambiguous defaults to NO-OP, which can only keep a writer in
+    the permanent no-op table and keep a downstream read visible as a
+    finding — a false alarm at worst, never a laundering pass. Honest
+    residual: a genuinely value-changing rich-object rewrite (e.g. a tensor
+    cell overwritten with a distinct same-class tensor holding different
+    contents) is classified no-op here, so reads it feeds must be
+    discharged by review (pinned finding/probe or a matrix axis whose
+    first-write is observed), never by effectiveness evidence.
     """
 
-    if store.__class__ is OpRowStore:
-        store.__class__ = _AuditedOpRowStore
-    _AUDIT_COLLECTORS.setdefault(id(store), set())
-    _AUDIT_ROW_RELEASES.setdefault(id(store), set())
+    if old is new:
+        # Rebinding the identical object writes nothing the cell did not
+        # already hold; in-place mutation of it is judged by the begin/end
+        # fingerprint diff, never here (review note N3).
+        return False
+    if old is _MISSING:
+        return True
+    old_cls = old.__class__
+    if old_cls is not new.__class__:
+        return True
+    if old_cls in (bool, int, float, str, bytes, type(None)):
+        return old != new
+    if old_cls is dict or old_cls is list or old_cls is set:
+        return _cell_content_fingerprint(old) != _cell_content_fingerprint(new)
+    if old_cls is tuple or old_cls is frozenset:
+        try:
+            return _value_fingerprint(old) != _value_fingerprint(new)
+        except Exception:
+            return False
+    return False
+
+
+class _CombinedAuditOpRowStore(OpRowStore):
+    """Read+write recording twin for the recording/read-audit modes.
+
+    Same class-swap mechanics as ``_AuditedOpRowStore``; additionally
+    records column-granular reads through ``cell_get`` (the one facade read
+    chokepoint) and tags each intercepted write as content-effective or
+    no-op. The old-value probe inside ``cell_set`` reads ``self._rows``
+    directly — NEVER through ``cell_get`` — so the effectiveness guard
+    cannot record a phantom read of the written column (review note N3).
+    """
+
+    __slots__ = ()
+
+    def cell_get(self, row: int, fid: int) -> Any:
+        """Record the read column id, then perform the read.
+
+        Reads on rows already marked RELEASED this window (op removal
+        husking walks and clears every set cell) are row-lifecycle events
+        like the husking deletes — recording them would report the whole
+        schema as step-3/6 reads. Reads BEFORE the release mark (e.g. the
+        orphan-record construction) still record normally.
+        """
+
+        store_id = id(self)
+        if _CLONE_SCOPE_DEPTH.get(store_id, 0):
+            collector = _AUDIT_CLONE_READS.get(store_id)
+        else:
+            collector = _AUDIT_READS.get(store_id)
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
+            store_id, _NO_RELEASES
+        ):
+            collector.add(fid)
+        return OpRowStore.cell_get(self, row, fid)
+
+    def cell_set(self, row: int, fid: int, value: Any) -> None:
+        """Record the write and its content-effectiveness, then write."""
+
+        store_id = id(self)
+        collector = _AUDIT_COLLECTORS.get(store_id)
+        if collector is not None:
+            collector.add(fid)
+            effects = _AUDIT_WRITE_EFFECTS.get(store_id)
+            if effects is not None and fid not in effects:
+                rows = self._rows
+                old = rows[row][fid] if rows is not None else _MISSING
+                if _write_is_content_effective(old, value):
+                    effects.add(fid)
+        OpRowStore.cell_set(self, row, fid, value)
+
+    def cell_del(self, row: int, fid: int) -> bool:
+        """Record the deleted column id, then perform the delete.
+
+        A delete of a previously-set cell is content-effective by
+        definition; husking deletes stay row-lifecycle events.
+        """
+
+        store_id = id(self)
+        collector = _AUDIT_COLLECTORS.get(store_id)
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
+            store_id, _NO_RELEASES
+        ):
+            collector.add(fid)
+            result = OpRowStore.cell_del(self, row, fid)
+            if result:
+                effects = _AUDIT_WRITE_EFFECTS.get(store_id)
+                if effects is not None:
+                    effects.add(fid)
+            return result
+        return OpRowStore.cell_del(self, row, fid)
+
+
+@contextmanager
+def row_clone_scope(store: Any) -> Iterator[None]:
+    """Tag reads inside the scope as row-clone reads (category d).
+
+    Free when unarmed (review note N7): ``Op.copy()`` also runs on pickle,
+    fork-fallback, and preview paths where no audit exists — the fast path
+    is one dict lookup. Detached stores and fork views are never audited,
+    so their ids simply miss.
+    """
+
+    store_id = id(store)
+    if store_id not in _AUDIT_READS:
+        yield
+        return
+    _CLONE_SCOPE_DEPTH[store_id] = _CLONE_SCOPE_DEPTH.get(store_id, 0) + 1
+    try:
+        yield
+    finally:
+        depth = _CLONE_SCOPE_DEPTH.get(store_id, 1) - 1
+        if depth:
+            _CLONE_SCOPE_DEPTH[store_id] = depth
+        else:
+            _CLONE_SCOPE_DEPTH.pop(store_id, None)
+
+
+class StepAuditResult(NamedTuple):
+    """One closed audit window's observations (column NAMES, not fids)."""
+
+    written_columns: set[str]
+    released_rows: int
+    read_columns: set[str]
+    clone_read_columns: set[str]
+    effective_write_columns: set[str]
+
+
+def begin_cell_write_audit(store: OpRowStore, *, record_reads: bool = False) -> None:
+    """Start recording column writes (and optionally reads) on ``store``.
+
+    Ordering is load-bearing (design-ppdag-v3 §2.5, Opus 5): the
+    mutable-container fingerprint sweep runs arbitrary ``__repr__`` code at
+    the leaves, so the snapshot is built FIRST and the class swap happens
+    LAST — arming before fingerprinting would let any repr path reaching
+    ``cell_get`` self-pollute the window's read record and break
+    ``observed <= declared``.
+    """
+
     fingerprints: dict[int, int] = {}
     rows = store._rows
     baseline_rows = 0
@@ -827,22 +1008,41 @@ def begin_cell_write_audit(store: OpRowStore) -> None:
                 if fingerprint is not None:
                     fingerprints[base + fid] = fingerprint
     _AUDIT_FINGERPRINTS[id(store)] = (baseline_rows, fingerprints)
+    _AUDIT_COLLECTORS.setdefault(id(store), set())
+    _AUDIT_ROW_RELEASES.setdefault(id(store), set())
+    if record_reads:
+        _AUDIT_READS.setdefault(id(store), set())
+        _AUDIT_CLONE_READS.setdefault(id(store), set())
+        _AUDIT_WRITE_EFFECTS.setdefault(id(store), set())
+    if store.__class__ is OpRowStore:
+        store.__class__ = (
+            _CombinedAuditOpRowStore if record_reads else _AuditedOpRowStore
+        )
 
 
-def end_cell_write_audit(store: OpRowStore) -> tuple[set[str], int]:
-    """Stop recording; return the written column NAMES and released-row count.
+def end_cell_write_audit(store: OpRowStore) -> StepAuditResult:
+    """Stop recording; return the window's observations by column NAME.
 
     Columns whose mutable-container cells changed CONTENT since the audit
-    began count as written even without an intercepted ``cell_set`` — the
-    in-place mutation path. Rows released whole (op removal husking) are
-    excluded from both channels and reported as the second element, checked
-    against the step contract's explicit ``removes_rows`` sanction.
+    began count as written (and content-effective) even without an
+    intercepted ``cell_set`` — the in-place mutation path, judged ONLY by
+    this begin/end fingerprint diff (review note N3). Rows released whole
+    (op removal husking) are excluded from the column channels and reported
+    as ``released_rows``, checked against the step contract's explicit
+    ``row_effects`` sanction. Collectors and the snapshot are popped BEFORE
+    the diff runs, so the diff's own reads cannot pollute the record.
     """
 
-    observed = _AUDIT_COLLECTORS.pop(id(store), set())
-    released = _AUDIT_ROW_RELEASES.pop(id(store), set())
-    snapshot = _AUDIT_FINGERPRINTS.pop(id(store), None)
-    if store.__class__ is _AuditedOpRowStore:
+    store_id = id(store)
+    observed = _AUDIT_COLLECTORS.pop(store_id, set())
+    released = _AUDIT_ROW_RELEASES.pop(store_id, set())
+    snapshot = _AUDIT_FINGERPRINTS.pop(store_id, None)
+    reads = _AUDIT_READS.pop(store_id, set())
+    clone_reads = _AUDIT_CLONE_READS.pop(store_id, set())
+    tracked_effects = _AUDIT_WRITE_EFFECTS.pop(store_id, None)
+    effects = tracked_effects if tracked_effects is not None else set()
+    _CLONE_SCOPE_DEPTH.pop(store_id, None)
+    if store.__class__ in (_AuditedOpRowStore, _CombinedAuditOpRowStore):
         store.__class__ = OpRowStore  # type: ignore[assignment]
     layout_names = store.layout.names
     rows = store._rows
@@ -859,11 +1059,24 @@ def end_cell_write_audit(store: OpRowStore) -> tuple[set[str], int]:
                 continue
             base = row_index * n_fields
             for fid, value in enumerate(rows[row_index]):
-                if fid in observed:
+                # Write-only mode keeps the historical skip on intercepted
+                # columns; effects tracking additionally diffs intercepted-
+                # but-not-yet-effective columns so an in-place mutation
+                # behind a no-op rebind still reads as content-effective.
+                if fid in observed and (
+                    tracked_effects is None or fid in effects
+                ):
                     continue
                 if _cell_content_fingerprint(value) != baseline.get(base + fid):
                     observed.add(fid)
-    return {layout_names[fid] for fid in observed}, len(released)
+                    effects.add(fid)
+    return StepAuditResult(
+        {layout_names[fid] for fid in observed},
+        len(released),
+        {layout_names[fid] for fid in reads},
+        {layout_names[fid] for fid in clone_reads},
+        {layout_names[fid] for fid in effects},
+    )
 
 
 class DetachedOpStore:

@@ -10,7 +10,9 @@ eviction plus parameter-reference release. Step order is load-bearing.
 
 | File | Steps | Purpose |
 |------|-------|---------|
-| `__init__.py` | orchestrator | Full `postprocess()` pipeline and step contracts |
+| `__init__.py` | orchestrator | `postprocess()` prologue/epilogue, audit helpers, re-exports |
+| `_contracts.py` | contracts | Step contracts, frozen rank, pinned-pair corpus, capture baseline |
+| `_executor.py` | derivation + executor | Edge derivation, rank-keyed Kahn, import checks, StepSpec registry, run_pipeline |
 | `_materialize.py` | 0 | Project capture events into raw `Op` state |
 | `graph_traversal.py` | 1-4 | Output nodes, output ancestors, orphan removal, distances |
 | `ast_branches.py` | 5 support, 11.5 | Conditional AST indexing and source variable names |
@@ -21,30 +23,52 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | `finalization.py` | 12-20 | Undecorate, params, layers, modules, hash, streaming finalization/eviction, ref release |
 | `incremental.py` | fastlog enrichment | Adds module paths and param addresses to sparse recordings |
 
-## Step Contracts (M10)
+## Step Contracts and the Derived Order (M10 + design-ppdag-v3)
 
-Every step's `PostprocessStepContract` declares its exact op-store COLUMN
-write set (`writes`). Under `TORCHLENS_POSTPROCESS_ASSERTIONS` a
-zero-cost-when-off audit (class-swap instrumentation on the op row store)
-verifies each step writes only declared columns; a new column write fails the
-tripwire and widening a declared set is a reviewed contract diff. The audit
-covers assignment/deletion AND in-place container mutation (per-step
-order-canonical content fingerprints of mutable dict/list/set cells on rows
-that existed at step begin — unordered containers hash sorted element
-fingerprints, so equal content never false-positives on iteration order).
-Whole-row lifecycle is audited separately from column writes: row creation is
-a step's produces contract, and row REMOVAL (op husking releases every cell)
-is checked against the contract's explicit `removes_rows` sanction — an
-unsanctioned removal fails with a precise message, and a sanctioned one
-(step 3 orphan removal) does not read as a wall of column writes. Read sets
-are not audited (named remaining slice), and mutables nested inside
-non-builtin custom objects are the disclosed residual. Transient
+Every step's `PostprocessStepContract` (`_contracts.py`) declares its exact
+op-store COLUMN write set AND read set, plus `placeholder_probes` (reviewed
+reads that legally observe the step-0 placeholder), `row_effects`
+(`creates`/`deletes` whole-row sanctions — `creates` also carries row-clone
+read legality), and `trace_state` tokens (closed 20-token vocabulary,
+`r:`/`w:` stored form, `rw:` construction shorthand). The step order is
+DERIVED from these declarations (`_executor.py`): every RAW/WW/WAR,
+two-sided row-barrier, token, and barrier edge orients by the frozen
+`LEGACY_STEP_RANK`, rank-keyed Kahn reproduces the registry exactly (import
+checks R1/R2), and the semantic direction authority is the reason-bearing
+`PINNED_ORDER_PAIRS` corpus (import check K1; test-side K2). A coordinated
+rank+registry reversal passes the drift checks by construction — only the
+corpus catches it, by named reviewed entry.
+
+Under `TORCHLENS_POSTPROCESS_ASSERTIONS` a zero-cost-when-off audit
+(class-swap instrumentation on the op row store) verifies each step writes
+only declared columns; `TORCHLENS_POSTPROCESS_READ_AUDIT=enforce`
+additionally verifies reads stay inside declared reads+probes (the write
+audit keeps a read-free class so enforcing writes never pays a `cell_get`
+override). The audit covers assignment/deletion AND in-place container
+mutation (per-step order-canonical content fingerprints of mutable
+dict/list/set cells on rows that existed at step begin). Whole-row lifecycle
+is separate: creation is a produces contract; REMOVAL (husking releases and
+re-reads every cell) checks the `row_effects` `deletes` sanction, and
+released-row reads/deletes are row-lifecycle events, not column accesses.
+`Op.copy()`'s whole-schema getattr loop is tagged by `row_clone_scope` as
+the row-clone access kind — legal only on `creates` steps, no per-column
+edges (the row barrier carries ordering). Recording mode additionally tags
+writes content-effective vs no-op (a permanent no-op writer cannot
+discharge a read-before-write finding). The recording/enforcement axes
+matrix lives in `tests/support/postprocess_axes.py`; per-axis enforcement
+and the phantom-declaration/no-op-writer union reports run in
+`tests/test_postprocess_enforcement.py`. Known day-1 findings are pinned by
+name in `tests/test_postprocess_dag.py` (step 3 reads `label`/`layer_label`
+as data — root-cause pending, never silenced). Disclosed residuals:
+mutables nested inside non-builtin custom objects; kind-table cells; the
+`is OpRowStore` swap guard silently skips fork `OpStoreView`s and sealed
+stores (sealing happens after step 20, outside every window). Transient
 build scratch lives in three named per-phase workspaces (`ir/workspaces.py`),
 not a flat `TraceBuildState` (deleted in M10): `RawGraphWorkspace` (capture
 ingress + steps 0-11, also the backend `finalize_forward_session` ownership
 token), `ModuleCaptureWorkspace` (module prep/stack capture, consumed at step
-16), and `WrapperRuntimeWorkspace` (wrapper hot path). All three drop at the
-transient-state cleanup seam.
+16), and `WrapperRuntimeWorkspace` (wrapper hot path). All three drop at
+step 17.5 (the contracted container-adoption + workspace-drop seam).
 
 ## The Ordered Steps
 
@@ -72,6 +96,7 @@ transient-state cleanup seam.
 | 16 | `_build_module_logs` | Build ModuleLogs |
 | 16.5 | `compute_graph_shape_hash` | Hash graph shape before pass-finished behavior changes |
 | 17 | `_set_tracing_finished` | Switch Trace to user-facing behavior |
+| 17.5 | executor `_run_step_17_5` | Adopt container records; drop the three per-phase workspaces |
 | 18 | `_finalize_streamed_bundle` | Finalize streamed out bundle |
 | 19 | `_evict_streamed_outs` | Optional in-memory out eviction |
 | 20 | `release_param_refs` | Drop live parameter references after finalization |

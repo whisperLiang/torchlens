@@ -1,17 +1,38 @@
 # postprocess/ - Implementation Guide
 
-## Critical Ordering Dependencies
-- Step 0 materializes sealed capture events before graph traversal begins.
-- Steps 1-3 must run before Step 5 so conditional attribution sees an orphan-free graph.
-- Module suffixes must already be present on `equivalence_class` before Step 7.
-- Step 7 must precede Step 8 because label mapping uses recurrent groups.
-- Step 9 must precede Step 11 because lookup keys depend on finalized module hierarchy info.
-- Step 10 must rename global refs before lookup-key finalization.
-- Step 11.5 resolves source variable names through `ast_branches.py` after final ops exist.
-- Step 15.5 must precede Step 16 because `Module.layers` points to `Layer` keys.
-- Step 16.5 computes `graph_shape_hash` before `_set_tracing_finished` changes access behavior.
-- Steps 18-19 are only for streamed out bundles.
-- Step 20 releases live parameter references after all logs and optional streams are finalized.
+## Ordering Is Derived (design-ppdag-v3)
+Step order is NOT hand-maintained. `_contracts.py` holds each step's declared
+contract (op-column `writes`/`reads`, `placeholder_probes`, `row_effects`,
+`trace_state` tokens) plus the two frozen direction authorities:
+`LEGACY_STEP_RANK` (every derived edge orients by rank, never by registry
+position) and the reason-bearing `PINNED_ORDER_PAIRS` corpus. `_executor.py`
+derives the edges (RAW/WW/WAR, two-sided row barriers, token conflicts, the
+step-17 barrier), runs rank-keyed Kahn, and refuses import when the derived
+order, registry, rank, or corpus disagree (checks R1/R2/K1 + the token
+read-before-write analogue). `tests/test_postprocess_dag.py` freezes the
+goldens (multi-writer table, probe set, rank), pins the day-1 findings by
+name, and holds K2 (every derived producer->consumer pair must be pinned
+with a reviewed reason).
+
+Reordering steps therefore requires: editing the named corpus entry (the
+semantic review), re-recording the axes matrix
+(`tests/support/postprocess_axes.py`), the byte-identity oracles, and a
+warnings/exception-order review (those are pinned only by day-1 identity).
+The historical prose invariants (1-3 before 5, 7 before 8, 9/10 before 11,
+15.5 before 16, 16.5 before 17, 18/19 before 20) are corpus entries now.
+
+## Executor
+`postprocess()` keeps the prologue (pre-0 + step-0 materialize block), the
+no-layers early exit, and the freeze epilogue; steps 1-20 run through
+`_executor.run_pipeline` over `STEP_REGISTRY`. Every step body resolves its
+callable through the `torchlens.postprocess` module namespace AT CALL TIME —
+monkeypatching a step function on the module still works and still trips the
+audit (the seam test proves it). Audit windows are explicit per-step
+boundaries: begin -> run -> end-in-finally -> contract check ->
+postconditions OUTSIDE any window; no window survives the loop, so the
+freeze seam runs unaudited by construction. Step 18's `should_run` IS the
+streaming snapshot point (context-writing, never trace-writing); step 19
+gates on the snapshot; `should_run` evaluates exactly once per step.
 
 ## Step 5 Conditional Branch Detection
 - Implementation is in `control_flow.py` with AST support from `ast_branches.py`.

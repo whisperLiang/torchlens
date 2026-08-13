@@ -115,9 +115,10 @@ def _clear_entry_attributes(log_entry: Op) -> None:
     from .._trace_core.op_store import mark_op_row_released
     from .op import _detach_op_husk
 
-    # Whole-row release: tell any active step write audit these per-cell
-    # deletes are the op's removal husking (a row-lifecycle event checked
-    # against the step's removes_rows sanction), not column writes.
+    # Whole-row release: tell any active step audit the per-cell reads and
+    # deletes below are the op's removal husking (a row-lifecycle event
+    # checked against the step's 'deletes' row_effects sanction), not
+    # column accesses.
     try:
         row_store = object.__getattribute__(log_entry, "_core")
         row = object.__getattribute__(log_entry, "_row")

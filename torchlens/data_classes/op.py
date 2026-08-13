@@ -3421,11 +3421,20 @@ class Op:
             "out_versions_by_child",
             "container_spec",
         ]
-        for field in LAYER_PASS_LOG_FIELD_ORDER:
-            if field not in fields_not_to_deepcopy:
-                fields_dict[field] = copy.deepcopy(getattr(self, field, None))
-            else:
-                fields_dict[field] = getattr(self, field, None)
+        from .._trace_core.op_store import row_clone_scope
+
+        # The whole-schema getattr loop is a ROW-CLONE read, not a set of
+        # per-column dependencies: under a combined step audit these reads
+        # are tagged category (d) via the clone scope (design-ppdag-v3
+        # §2.4d) — legal on row-creating steps, a finding elsewhere. The
+        # scope is one dict lookup when no audit is armed; clone WRITES
+        # bypass interception entirely (adopt_row).
+        with row_clone_scope(object.__getattribute__(self, "_core")):
+            for field in LAYER_PASS_LOG_FIELD_ORDER:
+                if field not in fields_not_to_deepcopy:
+                    fields_dict[field] = copy.deepcopy(getattr(self, field, None))
+                else:
+                    fields_dict[field] = getattr(self, field, None)
         copied_entry = type(self)(fields_dict, _store=_store)
         return copied_entry
 
