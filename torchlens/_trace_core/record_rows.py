@@ -57,7 +57,10 @@ class RecordCellField:
         A ``PooledCell`` (M14 duplicate/empty-container pooling) hydrates a
         fresh exact-type container on first read and caches it back, so
         identity is stable across reads and per-row in-place mutation stays
-        isolated.
+        isolated. A compacted singleton-label cell (M14 slice 2: the exact
+        str object registered by the freeze-seam pass) decodes to a fresh
+        one-element list the same way — identity-stable after the first
+        read, per-row mutation isolated, uninspected rows retain no list.
         """
 
         if record is None:
@@ -72,6 +75,9 @@ class RecordCellField:
             raise AttributeError(self._name)
         if value.__class__ is PooledCell:
             value = value.hydrate()
+            store.cell_set(row, self._fid, value)
+        elif value.__class__ is str and store.compacted_singleton(row, self._fid, value):
+            value = [value]
             store.cell_set(row, self._fid, value)
         return value
 
@@ -258,6 +264,12 @@ def detach_record(record: Any) -> None:
     row = instance_dict[ROW_KEY]
     layout = store.layout
     cells = [store.cell_get(row, fid) for fid in range(layout.n_fields)]
+    for fid, value in enumerate(cells):
+        # Decode compacted singleton-label cells while copying: a detached
+        # record leaves its trace, so the internal encoding (whose decode
+        # needs the source store's registry) must never travel with it.
+        if value.__class__ is str and store.compacted_singleton(row, fid, value):
+            cells[fid] = [value]
     detached = DetachedOpStore(layout)
     detached.adopt_row(cells)
     instance_dict[CORE_KEY] = detached

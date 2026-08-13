@@ -71,9 +71,7 @@ _OP_SESSION_CACHE_FIELDS = (
 _OP_FID_BY_NAME = _OP_STORE_LAYOUT.fid_by_name
 _SOURCE_TRACE_REF_FID = _OP_FID_BY_NAME["_source_trace_ref"]
 _OP_SESSION_CACHE_FIDS = tuple(
-    _OP_FID_BY_NAME[name]
-    for name in _OP_SESSION_CACHE_FIELDS
-    if name in _OP_FID_BY_NAME
+    _OP_FID_BY_NAME[name] for name in _OP_SESSION_CACHE_FIELDS if name in _OP_FID_BY_NAME
 )
 
 _OBJECT_SETATTR = object.__setattr__
@@ -212,9 +210,7 @@ class _RecordTranslator:
         clone = accessor_cls.__new__(accessor_cls)
         clone.__dict__.update(accessor.__dict__)
         remap = self.map
-        clone._dict = {
-            key: remap.get(id(item), item) for key, item in accessor._dict.items()
-        }
+        clone._dict = {key: remap.get(id(item), item) for key, item in accessor._dict.items()}
         clone._list = [remap.get(id(item), item) for item in accessor._list]
         if "_source_ref" in clone.__dict__ and self._fork_ref is not None:
             clone._source_ref = self._fork_ref
@@ -270,9 +266,7 @@ def _default_fork_policy(value: Any) -> ForkFieldPolicy:
     return ForkFieldPolicy.FORK_COPY
 
 
-def _fork_model_field(
-    parent: Trace, field_name: str, value: Any, memo: dict[Any, Any]
-) -> Any:
+def _fork_model_field(parent: Trace, field_name: str, value: Any, memo: dict[Any, Any]) -> Any:
     """Apply the Trace fork policy to a single field."""
 
     if field_name == "_runnable":
@@ -373,9 +367,7 @@ def _fill_detached_op(
     _OBJECT_SETATTR(shell, "_source_trace_ref", fork_ref)
 
 
-def _fill_detached_record(
-    parent_record: Any, shell: Any, translator: _RecordTranslator
-) -> None:
+def _fill_detached_record(parent_record: Any, shell: Any, translator: _RecordTranslator) -> None:
     """Bind one detached-fallback record shell to an isolated row copy."""
 
     parent_dict = parent_record.__dict__
@@ -384,7 +376,12 @@ def _fill_detached_record(
     layout = type(parent_record)._TL_LAYOUT
     detached = DetachedOpStore(layout)
     for fid in range(layout.n_fields):
-        detached.cell_set(0, fid, cow_copy_value(store.cell_get(row, fid), translator))
+        value = store.cell_get(row, fid)
+        # Decode compacted singleton-label cells (M14 slice 2) while
+        # copying: a detached shell has no registry to decode them later.
+        if value.__class__ is str and store.compacted_singleton(row, fid, value):
+            value = [value]
+        detached.cell_set(0, fid, cow_copy_value(value, translator))
     shell.__dict__[CORE_KEY] = detached
     shell.__dict__[ROW_KEY] = 0
 
@@ -492,9 +489,7 @@ def _fill_layer_shells(
             view = equivalent_view_memo.get(equivalence_class)
             if view is None:
                 shell.equivalent_ops = fork_equivalent_ops[equivalence_class]
-                view = shell.__dict__.get(
-                    "equivalent_ops", fork_equivalent_ops[equivalence_class]
-                )
+                view = shell.__dict__.get("equivalent_ops", fork_equivalent_ops[equivalence_class])
                 equivalent_view_memo[equivalence_class] = view
             else:
                 shell.equivalent_ops = view
@@ -523,9 +518,7 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
 
     core = parent.__dict__.get("_trace_core")
     fork_core = (
-        core.fork()
-        if core is not None and core.ops is not None and core.ops.frozen
-        else None
+        core.fork() if core is not None and core.ops is not None and core.ops.frozen else None
     )
     if fork_core is not None:
         # The module kind's cells embed accessor objects (``Module.ops``/
