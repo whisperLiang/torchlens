@@ -3486,7 +3486,9 @@ def _tinygrad_outputs_close(backend: TinygradBackend, left: Any, right: Any) -> 
         return False
     return all(
         _payloads_close(backend._realized_copy(left_leaf), backend._realized_copy(right_leaf))
-        for (_left_path, left_leaf), (_right_path, right_leaf) in zip(left_leaves, right_leaves)
+        for (_left_path, left_leaf), (_right_path, right_leaf) in zip(
+            left_leaves, right_leaves, strict=True
+        )
     )
 
 
@@ -3549,7 +3551,7 @@ def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:
             return False
         return all(
             _payload_values_close(left_item, right_item, dtype_name)
-            for left_item, right_item in zip(left, right)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if "bool" in dtype_name or "int" in dtype_name:
         return left == right

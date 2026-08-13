@@ -1067,7 +1067,9 @@ def _honest_multipass_shape(values: List[Any]) -> tuple:
     if len(tuples) != len(values) or len({len(t) for t in tuples}) != 1:
         return ("varies",)
     dims: List[Any] = []
-    for dim_values in zip(*tuples):
+    # The guard above already returned ("varies",) unless every tuple has the
+    # same length, so this transpose is exact rather than truncating.
+    for dim_values in zip(*tuples, strict=True):
         distinct = set(dim_values)
         if len(distinct) == 1:
             dims.append(dim_values[0])
@@ -1710,9 +1712,18 @@ def _reuse_streamed_blob_ids(
         raise TorchLensIOError(
             "Streaming finalize expected scrubbed_state['layer_list'] to be a list."
         )
+    # The scrubbed layers are a 1:1 scrub of trace.layer_list. If they ever
+    # diverge, pairing them positionally would silently finalize only the
+    # shorter prefix -- writing a bundle that looks complete but is missing
+    # blobs for every layer past the truncation point.
+    if len(scrubbed_layers) != len(trace.layer_list):
+        raise TorchLensIOError(
+            "Streaming finalize expected one scrubbed layer per live layer, got "
+            f"{len(scrubbed_layers)} scrubbed vs {len(trace.layer_list)} live."
+        )
 
     skipped_blob_ids: set[str] = set()
-    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers):
+    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers, strict=True):
         for tensor_field, pending_field in (
             ("out", "_pending_blob_id"),
             ("transformed_out", "_pending_transformed_out_blob_id"),
@@ -1815,8 +1826,17 @@ def _attach_streamed_tensor_refs(
         raise TorchLensIOError(
             "Streaming finalize expected scrubbed_state['layer_list'] to be a list."
         )
+    # The scrubbed layers are a 1:1 scrub of trace.layer_list. If they ever
+    # diverge, pairing them positionally would silently finalize only the
+    # shorter prefix -- writing a bundle that looks complete but is missing
+    # blobs for every layer past the truncation point.
+    if len(scrubbed_layers) != len(trace.layer_list):
+        raise TorchLensIOError(
+            "Streaming finalize expected one scrubbed layer per live layer, got "
+            f"{len(scrubbed_layers)} scrubbed vs {len(trace.layer_list)} live."
+        )
 
-    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers):
+    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers, strict=True):
         for tensor_field, ref_field, kind in (
             ("out", "out_ref", "out"),
             ("grad", "grad_ref", "grad"),

@@ -878,7 +878,9 @@ def validate_witness_obligations(
         if prefix != "call" or not separator or not suffix.isdigit():
             raise ContextFieldInvalidError(field, f"malformed call id {call.call_id!r}")
         numbers.append(int(suffix))
-    if any(later <= earlier for earlier, later in zip(numbers, numbers[1:])):
+    # strict=False is deliberate: this is the consecutive-pairs monotonicity
+    # window, ragged by construction (n-1 pairs from n call ids).
+    if any(later <= earlier for earlier, later in zip(numbers, numbers[1:], strict=False)):
         raise ContextFieldInvalidError(field, "call ids are not strictly increasing")
     op_label_set = {label for call in calls for label in call.op_labels}
     slot_label_set = {

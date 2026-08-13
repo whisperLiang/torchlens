@@ -1639,7 +1639,9 @@ def _pf_consumer_sites_advance(
     paired_ranks = (
         (earlier_rank, later_rank)
         for color in earlier
-        for earlier_rank, later_rank in zip(earlier[color], later[color])
+        # The per-color length guard above already returned False on any
+        # mismatch, so every color's rank lists pair exactly.
+        for earlier_rank, later_rank in zip(earlier[color], later[color], strict=True)
     )
     comparisons = list(paired_ranks)
     return all(later_rank >= earlier_rank for earlier_rank, later_rank in comparisons) and any(
@@ -1880,7 +1882,9 @@ def _pf_partition_class(
 
     member_signature_keys = [frozenset(signatures[member].items()) for member in members]
     cohorts: dict[frozenset, list[str]] = defaultdict(list)
-    for member, signature_key in zip(members, member_signature_keys):
+    # member_signature_keys is built by comprehension over members, so the two
+    # pair exactly by construction.
+    for member, signature_key in zip(members, member_signature_keys, strict=True):
         cohorts[signature_key].append(member)
     cohort_sizes = {signature: len(cohort) for signature, cohort in cohorts.items()}
 
@@ -1895,7 +1899,10 @@ def _pf_partition_class(
         # path compression), so breaking out is output-identical while avoiding
         # the O(len(cohort)^2) tail of already-unified pairs.
         distinct_roots = len({find(member) for member in cohort})
-        pair_iter = it.chain(zip(cohort, cohort[1:]), it.combinations(cohort, 2))
+        # strict=False is deliberate: zip(seq, seq[1:]) is the consecutive-pairs
+        # sliding window, which is ragged by construction (n-1 pairs from n
+        # items). strict=True here would raise on every non-empty cohort.
+        pair_iter = it.chain(zip(cohort, cohort[1:], strict=False), it.combinations(cohort, 2))
         for member1, member2 in pair_iter:
             if find(member1) == find(member2):
                 continue
@@ -2276,7 +2283,12 @@ def _merge_iso_groups_to_layers(
             ]
             if len(combination_nodes) < 2:
                 continue
-        pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(combination_nodes, 2))
+        # strict=False is deliberate: the consecutive-pairs sliding window is
+        # ragged by construction (see the cohort sweep above).
+        pair_iter = it.chain(
+            zip(iso_nodes, iso_nodes[1:], strict=False),
+            it.combinations(combination_nodes, 2),
+        )
         for node1_label, node2_label in pair_iter:
             if find(node1_label) == find(node2_label):
                 continue

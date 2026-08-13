@@ -922,7 +922,8 @@ def _alias_covers_whole_storage(alias: torch.Tensor, storage_nbytes: int) -> boo
         if alias.storage_offset() != 0:
             return False
         span_elems = 1
-        for size, stride in zip(alias.shape, alias.stride()):
+        # len(shape) == len(stride) is a torch invariant (both are the rank).
+        for size, stride in zip(alias.shape, alias.stride(), strict=True):
             if size == 0:
                 return False
             span_elems += (size - 1) * abs(stride)
@@ -1316,7 +1317,8 @@ def tensor_byte_footprint(value: torch.Tensor) -> Optional[TensorByteFootprint]:
             )
         low = 0
         high = 0
-        for size, stride in zip(shape, strides):
+        # shape and strides both come from the same tensor: equal by rank.
+        for size, stride in zip(shape, strides, strict=True):
             contribution = (size - 1) * stride
             if contribution < 0:
                 low += contribution
@@ -1356,7 +1358,9 @@ def _footprint_is_dense_interval(footprint: TensorByteFootprint) -> bool:
     if footprint.numel == 0:
         return False
     dims = [
-        (abs(stride), size) for size, stride in zip(footprint.shape, footprint.strides) if size > 1
+        (abs(stride), size)
+        for size, stride in zip(footprint.shape, footprint.strides, strict=True)
+        if size > 1
     ]
     if not dims:
         # All dims singleton: the footprint touches exactly one element -> a trivially dense
@@ -1380,7 +1384,7 @@ def _footprint_stride_gcd(footprint: TensorByteFootprint) -> int:
     from math import gcd
 
     result = 0
-    for size, stride in zip(footprint.shape, footprint.strides):
+    for size, stride in zip(footprint.shape, footprint.strides, strict=True):
         if size > 1 and stride != 0:
             result = gcd(result, abs(stride))
     return result
@@ -1399,7 +1403,7 @@ def footprint_touched_element_addresses(footprint: TensorByteFootprint) -> set[i
         return set()
     esize = footprint.element_size
     addresses = {footprint.origin_byte}
-    for size, stride in zip(footprint.shape, footprint.strides):
+    for size, stride in zip(footprint.shape, footprint.strides, strict=True):
         if size <= 1:
             continue
         step = stride * esize

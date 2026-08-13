@@ -1002,7 +1002,9 @@ class MLXBackend:
         events: list[OpEvent] = []
         policy = self._capture_policy(session)
         output_by_site = tuple(output_sites)
-        for site_index, (output, reserved) in enumerate(zip(output_by_site, reserved_block)):
+        for site_index, (output, reserved) in enumerate(
+            zip(output_by_site, reserved_block, strict=True)
+        ):
             if not self.is_tensor(output):
                 continue
             self.tensor_store.set_label(output, reserved.label_raw)
@@ -1420,7 +1422,7 @@ class MLXBackend:
                 )
             grad_trees = grads if len(differentiated_argnums) != 1 else (grads,)
             records: dict[str, DerivedGradRecord] = {}
-            for value_argnum, grad_tree in zip(differentiated_argnums, grad_trees):
+            for value_argnum, grad_tree in zip(differentiated_argnums, grad_trees, strict=True):
                 records.update(
                     _records_for_mlx_grad_tree(
                         grad_tree=grad_tree,
@@ -1748,7 +1750,7 @@ class MLXBackend:
             replacements: dict[int, Any] = {}
             slots: list[tuple[int, str]] = []
             appliers: list[tuple[int, Any]] = []
-            for index, (leaf, entry) in enumerate(zip(outputs, reserved)):
+            for index, (leaf, entry) in enumerate(zip(outputs, reserved, strict=True)):
                 record_ctx = self.build_record_context(trace, entry, func_event_input, leaf)
                 if plan is not None and selector_matches_capture_context(plan.selector, record_ctx):
                     replacement = self._apply_mlx_intervention(plan, leaf)
@@ -3301,13 +3303,15 @@ def _mlx_trees_close(left: Any, right: Any) -> bool:
         if not (isinstance(left, tuple) and isinstance(right, tuple)):
             return False
         return len(left) == len(right) and all(
-            _mlx_trees_close(left_item, right_item) for left_item, right_item in zip(left, right)
+            _mlx_trees_close(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if isinstance(left, list) or isinstance(right, list):
         if not (isinstance(left, list) and isinstance(right, list)):
             return False
         return len(left) == len(right) and all(
-            _mlx_trees_close(left_item, right_item) for left_item, right_item in zip(left, right)
+            _mlx_trees_close(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if isinstance(left, dict) or isinstance(right, dict):
         if not (isinstance(left, dict) and isinstance(right, dict)):

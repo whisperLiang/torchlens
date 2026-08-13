@@ -392,9 +392,14 @@ def interpret_closed_jaxpr_with_inlining(
         """
 
         env: dict[Any, Any] = {}
-        for var, const in zip(inner.jaxpr.constvars, inner.consts):
+        # Every jaxpr env binding in this interpreter pairs a var list with its
+        # value list (constvars/consts, invars/args, outvars/outputs), which a
+        # well-formed jaxpr guarantees are equal length. strict=True is used
+        # throughout: a truncated pairing would leave a variable unbound and
+        # surface later as an unrelated read failure or a silently wrong value.
+        for var, const in zip(inner.jaxpr.constvars, inner.consts, strict=True):
             _write_env(env, var, const, core)
-        for var, arg in zip(inner.jaxpr.invars, args):
+        for var, arg in zip(inner.jaxpr.invars, args, strict=True):
             _write_env(env, var, arg, core)
 
         for eqn_index, eqn in enumerate(inner.jaxpr.eqns):
@@ -449,7 +454,7 @@ def interpret_closed_jaxpr_with_inlining(
                             inherited_module_call_stack=inherited_module_call_stack,
                             rewrite_outputs=rewrite_outputs,
                         )
-                for var, value in zip(eqn.outvars, outputs):
+                for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
             if primitive_name == "cond":
@@ -465,7 +470,7 @@ def interpret_closed_jaxpr_with_inlining(
                     interpret_inner=interpret_inner,
                     control_capture_indices=control_capture_indices,
                 )
-                for var, value in zip(eqn.outvars, outputs):
+                for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
             if primitive_name in {"while", "while_loop"}:
@@ -516,7 +521,7 @@ def interpret_closed_jaxpr_with_inlining(
                             inherited_module_call_stack=inherited_module_call_stack,
                             rewrite_outputs=rewrite_outputs,
                         )
-                for var, value in zip(eqn.outvars, outputs):
+                for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
             if primitive_name == "custom_vjp_call":
@@ -535,7 +540,7 @@ def interpret_closed_jaxpr_with_inlining(
                     inherited_module_call_stack=inherited_module_call_stack,
                     rewrite_outputs=rewrite_outputs,
                 )
-                for var, value in zip(eqn.outvars, outputs):
+                for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
             if primitive_name in REJECTED_NESTED_PRIMITIVES:
@@ -562,7 +567,7 @@ def interpret_closed_jaxpr_with_inlining(
                     module_stack_from_eqn(eqn) or inherited_module_stack,
                     module_call_stack_from_eqn(eqn) or inherited_module_call_stack,
                 )
-                for var, value in zip(eqn.outvars, outputs):
+                for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
             if _has_nested_jaxpr(eqn, core):
@@ -571,7 +576,7 @@ def interpret_closed_jaxpr_with_inlining(
             outputs = tuple(result if eqn.primitive.multiple_results else (result,))
             capture_index = len(captures)
             outputs = rewrite_outputs(capture_index, outputs)
-            for var, value in zip(eqn.outvars, outputs):
+            for var, value in zip(eqn.outvars, outputs, strict=True):
                 _write_env(env, var, value, core)
             equation_module_stack = module_stack_from_eqn(eqn) or inherited_module_stack
             equation_module_call_stack = (
@@ -731,7 +736,7 @@ def _interpret_scan(
     for logical_index in range(length):
         physical_index = length - 1 - logical_index if reverse else logical_index
         x_slices = tuple(_slice_scan_leaf(value, physical_index) for value in xs_values)
-        for xs_index, (xs_value, x_slice) in enumerate(zip(xs_values, x_slices)):
+        for xs_index, (xs_value, x_slice) in enumerate(zip(xs_values, x_slices, strict=True)):
             capture_index = len(captures)
             (x_slice,) = rewrite_outputs(capture_index, (x_slice,))
             captures.append(
@@ -1936,9 +1941,9 @@ def _evaluate_closed_jaxpr_no_capture(closed_jaxpr: Any, args: Sequence[Any]) ->
     from jax.extend import core
 
     env: dict[Any, Any] = {}
-    for var, const in zip(closed_jaxpr.jaxpr.constvars, closed_jaxpr.consts):
+    for var, const in zip(closed_jaxpr.jaxpr.constvars, closed_jaxpr.consts, strict=True):
         _write_env(env, var, const, core)
-    for var, arg in zip(closed_jaxpr.jaxpr.invars, args):
+    for var, arg in zip(closed_jaxpr.jaxpr.invars, args, strict=True):
         _write_env(env, var, arg, core)
     for eqn in closed_jaxpr.jaxpr.eqns:
         primitive_name = eqn.primitive.name
@@ -1951,7 +1956,7 @@ def _evaluate_closed_jaxpr_no_capture(closed_jaxpr: Any, args: Sequence[Any]) ->
         inputs = tuple(_read_env(env, var, core) for var in eqn.invars)
         result = eqn.primitive.bind(*inputs, **eqn.params)
         outputs = tuple(result if eqn.primitive.multiple_results else (result,))
-        for var, value in zip(eqn.outvars, outputs):
+        for var, value in zip(eqn.outvars, outputs, strict=True):
             _write_env(env, var, value, core)
     return tuple(_read_env(env, var, core) for var in closed_jaxpr.jaxpr.outvars)
 

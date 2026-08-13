@@ -712,7 +712,7 @@ class PaddleBackend:
             replay_grads_by_id.update(
                 {
                     id(candidate.value): grad
-                    for candidate, grad in zip(non_loss_candidates, replay_grads)
+                    for candidate, grad in zip(non_loss_candidates, replay_grads, strict=True)
                 }
             )
         if self.is_tensor(loss):
@@ -2462,7 +2462,7 @@ def _records_for_paddle_leaf_grads(
     """
 
     records: dict[str, DerivedGradRecord] = {}
-    for leaf, grad in zip(leaves, grads):
+    for leaf, grad in zip(leaves, grads, strict=True):
         if grad is None:
             continue
         records[leaf.path] = DerivedGradRecord(
@@ -2713,11 +2713,13 @@ def _paddle_trees_close(backend: PaddleBackend, left: Any, right: Any) -> bool:
         )
     if isinstance(left, tuple) and isinstance(right, tuple) and len(left) == len(right):
         return all(
-            _paddle_trees_close(backend, l_item, r_item) for l_item, r_item in zip(left, right)
+            _paddle_trees_close(backend, l_item, r_item)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
         return all(
-            _paddle_trees_close(backend, l_item, r_item) for l_item, r_item in zip(left, right)
+            _paddle_trees_close(backend, l_item, r_item)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
         return all(_paddle_trees_close(backend, left[key], right[key]) for key in left)

@@ -661,7 +661,9 @@ class JAXBackend:
             label: value if isinstance(value, tuple) else (value,)
             for label, value in getattr(trace, "_selective_save_hidden_payloads", {}).items()
         }
-        for capture, op in zip(captures, equation_ops):
+        # The len(captures) != len(equation_ops) guard above already returned
+        # False, so these pair exactly.
+        for capture, op in zip(captures, equation_ops, strict=True):
             if capture.kind != _jax_op_capture_kind(op):
                 return False
             inputs = _inputs_from_trace_graph(capture, op, ops_by_label, hidden_outputs_by_label)
@@ -1652,7 +1654,7 @@ class JAXBackend:
 
         grad_trees = grads
         records: dict[str, DerivedGradRecord] = {}
-        for argnum, grad_tree in zip(differentiated_argnums, grad_trees):
+        for argnum, grad_tree in zip(differentiated_argnums, grad_trees, strict=True):
             records.update(
                 _records_for_grad_tree(
                     grad_tree=grad_tree,
@@ -1791,7 +1793,8 @@ class JAXBackend:
             """
 
             tap_values = {
-                (spec.capture_index, spec.output_index): tap for spec, tap in zip(specs, taps)
+                (spec.capture_index, spec.output_index): tap
+                for spec, tap in zip(specs, taps, strict=True)
             }
             result = interpret_closed_jaxpr_with_inlining(
                 closed_jaxpr,
@@ -1850,7 +1853,7 @@ class JAXBackend:
 
         specs_by_label: dict[str, list[_JaxIntermediateTapSpec]] = defaultdict(list)
         passed_by_label: dict[str, list[tuple[_JaxIntermediateTapSpec, Any]]] = defaultdict(list)
-        for tap_index, (spec, grad) in enumerate(zip(specs, producer_grads)):
+        for tap_index, (spec, grad) in enumerate(zip(specs, producer_grads, strict=True)):
             specs_by_label[spec.op_label].append(spec)
             if not _jax_intermediate_oracle_passes(
                 spec=spec,

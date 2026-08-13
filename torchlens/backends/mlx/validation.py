@@ -286,7 +286,10 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
             continue
         if len(perturbed) != len(baseline):
             return PERTURBATION_PROVED
-        if any(not _payloads_close(p_out, b_out) for p_out, b_out in zip(perturbed, baseline)):
+        if any(
+            not _payloads_close(p_out, b_out)
+            for p_out, b_out in zip(perturbed, baseline, strict=True)
+        ):
             return PERTURBATION_PROVED
     return PERTURBATION_UNPROVED
 
@@ -650,7 +653,17 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
                 _saved_payload(trace, ops_by_label, label) for label in capture.labels_raw
             )
             mx.eval(*expected)
-            if any(not _payloads_close(f_out, e_out) for f_out, e_out in zip(final, expected)):
+            # Fail CLOSED on an arity mismatch. The replay must produce exactly one
+            # output per captured label; pairing them positionally without this
+            # check would compare only the common prefix, so a replay that dropped
+            # outputs would validate on the surviving ones and report PASS.
+            if len(final) != len(expected):
+                failed_count += 1
+                continue
+            if any(
+                not _payloads_close(f_out, e_out)
+                for f_out, e_out in zip(final, expected, strict=True)
+            ):
                 failed_count += 1
                 continue
             perturb_capture = MLXOpCapture(

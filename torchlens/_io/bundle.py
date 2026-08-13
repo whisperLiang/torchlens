@@ -1812,7 +1812,9 @@ def _preflight_unified_trace_body_index(
         )
 
     missing_blob_ids: list[str] = []
-    for index, (body_entry, tensor_entry) in enumerate(zip(body_index, tensors)):
+    # The explicit length guard above already refused any mismatch, so these
+    # pair exactly.
+    for index, (body_entry, tensor_entry) in enumerate(zip(body_index, tensors, strict=True)):
         if not isinstance(body_entry, dict) or not isinstance(tensor_entry, dict):
             raise TorchLensIOError(
                 f"Unified trace body_index/tensors entry {index} must be an object."
@@ -2549,7 +2551,11 @@ def _apply_visualization_save_policy(
 
     visualizer_dir = tmp_path / "visualizers"
     final_visualizer_dir = bundle_path / "visualizers"
-    for index, (live_layer, scrubbed_layer) in enumerate(zip(trace.layer_list, scrubbed_layers)):
+    # scrubbed_layers is a 1:1 scrub of trace.layer_list; pairing a truncated
+    # prefix would silently skip visualizer copies for the tail layers.
+    for index, (live_layer, scrubbed_layer) in enumerate(
+        zip(trace.layer_list, scrubbed_layers, strict=True)
+    ):
         source_path_value = getattr(live_layer, "visualizer_path", None)
         if not isinstance(source_path_value, str):
             continue
@@ -2704,7 +2710,9 @@ def _attach_fast_copy_specs(
 
     used_blob_ids = {blob_spec.blob_id for blob_spec in blob_specs}
     fast_copy_specs: list[_FastCopySpec] = []
-    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers):
+    # 1:1 scrub of trace.layer_list -- a truncated pairing would silently drop
+    # fast-copy specs for the tail layers, losing their payloads in the copy.
+    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers, strict=True):
         if include_outs:
             fast_copy_spec = _maybe_make_fast_copy_spec(
                 live_layer=live_layer,

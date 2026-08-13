@@ -210,12 +210,21 @@ def _add_output_layers(
     if output_parent_labels is None:
         # Legacy alignment: callers that predate per-tensor parent resolution
         # paired ``self.output_layers`` positionally with the output tensors.
-        output_parent_labels = list(self.output_layers)
+        # That list may be SHORTER than the outputs (unattributed outputs have
+        # no entry), so normalize it to one slot per output tensor here. Padding
+        # with None is behavior-identical to the truncating zip this replaces:
+        # the padded slots are dropped by the ``is not None`` filter below, and
+        # surplus labels were already discarded. Normalizing lets the pairing be
+        # strict, which is what actually matters -- a labels/tensors/addresses
+        # length mismatch on the modern path must fail loud rather than yield a
+        # silently shorter, entirely plausible set of output nodes.
+        legacy_labels = list(self.output_layers)[: len(output_tensors)]
+        output_parent_labels = legacy_labels + [None] * (len(output_tensors) - len(legacy_labels))
 
     paired_outputs = [
         (parent_label, output_tensor, output_address)
         for parent_label, output_tensor, output_address in zip(
-            output_parent_labels, output_tensors, output_addresses
+            output_parent_labels, output_tensors, output_addresses, strict=True
         )
         if parent_label is not None
     ]
