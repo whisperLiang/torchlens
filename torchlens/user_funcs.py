@@ -274,12 +274,19 @@ def _prepare_capture_cache_dir(cache_dir_value: str | Path | None) -> tuple[Path
     """
 
     cache_dir = _capture_cache_dir(cache_dir_value)
+    # ``mkdir(parents=True, mode=...)`` applies the mode to the LEAF only, so the
+    # configured directory itself would keep the ambient umask permissions. Harden it
+    # only when THIS call created it: a caller-supplied ``cache_dir`` that already exists
+    # may be shared with other purposes, and silently tightening it would be a surprising
+    # side effect on a path torchlens does not own. ``capture/`` is unambiguously ours and
+    # is always hardened -- and the authentication tag, not the mode, is what makes a
+    # permissive ancestor harmless (a planted entry carries no valid tag, and an
+    # attacker-supplied secret fails the ownership check).
+    created_cache_dir = not cache_dir.exists()
     cache_root = cache_dir / "capture"
     cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Both levels: ``mkdir(parents=True, mode=...)`` applies the mode to the LEAF only,
-    # so the configured directory itself would keep the ambient umask permissions and a
-    # second principal could replace the whole ``capture`` subtree.
-    _harden_capture_cache_dir(cache_dir)
+    if created_cache_dir:
+        _harden_capture_cache_dir(cache_dir)
     _harden_capture_cache_dir(cache_root)
     return cache_root, _capture_cache_secret(cache_root)
 
