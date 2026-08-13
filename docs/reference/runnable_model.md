@@ -13,6 +13,13 @@ A sparse runnable artifact records one observed execution path without embedding
 object or tensor-valued intermediates in its sparse core. It can be loaded for analysis and,
 when readiness succeeds, replayed through the transactional `Trace.run()` API.
 
+Runnable saving requires replay-template metadata from the original capture. Opt in with
+`capture=tl.options.CaptureOptions(intervention_ready=True)` (or the equivalent flat
+`intervention_ready=True` argument) before calling
+`tl.save(trace, path, level="runnable", ...)`. A normal capture remains valid for analysis
+saves, but runnable preflight rejects it with `RunnablePreflightError` and the structured
+`MISSING_CALLABLE_REF` finding; saving cannot reconstruct the missing call templates later.
+
 The subsystem has four ownership regions:
 
 | Owner | Responsibility |
@@ -142,6 +149,10 @@ TorchLens logging paused.
 `fast=True` is an explicit stateful static-loop mode, not a relaxation of the proof contract.
 Loaded traces must first complete an ordinary verified run. Required input, path, output, and
 control-witness guards remain active, and divergence always raises.
+
+For dataset-style activation collection, use that ordinary run as a verify-once gate, then call
+`run(..., fast=True)` for subsequent batches. Fast mode reuses staged state and compiled binders;
+it does not remove the static-path and control-witness guards.
 
 ## Threat-model boundary
 

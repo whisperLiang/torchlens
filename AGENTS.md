@@ -67,7 +67,12 @@ Key entry points:
 Common unified capture patterns:
 
 ```python
-torch_trace = tl.trace(model, x, backend="torch")
+torch_trace = tl.trace(
+    model,
+    x,
+    backend="torch",
+    capture=tl.options.CaptureOptions(intervention_ready=True),
+)
 tf_trace = tl.trace(tf_model, tf_x, backend="tf")
 relu_trace = tl.trace(model, x, save=tl.func("relu"))
 windowed = tl.trace(
@@ -87,10 +92,10 @@ streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("
 recording = tl.record(model, x, save=tl.func("relu"))
 trace_from_recording = recording.to_trace()
 run_result = torch_trace.run(inputs=x, seed=42)
-loaded_result = tl.load("architecture.tlspec").run(inputs=x, seed=42)
 runnable_path = "architecture.tlspec"
 tl.save(torch_trace, runnable_path, level="runnable", include_weights=True)
-verified = tl.load(runnable_path).run(inputs=x, seed=42, on_divergence="raise")
+loaded_trace = tl.load(runnable_path)
+verified = loaded_trace.run(inputs=x, seed=42, on_divergence="raise")
 overview_svg = torch_trace.draw(collapse="auto", vis_fileformat="svg", vis_save_only=True)
 module_scores = torch_trace.module_collapse_order
 
@@ -98,9 +103,7 @@ module_scores = torch_trace.module_collapse_order
 op = torch_trace["relu_1_2"]
 rf_box = op.receptive_field.at((10, 10))
 unit = op.receptive_field.center_unit(batch_index=0)
-rf_gradient = op.receptive_field.gradient(unit)
 rf_check = op.receptive_field.check(unit)
-rf_image = op.receptive_field.show(unit, gradient=True)
 outgoing_box = op.projective_field.at((10, 10))
 layer_to_layer = op.receptive_field.at((10, 10), source=torch_trace.input_ops[0])
 rf_table = torch_trace.receptive_fields(level="layer")
@@ -110,6 +113,10 @@ pf_table = torch_trace.projective_fields(level="layer")
 armed_trace = tl.trace(model, x.requires_grad_(True),
                        capture=tl.options.CaptureOptions(backward_ready=True),
                        save_mode="reference")
+armed_op = armed_trace["relu_1_2"]
+armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
+rf_gradient = armed_op.receptive_field.gradient(armed_unit, retain_graph=True)
+rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 rf_results = tl.receptive_field.verify(armed_trace, units="center")
 # tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
@@ -145,13 +152,13 @@ pytest tests/ -m smoke -x --tb=short
 For changes touching module boundaries or public API, also run:
 
 ```bash
-pytest tests/ -m "not slow" -x --tb=short
+pytest tests/ -m "not rare and not slow" -x --tb=short
 ```
 
 ## Critical Invariants
 1. `_state.py` must never import other torchlens modules.
 2. `pause_logging()` must wrap internal torch ops during logging (`safe_copy`,
-   `activation_postfunc`, `get_tensor_memory_amount`).
+   `activation_transform`, `get_memory_amount`).
 3. Wrappers are persistent after lazy installation; `_logging_enabled` gates behavior.
 4. FIELD_ORDER constants and class definitions must stay in sync.
 5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
@@ -364,7 +371,7 @@ pytest tests/ -m "not slow" -x --tb=short
   failures.
 - Fast-path module decoration skips `_handle_module_entry`; alignment state must be
   replicated manually.
-- `get_tensor_memory_amount()` must use `pause_logging()` because `nelement()` and
+- `get_memory_amount()` must use `pause_logging()` because `nelement()` and
   `element_size()` are decorated.
 - If a `@property` raises `AttributeError`, Python falls through to `__getattr__`; use
   `ValueError` for TorchLens multi-pass access errors.
@@ -379,7 +386,7 @@ pip install -e ".[dev]"
 pip install -e ".[test]"
 pip install build && python -m build
 pytest tests/ -m smoke
-pytest tests/ -m "not slow"
+pytest tests/ -m "not rare and not slow"
 pytest tests/
 ruff format && ruff check --fix
 ```

@@ -8,15 +8,16 @@ computational graph, exposes rich per-op metadata, and lets you intervene on the
 network as it runs. Any architecture, even dynamic and recurrent ones.
 
 > **[Explore the Model Menagerie](https://modelmenagerie.ai)** -- a live, browsable atlas of
-> **11,000+ unique neural-network architectures** captured with TorchLens, from McCulloch & Pitts (1943)
+> **11,600+ cataloged neural-network architecture entries** captured with TorchLens, from
+> McCulloch & Pitts (1943)
 > to today's frontier models. *(Early preview.)*
 
-Run on **all 11,670 architectures** in the Model Menagerie (image, video, audio,
-multimodal, language; feedforward, recurrent, transformer, GNN, MoE, diffusion) — now
-**100% algorithmically verified** for capture correctness: every model's capture is
-replayed op-by-op against its own forward pass, with metadata-invariant tripwires over
-the graph, so faithful capture is **proven, not assumed**. And it records **every last
-detail of every part of your model**: **180+ metadata fields per operation**, and
+Run across **11,600+ cataloged entries** in the Model Menagerie (image, video, audio,
+multimodal, language; feedforward, recurrent, transformer, GNN, MoE, diffusion). Roughly
+**89% are currently algorithmically verified** for capture correctness: each verified
+capture is replayed op-by-op against its own forward pass, with metadata-invariant
+tripwires over the graph, so faithful capture is **proven, not assumed**. TorchLens also
+records **180+ metadata fields per operation**, and
 **550+ fields in total** across every record type — operations, modules, parameters,
 buffers, gradients, and the model itself.
 
@@ -46,15 +47,15 @@ log.draw()                    # PDF of the computational graph
 - [Performance guide](docs/performance.md) |
   [Receptive & projective fields](docs/receptive_projective_fields.md) |
   [AI-agent quick reference](docs/for-ai-agents.md) |
-  [Limitations](docs/LIMITATIONS.md) |
+  [Limitations and remedies](docs/reference/limitations.md) |
   [Migration tables](docs/migration/)
 
 
-## Validated on 11,600+ architectures
+## Validated across 11,600+ catalog entries
 
 TorchLens is not just smoke-tested on example models. Its menagerie validation
-campaign runs the same adversarial check across more than **11,600 neural-net
-architecture families**: capture the model with TorchLens, forward-replay the
+campaign runs the same adversarial check across more than **11,600 cataloged
+architecture entries**: capture the model with TorchLens, forward-replay the
 captured DAG, compare replayed outputs against the original forward pass, and
 run metadata-invariant tripwires over the resulting graph. If replay or an
 invariant fails, the capture is treated as genuinely wrong and caught
@@ -64,8 +65,9 @@ automatically, not waved through because the model "ran."
 model forward -> TorchLens capture -> DAG replay -> output parity + metadata invariants
 ```
 
-Today, roughly **89%** of that 11.6k+ menagerie is algorithmically verified and
-climbing, covering about **5,400 distinct architectures**. That is the wedge:
+Today, roughly **89%** of that 11,600+ catalog is algorithmically verified and
+climbing, covering about **5,400 distinct architecture families** after variants are
+collapsed. That is the wedge:
 TorchLens aims for captures that are **provably faithful, not just plausible**.
 Plain forward hooks and static extraction utilities can be fast and useful, but
 they can also silently miss dynamic paths, reused modules, functional ops,
@@ -378,6 +380,13 @@ This is the key differentiator from static-graph extractors like
 `torchvision.feature_extraction`, which require static computational graphs
 and cannot handle dynamic architectures.
 
+**Distributed boundaries.** With `tl.distributed.arm()` enabled before rank-local
+capture, explicit in-forward `torch.distributed` Python collectives become first-class
+boundary nodes. Diagnose rank sets with `tl.merge_report(...)` and merge compatible
+rank traces with `tl.merge_ranks(...)`. Sharded tensor topologies such as DTensor/FSDP/TP
+and pipeline point-to-point graphs still refuse with typed findings; see the
+[merged-trace contract](docs/reference/merged_trace_contract.md).
+
 **Multi-backend.** The same `tl.trace` API works across frameworks via
 `backend=`:
 
@@ -414,9 +423,10 @@ documented in [`docs/`](docs/).
 ## Gallery
 
 TorchLens visualizes any architecture -- no matter how exotic. Explore the
-**[Model Menagerie](https://modelmenagerie.ai)**: a browsable atlas of **11,000+ unique
-neural-network architectures** -- from McCulloch & Pitts (1943) to today's frontier models -- each with
-structured metadata and a faithful TorchLens-rendered diagram.
+**[Model Menagerie](https://modelmenagerie.ai)**: a browsable atlas of **11,600+ cataloged
+neural-network architecture entries** -- from McCulloch & Pitts (1943) to today's frontier
+models -- each with structured metadata and a TorchLens-rendered diagram. Roughly 89%
+currently carry the replay-and-invariant verification described above.
 
 > **Early preview.** The gallery is live and growing; full-text search, a downloadable dataset, and
 > richer per-model pages are on the way.
@@ -491,10 +501,13 @@ sparse tensors, meta tensors, quantization, and `torch.func.vmap`.
 See [LIMITATIONS.md](docs/LIMITATIONS.md) for the full matrix: what fails, what
 works, and the recommended workaround for each context.
 
-TorchLens also repairs detached `from torch import ...` references when wrappers are installed.
-The release default retains the legacy broad crawl; an opt-in
-[`patch_policy="scoped"`](docs/migration/scoped_detached_patching.md) mode narrows foreign-object
-mutation and offers a default-off shadow escape detector for pre-wrap closures and containers.
+TorchLens recovers most detached `from torch import ...` references with a disclosed rescue
+re-run and a small mechanical belt. The historical broad `sys.modules` crawl and
+`patch_policy=` rollout are deleted; those arguments are deprecated no-ops. For the strongest
+and simplest guarantee, call `torchlens.backends.torch.wrappers.wrap_torch()` before creating
+detached references. The optional `escape_detector="shadow"` diagnoses raw callable escapes. See
+[detached-reference handling](docs/migration/scoped_detached_patching.md) and the
+[limitations catalog](docs/reference/limitations.md).
 
 
 ## Tutorials and Docs
@@ -516,6 +529,8 @@ mutation and offers a default-off shadow escape detector for pre-wrap closures a
 | [docs/reference/hash.md](docs/reference/hash.md) | Provisional structural hashes and CI architecture pins |
 | [docs/reference/attribution.md](docs/reference/attribution.md) | Native input and layer attribution methods |
 | [docs/reference/collapse.md](docs/reference/collapse.md) | Smart-collapse visual reference and label contract |
+| [docs/reference/glossary.md](docs/reference/glossary.md) | Public terminology and stable mechanism names |
+| [docs/reference/limitations.md](docs/reference/limitations.md) | Edge scenarios, typed symptoms, and remedies |
 
 
 ## Security

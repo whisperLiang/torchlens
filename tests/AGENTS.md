@@ -20,6 +20,12 @@ pytest config excludes `rare` tests via `addopts = -m 'not rare'`.
 | Bridges/compat/export | `test_bridges_*.py`, `test_compat_report.py`, `test_exports.py`, `test_extractor_compat.py` |
 | Examples/audit | `test_examples.py`, `test_examples_load.py`, `test_not_mvp_audit.py` |
 | Train mode | `test_train_mode/` |
+| Backend contracts | `backend_conformance/`, `backend_parity/`, `backends/` |
+| Capture and surface oracles | `capture_oracle/`, `godobject_oracle/`, `surface_oracle/` |
+| Producer and semantic parity | `producer_parity/`, `semantic/`; the producer ledger is a committed gate artifact |
+| Crawler and benchmarks | `crawler/`, `bench/` |
+| Validation and visualization goldens | `validation_goldens/`, `visualization/`, `golden/`, `snapshots/` |
+| Shared data and helpers | `fixtures/`, `support/` |
 
 ## Running Tests
 
@@ -28,7 +34,7 @@ pytest tests/test_toy_models.py            # single file — targeted suites ARE
 pytest tests/test_toy_models.py::test_name # single test
 pytest tests/ -m smoke                     # commit-level gate (~20 min loaded; measured 2026-08-13)
 pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop
-pytest tests/ -m "not slow"                # phase-boundary backstop (skips slow real-world tests)
+pytest tests/ -m "not rare and not slow"   # phase-boundary backstop (keeps rare excluded)
 pytest tests/                              # default suite excluding rare
 pytest tests/ -k "loop"                    # keyword filter
 ```
@@ -37,10 +43,22 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 `pytest.importorskip()` or extras-aware skips.
 
 ## Markers
-- `smoke` - critical-path checks, <5s each (measured); the commit-level gate, NOT per-step.
-- `heavy` - mid-cost (5-20s) tests, excluded from smoke and the mid backstop.
-- `slow` - long-running (>20s) real-world tests.
-- `rare` - excluded by default unless explicitly selected.
+
+| Marker | Meaning |
+| --- | --- |
+| `smoke` | Critical-path checks, <5s each (measured); the commit-level gate, not per-step. |
+| `heavy` | Mid-cost (5-20s) tests, excluded from smoke and the mid backstop. |
+| `slow` | Long-running (>20s) real-world tests. |
+| `serial` | Load-sensitive tests that should run away from parallel worker load. |
+| `rare` | Always excluded by default unless explicitly selected. |
+| `optional` | Requires an optional dependency or runtime. |
+| `requires_assertions` | Needs Python `assert`; skipped under `python -O`. |
+| `backend_parity` | Active backend-substrate parity gate. |
+| `backend_jax` | Requires the optional JAX runtime. |
+| `backend_mlx` | Requires the optional MLX runtime. |
+| `backend_tinygrad` | Requires the optional tinygrad runtime. |
+| `backend_paddle` | Requires the optional Paddle runtime. |
+| `tf_backend` | Requires the optional TensorFlow runtime. |
 
 Markers are additive: a test carrying `smoke` together with `heavy`/`slow` still runs
 under `-m smoke`, so the combination is forbidden — drop `smoke` instead.
@@ -49,7 +67,9 @@ under `-m smoke`, so the combination is forbidden — drop `smoke` instead.
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,
-small inputs, vector/2D/complex inputs, and output directories. Model fixtures/classes live
+small inputs, vector/2D/complex inputs, and output directories.
+`tests/backends/conftest.py` supplies backend test isolation, and
+`tests/test_train_mode/conftest.py` supplies train-mode fixtures. Model fixtures/classes live
 primarily in `tests/example_models.py`.
 
 ## Output Directories

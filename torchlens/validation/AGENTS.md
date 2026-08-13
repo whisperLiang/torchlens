@@ -10,7 +10,7 @@
 
 ## backward.py
 - `validate_backward_pass()` compares TorchLens backward capture against stock autograd.
-- Keep tolerances and loss handling in sync with `capture/backward.py`.
+- Keep tolerances and loss handling in sync with `backends/torch/backward.py`.
 - Backward-specific kwargs are routed through `validate(..., scope="backward")`.
 
 ## consolidated.py
@@ -36,7 +36,8 @@ inf/NaN tensors, and special-value args.
 ## __init__.py Schema Checks
 - `validate_tlspec()` only validates unified `.tlspec` manifests.
 - Legacy `v2.16_*` formats return without schema validation.
-- Manifest schema lives at `torchlens/schemas/tlspec_manifest_v1.json`.
+- Manifest schemas live at `torchlens/schemas/tlspec_manifest_v{schema_version}.json`;
+  validation selects the version declared by each artifact.
 
 ## Known Limitations
 - bfloat16 tolerance remains tighter than dtype epsilon in some replay paths.

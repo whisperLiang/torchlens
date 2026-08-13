@@ -3,7 +3,7 @@
 ## What This Is
 Intervention owns selector resolution, hook/site helpers, replay/rerun/save workflows, and
 the compatibility facade for Bundle-level comparison tools. Bundle members are ordinary
-`Trace` objects; `torchlens.bundle.Bundle` projects sub-Trace objects across members through
+`Trace` objects; `tl.Bundle` projects sub-Trace objects across members through
 internal Super* views.
 
 ## Internal Layout
@@ -12,7 +12,7 @@ internal Super* views.
 - `_topology/` - Supergraph, SupergraphNode, TopologyDiff, `build_supergraph()`, and
   `compare_topology()`.
 - `_metrics.py` - tensor distance metrics shared by Super* diff helpers.
-- `bundle.py` - compatibility shim that re-exports `torchlens.bundle.Bundle` and
+- `bundle.py` - compatibility shim for the top-level `tl.Bundle` type and
   `AmbiguousLabelError`.
 
 ## Bundle Super Rules
