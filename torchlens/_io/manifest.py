@@ -701,7 +701,17 @@ def enforce_version_policy(manifest: Manifest) -> None:
         )
 
     runtime_torchlens = _parse_version(TORCHLENS_VERSION, label="runtime torchlens")
-    manifest_torchlens = _parse_version(manifest.torchlens_version, label="manifest torchlens")
+    manifest_torchlens = _parse_version(
+        manifest.torchlens_version,
+        label="manifest torchlens",
+        warn_on_failure=False,
+    )
+    if manifest_torchlens is None:
+        raise TorchLensIOError(
+            "Bundle torchlens_version="
+            f"{manifest.torchlens_version!r} could not be parsed under PEP 440; "
+            "refusing a current-schema artifact with unverifiable producer provenance."
+        )
     # A parseable torchlens_version below the floor refuses even when the
     # manifest claims a current tlspec_version: a real 2.33+ save can never
     # carry a pre-2.33 torchlens_version, so the pair is inconsistent.
@@ -729,14 +739,6 @@ def enforce_version_policy(manifest: Manifest) -> None:
                 manifest.torchlens_version,
                 TORCHLENS_VERSION,
             )
-    elif manifest.torchlens_version != TORCHLENS_VERSION:
-        warnings.warn(
-            "Bundle torchlens_version="
-            f"{manifest.torchlens_version} differs from runtime torchlens_version="
-            f"{TORCHLENS_VERSION} and could not be parsed under PEP 440.",
-            UserWarning,
-            stacklevel=2,
-        )
 
     runtime_python = _parse_version(_runtime_python_version(), label="runtime python")
     manifest_python = _parse_version(manifest.python_version, label="manifest python")
@@ -759,7 +761,12 @@ def enforce_version_policy(manifest: Manifest) -> None:
         )
 
 
-def _parse_version(version_text: str, *, label: str) -> Version | None:
+def _parse_version(
+    version_text: str,
+    *,
+    label: str,
+    warn_on_failure: bool = True,
+) -> Version | None:
     """Parse a version string under PEP 440 with warning fallback.
 
     Parameters
@@ -768,6 +775,8 @@ def _parse_version(version_text: str, *, label: str) -> Version | None:
         Raw version string to parse.
     label:
         Human-readable label for warnings.
+    warn_on_failure:
+        Whether an unparseable version should emit the legacy fallback warning.
 
     Returns
     -------
@@ -778,12 +787,13 @@ def _parse_version(version_text: str, *, label: str) -> Version | None:
     try:
         return Version(version_text)
     except InvalidVersion:
-        warnings.warn(
-            f"Could not parse {label} version {version_text!r} under PEP 440; "
-            "falling back to string comparison.",
-            UserWarning,
-            stacklevel=3,
-        )
+        if warn_on_failure:
+            warnings.warn(
+                f"Could not parse {label} version {version_text!r} under PEP 440; "
+                "falling back to string comparison.",
+                UserWarning,
+                stacklevel=3,
+            )
         return None
 
 

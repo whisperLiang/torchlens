@@ -432,3 +432,19 @@ def test_provenance_set_values_are_canonically_ordered() -> None:
     from torchlens._io.bundle import _json_ready_provenance_value
 
     assert _json_ready_provenance_value({"cuda", "cpu", "mps"}) == ["cpu", "cuda", "mps"]
+
+
+def test_current_manifest_refuses_unparseable_torchlens_version(tmp_path: Path) -> None:
+    """Current-schema artifacts cannot bypass the producer-version consistency belt."""
+
+    from torchlens._io import TorchLensIOError
+
+    path = tmp_path / "bad-version.tlspec"
+    tl.save(tl.trace(_LinearModel(), torch.ones(1, 2)), path)
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["torchlens_version"] = "not-a-version"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(TorchLensIOError, match="could not be parsed"):
+        tl.load(path)
