@@ -295,6 +295,15 @@ pytest tests/ -m "not slow" -x --tb=short
   relaxes no tier-(a) refusal (DTensor/TP/FSDP2/PP still refuse). Distributed rank processes
   (initialized process group, non-daemonic) are the sanctioned exception to the
   main-process-only capture guard.
+- `tl.merge_ranks([trace_or_path, ...])` merges N rank cores into a `MergedTrace` presenter at
+  their explicit collective boundaries (rung C1); `tl.merge_report(...)` diagnoses without
+  constructing. The derivation is audit-first (a conflicted membership never joins and never
+  becomes a presence gap), aligns seq counters as deltas from each rank's first recorded key,
+  and treats witness digests as demote-only evidence. Artifacts save as `merged-directory`
+  bundles whose descriptor is a cache: loads rederive from the rank cores and refuse typed on
+  any inequality. Frozen enums + error/finding codes: `torchlens.merged` +
+  `docs/reference/merged_trace_contract.md` (ordered-equality gated). p2p/pipeline (C3) and
+  DTensor topologies (C2) refuse typed; merged replay does not exist.
 - `CaptureOptions(save_budget=...)` is a per-device ceiling on retained activation bytes, default
   `"auto"` = half of measurable available memory. Exhaustive, predicate, and deferred
   `Op.save_activation()` paths pre-admit the primary source-sized RAM copy before allocation, then

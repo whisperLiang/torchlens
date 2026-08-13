@@ -547,8 +547,10 @@ def _validate_capture_values(values: Mapping[str, Any]) -> None:
         raise ValueError("distributed_witness must be 'none', 'digest', or 'payload'")
     if values["distributed_witness"] == "payload":
         raise ValueError(
-            "distributed_witness='payload' is reserved: payload witnesses land "
-            "with the merge artifact story (merge-ranks C1). Use 'digest'."
+            "distributed_witness='payload' is reserved: the C1 merged-artifact "
+            "story ships digest witnesses only; payload witnesses are "
+            "tensor-valued and require their own blob family (a future "
+            "reviewed schema change in merged_trace_contract.md). Use 'digest'."
         )
 
 

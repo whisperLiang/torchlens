@@ -236,10 +236,26 @@ print(tl.compat.report(model, x).to_markdown())
   `wildcard_recv_unsupported`, and `collective_boundary_runnable_unsupported` (runnable save +
   forward-replay validation refuse on collective-crossing traces; metadata invariants run in
   full). The pre-join membership-lineage audit over per-rank ledgers lives in
-  `torchlens.distributed.audit_membership_lineages` for the C1 merge engine. Arming relaxes NO
-  tier-(a) refusal: DTensor/TP/FSDP2/PP capture stays refused until the C2/C3 census proves
-  fidelity. Distributed rank processes (initialized process group, non-daemonic) are the one
-  sanctioned exception to the no-child-process capture guard.
+  `torchlens.distributed.audit_membership_lineages` and is run by the C1 merge engine. Arming
+  relaxes NO tier-(a) refusal: DTensor/TP/FSDP2/PP capture stays refused until the C2/C3 census
+  proves fidelity. Distributed rank processes (initialized process group, non-daemonic) are the
+  one sanctioned exception to the no-child-process capture guard.
+- CROSS-RANK MERGING (rung C1): `tl.merge_ranks([trace_or_path, ...])` stitches N rank cores into
+  a `MergedTrace` presenter (never a `Trace`/`Bundle` subclass) at their explicit collective
+  boundaries; `tl.merge_report(...)` is the graph-free diagnostic that never raises on conflicts.
+  The one pure derivation (audit-first: conflicted memberships never join and never become
+  presence gaps; seq-DELTA alignment from each rank's first recorded key, absolute bases never
+  compared; demote-only digest witnesses with the totalized `BoundaryConsistency` derivation)
+  runs at merge time and again verbatim at load rederivation. Frozen vocabularies
+  (`MergeAlignment` stored-vs-effective, `BoundaryConsistency`, `MergeValueStatus`,
+  `MergedErrorCode`, finding kinds) live in `torchlens.merged` and are release-gated against
+  `docs/reference/merged_trace_contract.md`. `merged.save(path)` writes the `merged-directory`
+  artifact (canonical-JSON descriptor CACHE + per-member tree hashes + byte-identical rank
+  cores); every load reruns the derivation and requires EXACT cache equality (tamper refuses
+  typed, never degrades to a gap); an unparseable member enters `load_degradations` and caps the
+  effective alignment at `partial`. Refused typed in C1: p2p/pipeline boundaries (C3), DTensor
+  dual geometry (C2), merged-level selectors, merged replay/runnable export/validate.
+  `distributed_witness="payload"` remains a typed construction refusal (digest witnesses only).
 - `CaptureOptions(save_budget=...)` bounds retained activation bytes per device, defaulting to
   `"auto"` (half of each device's available memory measured at its first save). Crossing it raises
   `tl.errors.SaveBudgetExceededError` naming the committed footprint, the tripping op, and the
