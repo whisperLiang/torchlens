@@ -519,3 +519,24 @@ def test_dispatch_mode_stack_probe_resolves_on_supported_torch() -> None:
     stack = tc.get_current_dispatch_mode_stack()
     assert isinstance(stack, list)
     assert tc.HAS_DISPATCH_MODE_STACK_QUERY is True
+
+
+def test_dynamo_is_compiling_raising_probe_discloses_possibly_compiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising is_compiling probe flips the flag and reads possibly-compiling.
+
+    r-b4 R26-3: the raising path used to return False WITHOUT flipping
+    HAS_DYNAMO_IS_COMPILING -- the wrapper then logged data-free FakeTensors
+    (the documented crash class) instead of taking the disclosed bypass.
+    """
+
+    def _raising_probe() -> bool:
+        raise RuntimeError("dynamo probe drifted")
+
+    _reset_capability(monkeypatch, "HAS_DYNAMO_IS_COMPILING")
+    monkeypatch.setattr(tc, "_DYNAMO_IS_COMPILING_FN", _raising_probe)
+    monkeypatch.setattr(tc, "_DYNAMO_IS_COMPILING_PROBED", True)
+    with pytest.warns(UserWarning, match="HAS_DYNAMO_IS_COMPILING"):
+        assert tc.dynamo_is_compiling() is True
+    assert tc.HAS_DYNAMO_IS_COMPILING is False

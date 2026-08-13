@@ -1818,8 +1818,14 @@ def dynamo_is_compiling() -> bool:
     -------
     bool
         True while a ``torch.compile`` region is being traced. False when the
-        capability is unavailable, so an absent probe degrades to "not
-        compiling" rather than disabling capture.
+        capability is structurally ABSENT (no probe resolved), so an absent
+        probe degrades to "not compiling" rather than disabling capture. True
+        when a resolved probe RAISES (r-b4 R26-3): "cannot answer" is treated
+        as possibly-compiling so the wrapper takes the disclosed dynamo-region
+        bypass (``capture_verified=False`` + ``dynamo_region_not_logged``)
+        instead of silently logging data-free FakeTensors -- the documented
+        crash class the guard exists to prevent. Both degraded paths flip
+        ``HAS_DYNAMO_IS_COMPILING``.
 
     Notes
     -----
@@ -1851,7 +1857,12 @@ def dynamo_is_compiling() -> bool:
     try:
         return bool(probe())
     except Exception:
-        return False
+        mark_torch_capability_missing(
+            "HAS_DYNAMO_IS_COMPILING",
+            "Dynamo-tracing detection raised; frames are treated as possibly-compiling "
+            "so compiled regions degrade to the disclosed bypass",
+        )
+        return True
 
 
 @contextlib.contextmanager
