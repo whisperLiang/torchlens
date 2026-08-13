@@ -93,6 +93,7 @@ MULTI_WRITER_GOLDEN = {
     "input_ancestors": ("4", "6", "9"),
     "input_to_module_calls": ("1", "11"),
     "internal_source_ancestors": ("6", "9"),
+    "internal_source_parents": ("6", "9"),
     "interventions": ("1", "3", "6", "9"),
     "is_buffer": ("1", "9"),
     "is_input": ("1", "9"),
@@ -133,12 +134,11 @@ PROBES_GOLDEN = {
         "conditional_else_children",
         "conditional_entry_children",
         "conditional_then_children",
-        "internal_source_parents",
         "layer_label",
         "out_ref",
         "recurrent_ops",
     )),
-    "6": frozenset(("internal_source_parents", "layer_label", "recurrent_ops")),
+    "6": frozenset(("layer_label", "recurrent_ops")),
     "12": frozenset(("out_ref",)),
     # Step 16/18 grad-family rows (manifest-swap 2026-08-13): the provisional
     # baseline over-included the backward-phase grad channel; the projected
@@ -200,15 +200,6 @@ PHANTOM_WRITE_EXEMPTIONS = {
     ("18", "grad_ref"): (
         "written only by the post-backward OUT-OF-PIPELINE deferred-grad "
         "streaming re-run of the same function body"
-    ),
-    ("6", "internal_source_parents"): (
-        "buffer-merge remove/append sites are code-real but IN-PIPELINE "
-        "unreachable: step 0 materializes internal_source_parents as the [] "
-        "placeholder and nothing in the pipeline populates it (capture "
-        "computes internal_parent_layer_labels; _materialize drops it — "
-        "pre-existing gap on base main, flagged for root-cause). The "
-        "buffer_duplicate axis fires the merge itself; this row retires "
-        "loudly the day the materialize gap is fixed"
     ),
     ("6", "address"): (
         "the None-address recovery/anonymous fallback is code-real but no "
@@ -378,7 +369,7 @@ def test_noop_writer_cannot_discharge_reads() -> None:
         original.contract,
         writes=original.writes,
         reads=original.reads,
-        placeholder_probes=frozenset(("internal_source_parents", "out_ref")),
+        placeholder_probes=frozenset(("out_ref",)),
         row_effects=original.row_effects,
         trace_state=original.trace_state,
     )

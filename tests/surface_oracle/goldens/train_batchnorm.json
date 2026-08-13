@@ -4141,7 +4141,9 @@
       "\"buffer_1\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_1"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -4578,7 +4580,10 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_3",
+     "buffer_4"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -7373,7 +7378,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": "output",
@@ -7766,7 +7773,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -13683,7 +13692,9 @@
       "\"buffer_1\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_1"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -14120,7 +14131,10 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_3",
+     "buffer_4"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -16915,7 +16929,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": "output",
@@ -17308,7 +17324,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -22412,7 +22430,9 @@
       "\"buffer_1\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_1"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -22849,7 +22869,10 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "buffer_3",
+     "buffer_4"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,
@@ -25644,7 +25667,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": "output",
@@ -26037,7 +26062,9 @@
       "\"buffer_4\""
      ]
     },
-    "internal_source_parents": [],
+    "internal_source_parents": [
+     "batchnorm_1_2"
+    ],
     "intervention_replaced": false,
     "interventions": [],
     "io_role": null,

@@ -487,17 +487,15 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             )
         ),
         # Probes (reviewed): out_ref gates load/stream-rehydrated
-        # payload refs in orphan_records; internal_source_parents, the five
+        # payload refs in orphan_records; the five
         # conditional child views, and recurrent_ops are read by the
         # removal-reference scrub (cleanup.py), which observes their
         # not-yet-populated placeholders and tolerates them by design —
         # the writers run later (5/9 for conditional views, 7 for
-        # recurrence groups, and internal_source_parents is
-        # placeholder-forever pending the materialize gap). These six were
+        # recurrence groups). These six were
         # previously laundered through no-op self-writes / a no-op step-1
         # writer (opus impl-review B1); probe-blessing is the same
-        # reviewed treatment internal_source_parents already had — the
-        # identical code path gets ONE disposition. layer_label is the
+        # reviewed treatment used by the identical code path. layer_label is the
         # _label_for_reference_removal fallback (layer_label -> _label_raw;
         # cleanup.py) — probe-blessed per the opus impl-review §4 split
         # after confirming the second reader
@@ -518,7 +516,6 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_else_children",
                 "conditional_entry_children",
                 "conditional_then_children",
-                "internal_source_parents",
                 "layer_label",
                 "out_ref",
                 "recurrent_ops",
@@ -658,17 +655,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 # no-op row.
                 "input_ancestors",
                 "internal_source_ancestors",
-                # Code-real but IN-PIPELINE UNREACHABLE (day-1 finding,
-                # fix round): the merge's internal_source_parents
-                # remove/append sites (control_flow.py _merge_buffer_entries)
-                # are guarded by membership tests on a column that step 0
-                # materializes as the [] placeholder and NOTHING in the
-                # pipeline populates — capture computes
-                # internal_parent_layer_labels (backends/torch/ops.py) but
-                # _materialize.py drops it. Kept declared as the named
-                # phantom exemption; fixing the materialize gap is a public
-                # field-content change (JMT/root-cause), and the exemption
-                # retires loudly the day it lands.
+                # Buffer merging repoints direct internal-source parents
+                # materialized from the capture journal at step 0.
                 "internal_source_parents",
                 "interventions",
                 "kwargs_template",
@@ -725,11 +713,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # _materialize_layer_mirrors_for_removed, early-returns until
         # layer_logs exist at step 15.5, so it never fires here);
         # recurrent_ops via the removal scrub's group rebind (groups are
-        # built at step 7); internal_source_parents via the merge membership
-        # tests (placeholder-forever, see the write-side comment).
+        # built at step 7).
         placeholder_probes=frozenset(
             (
-                "internal_source_parents",
                 "layer_label",
                 "recurrent_ops",
             )
@@ -832,6 +818,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "fx_qualpath",
                 "input_ancestors",
                 "internal_source_ancestors",
+                # Direct internal-source parent references are renamed from
+                # raw to final labels with the other graph edges.
+                "internal_source_parents",
                 # Same reviewed widening as args_template above.
                 "interventions",
                 "is_buffer",
@@ -2707,6 +2696,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "fx_qualpath",
                     "input_ancestors",
                     "internal_source_ancestors",
+                    "internal_source_parents",
                     "interventions",
                     "is_buffer",
                     "is_input",

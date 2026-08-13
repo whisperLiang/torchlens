@@ -329,6 +329,17 @@ class StaticReadOnly(nn.Module):
         return self.b + x
 
 
+def test_internal_source_parents_survive_journal_projection() -> None:
+    """Direct parents carrying buffer ancestry survive materialization."""
+
+    trace = tl.trace(StaticReadOnly(), torch.ones(2))
+
+    add_op = trace["add_1_1"]
+    output_op = trace["output_1"]
+    assert add_op.internal_source_parents == ("buffer_1",)
+    assert output_op.internal_source_parents == ("buffer_1",)
+
+
 class DataSetter(nn.Module):
     """``.data = tensor`` buffer storage reassignment model."""
 

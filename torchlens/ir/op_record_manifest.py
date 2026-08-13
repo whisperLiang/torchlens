@@ -1,14 +1,14 @@
-"""GENERATED FILE — do not edit. CellSourceManifest v1.
+"""GENERATED FILE — do not edit. CellSourceManifest v2.
 
 Regenerate with ``python -m tools.generate_op_record_manifest`` after editing
 the source spec in ``torchlens/ir/op_record_scatter.py``. The joint-freeze
 contract (producer DoR v4 section 5.2 / ppdag v3 section 9) versions this
-table; post-freeze changes bump the version, never mutate v1.
+table; post-freeze changes bump the version, never mutate v2.
 """
 
 from __future__ import annotations
 
-CELL_SOURCE_MANIFEST_VERSION = 1
+CELL_SOURCE_MANIFEST_VERSION = 2
 
 CELL_SOURCE_MANIFEST: dict[str, str] = {
     '_address_normalized': 'DEFAULT',
@@ -107,7 +107,7 @@ CELL_SOURCE_MANIFEST: dict[str, str] = {
     'input_to_module_calls': 'JOIN:module_enter',
     'input_was_parameter': 'FACET:graph',
     'internal_source_ancestors': 'FACET:ancestry',
-    'internal_source_parents': 'DEFAULT',
+    'internal_source_parents': 'JOIN:ancestry',
     'intervention_replaced': 'FACET:intervention',
     'interventions': 'FACET:intervention',
     'io_role': 'JOIN:io_role',
