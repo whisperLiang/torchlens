@@ -228,6 +228,10 @@ def test_copy_policies_pause_logging_for_internal_tensor_ops() -> None:
 
 
 @pytest.mark.parametrize("save_mode", ["copy", "reference", "view", "cpu_async"])
+@pytest.mark.filterwarnings(
+    "default:torch.quantize_per_tensor, torch.quantize_per_channel and other quantized tensor "
+    "creation functions.*:UserWarning"
+)
 def test_copy_tensor_payload_tensor_zoo(save_mode: str) -> None:
     """copy_tensor_payload handles representative tensor kinds under each save mode."""
 

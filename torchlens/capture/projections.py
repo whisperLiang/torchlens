@@ -1222,7 +1222,13 @@ def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
     if name == "has_internal_source_ancestor":
         return event.has_internal_source_ancestor
     if name == "internal_source_parents":
-        return []
+        return [
+            edge.parent_label_raw
+            for edge in event.parents
+            if trace.capture_events.live_index.require_event(
+                edge.parent_label_raw
+            ).has_internal_source_ancestor
+        ]
     if name == "internal_source_ancestors":
         return set(event.internal_source_ancestors)
     if name == "is_internal_sink":

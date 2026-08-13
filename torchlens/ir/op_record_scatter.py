@@ -34,7 +34,7 @@ from typing import Any
 
 from .op_record import FACET_DEFAULTS, IngestExtras, OpRecord
 
-CELL_SOURCE_MANIFEST_VERSION = 1
+CELL_SOURCE_MANIFEST_VERSION = 2
 
 CELL_SOURCES: dict[str, str] = {
     # ---- identity / core ----------------------------------------------------
@@ -191,7 +191,7 @@ CELL_SOURCES: dict[str, str] = {
     # ---- internal sources ----------------------------------------------------------
     "is_internal_source": "CORE",
     "has_internal_source_ancestor": "FACET:ancestry",
-    "internal_source_parents": "DEFAULT",
+    "internal_source_parents": "JOIN:ancestry",
     "internal_source_ancestors": "FACET:ancestry",
     "is_internal_sink": "DEFAULT",
     # ---- conditionals (STEP:5 domain) ----------------------------------------------
@@ -264,6 +264,30 @@ def _facet(record: OpRecord, name: str) -> Any:
     if value is not None:
         return value
     return FACET_DEFAULTS[name]()
+
+
+def _internal_source_parent_labels(record: OpRecord, owning_trace: Any) -> list[str]:
+    """Return direct parent labels whose paths include an internal source.
+
+    Parameters
+    ----------
+    record:
+        Journal record whose direct parent edges should be classified.
+    owning_trace:
+        Active trace providing the capture-time ancestry index.
+
+    Returns
+    -------
+    list[str]
+        Direct raw parent labels carrying internal-source ancestry, in edge order.
+    """
+
+    live_index = owning_trace.capture_events.live_index
+    return [
+        edge.parent_label_raw
+        for edge in record.core.parents
+        if live_index.require_event(edge.parent_label_raw).has_internal_source_ancestor
+    ]
 
 
 def scatter_record_to_cells(record: OpRecord, extras: IngestExtras, owning_trace: Any) -> dict:
@@ -424,7 +448,7 @@ def scatter_record_to_cells(record: OpRecord, extras: IngestExtras, owning_trace
         "buffer_source_func_name": None,
         "is_internal_source": core.layer_type != "input" and not core.parents,
         "has_internal_source_ancestor": ancestry.has_internal_source_ancestor,
-        "internal_source_parents": [],
+        "internal_source_parents": _internal_source_parent_labels(record, owning_trace),
         "internal_source_ancestors": set(ancestry.internal_source_ancestors),
         "is_internal_sink": False,
         "is_terminal_bool": False,

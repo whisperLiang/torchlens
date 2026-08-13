@@ -33,7 +33,6 @@ EXPECTED_PHANTOM_WRITES = {
     ("9", "args_template"),
     ("9", "kwargs_template"),
     ("18", "grad_ref"),
-    ("6", "internal_source_parents"),
     ("6", "address"),
 }
 

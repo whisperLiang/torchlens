@@ -346,6 +346,71 @@ def test_fresh_input_shape_triggers_zero_compiles_during_capture() -> None:
     assert any("relu" in label for label in trace.layer_labels)
 
 
+def test_failed_capture_restores_force_eager_stance() -> None:
+    """An escaped forward error cannot leave future compiled calls forced eager."""
+
+    torch.compiler.reset()
+    compile_events: list[object] = []
+
+    def counting_backend(graph_module: object, _example_inputs: list[torch.Tensor]) -> object:
+        """Record a real backend compile and return the eager graph callable.
+
+        Parameters
+        ----------
+        graph_module:
+            Dynamo-produced graph module.
+        _example_inputs:
+            Example tensor inputs supplied to the backend.
+
+        Returns
+        -------
+        object
+            Graph forward callable used as the compiled artifact.
+        """
+
+        compile_events.append(graph_module)
+        return graph_module.forward  # type: ignore[attr-defined, no-any-return]
+
+    compiled_free = torch.compile(
+        lambda tensor: torch.sin(tensor), backend=counting_backend, fullgraph=True
+    )
+
+    class _CompiledThenRaise(nn.Module):
+        """Call an initially-cold compiled function and then fail."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Execute under the capture stance before raising.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                This path never returns.
+
+            Raises
+            ------
+            RuntimeError
+                Always raised after the compiled call returns eagerly.
+            """
+
+            _ = compiled_free(x)
+            raise RuntimeError("injected stance-scope failure")
+
+    x = torch.randn(2, 4)
+    with pytest.raises(RuntimeError, match="injected stance-scope failure"):
+        tl.trace(_CompiledThenRaise(), x)
+    assert compile_events == [], "the stance must compile zero graphs"
+
+    compiled_free(x)
+    assert len(compile_events) == 1, (
+        "the first post-failure compiled call must compile; force_eager leaked"
+    )
+
+
 def test_warm_artifact_is_reproduced_and_the_recompile_is_bounded() -> None:
     """The coexistence contract: caches intact, at most ONE recompile after.
 

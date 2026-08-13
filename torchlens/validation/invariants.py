@@ -33,7 +33,7 @@ import re
 from collections.abc import Iterable, Mapping
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 from ..errors._base import ValidationError
@@ -2307,8 +2307,36 @@ def _check_graph_topology(ml: "Trace") -> None:
     label_set = set(ml.layer_labels) | set(ml.op_labels)
     output_set = set(ml.output_layers)
 
+    def label_aliases(entry: Any, fallback: str) -> set[str]:
+        """Return stored layer/op labels without invoking fragile accessors.
+
+        Parameters
+        ----------
+        entry:
+            Layer-like record whose independently stored labels should be read.
+        fallback:
+            Lookup label used to resolve ``entry``.
+
+        Returns
+        -------
+        set[str]
+            Layer, lookup, and recurrence-member labels available without
+            consulting ``Layer.label``. That accessor intentionally raises when
+            pass-count metadata is corrupt, but invariant checks must report the
+            owning corruption contract rather than leak that accessor error.
+        """
+
+        aliases = {fallback}
+        layer_label = getattr(entry, "layer_label", None)
+        if isinstance(layer_label, str):
+            aliases.add(layer_label)
+        recurrent_ops = getattr(entry, "recurrent_ops", ()) or ()
+        aliases.update(label for label in recurrent_ops if isinstance(label, str))
+        return aliases
+
     for lpl in ml.layer_list:
         label = lpl.layer_label
+        lpl_aliases = label_aliases(lpl, label)
 
         # Parent-child bidirectionality
         for p in lpl.parents:
@@ -2317,7 +2345,7 @@ def _check_graph_topology(ml: "Trace") -> None:
                 raise MetadataInvariantError(
                     name, f"Layer {label} has parent {p} not in layer_labels"
                 )
-            if label not in parent.children and lpl.label not in parent.children:
+            if not lpl_aliases.intersection(parent.children):
                 raise MetadataInvariantError(
                     name,
                     f"Layer {label} lists {p} as parent, but {p} does not list {label} as child",
@@ -2329,7 +2357,7 @@ def _check_graph_topology(ml: "Trace") -> None:
                 raise MetadataInvariantError(
                     name, f"Layer {label} has child {c} not in layer_labels"
                 )
-            if label not in child.parents and lpl.label not in child.parents:
+            if not lpl_aliases.intersection(child.parents):
                 raise MetadataInvariantError(
                     name,
                     f"Layer {label} lists {c} as child, but {c} does not list {label} as parent",
@@ -2363,8 +2391,7 @@ def _check_graph_topology(ml: "Trace") -> None:
         parent_alias_set = set(lpl.parents)
         for parent_label in lpl.parents:
             parent_entry = ml[parent_label]
-            parent_alias_set.add(parent_entry.layer_label)
-            parent_alias_set.add(getattr(parent_entry, "label", parent_label))
+            parent_alias_set.update(label_aliases(parent_entry, parent_label))
         for arg_domain in ("args", "kwargs"):
             for position, attributed_label in lpl.parent_arg_positions.get(arg_domain, {}).items():
                 try:
@@ -2375,12 +2402,7 @@ def _check_graph_topology(ml: "Trace") -> None:
                     # missing parent"); this check owns only the
                     # resolvable-but-not-a-parent inconsistency.
                     continue
-                attributed_aliases = {
-                    attributed_label,
-                    getattr(attributed_entry, "layer_label", None),
-                    getattr(attributed_entry, "label", None),
-                }
-                attributed_aliases.discard(None)
+                attributed_aliases = label_aliases(attributed_entry, attributed_label)
                 if attributed_aliases & parent_alias_set:
                     continue
                 raise MetadataInvariantError(
@@ -6447,6 +6469,15 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "non_torch",
     ),
     MetadataInvariantContract("special_layer_lists", _check_special_layer_lists, "torch"),
+    # Recurrence metadata controls whether Layer accessors may resolve a
+    # single pass. Validate it before topology and other checks invoke those
+    # accessors, so recurrence corruption is reported by its owning contract
+    # rather than leaking a ValueError or producing a secondary topology red.
+    MetadataInvariantContract(
+        "loop_detection_invariants",
+        _check_loop_detection_invariants,
+        "torch",
+    ),
     MetadataInvariantContract("graph_topology", _check_graph_topology, "torch"),
     MetadataInvariantContract(
         "backend_neutral_graph_topology",
@@ -6492,11 +6523,6 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
     ),
     # --- Phase 2: semantic invariants (M-R) ---
     MetadataInvariantContract("graph_ordering", _check_graph_ordering, "all"),
-    MetadataInvariantContract(
-        "loop_detection_invariants",
-        _check_loop_detection_invariants,
-        "torch",
-    ),
     MetadataInvariantContract(
         "pass_count_consistency",
         _check_pass_count_consistency,
