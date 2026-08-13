@@ -468,7 +468,12 @@ is the explicit guarded static-loop exception to source immutability: live trace
 functional `save=` predicate); loaded traces perform one ordinary verified run, then reuse staged
 state, compiled binders, and one result Trace. Every fast iteration retains input, output-shape/
 dtype, call-path, and control-witness guards and always raises on divergence. Default `fast=False`
-keeps the full transactional validation/attestation path. Model outputs with ZERO
+keeps the full transactional validation/attestation path. The fast-mode handle
+`Trace._fast_run_session` is a session-time `FieldPolicy.DROP` field: it is ordered in
+`MODEL_LOG_FIELD_ORDER` under a private name but never survives save/load, so it joins
+`measure_python_peak_memory`, `save_budget`, and `distributed_witness` in the session-time class
+(the private-named ordered DROP fields are ledgered with reasons in
+`tests/test_schema_lockstep.py::PRIVATE_ORDERED_DROP_FIELDS`). Model outputs with ZERO
 tensor leaves (all-literal trees, literal roots, empty containers) and namedtuple/mapping/
 registered-container outputs carrying extra per-instance state refuse at save
 (`missing_output_container_contract`; one per-kind capability table governs capture proof, save

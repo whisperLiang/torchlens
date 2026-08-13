@@ -247,7 +247,10 @@ pytest tests/ -m "not slow" -x --tb=short
     binders, and one result Trace; live traces use native forward plus targeted module hooks and
     only explicitly requested functional collection. Per-call input, path, output structure/shape/
     dtype, and control-witness guards remain mandatory; divergence always raises. `fast=False`
-    preserves the full transaction and attestation contract.
+    preserves the full transaction and attestation contract. The session handle
+    `Trace._fast_run_session` is a session-time `FieldPolicy.DROP` field (ordered under a private
+    name, never persisted), ledgered in
+    `tests/test_schema_lockstep.py::PRIVATE_ORDERED_DROP_FIELDS`.
 19. Runnable public vocabulary is frozen in `torchlens.runnable`: readiness is `ready|unavailable`,
     faithfulness is `verified|diverged|unverifiable`, state source is
     `live_model_state|embedded_capture_state|user_state_dict|random_initialization|not_applicable`,

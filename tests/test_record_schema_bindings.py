@@ -106,7 +106,13 @@ def test_binding_axes_are_coherent(schema_key: str) -> None:
 
 @pytest.mark.heavy
 def test_bindings_module_regenerates_identically() -> None:
-    """The checked-in bindings module matches a fresh generation byte-for-byte."""
+    """The generator CLI's ``--check`` contract agrees with the checked-in module.
+
+    The byte-level generated-vs-declared diff itself is smoke-gated in-process by
+    ``tests/test_schema_lockstep.py::test_generated_artifact_is_current``; this
+    heavier case additionally exercises the developer-facing CLI entry point that
+    a contributor actually runs.
+    """
 
     result = subprocess.run(
         [sys.executable, str(_REPO_ROOT / "tools" / "generate_record_schema.py"), "--check"],
