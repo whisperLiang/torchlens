@@ -22,17 +22,9 @@ from torchlens.capture.outcome import (
 )
 from torchlens.data_classes.trace import Trace
 from torchlens.fastlog._halt import HaltSignal
+from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
 
 pytestmark = pytest.mark.smoke
-
-
-class ThreeStageModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(3, 3)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(torch.relu(self.linear(x)))
 
 
 class ExplodingModel(nn.Module):
@@ -43,10 +35,6 @@ class ExplodingModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _ = self.linear(x)
         raise RuntimeError("user forward boom")
-
-
-def _halt_on_relu(ctx: object) -> bool:
-    return ctx.kind == "op" and ctx.func_name == "relu"
 
 
 def _failed_partial_trace() -> Trace:
@@ -74,7 +62,7 @@ def test_complete_tlspec_round_trip_adopts_attestation(tmp_path) -> None:
 
 
 def test_halted_tlspec_round_trip_adopts_attestation(tmp_path) -> None:
-    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     bundle = tmp_path / "halted.tlspec"
     tl.save(trace, bundle, overwrite=True)
     loaded = tl.load(bundle)
@@ -188,7 +176,7 @@ def test_n3_failed_capture_refuses_backward_and_replay() -> None:
 
 
 def test_n5_halted_push_refuses() -> None:
-    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     with pytest.raises(CaptureOutcomeError) as exc_info:
         trace.push()
     assert exc_info.value.fields["code"] == "N5"
@@ -200,7 +188,7 @@ def test_halted_backward_stays_allowed() -> None:
     trace = tl.trace(
         ThreeStageModel(),
         torch.ones(1, 3, requires_grad=True),
-        halt=_halt_on_relu,
+        halt=halt_on_relu,
         capture=tl.options.CaptureOptions(backward_ready=True),
         save_mode="reference",
     )
@@ -248,7 +236,7 @@ class SwallowingHaltModel(nn.Module):
 
 def test_swallowed_predicate_halt_fails_closed() -> None:
     with pytest.raises(StopSignalSwallowedError) as exc_info:
-        tl.trace(SwallowingHaltModel(), torch.ones(1, 3), halt=_halt_on_relu)
+        tl.trace(SwallowingHaltModel(), torch.ones(1, 3), halt=halt_on_relu)
     assert exc_info.value.fields["kind"] == "halt"
     partial = tl.partial.from_failed_capture(exc_info.value)
     assert partial.outcome.status is CaptureStatus.FAILED
@@ -309,7 +297,7 @@ def test_imperative_halt_outside_capture_propagates() -> None:
 def test_legitimate_halt_still_settles_halted() -> None:
     """The latch never converts an honestly-propagated halt into a failure."""
 
-    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     assert trace.outcome.status is CaptureStatus.HALTED
 
 
@@ -325,7 +313,7 @@ def test_recording_outcomes_stamped() -> None:
     assert complete.outcome.derived is False
 
     halted = tl.record(
-        ThreeStageModel(), x, save=lambda ctx: ctx.kind == "op", halt=_halt_on_relu
+        ThreeStageModel(), x, save=lambda ctx: ctx.kind == "op", halt=halt_on_relu
     )
     assert halted.outcome.status is CaptureStatus.HALTED
     assert halted.outcome.derived is False

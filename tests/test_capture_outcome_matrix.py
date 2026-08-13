@@ -24,18 +24,11 @@ from torchlens.capture.outcome import (
     CaptureStatus,
 )
 
+from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
+
 pytestmark = pytest.mark.smoke
 
 TORCHLENS_DIR = pathlib.Path(tl.__file__).resolve().parent
-
-
-class ThreeStageModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(3, 3)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(torch.relu(self.linear(x)))
 
 
 class NaNProducingModel(nn.Module):
@@ -46,10 +39,6 @@ class NaNProducingModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.linear(x)
         return torch.relu(y / torch.zeros_like(y))
-
-
-def _halt_on_relu(ctx: object) -> bool:
-    return ctx.kind == "op" and ctx.func_name == "relu"
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +141,7 @@ def test_cooked_halted_trace_refuses_runnable_save_and_live_replay(tmp_path) -> 
         ThreeStageModel(),
         torch.ones(1, 3),
         save=lambda ctx: ctx.kind == "op",
-        halt=_halt_on_relu,
+        halt=halt_on_relu,
     )
     cooked = recording.to_trace()
     assert cooked.outcome.status is CaptureStatus.HALTED

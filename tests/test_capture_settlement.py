@@ -20,23 +20,11 @@ import torchlens.postprocess as pp
 from torchlens.capture.outcome import CapturePhase, CaptureStatus, FailureOrigin
 from torchlens.fastlog import Recorder
 from torchlens.fastlog._halt import HaltSignal
+from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
 
 pytestmark = pytest.mark.smoke
 
 TORCHLENS_DIR = pathlib.Path(tl.__file__).resolve().parent
-
-
-class ThreeStageModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(3, 3)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(torch.relu(self.linear(x)))
-
-
-def _halt_on_relu(ctx: object) -> bool:
-    return ctx.kind == "op" and ctx.func_name == "relu"
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +63,7 @@ def test_recorder_scratch_pass_settles_complete() -> None:
 
 
 def test_halted_capture_settles_attested_halted() -> None:
-    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     outcome = trace.outcome
     assert outcome is not None
     assert outcome.status is CaptureStatus.HALTED
@@ -98,7 +86,7 @@ def test_halted_trace_analysis_save_round_trips(tmp_path) -> None:
     export to be allowed.
     """
 
-    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     assert "_output_attribution_input_tensors" not in trace.__dict__
     bundle = tmp_path / "halted_analysis.tlspec"
     tl.save(trace, bundle, overwrite=True)
@@ -122,7 +110,7 @@ def test_recorder_halt_pass_settles_attested_halted_unfinished(monkeypatch) -> N
 
     monkeypatch.setattr(Recorder, "_absorb_pass_events", _capture)
     with Recorder(
-        ThreeStageModel(), save=lambda ctx: ctx.kind == "op", halt=_halt_on_relu
+        ThreeStageModel(), save=lambda ctx: ctx.kind == "op", halt=halt_on_relu
     ) as recorder:
         output = recorder.log(torch.ones(1, 3))
     assert output is None
@@ -300,7 +288,7 @@ def test_halted_postprocess_failure_settles_failed_postprocess(monkeypatch) -> N
 
     monkeypatch.setattr(pp, "_add_output_layers", _boom)
     with pytest.raises(ValueError, match="planted halted-pp") as exc_info:
-        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     assert isinstance(exc_info.value.__context__, HaltSignal)
     outcome = captured[0].outcome
     assert outcome is not None
@@ -320,7 +308,7 @@ def test_halted_finalize_failure_settles_failed_finalize(monkeypatch) -> None:
 
     monkeypatch.setattr(TorchBackend, "cleanup_model_session", _boom)
     with pytest.raises(ValueError, match="planted halted-cleanup") as exc_info:
-        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
+        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
     assert isinstance(exc_info.value.__context__, HaltSignal)
     outcome = sessions[-1].outcome
     assert outcome is not None
@@ -381,7 +369,7 @@ def test_cooked_halted_trace_settles_attested_halted() -> None:
         ThreeStageModel(),
         torch.ones(1, 3),
         save=lambda ctx: ctx.kind == "op",
-        halt=_halt_on_relu,
+        halt=halt_on_relu,
     )
     assert recording.halted is True
     cooked = recording.to_trace()
