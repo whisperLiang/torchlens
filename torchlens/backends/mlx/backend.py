@@ -578,6 +578,8 @@ def _find_mlx_compiled_attributes(
     seen: set[int] = set()
 
     def _scan_value(path: str, value: Any, depth: int) -> None:
+        """Record ``path`` when ``value`` (or a direct list/dict item) is the transform type."""
+
         if type(value) is transform_type:
             found.add(path)
             return
@@ -594,6 +596,13 @@ def _find_mlx_compiled_attributes(
                     found.add(f"{path}[{key!r}]")
 
     def _scan_module(prefix: str, module: object, depth: int) -> None:
+        """Recurse through one ``mlx.nn.Module``'s attribute and dict surfaces.
+
+        Both surfaces are scanned because ``mlx.nn.Module`` subclasses ``dict``:
+        children and arrays live in the dict items while plain Python attributes
+        land in ``__dict__``. Bounded by ``max_depth`` and an identity-seen set.
+        """
+
         if depth > max_depth or id(module) in seen:
             return
         seen.add(id(module))

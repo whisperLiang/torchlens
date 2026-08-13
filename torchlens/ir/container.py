@@ -697,6 +697,8 @@ def _generated_dataclass_init_marker() -> str | None:
 
     @dataclasses.dataclass
     class _Probe:
+        """Throwaway dataclass whose generated ``__init__`` supplies the marker."""
+
         _x: int
 
     for klass in _Probe.__mro__:

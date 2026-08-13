@@ -131,6 +131,8 @@ def _loaded_non_torch_validation_replay_unavailable(trace: Any) -> bool:
 
 
 class TraceValidationMixin(_TraceMixinBase):
+    """``Trace`` validation surface: forward replay, backward checks, and re-capture."""
+
     def save_new_outs(
         self: "Trace",
         model: torch.nn.Module,

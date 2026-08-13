@@ -891,6 +891,12 @@ def _make_plan_predicate(
     """Build the record predicate that fingerprints the stream and saves sites."""
 
     def _predicate(ctx: Any) -> bool:
+        """Fingerprint the record stream and decide whether this site is wanted.
+
+        Stateful in ``cursor``: a repeat call for the same event index under an
+        alias label replays the previous decision instead of advancing the stream.
+        """
+
         try:
             if ctx.kind != "op":
                 return False

@@ -258,6 +258,8 @@ EXTRA_KEY_CHANNELS: frozenset[str] = frozenset(
 
 
 def _facet(record: OpRecord, name: str) -> Any:
+    """Return one facet of ``record``, materializing its checked-in default if absent."""
+
     from .op_record import _FACET_ATTRIBUTES
 
     value = getattr(record, _FACET_ATTRIBUTES[name])

@@ -1390,6 +1390,8 @@ def _with_per_draw_collapse_cache(render_fn: Any) -> Any:
 
     @functools.wraps(render_fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Install the per-draw collapse cache, always tearing it down afterwards."""
+
         token = _PER_DRAW_COLLAPSE_CACHE.set(_PerDrawCollapseCache())
         try:
             return render_fn(*args, **kwargs)

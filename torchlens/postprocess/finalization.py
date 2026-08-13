@@ -1119,6 +1119,12 @@ def _reconcile_multipass_layer_fields(layer_log: "Layer") -> None:
     varying: Dict[str, List[Any]] = {}
 
     def record_if_varying(field_name: str, values: List[Any]) -> bool:
+        """Record ``field_name`` as varying when its per-pass values are not all equal.
+
+        Returns ``True`` when the values differ, so the caller replaces the
+        representative field with an honest multi-pass summary.
+        """
+
         distinct_count = len({repr(value) for value in values})
         if distinct_count > 1:
             varying[field_name] = values

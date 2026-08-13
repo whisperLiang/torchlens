@@ -201,6 +201,8 @@ _TO_PANDAS_EXCLUDED_OP_FIELDS: frozenset[str] = frozenset(
 
 
 class TraceExportMixin(_TraceMixinBase):
+    """``Trace`` export surface: dataframe, dict, and tabular projections."""
+
     def to_pandas(self: "Trace", include_decoded_output_summary: bool = False) -> "pd.DataFrame":
         """Return a dataframe containing one row per layer pass.
 

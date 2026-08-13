@@ -248,6 +248,13 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
     def _resolve(
         self, address: str, entry: tuple[torch.Tensor | None, int | None]
     ) -> tuple[torch.Tensor | None, int | None]:
+        """Materialize the whole-storage baseline for one address, memoizing the result.
+
+        When the capture-state clone cannot be read as bytes the trace is marked in
+        ``_HOST_ESCAPE_MUTABLE_WRITEBACK`` and the unresolved entry is returned, so
+        the verdict degrades instead of comparing against a guessed baseline.
+        """
+
         capture_state = self._trace._runnable.capture_state
         clone = capture_state.get(address) if isinstance(capture_state, Mapping) else None
         before: torch.Tensor | None = None
@@ -267,6 +274,8 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
         return resolved
 
     def get(self, address: Any, default: Any = None) -> Any:
+        """Like ``dict.get``, but resolves a not-yet-materialized baseline on the way out."""
+
         entry = dict.get(self, address)
         if entry is None:
             return default

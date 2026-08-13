@@ -97,6 +97,8 @@ def _record_emitted_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     forward = warnings.showwarning
 
     def recorder(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Record ``(category, message)`` in ``seen``, then forward to the real handler."""
+
         seen.add((category, str(message)))
         forward(message, category, *args, **kwargs)
 
@@ -114,6 +116,8 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     forward = warnings.showwarning
 
     def dedup(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Forward only warnings whose ``(category, message)`` is not already in ``seen``."""
+
         if (category, str(message)) in seen:
             return
         forward(message, category, *args, **kwargs)

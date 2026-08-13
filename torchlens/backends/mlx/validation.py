@@ -113,6 +113,8 @@ def build_capture_template(
     cursor = iter(leaf_labels)
 
     def _slot(node: Any) -> Any:
+        """Replace each labeled array leaf with ``REPLAY_SLOT``, preserving structure."""
+
         if _is_mlx_array(node):
             label = next(cursor, None)
             return node if label is None else REPLAY_SLOT
@@ -461,6 +463,15 @@ def _reconstruct_value(
     cursor = iter(leaf_labels)
 
     def _rebuild(node: Any) -> Any:
+        """Rebuild one template node, binding each slot to its recorded parent label.
+
+        Raises
+        ------
+        ValueError
+            If a ``_ReplaySlot`` has no recorded label, which means the template and
+            the label fingerprint disagree. Fail closed rather than guess.
+        """
+
         if _is_mlx_array(node) or isinstance(node, _ReplaySlot):
             label = next(cursor, None)
             if label is None:

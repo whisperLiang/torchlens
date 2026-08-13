@@ -2691,6 +2691,8 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
     """
 
     def _require(flag: bool, name: str) -> None:
+        """Raise when a recorded ambient control is unsupported on this runtime."""
+
         if not flag:
             raise RuntimeError(
                 f"Recorded ambient execution context field {name!r} is not "

@@ -142,6 +142,8 @@ def _legacy_conditional_else_entry_edges(
 
 
 class TraceStatsMixin(_TraceMixinBase):
+    """``Trace`` computed-statistics surface: derived counts, edges, and summaries."""
+
     # ********************************************
     # ********** Computed Properties *************
     # ********************************************

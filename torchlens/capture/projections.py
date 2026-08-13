@@ -869,7 +869,8 @@ class OpDraft(Protocol):
 
     pipeline: str
 
-    def freeze(self) -> Any: ...
+    def freeze(self) -> Any:
+        """Materialize this draft into the record ``commit_op`` appends."""
 
 
 @dataclass(slots=True)

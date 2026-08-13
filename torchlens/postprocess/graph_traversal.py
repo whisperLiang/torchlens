@@ -649,6 +649,8 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
         return False
 
     def _numel(shape: Any) -> int | None:
+        """Element count for a fully-static integer shape tuple, else ``None``."""
+
         if not isinstance(shape, tuple):
             return None
         numel = 1

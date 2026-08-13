@@ -738,12 +738,21 @@ class _DeferredPayloadCloneFn(torch.autograd.Function):
     def forward(  # type: ignore[override]
         ctx: Any, source: torch.Tensor, holder: list[torch.Tensor]
     ) -> torch.Tensor:
+        """Return the aliased tensor held in ``holder``, unchanged.
+
+        The alias arrives inside ``holder`` rather than as a tensor argument so the
+        output is not one of autograd's inputs; otherwise autograd would return a
+        differentiable view instead of a plain tensor.
+        """
+
         return holder[0]
 
     @staticmethod
     def backward(  # type: ignore[override]
         ctx: Any, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None]:
+        """Pass the gradient straight through: ``clone`` and ``alias`` are identities."""
+
         return grad_output, None
 
 

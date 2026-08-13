@@ -271,10 +271,14 @@ def _ambient_execution_context(
         return None
 
     def _optional_bool(name: str) -> bool | None:
+        """Read one optional boolean field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else bool(value)
 
     def _optional_str(name: str) -> str | None:
+        """Read one optional string field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else str(value)
 
@@ -2484,6 +2488,8 @@ def _collect_baked_literal_values(
     sequences: set[tuple[Any, ...]] = set()
 
     def visit(node: Any) -> None:
+        """Accumulate the literal footprints reachable from one literal-argument node."""
+
         if isinstance(node, LiteralAtom):
             if node.kind is LiteralAtomKind.INT and isinstance(node.value, int):
                 ints.add(int(node.value))

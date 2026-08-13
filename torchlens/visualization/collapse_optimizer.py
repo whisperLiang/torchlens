@@ -1771,6 +1771,8 @@ def _segment_prefix_candidate_ends(
     exit_cover = [0] * (limit + 2)
 
     def cover(diff: list[int], low: int, high: int) -> None:
+        """Add one clamped ``[low, high]`` interval to a difference array."""
+
         low = max(low, 2)
         high = min(high, limit)
         if low <= high:
@@ -2044,6 +2046,8 @@ def _op_segment_label(
     valid = {str(op.label) for op in trace.ops}
 
     def endpoint(base: str, resolved: str) -> str:
+        """Render a range endpoint, keeping its pass suffix only for a multi-pass label."""
+
         multipass = f"{base}:2" in valid
         return resolved if ":" in resolved and multipass else base
 

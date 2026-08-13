@@ -395,6 +395,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     data = dict(payload)
 
     def _enum_or_none(key: str, enum_cls: type[Enum]) -> Any:
+        """Read one closed-vocabulary enum field, or ``None`` when absent.
+
+        Raises
+        ------
+        ValueError
+            If the value is not a string or is outside ``enum_cls``.
+        """
+
         value = data.get(key)
         if value is None:
             return None
@@ -414,6 +422,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     origin = _enum_or_none("origin", FailureOrigin)
 
     def _str_or_none(key: str) -> str | None:
+        """Read one optional string field.
+
+        Raises
+        ------
+        ValueError
+            If the value is present and not a string.
+        """
+
         value = data.get(key)
         if value is not None and not isinstance(value, str):
             raise ValueError(f"capture outcome field {key!r} must be a string or None")
@@ -431,6 +447,14 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
         raise ValueError("capture outcome field 'n_ops_committed' must be an int or None")
 
     def _bool(key: str, default: bool = False) -> bool:
+        """Read one strictly-boolean field, falling back to ``default`` when absent.
+
+        Raises
+        ------
+        ValueError
+            If the value is present and not a ``bool``.
+        """
+
         value = data.get(key, default)
         if not isinstance(value, bool):
             raise ValueError(f"capture outcome field {key!r} must be a bool")

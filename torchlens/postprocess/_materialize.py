@@ -163,6 +163,8 @@ def build_ingest_inputs(trace: "Trace", events: CaptureEvents) -> IngestInputs:
         trace._trace_core = core
 
     def timing_sink(bucket: str, elapsed: float) -> None:
+        """Record one ingest phase's elapsed time on the trace."""
+
         _record_phase_timing(trace, bucket, elapsed)
 
     return IngestInputs(

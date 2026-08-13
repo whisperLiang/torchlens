@@ -202,6 +202,8 @@ def _audit_one_membership(
     )
 
     def conflict(detail: str) -> MembershipLineageVerdict:
+        """Build a ``conflict`` verdict for this membership, with the arming remedy appended."""
+
         remedy = (
             " Remedy: call torchlens.distributed.arm() at process start, "
             "before any process group is created, on every rank."
@@ -216,6 +218,8 @@ def _audit_one_membership(
         )
 
     def compatible(detail: str) -> MembershipLineageVerdict:
+        """Build a ``compatible`` verdict for this membership."""
+
         return MembershipLineageVerdict(
             membership_digest=digest,
             status="compatible",

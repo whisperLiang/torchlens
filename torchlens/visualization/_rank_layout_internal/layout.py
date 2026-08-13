@@ -198,6 +198,8 @@ def _compute_topological_layout(
     # Compute module bounding boxes from node positions.
     # Collect all source labels in each module, including nested children.
     def _collect_module_node_labels(mod_key: str) -> set[str]:
+        """Collect every positioned node label inside ``mod_key``, including nested children."""
+
         ids: set[str] = set()
         for dn in module_direct_nodes.get(mod_key, []):
             nd = node_data.get(dn)
@@ -798,13 +800,19 @@ def _rescale_dot_for_rtree(dot_source: str, ceiling: float = _RTREE_COORD_CEILIN
     scale = ceiling / max_coord
 
     def _scale_pos(m: re.Match) -> str:
+        """Rewrite one pinned ``pos="x,y!"`` attribute at the uniform scale."""
+
         return f'pos="{float(m.group(1)) * scale:.1f},{float(m.group(2)) * scale:.1f}!"'
 
     def _scale_bb(m: re.Match) -> str:
+        """Rewrite one four-value ``bb="..."`` bounding box at the uniform scale."""
+
         vals = [float(m.group(i)) * scale for i in range(1, 5)]
         return 'bb="' + ",".join(f"{v:.1f}" for v in vals) + '"'
 
     def _scale_dim(m: re.Match) -> str:
+        """Rewrite one ``width=``/``height=`` inch dimension at the uniform scale."""
+
         return f"{m.group(1)}={float(m.group(2)) * scale:.4f}"
 
     out = _RTREE_POS_RE.sub(_scale_pos, dot_source)

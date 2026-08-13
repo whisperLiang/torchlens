@@ -85,10 +85,14 @@ def tree_hash(root: Path) -> str:
 
 
 def _member_dirname(rank: int) -> str:
+    """Canonical per-member directory name for one rank."""
+
     return f"rank_{rank:04d}.tlspec"
 
 
 def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
+    """Build the typed tamper refusal (integrity failure, never a presence gap)."""
+
     return MergedArtifactError(
         f"Merged artifact integrity failure: {detail}",
         code=MergedErrorCode.MERGED_DESCRIPTOR_TAMPER,
@@ -97,6 +101,8 @@ def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
 
 
 def _schema_refusal(detail: str, **payload: Any) -> MergedArtifactError:
+    """Build the typed merged-artifact schema refusal."""
+
     return MergedArtifactError(
         f"Merged artifact schema refusal: {detail}",
         code=MergedErrorCode.MERGED_SCHEMA_INVALID,

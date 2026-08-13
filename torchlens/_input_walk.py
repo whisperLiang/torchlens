@@ -790,10 +790,22 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
     refusals: list[dict[str, Any]] = []
 
     def _type_ref(item: Any) -> list[str]:
+        """Exact ``(module, qualname)`` witness for one container's class."""
+
         cls = type(item)
         return [str(cls.__module__), str(cls.__qualname__)]
 
     def _descend(item: Any, path: tuple[Any, ...]) -> None:
+        """Walk one input node, appending its structural node and any type refusals.
+
+        Only CONTAINER nodes carry the exact-class witness: a tensor leaf belongs to
+        the admission gate and a scalar leaf to the literal-witness VALUE contract,
+        so an exact-type fact on leaves would diverge value-equal inputs the value
+        contract admits. A semantic scalar -- including one appearing as a ``slice``
+        component -- emits a ``semantic_scalar_type`` refusal here and in the
+        symmetric runtime snapshot.
+        """
+
         kind = classify_input_container(item)
         # r67 heavy-gate fix: only CONTAINER nodes carry the exact-class witness. A
         # tensor leaf's identity is the admission gate's domain, and a scalar LEAF
@@ -929,6 +941,15 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         nodes.append(node)
 
     def _safe_aux(aux: Any) -> Any:
+        """Return JSON-safe registered-container aux data, refusing anything else.
+
+        Raises
+        ------
+        ValueError
+            If the aux tree holds a value outside ``None``/bool/int/float/str and
+            nested lists or tuples of those.
+        """
+
         if aux is None or isinstance(aux, (bool, int, float, str)):
             return aux
         if isinstance(aux, (list, tuple)):

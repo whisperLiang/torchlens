@@ -1168,12 +1168,16 @@ class Layer:
 
     @equivalent_ops.setter
     def equivalent_ops(self, value: Any) -> None:
+        """Shadow ``equivalent_ops`` per layer, normalizing to the immutable view type."""
+
         self.__dict__["equivalent_ops"] = _layer_normalize_relation_write(
             self, "equivalent_ops", value
         )
 
     @equivalent_ops.deleter
     def equivalent_ops(self) -> None:
+        """Tombstone ``equivalent_ops`` so batch removal of finished layers works."""
+
         # ``state_items`` skips the tombstone, so cleanup ``delattr``s this
         # name; without a deleter the property raises "can't delete
         # attribute", breaking batch removal of finished layers.

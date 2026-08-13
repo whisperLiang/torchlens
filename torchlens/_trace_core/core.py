@@ -338,6 +338,8 @@ class TraceCore:
                 )
 
         def _restore_epochs(snapshot: list) -> None:
+            """Restore the backward-epoch list in place from a transaction snapshot."""
+
             self.backward_epochs[:] = snapshot
 
         txn.stash("epochs", list(self.backward_epochs), _restore_epochs)

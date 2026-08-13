@@ -1181,6 +1181,8 @@ def _first_non_executable_arg(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
     """
 
     def _scan(value: Any) -> Any | None:
+        """Depth-first search for the first non-executable placeholder in one value."""
+
         if _is_non_executable_placeholder(value):
             return value
         if isinstance(value, (list, tuple)):

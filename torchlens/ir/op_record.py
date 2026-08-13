@@ -202,6 +202,8 @@ FACET_CLASSES: dict[str, type] = {
 
 
 def _default_graph_facet() -> GraphFacet:
+    """Build the checked-in absent-``graph``-facet default."""
+
     # The parent_arg_positions default is the sparse producer's literal
     # (consumers index the two domains unguarded).
     return GraphFacet(parent_arg_positions={"args": {}, "kwargs": {}})
@@ -268,6 +270,15 @@ class OpRecord:
         )
 
     def _facet_or_default(self, facet_name: str) -> Any:
+        """Return facet ``facet_name``, materializing the checked-in default if absent.
+
+        Raises
+        ------
+        OpRecordAttributeError
+            If the facet is absent and has no ``FACET_DEFAULTS`` entry, which makes
+            it required rather than defaultable.
+        """
+
         attribute = _FACET_ATTRIBUTES[facet_name]
         value = object.__getattribute__(self, attribute)
         if value is not None:
@@ -692,6 +703,8 @@ def validate_amendment(amendment: OpAmendment) -> None:
 
 
 def _amendment(family: str, target_seq: int, target_label_raw: str, *values: Any) -> OpAmendment:
+    """Build one validated ``OpAmendment`` of ``family`` for the named target op."""
+
     schema = AMENDMENT_FAMILIES[family]
     amendment = OpAmendment(
         seq=0,

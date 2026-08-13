@@ -26,6 +26,8 @@ __all__ = ["dtensor_dual_geometry"]
 
 
 def _as_int_list(value: Any) -> list[int] | None:
+    """Coerce an iterable to a list of ints, or ``None`` when it is not one."""
+
     try:
         return [int(item) for item in value]
     except Exception:

@@ -1481,24 +1481,32 @@ class _RolledEdgeMaps:
         self._parents_per_pass: dict[str, dict[int, list[str]]] = {}
 
     def child_ops_per_layer(self, layer: "Layer") -> dict[str, list[int]]:
+        """Per-draw memo of ``Layer.child_ops_per_layer``."""
+
         found = self._child_ops.get(layer.layer_label)
         if found is None:
             found = self._child_ops[layer.layer_label] = layer.child_ops_per_layer
         return found
 
     def parent_ops_per_layer(self, layer: "Layer") -> dict[str, list[int]]:
+        """Per-draw memo of ``Layer.parent_ops_per_layer``."""
+
         found = self._parent_ops.get(layer.layer_label)
         if found is None:
             found = self._parent_ops[layer.layer_label] = layer.parent_ops_per_layer
         return found
 
     def edges_vary_across_ops(self, layer: "Layer") -> bool:
+        """Per-draw memo of ``Layer.edges_vary_across_ops``."""
+
         found = self._edges_vary.get(layer.layer_label)
         if found is None:
             found = self._edges_vary[layer.layer_label] = layer.edges_vary_across_ops
         return found
 
     def parents_per_pass(self, layer: "Layer") -> dict[int, list[str]]:
+        """Per-draw memo of ``Layer.parents_per_pass``."""
+
         found = self._parents_per_pass.get(layer.layer_label)
         if found is None:
             found = self._parents_per_pass[layer.layer_label] = layer.parents_per_pass

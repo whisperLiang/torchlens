@@ -236,21 +236,13 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
             "captured-gradient comparison, so there is nothing to preserve."
         ),
     ),
-    DeprecationFamily(
-        name="artifact_schema_age_advisory",
-        kind="artifact_advisory",
-        replacement="re-save the artifact with the current release",
-        remove_in="retained_indefinitely",
-        deprecated_in="unrecorded",
-        sites=("torchlens/_io/manifest.py::enforce_version_policy",),
-        note=(
-            "FINDING (warnings hygiene, filed not fixed here): this is NOT an API "
-            "deprecation -- it advises that a loaded bundle predates the runtime "
-            "schema -- yet it is raised as DeprecationWarning, which Python hides "
-            "from end users by default and which conflates artifact age with API "
-            "removal. Recategorizing it is a warnings-hygiene call, not a debt one."
-        ),
-    ),
+    # REMOVED in grind r3 (R15-F1): the "artifact_schema_age_advisory" family
+    # was never an API deprecation -- it advises that a loaded bundle predates
+    # the runtime schema. It now raises the visible
+    # `torchlens._io.ArtifactSchemaAgeWarning` (a UserWarning subclass), so it
+    # is out of this inventory's scope by construction. Its behavior is pinned
+    # by tests/test_rehydration_floor.py::
+    # test_between_floor_advisory_is_a_visible_user_warning.
 )
 
 _FAMILIES_BY_NAME = {family.name: family for family in DEPRECATION_FAMILIES}

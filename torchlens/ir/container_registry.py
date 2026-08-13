@@ -539,6 +539,8 @@ def _snapshots_dedup_equivalent(
         return False
 
     def _value_root(occurrence: ContainerLeafOccurrence) -> tuple[object, ...]:
+        """Identity key for one leaf occurrence: path, occurrence index, and value root."""
+
         label = occurrence.producer_op_label
         root = value_identity_roots.get(label, label) if label is not None else None
         return (occurrence.path, occurrence.occ_index, root)

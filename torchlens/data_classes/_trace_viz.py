@@ -53,6 +53,8 @@ def _flatten_backward_fire_ref(value: Any) -> tuple["FireRecord", ...]:
 
 
 class TraceVisualizationMixin(_TraceMixinBase):
+    """``Trace`` visualization surface: ``draw``, ``show``, and collapse diagnostics."""
+
     def show(self: "Trace", method: str = "graph", **kwargs: Any) -> str | None:
         """Render this trace using a lightweight notebook-friendly dispatcher.
 

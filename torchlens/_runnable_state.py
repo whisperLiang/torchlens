@@ -1093,6 +1093,8 @@ def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunn
     nonpersistent_buffers = _prepared_nonpersistent_buffers(trace, descriptor)
 
     def _staged(prepared: PreparedRunnableState) -> PreparedRunnableState:
+        """Move one prepared state bundle to its recorded per-slot devices."""
+
         staged = replace(
             prepared,
             slot_values=stage_state_to_slot_devices(descriptor, prepared.slot_values),
@@ -2071,6 +2073,8 @@ def _preflight_retention_floor(descriptor: SparseRunDescriptor) -> None:
     devices: dict[str, torch.device] = {}
 
     def _charge(slot: TensorSlotDescriptor) -> None:
+        """Add one slot's guaranteed-retained clone bytes to its device's floor."""
+
         device = _slot_device(slot)
         key = str(device)
         devices[key] = device
