@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pickle
 
+import pytest
 import torch
 from torch import nn
 
@@ -455,6 +456,29 @@ class TestFactBlocks:
         family = store.fact_blocks.families["param"]
         assert len(family.columns["param_shapes"]) == 2
         assert store.fact_blocks.hydrate(0, "param_shapes") == [(4, 3), (4,)]
+
+    def test_param_family_joins_are_scoped_by_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Independent param fact columns cannot overwrite each other's row joins."""
+
+        from torchlens._trace_core.fact_blocks import (
+            OP_PARAM_FACT_FIELDS,
+            convert_fact_cells,
+        )
+
+        monkeypatch.setitem(OP_PARAM_FACT_FIELDS, "extra_param_facts", list)
+        layout = OpStoreLayout(("param_shapes", "extra_param_facts"))
+        store = OpRowStore(layout)
+        for param_shapes, extra_facts in ((["shared"], ["first"]), (["shared"], ["second"])):
+            cells: list[object] = [_MISSING] * layout.n_fields
+            cells[layout.fid_by_name["param_shapes"]] = param_shapes
+            cells[layout.fid_by_name["extra_param_facts"]] = extra_facts
+            store.adopt_row(cells)
+
+        convert_fact_cells(store, {})
+
+        assert store.fact_blocks.hydrate(1, "param_shapes") == ["shared"]
+        assert store.fact_blocks.hydrate(0, "extra_param_facts") == ["first"]
+        assert store.fact_blocks.hydrate(1, "extra_param_facts") == ["second"]
 
     def test_finished_trace_fact_surface(self) -> None:
         from torchlens._trace_core.op_store import _FACT
