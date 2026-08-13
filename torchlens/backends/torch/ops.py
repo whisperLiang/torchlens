@@ -5395,7 +5395,17 @@ def _log_output_tensor_info(
     fields_dict["transformed_out"] = None
     fields_dict["has_saved_activation"] = False
     fields_dict["activation_transform"] = self.activation_transform
-    fields_dict["annotations"] = {}
+    # Collective boundary nodes carry their portable collective_boundary_v1
+    # payload in the reserved "collective" annotations namespace; the wrapper
+    # stamps it on the replay callable (same channel as the __tl_transform_*
+    # dunders). Deep-copied per output so sibling records never share state.
+    collective_info = getattr(fields_dict.get("func"), "__tl_collective_info__", None)
+    if collective_info:
+        import copy as _copy
+
+        fields_dict["annotations"] = {"collective": _copy.deepcopy(collective_info)}
+    else:
+        fields_dict["annotations"] = {}
     fields_dict["intervention_replaced"] = False
     fields_dict["fire_results"] = ()
     fields_dict["has_saved_args"] = False

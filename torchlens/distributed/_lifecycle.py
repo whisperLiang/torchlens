@@ -379,6 +379,9 @@ def _arm(source: str) -> ArmingRecord:
         )
         state = _ArmedState(arming=arming, recognizer=recognizer)
         _install_lifecycle_wraps(state)
+        from ..backends.torch.collectives import install_collective_wraps
+
+        install_collective_wraps(state.originals)
         _STATE = state
         return arming
 

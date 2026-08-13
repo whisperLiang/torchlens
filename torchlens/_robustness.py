@@ -278,6 +278,14 @@ def check_model_and_input_variants(
     # and a strided layout) and capture then silently reports zero parameters.
     check_distributed_capture(model, input_args, input_kwargs)
 
+    # SPMD processes that first-capture with distributed already initialized
+    # arm collective-boundary capture lazily here (restricted registry seeding,
+    # design-merge-ranks-c v5 rule 1.3.2). Explicit torchlens.distributed.arm()
+    # at process start remains the required spelling for MPMD programs.
+    from .distributed._lifecycle import maybe_auto_arm
+
+    maybe_auto_arm()
+
     offenses: List[Tuple[str, str]] = []
 
     # Treat a bare tensor and a container of tensors identically — ``_iter_tensors``
