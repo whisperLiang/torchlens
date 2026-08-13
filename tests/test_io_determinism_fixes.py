@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import pickle
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -227,3 +228,17 @@ def test_tuple_subclasses_preserve_type_across_bundle_round_trip(tmp_path: Path)
     assert isinstance(config["size"], torch.Size)
     assert type(config["maximum"]) is type(maximum)
     assert torch.equal(config["maximum"].values, maximum.values)
+
+
+def test_defaultdict_factory_survives_bundle_round_trip(tmp_path: Path) -> None:
+    """Auto-vivifying relation metadata remains a defaultdict after load."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    assert isinstance(trace.output_ops[0].module_entry_arg_keys, defaultdict)
+    path = tmp_path / "defaultdict.tlspec"
+    tl.save(trace, path)
+
+    loaded = tl.load(path)
+    mapping = loaded.output_ops[0].module_entry_arg_keys
+    assert isinstance(mapping, defaultdict)
+    assert mapping["unseen"] == []

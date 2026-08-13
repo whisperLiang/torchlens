@@ -432,8 +432,8 @@ def _scrub_value_kind(value_type: type) -> int:
 
     The branch order below is exactly the ``isinstance`` chain it replaces:
     ``torch.Size`` before ``tuple`` (it is a tuple subclass), and
-    ``OrderedDict``/``defaultdict`` before plain ``dict`` (both are dict
-    subclasses, and ``defaultdict`` rebuilds as a plain dict just as before).
+    ``OrderedDict``/``defaultdict`` before plain ``dict`` so their observable
+    ordering and default-factory behavior survive a round trip.
     """
 
     if issubclass(value_type, _SIMPLE_KEEP_TYPES):
@@ -558,6 +558,18 @@ def _scrub_value(
         # branches rebuild the mapping so a payload cannot slip into
         # ``metadata.pkl`` unscrubbed and un-inventoried.
         _reject_payload_mapping_keys(value, options)
+        if isinstance(value, defaultdict):
+            rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+            for key, item in value.items():
+                rebuilt[key] = _scrub_value(
+                    item,
+                    options,
+                    memo,
+                    blob_specs,
+                    blob_counter,
+                    stringify_unknown,
+                )
+            return rebuilt
         if kind == _SCRUB_ORDERED_DICT:
             return OrderedDict(
                 (
@@ -1385,8 +1397,9 @@ def _blobify_recursive_value(
             for key, item in value.items()
         )
     if isinstance(value, defaultdict):
-        return {
-            key: _blobify_recursive_value(
+        rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        for key, item in value.items():
+            rebuilt[key] = _blobify_recursive_value(
                 owner=owner,
                 field_name=field_name,
                 value=item,
@@ -1395,8 +1408,7 @@ def _blobify_recursive_value(
                 blob_specs=blob_specs,
                 blob_counter=blob_counter,
             )
-            for key, item in value.items()
-        }
+        return rebuilt
     if isinstance(value, dict):
         return {
             key: _blobify_recursive_value(
