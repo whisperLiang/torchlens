@@ -88,12 +88,11 @@ from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
     ModuleFrame,
-    OpEvent,
     OutputRef,
     OutputVersionEvent,
     ParentEdge,
 )
-from ...ir.capture_events import replace_op_event
+from ...ir.op_record import amend_lookback_retention
 from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import (
     ContainerSpec,
@@ -175,6 +174,7 @@ from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
 
 from ...capture.projections import (
     append_projected_event,
+    commit_op,
     get_active_recording_state,
 )
 from ...fastlog.exceptions import PredicateError
@@ -189,6 +189,7 @@ from ...capture.salient_args import extract_salient_args
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+    from ...ir.op_record import OpRecord
 
 
 class _AncestorBitset:
@@ -554,6 +555,11 @@ def _label_version_baseline(t: Any) -> int | None:
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
 
+# The producer-unification dual-path switch (TORCHLENS_CAPTURE_PRODUCER) died
+# with the legacy producer in P7: every torch capture freezes decomposed
+# ``OpRecord`` rows. Preview backends keep emitting compat ``OpEvent``s until
+# S15 and adapt at the one ingest boundary (``op_record_from_event``).
+
 
 @dataclass(frozen=True, slots=True)
 class CaptureProducerPolicy:
@@ -588,6 +594,11 @@ class CaptureProducerPolicy:
 
 _CAPTURE_PRODUCER_POLICIES: dict[CaptureProducerMode, CaptureProducerPolicy] = {}
 
+_EMIT_BY_MODE: dict[CaptureProducerMode, str] = {
+    "exhaustive": "_emit_exhaustive_operation_events",
+    "predicate": "_emit_predicate_operation_events",
+}
+
 
 def get_capture_producer_policy(mode: CaptureProducerMode) -> CaptureProducerPolicy:
     """Return the precomputed producer policy for ``mode``.
@@ -603,20 +614,19 @@ def get_capture_producer_policy(mode: CaptureProducerMode) -> CaptureProducerPol
         Cached policy object used on the decorated-operation hot path.
     """
 
-    if not _CAPTURE_PRODUCER_POLICIES:
-        _CAPTURE_PRODUCER_POLICIES.update(
-            {
-                "exhaustive": CaptureProducerPolicy(
-                    "exhaustive", _emit_exhaustive_operation_events
-                ),
-                "predicate": CaptureProducerPolicy("predicate", _emit_predicate_operation_events),
-            }
-        )
-    return _CAPTURE_PRODUCER_POLICIES[mode]
+    policy = _CAPTURE_PRODUCER_POLICIES.get(mode)
+    if policy is None:
+        emit = globals()[_EMIT_BY_MODE[mode]]
+        policy = CaptureProducerPolicy(mode, emit)
+        _CAPTURE_PRODUCER_POLICIES[mode] = policy
+    return policy
 
 
 def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> None:
     """Attach a precomputed producer policy to ``trace``.
+
+    Compiled once at session setup; the hot path only ever touches the
+    precompiled policy object.
 
     Parameters
     ----------
@@ -934,34 +944,15 @@ def _resolve_call_function_ref(
     return ref
 
 
-def _op_event_from_log(
-    trace: "Trace",
+def _exhaustive_freeze_refs(
     fields_dict: dict[str, Any],
     tensor: torch.Tensor,
-    fire_results: tuple[FireResult, ...] = (),
-    module_stack: tuple[ModuleFrame, ...] | None = None,
-    call_ref_box: list[FunctionCallRef] | None = None,
-) -> OpEvent:
-    """Build an ``OpEvent`` that mirrors a just-constructed ``Op``.
+    module_stack: tuple[ModuleFrame, ...] | None,
+) -> tuple[Any, tuple[ModuleFrame, ...], Any, BackendSemantics]:
+    """Compute the exhaustive freeze's shared nested refs ONCE per record.
 
-    Parameters
-    ----------
-    fields_dict
-        Raw field mapping used to construct ``op_log``.
-    tensor
-        Live output tensor for backend metadata.
-    fire_results
-        Live intervention fire results associated with this output.
-    module_stack
-        Precomputed immutable module frames shared by outputs from the call.
-    call_ref_box
-        Per-call one-element box sharing ONE ``FunctionCallRef`` across the
-        sibling outputs of a multi-output call (M7).
-
-    Returns
-    -------
-    OpEvent
-        Frozen operation event appended to ``CaptureEvents``.
+    Both freeze shapes (legacy ``OpEvent`` and decomposed ``OpRecord``) build
+    from these exact values, so the shapes cannot drift on the ref layer.
     """
 
     tensor_ref = _tensor_ref_from_fields(tensor, fields_dict)
@@ -1002,7 +993,82 @@ def _op_event_from_log(
             bytes_delta_at_call=fields_dict["bytes_delta_at_call"],
             bytes_peak_at_call=fields_dict["bytes_peak_at_call"],
         )
-    return OpEvent(
+    return tensor_ref, module_stack, transformed_ref, backend_semantics
+
+
+def _exhaustive_output_ref(
+    fields_dict: dict[str, Any], tensor_ref: Any, transformed_ref: Any
+) -> OutputRef:
+    """Return the exhaustive freeze's output ref (shared by both shapes)."""
+
+    return OutputRef(
+        tensor=tensor_ref,
+        transformed_tensor=transformed_ref,
+        has_saved_activation=fields_dict["has_saved_activation"],
+        output_device=fields_dict["output_device"],
+        activation_transform=fields_dict["activation_transform"],
+        detach_saved_activations=fields_dict["detach_saved_activations"],
+        visualizer_path=fields_dict["visualizer_path"],
+        multi_output_index=fields_dict["multi_output_index"],
+        in_multi_output=fields_dict["in_multi_output"],
+        container_path=tuple(fields_dict["container_path"]),
+        container_spec=fields_dict["container_spec"],
+        child_versions=tuple(fields_dict["out_versions_by_child"].items()),
+    )
+
+
+def _exhaustive_capture_policy(trace: "Trace", fields_dict: dict[str, Any]) -> CapturePolicy:
+    """Return the exhaustive freeze's capture policy (shared by both shapes)."""
+
+    return CapturePolicy(
+        must_keep_topology=True,
+        save_payload=fields_dict["has_saved_activation"],
+        requires_isolation=fields_dict["is_inplace"],
+        save_args=fields_dict["has_saved_args"],
+        save_code=bool(fields_dict["code_context"]),
+        save_rng=bool(fields_dict["func_rng_states"]),
+        save_grad=fields_dict["save_grads"],
+        stream=False,
+        save_mode=getattr(trace, "save_mode", "copy"),
+    )
+
+
+def _op_record_from_log(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+    tensor: torch.Tensor,
+    fire_results: tuple[FireResult, ...] = (),
+    module_stack: tuple[ModuleFrame, ...] | None = None,
+    call_ref_box: list[FunctionCallRef] | None = None,
+) -> "OpRecord":
+    """Exhaustive-pipeline decomposed freeze: ``OpCore`` + facets.
+
+    Reads the final exhaustive draft (``fields_dict``) through the shared
+    ref builders; facet PRESENCE mirrors
+    ``op_record_from_event`` applied to the equivalent compat event (S5:
+    absent facet != fabricated empty facet).
+    """
+
+    from ...ir.op_record import (
+        AncestryFacet,
+        AnnotationsFacet,
+        AutogradFacet,
+        ControlFacet,
+        GraphFacet,
+        InterventionFacet,
+        ModulesFacet,
+        OpCore,
+        OpRecord,
+        ParamsFacet,
+        PolicyFacet,
+        TransformFacet,
+    )
+
+    tensor_ref, module_stack, transformed_ref, backend_semantics = _exhaustive_freeze_refs(
+        fields_dict, tensor, module_stack
+    )
+    core = OpCore(
+        seq=0,
         kind="source" if fields_dict["is_input"] or fields_dict["is_buffer"] else "op",
         label_raw=fields_dict["_label_raw"],
         layer_label_raw=fields_dict["_layer_label_raw"],
@@ -1010,31 +1076,39 @@ def _op_event_from_log(
         raw_index=fields_dict["raw_index"],
         type_index=fields_dict["type_index"],
         step_index=fields_dict["step_index"] or 0,
-        # Durable records are trace-backref-free from birth: every consumer of
-        # OpEvent.source_trace resolves ``event.source_trace or trace`` with the
-        # materializing trace in scope, so the backref carried no information on
-        # the torch path and only created Trace<->event cycles (the reason the
-        # sealed stream needed a weak side registry). Preview backends still
-        # populate the compatibility field; its deletion is ports-phase work.
-        source_trace=None,
-        source_trace_id=None,
-        tracing_finished=fields_dict["_tracing_finished"],
-        construction_done=fields_dict["_construction_done"],
+        pass_index=fields_dict["pass_index"],
+        parents=_parent_edges_from_fields(fields_dict),
+        output=_exhaustive_output_ref(fields_dict, tensor_ref, transformed_ref),
+        is_bottom_level=True,
+        func_call_id=fields_dict["func_call_id"],
+    )
+    modules = tuple(fields_dict["modules"])
+    input_ancestors = frozenset(fields_dict["input_ancestors"])
+    internal_source_ancestors = frozenset(fields_dict["internal_source_ancestors"])
+    root_ancestors = frozenset(fields_dict["root_ancestors"])
+    has_internal_source_ancestor = fields_dict["has_internal_source_ancestor"]
+    grad_fn_class_qualname = fields_dict["grad_fn_class_qualname"]
+    # The legacy event's transform_config = {**user config, "_tl_annotations"}
+    # and the adapter pops the two smuggled channels back out; the direct
+    # builder starts from the clean user mapping and never smuggles.
+    user_transform_config = dict(fields_dict.get("transform_config") or {})
+    user_transform_config.pop("_tl_annotations", None)
+    fn_code_location = user_transform_config.pop("fn_code_location", None)
+    annotations_payload = dict(fields_dict.get("annotations") or {})
+    is_transform = bool(fields_dict.get("is_transform", False))
+    transform_kind = fields_dict.get("transform_kind")
+    transform_chain = tuple(fields_dict.get("transform_chain") or ())
+    transform_fn_name = fields_dict.get("transform_fn_name")
+    transform_fn_qualname = fields_dict.get("transform_fn_qualname")
+    transform_fn_source = fields_dict.get("transform_fn_source")
+    params = _param_refs_from_fields(fields_dict)
+    parent_params = tuple(fields_dict["parent_params"])
+    is_scalar_bool = fields_dict["is_scalar_bool"]
+    bool_value = fields_dict["bool_value"]
+    intervention_replaced = fields_dict["intervention_replaced"]
+    return OpRecord(
+        core=core,
         function=_resolve_call_function_ref(fields_dict, call_ref_box),
-        output=OutputRef(
-            tensor=tensor_ref,
-            transformed_tensor=transformed_ref,
-            has_saved_activation=fields_dict["has_saved_activation"],
-            output_device=fields_dict["output_device"],
-            activation_transform=fields_dict["activation_transform"],
-            detach_saved_activations=fields_dict["detach_saved_activations"],
-            visualizer_path=fields_dict["visualizer_path"],
-            multi_output_index=fields_dict["multi_output_index"],
-            in_multi_output=fields_dict["in_multi_output"],
-            container_path=tuple(fields_dict["container_path"]),
-            container_spec=fields_dict["container_spec"],
-            child_versions=tuple(fields_dict["out_versions_by_child"].items()),
-        ),
         templates=ArgTemplateRef(
             saved_args=fields_dict["saved_args"],
             saved_kwargs=fields_dict["saved_kwargs"],
@@ -1042,65 +1116,133 @@ def _op_event_from_log(
             kwargs_template=fields_dict["kwargs_template"],
             has_saved_args=fields_dict["has_saved_args"],
         ),
-        parents=_parent_edges_from_fields(fields_dict),
-        parent_arg_positions=copy.deepcopy(fields_dict["parent_arg_positions"]),
-        _edge_uses=tuple(
-            fields_dict["_edge_uses"]
-            or _build_edge_use_records(
-                trace,
-                fields_dict["parent_arg_positions"],
-                fields_dict["_label_raw"],
-                fields_dict["func_call_id"],
+        graph=GraphFacet(
+            parent_arg_positions=copy.deepcopy(fields_dict["parent_arg_positions"]),
+            edge_uses=tuple(
+                fields_dict["_edge_uses"]
+                or _build_edge_use_records(
+                    trace,
+                    fields_dict["parent_arg_positions"],
+                    fields_dict["_label_raw"],
+                    fields_dict["func_call_id"],
+                )
+            ),
+            unattributed_tensor_args=tuple(fields_dict.get("unattributed_tensor_args") or ()),
+            dropped_edge_tensor_args=tuple(fields_dict.get("dropped_edge_tensor_args") or ()),
+            is_output_parent=fields_dict["is_output_parent"],
+            input_was_parameter=bool(fields_dict.get("input_was_parameter", False)),
+            equivalence_class=fields_dict["equivalence_class"],
+        ),
+        modules_facet=(
+            ModulesFacet(module_stack=module_stack, modules=modules)
+            if module_stack or modules
+            else None
+        ),
+        ancestry=(
+            AncestryFacet(
+                input_ancestors=input_ancestors,
+                internal_source_ancestors=internal_source_ancestors,
+                root_ancestors=root_ancestors,
+                has_internal_source_ancestor=has_internal_source_ancestor,
             )
+            if (
+                input_ancestors
+                or internal_source_ancestors
+                or root_ancestors
+                or has_internal_source_ancestor
+            )
+            else None
         ),
-        params=_param_refs_from_fields(fields_dict),
-        parent_params=tuple(fields_dict["parent_params"]),
-        module_stack=module_stack,
-        modules=tuple(fields_dict["modules"]),
-        backend_semantics=backend_semantics,
-        policy=CapturePolicy(
-            must_keep_topology=True,
-            save_payload=fields_dict["has_saved_activation"],
-            requires_isolation=fields_dict["is_inplace"],
-            save_args=fields_dict["has_saved_args"],
-            save_code=bool(fields_dict["code_context"]),
-            save_rng=bool(fields_dict["func_rng_states"]),
-            save_grad=fields_dict["save_grads"],
-            stream=False,
-            save_mode=getattr(trace, "save_mode", "copy"),
+        autograd=(
+            AutogradFacet(grad_fn_class_qualname=grad_fn_class_qualname)
+            if grad_fn_class_qualname is not None
+            else None
         ),
-        predicate_matched=True,
-        pass_index=fields_dict["pass_index"],
-        grad_fn_class_qualname=fields_dict["grad_fn_class_qualname"],
-        grad_fn_handle=fields_dict["grad_fn_handle"],
-        equivalence_class=fields_dict["equivalence_class"],
-        is_transform=bool(fields_dict.get("is_transform", False)),
-        transform_kind=fields_dict.get("transform_kind"),
-        transform_chain=tuple(fields_dict.get("transform_chain") or ()),
-        transform_config={
-            **dict(fields_dict.get("transform_config") or {}),
-            "_tl_annotations": dict(fields_dict.get("annotations") or {}),
-        },
-        transform_fn_name=fields_dict.get("transform_fn_name"),
-        transform_fn_qualname=fields_dict.get("transform_fn_qualname"),
-        transform_fn_source=fields_dict.get("transform_fn_source"),
-        unattributed_tensor_args=tuple(fields_dict.get("unattributed_tensor_args") or ()),
-        dropped_edge_tensor_args=tuple(fields_dict.get("dropped_edge_tensor_args") or ()),
-        is_output_parent=fields_dict["is_output_parent"],
-        has_internal_source_ancestor=fields_dict["has_internal_source_ancestor"],
-        internal_source_ancestors=frozenset(fields_dict["internal_source_ancestors"]),
-        input_ancestors=frozenset(fields_dict["input_ancestors"]),
-        root_ancestors=frozenset(fields_dict["root_ancestors"]),
-        func_call_id=fields_dict["func_call_id"],
-        is_bottom_level=True,
-        is_scalar_bool=fields_dict["is_scalar_bool"],
-        bool_value=fields_dict["bool_value"],
-        input_was_parameter=bool(fields_dict.get("input_was_parameter", False)),
-        intervention_fired=bool(fire_results),
-        intervention_replaced=fields_dict["intervention_replaced"],
-        fire_results=fire_results,
-        intervention_template_ref=None,
+        transform=(
+            TransformFacet(
+                is_transform=is_transform,
+                transform_kind=transform_kind,
+                transform_chain=transform_chain,
+                transform_config=user_transform_config,
+                transform_fn_name=transform_fn_name,
+                transform_fn_qualname=transform_fn_qualname,
+                transform_fn_source=transform_fn_source,
+                fn_code_location=fn_code_location,
+            )
+            if (
+                is_transform
+                or transform_kind is not None
+                or transform_chain
+                or user_transform_config
+                or transform_fn_name is not None
+                or transform_fn_qualname is not None
+                or transform_fn_source is not None
+                or fn_code_location is not None
+            )
+            else None
+        ),
+        control=(
+            ControlFacet(is_scalar_bool=is_scalar_bool, bool_value=bool_value)
+            if is_scalar_bool is not None or bool_value is not None
+            else None
+        ),
+        params_facet=(
+            ParamsFacet(params=params, parent_params=parent_params)
+            if params or parent_params
+            else None
+        ),
+        annotations_facet=(
+            AnnotationsFacet(annotations=annotations_payload) if annotations_payload else None
+        ),
+        policy_facet=PolicyFacet(
+            backend_semantics=backend_semantics,
+            policy=_exhaustive_capture_policy(trace, fields_dict),
+            predicate_matched=True,
+            tracing_finished=fields_dict["_tracing_finished"],
+            construction_done=fields_dict["_construction_done"],
+        ),
+        intervention=(
+            InterventionFacet(
+                intervention_fired=bool(fire_results),
+                intervention_replaced=intervention_replaced,
+                fire_results=fire_results,
+            )
+            if (bool(fire_results) or intervention_replaced or fire_results)
+            else None
+        ),
     )
+
+
+@dataclass(slots=True)
+class ExhaustiveOpDraft:
+    """Exhaustive-pipeline draft (the three ``_make_layer_log_entry`` sites)."""
+
+    trace: Any
+    fields_dict: dict[str, Any]
+    tensor: torch.Tensor
+    fire_results: tuple[FireResult, ...]
+    module_stack: tuple[ModuleFrame, ...] | None
+    call_ref_box: list[FunctionCallRef] | None
+
+    pipeline: str = dataclasses.field(default="exhaustive", init=False)
+
+    @property
+    def grad_fn_handle(self) -> Any:
+        """The independently carried selected autograd handle (index stage)."""
+
+        return self.fields_dict["grad_fn_handle"]
+
+    def freeze(self) -> Any:
+        """Construct the journal record ONCE from the final draft state."""
+
+        return _op_record_from_log(
+            self.trace,
+            self.fields_dict,
+            self.tensor,
+            self.fire_results,
+            module_stack=self.module_stack,
+            call_ref_box=self.call_ref_box,
+        )
 
 
 def _is_namedtuple_instance(value: Any) -> bool:
@@ -5929,7 +6071,11 @@ def _replace_event_with_retained_payload(
         transformed_tensor=transformed_ref,
         has_saved_activation=True,
     )
-    replace_op_event(trace, raw_label, output=output_ref, predicate_matched=True)
+    trace.capture_events.append_amendment(
+        amend_lookback_retention(
+            event.seq, raw_label, output=output_ref, predicate_matched=True
+        )
+    )
 
 
 def _build_trace_predicate_context(
@@ -6121,6 +6267,19 @@ def _evaluate_trace_save_predicate(
     return spec, ctx
 
 
+def _module_filter_namespace(fields_dict: dict[str, Any]) -> SimpleNamespace:
+    """Build the legacy-shaped compatibility namespace ``module_filter`` sees.
+
+    The documented compatibility surface (producer unification 2.6): the
+    filter runs ONLY inside the exhaustive commit pipeline, and the namespace
+    carries the legacy key names WITHOUT ``fire_results`` (popped before the
+    filter today — preserved exactly). The decomposed producer builds this
+    same namespace lazily from its draft.
+    """
+
+    return SimpleNamespace(**fields_dict)
+
+
 def _make_layer_log_entry(
     self: "Trace",
     t: torch.Tensor,
@@ -6151,12 +6310,11 @@ def _make_layer_log_entry(
         t_kwargs = {}
 
     fire_results = tuple(fields_dict.pop("fire_results", ()))
-    from ...capture.projections import LiveOpView
 
     keep_by_predicate = True
     module_filter = getattr(self, "module_filter", None)
     if module_filter is not None:
-        keep_by_predicate = bool(module_filter(SimpleNamespace(**fields_dict)))
+        keep_by_predicate = bool(module_filter(_module_filter_namespace(fields_dict)))
     layer_nums_to_save = cast(Any, self._layer_nums_to_save)
     raw_index = cast(int, fields_dict["raw_index"])
     predicate_spec, predicate_ctx = _evaluate_trace_save_predicate(self, fields_dict, t)
@@ -6220,20 +6378,20 @@ def _make_layer_log_entry(
             and label not in _positions["kwargs"].values()
         )
     )
-    op_event = _op_event_from_log(
+    # The ONE commit tail (freeze -> atomic append) plus the two declared
+    # exhaustive-only post-tail stages (grad-handle index, LiveOpView) —
+    # see capture.projections.COMMIT_STAGE_MATRIX.
+    new_entry = commit_op(
         self,
-        fields_dict,
-        t,
-        fire_results,
-        module_stack=event_module_stack,
-        call_ref_box=call_ref_box,
+        ExhaustiveOpDraft(
+            trace=self,
+            fields_dict=fields_dict,
+            tensor=t,
+            fire_results=fire_results,
+            module_stack=event_module_stack,
+            call_ref_box=call_ref_box,
+        ),
     )
-    self.capture_events.append(op_event)
-    if op_event.grad_fn_handle is not None:
-        self.capture_events.grad_fn_handles_by_label_raw[op_event.label_raw] = (
-            op_event.grad_fn_handle
-        )
-    new_entry = LiveOpView(self, op_event)
     if predicate_ctx is not None and not save_this_activation:
         _retain_lookback_candidate(self, predicate_ctx, fields_dict, t)
     _raise_if_nonfinite_requested(self, t, new_entry)

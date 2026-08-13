@@ -456,7 +456,7 @@ class Recording(CapturedRun):
         elif self._capture_events is not None:
             from ..capture.projections import activation_record_from_event
 
-            for event in self._capture_events.op_events:
+            for event in self._capture_events.amended_op_records():
                 record = activation_record_from_event(event)
                 if record is None:
                     continue
@@ -488,7 +488,11 @@ class Recording(CapturedRun):
                     contexts=contexts,
                     decisions=tuple(
                         bool(getattr(event, "predicate_matched", False))
-                        for event in getattr(self._capture_events, "op_events", ())
+                        for event in (
+                            self._capture_events.amended_op_records()
+                            if self._capture_events is not None
+                            else ()
+                        )
                     ),
                     predicate_failures=tuple(self.predicate_failures),
                 ),

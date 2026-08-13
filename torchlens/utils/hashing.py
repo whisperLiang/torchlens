@@ -310,11 +310,20 @@ def compute_raw_event_shape_hash(capture_events: Any) -> str:
         normalized parent-edge order indices, and normalized module addresses.
     """
 
+    # Read through the canonical reducer view, never the raw list: the hash is
+    # a persisted change-detection key and must keep seeing AMENDED parents
+    # (register_tensor_connection) when the raw list becomes append-only (P4).
+    # Today the reducer is a no-op passthrough, so this is byte-identical.
+    folded_events = (
+        capture_events.amended_op_records()
+        if hasattr(capture_events, "amended_op_records")
+        else capture_events.op_events
+    )
     order_by_raw_label = {
-        event.label_raw: index for index, event in enumerate(capture_events.op_events)
+        event.label_raw: index for index, event in enumerate(folded_events)
     }
     records = []
-    for index, event in enumerate(capture_events.op_events):
+    for index, event in enumerate(folded_events):
         function = event.function
         output = event.output
         tensor = output.tensor

@@ -30,6 +30,7 @@ from ...data_classes.trace import Trace
 from ...data_classes.trace import _init_module_hierarchy_data
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -922,7 +923,7 @@ class JAXBackend:
 
         label_by_value_id: dict[int, str] = {
             id(event.output.tensor.payload): event.label_raw
-            for event in trace.capture_events.op_events
+            for event in trace.capture_events.amended_op_records()
             if event.output.tensor.payload is not None
         }
         label_by_capture_index: dict[int, str] = {}
@@ -1418,7 +1419,7 @@ class JAXBackend:
             for index, output in enumerate(outputs)
         }
         is_multi_output = len(outputs) > 1
-        for event in list(trace.capture_events.op_events):
+        for event in list(trace.capture_events.amended_op_records()):
             if id(event.output.tensor.payload) not in output_ids:
                 continue
             leaf_index, container_path = output_metadata_by_id.get(
@@ -1433,13 +1434,14 @@ class JAXBackend:
                 container_path=container_path,
                 container_spec=output_container_spec,
             )
-            updated = replace(event, is_output_parent=True, output=updated_output)
-            trace.capture_events.op_event_by_label_raw[event.label_raw] = updated
-            trace.capture_events.live_index.replace(updated)
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == event.label_raw:
-                    trace.capture_events.op_events[index] = updated
-                    break
+            trace.capture_events.append_amendment(
+                amend_preview_output_parent_rebind(
+                    event.seq,
+                    event.label_raw,
+                    is_output_parent=True,
+                    output=updated_output,
+                )
+            )
 
     def _attach_params(self, trace: Trace, params_tree: object) -> None:
         """Populate ``trace.params`` from first-argument pytree leaves.

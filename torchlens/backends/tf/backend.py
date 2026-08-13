@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from ..._trace_core.relation_views import freeze_trace_relation_views
@@ -14,6 +14,7 @@ from ...backends import BackendName
 from ...data_classes.param import ParamAccessor
 from ...data_classes.trace import Trace
 from ...ir.capture_events import CaptureEvents
+from ...ir.op_record import amend_preview_output_parent_mark
 from ...intervention.selectors import BaseSelector
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
@@ -990,13 +991,9 @@ def _mark_outputs(trace: Trace, output: object, producer_by_ref: Mapping[object,
         event = trace.capture_events.op_event_by_label_raw.get(label)
         if event is None:
             continue
-        updated = replace(event, is_output_parent=True)
-        trace.capture_events.op_event_by_label_raw[label] = updated
-        for index, candidate in enumerate(trace.capture_events.op_events):
-            if candidate.label_raw == label:
-                trace.capture_events.op_events[index] = updated
-                trace.capture_events.live_index.replace(updated)
-                break
+        trace.capture_events.append_amendment(
+            amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+        )
 
 
 def _mark_static_outputs(trace: Trace, output_label_raws: Sequence[str]) -> None:
@@ -1021,13 +1018,9 @@ def _mark_static_outputs(trace: Trace, output_label_raws: Sequence[str]) -> None
         event = trace.capture_events.op_event_by_label_raw.get(label)
         if event is None:
             continue
-        updated = replace(event, is_output_parent=True)
-        trace.capture_events.op_event_by_label_raw[label] = updated
-        for index, candidate in enumerate(trace.capture_events.op_events):
-            if candidate.label_raw == label:
-                trace.capture_events.op_events[index] = updated
-                trace.capture_events.live_index.replace(updated)
-                break
+        trace.capture_events.append_amendment(
+            amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+        )
 
 
 def _iter_output_tensors(value: object) -> list[Any]:

@@ -969,7 +969,7 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
     events = getattr(trace, "capture_events", None)
     if events is not None and getattr(events, "op_events", None) is not None:
         rows = []
-        for event in events.op_events:
+        for event in events.amended_op_records():
             rows.append(
                 {
                     "name": str(event.layer_label_raw or event.label_raw),

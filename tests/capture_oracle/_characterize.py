@@ -20,7 +20,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.fastlog import Recording
-from torchlens.ir import CaptureEvents
 from torchlens.ir.events import OpEvent
 
 from ._models import build_model_case
@@ -366,13 +365,14 @@ def _project_event(event: OpEvent) -> dict[str, Any]:
     }
 
 
-def _snapshot_events(events: CaptureEvents) -> list[dict[str, Any]]:
+def _snapshot_events(journal: Any) -> list[dict[str, Any]]:
     """Snapshot operation events without retaining live tensor references.
 
     Parameters
     ----------
-    events:
-        Capture event buffer about to be materialized.
+    journal:
+        The step-0 ``JournalView`` (or any object with ``op_events`` and the
+        grad-fn handle side index) about to be ingested.
 
     Returns
     -------
@@ -380,7 +380,21 @@ def _snapshot_events(events: CaptureEvents) -> list[dict[str, Any]]:
         Raw-order operation event projections.
     """
 
-    return [_project_event(event) for event in events.op_events if event.kind == "op"]
+    # Producer-unification P2/P3: every characterized record flows through the
+    # inverse oracle adapter (identity for compat OpEvents; reconstructs a
+    # genuine OpEvent for decomposed OpRecords), so the UNCHANGED
+    # characterizer and its goldens survive the record-model migration. The
+    # grad-fn handle rides the journal side index (single ownership).
+    from producer_parity._oracle_adapter import op_event_from_record
+
+    handles = getattr(journal, "grad_fn_handles_by_label_raw", {})
+    return [
+        _project_event(
+            op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw))
+        )
+        for event in journal.op_events
+        if event.kind == "op"
+    ]
 
 
 def _install_instrumentation() -> _Instrumentation:
@@ -415,27 +429,30 @@ def _install_instrumentation() -> _Instrumentation:
 
     restore_callbacks.append(restore_policy)
 
-    postprocess_module = importlib.import_module("torchlens.postprocess")
     materialize_module = importlib.import_module("torchlens.postprocess._materialize")
-    original_public_materialize = postprocess_module.materialize_from_events
-    original_direct_materialize = materialize_module.materialize_from_events
+    original_ingest = materialize_module.ingest_op_records
 
-    def observing_materialize(trace: Any, events: CaptureEvents) -> None:
-        """Snapshot immutable field population and delegate unchanged."""
+    def observing_ingest(inputs: Any, manifest: Any) -> Any:
+        """Snapshot immutable field population and delegate unchanged.
 
-        event_snapshots.append(_snapshot_events(events))
-        original_direct_materialize(trace, events)
+        The step-0 interception seam is ``ingest_op_records(inputs, manifest)``
+        (producer unification P3): every caller — the torch orchestrator, the
+        preview backends, and partial recovery — reaches ingest through this
+        late-bound module attribute, and the folded journal view rides
+        ``inputs.journal``.
+        """
 
-    postprocess_module.materialize_from_events = observing_materialize
-    materialize_module.materialize_from_events = observing_materialize
+        event_snapshots.append(_snapshot_events(inputs.journal))
+        return original_ingest(inputs, manifest)
 
-    def restore_materialize() -> None:
-        """Restore both materialization references."""
+    materialize_module.ingest_op_records = observing_ingest
 
-        postprocess_module.materialize_from_events = original_public_materialize
-        materialize_module.materialize_from_events = original_direct_materialize
+    def restore_ingest() -> None:
+        """Restore the step-0 ingest seam."""
 
-    restore_callbacks.append(restore_materialize)
+        materialize_module.ingest_op_records = original_ingest
+
+    restore_callbacks.append(restore_ingest)
     return _Instrumentation(producer_modes, event_snapshots, restore_callbacks)
 
 

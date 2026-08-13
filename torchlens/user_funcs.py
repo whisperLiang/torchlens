@@ -57,7 +57,8 @@ from .backends._options import (
 from .backends._selective_save import apply_static_label_save_policy, reject_selector_outside_kinds
 from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
-from .ir import ParentEdge, replace_op_event
+from .ir import ParentEdge
+from .ir.op_record import amend_graph_edge_insertion
 from ._training_validation import TrainingModeConfigError, validate_training_compatibility
 from .utils._torch_compat import is_dynamo_compiled_callable
 from . import _state
@@ -756,14 +757,16 @@ def _register_live_tensor_connection(
     parent_arg_positions.setdefault("args", {})[len(parent_arg_positions.get("args", {}))] = (
         parent_label
     )
-    replace_op_event(
-        trace,
-        child_label,
-        parents=(
-            *event.parents,
-            ParentEdge(parent_label_raw=parent_label, arg_position=None, edge_use="output"),
-        ),
-        parent_arg_positions=parent_arg_positions,
+    trace.capture_events.append_amendment(
+        amend_graph_edge_insertion(
+            event.seq,
+            child_label,
+            parents=(
+                *event.parents,
+                ParentEdge(parent_label_raw=parent_label, arg_position=None, edge_use="output"),
+            ),
+            parent_arg_positions=parent_arg_positions,
+        )
     )
 
 

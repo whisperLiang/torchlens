@@ -558,11 +558,13 @@ def test_capture_events_concat_follows_declared_merge_law() -> None:
     from torchlens.ir.capture_events import LANE_MERGE_POLICIES, CaptureEvents
     from torchlens.ir.events import ModulePrepEvent, PreHookProvenanceEvent
 
-    # The merge law is total: every event lane on CaptureEvents has a policy.
+    # The merge law is total: every journal lane on CaptureEvents has a
+    # policy. Lanes are derived structurally (the list-typed journal buffers,
+    # i.e. ``field(default_factory=list)``), not by name: the amendment lane
+    # (``op_amendments``) is a journal lane whose rows are not events, and a
+    # name-suffix heuristic would silently miss any such lane.
     lane_fields = {
-        f.name
-        for f in dataclass_fields(CaptureEvents)
-        if f.name.endswith("_events") and f.name != "recent_events"
+        f.name for f in dataclass_fields(CaptureEvents) if f.default_factory is list
     }
     assert lane_fields == set(LANE_MERGE_POLICIES)
 

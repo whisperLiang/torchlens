@@ -44,6 +44,7 @@ from ..utils.tensor_utils import get_memory_amount_from_metadata
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
     from ..data_classes.trace import Trace
+    from ..ir.op_record import OpRecord
 
 _active_recording_state: "RecordingState | None" = None
 
@@ -587,24 +588,32 @@ def _capture_policy_from_spec(spec: CaptureSpec) -> CapturePolicy:
     return policy
 
 
-def _event_from_record(
+@dataclass(slots=True)
+class _SparseFreezeValues:
+    """Shared value bundle both sparse freeze shapes construct from."""
+
+    label_raw: str
+    tensor_ref: TensorRef
+    transformed_ref: TensorRef | None
+    module_stack: tuple[ModuleFrame, ...]
+    modules: tuple[tuple[str, int], ...]
+    is_scalar_bool: bool | None
+    bool_value: bool | None
+
+
+def _sparse_freeze_values(
     ctx: RecordContext,
-    spec: CaptureSpec,
     *,
-    tensor: torch.Tensor | None = None,
-    ram_payload: torch.Tensor | None = None,
-    transformed_ram_payload: torch.Tensor | None = None,
-    predicate_matched: bool,
-    backend_semantics: BackendSemantics | None = None,
-    function: FunctionCallRef | None = None,
-    container_path: tuple[Any, ...] = (),
+    tensor: torch.Tensor | None,
+    ram_payload: torch.Tensor | None,
+    transformed_ram_payload: torch.Tensor | None,
     module_fields: tuple[
         tuple[ModuleFrame, ...],
         tuple[tuple[str, int], ...],
     ]
-    | None = None,
-) -> OpEvent:
-    """Build a lightweight fastlog ``OpEvent`` without materializing an Op."""
+    | None,
+) -> _SparseFreezeValues:
+    """Compute the sparse commit's shared values ONCE for either freeze shape."""
 
     label_raw = ctx.raw_label or ctx.label
     memory = (
@@ -651,7 +660,116 @@ def _event_from_record(
             blob_ref=None,
             backend_handle_id=str(id(transformed_ram_payload)),
         )
-    event = OpEvent(
+    return _SparseFreezeValues(
+        label_raw=label_raw,
+        tensor_ref=tensor_ref,
+        transformed_ref=transformed_ref,
+        module_stack=module_stack,
+        modules=modules,
+        is_scalar_bool=is_scalar_bool,
+        bool_value=bool_value,
+    )
+
+
+def _sparse_function_ref(ctx: RecordContext, function: FunctionCallRef | None) -> FunctionCallRef:
+    """Return the sparse commit's function facet (name-only SHELL fallback)."""
+
+    return function or FunctionCallRef(
+        func=None,
+        func_name=ctx.func_name,
+        func_qualname=None,
+        func_call_id=None,
+        code_context=(),
+        func_duration=None,
+        flops_forward=None,
+        flops_backward=None,
+        func_rng_states=None,
+        func_autocast_state=None,
+        arg_names=(),
+        num_args_total=0,
+        num_pos_args=0,
+        num_kwargs=0,
+        non_tensor_pos_args=(),
+        non_tensor_kwargs=(),
+        func_non_tensor_args=(),
+        is_inplace=False,
+        func_config=(),
+    )
+
+
+def _sparse_output_ref(
+    ctx: RecordContext,
+    spec: CaptureSpec,
+    values: _SparseFreezeValues,
+    *,
+    ram_payload: torch.Tensor | None,
+    container_path: tuple[Any, ...],
+) -> OutputRef:
+    """Return the sparse commit's output ref (shared by both freeze shapes)."""
+
+    return OutputRef(
+        tensor=values.tensor_ref,
+        transformed_tensor=values.transformed_ref,
+        has_saved_activation=bool(spec.save_out and (ram_payload is not None)),
+        output_device=str(ctx.tensor_device) if ctx.tensor_device is not None else None,
+        activation_transform=None,
+        detach_saved_activations=not spec.keep_grad,
+        visualizer_path=None,
+        multi_output_index=ctx.output_index,
+        in_multi_output=bool(container_path),
+        container_path=container_path,
+        container_spec=None,
+        child_versions=(),
+    )
+
+
+def _record_from_record_context(
+    ctx: RecordContext,
+    spec: CaptureSpec,
+    *,
+    tensor: torch.Tensor | None = None,
+    ram_payload: torch.Tensor | None = None,
+    transformed_ram_payload: torch.Tensor | None = None,
+    predicate_matched: bool,
+    backend_semantics: BackendSemantics | None = None,
+    function: FunctionCallRef | None = None,
+    container_path: tuple[Any, ...] = (),
+    module_fields: tuple[
+        tuple[ModuleFrame, ...],
+        tuple[tuple[str, int], ...],
+    ]
+    | None = None,
+) -> "OpRecord":
+    """Sparse-pipeline decomposed freeze: ``OpCore`` + facets, no ``OpEvent``.
+
+    Value computation routes through ``_sparse_freeze_values``; facet PRESENCE mirrors ``op_record_from_event``
+    applied to the equivalent compat event (S5: an absent facet is never
+    fabricated empty, and a facet is present exactly when the legacy event
+    carries non-default values — plus ``graph``/``policy``, which the adapter
+    constructs unconditionally).
+    """
+
+    from ..ir.op_record import (
+        AnnotationsFacet,
+        ControlFacet,
+        GraphFacet,
+        ModulesFacet,
+        OpCore,
+        OpRecord,
+        PolicyFacet,
+        RecordingFacet,
+    )
+
+    values = _sparse_freeze_values(
+        ctx,
+        tensor=tensor,
+        ram_payload=ram_payload,
+        transformed_ram_payload=transformed_ram_payload,
+        module_fields=module_fields,
+    )
+    label_raw = values.label_raw
+    core = OpCore(
+        seq=0,
         kind=ctx.kind,
         label_raw=label_raw,
         layer_label_raw=label_raw,
@@ -659,92 +777,157 @@ def _event_from_record(
         raw_index=ctx.raw_index or ctx.event_index,
         type_index=ctx.type_index or 0,
         step_index=ctx.step_index or 0,
-        source_trace=None,
-        source_trace_id=None,
-        tracing_finished=False,
-        construction_done=True,
-        function=function
-        or FunctionCallRef(
-            func=None,
-            func_name=ctx.func_name,
-            func_qualname=None,
-            func_call_id=None,
-            code_context=(),
-            func_duration=None,
-            flops_forward=None,
-            flops_backward=None,
-            func_rng_states=None,
-            func_autocast_state=None,
-            arg_names=(),
-            num_args_total=0,
-            num_pos_args=0,
-            num_kwargs=0,
-            non_tensor_pos_args=(),
-            non_tensor_kwargs=(),
-            func_non_tensor_args=(),
-            is_inplace=False,
-            func_config=(),
-        ),
-        output=OutputRef(
-            tensor=tensor_ref,
-            transformed_tensor=transformed_ref,
-            has_saved_activation=bool(spec.save_out and (ram_payload is not None)),
-            output_device=str(ctx.tensor_device) if ctx.tensor_device is not None else None,
-            activation_transform=None,
-            detach_saved_activations=not spec.keep_grad,
-            visualizer_path=None,
-            multi_output_index=ctx.output_index,
-            in_multi_output=bool(container_path),
-            container_path=container_path,
-            container_spec=None,
-            child_versions=(),
-        ),
-        templates=_EMPTY_ARG_TEMPLATE_REF,
+        pass_index=ctx.pass_index,
         parents=tuple(
             ParentEdge(parent_label_raw=parent, arg_position=None, edge_use="unknown")
             for parent in ctx.parent_labels
         ),
-        parent_arg_positions={"args": {}, "kwargs": {}},
-        _edge_uses=(),
-        params=(),
-        parent_params=(),
-        module_stack=module_stack,
-        modules=modules,
-        backend_semantics=backend_semantics
-        if backend_semantics is not None
-        else _EMPTY_BACKEND_SEMANTICS,
-        policy=_capture_policy_from_spec(spec),
-        predicate_matched=predicate_matched,
-        pass_index=ctx.pass_index,
-        grad_fn_class_qualname=None,
-        grad_fn_handle=None,
-        equivalence_class=None,
-        is_transform=False,
-        transform_kind=None,
-        transform_chain=(),
-        transform_config={"_tl_annotations": _reference_annotations(spec.save_mode, ram_payload)},
-        transform_fn_name=None,
-        transform_fn_qualname=None,
-        transform_fn_source=None,
-        unattributed_tensor_args=(),
-        dropped_edge_tensor_args=(),
-        is_output_parent=ctx.is_output_parent,
-        has_internal_source_ancestor=False,
-        internal_source_ancestors=frozenset(),
-        input_ancestors=frozenset(),
-        root_ancestors=frozenset(),
-        func_call_id=ctx.func_call_id,
+        output=_sparse_output_ref(
+            ctx, spec, values, ram_payload=ram_payload, container_path=container_path
+        ),
         is_bottom_level=bool(ctx.is_bottom_level_func),
-        is_scalar_bool=is_scalar_bool,
-        bool_value=bool_value,
-        intervention_fired=False,
-        intervention_replaced=False,
-        fire_results=(),
-        intervention_template_ref=None,
-        record_context=ctx,
-        capture_spec=spec,
+        func_call_id=ctx.func_call_id,
     )
-    return event
+    annotations_payload = _reference_annotations(spec.save_mode, ram_payload)
+    control = (
+        ControlFacet(is_scalar_bool=values.is_scalar_bool, bool_value=values.bool_value)
+        if values.is_scalar_bool is not None or values.bool_value is not None
+        else None
+    )
+    return OpRecord(
+        core=core,
+        function=_sparse_function_ref(ctx, function),
+        templates=_EMPTY_ARG_TEMPLATE_REF,
+        graph=GraphFacet(
+            parent_arg_positions={"args": {}, "kwargs": {}},
+            is_output_parent=ctx.is_output_parent,
+        ),
+        modules_facet=(
+            ModulesFacet(module_stack=values.module_stack, modules=values.modules)
+            if values.module_stack or values.modules
+            else None
+        ),
+        control=control,
+        annotations_facet=(
+            AnnotationsFacet(annotations=dict(annotations_payload))
+            if annotations_payload
+            else None
+        ),
+        policy_facet=PolicyFacet(
+            backend_semantics=backend_semantics
+            if backend_semantics is not None
+            else _EMPTY_BACKEND_SEMANTICS,
+            policy=_capture_policy_from_spec(spec),
+            predicate_matched=predicate_matched,
+            tracing_finished=False,
+            construction_done=True,
+        ),
+        recording=RecordingFacet(record_context=ctx, capture_spec=spec),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The ONE commit tail (producer unification 3.1): freeze -> atomic append,
+# plus the declared exhaustive-only post-tail stages. The checked-in
+# stage-applicability matrix is conformance-asserted by the parity suite.
+# ---------------------------------------------------------------------------
+
+# Stage applicability per pre-commit pipeline (DoR 3.1). "tail" rows are
+# universal; everything else is declared to exactly one pipeline. The sparse
+# pipeline NEVER writes `_capture_parent_edge_truth` (the edge-truth seal is
+# not computable on sparse and would arm a deliberately dormant invariant).
+COMMIT_STAGE_MATRIX: dict[str, tuple[str, ...]] = {
+    "exhaustive": (
+        "fire_results_park",
+        "module_filter",
+        "selector",
+        "escrow_candidate",
+        "payload_disposition",
+        "predicate_saved_args",
+        "edge_truth_seal",
+        "freeze",
+        "append",
+        "grad_handle_index",
+        "live_op_view",
+        "lookback_retention_candidate",
+        "nonfinite_check",
+    ),
+    "sparse": (
+        "selector",
+        "demanded_enrichment",
+        "backend_semantics",
+        "payload_disposition",
+        "freeze",
+        "append",
+        "halt_evaluation",
+    ),
+}
+
+
+class OpDraft(Protocol):
+    """A finished pre-commit pipeline's draft, ready for freeze -> append."""
+
+    pipeline: str
+
+    def freeze(self) -> Any: ...
+
+
+@dataclass(slots=True)
+class SparseOpDraft:
+    """Sparse-pipeline draft (12 ``append_projected_event`` sites)."""
+
+    ctx: RecordContext
+    spec: CaptureSpec
+    tensor: torch.Tensor | None
+    ram_payload: torch.Tensor | None
+    transformed_ram_payload: torch.Tensor | None
+    predicate_matched: bool
+    backend_semantics: BackendSemantics | None
+    function: FunctionCallRef | None
+    container_path: tuple[Any, ...]
+    module_fields: tuple[
+        tuple[ModuleFrame, ...],
+        tuple[tuple[str, int], ...],
+    ] | None
+
+    pipeline: str = field(default="sparse", init=False)
+
+    def freeze(self) -> Any:
+        """Construct the journal record ONCE from the final draft state."""
+
+        return _record_from_record_context(
+            self.ctx,
+            self.spec,
+            tensor=self.tensor,
+            ram_payload=self.ram_payload,
+            transformed_ram_payload=self.transformed_ram_payload,
+            predicate_matched=self.predicate_matched,
+            backend_semantics=self.backend_semantics,
+            function=self.function,
+            container_path=self.container_path,
+            module_fields=self.module_fields,
+        )
+
+
+def commit_op(trace: Any, draft: OpDraft) -> "LiveOpView | None":
+    """The ONE commit tail: freeze -> atomic append (+ exhaustive stages).
+
+    Freeze constructs the journal record ONCE from the final draft (the
+    decomposed producer is the only producer since P7); append is the single
+    sequencing authority. The
+    two post-tail stages (grad-handle side index, ``LiveOpView``) exist only
+    on the exhaustive pipeline per ``COMMIT_STAGE_MATRIX`` — the sparse
+    pipeline returns ``None`` and pays neither.
+    """
+
+    record = draft.freeze()
+    trace.capture_events.append(record)
+    if draft.pipeline != "exhaustive":
+        return None
+    grad_fn_handle = draft.grad_fn_handle  # type: ignore[attr-defined]
+    if grad_fn_handle is not None:
+        trace.capture_events.grad_fn_handles_by_label_raw[record.label_raw] = grad_fn_handle
+    return LiveOpView(trace, record)
 
 
 def append_projected_event(
@@ -760,7 +943,7 @@ def append_projected_event(
     function: FunctionCallRef | None = None,
     container_path: tuple[Any, ...] = (),
 ) -> None:
-    """Append one lightweight predicate event to ``trace.capture_events``."""
+    """Append one lightweight predicate record to ``trace.capture_events``."""
 
     if not hasattr(trace, "capture_events"):
         from ..ir import CaptureEvents
@@ -776,10 +959,11 @@ def append_projected_event(
         _add_tensor_backward_hook(trace, tensor, label_raw)
     recording_state = _active_recording_state
     module_fields = None if recording_state is None else recording_state.module_fields_for(ctx)
-    trace.capture_events.append(
-        _event_from_record(
-            ctx,
-            spec,
+    commit_op(
+        trace,
+        SparseOpDraft(
+            ctx=ctx,
+            spec=spec,
             tensor=tensor,
             ram_payload=ram_payload,
             transformed_ram_payload=transformed_ram_payload,
@@ -788,7 +972,7 @@ def append_projected_event(
             function=function,
             container_path=container_path,
             module_fields=module_fields,
-        )
+        ),
     )
 
 
@@ -807,6 +991,25 @@ _OPLOG_FIELDS_KNOWN_LATE = frozenset(
         "layer_label_short",
     }
 )
+
+
+def _grad_fn_handle_from_index(trace: "Trace", event: OpEvent) -> Any:
+    """Read the live autograd handle from its single owner, the journal index.
+
+    grad_fn single ownership (producer unification P2): the journal's
+    ``grad_fn_handles_by_label_raw`` side index is the one handle authority.
+    The event-field fallback keeps byte-identity for detached streams until
+    the compat ``OpEvent`` field dies with the legacy producer.
+    """
+
+    events = getattr(trace, "capture_events", None)
+    if events is not None:
+        handle = events.grad_fn_handles_by_label_raw.get(event.label_raw)
+        if handle is not None:
+            return handle
+    # Compat OpEvents still carry the handle field; decomposed OpRecords never
+    # do (single ownership) and read as None here by strict-protocol default.
+    return getattr(event, "grad_fn_handle", None)
 
 
 def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
@@ -952,9 +1155,10 @@ def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
     if name == "grad_fn_class_qualname":
         return event.grad_fn_class_qualname
     if name == "grad_fn_object_id":
-        return None if event.grad_fn_handle is None else id(event.grad_fn_handle)
+        handle = _grad_fn_handle_from_index(trace, event)
+        return None if handle is None else id(handle)
     if name == "grad_fn_handle":
-        return event.grad_fn_handle
+        return _grad_fn_handle_from_index(trace, event)
     if name == "grad_fn":
         return None
     if name == "in_multi_output":
@@ -1380,6 +1584,10 @@ def _torch_device_from_string(device_name: Any) -> torch.device | None:
 
 
 def recording_trace_from_events(events: Any) -> tuple[RecordContext, ...]:
-    """Project capture events into fastlog ``RecordContext`` objects."""
+    """Project capture events into fastlog ``RecordContext`` objects.
 
-    return tuple(_record_context_from_event(event) for event in events.op_events)
+    Reads the amended reducer view: retention amendments rebind outputs and
+    policy facts the projected contexts must reflect.
+    """
+
+    return tuple(_record_context_from_event(event) for event in events.amended_op_records())

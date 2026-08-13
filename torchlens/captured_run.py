@@ -75,6 +75,8 @@ class CapturedRun:
         events = self.event_stream
         if events is None:
             return ()
+        if hasattr(events, "amended_op_records"):
+            return tuple(events.amended_op_records())
         return tuple(events.op_events)
 
     @property

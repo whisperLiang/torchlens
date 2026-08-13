@@ -10,7 +10,7 @@ import pytest
 
 import torchlens as tl
 from torchlens.backends import BackendUnsupportedError
-from torchlens.capture.projections import _event_from_record
+from torchlens.capture.projections import _record_from_record_context
 from torchlens.fastlog.storage_disk import _ctx_from_json, _ctx_to_json
 from torchlens.fastlog.types import CaptureSpec, RecordContext
 from torchlens.ir import (
@@ -103,9 +103,9 @@ def test_ctx_json_round_trip_is_stable_with_recursive_history() -> None:
 
 
 def test_internal_projection_coerces_deferred_value_to_none() -> None:
-    """RecordContext-to-event projection never stores the sentinel in metadata."""
+    """RecordContext-to-record projection never stores the sentinel in metadata."""
 
-    event = _event_from_record(
+    event = _record_from_record_context(
         _minimal_context(),
         CaptureSpec(save_out=False, save_metadata=True),
         predicate_matched=True,

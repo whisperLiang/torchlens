@@ -26,8 +26,19 @@ from .events import (
     PreHookProvenanceEvent,
 )
 from .live_index import LiveIndex
+from .op_record import (
+    OpAmendment,
+    OpRecord,
+    apply_patch_items,
+    validate_amendment,
+)
 from .predicate import RecordContext
 from .refs import ParamRef, ReservedLabel
+
+# The journal op lane's record union: compat flat events (legacy producer,
+# preview backends) and decomposed records (torch decomposed producer). The
+# compat member dies in S15.
+JournalOp = OpEvent | OpRecord
 
 
 # Declared merge law: how each journal lane combines when one run's stream is
@@ -51,10 +62,20 @@ LANE_MERGE_POLICIES: dict[str, str] = {
     "pre_hook_events": "append_restamp",
     "op_events": "append_restamp",
     "intervention_events": "append_restamp",
+    "op_amendments": "append_restamp",
     "output_version_events": "run_local",
     "buffer_write_events": "run_local",
     "backward_events": "run_local",
 }
+
+# Lanes whose events carry a ``target_seq`` reference into the op lane's seq
+# domain: concat rebinds those references through the merge seq map so a
+# genuinely-bound record follows its target into the combined journal (DoR
+# 4.6). Any new target-carrying lane MUST register here or its references
+# dangle silently after a merge.
+REBINDABLE_TARGET_LANES: frozenset[str] = frozenset(
+    {"intervention_events", "op_amendments"}
+)
 
 _LANE_APPENDERS: dict[str, str] = {
     "op_events": "append",
@@ -63,7 +84,30 @@ _LANE_APPENDERS: dict[str, str] = {
     "module_exit_events": "append_module_exit",
     "pre_hook_events": "append_pre_hook",
     "intervention_events": "append_intervention",
+    "op_amendments": "append_amendment",
 }
+
+
+class SealedJournalAmendmentError(RuntimeError):
+    """A typed amendment was appended to a sealed source journal.
+
+    After ``CaptureSession.seal()`` folds a journal into its
+    ``CapturedRunCore``, the sealed source refuses further amendment appends
+    fail-closed (DoR 4.5.5): post-seal knowledge must route through a working
+    projection (``copy_for_replay``), whose carried amendment lane the
+    watermark filter keeps double-application-free.
+    """
+
+
+class AmendmentTargetError(RuntimeError):
+    """An amendment's target cannot be resolved in this journal.
+
+    Raised when ``target_label_raw`` names no committed op, or (in a
+    single-seq-domain journal) when the resolved op's ``seq`` disagrees with
+    ``target_seq``. Multi-domain journals (multi-pass fastlog projections have
+    no single seq domain) resolve by label only, so the seq cross-check is
+    skipped there by design (reviewer note O-N6).
+    """
 
 
 class LaneMergePolicyError(RuntimeError):
@@ -96,7 +140,7 @@ class SourceSequencingError(RuntimeError):
 _RUN_NONCE_COUNTER = itertools.count(1)
 
 
-def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
+def _clone_op_event_for_replay(event: Any) -> Any:
     """Return a projection copy of ``event`` with independent mutable state.
 
     ``OpEvent`` is a frozen dataclass, but two of its fields are live dicts:
@@ -106,18 +150,49 @@ def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
     intentionally shared tensor payload / opaque handle), so the clone stays
     cheap and never copies activations.
 
+    Polymorphic from P3 (reviewer note O-N5): a decomposed ``OpRecord`` clones
+    the facets that carry live dicts (``graph.parent_arg_positions``,
+    ``transform.transform_config``, ``annotations.annotations``) — the same
+    shared-mutable-state guarantee, NOT a blanket identity return, because the
+    record's facets are frozen but those three payloads are not. The clone
+    ALWAYS owns a fresh ``core``: the journal ``append`` path stamps ``seq``
+    on the record's core (the one slot append mutates), so a shared core
+    would let re-stamping a merged clone silently rewrite the sealed source
+    stream's seq facts.
+
     Parameters
     ----------
     event
-        Sealed source operation event.
+        Sealed source operation event or decomposed op record.
 
     Returns
     -------
-    OpEvent
-        Event with fresh, independent ``transform_config`` and
-        ``parent_arg_positions`` containers.
+    OpEvent | OpRecord
+        Event/record whose reachable mutable dicts are independent copies.
     """
 
+    if isinstance(event, OpRecord):
+        record_changes: dict[str, Any] = {"core": replace(event.core)}
+        graph = event.graph
+        if graph is not None:
+            record_changes["graph"] = replace(
+                graph,
+                parent_arg_positions={
+                    domain: dict(positions)
+                    for domain, positions in graph.parent_arg_positions.items()
+                },
+            )
+        transform = event.transform
+        if transform is not None:
+            record_changes["transform"] = replace(
+                transform, transform_config=dict(transform.transform_config)
+            )
+        annotations_facet = event.annotations_facet
+        if annotations_facet is not None:
+            record_changes["annotations_facet"] = replace(
+                annotations_facet, annotations=dict(annotations_facet.annotations)
+            )
+        return replace(event, **record_changes)
     return replace(
         event,
         parent_arg_positions={
@@ -131,7 +206,7 @@ def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
 class CaptureEvents:
     """Mutable event buffer allocated once per capture."""
 
-    op_events: list[OpEvent] = field(default_factory=list)
+    op_events: list[JournalOp] = field(default_factory=list)
     module_prep_events: list[ModulePrepEvent] = field(default_factory=list)
     module_enter_events: list[ModuleEnterEvent] = field(default_factory=list)
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
@@ -148,6 +223,31 @@ class CaptureEvents:
         | GradFnFired
         | BackwardCoverageGap
     ] = field(default_factory=list)
+    # Typed post-commit knowledge lane (producer unification P4): the op lane
+    # is genuinely append-only and every post-commit mutation is an
+    # ``OpAmendment`` folded by the canonical reducer. Amendments are stamped
+    # from their OWN per-journal monotone counter (``amendment_seq``), NOT the
+    # shared event counter: their seq domain is lane-local so that appending
+    # an amendment never shifts the Tier-F ``seq`` facts on subsequent events
+    # (the temporal byte-identity baselines pin those), while the watermark
+    # filter and fold order only ever need lane-local monotonicity.
+    op_amendments: list[OpAmendment] = field(default_factory=list)
+    amendment_seq: int = 0
+    # Highest amendment seq folded into this journal's sealed core, stamped by
+    # ``CaptureSession.seal()`` (and mirrored onto the pre-seal projection
+    # clone — reviewer note S-N2). ``copy_for_replay`` preserves it and, when
+    # already-folded events seed the copy, filters the carried lane to
+    # ``seq > core_seal_watermark`` so double-application is impossible.
+    core_seal_watermark: int | None = None
+    # A sealed SOURCE journal refuses further amendment appends fail-closed;
+    # working projections reset this and accept appends.
+    amendments_sealed: bool = False
+    # False only for projections seeded from multiple concatenated seq
+    # domains (multi-pass fastlog); gates the target_seq cross-check (O-N6).
+    single_seq_domain: bool = True
+    _amended_fold_cache: tuple[tuple[int, int], list[JournalOp], dict[str, JournalOp]] | None = (
+        field(default=None, repr=False)
+    )
     param_refs: dict[str, ParamRef] = field(default_factory=dict)
     raw_layer_counter: int = 0
     raw_layer_type_counter: dict[str, int] = field(default_factory=dict)
@@ -245,38 +345,6 @@ class CaptureEvents:
         self.live_index.labels = list(events_by_label)
         self.live_index.rebuild_edges()
 
-    def _event_position(self, event: OpEvent) -> int | None:
-        """Return one event's canonical list position without a retained index.
-
-        Parameters
-        ----------
-        event
-            Existing operation event to locate.
-
-        Returns
-        -------
-        int | None
-            Producer-order position, or ``None`` when absent.
-        """
-
-        if self.op_events:
-            position = event.raw_index - self.op_events[0].raw_index
-            if 0 <= position < len(self.op_events):
-                candidate = self.op_events[position]
-                if (
-                    candidate.raw_index == event.raw_index
-                    and candidate.label_raw == event.label_raw
-                ):
-                    return position
-        return next(
-            (
-                index
-                for index, candidate in enumerate(self.op_events)
-                if candidate.raw_index == event.raw_index and candidate.label_raw == event.label_raw
-            ),
-            None,
-        )
-
     def copy_for_replay(
         self,
         *,
@@ -323,8 +391,31 @@ class CaptureEvents:
 
         if projected_op_events is None:
             replay_op_events = [_clone_op_event_for_replay(event) for event in self.op_events]
+            # Same-run structural copy of a possibly-unfolded journal: the
+            # carried amendment lane moves whole so the reducer keeps folding
+            # the same knowledge on the copy.
+            replay_amendments = list(self.op_amendments)
+            replay_single_domain = self.single_seq_domain
         else:
             replay_op_events = list(projected_op_events)
+            # Already-folded events seed the copy (a sealed core's fold, or a
+            # multi-pass concatenation of sealed folds). The carried lane is
+            # filtered to seq > core_seal_watermark so knowledge the seal
+            # already folded can never apply twice (DoR 4.5.3.ii); an unsealed
+            # source (no watermark) carries everything — its seeds are raw.
+            watermark = self.core_seal_watermark
+            if watermark is None:
+                replay_amendments = list(self.op_amendments)
+            else:
+                replay_amendments = [
+                    amendment
+                    for amendment in self.op_amendments
+                    if amendment.seq > watermark
+                ]
+            seed_seqs = [int(getattr(event, "seq", 0) or 0) for event in replay_op_events]
+            replay_single_domain = all(
+                later > earlier for earlier, later in zip(seed_seqs, seed_seqs[1:])
+            )
         replay_by_label = {event.label_raw: event for event in replay_op_events}
         projected_index = self.live_index.copy()
         if projected_op_events is None:
@@ -339,6 +430,14 @@ class CaptureEvents:
 
         return CaptureEvents(
             op_events=replay_op_events,
+            op_amendments=replay_amendments,
+            amendment_seq=self.amendment_seq,
+            core_seal_watermark=self.core_seal_watermark,
+            # A working projection accepts amendment appends even when its
+            # source was sealed; the watermark filter above keeps the carried
+            # lane double-application-free.
+            amendments_sealed=False,
+            single_seq_domain=replay_single_domain,
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
             module_exit_events=list(self.module_exit_events),
@@ -375,6 +474,8 @@ class CaptureEvents:
         """
 
         self.op_events.clear()
+        self.op_amendments.clear()
+        self._amended_fold_cache = None
         self.module_prep_events.clear()
         self.module_enter_events.clear()
         self.module_exit_events.clear()
@@ -404,8 +505,13 @@ class CaptureEvents:
             detaches all runtime-handle sidecars.
         """
 
-        structural_events: list[OpEvent] = []
-        for event in self.op_events:
+        # Terminal structural projection: fold the amendment lane first, then
+        # strip payloads from the FOLDED facts. Amendments may carry payload
+        # refs (lookback/boundary retention outputs), so retaining the raw
+        # lane after stripping would smuggle payloads past the release
+        # boundary; the folded facts ARE the amended structural truth.
+        structural_events: list[JournalOp] = []
+        for event in self.amended_op_records():
             tensor = replace(event.output.tensor, payload=None)
             transformed = event.output.transformed_tensor
             if transformed is not None:
@@ -430,15 +536,26 @@ class CaptureEvents:
                     args_template=None,
                     kwargs_template=None,
                 )
-            structural_events.append(
-                replace(
-                    event,
-                    output=output,
-                    templates=templates,
-                    source_trace=None,
+            if isinstance(event, OpRecord):
+                structural_events.append(
+                    replace(
+                        event,
+                        core=replace(event.core, output=output),
+                        templates=templates,
+                    )
                 )
-            )
+            else:
+                structural_events.append(
+                    replace(
+                        event,
+                        output=output,
+                        templates=templates,
+                        source_trace=None,
+                    )
+                )
         self.op_events = structural_events
+        self.op_amendments.clear()
+        self._amended_fold_cache = None
         self.module_prep_events = [
             replace(
                 event,
@@ -479,15 +596,179 @@ class CaptureEvents:
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
 
+    def amended_op_records(self) -> list[JournalOp]:
+        """Return the canonical folded view of the op lane.
+
+        The ONE reducer every amended-state consumer reads (producer
+        unification P2/P4). The raw ``op_events`` list is genuinely
+        append-only; typed amendments fold here in amendment-seq order with
+        last-wins-per-path semantics, on both journal shapes (decomposed
+        records via facet ``dataclasses.replace``, compat events via the 1:1
+        ``PATH_TO_FLAT`` table). With no amendments this is the raw list
+        itself (byte-identical passthrough). Raw ``op_events`` reads for
+        amended semantics are forbidden from P2 on.
+        """
+
+        if not self.op_amendments:
+            return self.op_events
+        return self._amended_fold()[0]
+
+    def amended_op_record(self, label_raw: str) -> JournalOp | None:
+        """Return one op record through the folded view."""
+
+        if not self.op_amendments:
+            return self.op_event_by_label_raw.get(label_raw)
+        return self._amended_fold()[1].get(label_raw)
+
+    def _amended_fold(self) -> tuple[list[JournalOp], dict[str, JournalOp]]:
+        """Compute (and cache) the amendment fold over the op lane.
+
+        On a single-seq-domain journal the (concat-rebound) ``target_seq`` is
+        the exact binding key: raw labels repeat across recorder passes once
+        journals merge, so when the SAME label names several events each
+        amendment folds onto the occurrence carrying its ``target_seq``
+        (refusing fail-closed when no occurrence of that label carries it).
+        Multi-domain projections have no single seq domain (O-N6): there
+        resolution is by ``target_label_raw`` and the fold lands on the LAST
+        occurrence, matching the live index's last-wins label semantics.
+        Every amendment re-validates against the closed registry at fold
+        (Sol 2.4). The cache keys on both lane lengths: each lane is
+        append-only, so growth is the only invalidation signal.
+        """
+
+        cache = self._amended_fold_cache
+        key = (len(self.op_events), len(self.op_amendments))
+        if cache is not None and cache[0] == key:
+            return cache[1], cache[2]
+        last_position: dict[str, int] = {
+            event.label_raw: index for index, event in enumerate(self.op_events)
+        }
+        position_by_seq: dict[int, int] | None = None
+        if self.single_seq_domain:
+            position_by_seq = {
+                event.seq: index for index, event in enumerate(self.op_events)
+            }
+        folded_list: list[JournalOp] = list(self.op_events)
+        for amendment in self.op_amendments:
+            validate_amendment(amendment)
+            label_raw = amendment.target_label_raw
+            position = last_position.get(label_raw)
+            if position is None:
+                raise AmendmentTargetError(
+                    f"amendment target {label_raw!r} names no committed op in "
+                    "this journal"
+                )
+            if (
+                position_by_seq is not None
+                and folded_list[position].seq != amendment.target_seq
+            ):
+                seq_position = position_by_seq.get(amendment.target_seq)
+                if (
+                    seq_position is None
+                    or folded_list[seq_position].label_raw != label_raw
+                ):
+                    raise AmendmentTargetError(
+                        f"amendment {amendment.family!r} target_seq "
+                        f"{amendment.target_seq} names no committed occurrence "
+                        f"of {label_raw!r} (single-seq-domain cross-check)"
+                    )
+                position = seq_position
+            folded_list[position] = apply_patch_items(
+                folded_list[position], amendment.patch
+            )
+        folded_by_label = {event.label_raw: event for event in folded_list}
+        self._amended_fold_cache = (key, folded_list, folded_by_label)
+        return folded_list, folded_by_label
+
+    def append_amendment(self, amendment: OpAmendment) -> JournalOp:
+        """Append one typed amendment, stamping its lane-local seq + nonce.
+
+        The single writer for the amendment lane: validates against the
+        closed family registry, resolves the target fail-closed, stamps
+        ``seq`` from the lane-local monotone counter and ``run_nonce`` from
+        this journal, and incrementally folds the patch into the live index
+        so hot-path label reads keep seeing amended state. The raw
+        ``op_events`` list is never touched.
+
+        Returns
+        -------
+        OpEvent | OpRecord
+            The folded target record after this amendment.
+        """
+
+        if self.amendments_sealed:
+            raise SealedJournalAmendmentError(
+                f"journal sealed at watermark {self.core_seal_watermark}: "
+                f"amendment {amendment.family!r} targeting "
+                f"{amendment.target_label_raw!r} must route through a working "
+                "projection (copy_for_replay), never the sealed source"
+            )
+        validate_amendment(amendment)
+        live_target = self.live_index.by_raw_label.get(amendment.target_label_raw)
+        if live_target is None:
+            raise AmendmentTargetError(
+                f"amendment {amendment.family!r} targets unknown op "
+                f"{amendment.target_label_raw!r}"
+            )
+        target = live_target
+        update_live_index = True
+        if self.single_seq_domain and live_target.seq != amendment.target_seq:
+            # Raw labels repeat across recorder passes once journals merge
+            # (each pass re-emits the same label_raw), so the label's LIVE
+            # (last) occurrence is not necessarily the bound target. In a
+            # single seq domain the (concat-rebound) target_seq is the exact
+            # key: bind to the earlier committed occurrence of the SAME label
+            # carrying that seq; anything else stays refused fail-closed.
+            target = next(
+                (
+                    event
+                    for event in reversed(self.op_events)
+                    if event.seq == amendment.target_seq
+                    and event.label_raw == amendment.target_label_raw
+                ),
+                None,
+            )
+            if target is None:
+                raise AmendmentTargetError(
+                    f"amendment {amendment.family!r} target_seq "
+                    f"{amendment.target_seq} names no committed occurrence of "
+                    f"{amendment.target_label_raw!r} (live occurrence has seq "
+                    f"{live_target.seq}; single-seq-domain cross-check)"
+                )
+            # The live index tracks only the label's LAST occurrence, and its
+            # incrementally-folded state belongs to that op: folding an
+            # earlier occurrence must not clobber it. The returned fold below
+            # is best-effort for this path (raw op + this patch); the reducer
+            # (``amended_op_records``) stays the canonical folded read.
+            update_live_index = False
+        self.amendment_seq += 1
+        object.__setattr__(amendment, "seq", self.amendment_seq)
+        object.__setattr__(amendment, "run_nonce", self.run_nonce)
+        self.op_amendments.append(amendment)
+        self._amended_fold_cache = None
+        folded = apply_patch_items(target, amendment.patch)
+        if update_live_index:
+            self.live_index.replace(folded)
+        return folded
+
     def next_seq(self) -> int:
         """Return the next value of the one run-monotonic event sequence."""
 
         self.event_seq += 1
         return self.event_seq
 
-    def append(self, event: OpEvent) -> None:
-        """Append a single operation event, stamping the global seq."""
-        object.__setattr__(event, "seq", self.next_seq())
+    def append(self, event: JournalOp) -> None:
+        """Append a single operation event/record, stamping the global seq.
+
+        The seq slot lives on the flat event for compat ``OpEvent``s and on
+        ``core`` for decomposed ``OpRecord``s; both are frozen dataclasses and
+        this append path is their single sequencing authority.
+        """
+        seq = self.next_seq()
+        if isinstance(event, OpRecord):
+            object.__setattr__(event.core, "seq", seq)
+        else:
+            object.__setattr__(event, "seq", seq)
         self.op_events.append(event)
         self.live_index.append(event)
 
@@ -580,6 +861,31 @@ class CaptureEvents:
         for lane_name in lane_names:
             if LANE_MERGE_POLICIES[lane_name] == "run_local":
                 continue
+            if lane_name == "op_amendments":
+                # Lane-local seq domain: amendments never share the event
+                # counter (their stamps must not shift Tier-F event seqs), so
+                # they validate against their own writer counter and merge in
+                # a dedicated pass below instead of the shared sorted merge.
+                previous_amendment_seq = 0
+                for amendment in other.op_amendments:
+                    if amendment.seq < 1:
+                        raise SourceSequencingError(
+                            "concat source lane 'op_amendments' holds an "
+                            f"unstamped amendment (seq {amendment.seq})"
+                        )
+                    if amendment.seq <= previous_amendment_seq:
+                        raise SourceSequencingError(
+                            f"concat source lane 'op_amendments' seq "
+                            f"{amendment.seq} does not increase past "
+                            f"{previous_amendment_seq}"
+                        )
+                    previous_amendment_seq = amendment.seq
+                if previous_amendment_seq > int(other.amendment_seq or 0):
+                    raise SourceSequencingError(
+                        f"concat source amendment seq {previous_amendment_seq} "
+                        f"exceeds the source writer counter {other.amendment_seq}"
+                    )
+                continue
             previous_seq = 0
             for event in getattr(other, lane_name):
                 seq = int(getattr(event, "seq", 0) or 0)
@@ -610,7 +916,7 @@ class CaptureEvents:
         merge_rows: list[tuple[int, str, Any]] = []
         for lane_name in lane_names:
             policy = LANE_MERGE_POLICIES[lane_name]
-            if policy == "run_local":
+            if policy == "run_local" or lane_name == "op_amendments":
                 continue
             source_events = list(getattr(other, lane_name))
             if not source_events:
@@ -636,6 +942,7 @@ class CaptureEvents:
             # validation.
             if (
                 lane_name == "intervention_events"
+                and lane_name in REBINDABLE_TARGET_LANES
                 and getattr(event, "run_token", None) == other.run_nonce
             ):
                 object.__setattr__(clone, "run_token", self.run_nonce)
@@ -645,6 +952,24 @@ class CaptureEvents:
             getattr(self, _LANE_APPENDERS[lane_name])(clone)
             if source_seq:
                 seq_map[source_seq] = clone.seq
+        # Dedicated amendment pass (REBINDABLE_TARGET_LANES): the lane rides
+        # its own seq domain, so it merges after the event lanes — every
+        # amendment's target op has already merged (or the append below
+        # refuses fail-closed). ``target_seq`` rebinds through the merge seq
+        # map into this journal's event domain; the appender re-stamps the
+        # lane-local seq and run nonce and re-folds the live index.
+        if (
+            "op_amendments" in lane_names
+            and LANE_MERGE_POLICIES["op_amendments"] != "run_local"
+        ):
+            for amendment in other.op_amendments:
+                clone = replace(amendment)
+                object.__setattr__(
+                    clone,
+                    "target_seq",
+                    seq_map.get(amendment.target_seq, amendment.target_seq),
+                )
+                self.append_amendment(clone)
 
     def append_backward(
         self,
@@ -771,34 +1096,7 @@ def register_live_event(trace: Any, event: OpEvent) -> None:
         events.grad_fn_handles_by_label_raw[event.label_raw] = event.grad_fn_handle
 
 
-def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | None:
-    """Replace one emitted operation event with updated field values.
-
-    Parameters
-    ----------
-    trace
-        Active trace carrying the capture event buffer.
-    label_raw
-        Raw label identifying the operation event.
-    **updates
-        Dataclass field updates to apply to the frozen event.
-
-    Returns
-    -------
-    OpEvent | None
-        Updated event when found, otherwise ``None``.
-    """
-
-    events = getattr(trace, "capture_events", None)
-    if events is None:
-        return None
-    event = events.op_event_by_label_raw.get(label_raw)
-    if event is None:
-        return None
-    updated_event = replace(event, **updates)
-    index = events._event_position(event)
-    if index is None:
-        return updated_event
-    events.op_events[index] = updated_event
-    events.live_index.replace(updated_event)
-    return updated_event
+# ``replace_op_event`` is DELETED (producer unification P4): the op lane is
+# genuinely append-only and every post-commit mutation routes through the
+# typed amendment lane (``CaptureEvents.append_amendment`` + the nine-family
+# registry in ``op_record.py``).
