@@ -83,29 +83,59 @@ _OPTION_POLICY_DEFAULTS: dict[str, Any] = {
     "lookback_payload_policy": "metadata_only",
 }
 
-_ALL_GATED_FALSE: dict[str, bool] = {
-    "backward_capture": False,
-    "fastlog": False,
-    "interventions": False,
-    "rng_replay": False,
-    "streaming": False,
+#: Declared truth for every gated capability flag on every backend. A lift is
+#: a ONE-LINE diff here (plus its real mechanism + conformance coverage);
+#: anything not listed True must refuse its public surface typed.
+EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
+    "torch": {
+        "backward_capture": True,
+        "fastlog": True,
+        "interventions": True,
+        "rng_replay": True,
+        "streaming": True,
+    },
+    "mlx": {
+        "backward_capture": False,
+        "fastlog": False,
+        # Lifted 2026-08: static-label intervene=/halt= dispatch for real
+        # (tests/test_mlx_interventions.py); value-dependent predicates and
+        # recipes= keep typed refusals inside the dispatch path.
+        "interventions": True,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "jax": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "tinygrad": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "paddle": {
+        "backward_capture": False,
+        "fastlog": False,
+        # Lifted 2026-08: live intervene=/halt= dispatch through the eager
+        # capture wrapper, forward-only (tests/test_paddle_backend_interventions.py);
+        # value-dependent predicates and recipes= keep typed refusals.
+        "interventions": True,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "tf": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
 }
-
-_EXPECTED_PREVIEW_GATED_FLAGS: dict[str, dict[str, bool]] = {
-    "mlx": dict(_ALL_GATED_FALSE),
-    "jax": dict(_ALL_GATED_FALSE),
-    "tinygrad": dict(_ALL_GATED_FALSE),
-    "paddle": {**_ALL_GATED_FALSE, "interventions": True},
-    "tf": dict(_ALL_GATED_FALSE),
-}
-"""Declared expected gated-capability matrix per preview backend.
-
-This is the single place a legitimate capability lift edits: a True entry
-requires the registered spec to bind a resolvable implementing surface AND
-the backend's capture path to genuinely dispatch every option the flag owns
-(``TRACE_OPTION_CAPABILITY_GATES``); everything else keeps the fail-closed
-biconditional refusals below.
-"""
 
 
 def test_every_capability_flag_has_a_production_consumer() -> None:
@@ -151,10 +181,11 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
     sentinel = object()
     for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
                          ("streaming", "streaming")):
-        if _EXPECTED_PREVIEW_GATED_FLAGS[name][flag]:
-            # Lifted capability: the flag is True with a real binding, and the
-            # capture path pops the option before extra-kwarg rejection, so
-            # the policy tables must no longer govern it.
+        if EXPECTED_GATED_CAPABILITIES[name][flag]:
+            # Lifted capability: the flag is True with a real binding, the
+            # capture path pops the option before extra-kwarg rejection (so the
+            # policy tables no longer govern it), and real dispatch + flag-False
+            # refusal are covered by the backend's own E2E suite.
             assert getattr(spec.capabilities, flag)
             assert require_capability_implementation(spec, flag) is not None
             assert option not in (policy.inert_values or {})
@@ -199,26 +230,25 @@ def test_registration_refuses_bare_capability_flips() -> None:
 
     for name in _PREVIEW_NAMES:
         for flag in sorted(GATED_CAPABILITY_FLAGS):
+            original_value = getattr(get_backend_spec(name).capabilities, flag)
             with pytest.raises(BackendCapabilityConformanceError):
                 register_backend_spec(
                     _spec_with_flag(name, flag, implementation=False), replace=True
                 )
-            assert (
-                getattr(get_backend_spec(name).capabilities, flag)
-                is _EXPECTED_PREVIEW_GATED_FLAGS[name][flag]
-            )
+            # The refused registration must leave the registered truth intact.
+            assert getattr(get_backend_spec(name).capabilities, flag) == original_value
 
 
 def test_in_place_capability_flip_refuses_end_to_end() -> None:
     """Sol probe: mutating the frozen table in place must refuse typed at trace()."""
 
     spec = get_backend_spec("mlx")
-    object.__setattr__(spec.capabilities, "interventions", True)
+    object.__setattr__(spec.capabilities, "streaming", True)
     try:
         with pytest.raises(BackendCapabilityConformanceError):
-            require_capability_implementation(spec, "interventions")
+            require_capability_implementation(spec, "streaming")
     finally:
-        object.__setattr__(spec.capabilities, "interventions", False)
+        object.__setattr__(spec.capabilities, "streaming", False)
 
 
 def test_record_gate_reads_the_capability_table() -> None:
@@ -420,27 +450,21 @@ def test_torch_fastlog_flag_false_refuses_record() -> None:
         tl.release_model(model)
 
 
-def test_registered_capability_tables_are_truthful_at_registration() -> None:
-    """Registered gated flags match the declared expected-capability matrix.
+def test_registered_capability_tables_match_declared_matrix() -> None:
+    """Every registered gated flag equals the declared expected matrix.
 
-    A legitimate lift edits ``_EXPECTED_PREVIEW_GATED_FLAGS`` (one-line matrix
-    diff) alongside real dispatch + conformance coverage; every True entry
-    must also resolve a real implementing surface.
+    A capability lift must edit ``EXPECTED_GATED_CAPABILITIES`` (one line)
+    alongside its real mechanism and conformance coverage; a drive-by flag
+    flip fails here.
     """
 
     for spec in registered_backend_specs():
-        capabilities = spec.capabilities
-        if str(spec.name) == "torch":
-            assert capabilities.backward_capture
-            assert capabilities.fastlog
-            assert capabilities.interventions
-            assert "runnable" in capabilities.save_levels
-            continue
-        expected = _EXPECTED_PREVIEW_GATED_FLAGS[str(spec.name)]
-        for flag, expected_value in expected.items():
-            assert getattr(capabilities, flag) is expected_value, (
-                f"{spec.name}: {flag} != declared matrix value {expected_value}"
+        expected = EXPECTED_GATED_CAPABILITIES[str(spec.name)]
+        for flag in sorted(GATED_CAPABILITY_FLAGS):
+            assert getattr(spec.capabilities, flag) == expected[flag], (
+                f"{spec.name}.{flag} diverges from EXPECTED_GATED_CAPABILITIES"
             )
-            if expected_value:
-                assert require_capability_implementation(spec, flag) is not None
-        assert "runnable" not in capabilities.save_levels
+        if str(spec.name) == "torch":
+            assert "runnable" in spec.capabilities.save_levels
+        else:
+            assert "runnable" not in spec.capabilities.save_levels

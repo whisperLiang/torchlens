@@ -987,6 +987,21 @@ def _mlx_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return MLXBackend().validate_trace(*args, **kwargs)
 
 
+def _mlx_interventions_implementation() -> object:
+    """Resolve the MLX static-label intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The plan resolver the MLX capture path invokes for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites.
+    """
+
+    from .mlx.interventions import resolve_mlx_intervention_plan
+
+    return resolve_mlx_intervention_plan
+
+
 def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to Paddle trace replay validation.
 
@@ -1085,7 +1100,7 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -1095,6 +1110,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=MLX_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _mlx_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",

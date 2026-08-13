@@ -162,25 +162,26 @@ def test_mlx_validation_branch_merge_healthy_passes() -> None:
     assert MLXBackend().validate_trace(trace) is True
 
 
-def test_mlx_end_to_end_bare_interventions_flip_refuses_typed() -> None:
-    """Sol probe, live: interventions=True flipped in place on the registered MLX
-    spec must refuse typed at trace() — never return a trace with the
-    intervention silently ignored."""
+def test_mlx_end_to_end_bare_streaming_flip_refuses_typed() -> None:
+    """Sol probe, live: a gated flag flipped True in place on the registered MLX
+    spec must refuse typed at trace() — never capture while silently ignoring
+    the option. (Interventions are genuinely lifted on MLX now, so the probe
+    uses streaming, which remains gated.)"""
 
     from torchlens.backends import BackendCapabilityConformanceError, get_backend_spec
 
     spec = get_backend_spec("mlx")
-    object.__setattr__(spec.capabilities, "interventions", True)
+    object.__setattr__(spec.capabilities, "streaming", True)
     try:
         with pytest.raises(BackendCapabilityConformanceError):
             tl.trace(
                 _TwoLayerMLP(),
                 mx.ones((1, 4)),
                 backend="mlx",
-                intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+                storage=object(),
             )
     finally:
-        object.__setattr__(spec.capabilities, "interventions", False)
+        object.__setattr__(spec.capabilities, "streaming", False)
 
 
 def test_mlx_validation_loaded_payload_stripped_trace_is_unavailable() -> None:
@@ -263,6 +264,49 @@ def test_mlx_constant_producer_reports_unverified_gap() -> None:
     assert result.state == "unverified"
     assert trace._mlx_perturbation_gaps
     assert all(label.startswith("add") for label in trace._mlx_perturbation_gaps)
+
+
+def test_mlx_capture_records_slot_labeled_leaves_instead_of_retaining() -> None:
+    """Replay records retain templates, not raw activations (opus F7).
+
+    Every labeled argument leaf is a ``REPLAY_SLOT`` sentinel (replay sources
+    it from the saved parent payload) and only unlabeled leaves — parameters
+    and constants — keep live arrays. Validation still passes end-to-end, so
+    the retention change provably feeds replay from the declared graph.
+    """
+
+    from torchlens.backends.mlx.validation import REPLAY_SLOT
+
+    trace = _healthy_trace()
+
+    def _leaves(node: object) -> list[object]:
+        if isinstance(node, (list, tuple)):
+            return [leaf for item in node for leaf in _leaves(item)]
+        if isinstance(node, dict):
+            return [leaf for item in node.values() for leaf in _leaves(item)]
+        return [node]
+
+    slotted = 0
+    for capture in trace._mlx_op_captures:
+        for index, value in enumerate(capture.args):
+            labels = (
+                capture.arg_leaf_labels[index]
+                if index < len(capture.arg_leaf_labels)
+                else ()
+            )
+            leaves = [
+                leaf
+                for leaf in _leaves(value)
+                if isinstance(leaf, mx.array) or leaf is REPLAY_SLOT
+            ]
+            for leaf, label in zip(leaves, labels):
+                if label is not None:
+                    assert leaf is REPLAY_SLOT
+                    slotted += 1
+                else:
+                    assert isinstance(leaf, mx.array)
+    assert slotted >= 1, "at least one labeled intermediate must be slotted"
+    assert MLXBackend().validate_trace(trace) is True
 
 
 def test_mlx_perturbation_scan_includes_kwargs() -> None:

@@ -11,7 +11,7 @@ preview, explicit `backend="tinygrad"` enables the tinygrad preview, and explici
 | Backend | Capture | Validation | Payloads | Modules | Gradients |
 |---|---|---|---|---|---|
 | `torch` | Stable eager wrapper capture | Replay validation | Materialized `.tlspec` payloads | `torch_module` | True backward capture |
-| `mlx` | Technical preview | Live per-op replay and parent perturbation over the captured (whitelisted) op set | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
+| `mlx` | Technical preview; static-label `intervene=`/`halt=` | Live per-op replay and parent perturbation over the captured (whitelisted) op set | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `jax` | Preview jaxpr-first functional capture | Live per-equation replay and parent perturbation | Materialized forward/derived array `.tlspec` payloads | `function_root`, Equinox/NNX `pytree_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `tinygrad` | Preview UOp-snapshot functional capture | Live UOp replay and parent perturbation on `DEV=PYTHON` payloads | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `paddle` | Preview dygraph/eager capture with live forward `intervene=`/`halt=` | Live replay/perturbation plus static inventory guard; corroborated user-intervention carve-out | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
@@ -87,15 +87,21 @@ internal UOp and rebuilding all descendants.
 TensorFlow eager `op_callbacks` are read-only in the supported Keras-3 / TF>=2.16 runtime, so
 interventions require a later writable monkeypatch layer.
 
-For that reason, non-torch backends other than Paddle support static-label `save=` only, and
-their `intervene=` and `halt=` are rejected with typed backend errors instead of false partial
-traces or validation passes. Value-dependent `save=` predicates stay rejected on every preview,
-Paddle included: preview `save=` is a post-finalization payload filter, not single-pass selective
-capture. Live JAX/tinygrad/Paddle/TF selective-save traces still run real replay validation
-through runtime-only hidden payloads; loaded traces report replay unavailable when those runtime
-captures were stripped. MLX supports static-label `save=` for `tl.func`, `tl.label`, `tl.module`,
-`tl.in_module`, `tl.contains`, and boolean composites of those; MLX validation is currently
-unsupported.
+For that reason, JAX and tinygrad support static-label `save=` only, and their `intervene=` and
+`halt=` are rejected with typed backend errors instead of false partial traces or validation
+passes. Value-dependent `save=` predicates stay rejected on every preview: preview `save=` is a
+post-finalization payload filter, not single-pass selective capture. Live selective-save traces
+still run real replay validation through runtime-only hidden payloads; loaded traces report
+replay unavailable when those runtime captures were stripped.
+
+Paddle supports static-label `trace(intervene=tl.when(...))` and `trace(halt=...)` on the
+forward-only eager capture path (see the Paddle preview section). MLX is the other eager
+exception: its wrapper sees each concrete lazy output before the caller, so MLX additionally
+supports static-label `trace(intervene=tl.when(...))` and `trace(halt=...)` (see the MLX preview
+section). Value-dependent predicates stay rejected on both — predicate-time values would require
+eager materialization that poisons their execution models. MLX supports static-label `save=` for
+`tl.func`, `tl.label`, `tl.module`, `tl.in_module`, `tl.contains`, and boolean composites of
+those.
 
 ## TensorFlow Preview
 
@@ -186,13 +192,28 @@ perturbation oracle, and only records with `status == "exact"` reach
 These derived gradients are not true backward capture, and `op.grads` /
 `trace.saved_grad_ops` stay true-backward-only.
 
+MLX supports static-label live interventions and halt. `trace(intervene=tl.when(static_selector,
+action))` substitutes matched output arrays at the wrapper boundary — the replacement genuinely
+flows into downstream ops — and `trace(halt=static_selector)` finalizes an honest partial trace at
+the matched frontier (`trace.halted`, `trace.halt_reason`; parameter accounting is restricted to
+the captured ops). Static selectors are `tl.func`, `tl.label`, `tl.module`, `tl.in_module`,
+`tl.contains`, and boolean composites. Supported actions are `tl.zero_ablate()`, `tl.scale(...)`,
+`tl.add(scalar | mx.array)`, `tl.clamp(...)`, `tl.mean_ablate()` (self form), `tl.replace_with(...)`,
+and callable transforms written against `mx.array`; other helpers build torch-only hooks and refuse
+by name. Hooks must preserve shape and dtype; violations refuse typed at fire time. Replay
+validation treats declared interventions as genuine user substitutions: the oracle recomputes the
+raw producer output, re-applies the declared hook, and compares — stripping or forging the
+declaration fails coverage against the emit-time inventory fingerprint. `mx.compile`/`mx.grad`/
+`mx.vmap` traced-transform wrappers refuse at capture entry, and a compiled attribute on the model
+ceilings the capture with `capture_verified=False` (`mlx_compiled_attribute_not_logged`).
+
 MLX rejects `tl.output(...)`, `tl.where(...)`,
-`tl.followed_by(...)`, `tl.preceded_by(...)`, value-dependent predicates, `intervene=`, `halt=`,
-streaming, `save_grads=`, `backward_ready=True`, and `tl.record(backend="mlx")`. MLX validation is
-currently unsupported, so selective save does not fabricate a replay pass. Portable MLX saves
+`tl.followed_by(...)`, `tl.preceded_by(...)`, value-dependent predicates, `recipes=`,
+backward-direction interventions, streaming, `save_grads=`, `backward_ready=True`, and
+`tl.record(backend="mlx")`. Portable MLX saves
 materialize forward and derived array payloads and load them back as `mlx.core.array` values when the
-MLX runtime is installed; loaded MLX traces still report replay validation as unavailable rather than
-as a pass.
+MLX runtime is installed; loaded MLX traces report replay validation as unavailable rather than
+as a pass when runtime replay captures were stripped.
 
 ## Paddle Preview
 

@@ -18,6 +18,27 @@ from typing import Any
 import numpy as np
 
 
+class _ReplaySlot:
+    """Sentinel standing in for a labeled array leaf in a capture template.
+
+    Replay never reads the stored value of a labeled leaf — it substitutes
+    the DECLARED parent's saved payload — so retaining the emit-time array
+    only pinned every intermediate activation for the lifetime of the trace.
+    The sentinel keeps the container structure and flatten order intact
+    (paddle's ``_template_value`` retention model).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return the sentinel's stable display form."""
+
+        return "<mlx-replay-slot>"
+
+
+REPLAY_SLOT = _ReplaySlot()
+
+
 @dataclass(frozen=True)
 class MLXOpCapture:
     """One captured MLX call retained for live replay validation.
@@ -32,11 +53,14 @@ class MLXOpCapture:
     func:
         Original (unwrapped) callable invoked by the wrapper.
     args:
-        Positional arguments as observed at call time.
+        Positional argument templates: labeled array leaves are replaced by
+        ``REPLAY_SLOT`` (replay sources them from saved parent payloads);
+        unlabeled leaves (parameters, constants) keep their emit-time values.
     kwargs:
-        Keyword arguments as observed at call time.
+        Keyword argument templates with the same slotting.
     output:
-        Raw output object returned by the call.
+        Unused legacy slot retained for constructor compatibility; the
+        expected replay values come from the trace's saved payloads.
     arg_leaf_labels:
         Per positional argument, the raw parent label of each array leaf in
         deterministic flatten order (``None`` for unlabeled leaves such as
@@ -44,6 +68,15 @@ class MLXOpCapture:
     kwarg_leaf_labels:
         The same per-leaf parent labels for keyword arguments, keyed by
         keyword name.
+    interventions:
+        Declared genuine user interventions as ``(output_leaf_index,
+        hook_identity)`` pairs. Mirrored into the emit-time inventory
+        fingerprint, so a post-hoc claim cannot steer hook re-application.
+    appliers:
+        Runtime hook appliers as ``(output_leaf_index, callable)`` pairs,
+        used by replay to reproduce the declared substitution. Never part of
+        the fingerprint; a record whose declared interventions lack a
+        matching applier fails closed.
     """
 
     labels_raw: tuple[str, ...]
@@ -54,6 +87,44 @@ class MLXOpCapture:
     output: Any = None
     arg_leaf_labels: tuple[tuple[str | None, ...], ...] = ()
     kwarg_leaf_labels: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
+    interventions: tuple[tuple[int, str], ...] = ()
+    appliers: tuple[tuple[int, Any], ...] = ()
+
+
+def build_capture_template(
+    value: Any,
+    leaf_labels: tuple[str | None, ...],
+) -> Any:
+    """Return ``value`` with labeled array leaves replaced by ``REPLAY_SLOT``.
+
+    Parameters
+    ----------
+    value:
+        Emit-time argument value.
+    leaf_labels:
+        Recorded per-leaf parent labels for ``value`` in flatten order.
+
+    Returns
+    -------
+    Any
+        Template retaining structure and unlabeled leaves only.
+    """
+
+    cursor = iter(leaf_labels)
+
+    def _slot(node: Any) -> Any:
+        if _is_mlx_array(node):
+            label = next(cursor, None)
+            return node if label is None else REPLAY_SLOT
+        if isinstance(node, tuple):
+            return tuple(_slot(item) for item in node)
+        if isinstance(node, list):
+            return [_slot(item) for item in node]
+        if isinstance(node, dict):
+            return {key: _slot(item) for key, item in node.items()}
+        return node
+
+    return _slot(value)
 
 
 def _is_mlx_array(value: Any) -> bool:
@@ -387,9 +458,15 @@ def _reconstruct_value(
     cursor = iter(leaf_labels)
 
     def _rebuild(node: Any) -> Any:
-        if _is_mlx_array(node):
+        if _is_mlx_array(node) or isinstance(node, _ReplaySlot):
             label = next(cursor, None)
             if label is None:
+                if isinstance(node, _ReplaySlot):
+                    # A slot with no recorded label means the template and
+                    # label fingerprint disagree; fail closed, never guess.
+                    raise ValueError(
+                        "MLX replay template slot has no recorded parent label."
+                    )
                 return node
             return _saved_payload(trace, ops_by_label, label)
         if isinstance(node, tuple):
@@ -479,8 +556,9 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
             tuple(labels),
             tuple(tuple(slot) for slot in arg_labels),
             tuple((key, tuple(slot)) for key, slot in kwarg_labels),
+            tuple(interventions),
         )
-        for name, labels, arg_labels, kwarg_labels in tuple(inventory)
+        for name, labels, arg_labels, kwarg_labels, interventions in tuple(inventory)
     )
     observed = sorted(
         (
@@ -490,6 +568,7 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
             tuple(
                 sorted((key, tuple(slot)) for key, slot in capture.kwarg_leaf_labels.items())
             ),
+            tuple(capture.interventions),
         )
         for capture in captures
     )
@@ -498,7 +577,9 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
         expected_only = [call for call in expected if call not in observed]
         observed_only = [call for call in observed if call not in expected]
         failures += max(1, len(expected_only) + len(observed_only))
-    inventoried_labels = {label for _name, labels, _args, _kwargs in expected for label in labels}
+    inventoried_labels = {
+        label for _name, labels, _args, _kwargs, _fires in expected for label in labels
+    }
     for op in getattr(trace, "layer_list", ()):
         if getattr(op, "is_input", False):
             continue
@@ -551,14 +632,32 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
             if len(replayed) != len(capture.labels_raw) or not replayed:
                 failed_count += 1
                 continue
+            final = list(replayed)
+            if capture.interventions:
+                # Genuine-intervention carve-out, scoped by the emit-time
+                # inventory fingerprint (coverage above): replay recomputes
+                # the RAW producer output, re-applies the declared hook, and
+                # the saved payload must equal hook(raw). A record whose
+                # declared interventions lack a matching applier fails
+                # closed; a plain capture never reaches this branch.
+                declared = dict(capture.interventions)
+                appliers = dict(capture.appliers)
+                if set(declared) != set(appliers) or any(
+                    index < 0 or index >= len(final) for index in declared
+                ):
+                    failed_count += 1
+                    continue
+                for index, apply in appliers.items():
+                    final[index] = apply(final[index])
+                mx.eval(*final)
             expected = tuple(
                 _saved_payload(trace, ops_by_label, label)
                 for label in capture.labels_raw
             )
             mx.eval(*expected)
             if any(
-                not _payloads_close(r_out, e_out)
-                for r_out, e_out in zip(replayed, expected)
+                not _payloads_close(f_out, e_out)
+                for f_out, e_out in zip(final, expected)
             ):
                 failed_count += 1
                 continue

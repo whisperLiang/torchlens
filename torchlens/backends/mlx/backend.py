@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -15,7 +16,13 @@ import numpy as np
 
 from ..._trace_core.relation_views import freeze_trace_relation_views
 from ... import _state
-from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...backends import (
+    BackendName,
+    BackendUnsupportedError,
+    get_backend_spec,
+    require_capability_implementation,
+)
+from ...fastlog._halt import HaltSignal
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -46,7 +53,7 @@ from ...validation.status import ValidationReplaySource, ValidationReplayStatus 
 from .._finalize import finalize_single_pass_trace
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
-from .validation import MLXOpCapture
+from .validation import MLXOpCapture, build_capture_template
 from .model_prep import (
     MLXModuleTree,
     cleanup_model_session,
@@ -483,6 +490,130 @@ class _MLXBoundaryReplacementObserver:
         return _replace_mlx_array_leaves(self.backend, output, replacements)
 
 
+def _mlx_probe_identity(value: Any) -> Any:
+    """Return ``value`` unchanged; probe body for traced-transform detection.
+
+    Parameters
+    ----------
+    value
+        Probe argument.
+
+    Returns
+    -------
+    Any
+        ``value`` unchanged.
+    """
+
+    return value
+
+
+def _mlx_traced_transform_type(mx: Any) -> type | None:
+    """Resolve the MLX traced-transform wrapper type from the runtime itself.
+
+    ``mx.compile``, ``mx.grad``, ``mx.value_and_grad``, and ``mx.vmap`` all
+    return the same opaque wrapper type, which replays a traced graph and
+    therefore bypasses (or worse, tracer-pollutes) the monkeypatched eager
+    capture surface. The type is resolved by compiling a trivial probe so the
+    authority is the runtime, never a spoofable ``__module__`` string.
+
+    Parameters
+    ----------
+    mx
+        Imported ``mlx.core`` module.
+
+    Returns
+    -------
+    type | None
+        Exact wrapper type, or ``None`` when the runtime exposes no
+        ``compile`` entry (detection then degrades gracefully).
+    """
+
+    compile_fn = getattr(mx, "compile", None)
+    if not callable(compile_fn):
+        return None
+    try:
+        return type(compile_fn(_mlx_probe_identity))
+    except Exception:
+        return None
+
+
+def _find_mlx_compiled_attributes(
+    model: object,
+    transform_type: type | None,
+    *,
+    max_depth: int = 8,
+) -> tuple[str, ...]:
+    """Return dotted paths of traced-transform callables reachable from ``model``.
+
+    The scan is bounded and disclosed: instance ``__dict__`` values of the
+    model and nested ``mlx.nn.Module`` children, plus one level inside plain
+    ``list``/``tuple``/``dict`` containers. Slots-only holders, values created
+    inside ``__call__``, and hot global/free compiled callables remain
+    documented residuals.
+
+    Parameters
+    ----------
+    model
+        Capture entry object.
+    transform_type
+        Exact traced-transform wrapper type from
+        :func:`_mlx_traced_transform_type`.
+    max_depth
+        Recursion bound over nested module attributes.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted dotted attribute paths holding traced-transform wrappers.
+    """
+
+    if transform_type is None:
+        return ()
+    try:
+        import mlx.nn as mlx_nn
+    except ImportError:
+        return ()
+    found: set[str] = set()
+    seen: set[int] = set()
+
+    def _scan_value(path: str, value: Any, depth: int) -> None:
+        if type(value) is transform_type:
+            found.add(path)
+            return
+        if isinstance(value, mlx_nn.Module):
+            _scan_module(path, value, depth)
+            return
+        if isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                if type(item) is transform_type:
+                    found.add(f"{path}[{index}]")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if type(item) is transform_type:
+                    found.add(f"{path}[{key!r}]")
+
+    def _scan_module(prefix: str, module: object, depth: int) -> None:
+        if depth > max_depth or id(module) in seen:
+            return
+        seen.add(id(module))
+        # mlx.nn.Module subclasses dict: children/arrays live in the dict
+        # items while plain Python attributes land in __dict__ — scan both.
+        surfaces: list[dict[str, Any]] = []
+        attributes = getattr(module, "__dict__", None)
+        if isinstance(attributes, dict):
+            surfaces.append(attributes)
+        if isinstance(module, dict):
+            surfaces.append(module)
+        for surface in surfaces:
+            for name, value in surface.items():
+                child_path = f"{prefix}.{name}" if prefix else str(name)
+                _scan_value(child_path, value, depth + 1)
+
+    if isinstance(model, mlx_nn.Module):
+        _scan_module("", model, 0)
+    return tuple(sorted(found))
+
+
 def _mlx_loaded_replay_unavailable(trace: Trace) -> bool:
     """Return whether a loaded MLX trace lacks live replay artifacts.
 
@@ -854,6 +985,8 @@ class MLXBackend:
         isolated_output: object,
         output_sites: tuple[object, ...],
         reserved_block: tuple[ReservedLabel, ...],
+        *,
+        fire_results_by_site: dict[int, tuple[FireResult, ...]] | None = None,
     ) -> tuple[OpEvent, ...]:
         """Emit topology-complete Protocol operation events for MLX outputs.
 
@@ -868,7 +1001,7 @@ class MLXBackend:
         events: list[OpEvent] = []
         policy = self._capture_policy(session)
         output_by_site = tuple(output_sites)
-        for output, reserved in zip(output_by_site, reserved_block):
+        for site_index, (output, reserved) in enumerate(zip(output_by_site, reserved_block)):
             if not self.is_tensor(output):
                 continue
             self.tensor_store.set_label(output, reserved.label_raw)
@@ -878,6 +1011,7 @@ class MLXBackend:
                 func_event_input.args,
                 dict(func_event_input.kwargs),
             )
+            fire_results = (fire_results_by_site or {}).get(site_index, ())
             event = self._build_event(
                 session=session,
                 kind="op",
@@ -889,6 +1023,7 @@ class MLXBackend:
                 edge_uses=edge_uses,
                 policy=policy,
                 is_input=False,
+                fire_results=fire_results,
             )
             events.append(event)
         return tuple(events)
@@ -939,6 +1074,8 @@ class MLXBackend:
         save_visualizations: bool = False,
         module_identity_mode: str | None = None,
         grad_options: GradOptions | None = None,
+        intervene: object | None = None,
+        halt: object | None = None,
     ) -> Trace:
         """Capture an MLX forward pass into a smoke-compatible Trace."""
 
@@ -966,6 +1103,38 @@ class MLXBackend:
                 "MLX backend preview does not support random_seed; pass explicit MLX RNG "
                 "state through the model/input surface instead."
             )
+        intervention_plan = None
+        halt_selector = None
+        if intervene is not None or halt is not None:
+            spec = get_backend_spec("mlx")
+            if not spec.capabilities.interventions:
+                raise BackendUnsupportedError(
+                    "MLX backend capability table declares interventions=False; "
+                    "refusing trace(intervene=/halt=) instead of silently "
+                    "ignoring the requested behavior."
+                )
+            # The registered binding IS the dispatch surface: resolution and
+            # application come from the capability implementation, so a bound-
+            # but-unregistered or in-place-flipped table refuses typed.
+            resolve = cast(Any, require_capability_implementation(spec, "interventions"))
+            intervention_plan, halt_selector = resolve(intervene, halt, self.mx)
+            if grad_options is not None:
+                raise BackendUnsupportedError(
+                    "MLX backend cannot combine grad_options with intervene=/halt=: "
+                    "the derived-gradient replay re-runs the model without the "
+                    "intervention surface, so its output-divergence oracle would "
+                    "always refuse. Capture the intervened trace and the derived "
+                    "gradients in separate calls."
+                )
+        transform_type = _mlx_traced_transform_type(self.mx)
+        if transform_type is not None and type(model) is transform_type:
+            raise BackendUnsupportedError(
+                "MLX capture entry is an mx.compile/mx.grad/mx.vmap traced-transform "
+                "wrapper. Traced replays bypass the eager capture surface, so logging "
+                "them would silently under-capture. Trace the eager mlx.nn.Module or "
+                "plain Python callable instead of its compiled/transformed wrapper."
+            )
+        compiled_attribute_paths = _find_mlx_compiled_attributes(model, transform_type)
         module_tree = discover_mlx_module_tree(model)
         use_object_module = _resolve_mlx_module_identity_mode(module_identity_mode, module_tree)
         trace = Trace(
@@ -1000,10 +1169,26 @@ class MLXBackend:
         )
         trace.trace_label = name
         trace.backend = cast(BackendName, self.name)
+        if compiled_attribute_paths:
+            # Conservative ceiling, not a refusal: the attribute may never be
+            # called, but a call would bypass wrapper capture (cold trace) or
+            # replay a cached graph (warm), so honesty cannot depend on it.
+            names = ", ".join(compiled_attribute_paths)
+            warnings.warn(
+                "MLX model holds mx.compile/traced-transform attribute(s) "
+                f"({names}); their interiors are not logged, so this capture "
+                "is marked capture_verified=False.",
+                UserWarning,
+                stacklevel=2,
+            )
+            trace.capture_verified = False
+            trace.capture_verification_reason = "mlx_compiled_attribute_not_logged"
         trace.capture_events = CaptureEvents()
         trace._mlx_saved_payloads = []
         trace._mlx_capture_depth = 0
         trace._mlx_module_stack = []
+        trace._mlx_intervention_plan = intervention_plan
+        trace._mlx_halt_selector = halt_selector
         trace._pre_forward_rng_states = None
         setattr(
             trace,
@@ -1018,10 +1203,30 @@ class MLXBackend:
         self._label_source_arrays(trace, args, kwargs)
         trace.capture_start_time = time.time()
         try:
-            with self.active_logging(trace):
-                output = cast(Any, model)(*args, **kwargs)
+            halt_signal: HaltSignal | None = None
+            try:
+                with self.active_logging(trace):
+                    output = cast(Any, model)(*args, **kwargs)
+            except HaltSignal as signal:
+                # Save-then-halt ordering: the frontier op's events were
+                # appended before the signal, so the partial graph ends at it.
+                halt_signal = signal
+                output = signal.frontier_output
+                trace.halted = True
+                trace.halt_reason = signal.reason
+                trace.halt_frontier = signal.reason
+            # Forward-time-only state: the emit path reads these during the
+            # model call; leaving them on the trace breaks the portable-state
+            # scrub (they are not in PORTABLE_STATE_SPEC by design).
+            del trace._mlx_intervention_plan
+            del trace._mlx_halt_selector
             trace.forward_duration = Duration(time.time() - trace.capture_start_time)
-            trace.raw_output = output_transform(output) if callable(output_transform) else None
+            if halt_signal is not None:
+                trace.raw_output = None
+            else:
+                trace.raw_output = (
+                    output_transform(output) if callable(output_transform) else None
+                )
             self.finalize_forward_session(trace, trace._raw_graph_ws)
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
@@ -1043,6 +1248,8 @@ class MLXBackend:
                 trace.num_params_frozen = 0
                 trace.param_source = "none"
             self._finish_trace(trace, module_tree if use_object_module else None)
+            if halt_signal is not None:
+                self._restrict_halted_param_logs(trace)
             if grad_options is not None:
                 self._attach_derived_grads(
                     trace=trace,
@@ -1059,6 +1266,38 @@ class MLXBackend:
         finally:
             self.cleanup_model_session(trace, model)
             self.unwrap(model)
+
+    def _restrict_halted_param_logs(self, trace: Trace) -> None:
+        """Restrict a halted trace's parameter accounting to captured ops.
+
+        A halted partial graph never ran the modules past the frontier, so
+        declaring the full model's parameter inventory would break the
+        trace/op self-consistency invariant (and overstate what the partial
+        capture proved). Only parameters attached to captured ops survive.
+
+        Parameters
+        ----------
+        trace
+            Finalized halted trace.
+        """
+
+        attached = {
+            barcode
+            for op in trace.layer_list
+            for barcode in (getattr(op, "_param_barcodes", None) or ())
+        }
+        kept = {
+            address: param
+            for address, param in trace.params.items()
+            if param.barcode in attached
+        }
+        trace.param_logs = ParamAccessor(kept)
+        trace.num_param_tensors = len(kept)
+        trace.num_params = sum(param.num_params for param in kept.values())
+        trace.num_params_trainable = sum(
+            param.num_params for param in kept.values() if param.is_trainable
+        )
+        trace.num_params_frozen = trace.num_params - trace.num_params_trainable
 
     def _attach_derived_grads(
         self,
@@ -1458,8 +1697,15 @@ class MLXBackend:
         output: object,
         *,
         module_stack: tuple[ModuleFrame, ...] | None = None,
-    ) -> None:
-        """Append one MLX operation event to ``trace``."""
+    ) -> Any:
+        """Append one MLX operation event and return the effective output.
+
+        Returns
+        -------
+        Any
+            The call output the model should consume downstream: the raw
+            output, or the tree with intervention-replaced leaves.
+        """
 
         # Container outputs (e.g. mx.split's list of arrays) materialize one
         # op per array leaf; dropping them here would silently disconnect the
@@ -1468,12 +1714,78 @@ class MLXBackend:
         # would bless the missing wiring.
         outputs = tuple(self._iter_arrays(output))
         if not outputs:
-            return
+            return output
         events = getattr(trace, "capture_events", None)
         if events is None:
             events = CaptureEvents()
             trace.capture_events = events
         reserved = events.reserve_label_block(op_name, len(outputs))
+        func_call_id = events.func_call_id_counter + 1
+        events.func_call_id_counter = func_call_id
+        func_event_input = FunctionEventInput(
+            func=func,
+            func_name=op_name,
+            func_qualname=getattr(func, "__qualname__", None),
+            args=args,
+            kwargs=kwargs,
+            raw_output=output,
+            arg_copies=None,
+            kwarg_copies=None,
+            module_stack=module_stack or tuple(getattr(trace, "_mlx_module_stack", ())),
+            is_bottom_level_func=True,
+            func_call_id=func_call_id,
+            expected_output_count=len(outputs),
+        )
+        # Static-label interventions substitute matched leaves BEFORE labeling
+        # and payload capture, so the recorded op output IS the value flowing
+        # into downstream ops; halt matches after the frontier op is captured
+        # (save-then-halt ordering).
+        plan = getattr(trace, "_mlx_intervention_plan", None)
+        halt_selector = getattr(trace, "_mlx_halt_selector", None)
+        fire_results_by_site: dict[int, tuple[FireResult, ...]] = {}
+        intervention_slots: tuple[tuple[int, str], ...] = ()
+        intervention_appliers: tuple[tuple[int, Any], ...] = ()
+        halt_label: str | None = None
+        if plan is not None or halt_selector is not None:
+            from .interventions import selector_matches_capture_context
+
+            replacements: dict[int, Any] = {}
+            slots: list[tuple[int, str]] = []
+            appliers: list[tuple[int, Any]] = []
+            for index, (leaf, entry) in enumerate(zip(outputs, reserved)):
+                record_ctx = self.build_record_context(trace, entry, func_event_input, leaf)
+                if plan is not None and selector_matches_capture_context(
+                    plan.selector, record_ctx
+                ):
+                    replacement = self._apply_mlx_intervention(plan, leaf)
+                    replacements[id(leaf)] = replacement
+                    fire_results_by_site[index] = (
+                        FireResult(
+                            plan_id="mlx_intervene",
+                            site_label=entry.label_raw,
+                            fired_at_capture_index=entry.raw_index,
+                            pre_hook_shape=self._shape(leaf),
+                            post_hook_shape=self._shape(replacement),
+                            pre_hook_dtype=self._dtype(leaf),
+                            post_hook_dtype=self._dtype(replacement),
+                            replaced=True,
+                            fire_record=None,
+                        ),
+                    )
+                    slots.append((index, plan.applier.identity))
+                    appliers.append((index, plan.applier.apply))
+                if (
+                    halt_selector is not None
+                    and halt_label is None
+                    and selector_matches_capture_context(halt_selector, record_ctx)
+                ):
+                    halt_label = entry.label_raw
+            if replacements:
+                output = _replace_mlx_array_leaves(self, output, replacements)
+                outputs = tuple(self._iter_arrays(output))
+                func_event_input = replace(func_event_input, raw_output=output)
+                intervention_slots = tuple(slots)
+                intervention_appliers = tuple(appliers)
         op_captures = getattr(trace, "_mlx_op_captures", None)
         if op_captures is None:
             op_captures = []
@@ -1489,16 +1801,30 @@ class MLXBackend:
             key: tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
             for key, value in kwargs.items()
         }
+        # Template retention (paddle's _template_value model): labeled leaves
+        # become REPLAY_SLOT sentinels because replay sources them from saved
+        # parent payloads; keeping the raw arrays here pinned every
+        # intermediate activation for the trace's lifetime.
         op_captures.append(
             MLXOpCapture(
                 labels_raw=labels_raw,
                 op_name=op_name,
                 func=func,
-                args=args,
-                kwargs=dict(kwargs),
-                output=output,
+                args=tuple(
+                    build_capture_template(
+                        value,
+                        arg_leaf_labels[index] if index < len(arg_leaf_labels) else (),
+                    )
+                    for index, value in enumerate(args)
+                ),
+                kwargs={
+                    key: build_capture_template(value, kwarg_leaf_labels.get(key, ()))
+                    for key, value in kwargs.items()
+                },
                 arg_leaf_labels=arg_leaf_labels,
                 kwarg_leaf_labels=kwarg_leaf_labels,
+                interventions=intervention_slots,
+                appliers=intervention_appliers,
             )
         )
         # Independent replay inventory: the validation oracle's denominator.
@@ -1514,37 +1840,71 @@ class MLXBackend:
         if inventory is None:
             inventory = []
             trace._mlx_replay_inventory = inventory
+        # The 5th element pins emit-time intervention declarations, so a
+        # post-hoc claim that a value was (or was not) intervened mismatches
+        # the immutable fingerprint instead of steering hook re-application.
         inventory.append(
             (
                 op_name,
                 labels_raw,
                 arg_leaf_labels,
                 tuple(sorted((key, labels) for key, labels in kwarg_leaf_labels.items())),
+                intervention_slots,
             )
         )
-        func_call_id = events.func_call_id_counter + 1
-        events.func_call_id_counter = func_call_id
         emitted = self.emit_function_outputs(
             trace,
-            FunctionEventInput(
-                func=func,
-                func_name=op_name,
-                func_qualname=getattr(func, "__qualname__", None),
-                args=args,
-                kwargs=kwargs,
-                raw_output=output,
-                arg_copies=None,
-                kwarg_copies=None,
-                module_stack=module_stack or tuple(getattr(trace, "_mlx_module_stack", ())),
-                is_bottom_level_func=True,
-                func_call_id=func_call_id,
-                expected_output_count=len(outputs),
-            ),
+            func_event_input,
             output,
             outputs,
             reserved,
+            fire_results_by_site=fire_results_by_site,
         )
         events.extend(emitted)
+        if halt_label is not None:
+            raise HaltSignal(halt_label, frontier_output=output)
+        return output
+
+    def _apply_mlx_intervention(self, plan: Any, leaf: Any) -> Any:
+        """Apply one resolved intervention to a matched output leaf.
+
+        Parameters
+        ----------
+        plan
+            Resolved ``MLXInterventionPlan``.
+        leaf
+            Matched MLX output array.
+
+        Returns
+        -------
+        Any
+            Replacement array with identical shape and dtype.
+
+        Raises
+        ------
+        BackendUnsupportedError
+            If the hook result is not an MLX array or changes shape/dtype;
+            the MLX preview keeps a strict same-shape/same-dtype contract so
+            downstream lazy consumers cannot silently mis-broadcast.
+        """
+
+        replacement = plan.applier.apply(leaf)
+        if not self.is_tensor(replacement):
+            raise BackendUnsupportedError(
+                f"MLX intervention {plan.applier.identity!r} returned "
+                f"{type(replacement).__name__}; hooks must return an mx.array."
+            )
+        if self._shape(replacement) != self._shape(leaf) or self._dtype(
+            replacement
+        ) != self._dtype(leaf):
+            raise BackendUnsupportedError(
+                f"MLX intervention {plan.applier.identity!r} changed the output "
+                f"from shape={self._shape(leaf)} dtype={self._dtype(leaf)} to "
+                f"shape={self._shape(replacement)} dtype={self._dtype(replacement)}; "
+                "the MLX preview supports shape- and dtype-preserving "
+                "interventions only."
+            )
+        return replacement
 
     @staticmethod
     def _import_mlx() -> tuple[object, object]:
@@ -1677,6 +2037,7 @@ class MLXBackend:
         edge_uses: tuple[object, ...],
         policy: CapturePolicy,
         is_input: bool,
+        fire_results: tuple[FireResult, ...] = (),
     ) -> OpEvent:
         """Build one topology-complete MLX operation event."""
 
@@ -1785,9 +2146,9 @@ class MLXBackend:
             is_bottom_level=func_event_input.is_bottom_level_func,
             is_scalar_bool=None,
             bool_value=None,
-            intervention_fired=False,
-            intervention_replaced=False,
-            fire_results=(),
+            intervention_fired=bool(fire_results),
+            intervention_replaced=any(result.replaced for result in fire_results),
+            fire_results=fire_results,
             intervention_template_ref=None,
             record_context=self.build_record_context(
                 session,
