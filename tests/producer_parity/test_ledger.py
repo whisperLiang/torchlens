@@ -37,7 +37,7 @@ _LEDGER_DIR = Path(__file__).resolve().parent / "ledger"
 # (replace_op_event callers, in-place op_events[i] writes) must stay at ZERO.
 # ANY change to this set is a reviewed diff here.
 EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
-    "torchlens/backends/torch/ops.py",  # lookback_retention
+    "torchlens/backends/torch/_ops_retention.py",  # lookback_retention
     "torchlens/user_funcs.py",  # graph_edge_insertion (register_tensor_connection)
     "torchlens/backends/torch/model_prep.py",  # raw hook / module exit / boundary retention
     "torchlens/backends/torch/backend.py",  # output_parent_promotion

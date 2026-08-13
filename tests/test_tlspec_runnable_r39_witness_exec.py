@@ -1058,7 +1058,7 @@ def test_single_provider_finalizer_owns_settlement() -> None:
 
     import torchlens._runnable_execution as ex
 
-    source = Path(ex.__file__).read_text()
+    source = Path(ex.__file__).with_name("_runnable_providers.py").read_text()
     assert "_finalize_provider_run" in source
     # ``RunResult(`` and ``_run_report(`` must be constructed only inside the finalizer.
     lines = source.splitlines()

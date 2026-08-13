@@ -11,7 +11,7 @@
   "torchlens/backends/torch/model_prep.py:2154",
   "torchlens/backends/torch/model_prep.py:1835",
   "torchlens/backends/torch/model_prep.py:1975",
-  "torchlens/backends/torch/ops.py:6084",
+  "torchlens/backends/torch/_ops_retention.py:504",
   "torchlens/ir/capture_events.py:972",
   "torchlens/postprocess/graph_traversal.py:151",
   "torchlens/user_funcs.py:764"
