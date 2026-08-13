@@ -374,6 +374,43 @@ def test_warm_artifact_is_reproduced_and_the_recompile_is_bounded() -> None:
     assert torch.equal(post, warm), "the warm compiled artifact must be bitwise-reproduced"
 
 
+def test_count_compiles_verifies_the_coexistence_contract() -> None:
+    """``tl.debug.count_compiles`` measures both contract promises directly."""
+
+    torch.compiler.reset()
+    model = _CompiledAttrModel()
+    x = torch.randn(2, 4)
+    model(x)  # warm
+
+    with tl.debug.count_compiles() as during:
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            tl.trace(model, x)
+    assert during.frames_compiled == 0
+
+    with tl.debug.count_compiles() as after:
+        model(x)
+    assert after.frames_compiled <= 1
+
+
+def test_compat_row_states_the_coexistence_contract_under_stance() -> None:
+    """The torch.compile row documents the contract instead of a scope refusal."""
+
+    torch.compiler.reset()
+    row = tl.compat.report(_CompiledAttrModel(), torch.randn(2, 4)).row("torch_compile")
+    assert row.detected is True
+    assert row.status == "pass"
+    assert "set_stance" in row.details
+    assert "one bounded recompile" in row.details
+    assert "unwrap_torch()" in row.details
+    assert "tl.debug.graph_breaks" in row.suggestion
+    assert "tl.debug.count_compiles" in row.suggestion
+
+    clear_row = tl.compat.report(nn.Identity(), torch.randn(2, 4)).row("torch_compile")
+    assert clear_row.detected is False
+    assert "original eager Python" in clear_row.details
+
+
 def test_no_stance_tamper_fallback_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the capability flag off, the exact pre-stance path re-engages.
 
