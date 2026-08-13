@@ -4352,7 +4352,20 @@ def _tensor_container_skeleton(component: Any) -> NonTensorLiteral:
     return _encode_literal(component)
 
 
-def _encode_literal(value: Any) -> NonTensorLiteral:
+_MAX_ENCODE_LITERAL_NESTING_DEPTH = 64
+"""Save-side literal nesting bound, strictly below every decode ceiling.
+
+The load side bounds decoded literals at 200 levels AND the bounded JSON
+reader refuses ``manifest.json`` documents deeper than 200 levels; one
+encoded literal level costs several JSON levels, so an unbounded save could
+succeed while producing a bundle no loader can open (~65-70 literal levels)
+or die inside ``save()`` with a raw ``RecursionError`` (~1000 levels).
+Refusing at 64 keeps every successfully saved bundle loadable and routes the
+refusal through the existing typed ``UNSUPPORTED_LITERAL`` diagnostic.
+"""
+
+
+def _encode_literal(value: Any, _depth: int = 0) -> NonTensorLiteral:
     """Encode a Python value using only the frozen safe literal grammar.
 
     r69 B: scalar admission is CLASSIFIER-FIRST (``torchlens._input_walk.
@@ -4362,9 +4375,23 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     ``_UnsupportedLiteralError`` (typed refusal / opaque routing at the caller).
     Stock NumPy numeric/bool wrappers normalize through the RATIFIED transparent
     value lane (``.item()``); exact builtin atoms encode as before.
+
+    Container admission is EXACT-TYPE (same r69 B discipline as the key codec):
+    a namedtuple, ``OrderedDict``/``defaultdict``, or user list/dict subclass
+    carries semantic type identity or extra state the decode side rebuilds as
+    plain builtins, so it refuses typed instead of laundering. ``torch.Size``
+    is the one ratified allowlisted subclass: it encodes as a plain int tuple
+    (a documented value normalization with no hidden state).
     """
 
     from torchlens._input_walk import classify_scalar
+
+    if _depth > _MAX_ENCODE_LITERAL_NESTING_DEPTH:
+        raise _UnsupportedLiteralError(
+            "Literal nesting exceeds the maximum encodable depth of "
+            f"{_MAX_ENCODE_LITERAL_NESTING_DEPTH}; a deeper value could not be "
+            "decoded by any loader."
+        )
 
     scalar_kind, scalar_payload = classify_scalar(value)
     if scalar_kind == "semantic":
@@ -4405,20 +4432,20 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     torch_symbol = _torch_symbol_qualname(value)
     if torch_symbol is not None:
         return LiteralTorchSymbol(torch_symbol)
-    if isinstance(value, list):
+    if type(value) is list:
         return LiteralSequence(
             LiteralSequenceKind.LIST,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, tuple):
+    if type(value) is tuple or type(value) is torch.Size:
         return LiteralSequence(
             LiteralSequenceKind.TUPLE,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         return LiteralMapping(
             tuple(
-                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item))
+                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item, _depth + 1))
                 for key, item in value.items()
             )
         )

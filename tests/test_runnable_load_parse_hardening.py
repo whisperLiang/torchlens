@@ -150,3 +150,57 @@ def test_validated_dtype_literal_returns_canonical_spelling() -> None:
     assert _validated_dtype_literal("f", "torch.float32") == "torch.float32"
     with pytest.raises(ContextFieldInvalidError):
         _validated_dtype_literal("f", "not_a_dtype")
+
+
+def test_encode_literal_exact_type_discipline() -> None:
+    """Container subclasses refuse typed instead of laundering to builtins (F-R10-B3)."""
+
+    from collections import OrderedDict, namedtuple
+
+    from torchlens._io.runnable import _encode_literal, _UnsupportedLiteralError
+    from torchlens._runnable_verification import _decode_literal
+
+    # Exact builtins and the ratified torch.Size allowlist still encode.
+    assert _decode_literal(_encode_literal([1, 2])) == [1, 2]
+    assert _decode_literal(_encode_literal((1, 2))) == (1, 2)
+    assert _decode_literal(_encode_literal({"k": 3})) == {"k": 3}
+    assert _decode_literal(_encode_literal(torch.Size((2, 3)))) == (2, 3)
+
+    Point = namedtuple("Point", ["x", "y"])
+    with pytest.raises(_UnsupportedLiteralError):
+        _encode_literal(Point(1, 2))
+    with pytest.raises(_UnsupportedLiteralError):
+        _encode_literal(OrderedDict([("k", 1)]))
+
+    class MyList(list):
+        """List subclass carrying semantic type identity."""
+
+    with pytest.raises(_UnsupportedLiteralError):
+        _encode_literal(MyList([1]))
+
+
+def test_encode_literal_bounds_nesting_below_every_decode_ceiling() -> None:
+    """Deep nesting refuses typed at SAVE, never a RecursionError or an unloadable bundle (F-R10-B5)."""
+
+    from torchlens._io.runnable import (
+        _MAX_ENCODE_LITERAL_NESTING_DEPTH,
+        _encode_literal,
+        _UnsupportedLiteralError,
+    )
+
+    shallow: object = 1
+    for _ in range(_MAX_ENCODE_LITERAL_NESTING_DEPTH):
+        shallow = [shallow]
+    _encode_literal(shallow)
+
+    deep: object = 1
+    for _ in range(_MAX_ENCODE_LITERAL_NESTING_DEPTH + 2):
+        deep = [deep]
+    with pytest.raises(_UnsupportedLiteralError, match="nesting"):
+        _encode_literal(deep)
+
+    bomb: object = 1
+    for _ in range(1000):
+        bomb = [bomb]
+    with pytest.raises(_UnsupportedLiteralError, match="nesting"):
+        _encode_literal(bomb)
