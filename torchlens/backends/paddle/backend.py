@@ -1610,6 +1610,11 @@ class PaddleBackend:
     def _finish_trace(self, trace: Trace, module_tree: PaddleModuleTree | None = None) -> None:
         """Finalize a manually captured Paddle Trace."""
 
+        # The Paddle validation sidecar (``trace._paddle_op_captures``) is keyed
+        # by RAW capture labels, which recurrence grouping never rewrites: raw
+        # labels stay resolvable through ``_label_raw``/``lookup_keys`` and the
+        # coverage oracle compares graph parents in raw-label space, so no
+        # relabel hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
@@ -1618,6 +1623,7 @@ class PaddleBackend:
             attach_object_module_logs=self._attach_object_module_logs,
             attach_op_params=_attach_paddle_op_params_for_finalize,
             count_layers_with_attached_params=True,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
 
     def _attach_object_module_logs(self, trace: Trace, tree: PaddleModuleTree) -> None:
@@ -2037,19 +2043,13 @@ def _ops_by_label(trace: Trace) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Operations keyed by known labels.
+        Operations keyed by known labels, with the recurrence-safe key
+        precedence documented on the validation-module implementation.
     """
 
-    result: dict[str, Any] = {}
-    for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
-    return result
+    from .validation import _ops_by_label as _validation_ops_by_label
+
+    return _validation_ops_by_label(trace)
 
 
 def _paddle_capture_is_factory_or_source(capture: Any) -> bool:
@@ -2507,6 +2507,17 @@ def _paddle_trace_intermediate_signatures(
     """
 
     groups: dict[PaddleIntermediateSignature, list[Any]] = defaultdict(list)
+    # Replay-side signatures speak RAW label space (the tap observer labels
+    # values with ``_label_raw``). Recurrence grouping rewrites ``op.parents``
+    # to final pass-qualified labels, so parents are resolved back to raw
+    # space before signature construction; an unresolvable parent keeps its
+    # literal label and simply never matches.
+    final_to_raw = {
+        str(getattr(op, "label", "")): str(getattr(op, "_label_raw", ""))
+        for op in getattr(trace, "layer_list", ())
+        if isinstance(getattr(op, "label", None), str)
+        and isinstance(getattr(op, "_label_raw", None), str)
+    }
     for op in getattr(trace, "layer_list", ()):
         if bool(getattr(op, "is_input", False)) or not bool(
             getattr(op, "has_saved_activation", False)
@@ -2517,7 +2528,10 @@ def _paddle_trace_intermediate_signatures(
         signature = PaddleIntermediateSignature(
             func_call_id=int(getattr(op, "func_call_id", 0)),
             op_name=str(getattr(op, "func_name", "")),
-            parent_labels=tuple(str(parent) for parent in getattr(op, "parents", ())),
+            parent_labels=tuple(
+                final_to_raw.get(str(parent), str(parent))
+                for parent in getattr(op, "parents", ())
+            ),
             module_stack=tuple(str(module) for module in getattr(op, "modules", ())),
         )
         groups[signature].append(op)

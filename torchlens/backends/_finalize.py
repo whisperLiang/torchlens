@@ -12,12 +12,15 @@ from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
 from ..postprocess.finalization import _build_module_logs, _build_root_module_log
+from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
 from ..quantities import Bytes
+from ._recurrence import compute_preview_recurrence_assignments, relabel_edge_metadata
 from .registry import BackendName
 
 OpHook: TypeAlias = Callable[[Any, Trace, set[str]], None]
 OpEnrichmentHook: TypeAlias = Callable[[Any], None]
 LayerEnrichmentHook: TypeAlias = Callable[[Any, Any], None]
+SidecarRelabelHook: TypeAlias = Callable[[dict[str, str]], None]
 ModuleCallNormalizer: TypeAlias = Callable[[Any], tuple[tuple[str, int], ...]]
 MetadataTopLevelPredicate: TypeAlias = Callable[
     [str, dict[str, Any], dict[str, dict[str, Any]]], bool
@@ -41,6 +44,8 @@ def finalize_single_pass_trace(
     count_layers_with_attached_params: bool = False,
     finish_before_module_logs: bool = True,
     compute_input_output_distances: bool | None = None,
+    recurrence_detection: bool = False,
+    relabel_sidecar_labels: SidecarRelabelHook | None = None,
 ) -> None:
     """Finalize raw single-pass op logs into public trace accessors.
 
@@ -75,6 +80,17 @@ def finalize_single_pass_trace(
         over the finalized single-pass graph. ``None`` reads the request the
         backend stored on ``trace.mark_layer_depths``; the effective value is
         written back to ``trace.mark_layer_depths`` either way.
+    recurrence_detection:
+        Whether to run the neutral recurrence grouper over the raw graph and
+        apply its assignments (multi-pass layers, pass-qualified op labels,
+        relabeled edges). ``False`` preserves the historical ungrouped
+        single-pass layout.
+    relabel_sidecar_labels:
+        Backend hook receiving the COMPLETE ``{raw_label: final_op_label}``
+        mapping after grouping relabels the graph. Backends holding
+        label-keyed sidecar state (validation replay inventories, intervention
+        records) must remap it atomically here; capture-index-keyed sidecars
+        may ignore the hook. Only called when ``recurrence_detection`` is on.
 
     Returns
     -------
@@ -82,10 +98,15 @@ def finalize_single_pass_trace(
         The trace is updated in place.
     """
 
+    assignments: dict[str, RecurrenceAssignment] | None = None
+    if recurrence_detection:
+        assignments = compute_preview_recurrence_assignments(trace, backend_name=backend_name)
+
     seen_param_barcodes: set[str] = set()
     layers_with_params_seen: set[str] = set()
     for raw_index, (label, op_log) in enumerate(trace._raw_graph_ws.raw_layer_dict.items()):
-        _finalize_single_op(trace, op_log, label, raw_index)
+        assignment = assignments.get(label) if assignments is not None else None
+        _finalize_single_op(trace, op_log, label, raw_index, assignment)
         if enrich_op is not None:
             enrich_op(op_log)
         if attach_op_params is not None:
@@ -96,12 +117,18 @@ def finalize_single_pass_trace(
             layers_with_params_seen.add(op_log.layer_label)
         if update_param_usage:
             _attach_param_usage(trace, op_log)
-        layer_log = Layer(op_log)
-        layer_log.ops[1] = op_log
+        layer_log = trace.layer_logs.get(op_log.layer_label)
+        layer_created = layer_log is None
+        if layer_created:
+            layer_log = Layer(op_log)
+        layer_log.ops[op_log.pass_index] = op_log
         layer_log.call_labels.append(op_log.label)
-        if enrich_layer is not None:
-            enrich_layer(layer_log, op_log)
-        trace.layer_logs[label] = layer_log
+        if op_log.num_passes != 1:
+            layer_log.num_passes = op_log.num_passes
+        if layer_created:
+            if enrich_layer is not None:
+                enrich_layer(layer_log, op_log)
+            trace.layer_logs[op_log.layer_label] = layer_log
 
     trace.num_ops = sum(
         1
@@ -112,11 +139,18 @@ def finalize_single_pass_trace(
         compute_input_output_distances = bool(getattr(trace, "mark_layer_depths", False))
     trace.mark_layer_depths = bool(compute_input_output_distances)
     if compute_input_output_distances:
+        # The flood runs BEFORE the relabel epilogue: edges and the trace-side
+        # input/output label lists are still uniformly raw here, so every seed
+        # resolves to its exact op (a layer label would resolve to pass 1 and
+        # mis-seed distances for outputs produced by a later pass).
         compute_preview_input_output_distances(trace)
-    # Single-pass finalization never groups recurrent calls; the stored flag is
-    # the EFFECTIVE value, so it must not claim grouping that never ran. (JAX
-    # finalizes through its own recurrence-grouping path and keeps the request.)
-    trace.recurrence_detection = False
+    if assignments is not None:
+        _apply_recurrence_relabel_epilogue(trace, assignments, relabel_sidecar_labels)
+    # The stored flag is the EFFECTIVE value: ``True`` only when the neutral
+    # grouper actually ran over this graph, so an ungrouped finalize can never
+    # claim grouping that never happened. (JAX finalizes through its own
+    # recurrence-grouping path and keeps the request.)
+    trace.recurrence_detection = assignments is not None
     if update_param_totals_from_layers:
         _update_param_totals_from_layers(trace)
     if count_layers_with_attached_params:
@@ -449,8 +483,14 @@ def _update_distance(op_log: Any, min_field: str, max_field: str, hops: int) -> 
     setattr(op_log, max_field, hops if current_max is None else max(current_max, hops))
 
 
-def _finalize_single_op(trace: Trace, op_log: Any, label: str, raw_index: int) -> None:
-    """Attach standard single-pass labels and lookup keys to one op log.
+def _finalize_single_op(
+    trace: Trace,
+    op_log: Any,
+    label: str,
+    raw_index: int,
+    assignment: RecurrenceAssignment | None = None,
+) -> None:
+    """Attach final labels and lookup keys to one op log.
 
     Parameters
     ----------
@@ -462,6 +502,13 @@ def _finalize_single_op(trace: Trace, op_log: Any, label: str, raw_index: int) -
         Raw backend label.
     raw_index:
         Zero-based raw op index.
+    assignment:
+        Recurrence assignment for this op when grouping ran. ``None`` (and any
+        singleton assignment) reproduces the historical single-pass layout:
+        the raw label stays the layer label and the main lookup key. Multi-pass
+        members become pass-qualified: ``label`` is ``layer_label:pass_index``,
+        the main key is the pass label, and the shared layer label resolves to
+        the first pass.
 
     Returns
     -------
@@ -469,25 +516,118 @@ def _finalize_single_op(trace: Trace, op_log: Any, label: str, raw_index: int) -
         ``op_log`` and trace lookup dictionaries are mutated in place.
     """
 
-    pass_label = f"{label}:1"
+    layer_label = assignment.layer_label if assignment is not None else label
+    pass_index = assignment.pass_index if assignment is not None else 1
+    num_passes = assignment.num_passes if assignment is not None else 1
+    pass_label = f"{layer_label}:{pass_index}"
     op_log._label_raw = label
-    op_log._layer_label_raw = label
+    op_log._layer_label_raw = layer_label
     op_log.label = pass_label
     op_log.label_short = pass_label
-    op_log.layer_label = label
-    op_log.layer_label_short = label
+    op_log.layer_label = layer_label
+    op_log.layer_label_short = layer_label
     op_log.lookup_keys = [label, pass_label]
-    op_log.pass_index = 1
-    op_log.num_passes = 1
+    op_log.pass_index = pass_index
+    op_log.num_passes = num_passes
+    if assignment is not None:
+        op_log.equivalence_class = assignment.equivalence_key
     trace.layer_list.append(op_log)
-    trace.layer_dict_main_keys[label] = op_log
+    trace.layer_dict_main_keys[label if num_passes == 1 else pass_label] = op_log
     trace.layer_dict_all_keys[label] = op_log
     trace.layer_dict_all_keys[pass_label] = op_log
+    if num_passes > 1 and layer_label not in trace.layer_dict_all_keys:
+        trace.layer_dict_all_keys[layer_label] = op_log
+        op_log.lookup_keys.append(layer_label)
     trace.op_labels.append(pass_label)
-    trace.layer_labels.append(label)
-    trace.layer_num_calls[label] = 1
+    if layer_label not in trace.layer_num_calls:
+        trace.layer_labels.append(layer_label)
+    trace.layer_num_calls[layer_label] = num_passes
     trace._lookup_keys_to_layer_num_dict[label] = raw_index
     trace._layer_num_to_lookup_keys_dict[raw_index].append(label)
+
+
+def _apply_recurrence_relabel_epilogue(
+    trace: Trace,
+    assignments: dict[str, RecurrenceAssignment],
+    relabel_sidecar_labels: SidecarRelabelHook | None,
+) -> None:
+    """Relabel graph metadata after recurrence assignments were applied.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose ops already carry final (possibly pass-qualified) labels.
+    assignments:
+        Recurrence assignments keyed by raw label.
+    relabel_sidecar_labels:
+        Backend hook receiving the complete raw-to-final label mapping so
+        label-keyed sidecar state can be remapped atomically.
+
+    Returns
+    -------
+    None
+        Edge metadata, trace-side label lists, equivalence metadata, and
+        backend sidecars are updated in place.
+
+    Notes
+    -----
+    Edge labels are rewritten only for members of multi-pass groups: singleton
+    ops keep their raw labels as layer labels (the historical layout), while a
+    grouped member's raw label no longer names any visible layer and every
+    reference to it must follow the op to its pass-qualified label. Raw labels
+    stay resolvable through ``lookup_keys`` either way.
+    """
+
+    raw_dict = trace._raw_graph_ws.raw_layer_dict
+    raw_to_final = {label: raw_dict[label].label for label in raw_dict}
+    changed = {
+        label: final
+        for label, final in raw_to_final.items()
+        if raw_dict[label].num_passes != 1
+    }
+    if changed:
+        for op_log in raw_dict.values():
+            relabel_edge_metadata(op_log, changed)
+        # Trace-side input/output/source lists speak OP space: each entry must
+        # resolve to the specific pass that produced the value (``output_ops``
+        # reads them through ``trace[label]``). Inputs and internal sources are
+        # pseudo-ops and never group; only lists naming grouped computational
+        # ops (an output produced by a later pass) are rewritten, to the
+        # pass-qualified final label. The module-log builders map these to
+        # layer space at their own boundary.
+        for attr_name in (
+            "input_layers",
+            "output_layers",
+            "internal_source_layers",
+            "internal_source_ops",
+            "buffer_layers",
+        ):
+            labels = getattr(trace, attr_name, None)
+            if isinstance(labels, list):
+                setattr(
+                    trace,
+                    attr_name,
+                    [
+                        changed.get(item, item) if isinstance(item, str) else item
+                        for item in labels
+                    ],
+                )
+
+    equivalent_labels_by_key: dict[str, set[str]] = {}
+    for op_log in raw_dict.values():
+        equivalent_labels_by_key.setdefault(op_log.equivalence_class, set()).add(op_log.label)
+    for label, op_log in raw_dict.items():
+        op_log.equivalent_ops = equivalent_labels_by_key[op_log.equivalence_class]
+        op_log.recurrent_ops = [
+            raw_to_final[member]
+            for member in assignments[label].recurrent_labels
+            if member in raw_to_final
+        ]
+    trace.op_equivalence_classes.clear()
+    trace.op_equivalence_classes.update(equivalent_labels_by_key)
+
+    if relabel_sidecar_labels is not None:
+        relabel_sidecar_labels(dict(raw_to_final))
 
 
 def _attach_param_usage(trace: Trace, op_log: Any) -> None:
