@@ -210,3 +210,20 @@ def test_frozenset_round_trips_recursive_blob_payloads(tmp_path: Path) -> None:
     assert isinstance(frozen, frozenset)
     assert len(frozen) == 1
     assert torch.equal(next(iter(frozen)), torch.tensor(3))
+
+
+def test_tuple_subclasses_preserve_type_across_bundle_round_trip(tmp_path: Path) -> None:
+    """Torch Size and structseq metadata do not flatten to builtin tuple."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    target = trace.output_ops[0]
+    maximum = torch.max(torch.tensor([1, 3]), dim=0)
+    target.func_config = {"size": torch.Size([2, 3]), "maximum": maximum}
+    path = tmp_path / "tuple-subclasses.tlspec"
+    tl.save(trace, path)
+
+    loaded = tl.load(path)
+    config = loaded.output_ops[0].func_config
+    assert isinstance(config["size"], torch.Size)
+    assert type(config["maximum"]) is type(maximum)
+    assert torch.equal(config["maximum"].values, maximum.values)

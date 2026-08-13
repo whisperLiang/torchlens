@@ -460,6 +460,39 @@ def _scrub_value_kind(value_type: type) -> int:
     return kind
 
 
+def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
+    """Rebuild a tuple-like container without erasing its public type.
+
+    Parameters
+    ----------
+    value:
+        Source tuple-like container.
+    items:
+        Scrubbed child values.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Rebuilt tuple subclass, or a plain tuple when its constructor is not portable.
+    """
+
+    materialized = tuple(items)
+    if isinstance(value, torch.Size):
+        return torch.Size(materialized)
+    maker = getattr(type(value), "_make", None)
+    if callable(maker):
+        try:
+            return maker(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    if type(value) is not tuple:
+        try:
+            return type(value)(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    return materialized
+
+
 def _scrub_value(
     value: Any,
     options: _ScrubOptions,
@@ -494,7 +527,7 @@ def _scrub_value(
     if kind == _SCRUB_SIMPLE:
         return value
     if kind == _SCRUB_SIZE:
-        return tuple(value)
+        return torch.Size(value)
     if kind == _SCRUB_BLOBREF:
         return value
     if kind == _SCRUB_LIST:
@@ -503,9 +536,12 @@ def _scrub_value(
             for item in value
         ]
     if kind == _SCRUB_TUPLE:
-        return tuple(
-            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+                for item in value
+            ),
         )
     if kind == _SCRUB_SET:
         return {
@@ -1293,7 +1329,7 @@ def _blobify_recursive_value(
     if isinstance(value, _SIMPLE_KEEP_TYPES):
         return value
     if isinstance(value, torch.Size):
-        return tuple(value)
+        return torch.Size(value)
     if isinstance(value, BlobRef):
         return value
     if options.payload_codec.can_encode(value):
@@ -1312,17 +1348,20 @@ def _blobify_recursive_value(
             for item in value
         ]
     if isinstance(value, tuple):
-        return tuple(
-            _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _blobify_recursive_value(
+                    owner=owner,
+                    field_name=field_name,
+                    value=item,
+                    options=options,
+                    memo=memo,
+                    blob_specs=blob_specs,
+                    blob_counter=blob_counter,
+                )
+                for item in value
+            ),
         )
     if isinstance(value, dict):
         # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload

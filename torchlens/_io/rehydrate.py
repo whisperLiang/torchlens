@@ -11,7 +11,7 @@ from __future__ import annotations
 import dataclasses
 import types
 from collections import OrderedDict, defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
@@ -335,6 +335,39 @@ _REHYDRATE_LEAF_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.d
 _REHYDRATE_KINDS: dict[type, int] = {}
 
 
+def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
+    """Rebuild a tuple-like container without erasing its public type.
+
+    Parameters
+    ----------
+    value:
+        Source tuple-like container.
+    items:
+        Rehydrated child values.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Rebuilt tuple subclass, or a plain tuple when reconstruction is unsupported.
+    """
+
+    materialized = tuple(items)
+    if isinstance(value, torch.Size):
+        return torch.Size(materialized)
+    maker = getattr(type(value), "_make", None)
+    if callable(maker):
+        try:
+            return maker(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    if type(value) is not tuple:
+        try:
+            return type(value)(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    return materialized
+
+
 def _rehydrate_node_kind(value_type: type) -> int:
     """Classify one node type for :func:`_rehydrate_object`, memoized per type.
 
@@ -388,21 +421,24 @@ def _rehydrate_object(
     if kind == _REHYDRATE_LEAF:
         return value
     if kind == _REHYDRATE_TUPLE:
-        return tuple(
-            _rehydrate_object(
-                item,
-                manifest_index,
-                bundle_path,
-                resolved_blobs_dir,
-                lazy,
-                map_location,
-                materialize_nested,
-                payload_hints,
-                audit_only_payloads,
-                payload_statuses,
-                seen,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _rehydrate_object(
+                    item,
+                    manifest_index,
+                    bundle_path,
+                    resolved_blobs_dir,
+                    lazy,
+                    map_location,
+                    materialize_nested,
+                    payload_hints,
+                    audit_only_payloads,
+                    payload_statuses,
+                    seen,
+                )
+                for item in value
+            ),
         )
     if kind == _REHYDRATE_LIST:
         for index, item in enumerate(value):
@@ -645,17 +681,20 @@ def _materialize_recursive_blob_refs(
             for item in value
         ]
     if isinstance(value, tuple):
-        return tuple(
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _materialize_recursive_blob_refs(
+                    item,
+                    manifest_index=manifest_index,
+                    bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
+                    map_location=map_location,
+                    payload_hints=payload_hints,
+                    payload_statuses=payload_statuses,
+                )
+                for item in value
+            ),
         )
     if isinstance(value, OrderedDict):
         return OrderedDict(
@@ -1231,18 +1270,21 @@ def _rehydrate_nested_object(
     if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)):
         return value
     if isinstance(value, tuple):
-        return tuple(
-            _rehydrate_nested_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (
+                _rehydrate_nested_object(
+                    item,
+                    manifest_index=manifest_index,
+                    bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
+                    map_location=map_location,
+                    payload_hints=payload_hints,
+                    payload_statuses=payload_statuses,
+                    seen=seen,
+                )
+                for item in value
+            ),
         )
     if isinstance(value, list):
         for index, item in enumerate(value):
