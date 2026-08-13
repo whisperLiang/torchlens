@@ -994,7 +994,12 @@ IGNORED_FUNCS = [
     ("torch.nn.functional", "upsample"),
     ("torch.nn.functional", "upsample_bilinear"),
     ("torch.nn.functional", "upsample_nearest"),
-    ("torch.nn.functional", "handle_torch_function"),
+    # ``handle_torch_function`` is deliberately ABSENT: it is __torch_function__
+    # protocol plumbing, not a tensor op. Decorating it made every composite's
+    # ``if has_torch_function(...)`` preamble route through a TorchLens wrapper
+    # whenever ANY foreign TorchFunctionMode was active (torch's own
+    # DeviceContext included), feeding function objects into tensor-arg capture
+    # and crashing with TorchLensTLCollisionError (stage-0 safety-net fix).
     ("torch.nn.functional", "sigmoid"),
     ("torch.nn.functional", "hardsigmoid"),
     ("torch.nn.functional", "tanh"),
@@ -1014,7 +1019,10 @@ IGNORED_FUNCS = [
     ("torch.Tensor", "__delitem__"),
     ("torch.Tensor", "__iter__"),
     ("torch.Tensor", "__init_subclass__"),
-    ("torch.Tensor", "__torch_function__"),
+    # ``__torch_function__`` is deliberately ABSENT: same protocol-plumbing
+    # hazard as ``handle_torch_function`` above. (It was never actually
+    # decorated — classmethod access binds to <class 'method'>, which the
+    # decoration type gate skips — but listing it declared the wrong intent.)
     ("torch.Tensor", "__new__"),
     ("torch.Tensor", "__subclasshook__"),
     ("torch.Tensor", "as_subclass"),
