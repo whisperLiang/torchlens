@@ -4,18 +4,20 @@ All existing validation + visualization tests migrated from test_validation_and_
 plus new API coverage tests.
 """
 
+import os
 from collections.abc import Iterator
 from os.path import join as opj
 
 import example_models
 import pytest
 import torch
-from conftest import VIS_OUTPUT_DIR
 
 from torchlens import trace
 from torchlens.io import get_model_metadata
 from torchlens.validation import validate_forward_pass
 from torchlens.visualization import show_model_graph
+
+VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
 
 # =============================================================================
 # Simple operations

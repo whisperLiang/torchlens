@@ -312,3 +312,19 @@ def test_root_conftest_does_not_inject_repo_into_sys_path() -> None:
         "tests/conftest.py mutates sys.path and can mask a broken installed distribution; "
         f"offending lines: {violations}"
     )
+
+
+def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
+    """Root tests must consume shared state without bare ``conftest`` imports."""
+
+    tests_root = Path(__file__).resolve().parent
+    violations: list[str] = []
+    for path in tests_root.glob("test*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "conftest":
+                violations.append(f"{path.name}:{node.lineno}")
+    assert not violations, (
+        "Root tests import the ambiguous bare `conftest` module; use the session output "
+        f"environment or a real helper module instead: {violations}"
+    )

@@ -1,5 +1,6 @@
 """Tests for Param, ParamAccessor, and param-related visualization."""
 
+import os
 from os.path import join as opj
 from pathlib import Path
 
@@ -7,12 +8,13 @@ import example_models
 import pytest
 import torch
 import torch.nn as nn
-from conftest import VIS_OUTPUT_DIR
 
 from torchlens import trace as trace_fn
 from torchlens._errors import AmbiguousOpLookupError
 from torchlens.types import Param
 from torchlens.visualization import show_model_graph
+
+VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
 
 # ---------------------------------------------------------------------------
 # Bugfix regression: shared tiny model

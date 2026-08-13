@@ -75,6 +75,8 @@ def pytest_configure(config: pytest.Config) -> None:
     TEST_OUTPUTS_DIR = str(output_root)
     REPORTS_DIR = str(output_root / "reports")
     VIS_OUTPUT_DIR = str(output_root / "visualizations")
+    config._tl_prior_test_outputs_dir = os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR")
+    os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = TEST_OUTPUTS_DIR
     config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
@@ -85,6 +87,22 @@ def pytest_configure(config: pytest.Config) -> None:
     deterministic = torch.are_deterministic_algorithms_enabled()
     deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Restore the caller's test-output environment after pytest exits.
+
+    Parameters
+    ----------
+    config:
+        Active pytest configuration.
+    """
+
+    prior = getattr(config, "_tl_prior_test_outputs_dir", None)
+    if prior is None:
+        os.environ.pop("TORCHLENS_TEST_OUTPUTS_DIR", None)
+    else:
+        os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = prior
 
 
 # Smoke-tier duration budget (see tests/test_marker_lint.py). The partition
