@@ -140,6 +140,13 @@ def _execute_loaded_sparse_transaction(
     first_failed_check: ContractCheck | None = None
 
     def first_failed_contract_so_far() -> ContractCheck | None:
+        """Earliest failed check appended so far, or ``None`` while all pass.
+
+        Each check is visited at most once across the whole transaction, which
+        is sound only because ``contract_checks`` grows by append and
+        ``ContractCheck`` is frozen: no already-scanned check can later fail.
+        """
+
         nonlocal scan_cursor, first_failed_check
         while first_failed_check is None and scan_cursor < len(contract_checks):
             check = contract_checks[scan_cursor]
@@ -149,6 +156,12 @@ def _execute_loaded_sparse_transaction(
         return first_failed_check
 
     def raise_first_divergence_incremental() -> None:
+        """Raise the earliest failed contract check as a divergence, if any failed.
+
+        A no-op under :attr:`DivergencePolicy.RETURN_DIVERGED`, where the
+        failure is carried in the poisoned result instead of raised.
+        """
+
         failed = first_failed_contract_so_far()
         if failed is None or divergence_policy is DivergencePolicy.RETURN_DIVERGED:
             return

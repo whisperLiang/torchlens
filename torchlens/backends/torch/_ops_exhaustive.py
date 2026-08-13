@@ -522,6 +522,13 @@ def _iter_autograd_saved_candidates(grad_fn_handle: Any) -> list[Any]:
     saved_values: list[Any] = []
 
     def _read_saved_values() -> None:
+        """Append the grad_fn's saved tensors and ``_saved_*`` attributes to ``saved_values``.
+
+        Every read is individually best-effort: an attribute the autograd node
+        refuses to produce is skipped, so a partial list is a normal outcome.
+        The caller decides whether this runs under ``pause_logging``.
+        """
+
         try:
             saved_values.extend(getattr(grad_fn_handle, "saved_tensors", ()))
         except Exception:

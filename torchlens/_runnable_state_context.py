@@ -534,6 +534,15 @@ def _count_bounded_fake_tensor_mode_class() -> type[Any] | None:
         return None
 
     class _CountBoundedFakeTensorMode(base):  # type: ignore[valid-type,misc]
+        """``FakeTensorMode`` that aborts once a projection realizes too many fakes.
+
+        The count is per mode instance and cumulative across dispatches, minus
+        the baseline set by :meth:`_tl_set_baseline`; crossing ``ceiling``
+        raises ``_ProjectionCountExceeded`` mid-construction rather than after
+        the output tree exists. Data-dependent shape failures still propagate
+        from ``super()`` unchanged.
+        """
+
         def __init__(self, *args: Any, ceiling: int = _OUTPUT_COUNT_FLOOR, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self._tl_ceiling = ceiling
@@ -541,9 +550,14 @@ def _count_bounded_fake_tensor_mode_class() -> type[Any] | None:
             self._tl_baseline = 0
 
         def _tl_set_baseline(self) -> None:
-            # Discount fakes created by input conversion so only projection OUTPUT
-            # tensors count against the ceiling (from_tensor is not contractually
-            # dispatch-silent across torch versions -- keep this cross-version defense).
+            """Zero the ceiling budget at the current count, after input conversion.
+
+            Only projection OUTPUT tensors may consume the budget. Call this
+            once, after converting the real inputs and before dispatching the
+            projected op (``from_tensor`` is not contractually dispatch-silent
+            across torch versions, so the discount cannot be assumed to be nil).
+            """
+
             self._tl_baseline = self._tl_fake_count
 
         def __torch_dispatch__(

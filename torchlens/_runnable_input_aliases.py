@@ -90,6 +90,12 @@ def _input_alias_topology_checks(
     aliased_pairs: set[tuple[str, str]] = set()
 
     def _ordered_pair(left: str, right: str) -> tuple[str, str]:
+        """Canonicalize a slot-id pair by sort order so it dedupes as a set member.
+
+        Aliasing is symmetric, so ``(a, b)`` and ``(b, a)`` must never be two
+        entries.
+        """
+
         return (left, right) if left <= right else (right, left)
 
     # One pass over the unordered input pairs, under ONE logging pause (the
@@ -245,6 +251,13 @@ def build_input_attestation_fingerprint(
     """
 
     def _safe_bool(getter: Callable[[], Any]) -> bool:
+        """Read one optional tensor property as a bool, treating any failure as ``False``.
+
+        A property the runtime refuses to answer must not abort fingerprinting;
+        ``False`` is the fail-safe answer because it can only widen the
+        eligibility mismatch, never mint a false ``attested``.
+        """
+
         try:
             return bool(getter())
         except (RuntimeError, AttributeError, TypeError, NotImplementedError):

@@ -303,6 +303,13 @@ def _check_loop_detection_invariants(ml: Trace) -> None:
     ambiguous_keys = getattr(ml, "_ambiguous_lookup_keys", {})
 
     def _resolve(member_label: str) -> Op:
+        """Look up one group-member label, matching ``ml[member_label]`` exactly.
+
+        The two unambiguous dict hits are inlined for O(1) resolution; anything
+        else (ambiguous keys, substring/ordinal forms, misses) falls through to
+        the full ``Trace.__getitem__`` cascade so errors stay identical.
+        """
+
         hit = layer_logs.get(member_label, _MISS)
         if hit is not _MISS:
             return cast("Op", hit)

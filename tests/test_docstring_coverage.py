@@ -26,25 +26,13 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1] / "torchlens"
 #: Sites deliberately left undocumented for now, each with the reason it is
 #: deferred rather than exempt. Entries are ``(relative path, qualname)``.
 #:
-#: These four modules are the giant files being SPLIT in grind round 3; a
-#: docstring-only edit inside them would collide with the split lane for no
-#: benefit, since the code moves to new modules that this gate covers from
-#: birth. Delete each entry when the split lands (the test fails if you
-#: forget, in either direction).
-DEFERRED: dict[tuple[str, str], str] = {
-    ("_runnable_execution.py", "first_failed_contract_so_far"): "awaiting r3 file split",
-    ("_runnable_execution.py", "raise_first_divergence_incremental"): "awaiting r3 file split",
-    ("_runnable_execution.py", "_ordered_pair"): "awaiting r3 file split",
-    ("_runnable_execution.py", "_safe_bool"): "awaiting r3 file split",
-    ("_runnable_execution.py", "_CountBoundedFakeTensorMode"): "awaiting r3 file split",
-    (
-        "_runnable_execution.py",
-        "_CountBoundedFakeTensorMode._tl_set_baseline",
-    ): "awaiting r3 file split",
-    ("_runnable_execution.py", "_slot_numel"): "awaiting r3 file split",
-    ("backends/torch/ops.py", "_read_saved_values"): "awaiting r3 file split",
-    ("validation/invariants.py", "_resolve"): "awaiting r3 file split",
-}
+#: EMPTY, and that is the intended steady state: the ledger existed only to
+#: park the nine sites inside the giant files being SPLIT in grind round 3,
+#: and the split landed, so each was documented in its new module instead.
+#: Adding an entry is a last resort -- write the docstring. The staleness test
+#: keeps the ledger from rotting into a permanent exemption in either
+#: direction.
+DEFERRED: dict[tuple[str, str], str] = {}
 
 _PROPERTY_DECORATORS = frozenset({"property", "cached_property", "functools.cached_property"})
 

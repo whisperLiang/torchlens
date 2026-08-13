@@ -331,6 +331,12 @@ def _nondeterministic_value_sources(
     )
 
     def _slot_numel(slot_id: str) -> int | None:
+        """Element count of ``slot_id`` from its recorded shape, or ``None`` if unknown.
+
+        ``None`` means the slot is absent from the descriptor, never an empty
+        tensor: a zero-element slot reports ``0``.
+        """
+
         slot = slots.get(slot_id)
         if slot is None:
             return None
