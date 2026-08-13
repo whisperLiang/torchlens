@@ -258,7 +258,8 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         if isinstance(equivalence_class, str) and isinstance(record.equivalence_class, str):
             equivalence_class_map[equivalence_class] = record.equivalence_class
         parent_param_ops = getattr(record, "parent_param_ops", None)
-        if isinstance(parent_param_ops, dict):
+        record_spec = getattr(type(record), "PORTABLE_STATE_SPEC", {})
+        if isinstance(parent_param_ops, dict) and "parent_param_ops" in record_spec:
             record.parent_param_ops = {
                 remap_barcode_text(key): value for key, value in parent_param_ops.items()
             }
