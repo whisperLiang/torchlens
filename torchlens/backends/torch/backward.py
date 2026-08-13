@@ -2852,6 +2852,38 @@ def _clear_forward_grad_fn_refs(trace: Any) -> None:
         layer_log.grad_fn_handle = None
 
 
+def _warn_zero_match_backward_interventions(trace: Any) -> None:
+    """Warn when an armed capture-time backward selector fired nowhere.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose intervention spec and deferred fire counter should be
+        reconciled after a completed backward pass.
+    """
+
+    spec = getattr(trace, "_intervention_spec", None)
+    hook_specs = getattr(spec, "hook_specs", ())
+    selector_hooks = [
+        hook_spec
+        for hook_spec in hook_specs
+        if hook_spec.metadata.get("created_by") == "intervene_backward_selector"
+    ]
+    if not selector_hooks:
+        return
+    try:
+        if int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) == 0:
+            targets = [hook_spec.site_target for hook_spec in selector_hooks]
+            warnings.warn(
+                f"Capture-time backward intervention selector {targets[0]!r} matched zero "
+                "sites; no intervention fired.",
+                UserWarning,
+                stacklevel=3,
+            )
+    finally:
+        trace.__dict__.pop("_tl_intervene_selector_fire_count", None)
+
+
 def _run_backward_with_capture(
     trace: Any,
     loss: torch.Tensor,
@@ -3040,6 +3072,8 @@ def _run_backward_with_capture(
         )
         _rewalk_higher_order_grad_fns(trace)
         _materialize_backward_projections(trace)
+        if status == "ok":
+            _warn_zero_match_backward_interventions(trace)
         if memory_error is not None:
             raise memory_error
     return result

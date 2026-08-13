@@ -61,10 +61,10 @@ from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chu
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ._errors import (
     ArgumentConflictError,
-    KeywordConflictError,
     ArgumentTypeError,
     CaptureContextError,
     InvalidArgumentError,
+    KeywordConflictError,
     TorchLensPostfuncError,
 )
 from ._input_coerce import _coerce_input_args
@@ -936,6 +936,7 @@ def _warn_zero_match_capture_selectors(
         Emits at most one warning for each configured selector slot.
     """
 
+    defer_backward_intervention = False
     try:
         if (
             isinstance(save_selector, BaseSelector)
@@ -947,9 +948,16 @@ def _warn_zero_match_capture_selectors(
                 UserWarning,
                 stacklevel=3,
             )
+        if isinstance(intervene_selector, BaseSelector):
+            selector_direction = _selector_resolution_direction(intervene_selector)
+            defer_backward_intervention = (
+                selector_direction == "backward"
+                and intervene_direction in {"backward", "both"}
+            )
         if (
             isinstance(intervene_selector, BaseSelector)
-            and intervene_direction == "forward"
+            and not defer_backward_intervention
+            and intervene_direction in {"forward", "both"}
             and int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) == 0
         ):
             warnings.warn(
@@ -960,7 +968,8 @@ def _warn_zero_match_capture_selectors(
             )
     finally:
         trace.__dict__.pop("_tl_save_selector_fire_count", None)
-        trace.__dict__.pop("_tl_intervene_selector_fire_count", None)
+        if not defer_backward_intervention:
+            trace.__dict__.pop("_tl_intervene_selector_fire_count", None)
 
 
 def _merge_intervention_spec_hooks(
