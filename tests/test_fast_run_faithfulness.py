@@ -229,3 +229,34 @@ def test_fast_live_divergence_poisons_half_refreshed_trace() -> None:
     # point, so the user-owned Trace must carry the monotonic poison mark and
     # refuse downstream faithful consumers.
     assert captured._runnable.path_faithfulness is PathFaithfulness.DIVERGED
+
+
+def test_fast_live_inherited_divergence_never_unregisters_user_trace() -> None:
+    """An inherited divergence raise must not evict the user's live Trace."""
+
+    class BranchingFunctionModel(nn.Module):
+        """Choose between two same-shape activation functions from tensor data."""
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Apply the branch selected by the runtime sum."""
+
+            if bool((value.sum() > 0).item()):
+                return torch.relu(value)
+            return torch.sigmoid(value)
+
+    from torchlens import _state
+    from torchlens.errors import PathDivergenceError
+
+    model = BranchingFunctionModel().eval()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
+
+    with pytest.raises(PathDivergenceError):
+        captured.run(inputs=-torch.ones(2), fast=True)
+    # The poisoned mark is monotonic; a later good-input run raises the
+    # inherited divergence but must leave the USER-owned Trace registered
+    # (every other provider passes a throwaway fork to the discard arm).
+    with pytest.raises(PathDivergenceError):
+        captured.run(inputs=torch.ones(2), fast=True)
+    assert any(log is captured for log in _state.list_logs())

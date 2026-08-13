@@ -1320,6 +1320,9 @@ class _FastLiveSession:
             provisional_mismatch=None,
             numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
             divergence_policy=DivergencePolicy.RAISE,
+            # The fast-live "fork" IS the user's live Trace: an inherited
+            # divergence must raise without evicting it from the registry.
+            unregister_fork_on_divergence=False,
         )
 
     def _refresh_boundary_payloads(
