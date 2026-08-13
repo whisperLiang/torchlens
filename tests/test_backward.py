@@ -670,6 +670,7 @@ def test_backward_entrypoints_finalize_streaming_on_exception(
     assert finalized == [trace]
 
 
+@pytest.mark.slow
 def test_separate_unmanaged_engine_calls_get_separate_implicit_passes() -> None:
     """Graph-task identity prevents adjacent unmanaged backwards from merging."""
     from torchlens.backends.torch import backward
