@@ -60,7 +60,7 @@ def rebind_contextmanager(function: _F, namespace: dict[str, Any]) -> _F:
         Equivalent context-manager factory bound to ``namespace``.
     """
 
-    wrapped = cast("_F", function.__wrapped__)
+    wrapped = cast("_F", getattr(function, "__wrapped__"))
     rebound = contextmanager(rebind_function(wrapped, namespace))
     return cast("_F", rebound)
 
@@ -83,6 +83,6 @@ def rebind_lru_cache(function: _F, namespace: dict[str, Any], *, maxsize: int) -
         Equivalent cached function bound to ``namespace``.
     """
 
-    wrapped = cast("_F", function.__wrapped__)
+    wrapped = cast("_F", getattr(function, "__wrapped__"))
     rebound = lru_cache(maxsize=maxsize)(rebind_function(wrapped, namespace))
     return cast("_F", rebound)
