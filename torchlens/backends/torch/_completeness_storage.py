@@ -315,17 +315,21 @@ def _completeness_census_active() -> bool:
     would record the operand PRE-dispatch (before its buffer/op label exists) and mis-route a
     legitimately-witnessed read (e.g. a registered-buffer ``if self.gate``) into the fail-closed
     unattributable gate. So the belt records ONLY when the census is not currently observing.
+
+    The stack query routes through the ``_torch_compat`` accessor
+    (``HAS_DISPATCH_MODE_STACK_QUERY``) and FAILS CLOSED (r-b4 R26-1): "cannot answer"
+    reads as census-INACTIVE so the belt records the escape. The historical
+    ``except Exception: return True`` failed OPEN -- a private-API rename silently
+    disarmed the belt in exactly the census-blind regions it exists to cover,
+    converting a belt-witnessed escape into an unwitnessed one (false VERIFIED).
     """
 
-    try:
-        from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
+    from torchlens.utils._torch_compat import get_current_dispatch_mode_stack
 
-        return any(
-            isinstance(mode, _CompletenessDispatchMode)
-            for mode in _get_current_dispatch_mode_stack()
-        )
-    except Exception:  # pragma: no cover - defensive; treat unknown as census-active (skip)
-        return True
+    stack = get_current_dispatch_mode_stack()
+    if stack is None:
+        return False
+    return any(isinstance(mode, _CompletenessDispatchMode) for mode in stack)
 
 
 def _make_host_value_escape_method(original: Any, state: _WitnessState, name: str) -> Any:

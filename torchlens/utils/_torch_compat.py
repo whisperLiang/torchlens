@@ -72,6 +72,7 @@ __all__ = [
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
     "HAS_DEVICE_MESH",
+    "HAS_DISPATCH_MODE_STACK_QUERY",
     "HAS_DTENSOR",
     "HAS_DYNAMO_COMPILE_COUNTERS",
     "HAS_DYNAMO_IS_COMPILING",
@@ -109,6 +110,7 @@ __all__ = [
     "autocast_get_dtype",
     "autocast_is_enabled",
     "get_accumulate_grad_class",
+    "get_current_dispatch_mode_stack",
     "get_current_function_mode_stack",
     "get_device_constructors",
     "get_device_context_type",
@@ -1158,6 +1160,9 @@ HAS_C10D_GROUP_SEQ: bool = False
 _C10D_GROUP_SEQ_PROBED: bool = False
 HAS_C10D_ABORT_PG: bool = False
 _C10D_ABORT_PG_PROBED: bool = False
+HAS_DISPATCH_MODE_STACK_QUERY: bool = False
+_DISPATCH_MODE_STACK_FN: Callable[[], Any] | None = None
+_DISPATCH_MODE_STACK_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1184,6 +1189,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DTENSOR",
     "HAS_DEVICE_MESH",
     "HAS_PIPELINING",
+    "HAS_DISPATCH_MODE_STACK_QUERY",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_SET_STANCE",
     "HAS_DYNAMO_COMPILE_COUNTERS",
@@ -1267,6 +1273,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_fp8_dtypes(force_probe=True)
     get_dynamo_compile_counters(force_probe=True)
     probe_c10d_capabilities(force_probe=True)
+    get_current_dispatch_mode_stack()
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
@@ -1482,6 +1489,53 @@ def get_current_function_mode_stack() -> Iterable[Any] | None:
         )
         return None
     return stack_getter()
+
+
+def get_current_dispatch_mode_stack() -> list[Any] | None:
+    """Return the current thread's TorchDispatchMode stack when available.
+
+    Returns
+    -------
+    list[Any] | None
+        Active ``TorchDispatchMode`` instances, or ``None`` when the private
+        ``torch.utils._python_dispatch._get_current_dispatch_mode_stack`` probe
+        is absent or raises. ``None`` means "cannot answer": the host-escape
+        belt census check (its one consumer) must treat that as census-INACTIVE
+        so the belt records the escape (fail closed) rather than silently
+        standing down (r-b4 R26-1).
+
+    Notes
+    -----
+    Probed once and cached as a bound callable because this sits on the
+    host-value escape path (``item()`` / ``__bool__`` during capture). A probe
+    that raises is demoted to permanently-absent so later calls short-circuit.
+    """
+
+    global HAS_DISPATCH_MODE_STACK_QUERY, _DISPATCH_MODE_STACK_FN, _DISPATCH_MODE_STACK_PROBED
+
+    if not _DISPATCH_MODE_STACK_PROBED:
+        candidate = _import_module_attr_or_none(
+            "torch.utils._python_dispatch", "_get_current_dispatch_mode_stack"
+        )
+        _DISPATCH_MODE_STACK_FN = candidate if callable(candidate) else None
+        HAS_DISPATCH_MODE_STACK_QUERY = _DISPATCH_MODE_STACK_FN is not None
+        _DISPATCH_MODE_STACK_PROBED = True
+    probe = _DISPATCH_MODE_STACK_FN
+    if probe is None:
+        mark_torch_capability_missing(
+            "HAS_DISPATCH_MODE_STACK_QUERY",
+            "the host-escape belt records without census-activity suppression (fail closed)",
+        )
+        return None
+    try:
+        return list(probe())
+    except Exception:
+        _DISPATCH_MODE_STACK_FN = None
+        mark_torch_capability_missing(
+            "HAS_DISPATCH_MODE_STACK_QUERY",
+            "the host-escape belt records without census-activity suppression (fail closed)",
+        )
+        return None
 
 
 def get_torch_function_mode_stack_length() -> int | None:
