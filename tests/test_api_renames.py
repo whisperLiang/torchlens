@@ -12,7 +12,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import user_funcs
-from torchlens._deprecations import _WARNED_DEPRECATIONS
 from torchlens.options import CaptureOptions, SaveOptions, StreamingOptions, VisualizationOptions
 from torchlens.validation import core as validation_core
 
@@ -131,13 +130,6 @@ class _DummyLog:
         """Record cleanup calls from wrapper helpers."""
 
         self.cleaned_up = True
-
-
-@pytest.fixture(autouse=True)
-def clear_deprecation_state() -> None:
-    """Reset deprecation dedup state before each test."""
-
-    _WARNED_DEPRECATIONS.clear()
 
 
 @pytest.fixture

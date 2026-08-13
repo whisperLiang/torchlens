@@ -10,6 +10,7 @@ Tests that take >5 minutes are marked @pytest.mark.slow. To skip them:
     pytest tests/test_real_world_models.py -m "not slow"
 """
 
+import os
 from os.path import join as opj
 from typing import Any
 
@@ -23,10 +24,11 @@ import torch
 torchvision = pytest.importorskip("torchvision")
 
 import example_models  # noqa: E402
-from conftest import VIS_OUTPUT_DIR  # noqa: E402
 
 from torchlens.validation import validate_forward_pass  # noqa: E402
 from torchlens.visualization import show_model_graph  # noqa: E402
+
+VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
 
 
 def _clear_render_pdf(*path_parts: str) -> None:

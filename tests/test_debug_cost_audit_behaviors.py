@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 from torch import nn
@@ -27,11 +29,15 @@ class _TwoLineModel(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def cost_trace():
+def cost_trace() -> Iterator[tl.Trace]:
     """One captured trace shared across cost assertions."""
 
     torch.manual_seed(12)
-    return tl.trace(_TwoLineModel(), torch.randn(2, 4))
+    trace = tl.trace(_TwoLineModel(), torch.randn(2, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 @pytest.mark.smoke

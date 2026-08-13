@@ -10,6 +10,8 @@ field. These tests pin the two properties that make that safe:
    objects, not to orphan clones of the parent's.
 """
 
+from collections.abc import Iterator
+
 import pytest
 import torch
 from torch import nn
@@ -38,12 +40,16 @@ class _CondNet(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def cond_trace() -> tl.Trace:
+def cond_trace() -> Iterator[tl.Trace]:
     """Return a captured trace of ``_CondNet``."""
 
     torch.manual_seed(0)
     model = _CondNet()
-    return tl.trace(model, torch.randn(2, 8))
+    trace = tl.trace(model, torch.randn(2, 8))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _owned_object_ids(trace: tl.Trace) -> set[int]:

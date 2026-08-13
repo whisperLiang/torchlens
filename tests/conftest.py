@@ -1,15 +1,18 @@
 import os
+import random
 import sys
+import time
+from collections.abc import Iterator
 from os.path import join as opj
+from pathlib import Path
+from types import ModuleType
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from torchlens import _state  # noqa: E402
+from torchlens import _state
 
 # Menagerie tests exercise the menagerie/ build subsystem, which is not importable
 # on Python < 3.11 because it uses datetime.UTC. Skip collecting them on those
@@ -19,57 +22,36 @@ if sys.version_info < (3, 11):
     collect_ignore_glob.append("test_menagerie_*.py")
     collect_ignore_glob.append("crawler/*.py")
 
-# Deterministic seeding
-torch.manual_seed(0)
-torch.cuda.manual_seed_all(0)
-torch.use_deterministic_algorithms(True)
-
-# Output directories. Routine test-generated artifacts go under tests/generated_outputs/,
-# which is gitignored. Human-inspectable aesthetic reports keep stable paths there.
+# Output directories are assigned under pytest's private basetemp in
+# ``pytest_configure`` before test modules import these constants.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_OUTPUTS_DIR = opj(TESTS_DIR, "generated_outputs")
-REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
-VIS_OUTPUT_DIR = opj(TEST_OUTPUTS_DIR, "visualizations")
+TEST_OUTPUTS_DIR = ""
+REPORTS_DIR = ""
+VIS_OUTPUT_DIR = ""
 
-sub_dirs = [
-    "cornet",
-    "graph-neural-networks",
-    "language-models",
-    "multimodal-models",
-    "taskonomy",
-    "timm",
-    "torchaudio",
-    "torchvision-main",
-    "torchvision-detection",
-    "torchvision-opticflow",
-    "torchvision-segmentation",
-    "torchvision-video",
-    "torchvision-quantize",
-    "toy-networks",
-    "aesthetic_test_models",
-    "generative-models",
-    "nlp-models",
-    "time-series",
-    "point-cloud",
-    "super-resolution",
-    "autoencoders",
-    "state-space-models",
-    "attention-variants",
-    "gating-skip-patterns",
-    "exotic-architectures",
-    "reinforcement-learning",
-    "efficient-transformers",
-    "decoder-only-llms",
-    "encoder-only",
-    "encoder-decoder",
-    "perceiver",
-    "moe-models",
-    "detection-additional",
-]
-
-os.makedirs(REPORTS_DIR, exist_ok=True)
-for sub_dir in sub_dirs:
-    os.makedirs(opj(VIS_OUTPUT_DIR, sub_dir), exist_ok=True)
+_MISSING = object()
+_WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
+    ("torchlens._capture_state_helpers", "_VALIDATION_DEEPCOPY_WARNING_TYPES", set()),
+    ("torchlens._capture_state_helpers", "_COMPILED_MODEL_UNWRAP_WARNED", False),
+    ("torchlens._capture_state_helpers", "_COMPILED_FORCED_EAGER_WARNED", False),
+    ("torchlens._deprecations", "_WARNED_DEPRECATIONS", set()),
+    ("torchlens._io", "_LEGACY_THREAD_WARNING_EMITTED", {"flag": False}),
+    ("torchlens._io.bundle", "_NONPERSISTENT_DISCLOSURE_WARNED", False),
+    ("torchlens._io.bundle", "_UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED", False),
+    ("torchlens._state", "_functorch_warning_emitted", False),
+    ("torchlens._state", "_dynamo_warning_emitted", False),
+    ("torchlens.backends.tf._tf_compat", "_warned_missing_capabilities", set()),
+    ("torchlens.backends.torch.ops", "_UNSUPPORTED_OUTPUT_CONTAINER_WARNED", set()),
+    ("torchlens.data_classes.op", "_WARNED_REFERENCE_SAVE_MODE", False),
+    ("torchlens.distributed._lifecycle", "_AUTO_ARM_WARNED", False),
+    ("torchlens.fastlog._storage_resolver", "_WARNED_REFERENCE_SAVE_MODE", False),
+    ("torchlens.utils._torch_compat", "_warned_missing_capabilities", set()),
+    ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
+    ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),
+    ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),
+    ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED", False),
+    ("torchlens.visualization.auto_collapse", "_COUNT_MISMATCH_WARNING_EMITTED", False),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,16 +59,57 @@ for sub_dir in sub_dirs:
 # ---------------------------------------------------------------------------
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
-    """Enable usage stats collection for ArgSpec coverage analysis."""
-    _state._collect_usage_stats = True
+    """Initialize session-private outputs with shipped usage stats disabled.
+
+    Parameters
+    ----------
+    config:
+        Active pytest configuration.
+    """
+
+    global TEST_OUTPUTS_DIR, REPORTS_DIR, VIS_OUTPUT_DIR
+
+    output_root = config._tmp_path_factory.getbasetemp() / "torchlens-generated"
+    TEST_OUTPUTS_DIR = str(output_root)
+    REPORTS_DIR = str(output_root / "reports")
+    VIS_OUTPUT_DIR = str(output_root / "visualizations")
+    config._tl_prior_test_outputs_dir = os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR")
+    os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = TEST_OUTPUTS_DIR
+    config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
+    _state._collect_usage_stats = False
     _state._function_call_counts.clear()
     _state._function_call_models.clear()
+    # Pay PyTorch's one-time RNG and deterministic-mode initialization during
+    # session setup, not against whichever smoke test happens to run first.
+    torch.random.get_rng_state()
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
 
 
-# Smoke-tier duration budget (see tests/test_marker_lint.py). The partition
-# threshold for moving a test out of smoke is 5s measured; the enforcement
-# budget is ~3x that so parallel-box load noise does not false-trip the lint.
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Restore the caller's test-output environment after pytest exits.
+
+    Parameters
+    ----------
+    config:
+        Active pytest configuration.
+    """
+
+    prior = getattr(config, "_tl_prior_test_outputs_dir", None)
+    if prior is None:
+        os.environ.pop("TORCHLENS_TEST_OUTPUTS_DIR", None)
+    else:
+        os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = prior
+
+
+# Smoke-tier duration budget (see tests/test_marker_lint.py). The PARTITION
+# threshold for moving a test out of smoke is 5s measured; the ENFORCEMENT
+# budget stays 15s (3x, load-scaled below) until every >5s smoke test is
+# re-tiered — several measured 9.5-14.2s quiet on 2026-08-13. Lower to 5.0
+# once that re-tier lands (tracked follow-up).
 SMOKE_DURATION_BUDGET_SECONDS = 15.0
 
 
@@ -108,8 +131,10 @@ def _smoke_budget_load_factor() -> float:
 
 
 @pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
-    """Record smoke-marked tests that blow the tier's duration budget.
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[Any]
+) -> Iterator[pytest.TestReport]:
+    """Record smoke tests whose full setup/call/teardown exceeds the budget.
 
     A static lint cannot know runtimes, so an UNMARKED slow test landing in the
     smoke tier is only catchable at runtime. Offenders are stashed on the session
@@ -118,15 +143,76 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     """
 
     report = yield
-    if report.when == "call" and item.get_closest_marker("smoke") is not None:
-        budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
-        if report.duration > budget:
-            offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
-            if offenders is None:
-                offenders = []
-                item.session._tl_smoke_budget_offenders = offenders
-            offenders.append((item.nodeid, report.duration, budget))
+    durations = getattr(item, "_tl_phase_durations", None)
+    if durations is None:
+        durations = {}
+        item._tl_phase_durations = durations
+    durations[report.when] = report.duration
+    if report.when == "teardown" and item.get_closest_marker("smoke") is not None:
+        total_duration = sum(durations.values())
+        family = getattr(item, "originalname", None) or item.name.split("[")[0]
+        family_totals = getattr(item.session, "_tl_smoke_family_durations", None)
+        if family_totals is None:
+            family_totals = {}
+            item.session._tl_smoke_family_durations = family_totals
+        family_key = f"{item.path}::{family}"
+        family_totals[family_key] = family_totals.get(family_key, 0.0) + total_duration
+    else:
+        total_duration = 0.0
+    budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
+    if total_duration > budget:
+        offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
+        if offenders is None:
+            offenders = []
+            item.session._tl_smoke_budget_offenders = offenders
+        offenders.append((item.nodeid, total_duration, budget))
     return report
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(
+    collector: pytest.Collector,
+) -> Iterator[pytest.CollectReport]:
+    """Record test-module import and collection time for smoke-tier enforcement.
+
+    Parameters
+    ----------
+    collector:
+        Collector whose work is about to run.
+    """
+
+    started = time.perf_counter()
+    report = yield
+    if isinstance(collector, pytest.Module):
+        durations = getattr(collector.session, "_tl_module_collection_durations", None)
+        if durations is None:
+            durations = {}
+            collector.session._tl_module_collection_durations = durations
+        durations[str(collector.path)] = time.perf_counter() - started
+    return report
+
+
+def _is_full_usage_stats_run(config: pytest.Config) -> bool:
+    """Return whether pytest selected the complete default non-rare suite.
+
+    Parameters
+    ----------
+    config:
+        Active pytest configuration.
+
+    Returns
+    -------
+    bool
+        ``True`` only for an unfiltered invocation rooted at ``tests/``.
+    """
+
+    if config.option.keyword:
+        return False
+    mark_expression = (config.option.markexpr or "").strip().replace("(", "").replace(")", "")
+    if mark_expression not in {"", "not rare"}:
+        return False
+    requested_paths = [Path(str(arg).split("::", maxsplit=1)[0]).resolve() for arg in config.args]
+    return requested_paths == [Path(TESTS_DIR).resolve()]
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -147,11 +233,22 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if item.get_closest_marker("requires_assertions") is not None:
                 item.add_marker(skip_no_assertions)
 
+    collect_usage_stats = _is_full_usage_stats_run(config)
+    _state._collect_usage_stats = collect_usage_stats
+    if collect_usage_stats:
+        _state._function_call_counts.clear()
+        _state._function_call_models.clear()
+
+    skip_partial_usage_stats = pytest.mark.skip(
+        reason="ArgSpec usage coverage requires an unfiltered full tests/ run"
+    )
     coverage_tests = []
     lint_tests = []
     other_tests = []
     for item in items:
         if "test_arg_positions" in item.nodeid:
+            if not collect_usage_stats:
+                item.add_marker(skip_partial_usage_stats)
             coverage_tests.append(item)
         elif "test_marker_lint" in item.nodeid:
             # The duration-budget lint reads offenders recorded during the run,
@@ -193,6 +290,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     del exitstatus
     _state._collect_usage_stats = False
+    _state._function_call_counts.clear()
+    _state._function_call_models.clear()
     config = session.config
     if config.option.collectonly or not _coverage_requested(config):
         return
@@ -239,22 +338,98 @@ def _isolated_torchlens_cache(tmp_path_factory: pytest.TempPathFactory):
         os.environ["TORCHLENS_CACHE_DIR"] = prior
 
 
-@pytest.fixture(autouse=True)
-def _reset_deprecation_dedup():
-    """Give every test a fresh deprecation-warning dedup set.
+def _copy_sentinel_value(value: object) -> object:
+    """Return an independent snapshot of a supported warn-once value.
 
-    ``warn_deprecated_alias`` correctly warns only once per process (so real user
-    sessions are not spammed), but that process-global dedup makes any test that asserts
-    ``pytest.warns(DeprecationWarning)`` order-dependent: if an earlier test already
-    tripped the same alias, the warning is suppressed here and the assertion fails with
-    "DID NOT WARN". Clearing the set before each test restores per-test isolation without
-    changing the shipped once-per-process behavior.
+    Parameters
+    ----------
+    value:
+        Boolean, set, or dictionary sentinel value.
+
+    Returns
+    -------
+    object
+        Independent mutable copy, or the original immutable value.
     """
 
-    from torchlens import _deprecations
+    if isinstance(value, (set, dict)):
+        return value.copy()
+    return value
 
-    _deprecations._WARNED_DEPRECATIONS.clear()
-    yield
+
+def _set_sentinel_default(module: ModuleType, name: str, default: object) -> None:
+    """Reset one imported warn-once sentinel to its cold-process value.
+
+    Parameters
+    ----------
+    module:
+        Imported module that owns the sentinel.
+    name:
+        Module attribute name.
+    default:
+        Cold-process sentinel value.
+    """
+
+    setattr(module, name, _copy_sentinel_value(default))
+
+
+@pytest.fixture(autouse=True)
+def _reset_warn_once_sentinels() -> Iterator[None]:
+    """Give every test fresh warn-once state and restore its incoming state."""
+
+    snapshots: dict[tuple[str, str], object] = {}
+    for module_name, name, default in _WARN_ONCE_SENTINELS:
+        module = sys.modules.get(module_name)
+        if module is None:
+            snapshots[(module_name, name)] = _MISSING
+            continue
+        snapshots[(module_name, name)] = _copy_sentinel_value(
+            getattr(module, name, _MISSING)
+        )
+        _set_sentinel_default(module, name, default)
+
+    try:
+        yield
+    finally:
+        for module_name, name, default in _WARN_ONCE_SENTINELS:
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            prior = snapshots[(module_name, name)]
+            if prior is _MISSING:
+                _set_sentinel_default(module, name, default)
+            else:
+                setattr(module, name, prior)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rng_state() -> Iterator[None]:
+    """Seed each test deterministically and restore all incoming RNG settings."""
+
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.random.get_rng_state()
+    cuda_initialized = torch.cuda.is_initialized()
+    cuda_states = torch.cuda.get_rng_state_all() if cuda_initialized else None
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    if cuda_initialized:
+        torch.cuda.manual_seed_all(0)
+    torch.use_deterministic_algorithms(True)
+
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.random.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+        torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
 
 
 @pytest.fixture

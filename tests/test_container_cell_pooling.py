@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pickle
 from collections import defaultdict
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -38,9 +39,15 @@ class _Stack(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def stack_trace() -> tl.Trace:
+def stack_trace() -> Iterator[tl.Trace]:
+    """Yield one shared stack Trace and release it after the module."""
+
     torch.manual_seed(0)
-    return tl.trace(_Stack(), torch.zeros(1, 4))
+    trace = tl.trace(_Stack(), torch.zeros(1, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _pooled_cells_by_field(store) -> dict[str, int]:

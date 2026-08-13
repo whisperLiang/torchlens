@@ -10,6 +10,7 @@ barrier copy per Layer, with the same copy-on-read isolation on read.
 from __future__ import annotations
 
 import pickle
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -42,13 +43,17 @@ class _LoopCell(nn.Module):
 
 
 @pytest.fixture(scope="module")
-def loop_trace() -> tl.Trace:
+def loop_trace() -> Iterator[tl.Trace]:
     """Trace of the recurrent cell, shared across tests (read-only)."""
 
     torch.manual_seed(0)
     model = _LoopCell()
     x = torch.randn(2, STEPS, DIM)
-    return tl.trace(model, x)
+    trace = tl.trace(model, x)
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _multi_pass_groups(trace: tl.Trace) -> dict[str, list]:

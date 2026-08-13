@@ -40,10 +40,15 @@ class _StoredFuncModel(nn.Module):
 
 @pytest.fixture(autouse=True)
 def _ensure_wrapped() -> Iterator[None]:
-    """Ensure torch wrappers are installed for each test."""
+    """Ensure wrappers are installed and restore their incoming state."""
 
+    was_wrapped = _state._is_decorated
     torch_wrappers.wrap_torch()
-    yield
+    try:
+        yield
+    finally:
+        if not was_wrapped:
+            torch_wrappers.unwrap_torch()
 
 
 def _require_torch_jit() -> None:

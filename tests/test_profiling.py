@@ -17,7 +17,6 @@ from os.path import join as opj
 import example_models
 import pytest
 import torch
-from conftest import REPORTS_DIR
 
 from torchlens import trace as trace_fn
 from torchlens.validation import validate_forward_pass
@@ -32,6 +31,7 @@ class _ValidationTimeout(Exception):
 # Config
 # ---------------------------------------------------------------------------
 
+REPORTS_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "reports")
 REPORT_PATH = opj(REPORTS_DIR, "profiling_report.txt")
 
 # Illustrative sampling across architecture families: toy models first,

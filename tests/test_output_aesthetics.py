@@ -27,7 +27,6 @@ import example_models
 import pytest
 import torch
 import torch.nn as nn
-from conftest import REPORTS_DIR, VIS_OUTPUT_DIR
 
 from torchlens import func, trace as trace_fn
 from torchlens.options import CaptureOptions
@@ -37,6 +36,9 @@ from torchlens.visualization import show_model_graph
 # Report helpers
 # ---------------------------------------------------------------------------
 
+TEST_OUTPUTS_DIR = os.environ["TORCHLENS_TEST_OUTPUTS_DIR"]
+REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
+VIS_OUTPUT_DIR = opj(TEST_OUTPUTS_DIR, "visualizations")
 REPORT_PATH = opj(REPORTS_DIR, "aesthetic_report.txt")
 VIS_DIR = opj(VIS_OUTPUT_DIR, "aesthetic_test_models")
 

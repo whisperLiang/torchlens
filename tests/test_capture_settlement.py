@@ -13,6 +13,7 @@ import pathlib
 
 import pytest
 import torch
+from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
 from torch import nn
 
 import torchlens as tl
@@ -20,7 +21,6 @@ import torchlens.postprocess as pp
 from torchlens.capture.outcome import CapturePhase, CaptureStatus, FailureOrigin
 from torchlens.fastlog import Recorder
 from torchlens.fastlog._halt import HaltSignal
-from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
 
 pytestmark = pytest.mark.smoke
 

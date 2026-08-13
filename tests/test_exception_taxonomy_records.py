@@ -10,7 +10,7 @@ both ``fields["remedy"]`` and the message tail.
 from __future__ import annotations
 
 import pickle
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -23,11 +23,15 @@ from torchlens._errors import PayloadUnavailableError, RecordBindingError
 
 
 @pytest.fixture(scope="module")
-def small_trace() -> Any:
+def small_trace() -> Iterator[Any]:
     """Capture one tiny fully-saved trace shared by the door provocations."""
 
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
-    return tl.trace(model, torch.randn(1, 4))
+    trace = tl.trace(model, torch.randn(1, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _assert_contract(exc: BaseException, expected_code: str, builtin: type[BaseException]) -> None:
