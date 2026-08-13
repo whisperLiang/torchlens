@@ -539,6 +539,23 @@ def test_param_gradient_payloads_use_trace_save_mode() -> None:
     assert all(payload.grad_fn is None for payload in payloads)
 
 
+def test_grad_fn_event_payloads_are_detached_snapshots() -> None:
+    """Projection rebuild never exposes graph-connected autograd hook buffers."""
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace), create_graph=True)
+
+    tensors = [
+        tensor
+        for grad_fn in trace.grad_fns
+        for call in grad_fn.calls.values()
+        for payload in (call.grad_inputs, call.grad_outputs)
+        for tensor in (payload or ())
+        if isinstance(tensor, torch.Tensor)
+    ]
+    assert tensors
+    assert all(tensor.grad_fn is None for tensor in tensors)
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""

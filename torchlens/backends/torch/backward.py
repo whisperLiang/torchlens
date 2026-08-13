@@ -1920,6 +1920,9 @@ def _make_grad_fn_hook(
         with pause_logging():
             grad_fn_handle._log_call(stored_grad_inputs, stored_grad_outputs, time.time())
         call_index = len(grad_fn_handle.calls)
+        logged_call = grad_fn_handle.calls[-1]
+        stored_grad_inputs = logged_call.grad_inputs
+        stored_grad_outputs = logged_call.grad_outputs
         events = _ensure_backward_event_stream(live_trace)
         event_timestamp = time.time()
         pass_index = int(
