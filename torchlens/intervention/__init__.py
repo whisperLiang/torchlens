@@ -1,4 +1,25 @@
-"""Import surface for TorchLens intervention selectors, hooks, reruns, and bundles."""
+"""Import surface for TorchLens intervention selectors, hooks, reruns, and bundles.
+
+Two of this package's public names are resolved LAZILY through the module
+``__getattr__`` below rather than imported eagerly, because their modules import
+BACK into modules whose own import pulls in ``torchlens.intervention``:
+
+* ``Bundle`` lives in :mod:`torchlens.bundle`, which imports
+  ``torchlens.intervention._metrics`` / ``._super`` / ``._topology``; importing any
+  of those first executes THIS ``__init__``, so an eager ``from .bundle import
+  Bundle`` here made ``import torchlens.bundle`` -- a PUBLIC module -- fail with a
+  partially-initialized-module ``ImportError``.
+* ``rerun`` / ``run`` live in :mod:`torchlens.intervention.rerun`, which imports
+  ``torchlens._chunking``; ``_chunking`` imports ``.intervention.errors``, so an
+  eager ``from .rerun import ...`` here made ``import torchlens._chunking`` fail
+  the same way.
+
+Deferring exactly these three names keeps every module in the package standalone
+importable (gated by ``tests/test_module_import_isolation.py``) while leaving the
+public surface, ``__all__``, and static types unchanged.
+"""
+
+from typing import TYPE_CHECKING, Any
 
 from ._metrics import (
     METRIC_REGISTRY,
@@ -22,7 +43,6 @@ from ._topology.topology import (
     build_supergraph,
     compare_topology,
 )
-from .bundle import Bundle
 from .errors import (
     AppendBatchDependenceError,
     AppendMismatchError,
@@ -93,7 +113,6 @@ from .hooks import (
 )
 from .predicates import add, replace_with, when
 from .replay import push, push_from, replay, replay_from
-from .rerun import rerun, run
 from .resolver import SiteTable, resolve_sites
 from .runtime import do
 from .save import (
@@ -156,6 +175,10 @@ from .types import (
     Unsupported,
     rebuild_container_from_spec,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only mirror of the lazy names below
+    from .bundle import Bundle
+    from .rerun import rerun, run
 
 __all__ = [
     "AppendBatchDependenceError",
@@ -307,3 +330,48 @@ __all__ = [
     "zero_ablate",
     "rebuild_container_from_spec",
 ]
+
+# Names whose defining module imports back into a module that imports this
+# package; see the module docstring. Resolved on first attribute access, after
+# this ``__init__`` has finished executing, so no partially-initialized module is
+# ever observed.
+_LAZY_NAMES: dict[str, str] = {
+    "Bundle": ".bundle",
+    "rerun": ".rerun",
+    "run": ".rerun",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the cycle-deferred public names on first access.
+
+    Parameters
+    ----------
+    name:
+        Attribute name being looked up on ``torchlens.intervention``.
+
+    Returns
+    -------
+    Any
+        The resolved attribute.
+
+    Raises
+    ------
+    AttributeError
+        For any name this package does not define.
+    """
+
+    module_name = _LAZY_NAMES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value  # memoize; subsequent lookups skip __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    """Return the public surface including the lazily-resolved names."""
+
+    return sorted(set(__all__) | set(globals()))

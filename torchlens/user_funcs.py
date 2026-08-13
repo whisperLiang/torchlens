@@ -2956,6 +2956,7 @@ def _public_impls_module() -> Any:
 
     _user_public_impls.trace = trace
     _user_public_impls._run_model_and_save_specified_outs = _run_model_and_save_specified_outs
+    _sync_public_impl_wrapper_metadata(_user_public_impls)
     return _user_public_impls
 
 
@@ -3045,28 +3046,57 @@ def validate_batch_of_models_and_inputs(*args: Any, **kwargs: Any) -> Any:
     return _public_impls_module().validate_batch_of_models_and_inputs(*args, **kwargs)
 
 
-def _sync_public_impl_wrapper_metadata() -> None:
+_PUBLIC_IMPL_WRAPPER_NAMES = (
+    "summary",
+    "show_model_graph",
+    "draw_backward",
+    "draw_combined",
+    "show_bundle_graph",
+    "validate_forward_pass",
+    "validate_backward_pass",
+    "validate_saved_outs",
+    "validate_batch_of_models_and_inputs",
+)
+
+_public_impl_metadata_synced = False
+
+
+def _sync_public_impl_wrapper_metadata(implementations: Any = None) -> None:
     """Expose canonical signatures on lazily delegated public wrappers.
+
+    ``torchlens._user_public_impls`` imports this module at its top, so when IT is
+    the module imported first (``import torchlens._user_public_impls``) the sync
+    below observes a partially initialized implementation module. Skipping the
+    not-yet-defined names -- instead of raising ``AttributeError`` and breaking a
+    standalone import -- keeps the cycle inert; the next
+    :func:`_public_impls_module` call completes the sync, and the flag makes the
+    completed sync a one-time cost.
+
+    Parameters
+    ----------
+    implementations:
+        Already-resolved implementation module, when the caller holds one.
 
     Returns
     -------
     None
-        Updates wrapper metadata in place after the implementation module is loaded.
+        Updates wrapper metadata in place once the implementation module is fully
+        loaded.
     """
 
-    implementations = _public_impls_module()
-    for name in (
-        "summary",
-        "show_model_graph",
-        "draw_backward",
-        "draw_combined",
-        "show_bundle_graph",
-        "validate_forward_pass",
-        "validate_backward_pass",
-        "validate_saved_outs",
-        "validate_batch_of_models_and_inputs",
-    ):
-        functools.update_wrapper(globals()[name], getattr(implementations, name))
+    global _public_impl_metadata_synced
+    if _public_impl_metadata_synced:
+        return
+    if implementations is None:
+        from . import _user_public_impls as implementations  # type: ignore[no-redef]
+    pending = False
+    for name in _PUBLIC_IMPL_WRAPPER_NAMES:
+        implementation = getattr(implementations, name, None)
+        if implementation is None:
+            pending = True
+            continue
+        functools.update_wrapper(globals()[name], implementation)
+    _public_impl_metadata_synced = not pending
 
 
 _sync_public_impl_wrapper_metadata()
