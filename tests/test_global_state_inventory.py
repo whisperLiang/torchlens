@@ -74,6 +74,9 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/_state.py", "_prepared_root_by_module"),
         ("torchlens/_state.py", "_stale_prepared_roots"),
         ("torchlens/backends/torch/_tl.py", "_RETIRED_LABEL_SESSION"),
+        # F3b's lazy public-impl metadata sync (3c7ed93e): a one-way
+        # synced-yet? sentinel flipped on first successful wrap, install-class.
+        ("torchlens/user_funcs.py", "_public_impl_metadata_synced"),
         ("torchlens/backends/torch/backward.py", "_AUTOGRAD_WRAPPERS_INSTALLED"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_AUTOGRAD_BACKWARD"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_AUTOGRAD_GRAD"),
