@@ -27,14 +27,24 @@ from torchlens.backends.mlx import MLXBackend  # noqa: E402
 
 
 class _TwoLayerMLP(nn.Module):
-    """Two-layer MLX MLP with a relu boundary to intervene on."""
+    """Two-layer MLX MLP with a relu boundary to intervene on.
+
+    Weights are deterministic and positive so the relu output is provably
+    nonzero on the all-ones input — random init occasionally lands an
+    all-negative hidden layer, which would make an ablation indistinguishable
+    from the baseline.
+    """
 
     def __init__(self) -> None:
-        """Initialize two linear layers."""
+        """Initialize two linear layers with deterministic positive weights."""
 
         super().__init__()
         self.l1 = nn.Linear(4, 3)
         self.l2 = nn.Linear(3, 2)
+        self.l1.weight = mx.full((3, 4), 0.5)
+        self.l1.bias = mx.full((3,), 0.1)
+        self.l2.weight = mx.full((2, 3), 0.25)
+        self.l2.bias = mx.full((2,), -0.2)
 
     def __call__(self, x: mx.array) -> mx.array:
         """Run the MLP forward pass."""
@@ -292,11 +302,15 @@ def test_mlx_in_module_intervention_site() -> None:
         """Model with a named encoder submodule."""
 
         def __init__(self) -> None:
-            """Initialize the encoder and head."""
+            """Initialize the encoder and head with deterministic weights."""
 
             super().__init__()
             self.encoder = nn.Linear(4, 3)
             self.head = nn.Linear(3, 2)
+            self.encoder.weight = mx.full((3, 4), 0.5)
+            self.encoder.bias = mx.full((3,), 0.1)
+            self.head.weight = mx.full((2, 3), 0.25)
+            self.head.bias = mx.full((2,), -0.2)
 
         def __call__(self, x: mx.array) -> mx.array:
             """Run encoder then head."""
