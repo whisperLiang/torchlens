@@ -2,6 +2,7 @@ import os
 import random
 import sys
 import time
+import weakref
 from collections.abc import Iterator
 from os.path import join as opj
 from pathlib import Path
@@ -31,7 +32,10 @@ VIS_OUTPUT_DIR = ""
 
 _MISSING = object()
 _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
-    ("torchlens._capture_state_helpers", "_VALIDATION_DEEPCOPY_WARNING_TYPES", set()),
+    # NOTE: this sentinel is a weakref.WeakSet in the package (type-keyed cache
+    # eviction, F3a); resetting it to a plain set() would strong-pin model
+    # classes — the reset must preserve the weak container type.
+    ("torchlens._capture_state_helpers", "_VALIDATION_DEEPCOPY_WARNING_TYPES", weakref.WeakSet()),
     ("torchlens._capture_state_helpers", "_COMPILED_MODEL_UNWRAP_WARNED", False),
     ("torchlens._capture_state_helpers", "_COMPILED_FORCED_EAGER_WARNED", False),
     ("torchlens._deprecations", "_WARNED_DEPRECATIONS", set()),
@@ -352,7 +356,7 @@ def _copy_sentinel_value(value: object) -> object:
         Independent mutable copy, or the original immutable value.
     """
 
-    if isinstance(value, (set, dict)):
+    if isinstance(value, (set, dict, weakref.WeakSet)):
         return value.copy()
     return value
 
