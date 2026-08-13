@@ -81,6 +81,8 @@ TARGET_ALL = [
     "head",
     "clamp",
     "mean_ablate",
+    "merge_ranks",
+    "merge_report",
     "noise",
     "project_off",
     "project_onto",
@@ -130,7 +132,7 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_matches_frozen_94_name_surface() -> None:
+def test_all_matches_frozen_96_name_surface() -> None:
     """Top-level ``__all__`` should match the current frozen API ledger.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
@@ -158,6 +160,8 @@ def test_all_matches_frozen_94_name_surface() -> None:
     `assert_unchanged` = 92. Model-lifecycle release support adds
     `release_model` = 93. The predicate-interpreter consolidation exports
     `grad_fn_label` (its own selector kind after the label-kind collision fix) = 94.
+    Merge-ranks rung C1 adds `merge_ranks` and `merge_report` (spec'd
+    top-level entry points; machinery lives in `torchlens.merged`) = 96.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """
