@@ -216,6 +216,8 @@ def _trace_mlx_model(
     module_identity_mode: str | None | MissingType,
     grad_options: Any | None | MissingType,
     verbose: bool | MissingType,
+    intervene: Any | None = None,
+    halt: Any | None = None,
 ) -> Trace:
     """Dispatch an MLX module capture through the optional MLX backend.
 
@@ -281,9 +283,10 @@ def _trace_mlx_model(
     )
     if capture_options.intervention_ready:
         raise BackendUnsupportedError(
-            "MLX backend does not support intervention_ready=True. "
-            "Intervention requires PyTorch autograd integration not present in MLX. "
-            "Omit intervention_ready or set False."
+            "MLX backend does not support intervention_ready=True: post-capture "
+            "rerun readiness requires PyTorch autograd integration not present in "
+            "MLX. Live static-label trace(intervene=tl.when(...)) IS supported; "
+            "omit intervention_ready or set False."
         )
     if capture_options.hooks:
         raise BackendUnsupportedError(
@@ -343,6 +346,8 @@ def _trace_mlx_model(
         save_visualizations=capture_options.save_visualizations,
         module_identity_mode=capture_options.module_identity_mode,
         grad_options=cast("Any", None if grad_options is MISSING else grad_options),
+        intervene=intervene,
+        halt=halt,
     )
     apply_static_label_save_policy(trace, save_predicate, backend_name="MLX")
     return trace
@@ -365,13 +370,16 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
     # Idempotent when the registry entry already resolved it; load-bearing for
     # direct/autoroute callers so the deprecated alias is honored, not dropped.
     resolve_public_depth_alias(kwargs)
+    # intervene=/halt= are DISPATCHED options on MLX (static-label live
+    # interventions); recipes= is refused typed by the capture path below.
+    # None of the three may flow through the capability-gated reject helper:
+    # with interventions=True that would raise the never-dispatches
+    # conformance error instead of running or refusing them properly.
     reject_extra_trace_kwargs(
         {
             "lookback": kwargs["lookback"],
             "lookback_payload_policy": kwargs["lookback_payload_policy"],
             "capture": kwargs["capture"],
-            "intervene": kwargs["intervene"],
-            "halt": kwargs["halt"],
             "storage": kwargs["storage"],
             "streaming": kwargs["streaming"],
             "inference_only": kwargs.get("inference_only", MISSING),
@@ -379,7 +387,6 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
             "stop_after": kwargs.get("stop_after", MISSING),
             "raise_on_nan": kwargs.get("raise_on_nan", MISSING),
             "profile": kwargs.get("profile", MISSING),
-            "recipes": kwargs.get("recipes", MISSING),
             "payload_policy": kwargs.get("payload_policy", MISSING),
             "save_preview": kwargs.get("save_preview", MISSING),
             "chunk_size": kwargs.get("chunk_size", MISSING),
@@ -405,17 +412,12 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
             allowed=_MLX_STATIC_LABEL_SAVE_SELECTOR_KINDS,
             backend_name="MLX",
         )
-    if kwargs["intervene"] is not None:
+    recipes_value = kwargs.get("recipes", MISSING)
+    if recipes_value is not MISSING and recipes_value is not None:
         raise BackendUnsupportedError(
-            "MLX backend does not support value-dependent trace(intervene=predicate) capture. "
-            "MLX lazy evaluation defers RecordContext.tensor_requires_grad, "
-            "is_scalar_bool, and bool_value without per-op mx.eval; use the PyTorch backend "
-            "for predicate-time interventions."
-        )
-    if kwargs["halt"] is not None:
-        raise BackendUnsupportedError(
-            "MLX backend does not support trace(halt=predicate) capture. "
-            "Use the PyTorch backend for predicate-time halt."
+            "MLX backend supports interventions only through static-label "
+            "trace(intervene=tl.when(...)) predicates; recipe specs (recipes=) "
+            "are not supported. Use the PyTorch backend for intervention recipes."
         )
     activation_transform = kwargs["activation_transform"]
     return _trace_mlx_model(
@@ -459,6 +461,8 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
         module_identity_mode=kwargs["module_identity_mode"],
         grad_options=kwargs["grad_options"],
         verbose=kwargs["verbose"],
+        intervene=kwargs["intervene"],
+        halt=kwargs["halt"],
     )
 
 
@@ -1403,7 +1407,7 @@ def _unsupported_trace_option_message(option_name: str, backend_name: str) -> st
     if option_name == "grad_options":
         return (
             "grad_options is only supported with backend='jax', backend='mlx', "
-            "backend='tinygrad', or backend='paddle'."
+            "backend='tinygrad', backend='paddle', or backend='tf'."
         )
     if option_name in {"jax_control_flow", "jax_max_control_flow_unroll"}:
         return (
@@ -1863,7 +1867,7 @@ def trace(
         raise BackendUnsupportedError(
             "jax_static_argnums is only supported with backend='jax'; grad_options is "
             "only supported with backend='jax', backend='mlx', backend='tinygrad', "
-            "or backend='paddle'."
+            "backend='paddle', or backend='tf'."
         )
     explicit_backend_spec = None
     if backend is not None:

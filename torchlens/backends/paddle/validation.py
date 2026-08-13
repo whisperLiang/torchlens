@@ -226,6 +226,8 @@ def _parent_perturbations_change_output(
     backend: Any,
     capture: Any,
     ops_by_label: Mapping[str, Any],
+    *,
+    baseline_output: Any | None = None,
 ) -> bool:
     """Return whether at least one value-parent perturbation changes output.
 
@@ -237,6 +239,11 @@ def _parent_perturbations_change_output(
         Paddle operation capture record.
     ops_by_label
         Materialized trace operations keyed by raw and public labels.
+    baseline_output
+        Optional replay baseline. For a corroborated user-intervened capture
+        the sensitivity check compares perturbed replays against the pre-hook
+        value: comparing against the recorded replacement payload would make
+        the check vacuously pass for constant replacements.
 
     Returns
     -------
@@ -250,7 +257,11 @@ def _parent_perturbations_change_output(
         return False
     if not rebuilt.parent_values:
         return _is_factory_or_source_capture(capture)
-    saved_output = _saved_payload(ops_by_label[getattr(capture, "label_raw")])
+    saved_output = (
+        baseline_output
+        if baseline_output is not None
+        else _saved_payload(ops_by_label[capture.label_raw])
+    )
     output_path = _capture_output_path(capture)
     attempted = False
     for parent_label, parent_value in rebuilt.parent_values.items():

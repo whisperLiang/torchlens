@@ -178,8 +178,11 @@ class _MLXWrapperRegistry:
                     trace._mlx_capture_depth -= 1
                 module_stack = tuple(getattr(trace, "_mlx_module_stack", ()))
                 emit = getattr(backend, "emit_mlx_operation")
-                emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
-                return output
+                # emit returns the effective output: intervention-replaced
+                # leaves must be what the model consumes downstream.
+                return emit(
+                    trace, op_name, original, args, kwargs, output, module_stack=module_stack
+                )
             finally:
                 if frame is not None:
                     getattr(trace, "_mlx_module_stack").pop()

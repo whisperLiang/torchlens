@@ -22,7 +22,7 @@ from .._finalize import attach_function_root_module, attach_object_module_logs
 from .._finalize import finalize_single_pass_trace
 from .._selective_save import reject_selector_outside_kinds
 from .._options import TF_EXTRA_KWARG_POLICY, TF_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing, reject_extra_trace_kwargs
+from .._options import default_if_missing, is_missing, reject_extra_trace_kwargs
 from .._options import reject_unsupported_trace_options
 from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
@@ -100,6 +100,8 @@ class TFBackend:
         layer_visualizers: dict[Any, Any] | None = None,
         save_visualizations: bool = False,
         module_identity_mode: str | None = None,
+        grad_options: Any | None = None,
+        intervene: Any | None = None,
         **extra_kwargs: Any,
     ) -> Trace:
         """Capture one TensorFlow eager forward into a ``Trace``.
@@ -152,8 +154,18 @@ class TFBackend:
         layer_visualizers = default_if_missing(layer_visualizers, None)
         save_visualizations = default_if_missing(save_visualizations, False)
         module_identity_mode = default_if_missing(module_identity_mode, None)
+        grad_options = default_if_missing(grad_options, None)
+        intervene = default_if_missing(intervene, None)
         save_predicate = _pop_tf_save_predicate(extra_kwargs)
+        _reject_unimplemented_intervention_options(extra_kwargs)
         _reject_extra_kwargs(extra_kwargs)
+        if intervene is not None and grad_options is not None:
+            raise BackendUnsupportedError(
+                "tf backend does not combine intervene= with grad_options=; the "
+                "derived-gradient replay reruns the un-intervened forward and would "
+                "always refuse on output divergence. Capture the two surfaces in "
+                "separate traces."
+            )
         if random_seed is not None:
             raise BackendUnsupportedError(
                 "tf backend preview does not support random_seed; use tf.random.set_seed(...) "
@@ -179,6 +191,19 @@ class TFBackend:
         plan = self.normalize_call(model=model, input_args=input_args, input_kwargs=input_kwargs)
         tf = self._import_tensorflow()
         if plan.mode == "graph_only":
+            if grad_options is not None:
+                raise BackendUnsupportedError(
+                    "tf grad_options requires eager live capture; static FuncGraph "
+                    f"capture ({plan.reason}) cannot run the GradientTape derived-"
+                    "gradient replay. Trace an eager-executable callable instead."
+                )
+            if intervene is not None:
+                raise BackendUnsupportedError(
+                    "tf intervene= requires eager live capture; static FuncGraph "
+                    f"capture ({plan.reason}) executes a frozen graph the writable "
+                    "wrap layer cannot substitute into. Trace an eager-executable "
+                    "callable instead."
+                )
             trace = self._new_trace(
                 model=model,
                 output_device=output_device,
@@ -285,12 +310,52 @@ class TFBackend:
             save_payloads=True,
             save_predicate=save_predicate,
         )
+        intervention_plan = None
+        if intervene is not None:
+            from .interventions import (
+                apply_tf_module_intervention,
+                audit_tf_site_reachability,
+                normalize_tf_interventions,
+                tf_intervention_wrap,
+            )
+
+            intervention_plan = normalize_tf_interventions(intervene, tf)
+            if intervention_plan.module_sites and module_tree is None:
+                raise BackendUnsupportedError(
+                    "tf module-boundary interventions (tl.module/tl.in_module "
+                    "conditions) require object-module attribution; this capture "
+                    "entry discovered no Keras/tf.Module tree."
+                )
+            active_plan = intervention_plan
+
+            def _module_exit_hook(
+                frame: Any, module_type: str, output: Any, module_stack: Any
+            ) -> Any:
+                """Substitute matched module-boundary intervention outputs."""
+
+                return apply_tf_module_intervention(
+                    active_plan,
+                    session,
+                    tf,
+                    trace,
+                    frame,
+                    module_type,
+                    output,
+                    module_stack,
+                )
+
+            session.module_exit_hook = _module_exit_hook
         trace.capture_events = CaptureEvents()
         trace.capture_start_time = time.time()
         previous_active_trace = _state._active_trace
         try:
             _state._active_trace = trace
-            result = session.run()
+            if intervention_plan is not None:
+                with tf_intervention_wrap(tf, intervention_plan, session):
+                    result = session.run()
+                audit_tf_site_reachability(intervention_plan, session)
+            else:
+                result = session.run()
         finally:
             _state._active_trace = previous_active_trace
         trace.forward_duration = Duration(time.time() - trace.capture_start_time)
@@ -305,6 +370,24 @@ class TFBackend:
         delattr(trace, "capture_events")
         self._attach_param_logs(trace, module_tree)
         self._finish_trace(trace, module_tree)
+        if grad_options is not None:
+            from .derived_grads import GradOptions, attach_tf_derived_grads
+
+            if not isinstance(grad_options, GradOptions):
+                raise BackendUnsupportedError(
+                    "tf grad_options must be a torchlens.backends.tf.GradOptions "
+                    f"instance; got {type(grad_options).__name__}."
+                )
+            attach_tf_derived_grads(
+                tf=tf,
+                trace=trace,
+                callable_obj=plan.callable_obj,
+                args=plan.args,
+                kwargs=plan.call_kwargs,
+                captured_output=result.output,
+                grad_options=grad_options,
+                module_tree=module_tree,
+            )
         freeze_trace_relation_views(trace)
         return trace
 
@@ -778,6 +861,41 @@ class TFBackend:
             return True
         generic_function_type = getattr(tf.types.experimental, "GenericFunction", None)
         return bool(generic_function_type is not None and isinstance(value, generic_function_type))
+
+
+def _reject_unimplemented_intervention_options(kwargs: dict[str, Any]) -> None:
+    """Refuse intervention-gated options the tf preview does not implement.
+
+    The ``interventions`` capability flag admits ``intervene=``, ``halt=``, and
+    ``recipes=`` through the shared option gate, so the two unimplemented
+    spellings keep their typed refusals here in the capture path instead of in
+    the declarative policy tables (where a True flag would classify them as
+    self-contradictory registrations).
+
+    Parameters
+    ----------
+    kwargs
+        Extra public kwargs forwarded to the TensorFlow backend.
+
+    Returns
+    -------
+    None
+        Returns when neither option is explicitly requested.
+    """
+
+    halt_value = kwargs.pop("halt", None)
+    if halt_value is not None and not is_missing(halt_value):
+        raise BackendUnsupportedError(
+            "tf backend interventions support intervene= only; trace(halt=...) needs "
+            "partial-forward finalization semantics the tf preview does not "
+            "implement. Use the PyTorch backend for predicate-time halt."
+        )
+    recipes_value = kwargs.pop("recipes", None)
+    if recipes_value is not None and not is_missing(recipes_value):
+        raise BackendUnsupportedError(
+            "tf backend interventions support intervene= only; trace(recipes=...) "
+            "replay recipes are torch-only. Use the PyTorch backend for recipes."
+        )
 
 
 def _reject_extra_kwargs(kwargs: dict[str, Any]) -> None:

@@ -179,9 +179,23 @@ print(tl.compat.report(model, x).to_markdown())
   preview when `keras.backend.backend() == "tensorflow"`. The shipped path is eager live capture
   with `op_callbacks` as the primary mechanism: real values, real taken-branch control flow,
   op-level records, and Keras/`tf.Module` module stacks. The graph-only FuncGraph static path is
-  implemented for compiled/SavedModel entries (opaque regions stay honestly unverified);
-  interventions, true backward capture, and T1 derived gradients remain deferred like sibling
-  preview gaps.
+  implemented for compiled/SavedModel entries (opaque regions stay honestly unverified).
+  Derived gradients (leaf + exact T1 intermediates) ship for eager entries via
+  `tl.backends.tf.GradOptions` — one GradientTape replay with divergence refusal; graph-only
+  captures refuse `grad_options` typed. Static-label `intervene=` ships for eager entries
+  through a two-level writable layer (module-boundary substitution + curated tf.nn/tf.math
+  functional wrap) with FAIL-CLOSED site reachability — a selector matching callback-captured
+  ops the wrap layer never saw refuses typed. `halt=`/`recipes=`, true backward capture, and
+  value-dependent predicates remain deferred like sibling preview gaps.
+- The Paddle preview supports live forward `trace(intervene=...)` and `trace(halt=...)` (eager
+  dygraph: the wrapper holds each concrete output before the caller sees it). The intervened op
+  keeps its real identity with the replacement payload plus hook-minted `FireRecord`s; the replay
+  oracle uses a narrow corroborated user-intervention carve-out, so a replacement value presented
+  as captured-native FAILS validation. Builtin helper adapters: `zero_ablate`, `scale`, `add`,
+  `replace_with` (others refuse typed); decisions are forward-only; intervention/halt predicates
+  may be value-dependent (real `tensor_requires_grad`/`is_scalar_bool`/`bool_value` in the ctx);
+  `recipes=` attaches facet recipes; `grad_options` cannot combine with `intervene=`/`halt=`.
+  Value-dependent `save=`, streaming, fastlog, and rng_replay stay refused on paddle.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

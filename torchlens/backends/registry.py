@@ -78,7 +78,7 @@ TINYGRAD_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options
 PADDLE_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options")
 """Trace options implemented by the Paddle preview backend."""
 
-TF_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode",)
+TF_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options")
 """Trace options implemented by the TensorFlow preview backend."""
 
 

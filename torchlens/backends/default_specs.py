@@ -570,6 +570,21 @@ def _torch_interventions_implementation() -> object:
     return apply_live_hooks_to_outputs
 
 
+def _tf_interventions_implementation() -> object:
+    """Resolve the TensorFlow static-label intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The writable-layer normalizer the tf capture path dispatches for
+        ``trace(intervene=...)`` sites.
+    """
+
+    from .tf.interventions import normalize_tf_interventions
+
+    return normalize_tf_interventions
+
+
 def _torch_fastlog_implementation() -> object:
     """Resolve the torch sparse-recording implementing surface.
 
@@ -701,6 +716,22 @@ def _tinygrad_capture_trace(*args: Any, **kwargs: Any) -> Any:
 
     resolve_public_depth_alias(kwargs)
     return TinygradBackend().capture_trace(*args, **kwargs)
+
+
+def _paddle_interventions_implementation() -> object:
+    """Resolve the Paddle live-intervention implementing surface.
+
+    Returns
+    -------
+    object
+        Runtime class the Paddle capture wrapper dispatches for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites. Import-light:
+        the module defers the paddle import to apply time.
+    """
+
+    from .paddle.interventions import PaddleInterventionRuntime
+
+    return PaddleInterventionRuntime
 
 
 def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
@@ -971,6 +1002,21 @@ def _mlx_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return MLXBackend().validate_trace(*args, **kwargs)
 
 
+def _mlx_interventions_implementation() -> object:
+    """Resolve the MLX static-label intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The plan resolver the MLX capture path invokes for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites.
+    """
+
+    from .mlx.interventions import resolve_mlx_intervention_plan
+
+    return resolve_mlx_intervention_plan
+
+
 def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to Paddle trace replay validation.
 
@@ -1069,7 +1115,7 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -1079,6 +1125,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=MLX_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _mlx_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",
@@ -1163,7 +1212,7 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -1173,6 +1222,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=PADDLE_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _paddle_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",
@@ -1196,16 +1248,19 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
-                intermediate_derived_grads=False,
+                intermediate_derived_grads=True,
                 input_container_structure="paths_only",
                 output_container_structure="paths_only",
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=TF_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _tf_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",
