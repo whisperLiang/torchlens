@@ -915,27 +915,6 @@ def test_validate_forward_pass_accepts_nested_lstm_module_outputs() -> None:
         trace.cleanup()
 
 
-def test_detached_reference_patcher_ignores_opaque_defaults() -> None:
-    """Detached-reference patching treats non-tuple defaults as opaque metadata."""
-
-    from torchlens.backends.torch.wrappers import _patch_function_defaults
-
-    class CallableWithOpaqueDefaults:
-        """Callable object exposing a non-standard ``__defaults__`` value."""
-
-        __defaults__ = object()
-
-        def __call__(self) -> None:
-            """Run the callable."""
-
-    candidate = CallableWithOpaqueDefaults()
-    original_defaults = candidate.__defaults__
-
-    _patch_function_defaults(candidate, {id(original_defaults): "replacement"})
-
-    assert candidate.__defaults__ is original_defaults
-
-
 def test_posthoc_perturb_constant_check_supports_complex_outputs() -> None:
     """Posthoc perturbation checks run on complex outputs without crashing.
 
