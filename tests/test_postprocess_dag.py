@@ -140,8 +140,31 @@ PROBES_GOLDEN = {
     )),
     "6": frozenset(("internal_source_parents", "layer_label", "recurrent_ops")),
     "12": frozenset(("out_ref",)),
+    # Step 16/18 grad-family rows (manifest-swap 2026-08-13): the provisional
+    # baseline over-included the backward-phase grad channel; the projected
+    # baseline excludes it, and the in-pipeline reads (which always observe
+    # the step-0 constant seed — grads are written post-backward, outside
+    # the pipeline) are reviewed observe-and-fall-through probes.
+    "16": frozenset(("_grad_records",)),
     "18": frozenset(
-        ("_facets_cache", "_projective_field_cache", "_receptive_field_cache")
+        (
+            "_facets_cache",
+            "_grad_records",
+            "_pending_grad_blob_id",
+            "_pending_transformed_grad_blob_id",
+            "_projective_field_cache",
+            "_receptive_field_cache",
+            "grad",
+            "grad_dtype",
+            "grad_fn",
+            "grad_shape",
+            "gradient_memory",
+            "has_grad",
+            "transformed_grad",
+            "transformed_grad_dtype",
+            "transformed_grad_shape",
+            "transformed_gradient_memory",
+        )
     ),
 }
 

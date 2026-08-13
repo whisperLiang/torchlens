@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
+from torchlens.ir.op_record_manifest import CELL_SOURCE_MANIFEST
+
 #: Closed trace-state token vocabulary (design-ppdag-v3 §2.2). Each token
 #: names one non-column state surface a step may consume or produce; the
 #: derivation orients token conflicts exactly like column conflicts. The
@@ -1157,6 +1159,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "raw_index",
             )
         ),
+        # Probe (reviewed, manifest-swap 2026-08-13): module-log grad
+        # summaries read the backward-phase _grad_records channel, which
+        # holds the step-0 constant seed on every in-pipeline axis (grads
+        # are written post-backward, outside the pipeline and its windows)
+        # — observe-empty-and-fall-through.
+        placeholder_probes=frozenset(("_grad_records",)),
         trace_state=tokens(
             "r:layer_logs",
             "r:module_build",
@@ -1436,12 +1444,32 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             )
         ),
         # Probes (reviewed): the whole-row portable scrub serializes
-        # every set cell, legally observing unset lazy caches.
+        # every set cell, legally observing unset lazy caches. The grad
+        # family (manifest-swap 2026-08-13) is the backward-phase channel:
+        # in-pipeline every one of these holds the step-0 constant seed
+        # (grads are written post-backward, when the deferred-grad
+        # streaming re-run executes this same body OUTSIDE the pipeline
+        # and its windows — the fact already carried by the
+        # ('18','grad_ref') phantom-write exemption); the reads
+        # observe-placeholder-and-fall-through.
         placeholder_probes=frozenset(
             (
                 "_facets_cache",
+                "_grad_records",
+                "_pending_grad_blob_id",
+                "_pending_transformed_grad_blob_id",
                 "_projective_field_cache",
                 "_receptive_field_cache",
+                "grad",
+                "grad_dtype",
+                "grad_fn",
+                "grad_shape",
+                "gradient_memory",
+                "has_grad",
+                "transformed_grad",
+                "transformed_grad_dtype",
+                "transformed_grad_shape",
+                "transformed_gradient_memory",
             )
         ),
         trace_state=tokens(
@@ -1483,175 +1511,56 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
 }
 
 
-#: PROVISIONAL capture baseline (design-ppdag-v3 §2.4, integration point):
-#: op-store columns legal to read with NO earlier pipeline writer because
-#: step 0 populates them from capture-event data. The AUTHORITATIVE source
-#: is the producer lane's jointly frozen CellSourceManifest — its projection
-#: (``capture_baseline_from_manifest`` below) replaces this literal at
-#: integration. This provisional set was hand-derived from
-#: ``_materialize.py::_fields_from_event`` and the sibling-field builders
-#: (module enter/exit, buffer-write, call-stack fill): a column is included
-#: iff its materialize value derives from event/capture data — a literal
-#: constant assignment (``label = None``, ``is_orphan = False``) is a schema
-#: placeholder and is EXCLUDED, because presence cannot distinguish
-#: "capture produced this" from "placeholder" (the vacuous-baseline defect).
-#: Granularity disclosure: per-column and static — a union over
-#: configurations (a backward-gated column is baseline even on forward-only
-#: axes where it holds the default). Per-row provenance is out of scope.
-#: Fail-closed: a NEW schema column is NOT baseline until classified here
-#: (its reads report as findings).
-CAPTURE_BASELINE_COLUMNS: frozenset[str] = frozenset(
-    (
-        "_construction_done",
-        "_edge_uses",
-        "_grad_records",
-        "_label_raw",
-        "_layer_label_raw",
-        "_param_barcodes",
-        "_param_logs",
-        "_pending_blob_id",
-        "_pending_grad_blob_id",
-        "_pending_transformed_grad_blob_id",
-        "_pending_transformed_out_blob_id",
-        "_source_trace_ref",
-        "_tracing_finished",
-        "activation_memory",
-        "activation_transform",
-        "address",
-        "annotations",
-        "arg_names",
-        "args_template",
-        "atomic_module_call",
-        "autograd_memory",
-        "backend_address",
-        "bool_value",
-        "buffer_source",
-        "buffer_source_func_name",
-        "buffer_value_changed",
-        "buffer_write_kind",
-        "bytes_delta_at_call",
-        "bytes_peak_at_call",
-        "children",
-        "code_context",
-        "container_path",
-        "container_spec",
-        "detach_saved_activations",
-        "device_ref",
-        "dropped_edge_tensor_args",
-        "dtype",
-        "dtype_ref",
-        "equivalence_class",
-        "equivalent_ops",
-        "flops_backward",
-        "flops_forward",
-        "func",
-        "func_autocast_state",
-        "func_call_id",
-        "func_config",
-        "func_duration",
-        "func_id",
-        "func_name",
-        "func_non_tensor_args",
-        "func_qualname",
-        "func_rng_states",
-        "grad",
-        "grad_dtype",
-        "grad_fn",
-        "grad_fn_class_name",
-        "grad_fn_class_qualname",
-        "grad_fn_handle",
-        "grad_fn_object_id",
-        "grad_shape",
-        "gradient_memory",
-        "has_children",
-        "has_grad",
-        "has_input_ancestor",
-        "has_internal_source_ancestor",
-        "has_out_variations",
-        "has_saved_activation",
-        "has_saved_args",
-        "in_multi_output",
-        "input_ancestors",
-        "input_to_module_calls",
-        "input_was_parameter",
-        "internal_source_ancestors",
-        "intervention_replaced",
-        "interventions",
-        "io_role",
-        "is_atomic_module",
-        "is_buffer",
-        "is_inplace",
-        "is_input",
-        "is_internal_source",
-        "is_module_output",
-        "is_output_parent",
-        "is_scalar_bool",
-        "is_transform",
-        "kwargs_template",
-        "module",
-        "module_call_stack",
-        "module_entry_arg_keys",
-        "modules",
-        "multi_output_index",
-        "multi_output_name",
-        "non_tensor_kwargs",
-        "non_tensor_pos_args",
-        "num_args_total",
-        "num_autograd_tensors",
-        "num_kwargs",
-        "num_params",
-        "num_params_frozen",
-        "num_params_trainable",
-        "num_pos_args",
-        "out",
-        "out_versions_by_child",
-        "output_device",
-        "output_of_module_calls",
-        "output_of_modules",
-        "param_memory",
-        "param_shapes",
-        "parent_arg_positions",
-        "parent_param_ops",
-        "parent_params",
-        "parents",
-        "pass_index",
-        "raw_index",
-        "resolver_status",
-        "root_ancestors",
-        "save_grads",
-        "saved_args",
-        "saved_kwargs",
-        "shape",
-        "step_index",
-        "transform_chain",
-        "transform_config",
-        "transform_fn_name",
-        "transform_fn_qualname",
-        "transform_fn_source",
-        "transform_kind",
-        "transformed_activation_memory",
-        "transformed_grad",
-        "transformed_grad_dtype",
-        "transformed_grad_shape",
-        "transformed_gradient_memory",
-        "transformed_out",
-        "transformed_out_dtype",
-        "transformed_out_shape",
-        "type",
-        "type_index",
-        "unattributed_tensor_args",
-        "visualizer_path",
-    )
-)
-
 #: The manifest source classes whose columns are capture-populated (legal
 #: to read with no earlier pipeline writer) vs excluded (placeholder until
-#: a pipeline step writes). Frozen vocabulary of CellSourceManifest v1 —
-#: exactly these six; the projection refuses unknown classes at call time
-#: so a manifest v2 with a new class (e.g. an aten lane) must extend this
-#: table explicitly (review note N5).
+#: a pipeline step writes). Vocabulary of the FROZEN CellSourceManifest v1
+#: (producer-seam-v1: ``CORE | FACET:<name> | JOIN:<lane> | STEP /
+#: DERIVED:init | DEFAULT | EXTRAS:<key> | NO_PRODUCER``); the projection
+#: refuses unknown classes at call time so a manifest v2 with a new class
+#: (e.g. an aten lane) must extend this table explicitly (review note N5).
+#: NO_PRODUCER (pure lazy caches) is excluded per design-ppdag-v3 §2.4.
 _MANIFEST_BASELINE_CLASSES: frozenset[str] = frozenset(("CORE", "FACET", "JOIN", "EXTRAS"))
-_MANIFEST_EXCLUDED_CLASSES: frozenset[str] = frozenset(("STEP", "DEFAULT"))
+_MANIFEST_EXCLUDED_CLASSES: frozenset[str] = frozenset(("STEP", "DEFAULT", "NO_PRODUCER"))
+
+#: INTEGRATION FINDING (2026-08-13, manifest-swap diff): manifest v1's
+#: ``DERIVED:init`` class CONFLATES two baseline behaviors and cannot
+#: project as a class. Five columns are derived inside ``Op.__init__``
+#: FROM CAPTURE FIELDS during step-0 row construction (op.py: dtype_ref
+#: <- dtype, device_ref <- out/output_device, backend_address <- address,
+#: resolver_status <- "resolved" disposition, _source_trace_ref <- the
+#: source_trace weakref), so they hold real content at step-0 exit and ARE
+#: baseline. Two (``out_ref``/``grad_ref``) are bare ``None`` defaults
+#: until step 18 or artifact load writes them — placeholder, NOT baseline.
+#: A NEW DERIVED:init column refuses projection until classified into one
+#: of these two tables; manifest v2 should split the class (cross-lane).
+_MANIFEST_DERIVED_INIT_BASELINE: frozenset[str] = frozenset(
+    ("_source_trace_ref", "backend_address", "device_ref", "dtype_ref", "resolver_status")
+)
+_MANIFEST_DERIVED_INIT_EXCLUDED: frozenset[str] = frozenset(("out_ref", "grad_ref"))
+
+#: INTEGRATION FINDING (2026-08-13, manifest-swap diff): the manifest
+#: generator flattened per-row override lanes to the scatter's default
+#: class. These four columns are classed ``DEFAULT`` but step-0 ingest
+#: fills them with REAL event content on the rows that have it
+#: (code-verified: buffer-write sibling fields at _materialize.py's
+#: buffer-event builder; ``multi_output_name`` from ``event.output_names``
+#: — the scatter spec's own ``buffer_write_kind`` row carries the
+#: "JOIN:buffer_write override when present" comment). Union-over-rows
+#: baseline semantics therefore include them. Each row here must still be
+#: classed in an EXCLUDED head by the manifest — the projection refuses a
+#: stale promotion row the day manifest v2 reclassifies the column.
+_MANIFEST_FLATTENED_OVERRIDE_BASELINE: frozenset[str] = frozenset(
+    ("buffer_source_func_name", "buffer_value_changed", "buffer_write_kind", "multi_output_name")
+)
+
+#: Manifest rows that are step-0 INPUT CHANNELS, not readable op-store
+#: columns (``source_trace`` is consumed into the ``_source_trace_ref``
+#: cell; ``_materialized_backend_address`` is an extra-key channel applied
+#: to the buffer address). They never appear in the op-store layout, so
+#: the baseline (a set of readable columns) skips them.
+_MANIFEST_INPUT_CHANNEL_ROWS: frozenset[str] = frozenset(
+    ("source_trace", "_materialized_backend_address")
+)
 
 
 def capture_baseline_from_manifest(source_classes: Mapping[str, str]) -> frozenset[str]:
@@ -1660,22 +1569,63 @@ def capture_baseline_from_manifest(source_classes: Mapping[str, str]) -> frozens
     Total over the frozen class vocabulary: an unknown class raises rather
     than silently classifying (fail-closed against manifest growth). The
     class argument is the manifest's per-column source-class NAME (the part
-    before any parameter, e.g. ``FACET(control)`` -> ``FACET``).
+    before any parameter, e.g. ``FACET:control`` -> ``FACET``).
     """
 
     baseline: set[str] = set()
     for column, source_class in source_classes.items():
-        head = source_class.split("(", 1)[0]
-        if head in _MANIFEST_BASELINE_CLASSES:
+        if column in _MANIFEST_INPUT_CHANNEL_ROWS:
+            continue
+        head = source_class.split(":", 1)[0].split("(", 1)[0]
+        if head == "DERIVED":
+            if column in _MANIFEST_DERIVED_INIT_BASELINE:
+                baseline.add(column)
+            elif column not in _MANIFEST_DERIVED_INIT_EXCLUDED:
+                raise ValueError(
+                    f"Unclassified DERIVED:init column {column!r}: manifest "
+                    "v1's DERIVED:init class conflates init-derived real "
+                    "content with step-18/load placeholders; classify the "
+                    "new column into _MANIFEST_DERIVED_INIT_BASELINE or "
+                    "_MANIFEST_DERIVED_INIT_EXCLUDED explicitly."
+                )
+        elif column in _MANIFEST_FLATTENED_OVERRIDE_BASELINE:
+            if head in _MANIFEST_BASELINE_CLASSES:
+                raise ValueError(
+                    f"Stale flattened-override promotion for {column!r}: the "
+                    f"manifest now classes it {source_class!r} (baseline on "
+                    "its own); delete the row from "
+                    "_MANIFEST_FLATTENED_OVERRIDE_BASELINE."
+                )
+            baseline.add(column)
+        elif head in _MANIFEST_BASELINE_CLASSES:
             baseline.add(column)
         elif head not in _MANIFEST_EXCLUDED_CLASSES:
             raise ValueError(
                 f"Unknown CellSourceManifest source class {source_class!r} "
                 f"for column {column!r}; extend the projection table "
                 "explicitly (frozen vocabulary: CORE|FACET|JOIN|EXTRAS in, "
-                "STEP|DEFAULT out)."
+                "STEP|DEFAULT|NO_PRODUCER out, DERIVED:init split by named "
+                "table)."
             )
     return frozenset(baseline)
+
+
+#: Capture baseline (design-ppdag-v3 §2.4): op-store columns legal to read
+#: with NO earlier pipeline writer because step 0 populates them from
+#: capture-event data. PROJECTED from the jointly frozen CellSourceManifest
+#: v1 (the provisional hand-derived literal was swapped out at integration,
+#: 2026-08-13). The swap diff against the provisional literal was
+#: root-caused column-by-column: 13 grad-family columns the hand-derivation
+#: over-included (constant seeds on every step-0 path — ``grad``/
+#: ``grad_fn``/``_grad_records``/``_pending_*_grad_blob_id``/... are
+#: written post-backward, OUT of the pipeline) are now correctly excluded;
+#: the named adjustment tables above carry the two directions in which the
+#: manifest itself is imprecise (DERIVED:init conflation, flattened
+#: override lanes). Granularity disclosure: per-column and static — a
+#: union over configurations and rows. Per-row provenance is out of scope.
+#: Fail-closed: a NEW schema column is NOT baseline until the manifest
+#: classifies it (its reads report as findings).
+CAPTURE_BASELINE_COLUMNS: frozenset[str] = capture_baseline_from_manifest(CELL_SOURCE_MANIFEST)
 
 
 @dataclass(frozen=True)
