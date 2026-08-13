@@ -1923,26 +1923,6 @@ def _model_input_storage_closure(descriptor: SparseRunDescriptor) -> set[str]:
     return closure
 
 
-def _descriptor_mutates_model_input(descriptor: SparseRunDescriptor) -> bool:
-    """Return whether any in-place call targets a model-input slot, its version chain, or a
-    view derived from it (r29-C3, F2-hon)."""
-
-    closure = _model_input_storage_closure(descriptor)
-    for call in descriptor.calls:
-        if call.is_inplace and _mutation_target_slot_id(call) in closure:
-            return True
-    return False
-
-
-def _tensor_storage_key(value: torch.Tensor) -> int | None:
-    """Return a stable base-storage identity for aliasing comparison, or ``None``."""
-
-    try:
-        return int(value.untyped_storage().data_ptr())
-    except (RuntimeError, AttributeError):
-        return None
-
-
 # r37 INV-2: the alias/overlap proof engine lives in ``utils.tensor_utils`` --
 # absolute, device-scoped byte intervals, three-valued relation, pure-integer
 # enumeration. The former local implementation keyed "same memory" on

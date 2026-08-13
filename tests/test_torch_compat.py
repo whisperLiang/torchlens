@@ -145,10 +145,19 @@ def _reset_capability(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
 
 
 def test_capability_attrs_cover_all_has_flags() -> None:
-    """Doctor capability inventory must cover every torch ``HAS_*`` flag."""
+    """Doctor capability inventory must cover every torch ``HAS_*`` flag exactly once.
+
+    Set equality alone hid three duplicated rows (``HAS_C10D_GROUP_REGISTRY``,
+    ``HAS_C10D_GROUP_SEQ``, ``HAS_C10D_ABORT_PG`` were each listed twice), so the
+    row count is asserted too: the inventory is a declaration table, and a
+    duplicated declaration is dead config.
+    """
 
     has_flags = {name for name in vars(tc) if name.startswith("HAS_")}
-    assert set(tc._CAPABILITY_ATTRS) == has_flags  # noqa: SLF001
+    attrs = tc._CAPABILITY_ATTRS  # noqa: SLF001
+    assert set(attrs) == has_flags
+    duplicates = sorted({name for name in attrs if attrs.count(name) > 1})
+    assert not duplicates, f"duplicated capability inventory rows: {duplicates}"
 
 
 def test_untyped_storage_wrapper_cache_probe_matches_runtime() -> None:
@@ -303,6 +312,9 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
         "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     }
+    # NOT floor-required, verified rather than assumed: HAS_NAMED_TENSOR_API is
+    # False on torch 2.13 (the named-tensor surface was REMOVED upstream), so its
+    # degraded branch is live on NEW torch, not dead at the old floor.
 
     assert required_present <= set(snapshot)
     # HAS_FUNCTORCH_LEVEL_API is torch-2.4+ only; do not require its value on 2.1-2.3.
