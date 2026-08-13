@@ -261,6 +261,15 @@ def _assert_no_open_window(self: "Trace") -> None:
     the freeze seam after step 20 legitimately rewrites relation cells
     wholesale and must run UNAUDITED by construction, not by a
     discard-and-hope.
+
+    The ``assert`` spelling is deliberate and safe here, unlike the
+    import-time structural checks the executor header bans it for (B1-23a,
+    reviewed and left as-is): this whole audit family is assert-based by
+    design, and ``_postprocess_assertions_enabled`` HARD-ERRORS when the audit
+    is armed under ``python -O``. Assertions-off therefore means the audit
+    never runs and this function is never called -- it cannot be silently
+    stripped mid-audit. Pinned by
+    ``tests/test_postprocess_retention_epilogue.py``.
     """
 
     core = self.__dict__.get("_trace_core")
