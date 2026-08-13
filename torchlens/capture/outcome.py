@@ -370,6 +370,33 @@ def require_capture_capability(
 # Persistence codec + load derivation
 # ---------------------------------------------------------------------------
 
+#: The closed persisted-payload key set (B1-07b). DERIVED from the writer
+#: (``CaptureOutcome.to_payload``) rather than hand-listed, so reader and writer
+#: cannot drift: adding a persisted field automatically widens the accepted set,
+#: and a field this reader does not know about refuses.
+_OUTCOME_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    CaptureOutcome(status=CaptureStatus.UNKNOWN).to_payload()
+)
+
+#: Fields that only a FAILED attestation may carry (B1-07a). Every settle path
+#: was enumerated to derive this: ``phase``/``origin``/``error_type`` are
+#: written by ``settle_failed``'s FAILED arm, ``demote_outcome``, and the
+#: fastlog failed-partial stamps -- and by nothing else. A record claiming
+#: COMPLETE while carrying ``phase="postprocess"`` and
+#: ``error_type="RuntimeError"`` is internally contradictory and must degrade
+#: to UNKNOWN rather than present as attested.
+_FAILED_ONLY_OUTCOME_FIELDS: tuple[str, ...] = ("phase", "origin", "error_type")
+
+#: Fields no COMPLETE/UNATTESTED attestation may carry. Both statuses mean "no
+#: stop boundary was reached", so boundary/frontier evidence contradicts them.
+#: HALTED and ABORTED_NONFINITE legitimately carry boundary facts, and a FAILED
+#: record demoted from HALTED inherits them, so those three are exempt.
+_NO_BOUNDARY_OUTCOME_FIELDS: tuple[str, ...] = (
+    "boundary_kind",
+    "boundary_label",
+    "frontier_labels",
+)
+
 
 def parse_outcome_payload(payload: object) -> CaptureOutcome:
     """Parse one persisted attestation payload against the closed vocabularies.
@@ -394,6 +421,22 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     if not isinstance(payload, Mapping):
         raise ValueError(f"capture outcome payload must be a mapping, got {type(payload).__name__}")
     data = dict(payload)
+    # B1-07(b): UNKNOWN KEYS REFUSE. The codec used to copy the dict and read
+    # only the keys it knew, so a verdict-steering field added in a later
+    # torchlens without a tlspec bump was invisible to this reader and no
+    # warning fired -- the reader would bless an attestation it could not fully
+    # evaluate. That is the exact incident class the lockstep mechanism kills
+    # elsewhere. Refusing routes through the existing degrade-to-UNKNOWN path
+    # (fail-closed, one warning, never a load crash), so an old torchlens
+    # reading a newer artifact says "I cannot verify this" instead of
+    # "verified".
+    unknown_keys = sorted(set(data) - _OUTCOME_PAYLOAD_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "capture outcome payload has unknown field(s) "
+            f"{unknown_keys} (this artifact was likely written by a newer "
+            "torchlens whose attestation this reader cannot fully evaluate)"
+        )
 
     def _enum_or_none(key: str, enum_cls: type[Enum]) -> Any:
         """Read one closed-vocabulary enum field, or ``None`` when absent.
@@ -478,6 +521,33 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     )
 
 
+def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
+    """Return whether one attestation is internally self-consistent (B1-07a).
+
+    Parameters
+    ----------
+    outcome:
+        Parsed attestation record.
+
+    Returns
+    -------
+    bool
+        False when the record carries evidence its own status forbids.
+    """
+
+    if outcome.status is not CaptureStatus.FAILED and any(
+        getattr(outcome, field_name) is not None for field_name in _FAILED_ONLY_OUTCOME_FIELDS
+    ):
+        return False
+    carries_boundary_evidence = any(
+        getattr(outcome, field_name) is not None for field_name in _NO_BOUNDARY_OUTCOME_FIELDS
+    )
+    return not (
+        outcome.status in (CaptureStatus.COMPLETE, CaptureStatus.UNATTESTED)
+        and carries_boundary_evidence
+    )
+
+
 def attestation_coherent(
     outcome: CaptureOutcome,
     *,
@@ -489,8 +559,19 @@ def attestation_coherent(
     The status-specific coherence matrix (design 2.4): a parsed attestation
     is adopted only when its status is possible given the artifact's
     structural fields, all read by TRUTHINESS.
+
+    Two layers, both required (B1-07a). The structural layer below asks
+    "is this status possible for these structural fields?". The CROSS-FIELD
+    layer asks "is this record internally consistent?" -- it used to be
+    missing entirely, so a payload could claim COMPLETE while carrying
+    ``phase="postprocess"``, ``origin="torchlens"`` and
+    ``error_type="RuntimeError"`` and be adopted as an attested COMPLETE
+    carrying its own failure evidence. This is a TIGHTENING of the matrix; no
+    previously-refused record is now accepted.
     """
 
+    if not _cross_field_coherent(outcome):
+        return False
     if outcome.status is CaptureStatus.COMPLETE:
         return (not halted) and finished
     if outcome.status is CaptureStatus.HALTED:
