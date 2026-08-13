@@ -315,6 +315,8 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_session_buffer_inventory": StorageBinding(StorageKind.RUNTIME),
         "_session_buffer_identity": StorageBinding(StorageKind.RUNTIME),
         "_backward_gradfn_refs": StorageBinding(StorageKind.RUNTIME),
+        "_last_validation_failure": StorageBinding(StorageKind.RUNTIME),
+        "_validation_diagnostics": StorageBinding(StorageKind.RUNTIME),
         "_output_style": StorageBinding(StorageKind.RUNTIME),
         "_output_head": StorageBinding(StorageKind.RUNTIME),
         "_output_tokenizer": StorageBinding(StorageKind.RUNTIME),

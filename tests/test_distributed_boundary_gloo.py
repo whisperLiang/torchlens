@@ -329,9 +329,11 @@ class TestReplayRefusals:
         expected = model(x)
         log = tl.trace(model, x, intervention_ready=True)
         # The control: no typed collective refusal fires on either surface.
-        # (Save before validate: replay validation leaves a runtime
-        # _last_validation_failure attr that the save scrub audit rejects --
-        # a pre-existing interaction unrelated to collective boundaries.)
+        # (The save-before-validate order is no longer load-bearing: B1-04
+        # declared _last_validation_failure / _validation_diagnostics as
+        # FieldPolicy.DROP rows, so validate-then-save round-trips too. Pinned
+        # in tests/test_capture_outcome_validation_side_channel.py; the order
+        # here is kept only to leave this test's history untouched.)
         tl.save(log, str(tmp_path / "plain.tlspec"), level="runnable")
         status = log.validate_forward_pass([expected])
         assert status is not None

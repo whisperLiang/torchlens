@@ -1416,6 +1416,18 @@ class Trace(
         "backward_peak_memory": FieldPolicy.KEEP,
         "backward_memory_backend": FieldPolicy.KEEP,
         "_backward_gradfn_refs": FieldPolicy.DROP,
+        # Validation side-channel state (B1-04). `validate_forward_pass` /
+        # `validate_saved_outs` are public methods on a user-held Trace, and
+        # validation ENTRY unconditionally sets `_last_validation_failure`
+        # (`reset_validation_failure` writes None on every run), so a plain
+        # validate-then-save sequence hit
+        # `TorchLensIOError: Trace._last_validation_failure is missing from
+        # PORTABLE_STATE_SPEC` -- a hard refusal on a completely ordinary
+        # workflow. Both attrs are session-time diagnostics carried on the
+        # trace as a side channel, exactly the `_fast_run_session` class, and
+        # `ValidationFailure`/`ValidationDiagnostic` are not portable records.
+        "_last_validation_failure": FieldPolicy.DROP,
+        "_validation_diagnostics": FieldPolicy.DROP,
         # Session-time semantic-output scratch (B1-02). Written at capture
         # entry, consumed only by ``decode_outputs_for_trace``, and dropped on
         # every settlement path (``capture/trace.py``'s
