@@ -25,12 +25,13 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal
 
 from ...intervention.selectors import BaseSelector
 from ...intervention.types import HelperSpec, InterventionDecision
 from ...ir.intervention import FireResult
+from ...ir.op_record import amend_module_exit_intervention
 from ..registry import BackendUnsupportedError
 from .._selective_save import reject_selector_outside_kinds
 
@@ -628,24 +629,26 @@ def _mark_intervention_event(session: Any, label: str, fire_result: FireResult) 
     Returns
     -------
     None
-        Mutates session capture events.
+        Appends one typed amendment to the session journal.
     """
 
+    # ``op_event_by_label_raw`` is the live-index view, so repeated firings on
+    # one site read the already-amended record and accumulate fire_results.
     event = session.events.op_event_by_label_raw.get(label)
     if event is None:
         return
-    updated = replace(
-        event,
-        intervention_fired=True,
-        intervention_replaced=fire_result.replaced,
-        fire_results=(*event.fire_results, fire_result),
+    # Post-commit knowledge rides the typed amendment lane (P4): the site op
+    # was committed by the op_callback before the wrap layer fired, so this is
+    # the one sanctioned channel — never an in-place op_events[i] write.
+    session.events.append_amendment(
+        amend_module_exit_intervention(
+            event.seq,
+            label,
+            intervention_fired=True,
+            intervention_replaced=fire_result.replaced,
+            fire_results=(*event.fire_results, fire_result),
+        )
     )
-    session.events.op_event_by_label_raw[label] = updated
-    for index, candidate in enumerate(session.events.op_events):
-        if candidate.label_raw == label:
-            session.events.op_events[index] = updated
-            session.events.live_index.replace(updated)
-            break
 
 
 def audit_tf_site_reachability(plan: TFInterventionPlan, session: Any) -> None:
