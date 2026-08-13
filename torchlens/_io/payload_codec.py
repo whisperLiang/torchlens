@@ -19,6 +19,7 @@ import torch
 
 from . import JaxPayloadLoadHint, PayloadLoadHints, _json
 from ._artifact_strings import _resolve_portable_device
+from .manifest import _json_ready_codec_metadata_value
 from .tensor_policy import FailReason, Ok, SkipReason, TensorPolicyDecision, is_supported_for_save
 
 
@@ -1744,13 +1745,7 @@ def _json_ready_mapping(values: dict[str, Any]) -> dict[str, Any]:
 def _json_ready_value(value: Any) -> Any:
     """Convert one value to JSON-friendly primitives."""
 
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_ready_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready_value(item) for item in value]
-    return str(value)
+    return _json_ready_codec_metadata_value(value)
 
 
 def _jax_unaddressable_reason(value: Any) -> str | None:

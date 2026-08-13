@@ -34,6 +34,8 @@ from . import (
 
 LOGGER = logging.getLogger(__name__)
 
+_CODEC_METADATA_TUPLE_TAG = "__torchlens_codec_tuple_v1__"
+
 
 @dataclass(frozen=True)
 class TensorEntry:
@@ -161,6 +163,12 @@ class TensorEntry:
         codec_metadata = data.get("codec_metadata")
         if codec_metadata is not None and not isinstance(codec_metadata, dict):
             raise TorchLensIOError("Manifest tensor entry 'codec_metadata' must be an object.")
+        if codec_metadata is not None:
+            codec_metadata = _restore_codec_metadata_value(codec_metadata)
+            if not isinstance(codec_metadata, dict):
+                raise TorchLensIOError(
+                    "Manifest tensor entry 'codec_metadata' must decode to an object."
+                )
         requires_grad = data.get("requires_grad", False)
         if not isinstance(requires_grad, bool):
             raise TorchLensIOError("Manifest tensor entry 'requires_grad' must be a boolean.")
@@ -191,7 +199,67 @@ class TensorEntry:
             JSON-ready manifest entry.
         """
 
-        return {key: value for key, value in asdict(self).items() if value is not None}
+        data = {key: value for key, value in asdict(self).items() if value is not None}
+        if self.codec_metadata is not None:
+            data["codec_metadata"] = _json_ready_codec_metadata_value(self.codec_metadata)
+        return data
+
+
+def _json_ready_codec_metadata_value(value: Any) -> Any:
+    """Encode tuple identity while making codec metadata JSON-ready.
+
+    Parameters
+    ----------
+    value:
+        Codec metadata value to encode.
+
+    Returns
+    -------
+    Any
+        JSON-ready value with tuples represented by an explicit tag.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return {
+            _CODEC_METADATA_TUPLE_TAG: [
+                _json_ready_codec_metadata_value(item) for item in value
+            ]
+        }
+    if isinstance(value, list):
+        return [_json_ready_codec_metadata_value(item) for item in value]
+    return str(value)
+
+
+def _restore_codec_metadata_value(value: Any) -> Any:
+    """Restore tagged container types in codec metadata.
+
+    Parameters
+    ----------
+    value:
+        JSON-decoded codec metadata value.
+
+    Returns
+    -------
+    Any
+        Value with tagged tuples reconstructed recursively.
+    """
+
+    if isinstance(value, list):
+        return [_restore_codec_metadata_value(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {_CODEC_METADATA_TUPLE_TAG}:
+            items = value[_CODEC_METADATA_TUPLE_TAG]
+            if not isinstance(items, list):
+                raise TorchLensIOError("Tagged codec metadata tuple must contain a list.")
+            return tuple(_restore_codec_metadata_value(item) for item in items)
+        return {key: _restore_codec_metadata_value(item) for key, item in value.items()}
+    return value
 
 
 @dataclass(frozen=True)

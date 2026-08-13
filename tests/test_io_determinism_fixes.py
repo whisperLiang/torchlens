@@ -513,3 +513,32 @@ def test_codec_metadata_preserves_explicit_none_values() -> None:
         "outer": None,
         "nested": {"inner": None},
     }
+
+
+def test_codec_metadata_round_trip_preserves_tuples() -> None:
+    """Tagged codec metadata distinguishes tuples from JSON lists."""
+
+    from torchlens._io.manifest import TensorEntry
+    from torchlens._io.payload_codec import _json_ready_mapping
+
+    metadata = _json_ready_mapping({"tuple": (1, [2, (3,)]), "list": [1, 2]})
+    entry = TensorEntry.from_dict(
+        {
+            "blob_id": "00000000",
+            "kind": "out",
+            "label": "output_1",
+            "relative_path": "tensors/00000000.safetensors",
+            "backend": "safetensors",
+            "shape": [1],
+            "dtype": "torch.float32",
+            "device_at_save": "cpu",
+            "layout": "torch.strided",
+            "bytes": 4,
+            "sha256": "0" * 64,
+            "codec_metadata": metadata,
+        }
+    )
+
+    assert entry.codec_metadata == {"tuple": (1, [2, (3,)]), "list": [1, 2]}
+    reparsed = TensorEntry.from_dict(entry.to_dict())
+    assert reparsed.codec_metadata == entry.codec_metadata
