@@ -554,33 +554,39 @@ def _container_member_key(member: Any, depth: int, visited_ids: List[int]) -> An
 
 
 def _count_container_ids(value: Any, id_counts: Dict[int, int], depth: int) -> None:
-    """Count every exact builtin container id reachable from one cell value.
+    """Count every exact builtin MUTABLE container id reachable from one cell.
 
     The alias census behind the pooling guard: a container whose id is seen
     more than once across ALL swept cells is aliased in-store, and replacing
     any of its cell appearances would break the alias for later in-place
     mutation, so such cells never pool.
+
+    Only ``dict``/``defaultdict``/``list``/``set`` ids matter (the pool key
+    visits exactly those). Hashability bounds the walk: dict KEYS and
+    ``set``/``frozenset`` members must be hashable, so no exact builtin
+    mutable container can hide below them — dict values, list members, and
+    tuple members are the only recursion edges.
     """
 
     cls = value.__class__
-    if (
-        cls is dict
-        or cls is list
-        or cls is set
-        or cls is defaultdict
-        or cls is tuple
-        or cls is frozenset
-    ):
+    if cls is dict or cls is defaultdict:
         oid = id(value)
         id_counts[oid] = id_counts.get(oid, 0) + 1
         if depth < 6:
-            if cls is dict or cls is defaultdict:
-                for key, member in value.items():
-                    _count_container_ids(key, id_counts, depth + 1)
-                    _count_container_ids(member, id_counts, depth + 1)
-            else:
-                for member in value:
-                    _count_container_ids(member, id_counts, depth + 1)
+            for member in value.values():
+                _count_container_ids(member, id_counts, depth + 1)
+    elif cls is list:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+        if depth < 6:
+            for member in value:
+                _count_container_ids(member, id_counts, depth + 1)
+    elif cls is set:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+    elif cls is tuple and depth < 6:
+        for member in value:
+            _count_container_ids(member, id_counts, depth + 1)
 
 
 def _pool_container_cells(
