@@ -177,8 +177,11 @@ pytest tests/ -m "not slow" -x --tb=short
 15. TensorFlow `backend="tf"` / `backend="tensorflow"` targets Keras 3 on TF>=2.16 with
     `keras.backend.backend() == "tensorflow"`. Eager `op_callbacks` capture is the shipped primary
     path; the graph-only FuncGraph static importer is implemented for compiled/SavedModel entries
-    (opaque regions stay unverified); interventions, true backward capture, and T1 derived
-    gradients are deferred.
+    (opaque regions stay unverified); derived gradients (leaf + exact T1 intermediates) ship
+    for eager entries via `tl.backends.tf.GradOptions` with divergence refusal, and graph-only
+    captures refuse `grad_options` typed; static-label `intervene=` ships for eager entries
+    through the two-level writable layer (module-boundary + curated functional wrap) with
+    fail-closed site reachability; `halt=`, `recipes=`, and true backward capture are deferred.
 16. Smart-collapse metadata is computed, not serialized: `Module.collapse_score`,
     `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)` must stay
     out of `*_FIELD_ORDER` schemas until the policy is intentionally stabilized.

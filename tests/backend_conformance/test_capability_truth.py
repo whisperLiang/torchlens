@@ -58,6 +58,12 @@ _TORCHLENS_ROOT = Path(tl.__file__).resolve().parent
 
 _PREVIEW_NAMES = ("mlx", "jax", "tinygrad", "paddle", "tf")
 
+EXPECTED_GATED_CAPABILITIES_MEMBERSHIP_UNUSED = frozenset({("tf", "interventions")})
+"""Preview ``(name, gated-flag)`` pairs lifted with REAL dispatch plus
+conformance coverage (parity-C: tf static-label interventions through the
+writable wrap layer). Lifting a preview capability is a one-line diff here;
+every pair not listed stays fail-closed in both directions."""
+
 _EXTRA_POLICIES = {
     "mlx": MLX_EXTRA_KWARG_POLICY,
     "jax": JAX_EXTRA_KWARG_POLICY,
@@ -131,7 +137,10 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
     "tf": {
         "backward_capture": False,
         "fastlog": False,
-        "interventions": False,
+        # Lifted 2026-08: static-label intervene= for eager entries via the
+        # two-level writable wrap layer (tests/backends/test_tf_interventions.py);
+        # halt= and value-dependent predicates keep typed refusals.
+        "interventions": True,
         "rng_replay": False,
         "streaming": False,
     },
@@ -335,7 +344,7 @@ class _StubTrace:
         self.backend = backend
 
 
-@pytest.mark.parametrize("name", ("jax", "mlx", "tinygrad", "paddle"))
+@pytest.mark.parametrize("name", ("jax", "mlx", "tinygrad", "paddle", "tf"))
 def test_backward_accessor_guard_redirects_to_derived_grads(name: str) -> None:
     """Derived-grads backends refuse with the derived-gradient redirect."""
 
@@ -343,9 +352,27 @@ def test_backward_accessor_guard_redirects_to_derived_grads(name: str) -> None:
         raise_if_no_backward_capture(_StubTrace(name), plural_subject="backward_passes")
 
 
-def test_backward_accessor_guard_tf_has_no_derived_redirect() -> None:
-    """tf declares no derived-gradient surface, so the redirect must not appear."""
+def test_backward_accessor_guard_without_derived_surface_has_no_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend declaring no derived-gradient surface must not get the redirect.
 
+    Every registered preview now declares ``intermediate_derived_grads=True``,
+    so the no-surface branch is exercised through a flag-flipped spec: the
+    guard must keep refusing typed without pointing at an accessor that does
+    not exist.
+    """
+
+    from torchlens.data_classes import _backend_capability_guards as guards
+
+    original = get_backend_spec("tf")
+    flipped = dataclasses.replace(
+        original,
+        capabilities=dataclasses.replace(
+            original.capabilities, intermediate_derived_grads=False
+        ),
+    )
+    monkeypatch.setattr(guards, "get_backend_spec", lambda _name: flipped)
     with pytest.raises(ValueError, match="declares no derived-gradient surface"):
         raise_if_no_backward_capture(_StubTrace("tf"), plural_subject="backward_passes")
 

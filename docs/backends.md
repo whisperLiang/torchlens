@@ -15,7 +15,7 @@ preview, explicit `backend="tinygrad"` enables the tinygrad preview, and explici
 | `jax` | Preview jaxpr-first functional capture | Live per-equation replay and parent perturbation | Materialized forward/derived array `.tlspec` payloads | `function_root`, Equinox/NNX `pytree_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `tinygrad` | Preview UOp-snapshot functional capture | Live UOp replay and parent perturbation on `DEV=PYTHON` payloads | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `paddle` | Preview dygraph/eager capture with live forward `intervene=`/`halt=` | Live replay/perturbation plus static inventory guard; corroborated user-intervention carve-out | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
-| `tf` | Preview eager op-callback capture; implemented graph-only FuncGraph static path for compiled/SavedModel entries | Callback self-consistency plus per-op replay/perturbation accounting | Materialized forward array `.tlspec` payloads | `function_root`, Keras/`tf.Module` object `object_module` | Deferred |
+| `tf` | Preview eager op-callback capture; implemented graph-only FuncGraph static path for compiled/SavedModel entries | Callback self-consistency plus per-op replay/perturbation accounting | Materialized forward array `.tlspec` payloads | `function_root`, Keras/`tf.Module` object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` (eager entries only) |
 
 Two cross-backend honesty notes apply to every preview row above:
 
@@ -84,8 +84,10 @@ low-level primitive interpreter can replace a primitive by position, but that is
 static-label `intervene=`/`halt=` contract. tinygrad builds a lazy UOp graph and concrete values
 appear only after `Tensor.realize()`/`Tensor.item()`, with no stable public API for replacing one
 internal UOp and rebuilding all descendants.
-TensorFlow eager `op_callbacks` are read-only in the supported Keras-3 / TF>=2.16 runtime, so
-interventions require a later writable monkeypatch layer.
+TensorFlow eager `op_callbacks` are read-only in the supported Keras-3 / TF>=2.16 runtime
+(re-verified on TF 2.21: returned replacement outputs are ignored), so TensorFlow interventions run
+through a writable wrap layer on top of the untouched callback capture spine — see the TensorFlow
+section below.
 
 For that reason, JAX and tinygrad support static-label `save=` only, and their `intervene=` and
 `halt=` are rejected with typed backend errors instead of false partial traces or validation
@@ -98,10 +100,12 @@ Paddle supports static-label `trace(intervene=tl.when(...))` and `trace(halt=...
 forward-only eager capture path (see the Paddle preview section). MLX is the other eager
 exception: its wrapper sees each concrete lazy output before the caller, so MLX additionally
 supports static-label `trace(intervene=tl.when(...))` and `trace(halt=...)` (see the MLX preview
-section). Value-dependent predicates stay rejected on both — predicate-time values would require
-eager materialization that poisons their execution models. MLX supports static-label `save=` for
-`tl.func`, `tl.label`, `tl.module`, `tl.in_module`, `tl.contains`, and boolean composites of
-those.
+section). TensorFlow supports static-label `intervene=` for eager entries through the writable
+wrap layer with fail-closed site reachability; TF `halt=` keeps its typed refusal (capture-path
+scope). Value-dependent predicates stay rejected on all three — predicate-time values would
+require eager materialization that poisons their execution models. MLX supports static-label
+`save=` for `tl.func`, `tl.label`, `tl.module`, `tl.in_module`, `tl.contains`, and boolean
+composites of those.
 
 ## TensorFlow Preview
 
@@ -145,9 +149,55 @@ TensorFlow `.tlspec` support uses `payload_policy="array_payloads"` for dense nu
 payloads. `bfloat16` records logical dtype metadata because NumPy transports it as `uint16`; string,
 resource, variant, and composite payloads fail closed.
 
-TensorFlow interventions, `halt=`, true backward capture, fastlog/`tl.record()`, streaming, and
-T1/intermediate derived gradients are deferred. These surfaces raise typed backend errors instead of
-silently producing partial traces.
+TensorFlow leaf gradients are a derived-gradient preview, not true backward capture:
+
+```python
+grad_options = tl.backends.tf.GradOptions(
+    loss_fn=lambda output: tf.reduce_sum(output),
+)
+trace = tl.trace(model, x, backend="tf", grad_options=grad_options)
+trace.derived_grads["inputs.0"]
+```
+
+The mechanism is one auxiliary forward replay under a persistent `tf.GradientTape` with the
+op-callback session installed: input tensors and module variables are watched explicitly, the
+replay raw output must match the captured raw output or the surface refuses with a typed
+divergence error, and one `tape.gradient` call produces leaf gradients for floating inputs and
+`trace.params` variables (mirrored onto `param.grad`). Set
+`GradOptions(intermediate_grads=True, max_intermediate_grads=...)` to additionally
+`tape.watch` every float op output live at callback time and attach exact op-level records. Only
+unambiguous `status == "exact"` matches (keyed on stream position, op type, parents, and module
+stack) reach `trace.intermediate_derived_grads` and read-only `op.derived_grad`;
+`has_backward_pass` remains `False`, and true-backward surfaces still raise. `grad_options`
+requires an eager live-capture entry: graph-only FuncGraph captures (compiled `Model.call`,
+`tf.function` roots, SavedModel signatures) refuse it typed because the derived-gradient replay
+cannot run inside a frozen graph.
+
+TensorFlow supports static-label `intervene=` on eager entries through a two-level writable layer
+on top of the read-only op-callback spine:
+
+```python
+ablated = tl.trace(model, x, backend="tf",
+                   intervene=tl.when(tl.func("relu"), tl.zero_ablate()))
+```
+
+`tl.module(...)`/`tl.in_module(...)` conditions substitute Keras/`tf.Module` call outputs at the
+module boundary (object-module attribution required); `tl.func`/`tl.label`/`tl.contains`
+conditions substitute returns of a curated registry of python entry points (`tf.nn`/`tf.math`
+core) that Keras-3 eager execution flows through. Replacement values are produced by real ops the
+callback records, so the trace stays honest by construction: downstream records consume the
+substituted values and the site op keeps its original payload plus a fire record. Site resolution
+FAILS CLOSED: a selector matching captured ops whose calls never passed through the wrap layer
+(gen_ops/C++ paths) raises a typed unreachable error instead of silently not intervening. Curated
+helper actions are `zero_ablate`, `scale`, and `add`, plus plain callables; replacements must
+preserve shape and dtype. Conditions must be static selectors; `direction="backward"`,
+value-dependent callable conditions, shape-changing replacements, graph-only entries, and
+combining `intervene=` with `grad_options=` refuse typed. `halt=` and `recipes=` keep typed
+refusals inside the capture path.
+
+TensorFlow true backward capture, `halt=`, fastlog/`tl.record()`, streaming, and value-dependent
+predicates remain deferred. These surfaces raise typed backend errors instead of silently
+producing partial traces.
 
 ## MLX Preview
 
