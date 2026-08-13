@@ -15,6 +15,26 @@ import torch
 import torchlens as tl
 
 
+class _TiedReprKey:
+    """Hashable key whose repr intentionally collides with peer keys."""
+
+    def __init__(self, token: str) -> None:
+        """Store deterministic content hidden from repr.
+
+        Parameters
+        ----------
+        token:
+            Stable key content.
+        """
+
+        self.token = token
+
+    def __repr__(self) -> str:
+        """Return an intentionally non-unique representation."""
+
+        return "tied"
+
+
 class _LinearModel(torch.nn.Module):
     """Tiny parameterized model used by deterministic artifact tests."""
 
@@ -324,3 +344,17 @@ def test_intervention_overwrite_rename_failure_restores_previous_artifact(
         trace.save_intervention(path, level="audit", overwrite=True)
 
     assert (path / "spec.json").read_bytes() == original_spec
+
+
+def test_content_hash_is_address_and_insertion_order_independent() -> None:
+    """Object fallback and tied mapping keys never ingest address or source order."""
+
+    left_a = _TiedReprKey("a")
+    left_b = _TiedReprKey("b")
+    right_a = _TiedReprKey("a")
+    right_b = _TiedReprKey("b")
+
+    assert tl.hash.content(left_a) == tl.hash.content(right_a)
+    assert tl.hash.content({left_a: 1, left_b: 2}) == tl.hash.content(
+        {right_b: 2, right_a: 1}
+    )
