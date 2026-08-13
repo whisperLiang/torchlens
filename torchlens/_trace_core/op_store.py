@@ -26,6 +26,7 @@ value); facade descriptors translate ``_MISSING`` into the exact
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, NamedTuple
@@ -286,12 +287,20 @@ class OpRowStore:
         return True
 
     def items(self, row: int) -> Iterator[tuple[str, Any]]:
-        """Yield ``(field_name, value)`` for every set cell in layout order."""
+        """Yield ``(field_name, value)`` for every set cell in layout order.
+
+        ``PooledCell`` cells hydrate to a fresh equal container (state
+        streams must never carry the internal pooled encoding); the cell
+        itself is left untouched — pickling a record must not materialize
+        its containers.
+        """
 
         names = self.layout.names
         for fid, name in enumerate(names):
             value = self.cell_get(row, fid)
             if value is not _MISSING:
+                if value.__class__ is PooledCell:
+                    value = value.hydrate()
                 yield name, value
 
     def retained_bytes(self) -> int:
@@ -611,6 +620,67 @@ def _eager_item(item: Any, translate: Callable[[Any], Any] | None) -> Any:
     if cls is dict or cls is list or cls is set:
         return _eager_copy(item, translate)
     return cow_copy_value(item, translate)
+
+
+class PooledCell:
+    """Shared canonical cell for pooled duplicate/empty mutable containers.
+
+    The M14 memory slice: the freeze-seam compaction replaces exact builtin
+    mutable-container cells (``dict``/``list``/``set``/top-level
+    ``defaultdict``) whose full content is provably immutable AND either
+    empty or repeated across cells with ONE shared ``PooledCell`` per
+    distinct content. The facade descriptors hydrate a fresh exact-type
+    container for the reading row on first access and cache it back — the
+    ``_FACT`` semantics: identity is stable across reads, per-row in-place
+    mutation stays isolated, and an uninspected row retains no per-row
+    container.
+
+    ``prototype`` is a DETACHED deep copy taken at pool time (never one of
+    the live cell values), so no external handle to a pre-pool container can
+    reach it and every hydration is a consistent snapshot.
+    """
+
+    __slots__ = ("prototype",)
+
+    def __init__(self, prototype: Any) -> None:
+        """Bind the detached canonical prototype container."""
+
+        self.prototype = prototype
+
+    def hydrate(self) -> Any:
+        """Return a fresh mutable container equal to the prototype.
+
+        Immutable members (the only members the pool key admits) are shared
+        by reference; nested exact builtin mutable containers are rebuilt
+        per hydration, so no mutable state is ever shared across rows.
+        """
+
+        return _detached_container_copy(self.prototype)
+
+    @classmethod
+    def from_value(cls, value: Any) -> "PooledCell":
+        """Build a pooled cell around a DETACHED copy of ``value``."""
+
+        return cls(_detached_container_copy(value))
+
+
+def _detached_container_copy(value: Any) -> Any:
+    """Deep-copy one exact builtin mutable container, sharing immutables."""
+
+    cls = value.__class__
+    if cls is defaultdict:
+        fresh: Any = defaultdict(value.default_factory)
+        for key, item in value.items():
+            item_cls = item.__class__
+            fresh[key] = (
+                _eager_copy(item, None)
+                if item_cls is dict or item_cls is list or item_cls is set
+                else item
+            )
+        return fresh
+    if not value:
+        return cls()
+    return _eager_copy(value, None)
 
 
 class _SealedRowMajorOpRowStore(OpRowStore):
@@ -1373,6 +1443,10 @@ class OpStoreView:
         if value is _MISSING or value is _CSR or value is _FACT:
             return value
         cls = value.__class__
+        if cls is PooledCell:
+            # Shared-by-construction (immutable prototype): the facade
+            # descriptor hydrates a fork-local container on first read.
+            return value
         if cls in _COW_ATOMIC:
             return value
         if cls is GroupRef:
@@ -1424,12 +1498,18 @@ class OpStoreView:
         return True
 
     def items(self, row: int) -> Iterator[tuple[str, Any]]:
-        """Yield ``(field_name, value)`` for every set cell in layout order."""
+        """Yield ``(field_name, value)`` for every set cell in layout order.
+
+        ``PooledCell`` cells hydrate fresh (never the internal encoding),
+        matching the base-store ``items`` contract.
+        """
 
         names = self.base.layout.names
         for fid, name in enumerate(names):
             value = self.cell_get(row, fid)
             if value is not _MISSING:
+                if value.__class__ is PooledCell:
+                    value = value.hydrate()
                 yield name, value
 
     def isolate_mutable_cells(self) -> None:

@@ -52,6 +52,30 @@ def compact_op_metadata(trace: "Trace") -> None:
         from .op import _compact_store_rows
 
         _compact_store_rows(store, pool)
+    if core is not None:
+        # Whole-cell container pooling (the M14 memory slice): duplicate and
+        # empty provably-immutable mutable-container cells collapse onto one
+        # shared PooledCell per distinct content — allowlisted op fields,
+        # every kind-table field (Module hook lists, custom_attributes...).
+        from .op import _POOLED_CONTAINER_FIELDS, _pool_container_cells
+
+        container_stores: list[tuple[Any, Any]] = []
+        if store is not None:
+            fid_by_name = store.layout.fid_by_name
+            container_stores.append(
+                (
+                    store,
+                    tuple(
+                        fid_by_name[name]
+                        for name in _POOLED_CONTAINER_FIELDS
+                        if name in fid_by_name
+                    ),
+                )
+            )
+        for kind_store in core.kind_rows.values():
+            container_stores.append((kind_store, None))
+        if container_stores:
+            _pool_container_cells(container_stores, {})
     seen_ops: set[int] = set()
     for op in ops:
         op_id = id(op)
