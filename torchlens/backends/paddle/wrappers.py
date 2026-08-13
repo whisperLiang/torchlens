@@ -344,8 +344,7 @@ class _PaddleWrapperRegistry:
                 trace._paddle_capture_depth = depth
             module_stack = tuple(getattr(trace, "_paddle_module_stack", ()))
             emit = getattr(backend, "emit_paddle_operation")
-            emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
-            return output
+            return emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
 
         setattr(owner, name, wrapper)
         return True
