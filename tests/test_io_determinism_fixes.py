@@ -424,3 +424,11 @@ def test_resave_preserves_model_fingerprint_with_buffers(tmp_path: Path) -> None
     first_manifest = json.loads((first_path / "manifest.json").read_text(encoding="utf-8"))
     second_manifest = json.loads((second_path / "manifest.json").read_text(encoding="utf-8"))
     assert second_manifest["model_fingerprint"] == first_manifest["model_fingerprint"]
+
+
+def test_provenance_set_values_are_canonically_ordered() -> None:
+    """Set-like provenance values normalize independently of hash iteration order."""
+
+    from torchlens._io.bundle import _json_ready_provenance_value
+
+    assert _json_ready_provenance_value({"cuda", "cpu", "mps"}) == ["cpu", "cuda", "mps"]

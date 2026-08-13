@@ -17,7 +17,7 @@ import subprocess
 import sys
 import uuid
 import warnings
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3115,6 +3115,12 @@ def _json_ready_provenance_value(value: Any) -> Any:
         return value
     if isinstance(value, Mapping):
         return {str(key): _json_ready_provenance_value(item) for key, item in value.items()}
+    if isinstance(value, Set):
+        normalized = [_json_ready_provenance_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
     if isinstance(value, Collection) and not isinstance(value, str | bytes | bytearray):
         return [_json_ready_provenance_value(item) for item in value]
     return str(value)
