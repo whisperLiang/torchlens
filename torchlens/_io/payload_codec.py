@@ -282,8 +282,18 @@ class JaxPayloadCodec:
             )
             return hint_result.value
 
-        dtype = getattr(jnp, logical_dtype, None)
-        value = jnp.asarray(array, dtype=dtype) if dtype is not None else jnp.asarray(array)
+        dtype_candidate = getattr(jnp, logical_dtype, None)
+        if dtype_candidate is None:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            )
+        try:
+            dtype = jnp.dtype(dtype_candidate)
+        except (TypeError, ValueError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            ) from exc
+        value = jnp.asarray(array, dtype=dtype)
         hint_result = _apply_jax_payload_hints(
             jax,
             value,

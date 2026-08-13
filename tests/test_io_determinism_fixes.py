@@ -9,6 +9,7 @@ import pickle
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -468,3 +469,15 @@ def test_tlspec_writer_refuses_nonstandard_nan_tokens(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Out of range float values"):
         _TlSpecWriter.write_json(path, {"bad": float("nan")})
     assert not path.exists()
+
+
+def test_jax_codec_refuses_unknown_logical_dtype() -> None:
+    """JAX decode fails closed instead of silently retaining the transport dtype."""
+
+    pytest.importorskip("jax")
+    from torchlens._io.payload_codec import JaxPayloadCodec
+    from torchlens.backends.registry import BackendRuntimeCompatibilityError
+
+    entry = {"logical_dtype": "not_a_real_jax_dtype", "codec_metadata": {}}
+    with pytest.raises(BackendRuntimeCompatibilityError, match="logical_dtype"):
+        JaxPayloadCodec().from_numpy(np.ones(1, dtype=np.float32), entry, map_location=None)
