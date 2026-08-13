@@ -2833,9 +2833,11 @@ def _ensure_model_prepared(model: nn.Module) -> None:
     4. ``patch_model_instance(model)`` — Per-capture Level 4 scan, including
        callable attributes reassigned since a prior capture.
     """
+    from .belt import sweep_stale_belt_references
     from .wrappers import wrap_torch, patch_detached_references, patch_model_instance
 
     wrap_torch()  # idempotent — no-op if already wrapped; auto-rewraps after unwrap
     _prepare_model_once(model)  # idempotent — cached in _state._prepared_models
     patch_detached_references(model=model)
     patch_model_instance(model)
+    sweep_stale_belt_references()

@@ -2687,6 +2687,9 @@ def unwrap_torch() -> None:
     _state._completeness_witness_mode = "off"
     _state._detached_patch_policy = _RELEASE_DEFAULT_PATCH_POLICY
     _state._detached_patch_modules = ()
+    from .belt import restore_belt_references
+
+    restore_belt_references()
     from .backward import uninstall_autograd_wrappers
 
     uninstall_autograd_wrappers()

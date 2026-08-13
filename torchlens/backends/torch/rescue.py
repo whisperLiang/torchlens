@@ -40,7 +40,7 @@ from ..._errors import OutputAttributionError
 from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 
 if TYPE_CHECKING:
-    from ...data_classes import Trace
+    from ...data_classes.trace import Trace
 
 __all__ = ["RescueTorchFunctionMode", "capture_with_rescue"]
 
