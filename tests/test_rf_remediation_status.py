@@ -166,6 +166,24 @@ def test_grouped_convolution_keeps_spatial_windows_with_channel_upper_bound() ->
     assert result.status is ReceptiveFieldValidationStatus.PASS
 
 
+@pytest.mark.parametrize("surface", ["check", "verify"])
+def test_poisoned_trace_refuses_receptive_field_verdicts(surface: str) -> None:
+    """RF verdict producers share the monotonic poisoned-trace refusal gate."""
+    from torchlens.errors import PoisonedRunError
+    from torchlens.runnable import PathFaithfulness, mark_trace_path_status
+
+    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+    trace = _trace(model, torch.ones(1, 1, 5, 5, requires_grad=True))
+    target = _op(trace, "conv2d")
+    mark_trace_path_status(trace, PathFaithfulness.DIVERGED, None)
+
+    with pytest.raises(PoisonedRunError, match="receptive field verification"):
+        if surface == "check":
+            target.receptive_field.check((0, 0, 2, 2))
+        else:
+            tl.receptive_field.verify(trace)
+
+
 class _DistinctAttention(nn.Module):
     """Scaled dot-product attention with separately traceable Q, K, and V inputs."""
 
