@@ -813,6 +813,7 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
     trace.capture_thread_activity_detected = False
     trace.escape_detector_backward_coverage = "not_armed"
     trace.__dict__.setdefault("escape_diagnostics", [])
+    trace.__dict__.setdefault("rescue_rerun", None)
     if _state._detached_patch_policy == "scoped":
         trace.capture_verified = False
         trace.capture_verification_reason = "scoped_dispatch_witness_not_enabled"

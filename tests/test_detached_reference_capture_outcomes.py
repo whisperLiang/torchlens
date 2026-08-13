@@ -8,38 +8,41 @@ signature"). Mechanics tests keep guarding the crawler while it exists
 replacement (the stage-2 rescue net + belt) must keep green, because it pins
 what users actually get.
 
-Every row PASSES TODAY: rows in the "covered" sections pin that the op is
-captured; rows in the "missed" sections pin the exact current failure
-signature (silent mid-graph corruption or the loud output-attribution error).
-When stage 2 lands, the missed rows are EXPECTED to start failing in the good
-direction (op captured instead of missed) and must be flipped deliberately —
-that is the point: no coverage change can happen silently.
+STAGE-2 STATE (rescue re-run live): the rows that previously pinned a SILENT
+mid-graph miss were flipped DELIBERATELY — the escape signal (provenance
+warning / unattributed-args flag / typed output-attribution error) now
+triggers a rescue re-run with the ``RescueTorchFunctionMode`` net armed, and
+the formerly-missed op is captured with wrapper fidelity and full disclosure
+(``capture_verified is False``, reason ``"mode_rescue_rerun"``, session-time
+``rescue_rerun`` record). The silent-corruption class no longer exists: every
+escape is either recovered+disclosed or unrecovered+disclosed.
 
 Row inventory (safety-net verdict, tri-lab matrices):
 
-- Covered today (converted from mechanics): module-level refs, class attrs
-  and function defaults in torch-mentioning source, model instance holders
-  (direct / list / dict / ``partial.func`` / ``partial.args`` /
-  ``partial.keywords``).
-- The 7 crawler-missed classes (silent today): closure cells, staticmethods,
-  module-level partials, plain-object attrs, pre-bound tensor methods,
-  torch-free-source module class attrs, C-held refs (``lru_cache`` proxy).
+- Covered by wrappers/crawl (converted from mechanics): module-level refs,
+  class attrs and function defaults in torch-mentioning source, model
+  instance holders (direct / list / dict / ``partial.func`` /
+  ``partial.args`` / ``partial.keywords``).
+- The 7 crawler-missed classes (RESCUED since stage 2): closure cells,
+  staticmethods, module-level partials, plain-object attrs, pre-bound tensor
+  methods, torch-free-source module class attrs, C-held refs (``lru_cache``
+  proxy).
 - The protocol-invisible class (``from_numpy`` / ``frombuffer`` /
   ``as_subclass``): these assert the BELT/wrapper path — no
   ``TorchFunctionMode`` can EVER see them (measured: zero callbacks), so the
-  rescue net cannot cover them and the wrapper+patch path must stay green.
+  rescue net cannot cover them and the wrapper+belt path must stay green
+  WITHOUT any rescue disclosure.
 - De-moded composite interiors: a crawler-reachable stale ref inside a
-  third-party ``handle_torch_function`` composite body — captured today,
-  structurally invisible to any mode (the protocol pops the mode before the
-  body runs).
+  third-party ``handle_torch_function`` composite body — structurally
+  invisible to any mode (the protocol pops the mode before the body runs).
 - Worker-thread stale refs: declared unsupported/ceilinged (op logging is
-  owner-thread-scoped by design, r43); the thread's op must NOT appear and
-  the capture must not crash.
-- The mid-graph silent-corruption case (opus matrix; previously uncovered by
-  any test): a missed op between two captured ops leaves the consumer with
-  ``parents == ()``, ``is_internal_source``, ``capture_verified is None``,
-  and ZERO escape diagnostics on the shipped default config. The only signal
-  is a generic provenance ``UserWarning``, pinned as part of the signature.
+  owner-thread-scoped by design, r43; modes are thread-local too). The
+  thread's op must NOT appear, the capture must not crash, and since stage 2
+  the unrecovered escape is DISCLOSED (``"escape_rescue_unrecovered"``),
+  never silent.
+- The mid-graph case that used to be silent corruption (opus matrix): now
+  the flagship rescue row asserting the recovered op re-enters the dataflow
+  (consumer has real parents again).
 """
 
 from __future__ import annotations
@@ -112,12 +115,12 @@ def _trace(model: nn.Module, x: torch.Tensor | None = None) -> tl.Trace:
 
 
 def _trace_with_provenance_warning(model: nn.Module) -> tl.Trace:
-    """Trace a model whose missed op MUST trigger the provenance warning.
+    """Trace a model whose PRIMARY run must emit the provenance warning.
 
     The generic ``UserWarning`` ("tensor arguments with no graph/source
-    provenance") is the ONLY signal today's default config emits for a
-    mid-graph miss — no escape diagnostic, no verification downgrade. It is
-    pinned here as part of the miss signature so it cannot silently vanish.
+    provenance") is the shipped-default escape signal for a mid-graph miss;
+    since stage 2 it is also the rescue-rerun trigger. Pinned here so the
+    signal path cannot silently vanish.
     """
     wrap_torch()
     with pytest.warns(UserWarning, match="no graph/source provenance"):
@@ -139,24 +142,36 @@ def _assert_captured(trace: tl.Trace, *expected: str) -> None:
         assert name in names, f"{name!r} missing from capture: {names}"
 
 
-def _assert_silent_midgraph_miss(trace: tl.Trace, missing: str, consumer: str) -> None:
-    """Pin TODAY's silent-corruption signature for a mid-graph missed op.
+def _assert_rescued(trace: tl.Trace, *expected: str) -> None:
+    """The stale-ref ops were RECOVERED by a rescue re-run, with disclosure.
 
-    The missed op is simply absent; its consumer is orphaned from the
-    dataflow (no parents, marked internal-source); the trace makes no
-    verification claim and raises ZERO escape diagnostics on the shipped
-    default config. Stage 2 must flip this row to a captured op (rescue) or
-    a loud disclosure — flipping it back to silence must be impossible.
+    A rescued capture must carry the full honesty record: the ops are
+    present, the trace never claims verification (mode presence can de-fuse
+    fast paths and the forward ran twice), and the session-time
+    ``rescue_rerun`` record names the recovery. Flipping any of this back to
+    a silent miss must be impossible.
     """
-    names = _op_names(trace)
-    assert missing not in names, f"row premise broken: {missing!r} was captured"
-    consumers = [op for op in trace.ops if op.func_name == consumer]
-    assert consumers, f"consumer {consumer!r} missing entirely: {names}"
-    consumer_op = consumers[0]
-    assert consumer_op.parents == ()
-    assert consumer_op.is_internal_source
-    assert trace.capture_verified is None
-    assert _escape_count(trace) == 0
+    _assert_captured(trace, *expected)
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "mode_rescue_rerun"
+    info = trace.rescue_rerun
+    assert info is not None and info["recovered"] is True
+    if info["primary_error"] is not None:
+        return  # primary raised before producing ops; no multiset diff to name
+    for name in expected:
+        if name in info["recovered_ops"]:
+            break
+    else:
+        raise AssertionError(f"none of {expected!r} in recovered_ops: {info['recovered_ops']!r}")
+
+
+def _assert_unrecovered_disclosed(trace: tl.Trace, missing: str) -> None:
+    """The escape stands (beyond any mode) but is DISCLOSED, never silent."""
+    assert missing not in _op_names(trace)
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
+    info = trace.rescue_rerun
+    assert info is not None and info["recovered"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +240,11 @@ def test_model_instance_holders_are_captured(corpus_env: _CorpusEnv) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The 7 crawler-missed classes: pin TODAY's silent miss (or loud crash)
+# The 7 crawler-missed classes: RESCUED since stage 2 (recovered + disclosed)
 # ---------------------------------------------------------------------------
 
 
-def test_closure_cell_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_closure_cell_ref_is_rescued(corpus_env: _CorpusEnv) -> None:
     raw_cos = corpus_env.cos
 
     def make_closure() -> Callable[[torch.Tensor], torch.Tensor]:
@@ -244,10 +259,10 @@ def test_closure_cell_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) ->
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(closure(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
-def test_staticmethod_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_staticmethod_ref_is_rescued(corpus_env: _CorpusEnv) -> None:
     class Holder:
         static = staticmethod(corpus_env.cos)
 
@@ -255,10 +270,10 @@ def test_staticmethod_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) ->
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(Holder.static(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
-def test_module_level_partial_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_module_level_partial_is_rescued(corpus_env: _CorpusEnv) -> None:
     mod = types.ModuleType("_tl_outcome_module_partial")
     corpus_env.register_module(mod)
     mod.partial = functools.partial(corpus_env.cos)
@@ -267,10 +282,10 @@ def test_module_level_partial_is_silently_missed_midgraph(corpus_env: _CorpusEnv
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(mod.partial(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
-def test_plain_object_attr_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_plain_object_attr_is_rescued(corpus_env: _CorpusEnv) -> None:
     class Plain:
         pass
 
@@ -281,10 +296,10 @@ def test_plain_object_attr_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(holder.op(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
-def test_prebound_tensor_method_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_prebound_tensor_method_is_rescued(corpus_env: _CorpusEnv) -> None:
     owner = torch.tensor([1.0, 2.0])
     bound_add = owner.add  # bound BEFORE wrap; the descriptor inside is raw
 
@@ -292,10 +307,10 @@ def test_prebound_tensor_method_is_silently_missed_midgraph(corpus_env: _CorpusE
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(bound_add(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="add", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "add")
 
 
-def test_c_held_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
+def test_c_held_ref_is_rescued(corpus_env: _CorpusEnv) -> None:
     """``lru_cache`` C-level storage as the proxy for a compiled extension."""
     raw_cos = corpus_env.cos
 
@@ -309,7 +324,7 @@ def test_c_held_ref_is_silently_missed_midgraph(corpus_env: _CorpusEnv) -> None:
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(held()(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
 def _import_temp_module(tmp_path: Path, mod_name: str, source: str) -> types.ModuleType:
@@ -324,7 +339,7 @@ def _import_temp_module(tmp_path: Path, mod_name: str, source: str) -> types.Mod
         sys.path.remove(str(tmp_path))
 
 
-def test_torch_free_source_class_attr_is_silently_missed_midgraph(
+def test_torch_free_source_class_attr_is_rescued(
     corpus_env: _CorpusEnv, tmp_path: Path
 ) -> None:
     """Torch-free FILE-BACKED source: the source gate skips the deep scan."""
@@ -336,13 +351,14 @@ def test_torch_free_source_class_attr_is_silently_missed_midgraph(
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(mod.Holder.op(torch.sigmoid(v)))
 
-    _assert_silent_midgraph_miss(_trace_with_provenance_warning(Model()), missing="cos", consumer="relu")
+    _assert_rescued(_trace_with_provenance_warning(Model()), "cos")
 
 
-def test_torch_free_source_output_position_crashes_loudly(
+def test_torch_free_source_output_position_is_rescued(
     corpus_env: _CorpusEnv, tmp_path: Path
 ) -> None:
-    """Same missed class in OUTPUT position: today's loud attribution error."""
+    """Same missed class in OUTPUT position: the typed attribution error is
+    itself an escape signal, so the capture is rescued instead of crashing."""
     mod = _import_temp_module(tmp_path, "_tl_outcome_torch_free_out", "class Holder:\n    pass\n")
     corpus_env.temp_modules.append(mod.__name__)
     mod.Holder.op = corpus_env.cos
@@ -352,8 +368,9 @@ def test_torch_free_source_output_position_crashes_loudly(
             return mod.Holder.op(torch.sigmoid(v))
 
     wrap_torch()
-    with pytest.raises(RuntimeError, match="could not attribute a model output tensor"):
-        tl.trace(Model(), torch.tensor([0.25, 0.5]))
+    trace = tl.trace(Model(), torch.tensor([0.25, 0.5]))
+    _assert_rescued(trace, "cos")
+    assert trace.rescue_rerun["trigger"] == "output_attribution_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +388,9 @@ def test_protocol_invisible_from_numpy_is_captured(corpus_env: _CorpusEnv) -> No
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return mod.op(arr) + v
 
-    _assert_captured(_trace(Model()), "from_numpy", "__add__")
+    trace = _trace(Model())
+    _assert_captured(trace, "from_numpy", "__add__")
+    assert trace.rescue_rerun is None  # belt coverage is PRIMARY, never a rescue
 
 
 def test_protocol_invisible_frombuffer_is_captured(corpus_env: _CorpusEnv) -> None:
@@ -384,7 +403,9 @@ def test_protocol_invisible_frombuffer_is_captured(corpus_env: _CorpusEnv) -> No
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return mod.op(buf, dtype=torch.float32) + v
 
-    _assert_captured(_trace(Model()), "frombuffer", "__add__")
+    trace = _trace(Model())
+    _assert_captured(trace, "frombuffer", "__add__")
+    assert trace.rescue_rerun is None  # belt coverage is PRIMARY, never a rescue
 
 
 def test_protocol_invisible_as_subclass_is_captured(corpus_env: _CorpusEnv) -> None:
@@ -399,7 +420,9 @@ def test_protocol_invisible_as_subclass_is_captured(corpus_env: _CorpusEnv) -> N
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return mod.op(v, SubTensor)
 
-    _assert_captured(_trace(Model()), "as_subclass")
+    trace = _trace(Model())
+    _assert_captured(trace, "as_subclass")
+    assert trace.rescue_rerun is None  # belt coverage is PRIMARY, never a rescue
 
 
 # ---------------------------------------------------------------------------
@@ -467,11 +490,13 @@ def test_worker_thread_ref_is_not_logged_and_capture_survives(corpus_env: _Corpu
             return torch.relu(v) + result["r"].sum()
 
     # The thread-made tensor re-enters the owner thread with no provenance,
-    # so the same disclosure warning fires as for any mid-graph miss.
+    # so the mid-graph escape signal fires and a rescue is ATTEMPTED — but
+    # modes are thread-local, so the re-run recovers nothing. Since stage 2
+    # the standing escape is disclosed instead of silent.
     trace = _trace_with_provenance_warning(Model())
     names = _op_names(trace)
-    assert "cos" not in names
     assert "relu" in names and "sum" in names and "__add__" in names
+    _assert_unrecovered_disclosed(trace, "cos")
 
 
 # ---------------------------------------------------------------------------
@@ -479,15 +504,15 @@ def test_worker_thread_ref_is_not_logged_and_capture_survives(corpus_env: _Corpu
 # ---------------------------------------------------------------------------
 
 
-def test_midgraph_silent_corruption_full_signature(corpus_env: _CorpusEnv) -> None:
-    """The complete TODAY-signature of a silent mid-graph escape, in one row.
+def test_midgraph_escape_is_rescued_full_signature(corpus_env: _CorpusEnv) -> None:
+    """The flagship rescue row: a mid-graph escape re-enters the dataflow.
 
-    ``sigmoid -> [missed cos] -> relu``: the trace contains sigmoid and relu,
-    no cos, relu is a parentless internal-source op whose only internal-source
-    ancestor is itself, the trace claims nothing (``capture_verified is
-    None``), and the shipped default config emits ZERO escape diagnostics —
-    i.e. the user gets a plausible-looking but corrupted graph with no signal
-    anything is wrong. This is the row stage 2 exists to flip."""
+    ``sigmoid -> [escaped cos] -> relu``: before stage 2 this was SILENT
+    corruption (cos absent, relu a parentless internal-source op, no claim,
+    zero diagnostics). Now the escape signal triggers the rescue re-run: cos
+    is captured between sigmoid and relu, relu has a real parent again, and
+    the trace carries the full disclosure. Flipping this row back to a
+    silent miss must be impossible."""
     raw_cos = corpus_env.cos
 
     def make_closure() -> Callable[[torch.Tensor], torch.Tensor]:
@@ -503,10 +528,11 @@ def test_midgraph_silent_corruption_full_signature(corpus_env: _CorpusEnv) -> No
             return torch.relu(closure(torch.sigmoid(v)))
 
     trace = _trace_with_provenance_warning(Model())
-    assert _op_names(trace) == ["none", "sigmoid", "relu", "none"]
+    assert _op_names(trace) == ["none", "sigmoid", "cos", "relu", "none"]
     relu_op = [op for op in trace.ops if op.func_name == "relu"][0]
-    assert relu_op.parents == ()
-    assert relu_op.is_internal_source
-    assert relu_op.internal_source_ancestors == frozenset({relu_op.label.split(":")[0]})
-    assert trace.capture_verified is None
+    assert relu_op.parents != ()
+    assert not relu_op.is_internal_source
+    _assert_rescued(trace, "cos")
+    assert trace.rescue_rerun["trigger"] == "unattributed_tensor_args"
+    assert trace.rescue_rerun["residual_signal"] is None
     assert _escape_count(trace) == 0

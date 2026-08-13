@@ -1144,6 +1144,7 @@ class Trace(
         "completeness_witness_callback_ns": FieldPolicy.DROP,
         "capture_verified": FieldPolicy.DROP,
         "capture_verification_reason": FieldPolicy.DROP,
+        "rescue_rerun": FieldPolicy.DROP,
         "capture_owner_thread_id": FieldPolicy.DROP,
         "capture_owner_thread_qualified": FieldPolicy.DROP,
         "capture_thread_count_start": FieldPolicy.DROP,

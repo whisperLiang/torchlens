@@ -72,6 +72,7 @@ MODEL_LOG_FIELD_ORDER = [
     "completeness_witness_callback_ns",
     "capture_verified",
     "capture_verification_reason",
+    "rescue_rerun",
     "capture_owner_thread_id",
     "capture_owner_thread_qualified",
     "capture_thread_count_start",

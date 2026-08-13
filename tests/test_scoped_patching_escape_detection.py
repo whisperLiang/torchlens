@@ -41,9 +41,21 @@ from torchlens.backends.torch.wrappers import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_wrapper_epoch() -> Iterator[None]:
-    """Give every certification test a clean wrapper policy epoch."""
+def _isolated_wrapper_epoch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Give every certification test a clean wrapper policy epoch.
 
+    The stage-2 rescue re-run is bypassed here: this module certifies the
+    escape DETECTOR (the sensor) in isolation — with rescue live, a detected
+    escape would be recovered and the shadow report would move into the
+    ``rescue_rerun`` disclosure. The integrated sensor->rescue path is
+    covered by ``test_rescue_rerun.py`` and the outcome corpus.
+    """
+
+    from torchlens.backends.torch import rescue as rescue_module
+
+    monkeypatch.setattr(
+        rescue_module, "capture_with_rescue", lambda run_capture, **_kw: run_capture()
+    )
     unwrap_torch()
     clear_patch_detached_references_cache()
     yield

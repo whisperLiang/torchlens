@@ -47,6 +47,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "completeness_witness_callback_ns": StorageBinding(StorageKind.RUNTIME),
         "capture_verified": StorageBinding(StorageKind.RUNTIME),
         "capture_verification_reason": StorageBinding(StorageKind.RUNTIME),
+        "rescue_rerun": StorageBinding(StorageKind.RUNTIME),
         "capture_owner_thread_id": StorageBinding(StorageKind.RUNTIME),
         "capture_owner_thread_qualified": StorageBinding(StorageKind.RUNTIME),
         "capture_thread_count_start": StorageBinding(StorageKind.RUNTIME),

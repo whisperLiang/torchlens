@@ -62,6 +62,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "completeness_witness_callback_ns": "witness",
     "capture_verified": "witness",
     "capture_verification_reason": "witness",
+    "rescue_rerun": "witness",
     "capture_owner_thread_id": "witness",
     "capture_owner_thread_qualified": "witness",
     "capture_thread_count_start": "witness",
