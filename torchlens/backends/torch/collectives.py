@@ -201,9 +201,14 @@ def _digest_tensor(tensor: torch.Tensor) -> str:
 
 
 def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
-    """One role-indexed entry; dual-geometry slots stay None for plain tensors."""
+    """One role-indexed entry; dual-geometry slots stay None for plain tensors.
 
-    return {
+    The physical ``shape`` is ALWAYS the local bytes actually held; for a
+    DTensor value (reachable once C2 relaxes the dtensor refusal) the logical
+    side is declared explicitly alongside it.
+    """
+
+    entry = {
         "role": role,
         "index": index,
         "shape": list(tensor.shape),
@@ -214,6 +219,16 @@ def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
         "mesh_coords": None,
         "shard_offset": None,
     }
+    from torchlens.distributed._dtensor import dtensor_dual_geometry
+
+    geometry = dtensor_dual_geometry(tensor)
+    if geometry is not None:
+        entry["shape"] = geometry.get("local_shape") or entry["shape"]
+        entry["logical_shape"] = geometry.get("logical_shape")
+        entry["placements"] = geometry.get("placements")
+        entry["mesh_coords"] = geometry.get("mesh_coords")
+        entry["shard_offset"] = geometry.get("shard_offset")
+    return entry
 
 
 def _resolve_root(bound: dict[str, Any], group: Any, src_or_dst: str) -> int | None:
