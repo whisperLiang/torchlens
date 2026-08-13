@@ -83,6 +83,57 @@ _OPTION_POLICY_DEFAULTS: dict[str, Any] = {
     "lookback_payload_policy": "metadata_only",
 }
 
+#: Declared truth for every gated capability flag on every backend. A lift is
+#: a ONE-LINE diff here (plus its real mechanism + conformance coverage);
+#: anything not listed True must refuse its public surface typed.
+EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
+    "torch": {
+        "backward_capture": True,
+        "fastlog": True,
+        "interventions": True,
+        "rng_replay": True,
+        "streaming": True,
+    },
+    "mlx": {
+        "backward_capture": False,
+        "fastlog": False,
+        # Lifted 2026-08: static-label intervene=/halt= dispatch for real
+        # (tests/test_mlx_interventions.py); value-dependent predicates and
+        # recipes= keep typed refusals inside the dispatch path.
+        "interventions": True,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "jax": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "tinygrad": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "paddle": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+    "tf": {
+        "backward_capture": False,
+        "fastlog": False,
+        "interventions": False,
+        "rng_replay": False,
+        "streaming": False,
+    },
+}
+
 
 def test_every_capability_flag_has_a_production_consumer() -> None:
     """No decorative flags: every field is read by production code or a gate map."""
@@ -127,6 +178,12 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
     sentinel = object()
     for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
                          ("streaming", "streaming")):
+        if EXPECTED_GATED_CAPABILITIES[name][flag]:
+            # Genuinely lifted: the option is dispatched by the backend's
+            # capture path and never flows through the reject helpers. Real
+            # dispatch + flag-False refusal are covered by the backend's own
+            # E2E suite (e.g. tests/test_mlx_interventions.py).
+            continue
         assert not getattr(spec.capabilities, flag)
         with pytest.raises(BackendUnsupportedError):
             reject_extra_trace_kwargs({option: sentinel}, policy, spec=spec)
@@ -167,23 +224,25 @@ def test_registration_refuses_bare_capability_flips() -> None:
 
     for name in _PREVIEW_NAMES:
         for flag in sorted(GATED_CAPABILITY_FLAGS):
+            original_value = getattr(get_backend_spec(name).capabilities, flag)
             with pytest.raises(BackendCapabilityConformanceError):
                 register_backend_spec(
                     _spec_with_flag(name, flag, implementation=False), replace=True
                 )
-            assert not getattr(get_backend_spec(name).capabilities, flag)
+            # The refused registration must leave the registered truth intact.
+            assert getattr(get_backend_spec(name).capabilities, flag) == original_value
 
 
 def test_in_place_capability_flip_refuses_end_to_end() -> None:
     """Sol probe: mutating the frozen table in place must refuse typed at trace()."""
 
     spec = get_backend_spec("mlx")
-    object.__setattr__(spec.capabilities, "interventions", True)
+    object.__setattr__(spec.capabilities, "streaming", True)
     try:
         with pytest.raises(BackendCapabilityConformanceError):
-            require_capability_implementation(spec, "interventions")
+            require_capability_implementation(spec, "streaming")
     finally:
-        object.__setattr__(spec.capabilities, "interventions", False)
+        object.__setattr__(spec.capabilities, "streaming", False)
 
 
 def test_record_gate_reads_the_capability_table() -> None:
@@ -385,20 +444,21 @@ def test_torch_fastlog_flag_false_refuses_record() -> None:
         tl.release_model(model)
 
 
-def test_registered_capability_tables_are_truthful_at_registration() -> None:
-    """Preview specs declare no capability their gates reject (spot invariants)."""
+def test_registered_capability_tables_match_declared_matrix() -> None:
+    """Every registered gated flag equals the declared expected matrix.
+
+    A capability lift must edit ``EXPECTED_GATED_CAPABILITIES`` (one line)
+    alongside its real mechanism and conformance coverage; a drive-by flag
+    flip fails here.
+    """
 
     for spec in registered_backend_specs():
-        capabilities = spec.capabilities
+        expected = EXPECTED_GATED_CAPABILITIES[str(spec.name)]
+        for flag in sorted(GATED_CAPABILITY_FLAGS):
+            assert getattr(spec.capabilities, flag) == expected[flag], (
+                f"{spec.name}.{flag} diverges from EXPECTED_GATED_CAPABILITIES"
+            )
         if str(spec.name) == "torch":
-            assert capabilities.backward_capture
-            assert capabilities.fastlog
-            assert capabilities.interventions
-            assert "runnable" in capabilities.save_levels
-            continue
-        assert not capabilities.backward_capture
-        assert not capabilities.fastlog
-        assert not capabilities.interventions
-        assert not capabilities.streaming
-        assert not capabilities.rng_replay
-        assert "runnable" not in capabilities.save_levels
+            assert "runnable" in spec.capabilities.save_levels
+        else:
+            assert "runnable" not in spec.capabilities.save_levels

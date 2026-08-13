@@ -218,14 +218,13 @@ PADDLE_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
 MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
     runtime_option_names=frozenset(),
     runtime_message=(
-        "MLX backend preview does not support runtime-mutation or stop-early "
-        "options: {names}. Static-label save= selectors are supported as "
-        "post-finalization payload filters, but trace(intervene=...) and "
-        "trace(halt=...) need predicate-time concrete values and mutation/partial "
-        "replay semantics that MLX lazy evaluation does not expose through a stable "
-        "TorchLens surface. Use an unfiltered tl.trace(..., backend='mlx') call, "
-        "static-label save= selectors, or the PyTorch backend for intervention, "
-        "halt, streaming, and value-dependent predicates."
+        "MLX backend preview does not support: {names}. Static-label save= "
+        "selectors, static-label trace(intervene=tl.when(...)), and static-label "
+        "trace(halt=...) are supported; streaming/storage and value-dependent "
+        "predicates need predicate-time concrete values or replay semantics that "
+        "MLX lazy evaluation does not expose through a stable TorchLens surface. "
+        "Use an unfiltered tl.trace(..., backend='mlx') call or the PyTorch "
+        "backend for this surface."
     ),
     fallback_message="",
     always_runtime=True,
@@ -233,8 +232,6 @@ MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
         "lookback": 0,
         "lookback_payload_policy": "metadata_only",
         "capture": None,
-        "intervene": None,
-        "halt": None,
         "storage": None,
         "streaming": None,
         "inference_only": False,
