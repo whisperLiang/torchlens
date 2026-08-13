@@ -90,6 +90,23 @@ def pytest_configure(config: pytest.Config) -> None:
 SMOKE_DURATION_BUDGET_SECONDS = 15.0
 
 
+def _smoke_budget_load_factor() -> float:
+    """Scale the wall-clock budget by CPU oversubscription at measurement time.
+
+    Wall-clock durations inflate roughly with run-queue pressure; a fixed
+    budget false-trips whenever an orchestrator runs sibling lanes on the same
+    box (measured 2026-08-13: the same four tests read 2.9-14.2s quiet but
+    15.6-34.9s at loadavg ~5x nproc). Capped so a pathological load reading
+    can never disarm the lint entirely.
+    """
+
+    try:
+        load_per_cpu = os.getloadavg()[0] / max(os.cpu_count() or 1, 1)
+    except OSError:  # pragma: no cover - getloadavg unsupported on the platform.
+        return 1.0
+    return min(max(load_per_cpu, 1.0), 4.0)
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     """Record smoke-marked tests that blow the tier's duration budget.
@@ -101,16 +118,14 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     """
 
     report = yield
-    if (
-        report.when == "call"
-        and report.duration > SMOKE_DURATION_BUDGET_SECONDS
-        and item.get_closest_marker("smoke") is not None
-    ):
-        offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
-        if offenders is None:
-            offenders = []
-            item.session._tl_smoke_budget_offenders = offenders
-        offenders.append((item.nodeid, report.duration, SMOKE_DURATION_BUDGET_SECONDS))
+    if report.when == "call" and item.get_closest_marker("smoke") is not None:
+        budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
+        if report.duration > budget:
+            offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
+            if offenders is None:
+                offenders = []
+                item.session._tl_smoke_budget_offenders = offenders
+            offenders.append((item.nodeid, report.duration, budget))
     return report
 
 
