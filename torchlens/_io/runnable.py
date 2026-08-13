@@ -1424,7 +1424,7 @@ def _add_persistent_buffer_slot_drafts(
         existing = existing_by_name.get(name)
         if existing is not None:
             binding = existing.state_binding
-            assert binding is not None
+            assert binding is not None  # narrowing; guarded by the branch above
             existing.state_binding = replace(
                 binding,
                 persistent=True,
@@ -2724,7 +2724,7 @@ def _build_input_boundary(
                 )
             )
             continue
-        assert snapshot_position is not None
+        assert snapshot_position is not None  # narrowing; guarded by the branch above
         seen_positions.add(snapshot_position)
         tensor_sites = sorted(
             tensor_by_position.get(snapshot_position, []),

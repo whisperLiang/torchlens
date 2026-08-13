@@ -65,10 +65,17 @@ def _mark_conditional_branches(self: "Trace") -> None:
     # key, attribution will produce zero edges, matching the fast-skip output.
     # This invariant makes bool-detector drift fail explicitly instead of
     # silently making the fast-path miss work.
-    if not bool_classifications:
-        assert not conditional_keys, (
-            "Internally-terminated bool layers were absent but conditional "
-            "keys were produced; the fast-skip precondition is stale."
+    if not bool_classifications and conditional_keys:
+        # A real raise, not an assert: the whole point of this guard is to make
+        # bool-detector drift fail EXPLICITLY, and `python -O` strips asserts --
+        # which would restore exactly the silent fast-path miss it exists to
+        # prevent.
+        raise RuntimeError(
+            "Internally-terminated bool layers were absent but "
+            f"{len(conditional_keys)} conditional key(s) were produced; the "
+            "fast-skip precondition is stale. This means the bool detector and "
+            "the conditional-key builder disagree, so conditional attribution "
+            "would silently diverge from the fast-path output."
         )
     events_by_key = _materialize_conditional_records(
         self,

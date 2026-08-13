@@ -554,6 +554,7 @@ def test_guard2_ledger_static_mirror() -> None:
         )
 
 
+@pytest.mark.requires_assertions
 def test_guard2_ledger_holds_on_default_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -852,6 +853,7 @@ def test_token_read_before_write_check_fires(monkeypatch: pytest.MonkeyPatch) ->
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_assertions
 def test_clone_scope_tags_step1_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     """Op.copy's whole-schema loop lands as category (d), not findings.
 
@@ -880,6 +882,7 @@ def test_clone_scope_tags_step1_reads(monkeypatch: pytest.MonkeyPatch) -> None:
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_read_enforcement_green_on_default_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -891,6 +894,7 @@ def test_read_enforcement_green_on_default_capture(
     trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_read_enforcement_trips_on_undeclared_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -944,6 +948,7 @@ def test_row_clone_scope_free_when_unarmed() -> None:
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_executor_seam_patched_step_executes_and_audits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1008,6 +1013,7 @@ def test_executor_should_run_called_exactly_once(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_executor_failing_step_propagates_and_cleans_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1039,6 +1045,7 @@ def test_executor_failing_step_propagates_and_cleans_windows(
     assert not _AUDIT_READS
 
 
+@pytest.mark.requires_assertions
 def test_no_window_open_past_step_20(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review note N11: the freeze seam runs unaudited by construction."""
 

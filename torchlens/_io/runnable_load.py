@@ -1188,7 +1188,7 @@ def validate_witness_obligations(
     for name, name_slots in slots_by_name.items():
         for slot in name_slots:
             binding = slot.state_binding
-            assert binding is not None
+            assert binding is not None  # narrowing; the real refusal is below
             is_unbound = slot.slot_id not in bound_slot_ids and name not in bound_state_names
             if is_unbound and binding.host_escape_disposition is None:
                 raise ContextFieldInvalidError(

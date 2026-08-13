@@ -154,6 +154,7 @@ PINNED_NOOP_WRITERS = {
 }
 
 
+@pytest.mark.requires_assertions
 @pytest.mark.parametrize(("axis_name", "axis_fn"), _AXES, ids=_AXIS_IDS)
 def test_axis_passes_read_and_write_enforcement(
     axis_name: str,
@@ -206,6 +207,7 @@ def test_buffer_duplicate_axis_actually_merges(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_buffer_from_input_axis_makes_ancestry_writes_effective(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -250,6 +252,7 @@ def test_buffer_from_input_axis_makes_ancestry_writes_effective(
             sink.clear()
 
 
+@pytest.mark.requires_assertions
 def test_reads_before_release_mark_still_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,6 +322,7 @@ def test_write_effectiveness_classifier_is_finding_favoring() -> None:
     assert not _write_is_content_effective(torch.zeros(2), torch.ones(2))
 
 
+@pytest.mark.requires_assertions
 @pytest.mark.heavy
 def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
     """Phantom-declaration and no-op-writer reports over the full matrix."""

@@ -170,13 +170,33 @@ _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
 def _postprocess_assertions_enabled() -> bool:
     """Return whether postprocess boundary assertions are enabled.
 
+    Refuses under ``python -O``. Every check in this audit -- undeclared column
+    writes, unsanctioned row releases, out-of-contract reads -- is spelled as an
+    ``assert``, and ``-O`` strips all of them. An audit that runs its windows,
+    checks nothing, and reports clean is worse than one that does not run: it
+    reads as evidence. So arming it in an environment that cannot execute it is a
+    hard error rather than a silent no-op.
+
     Returns
     -------
     bool
         ``True`` when ``TORCHLENS_POSTPROCESS_ASSERTIONS`` is set to a truthy value.
+
+    Raises
+    ------
+    RuntimeError
+        When the audit is armed but assertions are disabled (``-O`` / ``-OO``).
     """
 
-    return os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    enabled = os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    if enabled and not __debug__:
+        raise RuntimeError(
+            f"{_POSTPROCESS_ASSERT_ENV} is set but Python assertions are disabled "
+            "(-O / -OO), so every postprocess contract check would be stripped and "
+            "the audit would report clean without verifying anything. Re-run "
+            "without -O, or unset the variable to capture without the audit."
+        )
+    return enabled
 
 
 _WRITE_AUDIT_RECORD_ENV = "TORCHLENS_POSTPROCESS_WRITE_AUDIT"

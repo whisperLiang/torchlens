@@ -85,7 +85,23 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Move ArgSpec coverage test to run last so it sees all accumulated stats."""
+    """Order the ArgSpec coverage test last; skip assertion-dependent tests under -O.
+
+    ``python -O`` strips every ``assert``, which disables the postprocess contract
+    audit outright -- arming it then raises rather than silently reporting a clean
+    audit that verified nothing. Tests that arm the audit therefore cannot run
+    under ``-O`` and must SKIP, not fail, so the ``-O`` leg stays a meaningful
+    verdict-identity check on everything else.
+    """
+
+    if not __debug__:
+        skip_no_assertions = pytest.mark.skip(
+            reason="requires assertions; the postprocess audit cannot run under python -O"
+        )
+        for item in items:
+            if item.get_closest_marker("requires_assertions") is not None:
+                item.add_marker(skip_no_assertions)
+
     coverage_tests = []
     other_tests = []
     for item in items:
