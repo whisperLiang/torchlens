@@ -38,18 +38,18 @@ jobs:
     steps:
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.9"
 
@@ -82,6 +82,15 @@ jobs:
       # -- otherwise the PyPI upload fails with "FileNotFoundError: dist" and the
       # Release job goes red even though nothing was meant to ship. When a real
       # release IS cut, dist/* exists and both steps run normally.
+      # DELIBERATELY NOT SHA-PINNED -- the one exception to the pin-everything rule
+      # in this repo. PyPA's own documented guidance for this action is to track the
+      # `release/v1` branch so that security fixes to the publishing path (and
+      # changes required by PyPI's evolving Trusted Publishing / attestation
+      # endpoints) arrive without a manual bump. A stale pinned SHA here fails
+      # closed in the worst place: the release job. The trust anchor is the
+      # PyPA-owned repo plus OIDC trusted publishing (no long-lived token to
+      # steal), and this job's permissions are already minimized above.
+      # Revisit if PyPA starts publishing immutable release tags for it.
       - name: Publish to PyPI
         if: ${{ hashFiles('dist/**') != '' }}
         uses: pypa/gh-action-pypi-publish@release/v1

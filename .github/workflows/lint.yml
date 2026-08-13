@@ -13,17 +13,17 @@ jobs:
   ruff:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       # PIN AUTHORITY: keep in lockstep with pyproject.toml's dev extra and the
-      # ruff-pre-commit `rev` in .pre-commit-config.yaml. See
-      # tests/test_lint_parity.py::test_ruff_pin_is_identical_across_declaration_sites.
+      # ruff-pre-commit `rev` in .pre-commit-config.yaml. See tests/
+      # test_packaging_diet.py::test_ruff_pin_is_identical_across_declaration_sites.
       - run: uv pip install --system ruff==0.15.4
 
       # Check-only: Lint is a pure gate and must NOT push to main. It previously
