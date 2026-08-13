@@ -17,6 +17,8 @@ import torch
 from ..quantities import Bytes, Flops
 
 if TYPE_CHECKING:
+    from types import FrameType
+
     from ..data_classes.trace import Trace
 
 _T = TypeVar("_T")
@@ -455,7 +457,7 @@ def user_stacklevel(extra: int = 0) -> int:
         Stacklevel to pass to ``warnings.warn``.
     """
 
-    frame = sys._getframe(1)
+    frame: FrameType | None = sys._getframe(1)
     depth = 1
     while frame is not None:
         if not frame.f_code.co_filename.startswith(_PACKAGE_ROOT):
