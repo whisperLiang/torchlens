@@ -35,6 +35,14 @@ class _TiedReprKey:
         return "tied"
 
 
+class _TiedReprKeyA(_TiedReprKey):
+    """First distinct type sharing the tied representation."""
+
+
+class _TiedReprKeyB(_TiedReprKey):
+    """Second distinct type sharing the tied representation."""
+
+
 class _LinearModel(torch.nn.Module):
     """Tiny parameterized model used by deterministic artifact tests."""
 
@@ -358,3 +366,20 @@ def test_content_hash_is_address_and_insertion_order_independent() -> None:
     assert tl.hash.content({left_a: 1, left_b: 2}) == tl.hash.content(
         {right_b: 2, right_a: 1}
     )
+
+
+def test_loop_signature_sorts_sets_by_emitted_tokens() -> None:
+    """Set signature order is total even when distinct elements share repr."""
+
+    from torchlens.postprocess.loop_detection import _append_signature_tokens
+
+    tokens: list[str] = []
+    _append_signature_tokens(
+        {_TiedReprKeyB("b"), _TiedReprKeyA("a")},
+        "arg",
+        tokens,
+        0,
+    )
+
+    assert "_TiedReprKeyA" in tokens[1]
+    assert "_TiedReprKeyB" in tokens[2]

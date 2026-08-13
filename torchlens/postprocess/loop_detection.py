@@ -77,7 +77,11 @@ def _append_signature_tokens(arg: Any, prefix: str, tokens: list[str], depth: in
             _append_signature_tokens(arg[key], f"{prefix}.k{key!r}", tokens, depth + 1)
         return
     if isinstance(arg, (list, tuple, set, frozenset)):
-        elements = sorted(arg, key=repr) if isinstance(arg, (set, frozenset)) else arg
+        elements = (
+            sorted(arg, key=lambda element: _signature_element_sort_key(element, depth + 1))
+            if isinstance(arg, (set, frozenset))
+            else arg
+        )
         tokens.append(f"{prefix}={type(arg).__name__}[{len(arg)}]")
         for index, element in enumerate(elements):
             _append_signature_tokens(element, f"{prefix}.{index}", tokens, depth + 1)
@@ -88,6 +92,27 @@ def _append_signature_tokens(arg: Any, prefix: str, tokens: list[str], depth: in
         tokens.append(f"{prefix}={type_key[1]}:{arg!s}")
         return
     tokens.append(f"{prefix}=<{type_key[0]}.{type_key[1]}>")
+
+
+def _signature_element_sort_key(arg: Any, depth: int) -> tuple[str, ...]:
+    """Return the exact address-free tokens used to order one set element.
+
+    Parameters
+    ----------
+    arg:
+        Unordered container element.
+    depth:
+        Recursion depth inherited from the parent signature walk.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Emitted signature tokens under a neutral prefix.
+    """
+
+    tokens: list[str] = []
+    _append_signature_tokens(arg, "element", tokens, depth)
+    return tuple(tokens)
 
 
 def _structural_arg_signature(op: Any) -> str:
