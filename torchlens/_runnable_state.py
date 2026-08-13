@@ -1007,6 +1007,13 @@ def _apply_state_metadata_facts(
     for slot in descriptor.tensor_slots:
         if slot.state_binding is not None:
             name_by_slot[slot.slot_id] = slot.state_binding.state_dict_name
+    # Staged slot values can BE the trace-persisted clones (same-device slots are
+    # returned unwrapped), so the in-place ``requires_grad_`` flips below mutate
+    # state that outlives this call. A mid-loop refusal must publish NOTHING:
+    # every already-flipped bit is rolled back before the typed raise, or a
+    # slot-7 failure would leave slots 1-6 mutated on ``embedded_state`` /
+    # ``staged_user_state`` across future runs.
+    applied: list[tuple[torch.Tensor, bool]] = []
     for slot_id, value in prepared.slot_values.items():
         name = name_by_slot.get(slot_id)
         recorded = binding_facts.get(name, {}).get("requires_grad") if name is not None else None
@@ -1014,7 +1021,16 @@ def _apply_state_metadata_facts(
             continue
         try:
             value.requires_grad_(recorded)
+            applied.append((value, not recorded))
         except RuntimeError as exc:
+            for flipped, original_bit in applied:
+                try:
+                    flipped.requires_grad_(original_bit)
+                except RuntimeError:
+                    # Best-effort unwind: restoring a bit the tensor held moments
+                    # ago cannot realistically fail; a torn restore must not mask
+                    # the typed refusal below.
+                    continue
             # Unreachable for producer-validated artifacts (a ``requires_grad=True`` fact on
             # a non-differentiable slot refuses at save); a tampered artifact fails typed
             # here rather than running with an unreproduced declared fact.
