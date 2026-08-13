@@ -261,6 +261,15 @@ def _assert_no_open_window(self: "Trace") -> None:
     the freeze seam after step 20 legitimately rewrites relation cells
     wholesale and must run UNAUDITED by construction, not by a
     discard-and-hope.
+
+    The ``assert`` spelling is deliberate and safe here, unlike the
+    import-time structural checks the executor header bans it for (B1-23a,
+    reviewed and left as-is): this whole audit family is assert-based by
+    design, and ``_postprocess_assertions_enabled`` HARD-ERRORS when the audit
+    is armed under ``python -O``. Assertions-off therefore means the audit
+    never runs and this function is never called -- it cannot be silently
+    stripped mid-audit. Pinned by
+    ``tests/test_postprocess_retention_epilogue.py``.
     """
 
     core = self.__dict__.get("_trace_core")
@@ -463,6 +472,23 @@ def _drop_transient_capture_state(self: "Trace") -> None:
         "_wrapper_runtime_ws",
         "capture_events",
         "_output_container_specs_by_raw_label",
+        # B1-02: session-time semantic-output scratch. Two of the four pin live
+        # user objects (an HF tokenizer, a model-derived metadata key), so this
+        # seam is the postprocess-side belt for the capture-boundary drop in
+        # ``capture/trace.py`` -- including the halted postprocess, which
+        # reaches here through ``_finalize_halted_trace``.
+        "_output_style",
+        "_output_head",
+        "_output_tokenizer",
+        "_semantic_output_metadata",
+        # B1-17 companion (INTERVENED axis): capture-time dedup caches for the
+        # predicate-intervention spec/target mirrors. `..._target_keys` holds a
+        # STRONG reference to the live intervention spec plus a frozen-target
+        # set, so leaving it on the finished product retains capture-time
+        # objects for no reason. Cleaned centrally here rather than in
+        # `backends/torch/_ops_interventions.py` (another lane's file).
+        "_tl_predicate_intervention_spec_keys",
+        "_tl_predicate_intervention_target_keys",
     ]
     if not keep_deferred_streaming and not keep_selective_sink:
         field_names.extend(
@@ -516,10 +542,19 @@ def _refresh_fast_saved_summary(self: "Trace") -> None:
 def postprocess(
     self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
 ) -> None:
-    """Run the full postprocessing pipeline in exhaustive mode.
+    """Run the full postprocessing pipeline, with a TOTAL retention epilogue.
 
     Transforms the raw Trace captured during the forward pass into its
     final user-facing form.
+
+    B1-18: the H2 hot-AST release used to be a success-path epilogue
+    statement, so a postprocess failure -- and the zero-layer early return --
+    left the process-wide file cache holding parsed ASTs, parent maps, and line
+    splits for whole torch-library files. Distinct failing files accumulate up
+    to the 256-file cache bound, which resurrects exactly the multi-megabyte
+    retention class the seal exists to close. The release is a pure
+    process-wide cache drop (spans and retained source survive; an unprojected
+    scope re-parses), so it is safe on every exit and belongs in ``finally``.
 
     Parameters
     ----------
@@ -529,6 +564,26 @@ def postprocess(
         Hierarchical address strings for each output, for example ``"0.1"``
         for nested tuple outputs.
     """
+
+    try:
+        _postprocess_body(self, output_tensors, output_tensor_addresses)
+    finally:
+        ast_branches.release_parsed_asts()
+
+
+def _postprocess_body(
+    self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
+) -> None:
+    """Run steps 0-20 and the core freeze (see :func:`postprocess`).
+
+    Parameters
+    ----------
+    output_tensors:
+        Actual output tensors returned by the model's forward call.
+    output_tensor_addresses:
+        Hierarchical address strings for each output.
+    """
+
     capture_events = getattr(self, "capture_events", None)
     capture_session = None
     # Resolve each output tensor's graph parent BEFORE materializing events:
@@ -650,9 +705,9 @@ def postprocess(
         # release already stripped payloads, native handles, and the
         # source_trace backrefs, so this strong edge closes no new cycle.
         self.__dict__["_capture_events"] = capture_events
-    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs; drop the
-    # file cache's hot tier so no capture leaves whole torch-library ASTs
-    # pinned process-wide. Span data and projected calls survive, so lazy
-    # post-capture queries (Op.arg_expressions) stay re-parse-free in the
-    # common case and re-parse from retained source otherwise.
-    ast_branches.release_parsed_asts()
+    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs. The drop
+    # itself now lives in `postprocess`'s `finally` (B1-18) so a failing
+    # pipeline and the zero-layer early return release it too; span data and
+    # projected calls survive, so lazy post-capture queries
+    # (Op.arg_expressions) stay re-parse-free in the common case and re-parse
+    # from retained source otherwise.

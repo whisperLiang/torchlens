@@ -1416,6 +1416,51 @@ class Trace(
         "backward_peak_memory": FieldPolicy.KEEP,
         "backward_memory_backend": FieldPolicy.KEEP,
         "_backward_gradfn_refs": FieldPolicy.DROP,
+        # B1-17: the remaining undeclared runtime Trace attrs the widened
+        # lockstep gate finds across the 30-axis postprocess matrix. All are
+        # session-time by construction; declaring them makes the gate's
+        # authority the policy table rather than the pre-spec allowance in
+        # `_io/scrub.py`.
+        #
+        # Predicate-intervention dedup caches (INTERVENED axis).
+        # `..._target_keys` pins the live intervention spec, so it is also
+        # dropped at the postprocess seam.
+        "_tl_predicate_intervention_spec_keys": FieldPolicy.DROP,
+        "_tl_predicate_intervention_target_keys": FieldPolicy.DROP,
+        # Streaming-bundle provenance (STREAMING axes). Already popped and
+        # restored around the scrub by `_io/bundle.py` and cleared by
+        # `data_classes/cleanup.py`; a load rebinds them fresh, so DROP is the
+        # existing behavior made declarative.
+        "_source_bundle_path": FieldPolicy.DROP,
+        "_source_bundle_manifest_sha256": FieldPolicy.DROP,
+        # Two-pass selective-save retention flag (DEFERRED_RETENTION axis).
+        "_retain_layers_to_save_output_parents": FieldPolicy.DROP,
+        # Validation side-channel state (B1-04). `validate_forward_pass` /
+        # `validate_saved_outs` are public methods on a user-held Trace, and
+        # validation ENTRY unconditionally sets `_last_validation_failure`
+        # (`reset_validation_failure` writes None on every run), so a plain
+        # validate-then-save sequence hit
+        # `TorchLensIOError: Trace._last_validation_failure is missing from
+        # PORTABLE_STATE_SPEC` -- a hard refusal on a completely ordinary
+        # workflow. Both attrs are session-time diagnostics carried on the
+        # trace as a side channel, exactly the `_fast_run_session` class, and
+        # `ValidationFailure`/`ValidationDiagnostic` are not portable records.
+        "_last_validation_failure": FieldPolicy.DROP,
+        "_validation_diagnostics": FieldPolicy.DROP,
+        # Session-time semantic-output scratch (B1-02). Written at capture
+        # entry, consumed only by ``decode_outputs_for_trace``, and dropped on
+        # every settlement path (``capture/trace.py``'s
+        # ``_drop_semantic_output_transients`` plus the postprocess seam).
+        # Declared here so the runtime-declaration lockstep gate can SEE them
+        # on the halted axis and so the portable scrub is policy-driven rather
+        # than a hand-maintained name list in ``_io/scrub.py``:
+        # ``_output_tokenizer`` holds a LIVE user tokenizer and
+        # ``_semantic_output_metadata`` a model-derived key, so a surviving
+        # copy leaks vocab/merges into a plain pickle of the Trace.
+        "_output_style": FieldPolicy.DROP,
+        "_output_head": FieldPolicy.DROP,
+        "_output_tokenizer": FieldPolicy.DROP,
+        "_semantic_output_metadata": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         MODEL_LOG_FIELD_ORDER,
@@ -2601,6 +2646,18 @@ class Trace(
         state["_code_context_cache"] = {}
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
+        # B1-02: the semantic-output scratch never serializes. Plain pickle
+        # legitimately carries most session-time DROP state (in-process
+        # round-trips need `backward_ready`, `save_budget`, ...), but these two
+        # hold LIVE USER OBJECTS -- an HF tokenizer and a model-derived
+        # metadata key. A surviving copy reconstructs the tokenizer on load and
+        # bakes its vocab/merges into an artifact the user believes is a graph
+        # (measured 47KB -> 238KB). Capture drops them at every settlement
+        # path; this is the serialization boundary's own belt.
+        state.pop("_output_style", None)
+        state.pop("_output_head", None)
+        state.pop("_output_tokenizer", None)
+        state.pop("_semantic_output_metadata", None)
         state.pop("_raw_graph_ws", None)
         state.pop("_module_capture_ws", None)
         state.pop("_wrapper_runtime_ws", None)

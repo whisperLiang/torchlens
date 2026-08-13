@@ -671,6 +671,41 @@ def _live_records(trace: Trace) -> dict[str, Any]:
     }
 
 
+def all_live_records(trace: Trace) -> dict[str, list[Any]]:
+    """Return EVERY live instance per record family on one trace.
+
+    The B1-17 counterpart to :func:`_live_records`: that helper samples ONE
+    representative per family via ``next(iter(...))``, which cannot see an
+    attribute only some instances carry (a leak on the intervened op, the
+    buffer that came from an input, the second pass of a recurrent layer).
+
+    Parameters
+    ----------
+    trace:
+        Populated trace.
+
+    Returns
+    -------
+    dict[str, list[Any]]
+        Record class name -> every live instance of that family.
+    """
+
+    families: dict[str, list[Any]] = {
+        "Trace": [trace],
+        "Op": list(trace.ops),
+        "Layer": list(trace.layers),
+        "Param": list(trace.params),
+        "Buffer": list(trace.buffers),
+        "ModuleCall": list(trace.module_calls),
+        "Module": list(trace.modules),
+    }
+    grad_fns = list(trace.grad_fns)
+    families["GradFn"] = grad_fns
+    families["GradFnCall"] = [call for record in grad_fns for call in record.calls.values()]
+    families["BackwardPass"] = list(trace.backward_passes)
+    return families
+
+
 def undeclared_runtime_attributes(
     instance_attrs: set[str],
     policy: dict[str, RecordFieldPolicy],
@@ -729,6 +764,92 @@ def test_live_record_attributes_are_all_declared(lockstep_trace: Trace, record_n
         f"{record_name} carries undeclared attributes at runtime "
         f"(add them to FIELD_POLICY): {sorted(undeclared)}"
     )
+
+
+def _postprocess_axis_names() -> list[str]:
+    """Return the postprocess matrix axis names, or [] when unavailable."""
+
+    from support.postprocess_axes import iter_axes
+
+    return [name for name, _ in iter_axes()]
+
+
+@pytest.mark.parametrize("axis_name", _postprocess_axis_names())
+def test_live_record_attributes_are_declared_on_every_capture_axis(axis_name: str) -> None:
+    """The runtime-declaration gate runs on EVERY capture axis (B1-17).
+
+    The gate above samples ONE plain-capture fixture and ONE representative
+    instance per family, so it was blind on two counts at once: a field only a
+    non-plain capture writes, and a field only some instances of a family
+    carry. Both blind spots were real -- the halted axis carried four
+    undeclared Trace attrs (B1-02: two of them live user objects, one an HF
+    tokenizer that plain pickle then baked into the artifact) and the
+    intervened axis two more.
+
+    The axis list is the postprocess enforcement matrix
+    (``tests/support/postprocess_axes.py``), which is already the shared input
+    of the declaration-seeding sweep and the read-enforcement CI leg, so a new
+    capture configuration is covered here the moment it is added there. The
+    honest residual is exactly the axes NOT in that matrix.
+    """
+
+    from support.postprocess_axes import iter_axes
+
+    axis = dict(iter_axes())[axis_name]
+    trace = axis()
+    if trace is None:
+        # Axes that clean up internally (refresh) expose no product to sweep.
+        pytest.skip(f"axis {axis_name!r} returns no trace to inspect")
+    try:
+        offenders: dict[str, set[str]] = {}
+        for family, instances in all_live_records(trace).items():
+            for instance in instances:
+                if not hasattr(instance, "__dict__"):
+                    continue
+                undeclared = undeclared_runtime_attributes(
+                    set(vars(instance)),
+                    type(instance).FIELD_POLICY,
+                )
+                if undeclared:
+                    offenders.setdefault(family, set()).update(undeclared)
+        assert not offenders, (
+            f"capture axis {axis_name!r} carries undeclared attributes at "
+            f"runtime (add them to FIELD_POLICY): "
+            f"{ {family: sorted(names) for family, names in sorted(offenders.items())} }"
+        )
+    finally:
+        trace.cleanup()
+
+
+def test_the_axis_sweep_is_not_vacuous() -> None:
+    """The widened gate really covers the axes that carried the leaks.
+
+    A sweep that silently enumerated nothing would pass forever, so the axis
+    list is pinned to contain the two configurations B1-02/B1-17 found leaks
+    on, plus a materially larger set than the single plain fixture.
+    """
+
+    names = _postprocess_axis_names()
+    assert "halted" in names
+    assert "intervention" in names
+    assert len(names) >= 20
+
+
+def test_all_live_records_sweeps_more_than_one_instance_per_family(
+    lockstep_trace: Trace,
+) -> None:
+    """``all_live_records`` is a real widening over ``_live_records``.
+
+    If it collapsed to one instance per family it would re-introduce exactly
+    the blind spot it exists to close.
+    """
+
+    families = all_live_records(lockstep_trace)
+    assert set(families) == set(_RECORD_NAMES)
+    assert any(len(instances) > 1 for instances in families.values())
+    # Every representative the narrow helper picks is inside the wide sweep.
+    for family, representative in _live_records(lockstep_trace).items():
+        assert any(instance is representative for instance in families[family]), family
 
 
 def test_facade_plumbing_allowance_stays_minimal() -> None:

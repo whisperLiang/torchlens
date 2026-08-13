@@ -427,8 +427,16 @@ def run_pipeline(ctx: StepContext) -> None:
             if should:
                 spec.run(ctx)
             continue
-        module._open_step_write_audit(ctx.trace)
         try:
+            # B1-23b: the OPEN is inside the try. ``begin_cell_write_audit``
+            # registers the collectors and only then swaps the store class, and
+            # its fingerprint sweep runs arbitrary ``__repr__`` code at the
+            # leaves -- so a raise mid-arm used to escape with collectors
+            # registered under ``id(store)`` and the class possibly swapped,
+            # with nothing to unwind it. ``end_cell_write_audit`` is pop-based
+            # and only un-swaps an actually-audited class, so closing an
+            # unopened (or half-opened) window is safe.
+            module._open_step_write_audit(ctx.trace)
             if should:
                 spec.run(ctx)
         finally:
