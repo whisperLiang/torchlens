@@ -1347,8 +1347,15 @@ def _add_persistent_buffer_slot_drafts(
             for name in names
         }
     else:
-        # r75 F2 capture-time fallback: the model died before the save.
+        # r75 F2 capture-time fallback: the model died before the save. A LOADED
+        # runnable artifact has no capture-time snapshot either, but it embeds the
+        # full capture-time ``state_dict`` (the ``state_dict_v1`` family: parameters
+        # plus persistent buffers with real values) -- the same universe basis --
+        # so a runnable->load->runnable re-save is served from it instead of
+        # refusing with a factually false "no state records" claim.
         snapshot = trace._runnable.capture_state
+        if not isinstance(snapshot, Mapping):
+            snapshot = trace._runnable.embedded_state
         if isinstance(snapshot, Mapping):
             parameter_names = set()
             param_logs = getattr(trace, "param_logs", None)
@@ -1382,15 +1389,20 @@ def _add_persistent_buffer_slot_drafts(
             universe = trace._runnable.persistent_buffer_universe
             if not isinstance(universe, Mapping):
                 # No capture-time record either (``state_dict()`` failed at the
-                # capture boundary): the universe is UNKNOWN. Refuse loudly and
-                # typed -- mirroring the include_weights=True lane -- never
-                # silently under-declare.
+                # capture boundary, or the artifact was saved without embedded
+                # weights): the universe is UNKNOWN. Refuse loudly and typed --
+                # mirroring the include_weights=True lane -- never silently
+                # under-declare.
                 raise TorchLensIOError(
                     "Runnable save requires the persistent-buffer state universe, "
-                    "but the source model is no longer alive and no capture-time "
-                    "state records are available. The declared slot universe "
-                    "cannot be proven complete, so the runnable save is refused. "
-                    "Ordinary analysis save levels remain available."
+                    "but no source is available: the source model is not alive, "
+                    "no capture-time state records exist, and the trace carries "
+                    "no embedded capture state (a runnable artifact saved with "
+                    "include_weights=True re-saves; one saved without embedded "
+                    "weights cannot prove its slot universe complete). Ordinary "
+                    "analysis save levels remain available.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="runnable_resave_state_universe",
                 )
             buffer_names = tuple(str(name) for name in universe)
             geometry_by_name = {
@@ -1402,7 +1414,18 @@ def _add_persistent_buffer_slot_drafts(
                 for name, record in universe.items()
             }
         topology = trace._runnable.state_alias_topology
-        topology_groups = (topology.get("groups") if isinstance(topology, Mapping) else None) or {}
+        topology_groups = topology.get("groups") if isinstance(topology, Mapping) else None
+        if topology_groups is None and trace._runnable.descriptor is not None:
+            # Loaded re-save: the session-time alias-topology record does not
+            # survive save/load, but the loaded descriptor's state bindings carry
+            # the exact declared groups -- carry them forward rather than silently
+            # weakening a tied-state declaration on the re-saved artifact.
+            topology_groups = {
+                slot.state_binding.state_dict_name: slot.state_binding.alias_group
+                for slot in trace._runnable.descriptor.tensor_slots
+                if slot.state_binding is not None and slot.state_binding.alias_group is not None
+            }
+        topology_groups = topology_groups or {}
         buffer_name_set = set(buffer_names)
         names_by_group: dict[str, list[str]] = defaultdict(list)
         for name in buffer_names:

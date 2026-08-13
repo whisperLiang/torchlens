@@ -204,3 +204,52 @@ def test_encode_literal_bounds_nesting_below_every_decode_ceiling() -> None:
         bomb = [bomb]
     with pytest.raises(_UnsupportedLiteralError, match="nesting"):
         _encode_literal(bomb)
+
+
+def test_runnable_resave_refusal_is_honest_and_code_bearing(tmp_path: Path) -> None:
+    """Loaded-runnable re-save never claims 'no state records' falsely (F-R10-2).
+
+    A loaded artifact with embedded weights carries the full capture-time
+    state_dict, so the state-universe ladder must consult it: the re-save now
+    proceeds to the producer preflight and refuses with the TYPED diagnostics
+    naming the genuinely missing session-time producer records. An artifact
+    saved WITHOUT embedded weights keeps the universe refusal, now with an
+    honest reason and a stable error code (fields were empty before).
+    """
+
+    from torchlens._io import TorchLensIOError
+    from torchlens.errors import RunnablePreflightError
+
+    captured = tl.trace(
+        TinyModel(),
+        torch.ones(2, 3),
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    with_weights = tmp_path / "with-weights.tlspec"
+    captured.save(with_weights, level="runnable", include_weights=True)
+    loaded = tl.load(with_weights)
+    with pytest.raises(RunnablePreflightError) as preflight:
+        tl.save(loaded, tmp_path / "resave.tlspec", level="runnable", include_weights=True)
+    assert preflight.value.fields["code"] == "sparse_preflight_failed"
+    assert preflight.value.fields["diagnostics"]
+
+    recaptured = tl.trace(
+        TinyModel(),
+        torch.ones(2, 3),
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    without_weights = tmp_path / "no-weights.tlspec"
+    recaptured.save(without_weights, level="runnable")
+    loaded_bare = tl.load(without_weights)
+    with pytest.raises(TorchLensIOError) as refusal:
+        tl.save(loaded_bare, tmp_path / "resave2.tlspec", level="runnable")
+    assert refusal.value.fields["code"] == "run_capability_unavailable"
+    assert refusal.value.fields["detection_stage"] == "runnable_resave_state_universe"

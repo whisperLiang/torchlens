@@ -706,7 +706,11 @@ class TestCorr25LivePoisonSpine:
 
     def test_lossy_live_output_is_poisoned(self) -> None:
         x = torch.tensor([1.0, 2.0])
-        trace = tl.trace(_LossyLiveModel(), x, capture=_CAPTURE)
+        # The live provider holds only a weakref to the source model; keep a
+        # strong ref for the run (an inline temporary survives only until the
+        # next GC pass, making the test GC-timing-dependent).
+        model = _LossyLiveModel()
+        trace = tl.trace(model, x, capture=_CAPTURE)
         result = trace.run(inputs=x, on_divergence="return_diverged")
         assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
         assert result.report.poisoned is True
@@ -715,7 +719,9 @@ class TestCorr25LivePoisonSpine:
 
     def test_faithful_live_refresh_stays_unpoisoned(self) -> None:
         x = torch.tensor([1.0, 2.0])
-        trace = tl.trace(_FaithfulLiveModel(), x, capture=_CAPTURE)
+        # Strong model ref for the live run; see test_lossy_live_output_is_poisoned.
+        model = _FaithfulLiveModel()
+        trace = tl.trace(model, x, capture=_CAPTURE)
         result = trace.run(inputs=x)
         assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
         assert result.report.poisoned is False
