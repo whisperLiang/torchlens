@@ -1213,6 +1213,7 @@ def _load_trace_payload(
     setattr(trace, "_source_bundle_manifest_sha256", sha256_of_file(manifest_path))
     setattr(trace, "_source_bundle_path", bundle_path)
     setattr(trace, "_source_bundle_created_at", manifest.created_at)
+    setattr(trace, "_source_bundle_provenance", manifest.provenance)
     from .runnable_load import attach_sparse_run_readiness
 
     attach_sparse_run_readiness(trace, sparse_run)
@@ -2514,6 +2515,7 @@ def _scrub_trace_for_bundle(
         "_source_bundle_manifest_sha256",
         "_source_bundle_path",
         "_source_bundle_created_at",
+        "_source_bundle_provenance",
         "payload_load_status",
         "_validation_replay_status",
     ):
@@ -3027,6 +3029,10 @@ def _collect_provenance(trace: Trace) -> Provenance:
     """
 
     from .. import hash as trace_hash
+
+    source_provenance = getattr(trace, "_source_bundle_provenance", None)
+    if isinstance(source_provenance, Provenance):
+        return source_provenance
 
     devices = sorted(
         {

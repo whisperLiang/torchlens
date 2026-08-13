@@ -396,3 +396,17 @@ def test_merged_tree_hash_frames_paths_by_length() -> None:
 
     assert path_size == len(path.encode("utf-8"))
     assert framed[8 : 8 + path_size].decode("utf-8") == path
+
+
+def test_resave_preserves_capture_provenance_certificate(tmp_path: Path) -> None:
+    """Loaded artifact provenance is carried forward instead of re-derived weaker."""
+
+    first_path = tmp_path / "first.tlspec"
+    second_path = tmp_path / "second.tlspec"
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    tl.save(trace, first_path)
+    tl.save(tl.load(first_path), second_path)
+
+    first_manifest = json.loads((first_path / "manifest.json").read_text(encoding="utf-8"))
+    second_manifest = json.loads((second_path / "manifest.json").read_text(encoding="utf-8"))
+    assert second_manifest["provenance"] == first_manifest["provenance"]
