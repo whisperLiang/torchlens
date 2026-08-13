@@ -1206,6 +1206,19 @@ class TestContextFieldValidation:
 
 _COUPLED_WITNESS_EXEC_FILES = (
     "torchlens/_runnable_execution.py",
+    "torchlens/_runnable_attestation.py",
+    "torchlens/_runnable_call_arguments.py",
+    "torchlens/_runnable_call_outputs.py",
+    "torchlens/_runnable_input_aliases.py",
+    "torchlens/_runnable_input_metadata.py",
+    "torchlens/_runnable_input_sites.py",
+    "torchlens/_runnable_output_contracts.py",
+    "torchlens/_runnable_path_faithfulness.py",
+    "torchlens/_runnable_providers.py",
+    "torchlens/_runnable_state_context.py",
+    "torchlens/_runnable_transaction.py",
+    "torchlens/_runnable_verification.py",
+    "torchlens/_runnable_witness_contracts.py",
     "torchlens/_runnable_state.py",
     "torchlens/_io/runnable.py",
     "torchlens/backends/torch/completeness_witness.py",
@@ -1231,7 +1244,10 @@ class TestClassClosureMetaGates:
                 stripped = line.strip()
                 if "RunReport(" not in stripped or stripped.startswith("#"):
                     continue
-                if "return RunReport(" in stripped and path.name == "_runnable_execution.py":
+                if (
+                    "return RunReport(" in stripped
+                    and path.name == "_runnable_path_faithfulness.py"
+                ):
                     continue  # the _run_report finalizer itself
                 if "class RunReport" in stripped or "RunReport(`" in stripped:
                     continue

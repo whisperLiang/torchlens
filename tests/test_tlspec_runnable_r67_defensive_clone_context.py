@@ -30,6 +30,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _runnable_execution, _runnable_state
+from torchlens import _runnable_input_aliases, _runnable_input_metadata
 from torchlens.errors import PathDivergenceError, RunPreconditionError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness, StateSource
@@ -102,7 +103,10 @@ def test_r67_defensive_materialization_source_scan() -> None:
     # (plus the definition and the import) -- a new materialization site must be added
     # here deliberately, and no snapshot path may silently join.
     state_source = inspect.getsource(_runnable_state)
-    execution_source = inspect.getsource(_runnable_execution)
+    execution_source = "\n".join(
+        inspect.getsource(module)
+        for module in (_runnable_input_metadata, _runnable_input_aliases)
+    )
     state_uses = state_source.count(
         f"with _state.pause_logging(), {helper}():"
     ) + state_source.count(f"with {helper}():")

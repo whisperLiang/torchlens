@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from pathlib import Path
 import warnings
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
@@ -1026,9 +1027,14 @@ def test_completeness_witness_functions_have_docstrings() -> None:
         ``completeness_witness.py``.
     """
 
-    module_ast = ast.parse(inspect.getsource(cw))
+    source_paths = [
+        Path(cw.__file__),
+        *sorted(Path(cw.__file__).parent.glob("_completeness_*.py")),
+    ]
+    module_asts = [ast.parse(path.read_text()) for path in source_paths]
     missing = sorted(
         f"{node.lineno}:{node.name}"
+        for module_ast in module_asts
         for node in ast.walk(module_ast)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and ast.get_docstring(node) is None

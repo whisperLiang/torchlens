@@ -635,9 +635,8 @@ def test_single_classifier_owns_qualname_derivation() -> None:
     re-derives uninit nondeterminism from the family predicates and trips this
     tripwire (the r52 raise-vs-not_applicable inconsistency class)."""
 
-    source = (
-        Path(__file__).resolve().parents[1] / "torchlens" / "_runnable_execution.py"
-    ).read_text()
+    package_root = Path(__file__).resolve().parents[1] / "torchlens"
+    source = "\n".join(path.read_text() for path in sorted(package_root.glob("_runnable_*.py")))
     functions = re.split(r"(?m)^def ", source)
     predicates = (
         "qualname_is_uninitialized_alloc(",

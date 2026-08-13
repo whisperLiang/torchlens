@@ -124,6 +124,7 @@ def test_no_hot_path_liveoprecord_construction_or_field_writes() -> None:
     root = Path(__file__).resolve().parents[1]
     hot_files = [
         root / "torchlens/backends/torch/ops.py",
+        *sorted((root / "torchlens/backends/torch").glob("_ops_*.py")),
         root / "torchlens/backends/torch/model_prep.py",
         root / "torchlens/backends/torch/buffer_writes.py",
         root / "torchlens/backends/torch/tensor_tracking.py",

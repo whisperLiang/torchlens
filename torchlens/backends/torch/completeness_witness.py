@@ -34,8 +34,9 @@ records nothing and stays ``verified``. This ONE rule subsumes the r42 hon2_1
 ``pause_logging`` toggle race), and hon2_4 (the string hook) findings.
 """
 
-from __future__ import annotations
+# ruff: noqa: F401
 
+from __future__ import annotations
 import functools
 import inspect
 import sys
@@ -50,12 +51,10 @@ from types import MappingProxyType
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
-
 import torch
 import torch._ops as _torch_ops  # r47 hon2_1: enumerate the ``torch.ops.*`` __call__ classes
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 from torch.utils._python_dispatch import TorchDispatchMode
-
 from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER, tensor_version_or_none
 from ...utils._torch_symbols import torch_attr
 from ...utils._callable_safety import private_c_forward_op_module_names
@@ -76,6 +75,29 @@ from .escape_detection import (
     expected_original_call,
     mark_expected_original_accounted,
 )
+from ..._split_rebind import (
+    rebind_contextmanager as _rebind_contextmanager,
+    rebind_function as _rebind_function,
+)
+from . import _completeness_boundaries as _completeness_boundaries
+from . import _completeness_cross_thread as _completeness_cross_thread
+from . import _completeness_dispatch as _completeness_dispatch
+from . import _completeness_dispatch_names as _completeness_dispatch_names
+from . import _completeness_escape_state as _completeness_escape_state
+from . import _completeness_finalize as _completeness_finalize
+from . import _completeness_metadata as _completeness_metadata
+from . import _completeness_origins as _completeness_origins
+from . import _completeness_patches as _completeness_patches
+from . import _completeness_storage as _completeness_storage
+from ._completeness_types import (
+    AuditedCompletenessBoundary,
+    _DispatchCallsite,
+    _DispatchEvent,
+    _PlainScalarEscapeState,
+    _StorageOriginRegistry,
+    _TensorOriginRegistry,
+    _WitnessState,
+)
 
 CompletenessWitnessMode = Literal["off", "shadow"]
 """Supported dispatcher-witness rollout modes."""
@@ -86,15 +108,6 @@ MAX_AUDITED_COMPLETENESS_BOUNDARIES = 9
 _TORCH_ROOT = Path(torch.__file__).resolve().parent
 _TORCHLENS_ROOT = Path(__file__).resolve().parents[2]
 _FRAMEWORK_FILENAME_VERDICTS: dict[str, bool] = {}
-
-
-@dataclass(frozen=True)
-class AuditedCompletenessBoundary:
-    """One exact wrapper/operator boundary that is intentionally not captured."""
-
-    wrapper_name: str
-    operator: str | None
-    reason: str
 
 
 AUDITED_COMPLETENESS_BOUNDARIES: tuple[AuditedCompletenessBoundary, ...] = (
@@ -161,219 +174,6 @@ _REPLACEMENT_HOOK_FILE = Path(__file__).resolve().parent / "model_prep.py"
 
 _REPLACEMENT_HOOK_FUNC = "wrapped_hook"
 """Torchlens-owned frame name that wraps a raw ``register_forward_hook`` call."""
-
-
-def _in_replacement_hook_frame() -> bool:
-    """Return whether a genuine raw replacement hook is executing above the dispatch.
-
-    A genuine output-replacement ``register_forward_hook`` runs the user hook inside
-    TorchLens's own ``wrapped_hook`` frame (``model_prep._instrumented_forward_hook``).
-    Every aten dispatch emitted while that torchlens-owned frame is live is genuine
-    replacement construction -- either a raw-aten call (unowned) or a python-wrapped
-    call whose op is orphaned out of the final trace because its only consumer is the
-    untraceable replacement tensor. This exact, per-event signal lets the completeness
-    census excuse ONLY the untraceable dispatch attributable to a real replacement
-    while STILL failing on any unrelated silent drop, which fires OUTSIDE a
-    replacement hook.
-
-    Returns
-    -------
-    bool
-        ``True`` only when a torchlens replacement-hook frame is live on the stack.
-    """
-
-    frame: Any = sys._getframe(1)
-    while frame is not None:
-        code = frame.f_code
-        if code.co_name == _REPLACEMENT_HOOK_FUNC:
-            try:
-                if Path(code.co_filename).resolve() == _REPLACEMENT_HOOK_FILE:
-                    return True
-            except (OSError, RuntimeError, ValueError):
-                pass
-        frame = frame.f_back
-    return False
-
-
-def _is_expected_opaque_dispatch(operator: str, owner: ExpectedOriginalToken) -> bool:
-    """Return whether one owned dispatch exactly matches an audited boundary.
-
-    Parameters
-    ----------
-    operator:
-        Stable dispatcher operator name.
-    owner:
-        Exact wrapper token active for the dispatch.
-
-    Returns
-    -------
-    bool
-        ``True`` for an exact wrapper/operator row or a wrapper-wide metadata boundary.
-    """
-
-    return any(
-        row.wrapper_name == owner.wrapper_name
-        and (row.operator is None or row.operator == operator)
-        for row in AUDITED_COMPLETENESS_BOUNDARIES
-    )
-
-
-def completeness_scope_for_wrapper(
-    wrapper_name: str,
-) -> Literal["owned", "expected_opaque"]:
-    """Return the exact audited census scope for a wrapper edge.
-
-    Parameters
-    ----------
-    wrapper_name:
-        Stable wrapper edge name.
-
-    Returns
-    -------
-    Literal["owned", "expected_opaque"]
-        Audited scope; unknown wrappers always remain owned and fail closed.
-    """
-
-    return "expected_opaque" if wrapper_name in _EXPECTED_OPAQUE_WRAPPERS else "owned"
-
-
-@dataclass(frozen=True)
-class _DispatchCallsite:
-    """Stable user-side source location captured at dispatch time."""
-
-    file: str
-    line: int
-    function: str
-
-
-@dataclass
-class _DispatchEvent:
-    """One aten dispatcher event and its exact live wrapper owner, if any.
-
-    r35 I2: every event carries a lifecycle ``outcome`` -- ``started`` (armed),
-    then ``returned_tensor`` / ``returned_host_or_none`` / ``raised`` -- so the
-    runnable ledger can discharge every observed event as an accounted call, an
-    exact witness, an audited opaque boundary, or an explicit incomplete fact.
-    Only safe facts are recorded for a raise: operator, owner identity, and the
-    exception type module+qualname -- never exception objects/messages/tracebacks.
-    """
-
-    operator: str
-    owner: ExpectedOriginalToken | None
-    callsite: _DispatchCallsite | None
-    in_replacement_hook: bool = False
-    mutates: bool = False
-    state_view_accessor: bool = False
-    outcome: str = "started"
-    exception_type: str | None = None
-    contained_view: bool = False
-    """``aten.as_strided`` whose result byte span is contained in its operand's (r37)."""
-    metadata_witnessed: bool = False
-    """r67 C3: a host-returning metadata dispatch (``aten.is_pinned``) whose receiver was
-    positively attributed and recorded by the placement metadata net -- discharged as
-    witnessed (the observed-value ledger / input fact owns it); an UNATTRIBUTED receiver
-    keeps the incomplete fact (fail closed)."""
-
-
-@dataclass
-class _WitnessState:
-    """Per-forward dispatch census state."""
-
-    trace: Any
-    owner_thread_id: int
-    guard_pass_index: int
-    events: list[_DispatchEvent] = field(default_factory=list)
-    callback_ns: int = 0
-    census: bool = True
-    record_escapes: bool = False
-    ledger: bool = False
-    # r43: armed for the entire forward window (SAME lifetime as
-    # ``_observe_invisible_host_escapes``), cleared in its ``finally``. The
-    # non-owner captured-tensor belt gates on THIS flag, never the racy global
-    # ``_state._logging_enabled`` (which the owner flips under ``pause_logging``),
-    # closing the hon2_3 pause-race coin-flip.
-    belt_armed: bool = False
-    # (source_tensor, version_at_escape, byte_snapshot) for each mutable zero-copy alias
-    # (``numpy`` / ``__array__``) handed to the host this forward. Checked for host write-back
-    # at forward end. Strong refs keep the aliased storage alive until the comparison.
-    writeback_watch: list[tuple[torch.Tensor, int | None, torch.Tensor]] = field(
-        default_factory=list
-    )
-    # r67 C3: capture-scoped storage-origin map -- storage handle object ->
-    # ("input", site) | ("state", frozenset[str]) | ("other", None). Populated by the
-    # pre-index (known state/input storages) and by every bridge return; consulted by the
-    # storage accessor wrappers so a handle acquired ANYWHERE this forward attributes its
-    # actual reads. Uses weak keys when torch retains safe untyped-storage wrappers and
-    # identity-keyed strong entries on older torch whose ephemeral storage weakrefs can dangle.
-    # ``None`` until the wrappers arm.
-    storage_origins: "_StorageOriginRegistry | None" = None
-    # r67 C3: lazy ptr -> full state-name-set index (params + buffers, alias groups merged)
-    # backing the origin resolver's pointer fallback. Built once per forward on first use.
-    storage_state_ptr_names: "dict[int, frozenset[str]] | None" = None
-
-
-class _StorageOriginRegistry:
-    """Identity registry for capture-scoped storage-handle origins.
-
-    Parameters
-    ----------
-    weak_keys:
-        Use weak storage keys when the runtime retains a safe untyped-storage wrapper.
-        Otherwise retain handles strongly for this forward so neither dangling weakrefs
-        nor object-id reuse can corrupt attribution.
-    """
-
-    def __init__(self, *, weak_keys: bool) -> None:
-        """Initialize an empty storage-origin registry.
-
-        Parameters
-        ----------
-        weak_keys:
-            Whether storage handles are safe to hold through weak references.
-        """
-
-        self._weak: "weakref.WeakKeyDictionary[Any, tuple[str, Any]] | None" = (
-            weakref.WeakKeyDictionary() if weak_keys else None
-        )
-        self._strong: "dict[int, tuple[Any, tuple[str, Any]]]" = {}
-
-    def get(self, handle: Any) -> "tuple[str, Any] | None":
-        """Return the origin registered for ``handle`` by object identity.
-
-        Parameters
-        ----------
-        handle:
-            Typed or untyped torch storage handle.
-
-        Returns
-        -------
-        tuple[str, Any] | None
-            Registered origin, or ``None`` when the handle is unknown.
-        """
-
-        if self._weak is not None:
-            return self._weak.get(handle)
-        entry = self._strong.get(id(handle))
-        if entry is None or entry[0] is not handle:
-            return None
-        return entry[1]
-
-    def register(self, handle: Any, origin: "tuple[str, Any]") -> None:
-        """Register ``handle`` once without weakening identity guarantees.
-
-        Parameters
-        ----------
-        handle:
-            Typed or untyped torch storage handle.
-        origin:
-            Storage origin classification for the active capture.
-        """
-
-        if self._weak is not None:
-            if self._weak.get(handle) is None:
-                self._weak[handle] = origin
-            return
-        self._strong.setdefault(id(handle), (handle, origin))
 
 
 HOST_ESCAPE_OPERATORS = frozenset(
@@ -833,387 +633,6 @@ _ALIAS_DERIVED_VIEW = "derived_view"
 (a derived view the sparse replay never re-derives) -- fails closed."""
 
 
-def record_runnable_input_storage_sites(
-    trace: Any, tensor_leaves: "list[tuple[torch.Tensor, Any]]"
-) -> None:
-    """Index model-input TENSOR leaves by BASE-storage identity for alias-read witnessing (r31).
-
-    The object-identity map (``_runnable_input_tensor_sites``) misses a metadata read routed
-    through a ``.data`` / ``.detach()`` alias (or any derived view) of an input leaf: the alias
-    is a distinct Python object sharing the leaf's STORAGE but neither the leaf object nor a
-    ``_base``-linked view. This companion map lets :func:`_classify_input_storage_alias`
-    attribute such a read by storage identity + geometry. Storage pointers and geometry are
-    read under the internal-scalar-read marker so the live ``untyped_storage`` / ``data_ptr`` /
-    ``stride`` / ``storage_offset`` patches treat them as TorchLens-internal (no spurious
-    escape record, no fail-closed data_ptr trip). Runs only for runnable captures; stores no
-    tensors.
-    """
-
-    if not tensor_leaves:
-        return
-    # INV-2 annotation (r37): this map keys candidate input-leaf sites by storage
-    # POINTER for attribution-only lookups (a ``.data``/view metadata read resolves
-    # to its leaf). A pointer miss fails CLOSED (no attribution -> the fail-closed
-    # nets keep the run honest), never proves disjointness, so identity keying is
-    # sound without the absolute-interval engine.
-    storage_sites: dict[int, list[Any]] = {}
-    # r73 F1: LABEL-keyed capture-layout map for the input-DERIVED activation layout
-    # net. Input source tensors are logged (and labeled) BEFORE this indexer runs, so
-    # each leaf's raw label resolves an ``OpEvent.input_ancestors`` member back to its
-    # boundary site plus the leaf's capture-time stride tuple -- the layout basis a
-    # derived-intermediate layout read depends on.
-    label_layouts: dict[str, tuple[Any, tuple[int, ...]]] = {}
-    # ``pause_logging`` suppresses OP CAPTURE (``storage_offset`` / ``untyped_storage`` are
-    # torch-function-wrapped and would otherwise be logged as spurious ops, shifting call ids);
-    # ``internal_scalar_read`` marks the reads internal for the escape census / metadata patches.
-    with _state.pause_logging(), internal_scalar_read():
-        for tensor, site in tensor_leaves:
-            try:
-                ptr = tensor.untyped_storage().data_ptr()
-                geometry = (
-                    tuple(tensor.shape),
-                    tuple(int(v) for v in tensor.stride()),
-                    int(tensor.storage_offset()),
-                )
-                # r33 F5: the LEAF's conj/neg dispatch bits. A conj/neg VIEW of an input leaf
-                # shares its storage AND geometry but flips these bits; recording the leaf's
-                # true bits here lets the classifier reject such a same-geometry view instead
-                # of misattributing its ``is_conj``/``is_neg`` read as a leaf fact.
-                conj_neg = (bool(tensor.is_conj()), bool(tensor.is_neg()))
-            except (RuntimeError, AttributeError, TypeError, ValueError, NotImplementedError):
-                continue
-            storage_sites.setdefault(ptr, []).append((site, *geometry, *conj_neg))
-            label = get_tensor_label(tensor)
-            if isinstance(label, str):
-                label_layouts[label] = (site, geometry[1])
-    if storage_sites:
-        _RUNNABLE_INPUT_STORAGE_SITES[trace] = storage_sites
-    if label_layouts:
-        trace._runnable.input_label_layouts = label_layouts
-
-
-def _classify_input_storage_alias(
-    trace: Any, source: torch.Tensor
-) -> "tuple[str | None, Any, tuple[bool, bool] | None]":
-    """Classify ``source`` against the input-leaf storage map (r31, holes A/C).
-
-    Returns ``(_ALIAS_EQUIVALENT, site, leaf_conj_neg)`` when ``source`` shares an input leaf's
-    base storage with IDENTICAL geometry (a ``.data`` / ``.detach()`` alias -- a metadata read on
-    it equals a direct leaf read), ``(_ALIAS_DERIVED_VIEW, site, None)`` when it shares the
-    storage with DIFFERENT geometry (a derived view the replay never re-derives), or
-    ``(None, None, None)`` when it does not alias any input leaf's storage (a genuine unrelated
-    activation). ``leaf_conj_neg`` is the matched leaf's ``(is_conj, is_neg)`` bits so the caller
-    can reject a same-geometry conj/neg view (r33 F5). Storage-pointer/geometry reads run under
-    the internal marker so the live patches stay pass-through and cannot recurse back into
-    observation.
-    """
-
-    storage_sites = _RUNNABLE_INPUT_STORAGE_SITES.get(trace)
-    if not storage_sites:
-        return (None, None, None)
-    # ``pause_logging`` so the ``untyped_storage`` / ``storage_offset`` reads below are not
-    # captured as spurious ops mid-forward; ``internal_scalar_read`` keeps them off the census.
-    with _state.pause_logging(), internal_scalar_read():
-        try:
-            ptr = source.untyped_storage().data_ptr()
-        except (RuntimeError, AttributeError, TypeError, NotImplementedError):
-            return (None, None, None)
-        candidates = storage_sites.get(ptr)
-        if not candidates:
-            return (None, None, None)
-        try:
-            geometry: Any = (
-                tuple(source.shape),
-                tuple(int(v) for v in source.stride()),
-                int(source.storage_offset()),
-            )
-        except (RuntimeError, TypeError, ValueError):
-            geometry = None
-    for site, size, stride, offset, leaf_conj, leaf_neg in candidates:
-        if geometry is not None and geometry == (size, stride, offset):
-            return (_ALIAS_EQUIVALENT, site, (leaf_conj, leaf_neg))
-    return (_ALIAS_DERIVED_VIEW, candidates[0][0], None)
-
-
-def _input_base_tensor(source: torch.Tensor) -> "torch.Tensor | None":
-    """Return ``source._base`` read under the internal marker (r31).
-
-    ``_base`` is a witnessed getset PROPERTY replaced by a recording descriptor during a
-    runnable forward; reading it here for the view-linkage check must go under the
-    internal-scalar-read marker so the recording getter treats it as a TorchLens-internal read
-    (no recursion back into observation).
-    """
-
-    with _state.pause_logging(), internal_scalar_read():
-        try:
-            base = source._base
-        except (RuntimeError, AttributeError):
-            return None
-    return base if isinstance(base, torch.Tensor) else None
-
-
-def _record_input_metadata_read_at_site(trace: Any, site: Any, name: str, value: Any) -> None:
-    """Record one metadata-read fact against a resolved MODEL-INPUT leaf site.
-
-    Facts accumulate per input site into a runtime-only Trace stash the runnable producer
-    serializes as declared witness facts. A repeated read of the same predicate overwrites --
-    tensor metadata is stable across one forward, so the values are identical unless an in-place
-    layout change occurred, in which case the LAST observed value is the one nearest the branch.
-    """
-
-    facts = trace._runnable.input_metadata_reads
-    site_facts = facts.setdefault(site, {})
-    site_facts[name] = value
-
-
-def _record_input_metadata_read(trace: Any, source: torch.Tensor, name: str, value: Any) -> None:
-    """Record one metadata-read fact against the model-input leaf that IS ``source`` (by identity).
-
-    The receiver is attributed via the object-identity map recorded at capture start
-    (``_record_runnable_input_tensor_sites``); a read on any other tensor records nothing here
-    (storage-alias attribution is handled by :func:`_observe_input_metadata_read`).
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if not sites:
-        return
-    site = sites.get(id(source))
-    if site is None:
-        return
-    _record_input_metadata_read_at_site(trace, site, name, value)
-
-
-def _observe_input_metadata_read(trace: Any, source: torch.Tensor, name: str, value: Any) -> None:
-    """Attribute one metadata read to a model-input leaf, an alias, or a fail-closed view (r31).
-
-    Cases, in order:
-
-    * The receiver IS a model-input leaf (object identity) -> record a re-checkable
-      (site, predicate, value) fact.
-    * LEAF-ONLY AUTOGRAD (``requires_grad`` / ``grad_fn``): TorchLens's own per-op bookkeeping
-      reads these on input-derived views while logging is enabled (verified), indistinguishable
-      from a user view read, so a non-leaf read is IGNORED (leaf-only; documented residual).
-    * VIEW-FAIL AUTOGRAD / structural (``is_leaf`` / ``retains_grad`` / ``_base`` / ``_is_view``):
-      a read on a DERIVED VIEW of an input leaf (``retains_grad`` on a non-leaf view, r31 hole C)
-      is attributed by the CHEAP ``_base``-in-sites linkage and fails closed -- the view's state
-      is not re-derivable from the runtime leaf. A ``.data`` / ``.detach()`` storage-alias
-      (``_base`` None) is IGNORED (CONSTANT/detached, input-independent, no hole). These four are
-      NEVER read internally on an input view (verified), so a ``_base`` match is a genuine user
-      Python view read -- the framework-vs-user discriminator is the linkage itself.
-    * ALIAS-SAFE family (layout methods + ``is_conj`` / ``is_neg`` / ``is_inference`` /
-      ``is_pinned`` / ``is_shared`` / ``is_coalesced``): attributed by STORAGE IDENTITY. A read
-      on a ``.data`` / ``.detach()`` storage-alias with IDENTICAL geometry (r31 hole A) records
-      the leaf fact -- its value provably equals a direct leaf read. A storage-alias with
-      DIFFERENT geometry (a derived view, ``x.t().is_contiguous()``) fails closed. Only
-      Python-level reads reach this patch; torch's internal C++ layout reads bypass it, so a
-      layout-oblivious model records nothing.
-    * Anything else (a genuinely new activation not aliasing an input) -> ignore.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if not sites:
-        return
-    if id(source) in sites:
-        _record_input_metadata_read(trace, source, name, value)
-        return
-    if name in _INPUT_METADATA_LEAF_ONLY_AUTOGRAD_NAMES:
-        # ``requires_grad`` / ``grad_fn`` are read by TorchLens's own per-op bookkeeping on
-        # input-derived views; witnessed on the LEAF only (see the set docstring).
-        return
-    if name in _INPUT_METADATA_VIEW_FAIL_AUTOGRAD_NAMES:
-        base = _input_base_tensor(source)
-        if base is not None and id(base) in sites:
-            _INPUT_METADATA_VIEW_READ.add(trace)
-        return
-    if name in _INPUT_METADATA_ALIAS_SAFE_NAMES:
-        kind, site, leaf_conj_neg = _classify_input_storage_alias(trace, source)
-        if kind == _ALIAS_EQUIVALENT:
-            # r33 F5 (over-trigger fix): a conj/neg VIEW shares an input leaf's storage AND
-            # geometry but FLIPS the conj/neg dispatch bit. Geometry alone would record the
-            # view's ``is_conj=True`` as a LEAF fact, which the RAW runtime leaf (``is_conj``
-            # False) then contradicts -> a forced FALSE divergence on the ORIGINAL input
-            # (complex models permanently diverged, r31 regression). For ``is_conj``/``is_neg``
-            # the observed bit must EQUAL the leaf's; a same-geometry bit MISMATCH is a genuine
-            # derived (conj/neg) view and fails closed rather than misrecording a leaf fact.
-            if name in _INPUT_METADATA_CONJ_NEG_NAMES and leaf_conj_neg is not None:
-                leaf_bit = leaf_conj_neg[0] if name == "is_conj" else leaf_conj_neg[1]
-                if bool(value) != bool(leaf_bit):
-                    _INPUT_METADATA_VIEW_READ.add(trace)
-                    return
-            _record_input_metadata_read_at_site(trace, site, name, value)
-        elif kind == _ALIAS_DERIVED_VIEW:
-            _INPUT_METADATA_VIEW_READ.add(trace)
-        else:
-            base = _input_base_tensor(source)
-            if base is not None and id(base) in sites:
-                _INPUT_METADATA_VIEW_READ.add(trace)
-            elif name in _INPUT_METADATA_LAYOUT_NAMES:
-                # r73 F1: a layout read on a genuinely NEW activation (fresh storage,
-                # no input alias/view linkage). Memory format PROPAGATES through
-                # elementwise ops, so if the receiver's value DAG roots at a model
-                # input, the read steers on the runtime input's layout -- attribute
-                # by traced ancestry (see ``INPUT_DERIVED_LAYOUT_FACT_NAME``).
-                _observe_input_derived_layout_read(trace, source)
-
-
-def _observe_input_derived_layout_read(trace: Any, source: torch.Tensor) -> None:
-    """Attribute a layout read on an INPUT-DERIVED activation to its rooting input(s) (r73 F1).
-
-    Called only from the layout-trio fall-through of :func:`_observe_input_metadata_read`
-    (receiver already proven NOT an input leaf, storage alias, or ``_base``-linked view).
-    Resolution is bookkeeping only -- label/ledger/live-index lookups plus a wrapper-free
-    storage-pointer read under the internal marker -- so it can never recurse back into the
-    metadata patches.
-
-    COVERAGE NOTE (r75 F1, LOCKED): any unlabeled-or-unresolvable-receiver layout consumer
-    in this fall-through MUST FAIL CLOSED -- a silent no-record here is exactly the r74
-    ``.data``-alias false-VERIFIED reopening. The r73 version fail-OPENED on three rungs
-    (label ``None``, event ``None``, empty ``input_ancestors``); each now either resolves
-    POSITIVELY or downgrades completeness through ``_INPUT_METADATA_VIEW_READ`` (the same
-    presence-only weak set the sibling escape nets use for this receiver class).
-
-    Resolution ladder (:func:`_resolve_layout_rooting_labels`), then per rooting label:
-
-    * ANCESTRY-INTEGRITY check (:func:`_layout_ancestry_tainted`): the rooting event's
-      transitive parent chain must contain NO op with ``unattributed_tensor_args`` -- an
-      unattributed tensor arg (a ``.data``-style unlabeled alias consumed by a logged op)
-      is precisely where traced ancestry BREAKS, so recorded ``input_ancestors`` are a
-      lower bound, not the truth. A tainted labeled receiver is re-resolved through the
-      dispatch-origin ledger's LEAF origins (value-DAG-true through the break); an
-      unresolvable taint fails closed.
-    * Non-empty resolved input ancestry -> record :data:`INPUT_DERIVED_LAYOUT_FACT_NAME`
-      -- carrying the rooting LEAF's capture-time stride tuple -- on each ancestor input's
-      boundary site. An ancestor missing from the capture-layout map cannot pin a
-      comparison basis, so the fact is recorded on EVERY mapped site instead (fail closed:
-      the ceiling then keys on any input layout change).
-    * Empty resolved input ancestry with a CLEAN chain (or positive state/literal-only
-      ledger origins) -> genuinely state/internal-rooted: record nothing (contract
-      residual (3)'s STATE side stays untouched). Empty because ancestry ORPHANED is
-      unreachable here -- orphaned receivers are re-resolved or fail closed above.
-    """
-
-    layouts = trace._runnable.input_label_layouts
-    capture_events = getattr(trace, "capture_events", None)
-    live_index = getattr(capture_events, "live_index", None)
-    by_raw_label = getattr(live_index, "by_raw_label", None)
-    if not layouts or by_raw_label is None:
-        # Inputs exist (the object-identity map gated the caller) but no layout basis /
-        # live index is available to attribute against: fail closed, never silent.
-        _INPUT_METADATA_VIEW_READ.add(trace)
-        return
-    rooting_labels = _resolve_layout_rooting_labels(trace, by_raw_label, source)
-    if rooting_labels is None:
-        _INPUT_METADATA_VIEW_READ.add(trace)
-        return
-    ancestors: set[str] = set()
-    for rooting_label in rooting_labels:
-        event = by_raw_label.get(rooting_label)
-        if event is None or _layout_ancestry_tainted(trace, by_raw_label, rooting_label):
-            _INPUT_METADATA_VIEW_READ.add(trace)
-            return
-        ancestors.update(getattr(event, "input_ancestors", None) or ())
-    if not ancestors:
-        # Every rooting event is chain-clean with no input ancestry: positively
-        # state/internal-rooted (residual (3)) or a literal-only deterministic chain
-        # whose layout replays identically. Record nothing.
-        return
-    if all(ancestor in layouts for ancestor in ancestors):
-        targets = [layouts[ancestor] for ancestor in ancestors]
-    else:
-        targets = list(layouts.values())
-    for site, leaf_stride in targets:
-        _record_input_metadata_read_at_site(
-            trace, site, INPUT_DERIVED_LAYOUT_FACT_NAME, tuple(int(v) for v in leaf_stride)
-        )
-
-
-def _resolve_layout_rooting_labels(
-    trace: Any, by_raw_label: "Mapping[str, Any]", source: torch.Tensor
-) -> "set[str] | None":
-    """Resolve a layout-read receiver to the raw labels its VALUE roots through (r75 F1).
-
-    Ladder, first positive resolution wins; ``None`` means the caller MUST fail closed:
-
-    * OWN LABEL (or the ``_base`` fallback for an unlogged view of a logged activation),
-      accepted only when its traced ancestry is INTACT (:func:`_layout_ancestry_tainted`).
-    * DISPATCH-ORIGIN LEDGER leaf origins (r37 mechanism A): an unlabeled ``.data``-style
-      alias -- or a labeled receiver whose traced ancestry broke at one -- carries a
-      positive record of the terminal leaves its value derives from. ``rng`` / ``uninit``
-      taints fail closed (layout attribution through nondeterminism would launder it);
-      ``unknown`` falls through to the storage rung. A pure ``state:``/empty leaf set
-      resolves to ZERO labels -- a positive state-rooted/literal-only signal the caller
-      maps to "record nothing" (residual (3)), never a silent fail-open. r29 F1: that
-      positive reading is honored only for an UNLABELED receiver; a labeled receiver
-      that reached this rung through a TAINTED rung 1 fails closed instead (its
-      identity-keyed ledger entry may predate the taint event), and a receiver whose
-      current label is a storage-rebind BARRIER resolves ``unknown`` at the ledger
-      itself (:func:`_operand_leaf_origins`).
-    * STORAGE IDENTITY (r31 leaf / r63 state precedent): the receiver's true-original
-      storage pointer matched against live captured producer tensors
-      (``_CAPTURED_STORAGE_PTRS``) -- an alias mechanism the dispatch interpose never saw
-      still resolves to the logged activation whose bytes it shares.
-    """
-
-    label = get_tensor_label(source)
-    if label is None:
-        base = _input_base_tensor(source)
-        label = get_tensor_label(base) if base is not None else None
-    if label is not None and not _layout_ancestry_tainted(trace, by_raw_label, label):
-        return {label}
-    with _state.pause_logging(), internal_scalar_read():
-        leaf_origins = _operand_leaf_origins(trace, source)
-    if _ORIGIN_RNG in leaf_origins or _ORIGIN_UNINIT in leaf_origins:
-        return None
-    if _ORIGIN_UNKNOWN not in leaf_origins:
-        rooting = {
-            origin[len(_ORIGIN_LABEL_PREFIX) :]
-            for origin in leaf_origins
-            if origin.startswith(_ORIGIN_LABEL_PREFIX)
-        }
-        if not rooting and label is not None:
-            # r29 F1 (defense in depth): the receiver HAS a label but its traced
-            # ancestry is TAINTED, and the ledger resolved a pure-``state:``/
-            # literal (empty-label) basis. The identity-keyed ledger entry may
-            # predate the taint event (a non-dispatch mutation of the same
-            # object), so "positively state-rooted" cannot be trusted here --
-            # returning the empty set would fail OPEN in the caller (record
-            # nothing). Only an UNLABELED receiver's ledger resolution, or a
-            # clean-chain rung-1 label, may positively claim state rooting.
-            return None
-        return rooting
-    if label is None:
-        return _layout_storage_rooting_labels(trace, source)
-    return None
-
-
-def _layout_storage_rooting_labels(trace: Any, source: torch.Tensor) -> "set[str] | None":
-    """Resolve an unlabeled receiver to live captured producers by STORAGE IDENTITY (r75 F1).
-
-    Liveness-verified exactly like the r43 cross-thread belt: a pointer matches only while
-    a captured producing tensor is still alive AND still occupies that address, so a freed-
-    then-reused allocation can never misattribute. Pointer reads use the wrapper-free
-    true-original accessors under the internal marker (no observer recursion). ``None`` --
-    no live labeled producer shares the receiver's storage -- means the caller fails closed.
-    """
-
-    captured = _CAPTURED_STORAGE_PTRS.get(trace)
-    if not captured:
-        return None
-    with _state.pause_logging(), internal_scalar_read():
-        ptr = _raw_storage_ptr_no_observe(source)
-    if ptr is None:
-        return None
-    labels: set[str] = set()
-    for producer_ref in captured.get(ptr, ()):
-        producer = producer_ref()
-        if producer is None or _raw_storage_ptr_no_observe(producer) != ptr:
-            continue
-        producer_label = get_tensor_label(producer)
-        if isinstance(producer_label, str):
-            labels.add(producer_label)
-    return labels or None
-
-
 _LAYOUT_ANCESTRY_CLEAN: "weakref.WeakKeyDictionary[Any, set[str]]" = weakref.WeakKeyDictionary()
 """Per-trace memo of raw labels whose ENTIRE traced ancestry is attribution-intact (r75 F1).
 
@@ -1240,143 +659,6 @@ for layout/witness attribution exactly as the pre-M6 unattributed break did:
 y.view(...)``) is never registered here, so honest same-storage siblings keep
 their attribution (r85) and input-strided same-storage rebinds keep honest
 divergence semantics (hon1 V6)."""
-
-
-def record_storage_rebind_barrier(trace: Any, raw_label: str) -> None:
-    """Register one storage-swapping rebind op label as an ancestry barrier.
-
-    Parameters
-    ----------
-    trace:
-        Active capture Trace.
-    raw_label:
-        The rebind op's raw capture label (e.g. ``"data_1_3_raw"``).
-    """
-
-    labels = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
-    if labels is None:
-        labels = set()
-        _STORAGE_REBIND_BARRIER_LABELS[trace] = labels
-    labels.add(raw_label)
-
-
-def storage_rebind_barrier_labels(trace: Any) -> frozenset[str]:
-    """Return the storage-swapping rebind barrier labels recorded for one trace."""
-
-    labels = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", label: str) -> bool:
-    """Return whether a logged event's transitive traced ancestry is BROKEN (r75 F1).
-
-    ``OpEvent.input_ancestors`` unions only LABELED parents, so an op that consumed an
-    unlabeled tensor arg (``unattributed_tensor_args`` non-empty -- the ``.data`` alias, a
-    laundered raw-dispatch product) truncates ancestry SILENTLY: everything downstream
-    inherits the truncated set. Any such op anywhere in the parent DAG -- including the
-    event itself, an orphaned parentless root (``(y.data * 1.0)``), or a MIXED op with both
-    labeled parents and an unattributed arg (``torch.cat([y1, y.data])``) -- makes the
-    recorded ``input_ancestors`` a lower bound, so a layout consumer must not trust them.
-    An unresolvable parent label also counts as tainted (fail closed on observer
-    uncertainty). Pure event-field bookkeeping: no tensor method calls, no recursion into
-    the metadata patches.
-    """
-
-    clean = _LAYOUT_ANCESTRY_CLEAN.get(trace)
-    if clean is None:
-        clean = set()
-        _LAYOUT_ANCESTRY_CLEAN[trace] = clean
-    if label in clean:
-        return False
-    rebind_barriers = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
-    stack = [label]
-    visited: set[str] = set()
-    while stack:
-        current = stack.pop()
-        if current in visited or current in clean:
-            continue
-        visited.add(current)
-        event = by_raw_label.get(current)
-        if event is None:
-            return True
-        if getattr(event, "unattributed_tensor_args", None):
-            return True
-        # r28 reconcile: a storage-SWAPPING ``.data=`` rebind op is an ancestry
-        # barrier -- the r79/r81 belt posture never attributes verdict-steering
-        # facts across a storage-pointer swap, even though the capture graph
-        # honestly threads the rebind's consumers to its RHS producer.
-        if rebind_barriers and current in rebind_barriers:
-            return True
-        stack.extend(edge.parent_label_raw for edge in (getattr(event, "parents", None) or ()))
-    clean.update(visited)
-    return False
-
-
-def _state_derived_addresses(trace: Any, source: torch.Tensor) -> set[str]:
-    """Resolve ``source`` to the registered-state addresses whose storage it aliases (r63 C1).
-
-    Positive-attribution ladder, first hit wins: the buffer meta address stamped at forward
-    start (a DIRECT registered-buffer receiver; model inputs carry a label but never an
-    address, so an input can never resolve here); the forward-start param storage index
-    (``self.w`` and any ``.data`` / view / detach alias of it); the forward-start buffer
-    storage index (the ``.data`` / view alias twin for buffers). A miss returns empty --
-    an activation receiver records nothing (its geometry is recomputed by the replayed DAG).
-
-    r81: the direct-stamp rung requires the SESSION-VALIDATED stamp (current-session
-    object + live storage identity); a stale or ``.data``-rebound stamp falls through
-    to the storage-index rungs, which are anchored on live registered storage.
-    """
-
-    address = session_validated_buffer_address(trace, source)
-    if address is not None:
-        return {str(address)}
-    addresses = _param_derived_addresses(trace, source)
-    if addresses:
-        return addresses
-    buffer_storage_addresses = getattr(trace, "_buffer_storage_addresses", None)
-    if buffer_storage_addresses:
-        ptr = _escape_storage_ptr(source)
-        if ptr is not None and ptr in buffer_storage_addresses:
-            return {str(buffer_storage_addresses[ptr])}
-    return set()
-
-
-def _observe_state_metadata_read(trace: Any, source: torch.Tensor, read_kind: str) -> None:
-    """Attribute one PHYSICAL-metadata read on registered state as a state escape (r63 C1).
-
-    Closes the four r62/r63 attribution gaps: ``is_contiguous`` / ``stride`` /
-    ``storage_offset`` / ``is_conj`` (+ the ``is_neg`` lazy-bit sibling) on a registered
-    param/buffer previously routed ONLY through the model-input observer, which ignores
-    state -- so a model branching on ``self.weight.is_contiguous()`` produced no witness and
-    the transport-normalized replay reported a false ``verified``. A resolved read now:
-
-    * joins ``_HOST_ESCAPE_STATE_SOURCE_NAMES`` -- the slot is digest-witnessed by PASS A
-      (``unbound_state_escape:<name>`` fact; changed staged state -> ``unverifiable``),
-      exactly like a ``self.threshold.item()`` value read; and
-    * records its READ KIND in the per-slot metadata ledger consumed by the escape-gated
-      producer preflight (a read dim that was non-canonical at capture refuses the save;
-      an unread non-canonical slot -- the channels-last population -- stays saveable).
-
-    A model-input leaf receiver is the input nets' domain and is skipped; an unresolvable
-    receiver (an activation) records nothing here.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if sites and id(source) in sites:
-        return
-    addresses = _state_derived_addresses(trace, source)
-    if not addresses:
-        return
-    _record_state_metadata_read(trace, addresses, read_kind)
-
-
-def host_escape_state_metadata_reads(trace: Any) -> dict[str, frozenset[str]]:
-    """Return the per-state-name PHYSICAL-metadata read kinds witnessed for one trace."""
-
-    reads = _HOST_ESCAPE_STATE_METADATA_READS.get(trace)
-    if not reads:
-        return {}
-    return {name: frozenset(kinds) for name, kinds in reads.items()}
 
 
 # --- r65 Cluster X: THE authoritative state-metadata accessor mirror ------------------------
@@ -1521,97 +803,6 @@ recorded ``requires_grad`` bit (``grad_fn`` presence True refuses at save: no st
 carry a grad_fn). Kept weak-keyed off the schema."""
 
 
-def _state_direct_address(trace: Any, source: torch.Tensor) -> "str | None":
-    """Resolve ``source`` to a state address ONLY when it IS the registered object (r65).
-
-    The DIRECT-receiver discriminator for the autograd/structural family
-    (``_STATE_METADATA_DIRECT_ONLY_NAMES``): a registered buffer carries the buffer meta
-    address stamped at forward start (a ``.data``/view alias carries none), and a registered
-    parameter is an exact-type ``nn.Parameter`` object (op outputs and ``.data``/``detach()``
-    aliases are plain ``Tensor``s -- torch ops never construct ``nn.Parameter`` results, so
-    exact-type + param-storage membership identifies the registered object; an op that
-    returns the parameter ITSELF, e.g. an already-contiguous ``w.contiguous()``, is the same
-    object and attributes correctly). A miss returns ``None`` -- the read is the documented
-    alias/view residual, never misattributed.
-
-    r81: "IS the registered object" is enforced with the session belt (current-session
-    stamp + live storage identity), never the raw static stamp.
-    """
-
-    address = session_validated_buffer_address(trace, source)
-    if address is not None:
-        return str(address)
-    if type(source) is torch.nn.Parameter:
-        addresses = _param_derived_addresses(trace, source)
-        if addresses:
-            # r67 C6: the former ``len(addresses) == 1`` restriction silently DROPPED a
-            # tied parameter's direct read. Any resolved membership attributes; the
-            # recording layer fans out to the complete r37 alias group.
-            return next(iter(sorted(addresses)))
-    return None
-
-
-def _observe_state_metadata_read_direct(trace: Any, source: torch.Tensor, read_kind: str) -> None:
-    """Attribute one DIRECT-receiver-only metadata read on registered state (r65).
-
-    The autograd/structural twin of :func:`_observe_state_metadata_read`: joins the same
-    escape-source and read-kind ledgers, but ONLY when the receiver is the registered object
-    itself (see :func:`_state_direct_address`). An alias/view receiver records nothing (the
-    documented residual); an input-leaf receiver is the input nets' domain and is skipped.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if sites and id(source) in sites:
-        return
-    address = _state_direct_address(trace, source)
-    if address is None:
-        return
-    _record_state_metadata_read(trace, {address}, read_kind)
-
-
-def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str]":
-    """Fan resolved state addresses out to their COMPLETE r37 alias groups (r67 C6).
-
-    A direct read on ONE canonical name of a tied parameter / double-registered buffer is a
-    read of the shared allocation: every name in the identity-tied alias group carries the
-    fact. The r37 topology snapshot (``groups``: name -> group id) is the authority; a trace
-    without one keeps the resolved set unchanged (fail-safe: no expansion, the resolved
-    address still records).
-    """
-
-    if not addresses:
-        return addresses
-    topology = trace._runnable.state_alias_topology
-    groups = topology.get("groups") if isinstance(topology, Mapping) else None
-    if not isinstance(groups, Mapping) or not groups:
-        return addresses
-    group_ids = {groups[name] for name in addresses if name in groups}
-    if not group_ids:
-        return addresses
-    return addresses | {str(name) for name, group_id in groups.items() if group_id in group_ids}
-
-
-def _record_state_metadata_read(trace: Any, addresses: "set[str]", read_kind: str) -> None:
-    """Join resolved state addresses into the escape-source + read-kind ledgers (r63/r65).
-
-    r67 C6: fans out to the complete alias group -- a tied-parameter direct read marks
-    every canonical name sharing the allocation.
-    """
-
-    addresses = _expand_state_alias_addresses(trace, addresses)
-    state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-    if state_names is None:
-        state_names = set()
-        _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
-    state_names |= addresses
-    reads = _HOST_ESCAPE_STATE_METADATA_READS.get(trace)
-    if reads is None:
-        reads = {}
-        _HOST_ESCAPE_STATE_METADATA_READS[trace] = reads
-    for address in addresses:
-        reads.setdefault(address, set()).add(read_kind)
-
-
 _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS: "weakref.WeakKeyDictionary[Any, dict[str, dict[str, bool | None]]]" = weakref.WeakKeyDictionary()
 """Per-trace ledger of the ACTUAL values returned by placement accessor calls on state (r67 C3).
 
@@ -1625,312 +816,12 @@ off the schema like its read-kind sibling.
 """
 
 
-def _record_state_metadata_observation(
-    trace: Any, addresses: "set[str]", read_kind: str, observed: "bool | None"
-) -> None:
-    """Record one placement accessor's ACTUAL return against its state alias group (r67 C3)."""
-
-    _record_state_metadata_read(trace, addresses, read_kind)
-    addresses = _expand_state_alias_addresses(trace, addresses)
-    observations = _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS.get(trace)
-    if observations is None:
-        observations = {}
-        _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS[trace] = observations
-    for address in addresses:
-        slot = observations.setdefault(address, {})
-        if read_kind in slot and slot[read_kind] != observed:
-            slot[read_kind] = None  # disagreeing observations: unknown, fail closed
-        else:
-            slot[read_kind] = observed
-
-
-def host_escape_state_metadata_observations(trace: Any) -> dict[str, dict[str, "bool | None"]]:
-    """Return the per-state-name OBSERVED placement accessor returns for one trace (r67 C3)."""
-
-    observations = _HOST_ESCAPE_STATE_METADATA_OBSERVATIONS.get(trace)
-    if not observations:
-        return {}
-    return {name: dict(values) for name, values in observations.items()}
-
-
 _STATE_METADATA_PLACEMENT_OBSERVED_NAMES = frozenset({"is_shared", "is_pinned"})
 """Accessor names whose STATE reads are OBSERVED-VALUE read kinds (r67 C3): the producer
 predicate compares the user's one actual return against the device-defined staged/oracle
 value -- never a TorchLens speculative re-read, never an accelerator-initialization
 inference (free-F4: the CUDA-init proof-by-absence stamped canonical False on genuinely
 pinned XPU/MPS/externally-registered memory)."""
-
-
-def _observe_state_placement_read(
-    trace: Any, source: torch.Tensor, name: str, observed: "bool | None"
-) -> None:
-    """Attribute one placement accessor's ACTUAL return on a state receiver (r67 C3).
-
-    Same storage-identity attribution family as :func:`_observe_state_metadata_read`
-    (placement is a pure function of the slot's storage), with the observed value carried
-    into the observation ledger. ``None`` means the accessor raised or was arg-directed:
-    unknown, the producer refuses. Input-leaf receivers are the input nets' domain;
-    unrelated receivers record nothing.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if sites and id(source) in sites:
-        return
-    addresses = _state_derived_addresses(trace, source)
-    if not addresses:
-        return
-    _record_state_metadata_observation(trace, addresses, STATE_METADATA_MIRROR[name][1], observed)
-
-
-def _placement_read_witnessed(trace: Any, source: torch.Tensor) -> bool:
-    """Return whether a placement accessor's receiver is positively attributed (r67 C3).
-
-    True for a model-input leaf (fact recorded / alias-safe path), an input storage alias
-    (fact recorded, or derived-view fail-closed downgrade -- both honest), or a resolved
-    state receiver (observation recorded). False for an unrelated/unattributable receiver:
-    the census ledger fact then stands and the capture stays fail-closed.
-    """
-
-    sites = trace._runnable.input_tensor_sites or {}
-    if id(source) in sites:
-        return True
-    if _state_derived_addresses(trace, source):
-        return True
-    kind, _site, _leaf_conj_neg = _classify_input_storage_alias(trace, source)
-    return kind is not None
-
-
-def _discharge_placement_dispatch(state: "_WitnessState", base_operator: str) -> None:
-    """Mark the most recent matching host-return census event as metadata-witnessed."""
-
-    for event in reversed(state.events):
-        if (
-            event.outcome == "returned_host_or_none"
-            and not event.metadata_witnessed
-            and (event.operator == base_operator or event.operator.startswith(base_operator + "."))
-        ):
-            event.metadata_witnessed = True
-            return
-
-
-def _observe_state_metadata_fact(
-    trace: Any, source: torch.Tensor, fact_name: str, fact_value: bool
-) -> None:
-    """Record one DECLARED-STATE fact for a DIRECT registered param/buffer receiver (r65 F-1).
-
-    ``requires_grad`` records its bool value; ``grad_fn`` records presence. The fact ledger is
-    separate from the escape machinery by design (see ``_STATE_METADATA_FACTS``): recording is
-    idempotent-by-value for a stable bit, a repeated read overwrites with the latest observed
-    value, and a spurious TorchLens-internal read (should one survive the source markers)
-    records the true current bit, which staging reproduces -- harmless by construction.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if sites and id(source) in sites:
-        return
-    address = _state_direct_address(trace, source)
-    if address is None:
-        return
-    facts = _STATE_METADATA_FACTS.get(trace)
-    if facts is None:
-        facts = {}
-        _STATE_METADATA_FACTS[trace] = facts
-    # r67 C6: a tied slot's declared fact belongs to every canonical name sharing the
-    # allocation (one allocation, one autograd bit).
-    for name in _expand_state_alias_addresses(trace, {address}):
-        facts.setdefault(name, {})[fact_name] = bool(fact_value)
-
-
-def host_escape_state_metadata_facts(trace: Any) -> dict[str, dict[str, bool]]:
-    """Return the per-state-name DECLARED-STATE metadata facts witnessed for one trace."""
-
-    facts = _STATE_METADATA_FACTS.get(trace)
-    if not facts:
-        return {}
-    return {name: dict(values) for name, values in facts.items()}
-
-
-def _observe_state_property_read(trace: Any, source: torch.Tensor, name: str, value: Any) -> None:
-    """Dispatch one getset-PROPERTY read on a state receiver through the mirror (r65).
-
-    The property wrapper's state branch (the r64 gap: it had NONE): ``requires_grad`` /
-    ``grad_fn`` route to the declared-fact ledger; every other property routes to the
-    escape-gated read-kind ledger. All property names are autograd-family, so attribution is
-    DIRECT-receiver-only throughout; a non-state receiver records nothing.
-    """
-
-    route = STATE_METADATA_MIRROR.get(name)
-    if route is None:
-        return
-    route_kind, detail = route
-    if route_kind == _STATE_ROUTE_DECLARED_FACT:
-        if name in _INPUT_METADATA_PRESENCE_PROPERTY_NAMES:
-            fact_value = value is not None
-        else:
-            fact_value = bool(value)
-        _observe_state_metadata_fact(trace, source, detail, fact_value)
-    elif route_kind == _STATE_ROUTE_READ_KIND:
-        _observe_state_metadata_read_direct(trace, source, detail)
-
-
-def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any]":
-    """Classify a storage-bridge RECEIVER tensor as input-site / state-group / other (r67 C3).
-
-    Storage-level facts (byte count, sharing, pinning) are pure functions of the BASE storage,
-    invariant across every view/alias, so ANY input-storage-aliasing receiver (the leaf, a
-    ``.data``/``.detach()`` alias, a derived view) attributes to the leaf site, and any
-    state-storage-aliasing receiver attributes to the COMPLETE r37 alias group. An unrelated
-    receiver (a genuine activation) is ``("other", None)`` -- its storage geometry is
-    re-derived by the replayed DAG, so reads on it record nothing.
-    """
-
-    sites = trace._runnable.input_tensor_sites
-    if sites:
-        site = sites.get(id(source))
-        if site is not None:
-            return ("input", site)
-        kind, aliased_site, _leaf_conj_neg = _classify_input_storage_alias(trace, source)
-        if kind is not None:
-            return ("input", aliased_site)
-    addresses = _state_derived_addresses(trace, source)
-    if addresses:
-        return ("state", frozenset(_expand_state_alias_addresses(trace, addresses)))
-    return ("other", None)
-
-
-def _register_storage_handle_origin(
-    state: "_WitnessState", storage: Any, origin: "tuple[str, Any]"
-) -> None:
-    """Register one storage handle (and a typed handle's untyped backing) in the origin map."""
-
-    origins = state.storage_origins
-    if origins is None or storage is None:
-        return
-    for handle in (storage, getattr(storage, "_untyped_storage", None)):
-        if handle is None:
-            continue
-        try:
-            origins.register(handle, origin)
-        except TypeError:
-            # Unhashable/unweakrefable exotic handle: the pointer fallback still resolves
-            # it, and an unresolvable accessor fails closed -- never silently unrecorded.
-            continue
-
-
-def _register_storage_origin(state: "_WitnessState", source: torch.Tensor, storage: Any) -> None:
-    """Attribute one bridge-returned storage handle at ACQUISITION time (r67 C3/C6).
-
-    Acquisition records ORIGIN (+ the caller's existing writeback watch) ONLY -- no read
-    kind, no geometry fact, no input fact: a discarded handle is not an observation
-    (corr1-4). The actual accessor call on the handle records through
-    ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``.
-    """
-
-    with _state.pause_logging(), internal_scalar_read():
-        _register_storage_handle_origin(
-            state, storage, _tensor_receiver_origin(state.trace, source)
-        )
-
-
-def _lazy_storage_state_ptr_names(state: "_WitnessState") -> "dict[int, frozenset[str]]":
-    """Build (once per forward) the ptr -> full state-name-set fallback index (r67 C3).
-
-    Covers handles acquired BEFORE the accessor wrappers armed (a pre-forward
-    ``model.w.untyped_storage()`` held by the caller): live registered param/buffer storage
-    pointers are stable for the forward's duration (the model holds them), so pointer
-    identity is a sound attribution key here; a miss falls through to the input pointer
-    index and then fails closed as unattributable.
-    """
-
-    cached = state.storage_state_ptr_names
-    if cached is not None:
-        return cached
-    trace = state.trace
-    merged: dict[int, set[str]] = {}
-    for attribute in ("_param_storage_addresses", "_buffer_storage_addresses"):
-        table = getattr(trace, attribute, None)
-        if isinstance(table, dict):
-            for ptr, address in table.items():
-                try:
-                    merged.setdefault(int(ptr), set()).add(str(address))
-                except (TypeError, ValueError):
-                    continue
-    index = {
-        ptr: frozenset(_expand_state_alias_addresses(trace, names)) for ptr, names in merged.items()
-    }
-    state.storage_state_ptr_names = index
-    return index
-
-
-def _resolve_storage_origin(state: "_WitnessState", storage: Any) -> "tuple[str, Any] | None":
-    """Resolve a storage RECEIVER to its origin, or ``None`` when unattributable (r67 C3).
-
-    Ladder: the capture-scoped weak origin map (the handle itself, then a typed handle's
-    untyped backing), then the pointer fallback (state index, input index). ``None`` means
-    an owner-thread accessor on a storage TorchLens cannot attribute -- the caller MUST
-    fail closed (observer uncertainty), never record nothing.
-    """
-
-    origins = state.storage_origins
-    if origins is not None:
-        for handle in (storage, getattr(storage, "_untyped_storage", None)):
-            if handle is None:
-                continue
-            try:
-                origin = origins.get(handle)
-            except TypeError:
-                origin = None
-            if origin is not None:
-                return origin
-    with _state.pause_logging(), internal_scalar_read():
-        try:
-            backing = (
-                storage
-                if isinstance(storage, torch.UntypedStorage)
-                else getattr(storage, "_untyped_storage", None)
-            )
-            ptr = int(_ORIG_UNTYPED_STORAGE_DATA_PTR(backing)) if backing is not None else None
-        except (RuntimeError, TypeError, AttributeError, NotImplementedError):
-            ptr = None
-        if not ptr:
-            return None
-        names = _lazy_storage_state_ptr_names(state).get(ptr)
-        if names:
-            return ("state", names)
-        input_sites = _RUNNABLE_INPUT_STORAGE_SITES.get(state.trace)
-        if input_sites:
-            candidates = input_sites.get(ptr)
-            if candidates:
-                return ("input", candidates[0][0])
-    return None
-
-
-def _record_input_storage_nbytes(trace: Any, site: Any, storage: Any) -> None:
-    """Record the BASE-storage byte-count fact for a resolved input site at ACTUAL read time.
-
-    ``x.untyped_storage().nbytes()`` / ``.size()`` / ``len(...)`` return the input's BASE
-    storage byte count, which the shape+dtype input contract does NOT pin (r29-C1 F4): a
-    same-shape input that is a slice of a larger buffer differs from a freshly-allocated
-    contiguous twin. The recorded fact is ALWAYS the base untyped byte count (a typed
-    handle's element count is derived from the same base), re-checked against the RAW
-    runtime leaf. An unreadable base count fails closed (opaque ceiling), never records a
-    wrong literal.
-    """
-
-    with _state.pause_logging(), internal_scalar_read():
-        try:
-            backing = (
-                storage
-                if isinstance(storage, torch.UntypedStorage)
-                else getattr(storage, "_untyped_storage", None)
-            )
-            nbytes = int(_ORIG_UNTYPED_STORAGE_NBYTES(backing)) if backing is not None else None
-        except (RuntimeError, TypeError, AttributeError, NotImplementedError, ValueError):
-            nbytes = None
-    if nbytes is None:
-        _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(trace)
-        return
-    _record_input_metadata_read_at_site(trace, site, "storage_nbytes", nbytes)
 
 
 _HOST_ESCAPE_STATE_SOURCE_NAMES: "weakref.WeakKeyDictionary[Any, set[str]]" = (
@@ -1998,61 +889,6 @@ allow-list entry. Presence-only.
 """
 
 
-def input_metadata_view_read(trace: Any) -> bool:
-    """Return whether a metadata predicate was read on an input-derived view (r29-C1, F5)."""
-
-    return trace in _INPUT_METADATA_VIEW_READ
-
-
-def host_escape_source_labels(trace: Any) -> frozenset[str]:
-    """Return the recorded raw escape-source op labels for one trace."""
-
-    labels = _HOST_ESCAPE_SOURCE_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def host_escape_state_source_names(trace: Any) -> frozenset[str]:
-    """Return the ``state_dict`` names of every registered-state escape source."""
-
-    names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-    return frozenset(names) if names else frozenset()
-
-
-def host_escape_has_unattributable_bool(trace: Any) -> bool:
-    """Return whether an unwitnessable (pruned, unlabelled) bool escape was seen."""
-
-    return trace in _HOST_ESCAPE_UNATTRIBUTABLE_BOOL
-
-
-def host_escape_has_unattributable_opaque(trace: Any) -> bool:
-    """Return whether an unwitnessable census-invisible escape (``.tolist``/``.numpy``) was seen."""
-
-    return trace in _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE
-
-
-def host_escape_state_source_labels(trace: Any) -> frozenset[str]:
-    """Return the raw escape-source labels whose source is a registered param/buffer."""
-
-    labels = _HOST_ESCAPE_STATE_SOURCE_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def host_escape_bool_source_labels(trace: Any) -> frozenset[str]:
-    """Return the raw escape-source labels whose source is a bool control predicate."""
-
-    labels = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def host_escape_bool_consumer_locations(trace: Any) -> dict[str, tuple[tuple[str, int], ...]]:
-    """Return user source locations that consumed each captured bool tensor."""
-
-    locations = _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS.get(trace)
-    if not locations:
-        return {}
-    return {label: tuple(entries) for label, entries in locations.items()}
-
-
 _HOST_ESCAPE_LABEL_LEAF_ORIGINS: "weakref.WeakKeyDictionary[Any, dict[str, tuple[frozenset[str], frozenset[str]] | None]]" = weakref.WeakKeyDictionary()
 """Per-trace fallback witness basis for escape-source labels (r37 mechanism A).
 
@@ -2065,55 +901,6 @@ witnesses every leaf label's op digest (PASS B) and leaf state digest (PASS A), 
 is exactly the value basis the pruned chain read from. Every leaf label must itself
 resolve or the escape stays INCOMPLETE -- fallback never weakens, it substitutes an
 equivalent witness basis."""
-
-
-def host_escape_label_leaf_origins(
-    trace: Any,
-) -> Mapping[str, tuple[frozenset[str], frozenset[str]] | None]:
-    """Return the per-raw-label leaf-origin fallback basis for one trace."""
-
-    return dict(_HOST_ESCAPE_LABEL_LEAF_ORIGINS.get(trace, {}))
-
-
-def _record_escape_label_fallback(trace: Any, raw_label: str, source: torch.Tensor) -> None:
-    """Record the leaf-origin fallback basis for one labelled escape source.
-
-    ``None`` (fail-closed marker) wins over any positive entry on collision: if the
-    same label escapes twice and either occurrence is unresolvable, the fallback is
-    unusable for that label.
-    """
-
-    with _state.pause_logging(), internal_scalar_read():
-        leaf = _operand_leaf_origins(trace, source)
-    if _ORIGIN_UNKNOWN in leaf or _ORIGIN_RNG in leaf:
-        entry: tuple[frozenset[str], frozenset[str]] | None = None
-    else:
-        entry = (
-            frozenset(
-                origin[len(_ORIGIN_LABEL_PREFIX) :]
-                for origin in leaf
-                if origin.startswith(_ORIGIN_LABEL_PREFIX)
-            ),
-            frozenset(
-                origin[len(_ORIGIN_STATE_PREFIX) :]
-                for origin in leaf
-                if origin.startswith(_ORIGIN_STATE_PREFIX)
-            ),
-        )
-    table = _HOST_ESCAPE_LABEL_LEAF_ORIGINS.get(trace)
-    if table is None:
-        table = {}
-        _HOST_ESCAPE_LABEL_LEAF_ORIGINS[trace] = table
-    if raw_label in table and table[raw_label] is None:
-        return  # fail-closed marker sticks
-    if entry is None:
-        table[raw_label] = None
-        return
-    previous = table.get(raw_label)
-    if previous is None:
-        table[raw_label] = entry
-    else:
-        table[raw_label] = (previous[0] | entry[0], previous[1] | entry[1])
 
 
 _PRUNED_RNG_CONTROL_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = weakref.WeakKeyDictionary()
@@ -2130,23 +917,6 @@ witness completeness to keep such a model honestly UNVERIFIABLE + NOT_APPLICABLE
 of falsely VERIFIED + ATTESTED. A genuinely-dead RNG draw (result influences nothing) is
 NOT recorded here, so a deterministic model stays VERIFIED.
 """
-
-
-def pruned_rng_control_source_labels(trace: Any) -> frozenset[str]:
-    """Return raw labels of pruned torch-RNG ops that steered control flow."""
-
-    labels = _PRUNED_RNG_CONTROL_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def record_pruned_rng_control_source(trace: Any, label: str) -> None:
-    """Record one pruned torch-RNG op whose result drove a control decision."""
-
-    labels = _PRUNED_RNG_CONTROL_LABELS.get(trace)
-    if labels is None:
-        labels = set()
-        _PRUNED_RNG_CONTROL_LABELS[trace] = labels
-    labels.add(label)
 
 
 _ALIAS_MUTATION_CANDIDATE_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
@@ -2167,23 +937,6 @@ NOT recorded here, and is replayed normally.
 """
 
 
-def alias_mutation_candidate_labels(trace: Any) -> frozenset[str]:
-    """Return raw labels of in-place ops that mutate an unlabelled (invisible-alias) target."""
-
-    labels = _ALIAS_MUTATION_CANDIDATE_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def record_alias_mutation_candidate(trace: Any, label: str) -> None:
-    """Record one in-place op whose mutation target carries no resolvable capture label."""
-
-    labels = _ALIAS_MUTATION_CANDIDATE_LABELS.get(trace)
-    if labels is None:
-        labels = set()
-        _ALIAS_MUTATION_CANDIDATE_LABELS[trace] = labels
-    labels.add(label)
-
-
 _PRUNED_ALIAS_MUTATION_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -2198,23 +951,6 @@ that SURVIVES pruning is graph-represented and never recorded here.
 """
 
 
-def pruned_alias_mutation_source_labels(trace: Any) -> frozenset[str]:
-    """Return raw labels of unlabelled-alias in-place ops that were orphan-pruned."""
-
-    labels = _PRUNED_ALIAS_MUTATION_LABELS.get(trace)
-    return frozenset(labels) if labels else frozenset()
-
-
-def record_pruned_alias_mutation_source(trace: Any, label: str) -> None:
-    """Record one orphan-pruned in-place op that mutated an unlabelled (invisible) alias."""
-
-    labels = _PRUNED_ALIAS_MUTATION_LABELS.get(trace)
-    if labels is None:
-        labels = set()
-        _PRUNED_ALIAS_MUTATION_LABELS[trace] = labels
-    labels.add(label)
-
-
 _DATA_ALIAS_MUTATION_TRACES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 """Traces containing a successful write through a ``Tensor.data`` alias lineage.
 
@@ -2223,36 +959,6 @@ replay provenance. That graph node must not launder the descriptor's unsafe writ
 an in-place receiver reached directly from ``.data`` or through a storage-sharing view remains
 an untracked escape surface and ceilings runnable faithfulness to ``unverifiable``.
 """
-
-
-def data_alias_mutation_detected(trace: Any) -> bool:
-    """Return whether capture observed a write through a ``Tensor.data`` alias.
-
-    Parameters
-    ----------
-    trace : Any
-        Capture trace to inspect.
-
-    Returns
-    -------
-    bool
-        ``True`` when a successful receiver mutation targeted a data-alias
-        tensor or storage-sharing view derived from one.
-    """
-
-    return trace in _DATA_ALIAS_MUTATION_TRACES
-
-
-def record_data_alias_mutation(trace: Any) -> None:
-    """Record a successful write through a ``Tensor.data`` alias.
-
-    Parameters
-    ----------
-    trace : Any
-        Active capture trace whose runnable proof must be ceilinged.
-    """
-
-    _DATA_ALIAS_MUTATION_TRACES.add(trace)
 
 
 _HOST_ESCAPE_MUTABLE_WRITEBACK: "weakref.WeakSet[Any]" = weakref.WeakSet()
@@ -2266,12 +972,6 @@ whose bytes changed while its version stayed put was host-mutated through the al
 recorded here so the runnable producer fails closed (UNVERIFIABLE). A read-only conversion leaves
 the bytes unchanged and is never recorded, so it stays honestly VERIFIED. Presence-only.
 """
-
-
-def host_escape_has_mutable_writeback(trace: Any) -> bool:
-    """Return whether a host write-back through a mutable zero-copy alias was detected."""
-
-    return trace in _HOST_ESCAPE_MUTABLE_WRITEBACK
 
 
 _HOST_ESCAPE_RAW_POINTER: "weakref.WeakSet[Any]" = weakref.WeakSet()
@@ -2293,12 +993,6 @@ over-triggers at ~zero cost. TorchLens's own capture-internal ``data_ptr`` reads
 """
 
 
-def host_escape_has_raw_pointer(trace: Any) -> bool:
-    """Return whether a raw ``Tensor.data_ptr()`` pointer escaped to the host (r15-H1)."""
-
-    return trace in _HOST_ESCAPE_RAW_POINTER
-
-
 # --- r43 CLASS 2: non-owner captured-tensor touch (ONE fail-closed rule) --------------------
 #
 # JMT-locked: ANY non-owner thread that TOUCHES A CAPTURED TENSOR during the armed forward
@@ -2317,12 +1011,6 @@ other than the capture owner is outside the single-owner-thread replay model, so
 producer folds it into an INCOMPLETE witness downgrade -> UNVERIFIABLE + NOT_APPLICABLE.
 Presence-only. A non-owner thread that never touches a captured tensor records nothing.
 """
-
-
-def host_escape_has_cross_thread_captured_tensor(trace: Any) -> bool:
-    """Return whether a non-owner thread touched a captured tensor during the window (r43)."""
-
-    return trace in _HOST_ESCAPE_CROSS_THREAD_CAPTURED
 
 
 _CAPTURED_STORAGE_PTRS: "weakref.WeakKeyDictionary[Any, dict[int, tuple[weakref.ref[Any], ...]]]" = weakref.WeakKeyDictionary()
@@ -2375,432 +1063,6 @@ _AUTHORIZED_INTERNAL_CALLER_CODE: list[types.CodeType] = []
 _AUTHORIZED_INTERNAL_CALLER_CODE_IDS: set[int] = set()
 
 
-def _register_authorized_caller_namespace(
-    namespace: Mapping[str, Any], module_file: str
-) -> None:
-    """Collect a module namespace's own code objects into the witness roster.
-
-    Only code objects whose ``co_filename`` is ``module_file`` register (read
-    at import time from real code objects, before user code can interpose),
-    so imported foreign helpers and decorator-wrapper code from other modules
-    never widen the roster. Nested code constants (closures, comprehensions)
-    and ``__wrapped__`` chains are followed so a decorated or nested internal
-    caller still authenticates.
-    """
-
-    def _collect(code: types.CodeType) -> None:
-        """Register one module-local code object and its nested code constants."""
-
-        if code.co_filename != module_file or id(code) in _AUTHORIZED_INTERNAL_CALLER_CODE_IDS:
-            return
-        _AUTHORIZED_INTERNAL_CALLER_CODE.append(code)
-        _AUTHORIZED_INTERNAL_CALLER_CODE_IDS.add(id(code))
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                _collect(const)
-
-    def _walk(value: Any, seen: set[int]) -> None:
-        """Recurse module attributes to find every locally defined callable."""
-
-        if id(value) in seen:
-            return
-        seen.add(id(value))
-        if isinstance(value, (staticmethod, classmethod)):
-            value = value.__func__
-        if isinstance(value, property):
-            for accessor in (value.fget, value.fset, value.fdel):
-                if accessor is not None:
-                    _walk(accessor, seen)
-            return
-        if isinstance(value, types.FunctionType):
-            _collect(value.__code__)
-            wrapped = getattr(value, "__wrapped__", None)
-            if wrapped is not None:
-                _walk(wrapped, seen)
-            return
-        if isinstance(value, type):
-            for member in vars(value).values():
-                _walk(member, seen)
-
-    seen: set[int] = set()
-    for value in namespace.values():
-        _walk(value, seen)
-
-
-def _caller_frame_is_torchlens_internal(depth: int = 2) -> bool:
-    """Return whether the frame ``depth`` levels up is executing TorchLens's own code.
-
-    The witness's detector authorization is bound to TorchLens's OWN calling
-    frames, never to a helper's identity: user model code that imports and
-    calls an internal helper must not inherit the authorization (its raw
-    reads then run bare and the shadow detector convicts them normally).
-    Authentication is code-object IDENTITY against the import-time roster --
-    a frame qualifies only when its ``f_code`` IS one of the roster's own
-    code objects. Frame metadata (``f_globals['__name__']``,
-    ``co_filename``) is forgeable by ``exec``/``compile`` from user code and
-    is deliberately never consulted.
-
-    Parameters
-    ----------
-    depth:
-        Stack depth of the frame to authenticate, counted from this
-        function's own frame (``2`` = the immediate caller of the helper
-        that invoked this check).
-    """
-
-    try:
-        caller = sys._getframe(depth)
-    except ValueError:
-        return False
-    return id(caller.f_code) in _AUTHORIZED_INTERNAL_CALLER_CODE_IDS
-
-
-def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
-    """Return a tensor's untyped-storage data pointer via the true originals, ptr 0 -> None (r43).
-
-    GIL-atomic, wrapper-free, side-effect-free: it never fires an escape observer, a dispatch,
-    or a logging toggle, so it is safe to call from ANY thread. ``0`` (a meta / storageless
-    tensor) normalizes to ``None`` so distinct storageless tensors never alias one synthetic
-    pointer.
-
-    Detector authorization is granted only to TorchLens-internal callers: the
-    frame-bound tokens below exist so the WITNESS's own instrumentation reads
-    never self-trip the shadow detector. User code that imports and calls this
-    helper does not inherit that authorization -- its reads run bare through
-    the true originals and the detector observes and convicts them as the
-    unwrapped raw reaches they are.
-    """
-
-    if not isinstance(tensor, torch.Tensor):
-        return None
-    try:
-        if _state._escape_detector_mode != "off" and _caller_frame_is_torchlens_internal():
-            # The witness's own raw-original reads are instrumentation, not an
-            # escaped user op: authorize each one through the detector's typed
-            # per-call accounting so the shadow detector never reports
-            # TorchLens's own frame (a false ceiling that degraded otherwise
-            # verified armed captures with user-directed remediation text no
-            # user action could clear). The token is FRAME-BOUND to this exact
-            # call, so a genuine raw untyped_storage reach anywhere else still
-            # trips the detector — the exemption cannot widen.
-            with expected_original_call(
-                _ORIG_TENSORBASE_UNTYPED_STORAGE,
-                "completeness_witness:internal_storage_ptr",
-                census_scope="expected_opaque",
-            ) as storage_token:
-                storage = _ORIG_TENSORBASE_UNTYPED_STORAGE(tensor)
-            mark_expected_original_accounted(storage_token, captured=False)
-            with expected_original_call(
-                _ORIG_UNTYPED_STORAGE_DATA_PTR,
-                "completeness_witness:internal_storage_ptr",
-                census_scope="expected_opaque",
-            ) as ptr_token:
-                ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(storage)
-            mark_expected_original_accounted(ptr_token, captured=False)
-        else:
-            storage = _ORIG_TENSORBASE_UNTYPED_STORAGE(tensor)
-            ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(storage)
-    except (RuntimeError, TypeError, NotImplementedError, AttributeError):
-        return None
-    return int(ptr) if ptr else None
-
-
-def _nonowner_ptr_is_captured(state: "_WitnessState", ptr: int) -> bool:
-    """Return whether a storage pointer belongs to a captured input / param / activation (r43)."""
-
-    trace = state.trace
-    param_addresses = getattr(trace, "_param_storage_addresses", None)
-    if param_addresses and ptr in param_addresses:
-        return True
-    input_sites = _RUNNABLE_INPUT_STORAGE_SITES.get(trace)
-    if input_sites is not None and ptr in input_sites:
-        return True
-    # Activation storage identity is LIVENESS-VERIFIED: the ptr matches only when a captured
-    # producing tensor is still alive AND still occupies this exact address (so the touched
-    # tensor genuinely aliases it). A freed-then-reused address has only dead weakrefs -> no match
-    # (no over-trigger on a benign own-tensor allocation that inherited a stale address).
-    captured = _CAPTURED_STORAGE_PTRS.get(trace)
-    if captured is not None:
-        for producer_ref in captured.get(ptr, ()):
-            producer = producer_ref()
-            if producer is not None and _raw_storage_ptr_no_observe(producer) == ptr:
-                return True
-    return False
-
-
-def _nonowner_touch_is_captured(state: "_WitnessState", tensor: Any) -> bool:
-    """Return whether a non-owner thread's touched tensor is a CAPTURED tensor (r43).
-
-    Captured membership (all reads GIL-atomic; NO torch op, NO ``pause_logging``, NO observer
-    recursion): a capture label OR a registered param/buffer state address OR a dispatch-origin
-    ledger hit (a previously-registered owner-derived alias) OR STORAGE IDENTITY -- the tensor's
-    true-original storage pointer is a captured input-leaf, parameter, or activation pointer. A
-    benign own-tensor read (no label, no state, no ledger entry, unrelated storage) returns
-    ``False`` and never ceilings the capture.
-    """
-
-    if not isinstance(tensor, torch.Tensor):
-        return False
-    trace = state.trace
-    meta = get_tensor_meta(tensor)
-    # This path must remain observer-free: get_tensor_label() also validates the
-    # live storage, which calls the patched untyped_storage() host-escape surface.
-    # On a non-owner thread that wrapper re-enters this predicate indefinitely.
-    # The current-session object anchor is sufficient for captured membership:
-    # even a storage-rebound captured object must still trip the cross-thread
-    # ceiling, while a stale label from an earlier capture remains rejected.
-    if meta is not None and isinstance(meta.label_raw, str) and session_meta_is_anchored(meta):
-        return True
-    if meta is not None and getattr(meta, "address", None) is not None:
-        return True
-    if get_buffer_address(tensor) is not None:
-        return True
-    registry = _DISPATCH_TENSOR_ORIGINS.get(trace)
-    if registry is not None and registry.get(tensor) is not None:
-        return True
-    ptr = _raw_storage_ptr_no_observe(tensor)
-    if ptr is not None and _nonowner_ptr_is_captured(state, ptr):
-        return True
-    return False
-
-
-def _nonowner_escape_observe(state: "_WitnessState", tensor: Any) -> None:
-    """Ceiling the capture if a non-owner thread touched a captured tensor (r43).
-
-    The ONE non-owner belt action: NO origin resolution, NO ``pause_logging``, NO precise
-    witness -- a captured-tensor touch off-owner is outside the single-owner-thread replay
-    model and simply marks the cross-thread ceiling. Must be called only when the caller has
-    confirmed ``not owner`` and ``state.belt_armed``.
-    """
-
-    if _nonowner_touch_is_captured(state, tensor):
-        _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
-
-
-def observe_nonowner_operands(args: tuple[Any, ...], kwargs: dict[str, Any] | None) -> None:
-    """Ceiling the runnable capture when a NON-owner thread CONSUMES a captured operand (r45 hon2_1).
-
-    The r43 cross-thread belt patches tensor METHODS, so it only recognizes a non-owner thread's
-    tensor->host escape when the escaped tensor's OBJECT IDENTITY is captured / owner-registered
-    (a capture label, a registered state address, a dispatch-origin ledger hit, or captured
-    storage identity). A tensor DERIVED on the worker from a captured input (``(gate * 2).sum()``,
-    ``gate.clone()``, ``gate + 0``, ``gate @ w``, ``torch.cat([gate], 0)`` ...) has FRESH storage
-    that the OWNER-thread-only census / dispatch-origin ledger never registered, so its later value
-    escape was unwitnessed -> false ``VERIFIED`` on a changed input a fresh live run would branch
-    differently on (the r44 hon2_1 finding).
-
-    Every Python-visible torch/Tensor op flows through the GLOBAL torch-function wrapper (a
-    process-wide monkeypatch, unlike the thread-local aten census / dispatch mode). This observer
-    runs on the wrapper's NON-owner fast path and ceilings the artifact the FIRST time a non-owner
-    thread runs ANY torch op that consumes a captured tensor as an OPERAND -- op-agnostic, so it
-    covers the whole worker-derivation class by construction (no derived-product registry: ceiling
-    at the first consumption makes deeper-chain and escape-time provenance moot; the derived tensor
-    does not even exist yet).
-
-    Fail-CLOSED (r45 Fork C): any operand-inspection error during an armed capture ceilings the
-    trace -- an inspection failure on a non-owner op cannot be read as "no captured touch"
-    (validation is a tripwire). Benign-worker-safe: a non-owner thread operating only on tensors it
-    created INDEPENDENTLY of the capture matches no captured-membership signal and stays
-    ``VERIFIED``. The wrapper caller has already confirmed ``_state._nonowner_belt_armed`` and
-    non-owner identity, so the disarmed global hot path pays only a single bool read.
-
-    Parameters
-    ----------
-    args:
-        The positional operands of the wrapped torch call (``*args``).
-    kwargs:
-        The keyword operands of the wrapped torch call (``**kwargs``), or ``None``.
-    """
-
-    state = _ACTIVE_WITNESS_STATE
-    if state is None or not state.belt_armed:
-        return
-    if _state._active_trace is not state.trace:
-        return
-    if threading.get_ident() == state.owner_thread_id:
-        return
-    try:
-        for container in (args, kwargs):
-            if container is None:
-                continue
-            for operand in _iter_tensors_deep(container):
-                if _nonowner_touch_is_captured(state, operand):
-                    _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
-                    return
-    except Exception:
-        # An operand-inspection failure on a non-owner op during an armed capture cannot prove
-        # "no captured touch": fail closed (ceiling), never silently pass.
-        _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
-
-
-def _torch_ops_call_classes() -> tuple[type, ...]:
-    """Feature-detect every ``torch._ops`` class that defines its OWN ``__call__`` (r47 hon2_1).
-
-    The r45 hon2_1 non-owner operand observer runs on the GLOBAL torch-FUNCTION wrapper, but the
-    ``torch.ops.*`` (aten / higher-order / TorchBind) surface bypasses that wrapper entirely: a
-    worker thread deriving from / reading a captured tensor via ``torch.ops.aten.mul.Tensor(...)``,
-    ``torch.ops.aten.sum.default(...)``, ``torch.ops.aten._local_scalar_dense(...)``, ... never
-    hits the wrapper and the aten dispatch census is thread-LOCAL (a ``TorchDispatchMode`` cannot
-    see a non-owner thread), so its captured-operand consumption went unwitnessed -> false
-    ``VERIFIED`` on a diverging changed input (the r46 hon2_1 finding).
-
-    Every Python-visible ``torch.ops.*`` call flows through the ``__call__`` of a small set of
-    ``torch._ops`` classes (``OpOverloadPacket`` / ``OpOverload`` / ``TorchBindOpOverload`` /
-    ``HigherOrderOperator`` (+ the abstract ``OperatorBase``)). This scans STRUCTURALLY -- every
-    ``torch._ops`` class object defining its own callable ``__call__`` -- rather than importing the
-    names, which is version-robust across the declared torch floor->ceiling (2.1 -> 2.12+):
-    ``TorchBindOpOverload`` only appeared ~2.4, so a by-name import would ``ImportError`` on older
-    torch. A future torch that adds a call class is auto-covered by shape; a class whose ``__call__``
-    is removed silently drops out (fail-closed install downgrades the capture, never a silent hole).
-
-    Wrapping the WHOLE set including the abstract ``OperatorBase`` never double-observes: a concrete
-    subclass's ``__call__`` does NOT chain to ``super().__call__``, so a single ``aten.mul.Tensor``
-    call fires the observer exactly once (probed on torch 2.8).
-    """
-
-    out: list[type] = []
-    for attr in dir(_torch_ops):
-        obj = getattr(_torch_ops, attr, None)
-        if isinstance(obj, type) and callable(obj.__dict__.get("__call__")):
-            out.append(obj)
-    return tuple(out)
-
-
-def _make_nonowner_ops_call(original: Any) -> Any:
-    """Wrap a ``torch._ops`` class ``__call__`` with the non-owner captured-operand observer (r47).
-
-    The patched ``__call__`` short-circuits on a SINGLE bool read (``_nonowner_belt_armed``) so the
-    disarmed steady state pays ~nothing, and a real eager OWNER forward hits the Python
-    ``torch.ops.*.__call__`` path ZERO times (C++ dispatch; probed), so the armed owner window adds
-    ~no overhead. When the belt is armed, a runnable capture is active, and the caller is a
-    NON-owner thread, it routes the operands through the SAME storage-identity captured-membership
-    test (:func:`observe_nonowner_operands`, fail-closed internally) BEFORE delegating to the
-    original ``__call__``. The worker op is NEVER logged into the owner trace.
-    """
-
-    @functools.wraps(original)
-    def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-        """Observe non-owner ``torch._ops`` calls before delegating.
-
-        Parameters
-        ----------
-        self:
-            ``torch._ops`` receiver.
-        *args:
-            Positional operands passed to ``original``.
-        **kwargs:
-            Keyword operands passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if (
-            _state._nonowner_belt_armed
-            and _state._active_trace is not None
-            and _state._active_owner_thread_id != threading.get_ident()
-        ):
-            observe_nonowner_operands(args, kwargs)
-        return original(self, *args, **kwargs)
-
-    _patched.__tl_nonowner_ops_observer__ = True  # type: ignore[attr-defined]
-    return _patched
-
-
-def _private_c_forward_op_modules() -> tuple[Any, ...]:
-    """Resolve the patchable module-typed private-C forward-op modules (r49 hon2_1).
-
-    Structurally enumerated from the canonical forward-op module authority
-    (:func:`torchlens.utils._callable_safety.private_c_forward_op_module_names` -> the
-    ``torch._C._*`` entries of ``_ALLOWED_FORWARD_OP_MODULES``), resolved on the RUNNING torch
-    and filtered to ``types.ModuleType`` so:
-
-    * a torch lacking one (``_sparse`` / ``_nested`` on an older build) degrades gracefully
-      (skip-if-absent), and
-    * the class-typed, read-only / non-Python-patchable holders (``_VariableFunctions`` /
-      ``_TensorBase``) are EXCLUDED (their setattr raises -- accepted residual).
-
-    On torch 2.8 this yields exactly ``{_nn, _special, _fft, _linalg, _sparse, _nested}``. A
-    future private-C op module added to the curated set is auto-covered.
-    """
-
-    modules: list[Any] = []
-    for name in private_c_forward_op_module_names():
-        obj: Any = torch
-        resolved = True
-        for part in name.split(".")[1:]:  # skip the leading "torch"
-            obj = getattr(obj, part, None)
-            if obj is None:
-                resolved = False
-                break
-        if resolved and isinstance(obj, types.ModuleType):
-            modules.append(obj)
-    return tuple(modules)
-
-
-def _private_c_module_callables() -> tuple[tuple[Any, str, Any], ...]:
-    """Return ``(module, attr, original)`` for every module-level callable of the patchable
-    private-C forward-op modules (r49 hon2_1).
-
-    Dunder module metadata (``__loader__`` / ``__spec__`` / ...) is skipped; every remaining
-    module-level callable (the ~225 ``torch._C._{nn,special,fft,linalg,sparse,nested}`` free
-    functions) is a patch target so the belt is surface-complete for the whole module, not a
-    known-alias subset.
-    """
-
-    out: list[tuple[Any, str, Any]] = []
-    for module in _private_c_forward_op_modules():
-        for attr in dir(module):
-            if attr.startswith("__"):
-                continue
-            value = getattr(module, attr, None)
-            if callable(value):
-                out.append((module, attr, value))
-    return tuple(out)
-
-
-def _make_nonowner_private_c_callable(original: Any) -> Any:
-    """Wrap a private-C module FREE function with the non-owner captured-operand observer (r49).
-
-    Twin of :func:`_make_nonowner_ops_call` for MODULE-level free functions (no ``self``
-    receiver): private-C ops (``torch._C._nn.gelu(gate)``) are a THIRD op surface -- they bypass
-    BOTH the global torch-FUNCTION wrapper (no ``__torch_function__``) AND the ``torch._ops.*``
-    class patch (they dispatch their inner aten op down in C++), so a non-owner worker consuming
-    a captured operand through one went unwitnessed -> false ``VERIFIED`` (the r48 hon2_1
-    finding). Same three-term armed/owner short-circuit (disarmed steady state pays one bool
-    read; an OWNER-thread forward never reaches ``observe_nonowner_operands``) and the same
-    fail-closed operand test.
-    """
-
-    @functools.wraps(original)
-    def _patched(*args: Any, **kwargs: Any) -> Any:
-        """Observe non-owner private-C free-function calls before delegating.
-
-        Parameters
-        ----------
-        *args:
-            Positional operands passed to ``original``.
-        **kwargs:
-            Keyword operands passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if (
-            _state._nonowner_belt_armed
-            and _state._active_trace is not None
-            and _state._active_owner_thread_id != threading.get_ident()
-        ):
-            observe_nonowner_operands(args, kwargs)
-        return original(*args, **kwargs)
-
-    _patched.__tl_nonowner_ops_observer__ = True  # type: ignore[attr-defined]
-    return _patched
-
-
 _ACTIVE_WITNESS_STATE: "_WitnessState | None" = None
 """The runnable-capture witness state currently installed, or ``None`` (r43).
 
@@ -2808,22 +1070,6 @@ Published as the LAST step of ``capture_completeness_witness`` armation and clea
 the wrappers.py string interception can classify owner vs non-owner without threading the state
 through the torch-function wrapper. Captures do not nest, so a single slot suffices.
 """
-
-
-def string_escape_is_owner_thread(trace: Any) -> bool:
-    """Return whether the current thread is the capture owner for the string hook (r43).
-
-    Consumed by the wrappers.py ``__repr__``/``__str__``/``_str`` interception: the OWNER
-    thread keeps ``print_override`` (which formats under a global ``pause_logging``); a
-    NON-OWNER thread must NEVER flip that global toggle mid-forward (the hon2_4 crash), so it
-    calls the original torch string function unchanged. With no active runnable witness state
-    the legacy owner behavior is preserved (``True``).
-    """
-
-    state = _ACTIVE_WITNESS_STATE
-    if state is None or state.trace is not trace:
-        return True
-    return threading.get_ident() == state.owner_thread_id
 
 
 _HOST_ESCAPE_OBSERVER_FAILED: "weakref.WeakSet[Any]" = weakref.WeakSet()
@@ -2836,56 +1082,6 @@ restored, coverage for that forward is unknowable -- so the capture fails closed
 rather than silently reporting no escape. Optional/absent targets on a given torch version do
 NOT set this (they are classified absent by the version inventory). Presence-only.
 """
-
-
-def host_escape_observer_install_failed(trace: Any) -> bool:
-    """Return whether a required tensor->host value observer failed to install/restore (r39)."""
-
-    return trace in _HOST_ESCAPE_OBSERVER_FAILED
-
-
-def record_host_string_escape_source(trace: Any, tensor: Any) -> None:
-    """Record a tensor->host VALUE escape via string formatting (r39 hon2_1).
-
-    TorchLens intercepts ``__repr__`` / ``__str__`` / ``_str`` on a captured tensor and formats
-    it internally under ``pause_logging()`` (``print_override`` -> ``.detach().cpu().numpy()``),
-    which extracts the tensor's VALUES into the returned string -- a genuine tensor->host value
-    escape the user can fold back into control flow (the string NaN guard). Because that
-    extraction runs under PAUSED logging, the ordinary ``.numpy()`` / ``.item()`` escape
-    observers are blind to it (they gate on ``_state._logging_enabled``), so the print
-    interception records the SOURCE tensor here through the SAME attribution ladder.
-
-    NOTE (r39): the reconciled plan's E6 measurement of str/repr transitivity was taken on RAW
-    torch, where ``str()`` crosses patched ``item``/``tolist``. Inside a live capture TorchLens
-    intercepts the string path itself, so the fix lives at the interception, not in a
-    ``__repr__``/``__str__`` patch -- the escape still lands UNVERIFIABLE, consistently with how
-    every other value-extraction spelling (``.numpy()`` / ``.tolist()``) ceilings a changed run.
-
-    Gated by the runnable-capture escape-observation flag and skipped for TorchLens's own
-    marked internal reads (``internal_scalar_read``). A no-string forward records nothing.
-    """
-
-    if not getattr(trace, "intervention_ready", False):
-        return
-    if not isinstance(tensor, torch.Tensor):
-        return
-    if _internal_read_active():
-        return
-    # r43 hon2_4: route the string hook through the SAME owner-vs-non-owner rule as every
-    # other belt observer. The OWNER thread keeps the precise attribution ladder. A NON-OWNER
-    # thread applies the captured-tensor predicate (never origin resolution -- that flips the
-    # global ``pause_logging`` toggle, the hon2_4 crash path): a captured-tensor stringification
-    # ceilings, a benign OWN-tensor ``str()`` records nothing (no over-trigger).
-    state = _ACTIVE_WITNESS_STATE
-    if (
-        state is not None
-        and state.trace is trace
-        and threading.get_ident() != state.owner_thread_id
-    ):
-        if state.belt_armed:
-            _nonowner_escape_observe(state, tensor)
-        return
-    _record_escape_source_tensor(trace, tensor, invisible=True)
 
 
 _DISABLE_MODE_SITE_CATEGORIES = frozenset(
@@ -2933,49 +1129,6 @@ _DISABLE_MODE_SITE_CATEGORIES = frozenset(
 """Categories of torch modules that legitimately host ``_disable_current_modes`` sites (r39)."""
 
 
-def audit_disable_current_modes_sites() -> dict[str, tuple[str, ...]]:
-    """Snapshot-audit torch's ``_disable_current_modes`` sites (r39 advisory-but-armed immunizer).
-
-    The mode-independent method/module belt (:data:`HOST_VALUE_ESCAPE_METHODS` /
-    :data:`HOST_VALUE_ESCAPE_MODULE_FUNCS`) closes the census blind spot regardless of WHICH
-    torch region pops the dispatch modes, so this audit is NOT load-bearing -- it is an armed
-    snapshot. It enumerates the ``_disable_current_modes`` sites in the installed torch and
-    classifies each by its top-level containing module against
-    :data:`_DISABLE_MODE_SITE_CATEGORIES`. A site whose category is unknown is ``unclassified``,
-    turning the coverage meta-test RED so a human confirms the new region introduces no
-    value-escape spelling the belt misses.
-
-    Returns
-    -------
-    dict[str, tuple[str, ...]]
-        ``{"classified": (...), "unclassified": (...)}`` module paths (sorted).
-    """
-
-    classified: set[str] = set()
-    unclassified: set[str] = set()
-    try:
-        torch_root = Path(torch.__file__).resolve().parent
-    except Exception:  # pragma: no cover - torch always has a file
-        return {"classified": (), "unclassified": ()}
-    for path in torch_root.rglob("*.py"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except (OSError, UnicodeError):  # pragma: no cover - unreadable file
-            continue
-        if "_disable_current_modes(" not in text:
-            continue
-        relative = path.relative_to(torch_root)
-        top = relative.parts[0]
-        category = top[:-3] if top.endswith(".py") else top
-        (classified if category in _DISABLE_MODE_SITE_CATEGORIES else unclassified).add(
-            str(relative)
-        )
-    return {
-        "classified": tuple(sorted(classified)),
-        "unclassified": tuple(sorted(unclassified)),
-    }
-
-
 _COMPLETENESS_WITNESS_FILE = Path(__file__).resolve()
 """This module's path, skipped when locating the true invoker of an escape."""
 
@@ -2991,236 +1144,6 @@ _MAX_ESCAPE_STACK_DEPTH = 60
 
 _internal_read_state = threading.local()
 """Per-thread depth counter for the explicit TorchLens internal-scalar-read marker."""
-
-
-def _internal_read_active() -> bool:
-    """Return whether an explicit TorchLens internal-scalar-read marker is live.
-
-    The marker is set by construction ONLY around TorchLens's own capture-internal
-    scalar/comparison reads (see :func:`internal_scalar_read`). It is a per-thread depth
-    counter so nested internal reads compose correctly.
-    """
-
-    return getattr(_internal_read_state, "depth", 0) > 0
-
-
-@contextmanager
-def internal_scalar_read() -> Iterator[None]:
-    """Mark a region as a genuine TorchLens capture-internal scalar/comparison read.
-
-    TorchLens itself reads a scalar/bool from a tensor during capture -- extracting a
-    scalar-``bool`` op-output value (``ops._log_output_tensor_info``), comparing a
-    pre-call input copy against its post-call value for mutation/alias detection
-    (``tensor_nanequal`` via ``detect_torch_alias_contract`` and the child-version
-    snapshot), and similar bookkeeping reads. Those reads lower to
-    ``aten._local_scalar_dense`` (or, for content comparisons, ``aten.equal`` /
-    ``aten.allclose`` returning a Python ``bool``) and would otherwise be misrecorded as
-    USER host escapes and falsely trip the fail-closed INCOMPLETE gates. This context
-    manager marks them EXPLICITLY so the internal-vs-user classifier is an
-    allowlist-BY-CONSTRUCTION: an escape is "internal" iff this marker is active, never
-    because a stack frame's filename happens to resolve inside the ``torchlens`` package
-    (which is spoofable by an ``exec``-compiled user helper carrying a torchlens
-    ``co_filename``, and fails for a frameless C-callable). A genuine user escape runs
-    with the marker inactive and is always recorded.
-    """
-
-    depth = getattr(_internal_read_state, "depth", 0)
-    _internal_read_state.depth = depth + 1
-    try:
-        yield
-    finally:
-        _internal_read_state.depth = depth
-
-
-def _escape_source_is_torchlens_internal() -> bool:
-    """Return whether an escape dispatch is a marked TorchLens capture-internal read.
-
-    Classification is allowlist-BY-CONSTRUCTION: it is ``True`` iff an explicit
-    :func:`internal_scalar_read` marker is live on this thread, set only around
-    TorchLens's own genuine internal scalar/comparison reads. It NEVER infers "internal"
-    from a stack frame's ``co_filename`` (spoofable via an ``exec``-compiled user helper
-    given a torchlens filename, and undefined for a frameless C-callable such as
-    ``operator.methodcaller("item")``). A USER escape therefore can never be classified
-    internal, while TorchLens's own reads never trip the fail-closed gates.
-    """
-
-    return _internal_read_active()
-
-
-def _output_is_host_value(result: Any) -> bool:
-    """Return whether a dispatch output is a pure Python host value carrying no tensor.
-
-    A host value is a Python scalar (``bool`` / ``int`` / ``float`` / ``complex``) or a
-    ``list`` / ``tuple`` recursively of host values. A ``torch.Tensor`` output (or any
-    container carrying a tensor) is an ordinary op result, NOT a host escape.
-    """
-
-    if isinstance(result, torch.Tensor):
-        return False
-    if isinstance(result, (bool, int, float, complex)):
-        return True
-    if isinstance(result, (list, tuple)):
-        return len(result) > 0 and all(_output_is_host_value(value) for value in result)
-    return False
-
-
-def _iter_tensor_operands(args: tuple[Any, ...]) -> Iterator[torch.Tensor]:
-    """Yield each tensor operand of a dispatch, including tensors nested one list/tuple deep."""
-
-    for value in args:
-        if isinstance(value, torch.Tensor):
-            yield value
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, torch.Tensor):
-                    yield item
-
-
-def _record_host_escape_source(trace: Any, func: Any, args: tuple[Any, ...], result: Any) -> None:
-    """Record the raw producing-op label of every tensor->host VALUE-escape SOURCE.
-
-    NARROW value-escape rule: the dispatch's operator (overload-stripped) must be one of
-    the ``HOST_ESCAPE_OPERATORS`` VALUE reads (``aten._local_scalar_dense`` from
-    ``.item()`` / ``int()`` / ``float()`` / ``__index__`` / ``bool()``, or the direct
-    tensor->``bool`` predicates ``aten.equal`` / ``aten.allclose`` / ``aten.is_nonzero``)
-    AND its output must be a pure Python host value. That host value can be baked into a
-    downstream op literal (verbatim OR after arbitrary Python arithmetic) or steer
-    pure-Python control flow -- neither of which the sparse DAG can recompute.
-
-    The rule is DELIBERATELY not a general "any non-tensor output" census: tensor
-    STRUCTURE/METADATA ops (``size`` / ``sym_size`` / ``numel`` / ``dim`` / ``stride`` /
-    ``is_contiguous`` / ``dtype`` / ``device`` / ``storage_offset`` / ...) also return
-    non-tensor host values, but those derive from shape/layout, are input-VALUE-
-    independent (already covered by the separate input-shape-mismatch check), and a real
-    model reads them constantly -- witnessing them over-triggers a false UNVERIFIABLE on
-    escape-free models and pathologically slows per-op capture. Restricting to the value
-    allowlist keeps genuine escapes witnessed without either regression.
-
-    Every tensor operand of a value escape is recorded as a source; its raw capture label
-    lets the runnable descriptor witness that source slot and, at run time, refuse a false
-    VERIFIED when the slot recomputes different bytes for a changed input.
-    """
-
-    if not args or not _is_aten_operator(func):
-        return
-    if _operator_base_name(func) not in HOST_ESCAPE_OPERATORS:
-        return
-    if not _output_is_host_value(result):
-        return
-    for source in _iter_tensor_operands(args):
-        _record_escape_source_tensor(trace, source, invisible=False)
-
-
-def _escape_storage_ptr(source: torch.Tensor) -> int | None:
-    """Return ``source``'s untyped-storage data pointer, read under the internal marker.
-
-    The internal-read marker keeps this OWN resolution read from being mistaken for a user
-    ``data_ptr()`` raw-pointer escape (the storage ``data_ptr`` accessor is patched for the forward).
-    """
-
-    try:
-        with internal_scalar_read():
-            return source.untyped_storage().data_ptr()
-    except (RuntimeError, TypeError, NotImplementedError):
-        return None
-
-
-def _param_derived_addresses(trace: Any, source: torch.Tensor) -> set[str]:
-    """Return the state address of the registered PARAMETER whose storage ``source`` aliases.
-
-    DIRECT alias rung only (r18): ``source`` shares a param's storage (``self.w.detach()``,
-    ``self.w[0]``, ``self.w.tolist()``, ``self.w.detach().numpy()``) -- its storage pointer
-    is in the forward-start param index. Resolves for frozen params too (no autograd needed).
-
-    r37 INV-1: the former DERIVED autograd rung (r19-C -- walk ``grad_fn`` back to
-    ``AccumulateGrad`` leaves and declare purity when every leaf is a registered param) is
-    REMOVED as an attribution mechanism. Measured on torch 2.8 (exp1, hon2_3): a DETACHED
-    or non-differentiable-dtype operand (``x.data``, ``x.detach()``, a bool mask from
-    ``x > 0``, a long index, ``where``'s condition) contributes NO autograd slot at all, so
-    "every leaf is a param" never proves operand totality -- the walk blessed
-    input-contaminated chains as pure-param (false VERIFIED, hon2_3). Pure param-derived
-    reads are recovered ONLY through positive dispatch-origin propagation
-    (:func:`_resolved_dispatch_origins`); no autograd-graph structural argument may ever
-    serve as an operand-totality proof again (INV-1 banned mechanism).
-    """
-
-    param_storage_addresses = getattr(trace, "_param_storage_addresses", None)
-    if not param_storage_addresses:
-        return set()
-    direct = _escape_storage_ptr(source)
-    if direct is not None and direct in param_storage_addresses:
-        return {str(param_storage_addresses[direct])}
-    return set()
-
-
-class _TensorOriginRegistry:
-    """Identity-keyed weak map: live tensor object -> propagated origin set.
-
-    ``WeakKeyDictionary`` is unusable for tensors (its ref-equality path invokes the
-    tensor's elementwise ``__eq__``), so entries key on ``id(tensor)`` with a weakref
-    finalizer removing the entry when the tensor dies, and a liveness identity check
-    guarding against id reuse.
-    """
-
-    __slots__ = ("_entries",)
-
-    def __init__(self) -> None:
-        """Initialize the weak identity map backing store."""
-        self._entries: dict[int, tuple[Any, frozenset[str], frozenset[str]]] = {}
-
-    def get(self, tensor: torch.Tensor) -> tuple[frozenset[str], frozenset[str]] | None:
-        """Return the live alias metadata for ``tensor`` when still registered.
-
-        Parameters
-        ----------
-        tensor:
-            Tensor whose registration should be resolved.
-
-        Returns
-        -------
-        tuple[frozenset[str], frozenset[str]] | None
-            Registered display and leaf address sets, or ``None`` when absent or stale.
-        """
-        entry = self._entries.get(id(tensor))
-        if entry is None:
-            return None
-        ref, display, leaf = entry
-        return (display, leaf) if ref() is tensor else None
-
-    def set(self, tensor: torch.Tensor, display: frozenset[str], leaf: frozenset[str]) -> None:
-        """Register alias metadata for ``tensor`` with weak cleanup.
-
-        Parameters
-        ----------
-        tensor:
-            Tensor to register.
-        display:
-            Display-address set for ``tensor``.
-        leaf:
-            Leaf-address set for ``tensor``.
-        """
-        key = id(tensor)
-        entries = self._entries
-
-        def _cleanup(dead_ref: Any, key: int = key) -> None:
-            """Delete the dead entry when the weakref target is reclaimed.
-
-            Parameters
-            ----------
-            dead_ref:
-                Weak reference whose referent just died.
-            key:
-                Identity-map key to clear when it still points at ``dead_ref``.
-            """
-            entry = entries.get(key)
-            if entry is not None and entry[0] is dead_ref:
-                del entries[key]
-
-        try:
-            ref = weakref.ref(tensor, _cleanup)
-        except TypeError:
-            return  # non-weakref-able exotic subclass: stays unregistered (-> unknown)
-        entries[key] = (ref, display, leaf)
 
 
 _DISPATCH_TENSOR_ORIGINS: "weakref.WeakKeyDictionary[Any, _TensorOriginRegistry]" = (
@@ -3255,665 +1178,6 @@ _ORIGIN_FLATTEN_DEPTH_LIMIT = 4
 """Recursion bound for flattening tensor operands/results out of dispatch containers."""
 
 
-def _iter_tensors_deep(value: Any, depth: int = 0) -> Iterator[torch.Tensor]:
-    """Yield every tensor in a dispatch argument/result container, bounded-depth."""
-
-    if isinstance(value, torch.Tensor):
-        yield value
-        return
-    if depth >= _ORIGIN_FLATTEN_DEPTH_LIMIT:
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _iter_tensors_deep(item, depth + 1)
-    elif isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iter_tensors_deep(item, depth + 1)
-
-
-def _operand_origins(trace: Any, operand: torch.Tensor) -> frozenset[str]:
-    """Resolve ONE dispatch operand to its positive value origins (or ``unknown``).
-
-    Resolution ladder (first hit wins): capture label (a tagged input/op output is
-    witnessable by its own slot digest); registered-state meta/buffer address; the
-    dispatch-origin ledger (a previously registered unlabelled alias/product); direct
-    registered-param storage identity. Anything unresolved is ``unknown`` -- an
-    explicit taint, never an omission (INV-1).
-    """
-
-    label = get_tensor_label(operand)
-    if isinstance(label, str):
-        return frozenset({f"{_ORIGIN_LABEL_PREFIX}{label}"})
-    # r81 (r80 F2): a ``state:`` origin requires the SESSION-VALIDATED stamp
-    # (current-session object + live storage identity), never the raw static
-    # stamp -- a stamped plain-attr buffer whose storage was ``.data``-rebound
-    # to input data mid-forward must resolve as ``unknown`` (explicit taint),
-    # not launder input-derived values into the residual-(3) state exemption.
-    buffer_address = session_validated_buffer_address(trace, operand)
-    if buffer_address is not None:
-        return frozenset({f"{_ORIGIN_STATE_PREFIX}{buffer_address}"})
-    registry = _DISPATCH_TENSOR_ORIGINS.get(trace)
-    if registry is not None:
-        entry = registry.get(operand)
-        if entry is not None:
-            return entry[0]
-    param_storage_addresses = getattr(trace, "_param_storage_addresses", None)
-    if param_storage_addresses:
-        ptr = _escape_storage_ptr(operand)
-        if ptr is not None and ptr in param_storage_addresses:
-            return frozenset({f"{_ORIGIN_STATE_PREFIX}{param_storage_addresses[ptr]}"})
-    return frozenset({_ORIGIN_UNKNOWN})
-
-
-def _operand_leaf_origins(trace: Any, operand: torch.Tensor) -> frozenset[str]:
-    """Resolve ONE operand to its TERMINAL leaf origins (state / input-or-boundary labels).
-
-    Unlike :func:`_operand_origins` (where an interior op's own label wins -- the best,
-    finest witness), leaf resolution propagates THROUGH interior labeled results down to
-    a basis that survives orphan-pruning: registered state addresses and the labels of
-    tensors that were never produced by an in-scope dispatch (model inputs and other
-    boundary tensors). The producer consumes this basis as the fail-closed FALLBACK
-    witness set for an escape whose direct source label was orphan-pruned (r37
-    mechanism A: "falls back to propagated leaf origins for pruned labels").
-    """
-
-    # r81 (r80 F2): the leaf ``state:`` rung requires the SESSION-VALIDATED
-    # stamp -- this ledger rung was the actual suppression vehicle for the
-    # plain-attr ``.data=`` input-layout launder: the rebound receiver's raw
-    # stamp resolved every downstream product to a pure ``state:`` leaf basis,
-    # so the layout ladder recorded nothing (residual (3)) and the twin
-    # false-VERIFIED. The belt makes the rebound receiver ``unknown`` instead.
-    buffer_address = session_validated_buffer_address(trace, operand)
-    if buffer_address is not None:
-        return frozenset({f"{_ORIGIN_STATE_PREFIX}{buffer_address}"})
-    registry = _DISPATCH_TENSOR_ORIGINS.get(trace)
-    if registry is not None:
-        entry = registry.get(operand)
-        if entry is not None:
-            # r29 F1: a ledger entry is identity-keyed, so it survives a
-            # storage-SWAPPING ``.data=`` rebind of the SAME object and then
-            # describes the PRE-rebind value -- the exact staleness that let a
-            # rebound receiver's leaf basis resolve pure-``state:`` and launder
-            # an input-layout read (sec1 false VERIFIED). A receiver currently
-            # labeled by a barrier op resolves ``unknown`` (explicit taint):
-            # the taint then propagates through every downstream registration,
-            # so products of the rebound tensor fail closed too. Pointer-
-            # preserving rebinds never register a barrier (r85 siblings keep
-            # their attribution).
-            rebind_barriers = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
-            if rebind_barriers:
-                label = get_tensor_label(operand)
-                if isinstance(label, str) and label in rebind_barriers:
-                    return frozenset({_ORIGIN_UNKNOWN})
-            return entry[1]
-    param_storage_addresses = getattr(trace, "_param_storage_addresses", None)
-    if param_storage_addresses:
-        ptr = _escape_storage_ptr(operand)
-        if ptr is not None and ptr in param_storage_addresses:
-            return frozenset({f"{_ORIGIN_STATE_PREFIX}{param_storage_addresses[ptr]}"})
-    label = get_tensor_label(operand)
-    if isinstance(label, str):
-        # Not a dispatch product: an input / boundary tensor whose label is terminal.
-        return frozenset({f"{_ORIGIN_LABEL_PREFIX}{label}"})
-    return frozenset({_ORIGIN_UNKNOWN})
-
-
-def _operator_is_seeded_rng(func: Any) -> bool:
-    """Return whether a dispatcher overload is torch-tagged nondeterministic-seeded."""
-
-    try:
-        return torch.Tag.nondeterministic_seeded in getattr(func, "tags", ())
-    except (TypeError, RuntimeError):
-        return True  # unreadable tags: treat as RNG (fail closed)
-
-
-def _operator_uninit_family_tail(func: Any) -> str | None:
-    """Return a dispatcher overload's base op name IF it is in the uninit family.
-
-    r53 hon_2: the shared closed table lives in ``utils/rng.py`` (one predicate,
-    three layers). At this layer the spelling is the overload-independent aten
-    base name (``aten.empty_like`` -> ``empty_like``).
-    """
-
-    from ...utils.rng import _UNINIT_ALLOC_FACTORY_TAILS, _UNINIT_ALLOC_RESIZE_TAILS
-
-    base = _operator_base_name(func)
-    if not base.startswith("aten."):
-        return None
-    tail = base[len("aten.") :]
-    if tail in _UNINIT_ALLOC_FACTORY_TAILS or tail in _UNINIT_ALLOC_RESIZE_TAILS:
-        return tail
-    return None
-
-
-def _python_tensor_method_uninit_family_tail(
-    namespace: str | None, qualname: str | None, args: tuple[Any, ...] = ()
-) -> str | None:
-    """Return a PYTHON-``torch.Tensor``-method spelling's uninit family tail (r55 hon_1).
-
-    The dispatch-level origin ledger above keys the family off aten base names,
-    which is complete for every spelling that REDISPATCHES an aten family op --
-    including the legacy ``Tensor.new(sizes)``, whose size form redispatches
-    ``aten.empty.memory_format`` (probed), so LIVE capture tainting already
-    covers it transitively. This function is the DECLARED recognition of the
-    family over the Python-``torch.Tensor``-method surface -- the spellings the
-    load-side qualname classifier and the family-drift meta-test see (``new``
-    has NO aten spelling: ``hasattr(torch.ops.aten, "new")`` is ``False``).
-    It consults the single ``utils/rng.py`` table block (never re-derives):
-
-    - a plain factory/resize tail (``empty_like``, ``resize_``) matches by
-      qualname alone, exactly like the load-side classifier;
-    - a SIZE-GATED tail (``new``) additionally requires the size-argument form;
-      an UNDECIDABLE form (``uninit_new_call_is_size_form`` returning ``None``)
-      fails closed to recognized-as-family, mirroring the grow-gate posture.
-
-    The Python-Tensor-method drift meta-test
-    (``tests/test_tlspec_runnable_r53_uninit_alloc.py``) enumerates
-    ``torch.Tensor`` allocation-pattern methods against this recognition so a
-    FUTURE python-only uninit factory with no aten spelling is a FAILING test,
-    never a silent gap slipping both the aten drift test and this surface.
-    """
-
-    from ...utils.rng import (
-        qualname_is_uninit_growth_resize,
-        qualname_is_uninit_size_gated_alloc,
-        qualname_is_uninitialized_alloc,
-        uninit_new_call_is_size_form,
-    )
-
-    if not qualname:
-        return None
-    tail = qualname.rsplit(".", 1)[-1]
-    if qualname_is_uninitialized_alloc(namespace, qualname) or qualname_is_uninit_growth_resize(
-        namespace, qualname
-    ):
-        return tail
-    if qualname_is_uninit_size_gated_alloc(namespace, qualname):
-        if uninit_new_call_is_size_form(args) is False:
-            return None  # data-form ``new([values])``/``new(tensor)``: deterministic copy
-        return tail  # size form, or undecidable -> fail closed to tainted
-    return None
-
-
-def _operator_is_growth_resize(func: Any) -> bool:
-    """Return whether a dispatcher overload is a resize spelling (grow-gated family)."""
-
-    from ...utils.rng import _UNINIT_ALLOC_RESIZE_TAILS
-
-    base = _operator_base_name(func)
-    return base.startswith("aten.") and base[len("aten.") :] in _UNINIT_ALLOC_RESIZE_TAILS
-
-
-def _operator_total_writer_destination(
-    func: Any, args: tuple[Any, ...], kwargs: dict[str, Any] | None
-) -> Any | None:
-    """Return the tensor whose bytes this dispatch TOTALLY overwrites, or ``None``.
-
-    Total writers per the shared r53 hon_2 sanitizer table: the ``out=`` kwarg
-    destination (torch's ``out=`` convention IS a full overwrite; only an exact
-    single-tensor ``out`` sanitizes) and the in-place
-    ``copy_``/``zero_``/``fill_``/RNG-fill receivers. Partial or unprovable
-    in-place writers return ``None`` (taint propagates, fail closed).
-    """
-
-    from ...utils.rng import _UNINIT_RNG_FILL_TAILS, _UNINIT_TOTAL_WRITER_TAILS
-
-    if kwargs:
-        out = kwargs.get("out")
-        if isinstance(out, torch.Tensor):
-            return out
-    base = _operator_base_name(func)
-    if base.startswith("aten."):
-        tail = base[len("aten.") :]
-        if tail in _UNINIT_TOTAL_WRITER_TAILS or tail in _UNINIT_RNG_FILL_TAILS:
-            if args and isinstance(args[0], torch.Tensor):
-                return args[0]
-    return None
-
-
-def _live_deterministic_fill_governs() -> bool:
-    """Return whether the LIVE capture context proves deterministic uninit fill."""
-
-    from ...utils._torch_compat import (
-        HAS_DETERMINISTIC_ALGORITHMS_QUERY,
-        read_fill_uninitialized_memory,
-    )
-    from ...utils.rng import deterministic_fill_governs
-
-    deterministic = (
-        bool(torch.are_deterministic_algorithms_enabled())
-        if HAS_DETERMINISTIC_ALGORITHMS_QUERY
-        else None
-    )
-    return deterministic_fill_governs(deterministic, read_fill_uninitialized_memory())
-
-
-def _register_dispatch_result_origins(
-    state: "_WitnessState",
-    func: Any,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any] | None,
-    result: Any,
-    pre_dispatch_receiver_numel: int | None = None,
-) -> None:
-    """Propagate the union of operand origins onto every tensor result (mechanism A).
-
-    A seeded-RNG operator additionally taints its results with the ``rng`` origin so a
-    pruned host read of raw RNG output can never be attributed as a deterministic
-    function of its operands. An in-place operator's mutated unlabelled receiver is
-    covered because the receiver IS a result-aliasing operand: re-registering results
-    updates its entry with the union (its VALUE now depends on all operands).
-
-    r53 hon_2: an uninitialized-memory family op (``empty`` factories; a GROWING
-    ``resize_``, decided against ``pre_dispatch_receiver_numel`` read at the
-    interpose BEFORE the receiver was resized, failing closed to tainted when
-    unavailable) additionally taints its results with the distinct ``uninit``
-    origin -- closing the empty-operand-set hole where allocator garbage
-    registered an EMPTY origin set and was later attributed as a "literal-only
-    deterministic chain". A total writer (``out=`` destination,
-    ``copy_``/``zero_``/``fill_``/RNG fill receiver) EXCLUDES the destination
-    operand's prior origins from the union: the post-write value derives from
-    the value-source operands only (exact value semantics -- strictly more
-    precise, never less safe).
-    """
-
-    trace = state.trace
-    display_union: set[str] = set()
-    leaf_union: set[str] = set()
-    # ``pause_logging`` + the internal marker: origin resolution reads storage
-    # pointers/labels through torch-function-wrapped accessors; unpaused reads
-    # would be logged as spurious ops mid-forward (shifting raw counters and
-    # staling every label recorded after them) and would trip the escape census.
-    # The r53 hon_2 metadata reads (``numel`` on the result, the ``out=`` kwarg
-    # probe) live INSIDE the same paused scope for exactly that reason.
-    with _state.pause_logging(), internal_scalar_read():
-        total_write_destination = _operator_total_writer_destination(func, args, kwargs)
-        for operand in _iter_tensors_deep(args):
-            if operand is total_write_destination:
-                continue
-            display_union |= _operand_origins(trace, operand)
-            leaf_union |= _operand_leaf_origins(trace, operand)
-        if kwargs:
-            for operand in _iter_tensors_deep(kwargs):
-                if operand is total_write_destination:
-                    continue
-                display_union |= _operand_origins(trace, operand)
-                leaf_union |= _operand_leaf_origins(trace, operand)
-        exposes_uninit = False
-        if _operator_uninit_family_tail(func) is not None:
-            exposes_uninit = True
-            result_numel = result.numel() if isinstance(result, torch.Tensor) else None
-            if _operator_is_growth_resize(func):
-                # Shrink/same-size preserves the element prefix (probed clean);
-                # an unreadable pre-call size fails closed to tainted.
-                exposes_uninit = (
-                    pre_dispatch_receiver_numel is None
-                    or result_numel is None
-                    or result_numel > pre_dispatch_receiver_numel
-                )
-            elif result_numel == 0:
-                exposes_uninit = False  # zero elements: no bytes to expose
-            if exposes_uninit and _live_deterministic_fill_governs():
-                exposes_uninit = False  # torch fills deterministically (probed NaN)
-    if _operator_is_seeded_rng(func):
-        display_union.add(_ORIGIN_RNG)
-        leaf_union.add(_ORIGIN_RNG)
-    if exposes_uninit:
-        display_union.add(_ORIGIN_UNINIT)
-        leaf_union.add(_ORIGIN_UNINIT)
-    if _operator_base_name(func) == "aten.as_strided" and not _as_strided_result_contained(
-        args, result
-    ):
-        # An out-of-span restride can address storage bytes outside every operand's
-        # witnessed span: its value is NOT a function of the operands (fail closed).
-        display_union.add(_ORIGIN_UNKNOWN)
-        leaf_union.add(_ORIGIN_UNKNOWN)
-    display = frozenset(display_union)
-    leaf = frozenset(leaf_union)
-    registry = _DISPATCH_TENSOR_ORIGINS.get(trace)
-    if registry is None:
-        registry = _TensorOriginRegistry()
-        _DISPATCH_TENSOR_ORIGINS[trace] = registry
-    # r43 CLASS 2: index every owner-produced activation's storage pointer so the non-owner
-    # storage-identity catch-all recognizes a ``.data`` / view / detach alias of a captured
-    # activation touched off-owner. The true-original accessor is wrapper-free.
-    captured_ptrs = _CAPTURED_STORAGE_PTRS.get(trace)
-    if captured_ptrs is None:
-        captured_ptrs = {}
-        _CAPTURED_STORAGE_PTRS[trace] = captured_ptrs
-    for produced in _iter_tensors_deep(result):
-        # Labeled results register too: the display ladder still prefers their own
-        # label (finest witness), but the LEAF set must flow through them so a later
-        # orphan-pruned chain can fall back to a surviving witness basis.
-        registry.set(produced, display, leaf)
-        produced_ptr = _raw_storage_ptr_no_observe(produced)
-        if produced_ptr is None:
-            continue
-        try:
-            produced_ref = weakref.ref(produced)
-        except TypeError:
-            continue  # non-weakref-able exotic subclass: storage identity not indexed
-        # Copy-on-write, prune-dead on append (bounds a reused address to its LIVE aliases,
-        # keeping the per-ptr tuple tiny and the worker-side read race-free against an
-        # atomic dict-value reassignment).
-        live = tuple(ref for ref in captured_ptrs.get(produced_ptr, ()) if ref() is not None)
-        captured_ptrs[produced_ptr] = (*live, produced_ref)
-
-
-def _resolved_dispatch_origins(
-    trace: Any,
-    source: torch.Tensor,
-    *,
-    prefer_ledger: bool = False,
-) -> tuple[set[str], set[str]] | None:
-    """Resolve an unlabelled escape source to positive (labels, state names), or ``None``.
-
-    Parameters
-    ----------
-    trace:
-        Active capture trace owning the dispatch-origin ledger.
-    source:
-        Tensor whose value origins must be resolved.
-    prefer_ledger:
-        Whether to consult the dispatch ledger before the tensor's own label.
-        ``Tensor.data`` aliases use this route because their canonical detach
-        label represents the getter, while the ledger names the semantic base
-        producer required by the host-escape witness.
-
-    Returns ``None`` -- the caller MUST fail closed -- when the source's propagated
-    origin set contains ``unknown`` (an operand the census could not attribute),
-    ``rng`` (raw seeded-RNG output; the torch-RNG nets own that class, and value
-    attribution through it would launder nondeterminism), or ``uninit`` (r53
-    hon_2: uninitialized allocator bytes are not a function of the recorded
-    computation, so attributing through them would launder nondeterminism as a
-    deterministic chain). An empty origin pair is a positive result: the value
-    derives from a literal-only deterministic chain that replays identically, so
-    it needs no witness.
-    """
-
-    origins: frozenset[str] | None = None
-    if prefer_ledger:
-        registry = _DISPATCH_TENSOR_ORIGINS.get(trace)
-        entry = registry.get(source) if registry is not None else None
-        if entry is not None:
-            origins = entry[0]
-    if origins is None:
-        with _state.pause_logging(), internal_scalar_read():
-            origins = _operand_origins(trace, source)
-    if _ORIGIN_UNKNOWN in origins or _ORIGIN_RNG in origins or _ORIGIN_UNINIT in origins:
-        return None
-    labels = {
-        origin[len(_ORIGIN_LABEL_PREFIX) :]
-        for origin in origins
-        if origin.startswith(_ORIGIN_LABEL_PREFIX)
-    }
-    states = {
-        origin[len(_ORIGIN_STATE_PREFIX) :]
-        for origin in origins
-        if origin.startswith(_ORIGIN_STATE_PREFIX)
-    }
-    return labels, states
-
-
-def _record_escape_source_tensor(
-    trace: Any,
-    source: torch.Tensor,
-    *,
-    invisible: bool,
-    fail_closed: bool = True,
-    resolve_origins: bool = True,
-) -> None:
-    """Record ONE tensor->host escape source, visible or census-invisible, uniformly.
-
-    ``invisible`` is ``True`` for a ``.tolist()`` / ``.numpy()`` / ``__array__``
-    conversion (observed by the scoped method patch) and ``False`` for an
-    ``aten._local_scalar_dense`` scalar escape (observed by the aten census). Both
-    mechanisms feed the SAME per-trace side tables so the runnable descriptor witnesses
-    every source class -- input, internal op, bound/unbound param, bound/unbound buffer --
-    by its capture-time digest through one uniform pass. Side tables are mutated via
-    GIL-atomic ``set.add``/``dict`` writes (CPython), so cross-thread recording (r41)
-    needs no extra locking.
-
-    ``fail_closed`` (r41 hon2_1/F): ``False`` -- the FOREIGN (pre-existing) thread
-    posture -- skips exactly the two unattributable rungs (the fail-closed bool/opaque
-    records), so an unattributable foreign-thread read never ceilings the capture while
-    every POSITIVE rung (label, registered-state alias, dispatch origin) still records.
-
-    ``resolve_origins`` (r41): ``False`` skips the dispatch-origin resolution rung and
-    the leaf-origin fallback recording, both of which take ``pause_logging`` (a GLOBAL
-    toggle a non-owner thread must never flip mid-forward). An absent fallback entry is
-    consumed by the producer exactly like the fail-closed ``None`` marker (an
-    orphan-pruned label without a basis stays INCOMPLETE), so skipping never weakens.
-
-    An escape dispatched from TorchLens's own op-logging internals (a metadata read of a
-    freshly-produced op output) is NOT a user escape and is skipped, so the fail-closed
-    INCOMPLETE gates never fire on TorchLens's own reads.
-    """
-
-    if _escape_source_is_torchlens_internal():
-        return
-    is_bool = source.dtype is torch.bool
-    # ``Tensor.data`` is captured as a canonical detach node so ordinary tensor
-    # replay retains a graph edge. For a host escape, however, the alias is not
-    # the semantic value source: resolve its dispatch origins exactly like the
-    # historical unlabelled ``.data`` object so the witness attributes the base
-    # producer rather than the synthetic getter node.
-    data_alias = is_tensor_data_alias(source)
-    label = None if data_alias else get_tensor_label(source)
-    if not isinstance(label, str):
-        # An UNLABELLED escape source (a ``.data`` alias, a raw-dispatch product):
-        # r37 INV-1 single-exit attribution ladder. Every rung is a POSITIVE
-        # attribution to a witnessable source; the fallthrough IS the fail-closed
-        # record. Banned forever as discharge mechanisms: scalar value equality
-        # (hon2_2), ``.item()`` re-extraction on unknown-arity operands (hon2_1),
-        # and any autograd-graph structural purity argument (hon2_3 / exp1).
-        if is_bool:
-            # A pruned, unlabelled bool predicate is covered by NO net -> fail closed
-            # (skipped for a foreign thread: no attribution, no ceiling).
-            if fail_closed:
-                _HOST_ESCAPE_UNATTRIBUTABLE_BOOL.add(trace)
-            return
-        # Rung 1 (r18): direct registered-param storage alias -- witnessed by the
-        # param state slot (``self.w.tolist()`` directly on a param carries no label).
-        param_addresses = _param_derived_addresses(trace, source)
-        if param_addresses:
-            state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-            if state_names is None:
-                state_names = set()
-                _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
-            state_names |= param_addresses
-            return
-        # Rung 2 (r37 mechanism A): positive dispatch-origin propagation. The census
-        # registered this tensor's value origins at its producing dispatch; resolve
-        # them to witnessable raw labels (tensor-op/input sources -> PASS B digest)
-        # and state names (param/buffer sources -> PASS A digest). Multi-element and
-        # scalar sources resolve identically -- no arity assumption anywhere.
-        # Owner-thread only (resolution flips the global logging toggle).
-        resolved = (
-            _resolved_dispatch_origins(trace, source, prefer_ledger=data_alias)
-            if resolve_origins
-            else None
-        )
-        if resolved is not None:
-            origin_labels, origin_states = resolved
-            if origin_labels:
-                sources = _HOST_ESCAPE_SOURCE_LABELS.get(trace)
-                if sources is None:
-                    sources = set()
-                    _HOST_ESCAPE_SOURCE_LABELS[trace] = sources
-                sources |= origin_labels
-                # An origin label can itself be an interior (later orphan-pruned)
-                # op label; give each the same leaf fallback basis.
-                for origin_label in origin_labels:
-                    _record_escape_label_fallback(trace, origin_label, source)
-            if origin_states:
-                state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-                if state_names is None:
-                    state_names = set()
-                    _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
-                state_names |= origin_states
-            # Empty label+state origins: a literal-only deterministic chain whose
-            # baked value replays identically -- positively attributed, witness-free.
-            return
-        # Fallthrough: no positive attribution -> fail closed (INCOMPLETE). This is
-        # the ONLY other exit; there is no third state (INV-1). A foreign thread
-        # (``fail_closed=False``) skips the record: no attribution, no ceiling.
-        if fail_closed:
-            _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(trace)
-        return
-    sources = _HOST_ESCAPE_SOURCE_LABELS.get(trace)
-    if sources is None:
-        sources = set()
-        _HOST_ESCAPE_SOURCE_LABELS[trace] = sources
-    sources.add(label)
-    # r37 mechanism A: record the leaf-origin fallback basis NOW (the live tensor and
-    # its propagated origins exist only during capture). Consumed by the producer only
-    # if this label turns out orphan-pruned. Skipped on non-owner threads (r41,
-    # ``resolve_origins=False``): an absent entry reads exactly like the fail-closed
-    # marker if the label is later orphan-pruned -- never weaker.
-    if resolve_origins:
-        _record_escape_label_fallback(trace, label, source)
-    # A BOOL predicate source stays in the main set (the pruned-RNG control-flow
-    # detector consumes it) but is tracked here so the runnable producer excludes an
-    # unresolved bool predicate from the tensor-op INCOMPLETE gate (it is the
-    # control-witness / conditional / loop / pruned-RNG net's domain).
-    if is_bool:
-        bool_sources = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
-        if bool_sources is None:
-            bool_sources = set()
-            _HOST_ESCAPE_BOOL_SOURCE_LABELS[trace] = bool_sources
-        bool_sources.add(label)
-    # A registered buffer/parameter source (identified by a non-None state address) is
-    # witnessed by its state slot digest. Record BOTH the raw label (so the producer
-    # does not close an unresolved orphan-pruned STATE label as a pruned tensor-op
-    # chain) AND the state_dict name/address (so the producer witnesses the state slot
-    # even when the state ALSO feeds a traced graph op -- bound-ness never exempts the
-    # escape witness).
-    meta = get_tensor_meta(source)
-    address = getattr(meta, "address", None) if meta is not None else None
-    # r18 + r19-C: a PARAMETER host escape resolves by state slot exactly like a buffer. A buffer
-    # keeps a graph SOURCE node, so its ``.detach()`` host read survives orphan-pruning and witnesses
-    # by its kept op; a parameter carries NO source node, so a param-rooted read op is orphan-pruned
-    # and its raw label resolves to no final op -> the escape would fail closed (INCOMPLETE_SCALAR_
-    # ESCAPE -> a spurious UNVERIFIABLE) even for a purely READ-ONLY stat log. Resolve the param
-    # state slot(s) so the read-only escape is witnessed by the param's capture-time digest (value-
-    # correct -- an unchanged param re-digests identically -> VERIFIED; a changed param -> UNVERIFIABLE),
-    # the same honest read/write distinction the buffer path draws. ``_param_derived_addresses`` covers
-    # both a DIRECT param alias (r18: ``self.w.detach()``, ``self.w[0]``) and a DERIVED pruned read
-    # rooted purely in params (r19-C: ``self.w.sum()``, ``float(self.w.max())``). A genuine host WRITE
-    # is caught independently by the parameter whole-storage byte tripwire
-    # (``buffer_writes._reconcile_params`` -> ``_HOST_ESCAPE_MUTABLE_WRITEBACK``), so read resolution
-    # never blesses a mutated param.
-    state_addresses: set[str] = set()
-    if address is not None:
-        state_addresses.add(str(address))
-    else:
-        state_addresses |= _param_derived_addresses(trace, source)
-    if state_addresses:
-        state_sources = _HOST_ESCAPE_STATE_SOURCE_LABELS.get(trace)
-        if state_sources is None:
-            state_sources = set()
-            _HOST_ESCAPE_STATE_SOURCE_LABELS[trace] = state_sources
-        state_sources.add(label)
-        state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-        if state_names is None:
-            state_names = set()
-            _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
-        state_names |= state_addresses
-
-
-def _operator_name(func: Any) -> str:
-    """Return a stable dispatcher operator and overload name.
-
-    Parameters
-    ----------
-    func:
-        Dispatcher callable received by ``__torch_dispatch__``.
-
-    Returns
-    -------
-    str
-        Best-effort qualified operator name such as ``aten.relu.default``.
-    """
-
-    try:
-        return str(func)
-    except Exception:
-        return type(func).__name__
-
-
-def _operator_base_name(func: Any) -> str:
-    """Return a dispatcher operator's namespace+base name with the overload stripped.
-
-    ``_operator_name`` yields the fully-qualified ``aten.<op>.<overload>`` (e.g.
-    ``aten.equal.default``); this drops the trailing ``.<overload>`` so a value-escape
-    op is matched by its overload-independent base (``aten.equal``) against
-    ``HOST_ESCAPE_OPERATORS``. A name with no overload segment is returned unchanged.
-    """
-
-    name = _operator_name(func)
-    if name.count(".") >= 2:
-        return name.rsplit(".", 1)[0]
-    return name
-
-
-def _is_aten_operator(func: Any) -> bool:
-    """Return whether a dispatcher callable belongs to the aten namespace.
-
-    Parameters
-    ----------
-    func:
-        Dispatcher callable received by ``__torch_dispatch__``.
-
-    Returns
-    -------
-    bool
-        ``True`` only for the aten census domain.
-    """
-
-    namespace = getattr(func, "namespace", None)
-    if isinstance(namespace, str):
-        return namespace == "aten"
-    return _operator_name(func).startswith("aten.")
-
-
-def _is_mutating_operator(func: Any) -> bool:
-    """Return whether a dispatcher operator writes to any of its arguments.
-
-    Mutation is read from the operator's own ``FunctionSchema`` (torch ground
-    truth), never a name-string heuristic: ``schema.is_mutable`` covers every
-    in-place operator (trailing-underscore names such as ``mul_``/``copy_``) as
-    well as ``out=`` overloads whose name does NOT end in an underscore. Per-arg
-    ``alias_info.is_write`` is used as a robust fallback when the schema flag is
-    unavailable. Pure reads such as ``aten.equal`` / ``aten.allclose`` return
-    ``False``, which is exactly why benign ``owner_not_captured`` control-flow
-    comparisons are never mistaken for value-affecting drops.
-
-    Parameters
-    ----------
-    func:
-        Dispatcher callable received by ``__torch_dispatch__``.
-
-    Returns
-    -------
-    bool
-        ``True`` when the operator mutates (writes) at least one argument.
-    """
-
-    schema = getattr(func, "_schema", None)
-    if schema is None:
-        return False
-    is_mutable = getattr(schema, "is_mutable", None)
-    if isinstance(is_mutable, bool):
-        return is_mutable
-    arguments = getattr(schema, "arguments", ()) or ()
-    for argument in arguments:
-        alias_info = getattr(argument, "alias_info", None)
-        if alias_info is not None and getattr(alias_info, "is_write", False):
-            return True
-    return False
-
-
 # Pure-view / aliasing accessor operators emitted by the ``.data`` property getter on a
 # registered buffer. Accessing ``self.b.data`` (the standard buffer-write idiom
 # ``self.b.data.copy_(x)``) dispatches a raw ``aten.detach.default`` with NO python wrapper
@@ -3924,115 +1188,6 @@ def _is_mutating_operator(func: Any) -> bool:
 # value-affecting drop, and a dropped value-producing op (``aten.add`` etc.) on a buffer is
 # NOT in this set and still trips the tripwire.
 _BUFFER_STATE_VIEW_OPERATORS = frozenset({"aten.detach", "aten.alias"})
-
-
-def _is_buffer_state_view_dispatch(
-    trace: Any,
-    func: Any,
-    owner: "ExpectedOriginalToken | None",
-    mutates: bool,
-    args: tuple[Any, ...],
-) -> bool:
-    """Return whether an aten dispatch is a ``.data``-accessor view on a registered buffer.
-
-    This flags the intrinsic, legitimately-uncaptured ``aten.detach`` a registered buffer's
-    ``.data`` property emits during a buffer WRITE (``self.b.data.copy_(x)``). The predicate is
-    intentionally strict on every axis so it can never mask a genuine untraced dispatch:
-
-    * ``owner is None`` -- the dispatch has NO python-wrapper owner (a wrapped ``.detach()``
-      call would be an accounted owner, not a gap; only the property-accessor path is unowned).
-    * ``not mutates`` -- the operator writes to no argument (ground-truth schema flag). A
-      value-affecting in-place drop can never be credited here.
-    * ``aten.detach`` / ``aten.alias`` only -- pure aliasing views. A dropped value-producing
-      op (``aten.add``/``aten.mul``/...) on the buffer is NOT in this set and stays unaccounted.
-    * ``args[0]`` is a REGISTERED BUFFER whose stamp is SESSION-VALIDATED (r81:
-      current-session object + live storage identity -- a stale or input-rebound
-      stamp is never credited as a benign state view).
-
-    Parameters
-    ----------
-    trace:
-        Active capture trace owning the session buffer identity registry.
-    func:
-        Dispatcher operator overload.
-    owner:
-        The live wrapper owner of the dispatch, or ``None`` when unowned.
-    mutates:
-        Whether the operator writes to any argument (schema ground truth).
-    args:
-        Positional dispatcher arguments; ``args[0]`` is the view source.
-
-    Returns
-    -------
-    bool
-        ``True`` only for a ``.data``-accessor view dispatch on a registered buffer.
-    """
-
-    if owner is not None or mutates:
-        return False
-    if _operator_base_name(func) not in _BUFFER_STATE_VIEW_OPERATORS:
-        return False
-    if not args:
-        return False
-    source = args[0]
-    return (
-        isinstance(source, torch.Tensor)
-        and session_validated_buffer_address(trace, source) is not None
-    )
-
-
-def _dispatch_callsite() -> _DispatchCallsite:
-    """Return the first non-framework frame above the dispatch callback.
-
-    Returns
-    -------
-    _DispatchCallsite
-        Best-effort source location for an unowned dispatcher event.
-    """
-
-    frame: Any = sys._getframe(2)
-    fallback = frame
-    while frame is not None:
-        filename = frame.f_code.co_filename
-        framework_frame = _FRAMEWORK_FILENAME_VERDICTS.get(filename)
-        if framework_frame is None:
-            try:
-                resolved = Path(filename).resolve()
-                framework_frame = resolved.is_relative_to(_TORCH_ROOT) or resolved.is_relative_to(
-                    _TORCHLENS_ROOT
-                )
-            except (OSError, RuntimeError, ValueError):
-                framework_frame = False
-            _FRAMEWORK_FILENAME_VERDICTS[filename] = framework_frame
-        if not framework_frame:
-            return _DispatchCallsite(filename, frame.f_lineno, frame.f_code.co_name)
-        fallback = frame
-        frame = frame.f_back
-    return _DispatchCallsite(
-        fallback.f_code.co_filename,
-        fallback.f_lineno,
-        fallback.f_code.co_name,
-    )
-
-
-def record_uncaptured_owner_callsite(token: ExpectedOriginalToken | None) -> None:
-    """Attach a user callsite only when an owned interval emitted no op.
-
-    Parameters
-    ----------
-    token:
-        Completed exact wrapper token, if diagnostics were armed.
-
-    Returns
-    -------
-    None
-        The token receives a stable file, line, and function tuple in place.
-    """
-
-    if token is None:
-        return
-    callsite = _dispatch_callsite()
-    token.capture_callsite = (callsite.file, callsite.line, callsite.function)
 
 
 class _CompletenessDispatchMode(TorchDispatchMode):
@@ -4184,45 +1339,6 @@ class _CompletenessDispatchMode(TorchDispatchMode):
         return result
 
 
-def _dispatch_result_holds_tensor(result: Any) -> bool:
-    """Return whether an aten dispatch result contains any tensor (one level deep)."""
-
-    if isinstance(result, torch.Tensor):
-        return True
-    if isinstance(result, (list, tuple)):
-        return any(isinstance(item, torch.Tensor) for item in result)
-    return False
-
-
-def _event_is_capture_accounted(event: _DispatchEvent) -> bool:
-    """Return whether the event is represented by its owner's captured artifact.
-
-    Ordinary wrapped operations account for their complete aten decomposition. A token
-    credited by synthesized boundary Ops is narrower: it accounts for the non-mutating
-    opaque output construction represented by those exact boundary tensors and raw labels,
-    but never for a mutating dispatch. Mutations always remain visible because a
-    functionless boundary cannot attest their side effects on existing graph values.
-
-    Parameters
-    ----------
-    event:
-        Dispatcher event being finalized.
-
-    Returns
-    -------
-    bool
-        Whether this exact event has a captured representation.
-    """
-
-    owner = event.owner
-    if owner is None or owner.capture_accounted is not True:
-        return False
-    boundary_outputs = owner.capture_accounted_outputs
-    if not boundary_outputs:
-        return True
-    return not event.mutates
-
-
 _RUNNABLE_LEDGER_FACTS: "weakref.WeakKeyDictionary[Any, list[dict[str, Any]]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -4235,12 +1351,6 @@ mutation-capable unknown (``opaque_side_effect``). The runnable producer maps a
 non-empty fact list to an INCOMPLETE witness-completeness downgrade, so every
 run of that artifact ceilings at ``unverifiable`` + ``not_applicable``.
 """
-
-
-def runnable_ledger_facts(trace: Any) -> tuple[Mapping[str, Any], ...]:
-    """Return the recorded undischarged lifecycle facts for one trace."""
-
-    return tuple(_RUNNABLE_LEDGER_FACTS.get(trace, ()))
 
 
 _PURE_VIEW_DISPATCH_OPERATORS = frozenset({"aten.detach", "aten.alias"})
@@ -4262,325 +1372,6 @@ incomplete fact.
 """
 
 
-def _tensor_abs_byte_span(value: torch.Tensor) -> tuple[int, int] | None:
-    """Absolute (start, end] byte span a strided tensor's elements touch, or ``None``.
-
-    Local minimal span math (min/max stride contributions on absolute addresses);
-    the full shared relation engine lives in ``utils.tensor_utils`` -- this helper
-    only answers CONTAINMENT for the as_strided audited row and fails ``None``-closed.
-    """
-
-    try:
-        with internal_scalar_read():
-            base = int(value.untyped_storage().data_ptr())
-        esize = int(value.element_size())
-        if base == 0 and value.numel() > 0:
-            return None
-        origin = base + int(value.storage_offset()) * esize
-        if value.numel() == 0:
-            return (origin, origin)
-        low = 0
-        high = 0
-        for size, stride in zip(value.shape, value.stride()):
-            contribution = (int(size) - 1) * int(stride)
-            if contribution < 0:
-                low += contribution
-            else:
-                high += contribution
-        return (origin + low * esize, origin + high * esize + esize)
-    except (RuntimeError, AttributeError, TypeError, ValueError, NotImplementedError):
-        return None
-
-
-def _as_strided_result_contained(args: tuple[Any, ...], result: Any) -> bool:
-    """Return whether an ``aten.as_strided`` result's byte span sits inside its operand's."""
-
-    if not args or not isinstance(args[0], torch.Tensor) or not isinstance(result, torch.Tensor):
-        return False
-    with _state.pause_logging():
-        operand_span = _tensor_abs_byte_span(args[0])
-        result_span = _tensor_abs_byte_span(result)
-    if operand_span is None or result_span is None:
-        return False
-    return operand_span[0] <= result_span[0] and result_span[1] <= operand_span[1]
-
-
-def _finalize_runnable_ledger(state: _WitnessState) -> None:
-    """Discharge every observed dispatch event or record an incomplete fact (r35 I2, r37 INV-1).
-
-    EXHAUSTIVE over the outcome vocabulary: every event terminates in exactly one
-    explicit disposition -- accounted modeled call, exact audited opaque boundary,
-    replacement-hook construction, escape-net witness, ``.data``-accessor state view,
-    audited pure-view row, or an explicit incomplete fact. Discharge rules
-    (owner-accounted; no exception-type or framework-file exemptions): a subevent
-    whose enclosing wrapper owner became an accounted modeled call is discharged
-    (replaying the owner replays its internals); a host-return witnessed by the exact
-    escape net (``HOST_ESCAPE_OPERATORS``) is discharged (post-hon2_1 the net is
-    total: every operand records a positive attribution or a fail-closed flag). A
-    ``returned_tensor`` event -- the corr2-1 class -- is NEVER implicitly discharged:
-    an unowned mutating dispatch records ``opaque_side_effect`` and an unowned
-    non-mutating value-producing dispatch records ``unmodeled_tensor_return`` (its
-    product can bake into a later traced call as an unwitnessed constant). An
-    unhandled outcome value is a hard internal error, never a silent pass. This
-    finalize runs only when the forward COMPLETED -- an undischarged raise means the
-    exception was caught before forward completion: exception-driven control flow the
-    sparse replay cannot witness.
-    """
-
-    facts: list[dict[str, Any]] = []
-    for event in state.events:
-        owner = event.owner
-        owner_accounted = _event_is_capture_accounted(event)
-        audited_opaque = owner is not None and _is_expected_opaque_dispatch(event.operator, owner)
-        # ``_operator_name`` yields overload-qualified names (``aten.equal.default``);
-        # the allowlists hold overload-stripped base names.
-        base_operator = (
-            event.operator.rsplit(".", 1)[0] if event.operator.count(".") >= 2 else event.operator
-        )
-        if event.outcome == "raised":
-            if owner_accounted or audited_opaque or event.in_replacement_hook:
-                continue
-            facts.append(
-                {
-                    "kind": "caught_exception_control",
-                    "operator": event.operator,
-                    "owner_wrapper": owner.wrapper_name if owner is not None else None,
-                    "owner_func_name": owner.func_name if owner is not None else None,
-                    "exception_type": event.exception_type,
-                    "mutates": bool(event.mutates),
-                }
-            )
-        elif event.outcome == "returned_host_or_none":
-            if owner_accounted or audited_opaque or event.in_replacement_hook:
-                continue
-            if base_operator in HOST_ESCAPE_OPERATORS:
-                # Witnessed exactly by the tensor->host escape net.
-                continue
-            if event.state_view_accessor:
-                continue
-            if event.metadata_witnessed and not event.mutates:
-                # r67 C3: witnessed exactly by the placement metadata net -- the wrapper
-                # recorded the receiver's observed value (state observation ledger) or
-                # input fact, so the producer gate owns the honesty decision. An
-                # unattributed receiver never sets the flag and stays an incomplete fact.
-                continue
-            facts.append(
-                {
-                    "kind": "opaque_side_effect" if event.mutates else "unmodeled_host_return",
-                    "operator": event.operator,
-                    "owner_wrapper": owner.wrapper_name if owner is not None else None,
-                    "owner_func_name": owner.func_name if owner is not None else None,
-                    "exception_type": None,
-                    "mutates": bool(event.mutates),
-                }
-            )
-        elif event.outcome == "returned_tensor":
-            if owner_accounted or audited_opaque or event.in_replacement_hook:
-                continue
-            if event.state_view_accessor:
-                continue
-            if not event.mutates and base_operator in _PURE_VIEW_DISPATCH_OPERATORS:
-                continue
-            if not event.mutates and event.contained_view:
-                # Audited span-contained ``as_strided`` (DLPack/array-interop restride).
-                continue
-            facts.append(
-                {
-                    "kind": "opaque_side_effect" if event.mutates else "unmodeled_tensor_return",
-                    "operator": event.operator,
-                    "owner_wrapper": owner.wrapper_name if owner is not None else None,
-                    "owner_func_name": owner.func_name if owner is not None else None,
-                    "exception_type": None,
-                    "mutates": bool(event.mutates),
-                }
-            )
-        elif event.outcome == "started":
-            # A dispatch that neither returned nor raised cannot exist on a completed
-            # forward; record fail-closed rather than silently passing (INV-1).
-            facts.append(
-                {
-                    "kind": "unclassified_event",
-                    "operator": event.operator,
-                    "owner_wrapper": owner.wrapper_name if owner is not None else None,
-                    "owner_func_name": owner.func_name if owner is not None else None,
-                    "exception_type": None,
-                    "mutates": bool(event.mutates),
-                }
-            )
-        else:  # pragma: no cover - unreachable by construction
-            raise AssertionError(
-                f"Internal invariant violation: unhandled dispatch outcome {event.outcome!r}; "
-                "every outcome value must have an explicit ledger disposition (INV-1)."
-            )
-    if facts:
-        _RUNNABLE_LEDGER_FACTS.setdefault(state.trace, []).extend(facts)
-
-
-def _whole_storage_uint8(source: torch.Tensor) -> torch.Tensor:
-    """Return a ``uint8`` tensor viewing ``source``'s ENTIRE untyped storage (all bytes).
-
-    A zero-copy alias (``source.numpy()`` / ``source.untyped_storage()`` / a raw ``data_ptr``)
-    shares the WHOLE storage, not just ``source``'s element extent: ``np.as_strided`` and a
-    storage ``__setitem__`` can write bytes OUTSIDE ``source``'s view window (r15-H2). Comparing
-    the whole aliased storage -- not ``source.detach().clone()`` (its own extent only) -- makes ANY
-    host write anywhere in the shared storage detectable at forward end.
-    """
-
-    untyped = source.untyped_storage()
-    view = torch.empty(0, dtype=torch.uint8, device=source.device)
-    view.set_(untyped, 0, (untyped.nbytes(),), (1,))
-    return view
-
-
-def _snapshot_writeback_source(state: _WitnessState, source: torch.Tensor) -> None:
-    """Record a before-image of a mutable zero-copy alias source for later write-back detection.
-
-    Snapshots ``source``'s version and a detached byte clone of its WHOLE untyped storage under
-    ``pause_logging`` (so the clone is not itself captured or censused) and holds a strong ref to
-    ``source`` so the shared storage stays alive until the forward-end comparison. Snapshotting the
-    full aliased storage (not just ``source``'s element extent) closes the r15-H2 out-of-extent
-    gap: a host write through the alias's storage handle to bytes OUTSIDE ``source``'s view window
-    (storage ``__setitem__`` / ``np.as_strided``) is still caught. A source that cannot be
-    snapshotted (e.g. a meta tensor with no storage) fails closed immediately.
-    """
-
-    try:
-        with _state.pause_logging():
-            version = tensor_version_or_none(source)
-            before = _whole_storage_uint8(source).clone()
-    except (RuntimeError, TypeError, NotImplementedError):
-        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-        return
-    state.writeback_watch.append((source, version, before))
-
-
-def _iter_dispatch_tensors(
-    args: tuple[Any, ...], kwargs: dict[str, Any] | None
-) -> Iterator[torch.Tensor]:
-    """Yield every ``torch.Tensor`` operand of a dispatch, flattening list/tuple containers.
-
-    Aten operands are tensors, scalars, or (for ``cat`` / ``stack`` / ``_foreach_*``) lists/tuples
-    of tensors; this walks those one-deep-or-more without importing a pytree so the per-consumption
-    watch can see every tensor an op reads.
-    """
-
-    stack: list[Any] = list(args)
-    if kwargs:
-        stack.extend(kwargs.values())
-    while stack:
-        item = stack.pop()
-        if isinstance(item, torch.Tensor):
-            yield item
-        elif isinstance(item, (list, tuple)):
-            stack.extend(item)
-
-
-def _sample_writeback_at_consumption(
-    state: _WitnessState, args: tuple[Any, ...], kwargs: dict[str, Any] | None
-) -> None:
-    """Detect a transient host write-back that is LIVE when a traced op CONSUMES a watched source.
-
-    A mutable zero-copy alias (``numpy`` / ``__array__`` / a storage handle) can be written,
-    consumed by a downstream traced op, then byte-exactly RESTORED before forward end -- so the
-    single end-of-forward compare (:func:`_check_writeback_watch`) sees ``before == after`` and
-    would falsely VERIFY (r16-H1 TOCTOU). Sampling the watched source's WHOLE-STORAGE bytes at each
-    CONSUMPTION catches the write while it is live in a traced op's input, then rolls it back.
-
-    Soundness (no over-trigger). Only a byte difference with the source's version UNCHANGED since
-    the exposure is flagged:
-
-    * version UNCHANGED + bytes differ -> NO tracked in-place op touched the storage, so the diff is
-      an opaque host write-back that is LIVE for this traced consumer -> UNVERIFIABLE (the TOCTOU);
-    * version BUMPED -> a TRACKED, replayable in-place op is responsible for the diff, so the
-      per-consumption sample defers to the end-of-forward compare (which conservatively handles a
-      version-bumped byte diff). Flagging it here would falsely trip a legitimate tracked-op
-      sequence that later restores the bytes (e.g. ``arr=y.numpy(); y.add_(1); z=y*2; y.sub_(1)``).
-
-    A read-only ``.numpy().sum()`` never changes the bytes, so it is never flagged. The scan runs
-    only while a mutable alias is live (``writeback_watch`` non-empty) and only compares a watched
-    source when THIS op actually consumes its storage, so a transient write that never reaches a
-    traced consumer of the source (restored before it is read) stays honestly VERIFIED.
-    """
-
-    if not state.writeback_watch and not _has_state_toctou_watch(state.trace):
-        return
-    # INV-2 annotation (r37): the ``data_ptr`` matching below is ATTRIBUTION-ONLY
-    # identity -- it decides which watched source a consuming op MIGHT touch, and a
-    # missed match merely defers to the end-of-forward WHOLE-STORAGE content compare
-    # (which needs no pointer reasoning at all). Pointer identity is never used as a
-    # disjointness proof here, so the absolute-interval engine is not required.
-    try:
-        with _state.pause_logging():
-            consumed_ptrs: set[int] = set()
-            for operand in _iter_dispatch_tensors(args, kwargs):
-                try:
-                    consumed_ptrs.add(operand.untyped_storage().data_ptr())
-                except (RuntimeError, TypeError, NotImplementedError):
-                    continue
-            if not consumed_ptrs:
-                return
-            if _sample_state_toctou_at_consumption(state, consumed_ptrs):
-                return
-            for source, version, before in state.writeback_watch:
-                try:
-                    if source.untyped_storage().data_ptr() not in consumed_ptrs:
-                        continue
-                    if tensor_version_or_none(source) != version:
-                        continue
-                    if not torch.equal(
-                        _whole_storage_uint8(source), before
-                    ):  # byte-exact uint8 view
-                        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                        return
-                except (RuntimeError, TypeError, NotImplementedError):
-                    _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                    return
-    except (RuntimeError, TypeError, NotImplementedError):
-        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-        return
-
-
-def _has_state_toctou_watch(trace: Any) -> bool:
-    """Return whether the active trace has registered state byte watches.
-
-    Returns
-    -------
-    bool
-        ``True`` when buffer/parameter write tracking has live state snapshots.
-    """
-
-    tracker = getattr(trace, "_buffer_write_tracker", None)
-    if tracker is None:
-        return False
-    param_snapshots = getattr(tracker, "address_to_param_snapshot", None)
-    buffer_snapshots = getattr(tracker, "address_to_expected_storage_snapshot", None)
-    return bool(param_snapshots) or bool(buffer_snapshots)
-
-
-def _sample_state_toctou_at_consumption(state: _WitnessState, consumed_ptrs: set[int]) -> bool:
-    """Detect transient registered-state mutations when a traced op consumes them.
-
-    Parameters
-    ----------
-    state:
-        Active completeness-witness state.
-    consumed_ptrs:
-        Storage data pointers consumed by the current dispatcher operation.
-
-    Returns
-    -------
-    bool
-        ``True`` when an opaque state write-back was detected and recorded.
-    """
-
-    tracker = getattr(state.trace, "_buffer_write_tracker", None)
-    if tracker is None:
-        return False
-    if _sample_param_toctou_at_consumption(state, tracker, consumed_ptrs):
-        return True
-    return _sample_buffer_toctou_at_consumption(state, tracker, consumed_ptrs)
-
-
 # PERF (w15 F1): exact classes whose ``untyped_storage``/``data_ptr`` provably resolve to the
 # snapshotted true originals (`_ORIG_TENSORBASE_UNTYPED_STORAGE` / `_ORIG_UNTYPED_STORAGE_DATA_PTR`).
 # The per-consumption TOCTOU scans run under ``pause_logging`` on the OWNER thread, where the
@@ -4590,295 +1381,6 @@ def _sample_state_toctou_at_consumption(state: _WitnessState, consumed_ptrs: set
 # Python level, so anything else keeps the verbatim wrapped per-item path.
 _PLAIN_TENSOR_CLS = torch.Tensor
 _PLAIN_PARAM_CLS = torch.nn.Parameter
-
-
-def _split_consumed_state_items(
-    items: tuple[tuple[str, Any], ...], consumed_ptrs: set[int]
-) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
-    """Split registered state items into consumed-storage HITS and verbatim-path leftovers.
-
-    PERF (w15 F1): the per-consumption TOCTOU scans read every registered param/buffer's
-    CURRENT storage pointer on EVERY dispatched op -- O(ops x params), and each per-item
-    wrapped ``untyped_storage().data_ptr()`` call additionally pays the armed numpy-RNG
-    setprofile classifier's per-event toll, the multiplicative structure behind the
-    quadratic runnable-producer capture. This helper keeps the FULL per-op scan (the scan
-    itself is the r16-H1/r18 coverage: a registration-time ptr->address index goes STALE
-    under a mid-forward ``p.data = other`` rebind and would falsely VERIFY a restored
-    transient write) but batches the pointer reads through ``map`` over the true-original
-    C accessors: C-to-C calls never enter the interpreter loop, so no profile event fires
-    per item and no wrapper frame is paid. ``sys.setprofile`` hooks by contract only see
-    interpreter-level calls, so nothing the RNG monitor could ever have classified is
-    hidden -- user draw-sites always run through the interpreter and remain fully visible.
-
-    Coverage is byte-identical to the verbatim loop: the raw read is only used for exact
-    ``torch.Tensor`` / ``nn.Parameter`` instances (where the wrapped, paused spelling is a
-    pure call-through to the same originals -- raw ``0`` pointers included), any exotic
-    class falls to the leftover list for the verbatim wrapped per-item path, and ANY
-    batch-read exception routes EVERY item to that verbatim path (which reproduces the
-    original per-item skip semantics exactly).
-
-    Returns
-    -------
-    tuple[list, list]
-        ``(hits, leftovers)``: items whose current storage pointer is in
-        ``consumed_ptrs`` (dict order), and items that must take the verbatim per-item
-        path (exotic classes, or all items on a batch-read failure).
-    """
-
-    fast = [
-        pair
-        for pair in items
-        if pair[1].__class__ is _PLAIN_TENSOR_CLS or pair[1].__class__ is _PLAIN_PARAM_CLS
-    ]
-    if len(fast) != len(items):
-        leftovers = [
-            pair
-            for pair in items
-            if not (pair[1].__class__ is _PLAIN_TENSOR_CLS or pair[1].__class__ is _PLAIN_PARAM_CLS)
-        ]
-    else:
-        leftovers = []
-    if not fast:
-        return [], leftovers
-    try:
-        ptrs = list(
-            map(
-                _ORIG_UNTYPED_STORAGE_DATA_PTR,
-                map(_ORIG_TENSORBASE_UNTYPED_STORAGE, [pair[1] for pair in fast]),
-            )
-        )
-    except (RuntimeError, TypeError, NotImplementedError, AttributeError):
-        # Fail SAFE, never fast: any batch failure sends every item through the verbatim
-        # wrapped per-item path, which reproduces the original skip semantics per tensor.
-        return [], list(items)
-    hits = [pair for pair, ptr in zip(fast, ptrs) if ptr in consumed_ptrs]
-    return hits, leftovers
-
-
-def _sample_param_toctou_at_consumption(
-    state: _WitnessState, tracker: Any, consumed_ptrs: set[int]
-) -> bool:
-    """Compare consumed parameters against their pre-forward byte snapshots.
-
-    Parameters
-    ----------
-    state:
-        Active completeness-witness state.
-    tracker:
-        Buffer/parameter write tracker attached to the active trace.
-    consumed_ptrs:
-        Storage data pointers consumed by the current dispatcher operation.
-
-    Returns
-    -------
-    bool
-        ``True`` when a consumed parameter differs from its pre-forward bytes.
-    """
-
-    tensors = getattr(tracker, "address_to_param_tensor", None)
-    snapshots = getattr(tracker, "address_to_param_snapshot", None)
-    if not isinstance(tensors, dict) or not isinstance(snapshots, dict):
-        return False
-    hits, leftovers = _split_consumed_state_items(tuple(tensors.items()), consumed_ptrs)
-    for address, source in hits:
-        if _param_baseline_differs(state, snapshots, address, source):
-            return True
-    for address, source in leftovers:
-        if not isinstance(source, torch.Tensor):
-            continue
-        try:
-            if source.untyped_storage().data_ptr() not in consumed_ptrs:
-                continue
-        except (RuntimeError, TypeError, NotImplementedError):
-            continue
-        if _param_baseline_differs(state, snapshots, address, source):
-            return True
-    return False
-
-
-def _param_baseline_differs(
-    state: _WitnessState, snapshots: dict[str, Any], address: str, source: torch.Tensor
-) -> bool:
-    """Compare one consumed param's whole-storage bytes against its pre-forward baseline."""
-
-    baseline = snapshots.get(address)
-    if not isinstance(baseline, tuple) or not baseline:
-        return False
-    before = baseline[0]
-    if not isinstance(before, torch.Tensor):
-        return False
-    try:
-        if not torch.equal(_whole_storage_uint8(source), before):  # byte-exact uint8 view
-            _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-            return True
-    except (RuntimeError, TypeError, NotImplementedError):
-        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-        return True
-    return False
-
-
-def _sample_buffer_toctou_at_consumption(
-    state: _WitnessState, tracker: Any, consumed_ptrs: set[int]
-) -> bool:
-    """Compare consumed buffers against the journal-advanced expected bytes.
-
-    Parameters
-    ----------
-    state:
-        Active completeness-witness state.
-    tracker:
-        Buffer/parameter write tracker attached to the active trace.
-    consumed_ptrs:
-        Storage data pointers consumed by the current dispatcher operation.
-
-    Returns
-    -------
-    bool
-        ``True`` when a consumed buffer differs from its journal-advanced bytes.
-    """
-
-    tensors = getattr(tracker, "address_to_tensor", None)
-    snapshots = getattr(tracker, "address_to_expected_storage_snapshot", None)
-    if not isinstance(tensors, dict) or not isinstance(snapshots, dict):
-        return False
-    hits, leftovers = _split_consumed_state_items(tuple(tensors.items()), consumed_ptrs)
-    for address, source in hits:
-        if _buffer_expected_differs(state, snapshots, address, source):
-            return True
-    for address, source in leftovers:
-        if not isinstance(source, torch.Tensor):
-            continue
-        try:
-            if source.untyped_storage().data_ptr() not in consumed_ptrs:
-                continue
-        except (RuntimeError, TypeError, NotImplementedError):
-            continue
-        if _buffer_expected_differs(state, snapshots, address, source):
-            return True
-    return False
-
-
-def _buffer_expected_differs(
-    state: _WitnessState, snapshots: dict[str, Any], address: str, source: torch.Tensor
-) -> bool:
-    """Compare one consumed buffer's whole-storage bytes against its journal-advanced bytes."""
-
-    expected = snapshots.get(address)
-    if not isinstance(expected, torch.Tensor):
-        return False
-    try:
-        if not torch.equal(_whole_storage_uint8(source), expected):  # byte-exact uint8 view
-            _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-            return True
-    except (RuntimeError, TypeError, NotImplementedError):
-        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-        return True
-    return False
-
-
-def _make_invisible_escape_wrapper(original: Any, state: _WitnessState, name: str) -> Any:
-    """Wrap a tensor->host conversion method to record its SOURCE, then call through.
-
-    The wrapper records the receiver tensor (the escape SOURCE) into the shared escape
-    tables, gated to the active trace so a TorchLens-internal conversion (run under
-    ``pause_logging``) is never mistaken for a user escape. Fires on every thread under
-    the r43 owner-vs-non-owner rule: the OWNER thread (gated on ``_logging_enabled``)
-    records through the full precise ladder plus the blanket flags/watches; a NON-owner
-    thread (gated on ``belt_armed``) ceilings only when it touches a captured tensor and
-    otherwise records nothing (a benign background thread touching its OWN tensors never
-    ceilings the capture). For a
-    mutable zero-copy alias conversion (``numpy`` / ``__array__``) it also records a
-    before-image so a subsequent host write-back through the alias is detected at
-    forward end. It always calls the original method unchanged, so values, goldens, and
-    outputs are byte-identical. r43: the OWNER thread keeps the precise ladder; a NON-owner
-    thread's captured-tensor touch ceilings via :func:`_nonowner_escape_observe`.
-    """
-
-    # Storage-pointer bridges (untyped_storage / storage / data_ptr) are watched for host
-    # write-back but are WATCH-ONLY: a read-only pointer/identity check exposes no scalar value,
-    # so recording them as value-escape sources would over-trigger and is deliberately skipped.
-    is_storage_bridge = name in STORAGE_BRIDGE_ESCAPE_FUNCS
-    watch_writeback = name in MUTABLE_ALIAS_ESCAPE_FUNCS or is_storage_bridge
-    record_source = not is_storage_bridge
-    # ``data_ptr()`` alone leaks a RAW pointer no forward-end byte watch can re-inspect (r15-H1);
-    # a genuine user call fails closed to UNVERIFIABLE. ``untyped_storage()`` / ``storage()`` keep
-    # the watch-only write-back treatment (their value reads are already UNVERIFIABLE).
-    is_raw_pointer = name == "data_ptr"
-    # r67 C3/C6: storage ACQUISITION registers the returned handle's ORIGIN (input site /
-    # full state alias group / other) in the capture-scoped weak origin map -- and NOTHING
-    # else. The former exposure-time geometry stamp ("``.nbytes()`` is one attribute away")
-    # violated actual-read gating (corr1-4: a discarded handle on a larger-base slot false-
-    # refused the save); the real accessor call on the handle now records through
-    # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``.
-    registers_storage_origin = name in {"untyped_storage", "storage", "_typed_storage"}
-    # r65 (closes r64 F2): a zero-copy VIEW export pins the receiver's full layout with no
-    # accessor call at all -- ``numpy()``/``__array__`` expose ndarray ``.strides``/``.flags``
-    # and DLPack capsules carry strides + byte offset. On a STATE-derived receiver that
-    # geometry is a pure function of the slot's physical form (a view-of-state receiver
-    # attributes to the slot exactly as r63), so the export records the exact-layout read
-    # kinds. ``tolist()`` COPIES (layout-safe) and is deliberately excluded.
-    records_state_view_geometry = name in {"numpy", "__array__", "__dlpack__"}
-
-    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
-        """Record one tensor host-export access and then call through.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver for the export.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original`` or the cached storage bridge result.
-        """
-        result_holder: dict[str, Any] = {}
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled:
-                    if record_source:
-                        _record_escape_source_tensor(state.trace, self, invisible=True)
-                    if records_state_view_geometry:
-                        _observe_state_metadata_read(
-                            state.trace, self, STATE_METADATA_MIRROR["stride"][1]
-                        )
-                        _observe_state_metadata_read(
-                            state.trace, self, STATE_METADATA_MIRROR["storage_offset"][1]
-                        )
-                    if registers_storage_origin and not _internal_read_active():
-                        storage = original(self, *args, **kwargs)
-                        result_holder["value"] = storage
-                        _register_storage_origin(state, self, storage)
-                    # A raw ``data_ptr()`` pointer is unobservable; only a genuine USER call
-                    # (internal marker inactive -- TorchLens's own bookkeeping ``data_ptr``
-                    # reads run under it) fails closed so the tensor's subsequent value cannot
-                    # be silently VERIFIED.
-                    if is_raw_pointer and not _internal_read_active():
-                        _HOST_ESCAPE_RAW_POINTER.add(state.trace)
-                    # TorchLens's OWN capture-internal aliasing / version bookkeeping reads
-                    # storage pointers (``aliasing._tensors_alias`` ->
-                    # ``untyped_storage().data_ptr()``) under the explicit ``internal_scalar_read``
-                    # marker. Those are NOT user exposures: snapshotting them and byte-comparing
-                    # under the r14-H1 gate would falsely trip on a later legitimate TRACKED
-                    # in-place op. Only watch a storage bridge when the marker is inactive -- a
-                    # genuine user ``data_ptr()`` / ``storage()`` call. (The numpy / __array__
-                    # mutable alias is never called internally, so it is always watched, as r13.)
-                    if watch_writeback and not (is_storage_bridge and _internal_read_active()):
-                        _snapshot_writeback_source(state, self)
-            elif state.belt_armed:
-                # r43: a non-owner touch of a captured tensor (this receiver, or a captured-
-                # derived alias by storage identity) ceilings the capture. A benign OWN-tensor
-                # conversion records nothing.
-                _nonowner_escape_observe(state, self)
-        if "value" in result_holder:
-            return result_holder["value"]
-        return original(self, *args, **kwargs)
-
-    return wrapper
 
 
 # --- r67 C3/C6: THE atomic storage-accessor disposition table -------------------------------
@@ -5053,1676 +1555,6 @@ absent on a given torch build (feature-gated members) are skipped at install.
 """
 
 
-def _nonowner_storage_observe(state: "_WitnessState", storage: Any) -> None:
-    """Ceiling the capture when a NON-owner thread touches a CAPTURED storage handle (r67)."""
-
-    try:
-        backing = (
-            storage
-            if isinstance(storage, torch.UntypedStorage)
-            else getattr(storage, "_untyped_storage", None)
-        )
-        ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(backing) if backing is not None else None
-    except (RuntimeError, TypeError, NotImplementedError, AttributeError):
-        ptr = None
-    if isinstance(ptr, int) and ptr and _nonowner_ptr_is_captured(state, ptr):
-        _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
-
-
-def _record_state_value_escape(trace: Any, addresses: "set[str]") -> None:
-    """Join a storage-spelling VALUE read into the state digest witness (r67 C3)."""
-
-    addresses = _expand_state_alias_addresses(trace, addresses)
-    state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
-    if state_names is None:
-        state_names = set()
-        _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
-    state_names |= addresses
-
-
-def _attribute_storage_placement(
-    state: "_WitnessState",
-    storage: Any,
-    name: str,
-    observed: "bool | None",
-    had_args: bool,
-) -> None:
-    """Attribute one storage-handle placement accessor call, tensor-spelling-identically."""
-
-    origin = _resolve_storage_origin(state, storage)
-    if origin is None:
-        _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(state.trace)
-        return
-    origin_kind, payload = origin
-    if origin_kind == "state":
-        read_kind = STATE_METADATA_MIRROR[name][1]
-        _record_state_metadata_observation(state.trace, set(payload), read_kind, observed)
-    elif origin_kind == "input":
-        if observed is not None and not had_args:
-            _record_input_metadata_read_at_site(state.trace, payload, name, observed)
-        else:
-            # An arg-directed or raising placement query off an input is not re-checkable
-            # against the raw runtime leaf: fail closed (same downgrade as a derived-view
-            # metadata read).
-            _INPUT_METADATA_VIEW_READ.add(state.trace)
-
-
-def _make_storage_metadata_wrapper(
-    original: Any, state: "_WitnessState", name: str, disposition: str
-) -> Any:
-    """Wrap one storage-class accessor: call through ONCE, then record the real result."""
-
-    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        """Record one storage accessor observation before returning the real result.
-
-        Parameters
-        ----------
-        self:
-            Storage-like receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if _state._active_trace is not state.trace:
-            return original(self, *args, **kwargs)
-        if threading.get_ident() != state.owner_thread_id:
-            if state.belt_armed:
-                _nonowner_storage_observe(state, self)
-            return original(self, *args, **kwargs)
-        if not _state._logging_enabled or _internal_read_active():
-            return original(self, *args, **kwargs)
-        # The original runs PAUSED + marked: several storage accessors delegate through
-        # tensor machinery (``UntypedStorage.is_pinned`` builds a scratch tensor and calls
-        # ``Tensor.is_pinned(device)``), and that torch-internal delegation must neither be
-        # captured as phantom graph ops nor double-recorded by the tensor-spelling
-        # wrappers -- THIS wrapper records the single user-visible observation.
-        if disposition == _STORAGE_ACCESSOR_PLACEMENT:
-            had_args = bool(args or kwargs)
-            try:
-                with _state.pause_logging(), internal_scalar_read():
-                    result = original(self, *args, **kwargs)
-            except Exception:
-                # The exception itself is control-flow signal; observed=None refuses.
-                _attribute_storage_placement(state, self, name, None, had_args)
-                raise
-            observed = None if had_args else bool(result)
-            _attribute_storage_placement(state, self, name, observed, had_args)
-            return result
-        with _state.pause_logging(), internal_scalar_read():
-            result = original(self, *args, **kwargs)
-        origin = _resolve_storage_origin(state, self)
-        if origin is None:
-            # Unattributable owner-thread storage access: fail closed (observer
-            # uncertainty), never silently record nothing.
-            _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(state.trace)
-            return result
-        origin_kind, payload = origin
-        if disposition == _STORAGE_ACCESSOR_ORIGIN_BRIDGE:
-            _register_storage_handle_origin(state, result, origin)
-            return result
-        if origin_kind == "other":
-            return result
-        if disposition == _STORAGE_ACCESSOR_NBYTES:
-            if origin_kind == "input":
-                _record_input_storage_nbytes(state.trace, payload, self)
-            else:
-                _record_state_metadata_read(
-                    state.trace, set(payload), STATE_METADATA_MIRROR["storage_nbytes"][1]
-                )
-        elif disposition == _STORAGE_ACCESSOR_MUTATOR:
-            _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-        elif disposition == _STORAGE_ACCESSOR_VALUE_READ:
-            if name == "type" and not args and not kwargs:
-                return result  # no-arg type(): a class-name string; dtype/device slot-pinned
-            if origin_kind == "state":
-                _record_state_value_escape(state.trace, set(payload))
-            else:
-                _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(state.trace)
-        elif disposition == _STORAGE_ACCESSOR_FAIL_CLOSED:
-            _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(state.trace)
-        return result
-
-    return wrapper
-
-
-def _make_storage_property_wrapper(
-    descriptor: Any, state: "_WitnessState", name: str, disposition: str
-) -> property:
-    """Wrap a storage-class PROPERTY row (``filename`` / ``_cdata``) read-through."""
-
-    def getter(self: Any) -> Any:
-        """Read one storage property and attribute the host exposure when needed.
-
-        Parameters
-        ----------
-        self:
-            Storage-like receiver.
-
-        Returns
-        -------
-        Any
-            Value returned by ``descriptor``.
-        """
-        value = descriptor.__get__(self, type(self))
-        if _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled and not _internal_read_active():
-                    if disposition == _STORAGE_ACCESSOR_RAW_POINTER:
-                        _HOST_ESCAPE_RAW_POINTER.add(state.trace)
-                    else:
-                        origin = _resolve_storage_origin(state, self)
-                        if origin is None or origin[0] in ("input", "state"):
-                            _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(state.trace)
-            elif state.belt_armed:
-                _nonowner_storage_observe(state, self)
-        return value
-
-    return property(getter)
-
-
-def _make_storage_raw_pointer_wrapper(original: Any, state: _WitnessState) -> Any:
-    """Wrap ``UntypedStorage.data_ptr`` / ``TypedStorage.data_ptr`` to fail closed, then read through.
-
-    ``tensor.data_ptr()`` is fail-closed by :func:`_make_invisible_escape_wrapper` (r15-H1), but the
-    SAME raw pointer is reachable off the Storage HANDLE: ``tensor.untyped_storage().data_ptr()`` /
-    ``tensor.storage().data_ptr()`` call ``data_ptr`` on the ``UntypedStorage`` / ``TypedStorage``
-    object, NOT on ``torch.Tensor`` -- so the Tensor patch never fires and the raw pointer escapes
-    unobserved (r16-C1). A ``ctypes`` READ through it bakes a stale literal and a WRITE through it
-    mutates the source with no dispatch, no version bump, and no byte the forward-end watch can
-    re-inspect. A genuine USER storage ``data_ptr()`` therefore fails closed to UNVERIFIABLE, exactly
-    like the Tensor path. Scoped to the ``data_ptr()`` ACCESSOR only: read-only
-    ``untyped_storage().nbytes()`` / ``.size()`` (pure metadata, no pointer) never trips it.
-    TorchLens's own capture-internal storage-pointer reads (``aliasing._tensors_alias`` ->
-    ``untyped_storage().data_ptr()``) run under the ``internal_scalar_read`` marker and are excluded.
-    r43: the OWNER thread fails closed (blanket raw-pointer flag) exactly as before; a NON-OWNER
-    thread ceilings ONLY when the storage belongs to a CAPTURED tensor (its raw pointer, read via
-    the original accessor, is a captured input/param/activation pointer), so a foreign library's
-    own ``data_ptr()`` reads never ceiling the capture.
-    """
-
-    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        """Read one storage raw pointer while enforcing the witness downgrade.
-
-        Parameters
-        ----------
-        self:
-            Storage-like receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Raw pointer result from ``original``.
-        """
-        if _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled and not _internal_read_active():
-                    _HOST_ESCAPE_RAW_POINTER.add(state.trace)
-            elif state.belt_armed:
-                try:
-                    ptr = original(self, *args, **kwargs)
-                except (RuntimeError, TypeError, NotImplementedError):
-                    ptr = None
-                if isinstance(ptr, int) and ptr and _nonowner_ptr_is_captured(state, ptr):
-                    _HOST_ESCAPE_CROSS_THREAD_CAPTURED.add(state.trace)
-        return original(self, *args, **kwargs)
-
-    return wrapper
-
-
-def _completeness_census_active() -> bool:
-    """Return whether the aten completeness census mode is on the active dispatch stack (r39).
-
-    The mode-independent method/predicate belt is only NEEDED when the census is BLIND -- inside
-    a ``_disable_current_modes()`` region that popped :class:`_CompletenessDispatchMode` off the
-    dispatch stack (measured E6). When the census IS active it observes the escape at its aten
-    dispatch, where the source tensor is fully labelled/attributed; the belt firing there too
-    would record the operand PRE-dispatch (before its buffer/op label exists) and mis-route a
-    legitimately-witnessed read (e.g. a registered-buffer ``if self.gate``) into the fail-closed
-    unattributable gate. So the belt records ONLY when the census is not currently observing.
-    """
-
-    try:
-        from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
-
-        return any(
-            isinstance(mode, _CompletenessDispatchMode)
-            for mode in _get_current_dispatch_mode_stack()
-        )
-    except Exception:  # pragma: no cover - defensive; treat unknown as census-active (skip)
-        return True
-
-
-def _make_host_value_escape_method(original: Any, state: _WitnessState, name: str) -> Any:
-    """Wrap a tensor->host VALUE method to record its tensor operand SOURCES (r39 hon2_1).
-
-    ``item`` / ``__bool__`` / ``__int__`` / ``__float__`` / ``__index__`` / ``__complex__`` and
-    the pure predicates ``equal`` / ``allclose`` / ``is_nonzero`` all read a captured tensor's
-    VALUE out to the host. The aten census sees them through ``aten._local_scalar_dense`` /
-    ``aten.equal`` -- EXCEPT inside torch's own ``_disable_current_modes()`` regions (tensor
-    string formatting; explicit predicate guards), which pop the census TorchDispatchMode
-    (measured E6). This method patch fires regardless of dispatch-mode state, feeding the SAME
-    ``_record_escape_source_tensor(..., invisible=True)`` attribution ladder as the census, so
-    the escape is witnessed by its SOURCE tensor's capture-time digest either way.
-
-    Records ``self`` plus any tensor argument (``equal`` / ``allclose`` take a second tensor
-    operand), gated to the active trace with TorchLens's own marked internal reads excluded.
-    r43: fires on every thread under the owner-vs-non-owner rule -- on a NON-owner thread the
-    census mode is never on that thread's dispatch stack (a ``TorchDispatchMode`` is
-    thread-local), so this belt is correctly PRIMARY there and ceilings a captured-tensor touch;
-    a benign own-tensor touch records nothing. Always calls the exact original unchanged
-    (byte-identical values, goldens, and control flow). On the owner the census stays the
-    primary observer; this is the idempotent mode-independent belt (shared source table -> no
-    double count).
-    """
-
-    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
-        """Record one tensor host-value method invocation when the census is blind.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled and not _internal_read_active():
-                    if name == "__bool__":
-                        _record_bool_consumer_location(state.trace, self)
-                    if not _completeness_census_active():
-                        _record_escape_source_tensor(state.trace, self, invisible=True)
-                        for value in (*args, *kwargs.values()):
-                            if isinstance(value, torch.Tensor):
-                                _record_escape_source_tensor(state.trace, value, invisible=True)
-            elif state.belt_armed:
-                # r43: a NON-owner value escape ceilings iff its receiver OR any tensor operand
-                # is a captured tensor (the census is thread-local, so the belt is PRIMARY here).
-                _nonowner_escape_observe(state, self)
-                for value in (*args, *kwargs.values()):
-                    if isinstance(value, torch.Tensor):
-                        _nonowner_escape_observe(state, value)
-        return original(self, *args, **kwargs)
-
-    return wrapper
-
-
-@dataclass
-class _PlainScalarEscapeState:
-    """Aggregate tensor-to-Python scalar escapes for one plain capture."""
-
-    trace: Any
-    owner_thread_id: int
-    count: int = 0
-    first_file: str | None = None
-    first_line: int | None = None
-
-
-def _first_scalar_escape_source() -> tuple[str | None, int | None]:
-    """Return the first non-TorchLens frame for a scalar escape call.
-
-    Returns
-    -------
-    tuple[str | None, int | None]
-        Source filename and line, or ``(None, None)`` if no user frame is visible.
-    """
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back if frame is not None else None
-        while frame is not None:
-            filename = Path(frame.f_code.co_filename).resolve()
-            try:
-                filename.relative_to(_TORCHLENS_ROOT)
-            except ValueError:
-                return str(filename), frame.f_lineno
-            frame = frame.f_back
-    finally:
-        del frame
-    return None, None
-
-
-def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
-    """Record where one labelled bool tensor reached Python's ``__bool__`` protocol.
-
-    Parameters
-    ----------
-    trace:
-        Active capture trace.
-    source:
-        Bool tensor consumed by Python control flow or ``bool(...)``.
-    """
-
-    if source.dtype is not torch.bool:
-        # DELIBERATE, documented false negative: ``if x.sum():`` truthiness on
-        # a non-bool tensor is a real bool consumption, but recording it would
-        # materialize conditional arm edges whose predicate the runnable
-        # witness-obligation registry cannot witness (only ``is_scalar_bool``
-        # ops receive predicate witnesses), making every level="runnable" save
-        # of such a model refuse at producer preflight. Lifting this gate
-        # requires a truthiness predicate witness family in the runnable
-        # contract first. Pinned by
-        # tests/test_condbranch_hardening.py::test_float_truthiness_stays_documented_false_negative.
-        return
-    label = get_tensor_label(source)
-    if not isinstance(label, str):
-        return
-    filename, line_number = _first_scalar_escape_source()
-    if filename is None or line_number is None:
-        return
-    locations = _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS.get(trace)
-    if locations is None:
-        locations = {}
-        _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS[trace] = locations
-    entries = locations.setdefault(label, [])
-    location = (filename, line_number)
-    if location not in entries:
-        entries.append(location)
-
-    bool_sources = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
-    if bool_sources is None:
-        bool_sources = set()
-        _HOST_ESCAPE_BOOL_SOURCE_LABELS[trace] = bool_sources
-    bool_sources.add(label)
-
-
-def _make_plain_scalar_escape_method(
-    original: Any,
-    state: _PlainScalarEscapeState,
-    name: str,
-) -> Any:
-    """Wrap one tensor scalar protocol method for a plain capture.
-
-    Parameters
-    ----------
-    original:
-        Exact PyTorch method to call unchanged.
-    state:
-        Per-capture warning aggregate.
-    name:
-        Tensor scalar-protocol method name.
-
-    Returns
-    -------
-    Any
-        Read-through wrapper around ``original``.
-    """
-
-    @functools.wraps(original)
-    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
-        """Aggregate one plain scalar escape before delegating to ``original``.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if (
-            _state._logging_enabled
-            and _state._active_trace is state.trace
-            and threading.get_ident() == state.owner_thread_id
-            and not _internal_read_active()
-            and get_tensor_label(self) is not None
-        ):
-            state.count += 1
-            if state.first_file is None:
-                state.first_file, state.first_line = _first_scalar_escape_source()
-            if name == "__bool__":
-                _record_bool_consumer_location(state.trace, self)
-        return original(self, *args, **kwargs)
-
-    return wrapper
-
-
-def _external_warning_stacklevel() -> int:
-    """Return a warning stack level that resolves outside the TorchLens package.
-
-    Returns
-    -------
-    int
-        Stack level suitable for :func:`warnings.warn`.
-    """
-    level = 1
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back if frame is not None else None
-        while frame is not None:
-            try:
-                Path(frame.f_code.co_filename).resolve().relative_to(_TORCHLENS_ROOT)
-            except ValueError:
-                return level
-            level += 1
-            frame = frame.f_back
-    finally:
-        del frame
-    return level
-
-
-@contextmanager
-def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
-    """Warn once when a plain capture reads captured tensor data as Python scalars.
-
-    Parameters
-    ----------
-    trace:
-        Active plain Trace receiving the per-capture aggregate.
-
-    Yields
-    ------
-    None
-        The backend enters active logging inside this scoped method patch.
-
-    Notes
-    -----
-    Runnable-eligible captures already install the full completeness witness
-    belt and are deliberately excluded. This lightweight observer neither
-    constructs witness state nor changes capture verification verdicts.
-    """
-    if bool(getattr(trace, "intervention_ready", False)):
-        yield
-        return
-
-    state = _PlainScalarEscapeState(trace=trace, owner_thread_id=threading.get_ident())
-    restores: dict[str, tuple[bool, Any]] = {}
-    for name in HOST_VALUE_ESCAPE_METHODS & {
-        "item",
-        "__bool__",
-        "__int__",
-        "__float__",
-        "__index__",
-        "__complex__",
-    }:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            continue
-        shadowed = name in torch.Tensor.__dict__
-        try:
-            setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state, name))
-        except (TypeError, AttributeError):
-            continue
-        restores[name] = (shadowed, original)
-    try:
-        yield
-    finally:
-        for name, (shadowed, original) in restores.items():
-            if shadowed:
-                setattr(torch.Tensor, name, original)
-            else:
-                delattr(torch.Tensor, name)
-        if state.count:
-            location = (
-                f"{state.first_file}:{state.first_line}"
-                if state.first_file is not None and state.first_line is not None
-                else "an unknown user source location"
-            )
-            warnings.warn(
-                ScalarEscapeWarning(
-                    "TorchLens observed "
-                    f"{state.count} tensor-to-Python scalar escape(s) during capture; "
-                    f"first at {location}. Keep it as a tensor or pass the value as an "
-                    "explicit input; the dependence is not captured.",
-                    file_path=state.first_file,
-                    line_no=state.first_line,
-                    count=state.count,
-                ),
-                stacklevel=_external_warning_stacklevel(),
-            )
-
-
-def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessState) -> Any:
-    """Wrap ``torch.equal`` / ``torch.allclose`` / ``torch.is_nonzero`` to record operands (r39).
-
-    Like the Tensor-method belt, records every tensor operand ONLY when the aten census is not
-    currently observing (a ``_disable_current_modes()`` region), so it complements -- never
-    duplicates or pre-empts -- the census. On a non-owner thread the census mode is never on
-    that thread's stack, so this belt is correctly primary there (r43 owner-vs-non-owner rule:
-    a captured-tensor operand ceilings, a benign own-tensor operand records nothing). Distinct
-    from :func:`_make_module_escape_wrapper` (dlpack export), which is census-INVISIBLE always
-    and therefore records unconditionally.
-    """
-
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        """Record module-level predicate operands when the census is inactive.
-
-        Parameters
-        ----------
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if (
-                    _state._logging_enabled
-                    and not _internal_read_active()
-                    and not _completeness_census_active()
-                ):
-                    for value in (*args, *kwargs.values()):
-                        if isinstance(value, torch.Tensor):
-                            _record_escape_source_tensor(state.trace, value, invisible=True)
-            elif state.belt_armed:
-                for value in (*args, *kwargs.values()):
-                    if isinstance(value, torch.Tensor):
-                        _nonowner_escape_observe(state, value)
-        return original(*args, **kwargs)
-
-    return wrapper
-
-
-def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
-    """Wrap a module-level tensor->host export function to record its tensor argument SOURCE.
-
-    Used for ``torch.utils.dlpack.to_dlpack`` (and, if patchable, ``torch._C._to_dlpack``), which
-    are C bindings that NEVER call the Python ``Tensor.__dlpack__`` the method patch covers. The
-    wrapper records every tensor operand as an escape source under the active-forward gate
-    (r41: on every thread -- in-window fail-closed, foreign positive-only), then calls through
-    unchanged so the exported capsule is byte-identical.
-    """
-
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        """Record module-level tensor exports before delegating.
-
-        Parameters
-        ----------
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        if _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled:
-                    for value in (*args, *kwargs.values()):
-                        if isinstance(value, torch.Tensor):
-                            _record_escape_source_tensor(state.trace, value, invisible=True)
-                            # r65 (F2): ``to_dlpack`` exports a zero-copy capsule pinning
-                            # the operand's full layout (strides + byte offset), so a
-                            # state-derived operand records the exact-layout read kinds,
-                            # mirroring the ``__dlpack__`` method belt.
-                            _observe_state_metadata_read(
-                                state.trace, value, STATE_METADATA_MIRROR["stride"][1]
-                            )
-                            _observe_state_metadata_read(
-                                state.trace,
-                                value,
-                                STATE_METADATA_MIRROR["storage_offset"][1],
-                            )
-            elif state.belt_armed:
-                for value in (*args, *kwargs.values()):
-                    if isinstance(value, torch.Tensor):
-                        _nonowner_escape_observe(state, value)
-        return original(*args, **kwargs)
-
-    return wrapper
-
-
-def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> property:
-    """Wrap a zero-copy buffer PROPERTY to record its SOURCE tensor, then read through.
-
-    Used for ``__cuda_array_interface__`` (a non-callable getset descriptor the method
-    patch cannot wrap). The property getter records the receiver tensor as an escape
-    source under the same active-forward gate (r41: on every thread -- in-window
-    fail-closed, foreign positive-only), then delegates to the original descriptor so
-    the returned value is byte-identical.
-    """
-
-    def getter(self: torch.Tensor) -> Any:
-        """Read the wrapped export property while attributing the tensor source.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-
-        Returns
-        -------
-        Any
-            Value returned by ``descriptor``.
-        """
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled:
-                    _record_escape_source_tensor(state.trace, self, invisible=True)
-                    # r65 (F2): the CUDA array interface dict carries an explicit
-                    # ``strides`` key + data pointer -- a zero-copy layout export exactly
-                    # like ``numpy()``/``__dlpack__`` -- so a state-derived receiver
-                    # records the exact-layout read kinds.
-                    _observe_state_metadata_read(
-                        state.trace, self, STATE_METADATA_MIRROR["stride"][1]
-                    )
-                    _observe_state_metadata_read(
-                        state.trace, self, STATE_METADATA_MIRROR["storage_offset"][1]
-                    )
-            elif state.belt_armed:
-                _nonowner_escape_observe(state, self)
-        return descriptor.__get__(self, torch.Tensor)
-
-    return property(getter)
-
-
-def _make_input_metadata_wrapper(
-    original: Any, state: _WitnessState, name: str, stride_original: Any
-) -> Any:
-    """Wrap a layout METHOD (``is_contiguous`` / ``stride`` / ``storage_offset``) to record a
-    MODEL-INPUT layout fact, then call through.
-
-    The wrapper computes the original result first (byte-identical behavior), then -- gated
-    to the owner thread / active trace / logging-enabled window, with TorchLens's own
-    marked internal reads excluded -- attributes a layout fact when the receiver is a
-    model-input leaf (or downgrades on a derived view; see
-    :func:`_observe_input_metadata_read`). ``stride`` records the FULL stride tuple (a
-    dim-scoped ``x.stride(0)`` read is implied by it); ``is_contiguous`` with the default
-    memory format records the boolean, while an explicit ``memory_format=`` probe records the
-    full stride tuple instead, which determines contiguity under EVERY memory format (given
-    the already-checked shape) without enumerating formats. ``storage_offset`` records the
-    integer offset read from the RAW pre-clone input.
-    """
-
-    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
-        """Read one input-layout accessor and record any witnessed metadata fact.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-        result = original(self, *args, **kwargs)
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled and not _internal_read_active():
-                    # r63 C1 (r65: table-driven): a layout read on REGISTERED STATE (param/
-                    # buffer or a storage alias of one) attributes a state escape + a
-                    # per-slot read-kind fact BEFORE the input-scoped observation (receiver
-                    # sets are disjoint; a state receiver is invisible to the input nets).
-                    # Recorded even when the observed value later fails to normalize (fail
-                    # closed). ``is_contiguous`` probed with an explicit ``memory_format=``
-                    # pins the exact stride tuple, so it resolves to the ``stride`` row.
-                    if name == "is_contiguous" and (args or kwargs):
-                        state_read_kind = STATE_METADATA_MIRROR["stride"][1]
-                    else:
-                        state_read_kind = STATE_METADATA_MIRROR[name][1]
-                    _observe_state_metadata_read(state.trace, self, state_read_kind)
-                    if name == "storage_offset":
-                        try:
-                            _observe_input_metadata_read(
-                                state.trace, self, "storage_offset", int(result)
-                            )
-                        except (RuntimeError, TypeError, ValueError):
-                            return result
-                    elif name == "is_contiguous" and not args and not kwargs:
-                        _observe_input_metadata_read(
-                            state.trace, self, "is_contiguous", bool(result)
-                        )
-                    elif stride_original is not None:
-                        try:
-                            full_stride = tuple(int(v) for v in stride_original(self))
-                        except (RuntimeError, TypeError):
-                            return result
-                        _observe_input_metadata_read(state.trace, self, "stride", full_stride)
-            elif state.belt_armed:
-                # r43: a non-owner metadata read on a CAPTURED input tensor is a captured-tensor
-                # touch -> ceiling; a read on an unrelated own tensor records nothing.
-                _nonowner_escape_observe(state, self)
-        return result
-
-    return wrapper
-
-
-def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: str) -> Any:
-    """Wrap a boolean host-value METHOD (``is_conj`` / ``is_neg`` / ``is_inference`` /
-    ``is_pinned`` / ``is_shared`` / ``is_coalesced`` / ``_is_view``) to record a MODEL-INPUT
-    metadata fact, then call through (r31).
-
-    The wrapper computes the original result first (byte-identical behavior; an accessor that
-    raises -- e.g. ``is_coalesced`` on a dense tensor -- propagates unchanged and records
-    nothing), then -- gated to the owner thread / active trace / logging-enabled window with
-    TorchLens's own marked internal reads excluded -- records ``bool(result)`` when the receiver
-    is a model-input leaf or an alias of one (see :func:`_observe_input_metadata_read`). These
-    accessors take no value-bearing arguments, so a call carrying args is passed through without
-    recording.
-    """
-
-    is_placement = name in _STATE_METADATA_PLACEMENT_OBSERVED_NAMES
-
-    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
-        """Read one boolean metadata accessor and record any witnessed fact.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-        *args:
-            Positional arguments passed to ``original``.
-        **kwargs:
-            Keyword arguments passed to ``original``.
-
-        Returns
-        -------
-        Any
-            Result from ``original``.
-        """
-
-        def _owner_observing() -> bool:
-            """Return whether the owner thread is currently recording this accessor.
-
-            Returns
-            -------
-            bool
-                ``True`` when the current call is an owner-thread recording observation.
-            """
-            return (
-                isinstance(self, torch.Tensor)
-                and _state._active_trace is state.trace
-                and threading.get_ident() == state.owner_thread_id
-                and _state._logging_enabled
-                and not _internal_read_active()
-            )
-
-        try:
-            result = original(self, *args, **kwargs)
-        except Exception:
-            # r67 C3: a RAISING placement accessor on a state receiver is control-flow
-            # signal with no reproducible observed value -- record unknown (refuse).
-            if is_placement and _owner_observing():
-                _observe_state_placement_read(state.trace, self, name, None)
-            raise
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if is_placement and (args or kwargs) and _owner_observing():
-                    # Arg-directed placement query (``is_pinned(device=...)``): the return
-                    # is not the slot's default-device placement -- unknown, refuse.
-                    _observe_state_placement_read(state.trace, self, name, None)
-                if (
-                    not args
-                    and not kwargs
-                    and _state._logging_enabled
-                    and not _internal_read_active()
-                ):
-                    # r63 C1 (r65: FULL mirror, table-driven -- the is_conj/is_neg-only
-                    # branch is gone): every bool metadata accessor is a PHYSICAL state
-                    # fact normalized by transport+staging, so a read on registered state
-                    # attributes a state escape + read-kind fact. The alias-safe subset
-                    # (conj/neg bits, storage/creation placement) attributes by STORAGE
-                    # IDENTITY (a view's value is a pure function of the slot's storage);
-                    # ``_is_view`` is autograd-family and attributes DIRECT-receiver-only;
-                    # ``is_coalesced`` is structural (raises on dense strided state, and
-                    # sparse layouts are refused at bind/save by the layout dim).
-                    # r67 C3: ``is_shared``/``is_pinned`` carry the ACTUAL returned value
-                    # into the observation ledger (observed-value read kinds).
-                    state_route = STATE_METADATA_MIRROR.get(name)
-                    if is_placement:
-                        _observe_state_placement_read(state.trace, self, name, bool(result))
-                        # r67 C3: an attributed placement dispatch (``aten.is_pinned``) is
-                        # witnessed by the observation/fact ledgers -- discharge its census
-                        # event so an ATTRIBUTED read no longer ceilings as an unmodeled
-                        # host return; an unattributed receiver keeps the fact.
-                        if _placement_read_witnessed(state.trace, self):
-                            _discharge_placement_dispatch(state, f"aten.{name}")
-                    elif state_route is not None and state_route[0] == _STATE_ROUTE_READ_KIND:
-                        if name in _STATE_METADATA_DIRECT_ONLY_NAMES:
-                            _observe_state_metadata_read_direct(state.trace, self, state_route[1])
-                        else:
-                            _observe_state_metadata_read(state.trace, self, state_route[1])
-                    try:
-                        _observe_input_metadata_read(state.trace, self, name, bool(result))
-                    except (RuntimeError, TypeError, ValueError):
-                        return result
-            elif state.belt_armed:
-                _nonowner_escape_observe(state, self)
-        return result
-
-    return wrapper
-
-
-def _make_input_metadata_grad_property(
-    descriptor: Any, state: _WitnessState, name: str
-) -> property:
-    """Wrap an autograd/leaf getset descriptor (``requires_grad`` / ``grad_fn`` / ``is_leaf``)
-    to record a MODEL-INPUT autograd fact.
-
-    Like ``_make_invisible_escape_property`` this replaces a non-callable getset descriptor
-    with a recording ``property``. ``requires_grad`` is writable (``x.requires_grad = True`` /
-    ``requires_grad_()`` inside a forward), so its setter MUST be delegated -- a getter-only
-    property would turn that write into an ``AttributeError`` mid-capture; ``grad_fn`` /
-    ``is_leaf`` are read-only, so a setter is only installed when the original descriptor
-    supports ``__set__``. ``grad_fn`` is recorded as a PRESENCE boolean (the backward object
-    itself is not comparable across runs); the others as their boolean value.
-    """
-
-    records_presence = name in _INPUT_METADATA_PRESENCE_PROPERTY_NAMES
-    records_int = name in _INPUT_METADATA_INT_PROPERTY_NAMES
-
-    def getter(self: torch.Tensor) -> Any:
-        """Read one autograd property and record any witnessed metadata fact.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-
-        Returns
-        -------
-        Any
-            Value returned by ``descriptor``.
-        """
-        value = descriptor.__get__(self, torch.Tensor)
-        if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
-            if threading.get_ident() == state.owner_thread_id:
-                if _state._logging_enabled and not _internal_read_active():
-                    # r65 Cluster X: the STATE branch (the r64 gap -- this wrapper had
-                    # none, so ``self.w.requires_grad`` / ``self.b._version`` reads on
-                    # registered state recorded NOTHING). Dispatched through the
-                    # authoritative mirror BEFORE the input-scoped observation (receiver
-                    # sets are disjoint): ``requires_grad``/``grad_fn`` record a declared
-                    # fact staging reproduces; the rest record escape-gated read kinds.
-                    _observe_state_property_read(state.trace, self, name, value)
-                    if records_presence:
-                        fact: Any = value is not None
-                    elif records_int:
-                        try:
-                            fact = int(value)
-                        except (TypeError, ValueError):
-                            fact = None
-                    else:
-                        fact = bool(value)
-                    if fact is not None:
-                        _observe_input_metadata_read(state.trace, self, name, fact)
-            elif state.belt_armed:
-                _nonowner_escape_observe(state, self)
-        return value
-
-    has_setter = hasattr(descriptor, "__set__")
-
-    def setter(self: torch.Tensor, value: Any) -> None:
-        """Delegate writes to the wrapped descriptor unchanged.
-
-        Parameters
-        ----------
-        self:
-            Tensor receiver.
-        value:
-            Value to write through to ``descriptor``.
-        """
-        descriptor.__set__(self, value)
-
-    return property(getter, setter if has_setter else None)
-
-
-@contextmanager
-def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
-    """Scoped-patch ``.tolist()`` / ``.numpy()`` / ``__array__`` to record escape sources.
-
-    These conversions emit NO aten dispatch, so the aten census cannot see them. A
-    ``TorchFunctionMode`` WOULD observe them but flips ``has_torch_function`` globally,
-    which breaks TorchLens's own function-wrapping capture (an unrelated capture bug).
-    Instead this temporarily replaces the exact ``torch.Tensor`` conversion methods for the
-    duration of ONE runnable forward and restores them unconditionally, without installing
-    any torch mode -- so ordinary capture is completely undisturbed. The record is gated to
-    the active forward, so TorchLens-internal conversions do not register as user escapes.
-    """
-
-    originals: dict[str, Any] = {}
-    for name in INVISIBLE_HOST_ESCAPE_FUNCS | STORAGE_BRIDGE_ESCAPE_FUNCS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_invisible_escape_wrapper(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        originals[name] = original
-    # r39 hon2_1: mode-independent belt for the aten census -- the scalar numeric protocol
-    # (``item``/``__bool__``/``__int__``/``__float__``/``__index__``/``__complex__``) and the
-    # pure predicates (``equal``/``allclose``/``is_nonzero``). These fire regardless of
-    # dispatch-mode state, so a scalar/predicate escape inside torch's own
-    # ``_disable_current_modes()`` (tensor string formatting; explicit guards) still hits a
-    # Python observer. Several names are getset/slot members of the C ``TensorBase`` and NOT in
-    # ``torch.Tensor.__dict__``; setting them installs a SHADOW that restore must DELETE (never
-    # set back to the base slot). A required-observer install failure fails the capture closed.
-    host_value_method_restore: dict[str, tuple[bool, Any]] = {}
-    for name in HOST_VALUE_ESCAPE_METHODS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        shadowed = name in torch.Tensor.__dict__
-        try:
-            setattr(torch.Tensor, name, _make_host_value_escape_method(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        host_value_method_restore[name] = (shadowed, original)
-    # Module-level zero-copy export C bindings that bypass the Tensor method patch:
-    # ``torch.utils.dlpack.to_dlpack`` == ``torch._C._to_dlpack`` never calls
-    # ``Tensor.__dlpack__``. Patch the Python-level function (and ``torch._C._to_dlpack`` if the
-    # C module permits assignment) to record the exported tensor as an escape source.
-    module_originals: list[tuple[Any, str, Any]] = []
-    for module, func_name in _MODULE_ESCAPE_TARGETS():
-        original_func = getattr(module, func_name, None)
-        if original_func is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(module, func_name, _make_module_escape_wrapper(original_func, state))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        module_originals.append((module, func_name, original_func))
-    # r39 hon2_1: the ``torch.*`` MODULE predicate spellings (``torch.equal`` / ``torch.allclose``
-    # / ``torch.is_nonzero``) return a raw Python bool DIRECTLY from the dispatcher and, under an
-    # explicit ``_disable_current_modes()`` region, bypass the census (E6). Record every tensor
-    # operand -- the same shared source table as the Tensor-method belt.
-    for predicate_name in HOST_VALUE_ESCAPE_MODULE_FUNCS:
-        original_predicate = torch_attr(predicate_name)  # r47 secD_1: no lazy ``torch.__getattr__``
-        if original_predicate is None or not callable(original_predicate):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(
-                torch,
-                predicate_name,
-                _make_host_value_predicate_module_wrapper(original_predicate, state),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        module_originals.append((torch, predicate_name, original_predicate))
-    # Storage-handle raw-pointer accessors (r16-C1): ``UntypedStorage.data_ptr`` /
-    # ``TypedStorage.data_ptr`` reach the SAME raw pointer as ``Tensor.data_ptr`` but off the
-    # storage object, so the Tensor patch never sees them. Fail closed on a genuine user call.
-    # W1_F3 (round7 B1 class): an EMPTY storage-class scan is version-drift uncertainty, not
-    # proof of absence -- the Tensor storage-bridge methods could still hand out handles of a
-    # class this scan failed to enumerate, leaving every storage accessor unobserved. Same
-    # fail-closed posture as the ``_torch_ops_call_classes`` / ``_private_c_module_callables``
-    # empty scans below.
-    if not _STORAGE_RAW_POINTER_TARGETS():
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-    storage_originals: list[tuple[Any, Any]] = []
-    for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
-        storage_original = storage_cls.data_ptr
-        try:
-            setattr(
-                storage_cls, "data_ptr", _make_storage_raw_pointer_wrapper(storage_original, state)
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        storage_originals.append((storage_cls, storage_original))
-    # r67 C3/C6: arm the capture-scoped storage-origin map and install the actual-read
-    # accessor wrappers over BOTH storage classes' public surfaces, table-driven from
-    # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``. Fail CLOSED: an install failure on a
-    # wrap-required row downgrades the capture to INCOMPLETE (a silent skip would be a
-    # silent storage-spelling witness gap). Feature-absent members on this torch are
-    # skipped (classified absent, not failed).
-    state.storage_origins = _StorageOriginRegistry(weak_keys=HAS_CACHED_UNTYPED_STORAGE_WRAPPER)
-    storage_member_restore: list[tuple[Any, str, bool, Any]] = []
-    for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
-        rows = STORAGE_METADATA_ACCESSOR_DISPOSITIONS.get(storage_cls.__name__, {})
-        for member, (disposition, _why) in sorted(rows.items()):
-            if disposition not in _STORAGE_WRAPPED_DISPOSITIONS or member == "data_ptr":
-                continue
-            descriptor = inspect.getattr_static(storage_cls, member, None)
-            if descriptor is None:
-                continue  # feature-absent on this torch build
-            shadowed = member in storage_cls.__dict__
-            class_attr = getattr(storage_cls, member, None)
-            if callable(class_attr):
-                replacement: Any = _make_storage_metadata_wrapper(
-                    class_attr, state, member, disposition
-                )
-                restore_value: Any = class_attr
-            elif hasattr(descriptor, "__get__"):
-                replacement = _make_storage_property_wrapper(descriptor, state, member, disposition)
-                restore_value = descriptor
-            else:
-                # W1_F3 (round7 B1 class): a wrap-REQUIRED row whose member EXISTS but is
-                # neither callable nor a descriptor cannot be wrapped, so its reads are
-                # unobservable -- exactly the docstring contract "can neither be wrapped nor
-                # its source recorded": fail closed, never a silent skip.
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-                continue
-            try:
-                setattr(storage_cls, member, replacement)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-                continue
-            storage_member_restore.append((storage_cls, member, shadowed, restore_value))
-    property_originals: dict[str, Any] = {}
-    for name in INVISIBLE_HOST_ESCAPE_PROPERTIES:
-        descriptor = inspect.getattr_static(torch.Tensor, name, None)
-        if descriptor is None or not hasattr(descriptor, "__get__"):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_invisible_escape_property(descriptor, state))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        property_originals[name] = descriptor
-    # Model-input METADATA-PREDICATE observers (r27-H2): ``is_contiguous`` / ``stride``
-    # methods and the ``requires_grad`` getset descriptor. Read-through recorders gated to
-    # MODEL-INPUT receivers only; a model that never reads input layout/grad records nothing.
-    metadata_originals: dict[str, Any] = {}
-    stride_original = getattr(torch.Tensor, "stride", None)
-    for name in INPUT_METADATA_PREDICATE_FUNCS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(
-                torch.Tensor,
-                name,
-                _make_input_metadata_wrapper(original, state, name, stride_original),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        metadata_originals[name] = original
-    # Model-input BOOLEAN metadata METHODS beyond the layout trio (r31): ``is_conj`` /
-    # ``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced`` /
-    # ``_is_view``. Feature-detected (an accessor absent on the running torch is skipped) and
-    # gated to model-input receivers/aliases only; a model that never reads them records nothing.
-    bool_method_originals: dict[str, Any] = {}
-    for name in INPUT_METADATA_BOOL_METHODS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_input_metadata_bool_method(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        bool_method_originals[name] = original
-    # ``requires_grad`` / ``grad_fn`` / ``is_leaf`` live as getset descriptors on the C BASE
-    # class (``torch._C.TensorBase``), not in ``torch.Tensor.__dict__``; patching installs a
-    # SHADOWING property on ``torch.Tensor`` itself, so restore must DELETE the shadow when the
-    # name was not originally in ``torch.Tensor.__dict__``.
-    grad_property_restore: dict[str, tuple[bool, Any]] = {}
-    for prop_name in INPUT_METADATA_PROPERTY_NAMES:
-        prop_descriptor = inspect.getattr_static(torch.Tensor, prop_name, None)
-        if prop_descriptor is None or not hasattr(prop_descriptor, "__get__"):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        shadowed = prop_name in torch.Tensor.__dict__
-        try:
-            setattr(
-                torch.Tensor,
-                prop_name,
-                _make_input_metadata_grad_property(prop_descriptor, state, prop_name),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        grad_property_restore[prop_name] = (shadowed, prop_descriptor)
-    # r43: arm the non-owner captured-tensor belt for the whole forward window. The non-owner
-    # observers gate on THIS flag, never the owner's ``pause_logging``-toggled ``_logging_enabled``.
-    # r45 hon2_1: ``_state._nonowner_belt_armed`` mirrors ``belt_armed`` (SAME lifetime) so the
-    # GLOBAL torch-function wrapper's non-owner fast path can short-circuit on one bool read and
-    # only invoke the captured-operand observer during an armed runnable capture.
-    state.belt_armed = True
-    _state._nonowner_belt_armed = True
-    # r47 hon2_1: install a PROCESS-WIDE class-level observer on every ``torch._ops`` class that
-    # defines its own ``__call__`` (the ``torch.ops.*`` aten / higher-order / TorchBind surface,
-    # which bypasses the global torch-FUNCTION wrapper and whose aten census is thread-local). This
-    # is armed-lifecycle-scoped: installed for EXACTLY this forward window and restored FIRST in the
-    # ``finally`` so global torch dispatch is pristine the instant the forward ends. Fail CLOSED: an
-    # empty scan or an install/restore failure downgrades the capture to INCOMPLETE via
-    # ``_HOST_ESCAPE_OBSERVER_FAILED`` -- never a silent "no non-owner op touch".
-    torch_ops_call_restore: list[tuple[type, Any]] = []
-    _ops_call_classes = _torch_ops_call_classes()
-    if not _ops_call_classes:
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-    for _ops_cls in _ops_call_classes:
-        try:
-            _ops_original = _ops_cls.__dict__["__call__"]
-            setattr(_ops_cls, "__call__", _make_nonowner_ops_call(_ops_original))
-        except (TypeError, AttributeError, KeyError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        torch_ops_call_restore.append((_ops_cls, _ops_original))
-    # r49 hon2_1: extend the armed-lifecycle observer to the patchable private-C FREE-FUNCTION
-    # modules (``torch._C._{nn,special,fft,linalg,sparse,nested}``), structurally enumerated
-    # from the SAME curated forward-op module authority. These are a THIRD op surface: a
-    # private-C free function bypasses BOTH the global torch-FUNCTION wrapper AND the
-    # ``torch._ops.*`` class patch (it dispatches its inner aten op in C++), so a non-owner
-    # worker consuming a captured operand through ``torch._C._nn.gelu(gate)`` was unwitnessed
-    # -> false VERIFIED. Same fail-CLOSED posture: an empty scan or an install/restore failure
-    # downgrades the capture to INCOMPLETE via ``_HOST_ESCAPE_OBSERVER_FAILED``.
-    private_c_call_restore: list[tuple[Any, str, Any]] = []
-    _private_c_callables = _private_c_module_callables()
-    if not _private_c_callables:
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-    for _pc_module, _pc_attr, _pc_original in _private_c_callables:
-        try:
-            setattr(_pc_module, _pc_attr, _make_nonowner_private_c_callable(_pc_original))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        private_c_call_restore.append((_pc_module, _pc_attr, _pc_original))
-    try:
-        yield
-    finally:
-        state.belt_armed = False
-        _state._nonowner_belt_armed = False
-        # r47 hon2_1: restore the ``torch._ops`` class ``__call__`` patches FIRST and only when the
-        # current attr is still OUR wrapper (preserve a user mutation). A restore failure fails
-        # closed. A leaked patch would corrupt ALL torch dispatch process-wide, so this must always
-        # run -- it is the first action of the unconditional ``finally``.
-        for _ops_cls, _ops_original in torch_ops_call_restore:
-            try:
-                _current_call = _ops_cls.__dict__.get("__call__")
-                if getattr(_current_call, "__tl_nonowner_ops_observer__", False):
-                    setattr(_ops_cls, "__call__", _ops_original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r49 hon2_1: restore the private-C module free-function patches, sentinel-guarded
-        # (preserve any user mutation) and fail-closed on a restore failure. A leaked patch
-        # would misobserve later forwards, so this runs in the unconditional ``finally``
-        # alongside the ``torch._ops`` restore.
-        for _pc_module, _pc_attr, _pc_original in private_c_call_restore:
-            try:
-                _pc_current = getattr(_pc_module, _pc_attr, None)
-                if getattr(_pc_current, "__tl_nonowner_ops_observer__", False):
-                    setattr(_pc_module, _pc_attr, _pc_original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in originals.items():
-            try:
-                setattr(torch.Tensor, name, original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for module, func_name, original_func in module_originals:
-            try:
-                setattr(module, func_name, original_func)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for storage_cls, storage_original in storage_originals:
-            try:
-                setattr(storage_cls, "data_ptr", storage_original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r67 C3: restore the storage accessor wrappers shadow-aware (delete a shadow that
-        # was not originally in the class ``__dict__``) and disarm the origin map. A restore
-        # failure fails closed -- a leaked wrapper would misobserve later forwards.
-        for storage_cls, member, was_shadowed, restore_value in storage_member_restore:
-            try:
-                if was_shadowed:
-                    setattr(storage_cls, member, restore_value)
-                else:
-                    delattr(storage_cls, member)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        state.storage_origins = None
-        state.storage_state_ptr_names = None
-        for name, descriptor in property_originals.items():
-            try:
-                setattr(torch.Tensor, name, descriptor)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in metadata_originals.items():
-            try:
-                setattr(torch.Tensor, name, original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in bool_method_originals.items():
-            try:
-                setattr(torch.Tensor, name, original)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for prop_name, (was_shadowed, original_descriptor) in grad_property_restore.items():
-            try:
-                if was_shadowed:
-                    setattr(torch.Tensor, prop_name, original_descriptor)
-                else:
-                    delattr(torch.Tensor, prop_name)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r39 hon2_1: restore the host-value method belt shadow-aware (delete a shadow that
-        # was not originally in ``torch.Tensor.__dict__``). A restore failure fails closed.
-        for name, (was_shadowed, original) in host_value_method_restore.items():
-            try:
-                if was_shadowed:
-                    setattr(torch.Tensor, name, original)
-                else:
-                    delattr(torch.Tensor, name)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        _check_writeback_watch(state)
-
-
-def _STORAGE_RAW_POINTER_TARGETS() -> tuple[Any, ...]:
-    """Return storage classes whose ``data_ptr`` accessor leaks the raw pointer (r16-C1).
-
-    ``tensor.untyped_storage()`` yields a ``torch.UntypedStorage`` and ``tensor.storage()`` a
-    ``torch.TypedStorage``; ``data_ptr()`` on either hands out the same raw pointer the r15 Tensor
-    patch fails closed on. Both are Python-visible classes whose ``data_ptr`` method is patchable.
-    """
-
-    targets: list[Any] = []
-    for name in ("UntypedStorage", "TypedStorage"):
-        cls = torch_attr(name)  # r47 secD_1: no lazy ``torch.__getattr__``
-        if cls is not None and hasattr(cls, "data_ptr"):
-            targets.append(cls)
-    return tuple(targets)
-
-
-def _MODULE_ESCAPE_TARGETS() -> tuple[tuple[Any, str], ...]:
-    """Return ``(module, attribute)`` pairs for module-level zero-copy export C bindings."""
-
-    targets: list[tuple[Any, str]] = []
-    dlpack_mod = getattr(torch.utils, "dlpack", None)
-    if dlpack_mod is not None:
-        targets.append((dlpack_mod, "to_dlpack"))
-    c_mod = getattr(torch, "_C", None)
-    if c_mod is not None and hasattr(c_mod, "_to_dlpack"):
-        targets.append((c_mod, "_to_dlpack"))
-    return tuple(targets)
-
-
-def _check_writeback_watch(state: _WitnessState) -> None:
-    """Detect a host write-back through any watched mutable zero-copy alias at forward end.
-
-    The honest rule is keyed on the WHOLE aliased storage's BYTES, never on the version counter
-    (r14-H1) and never on only the view's element extent (r15-H2). A watched source whose whole
-    storage is UNCHANGED since the mutable-alias exposure was only read: it stays VERIFIED (a pure
-    read-only ``.numpy().sum()`` / storage-pointer identity check is not over-triggered). A watched
-    source whose storage bytes CHANGED anywhere -- INCLUDING outside the view's own window (a
-    storage ``__setitem__`` / ``np.as_strided`` write) -- is UNVERIFIABLE, in BOTH sub-cases:
-
-    * version UNCHANGED -> no tracked op touched it, so the byte diff can only be an opaque host
-      write-back through the alias (no aten dispatch, no version bump) -> host write-back;
-    * version BUMPED -> a tracked in-place op ALSO touched the source since the exposure, so the
-      raw byte comparison is AMBIGUOUS -- the diff could be the tracked op OR an additional host
-      write layered on top, and cannot prove the ABSENCE of a host write -> conservatively opaque.
-
-    Gating detection on ``version unchanged`` (the pre-r14 behaviour) let a tracked in-place op
-    that bumps the version AFTER the ``.numpy()`` / ``.data`` snapshot skip the byte compare, so a
-    host write-back on the same storage went undetected and the run falsely VERIFIED. Comparing
-    bytes alone closes that gate while keeping read-only exposures honestly VERIFIED.
-    """
-
-    if not state.writeback_watch:
-        return
-    try:
-        with _state.pause_logging():
-            for source, _version, before in state.writeback_watch:
-                try:
-                    if not torch.equal(
-                        _whole_storage_uint8(source), before
-                    ):  # byte-exact uint8 view
-                        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                        break
-                except (RuntimeError, TypeError, NotImplementedError):
-                    _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                    break
-    finally:
-        state.writeback_watch.clear()
-
-
-def _effective_mode() -> CompletenessWitnessMode:
-    """Return the validated process-level witness mode.
-
-    Returns
-    -------
-    CompletenessWitnessMode
-        Current dispatcher witness mode.
-    """
-
-    mode = _state._completeness_witness_mode
-    if mode not in {"off", "shadow"}:
-        raise RuntimeError(f"Invalid TorchLens completeness witness mode {mode!r}.")
-    return cast(CompletenessWitnessMode, mode)
-
-
-def _barcode_text(value: object | None) -> str | None:
-    """Return a stable diagnostic rendering of a wrapper barcode.
-
-    Parameters
-    ----------
-    value:
-        Random wrapper barcode or ``None``.
-
-    Returns
-    -------
-    str | None
-        String barcode suitable for a machine-readable report.
-    """
-
-    return None if value is None else str(value)
-
-
-def _finalize_census(state: _WitnessState) -> None:
-    """Cross-check dispatch ownership and attach structured Trace diagnostics.
-
-    Parameters
-    ----------
-    state:
-        Completed per-forward census.
-    """
-
-    trace = state.trace
-    owner_events: dict[int, tuple[ExpectedOriginalToken, list[str]]] = {}
-    # Owners whose aten dispatch fired inside a genuine raw replacement hook. The
-    # census excuses ONLY these orphaned owners (replacement construction) -- an
-    # orphaned owner outside a replacement hook stays a real silent-drop mismatch.
-    owner_in_replacement_hook: dict[int, bool] = {}
-    diagnostics: list[dict[str, Any]] = []
-    expected_opaque_count = 0
-    accounted_count = 0
-    for event_index, event in enumerate(state.events, start=1):
-        owner = event.owner
-        if owner is not None:
-            owner_entry = owner_events.setdefault(id(owner), (owner, []))
-            owner_entry[1].append(event.operator)
-            if event.in_replacement_hook:
-                owner_in_replacement_hook[id(owner)] = True
-        if owner is not None and _is_expected_opaque_dispatch(event.operator, owner):
-            expected_opaque_count += 1
-            continue
-        if _event_is_capture_accounted(event):
-            accounted_count += 1
-            continue
-        reason = "unowned_dispatch" if owner is None else "owner_not_captured"
-        callsite = event.callsite
-        if callsite is None and owner is not None and owner.capture_callsite is not None:
-            callsite = _DispatchCallsite(*owner.capture_callsite)
-        diagnostics.append(
-            {
-                "violation_id": len(diagnostics) + 1,
-                "event_index": event_index,
-                "operator": event.operator,
-                "reason": reason,
-                "owner_wrapper": owner.wrapper_name if owner is not None else None,
-                "owner_func_name": owner.func_name if owner is not None else None,
-                "owner_func_call_id": owner.func_call_id if owner is not None else None,
-                "owner_barcode": _barcode_text(owner.call_barcode) if owner is not None else None,
-                "file": callsite.file if callsite is not None else None,
-                "line": callsite.line if callsite is not None else None,
-                "function": callsite.function if callsite is not None else None,
-                "owner_thread_id": state.owner_thread_id,
-                "guard_pass_index": state.guard_pass_index,
-                "capture_mode": getattr(trace, "capture_mode", None),
-                "scope": "active_logging",
-                "enforced": False,
-                "in_replacement_hook": event.in_replacement_hook,
-                "mutates": event.mutates,
-                # A ``.data``-property accessor view (``aten.detach``/``aten.alias``) on a
-                # registered buffer -- the intrinsic, legitimately-uncaptured dispatch of the
-                # ``self.b.data.copy_(x)`` buffer-write idiom. The completeness backstop credits
-                # these apples-to-apples against the dispatch census (see
-                # ``validation.core.completeness_backstop_counts``); a genuine untraced op is
-                # never flagged here (unowned + non-mutating + pure-view + buffer only).
-                "state_view_accessor": event.state_view_accessor,
-            }
-        )
-    decompositions = trace.__dict__.setdefault("completeness_decompositions", [])
-    for owner, operators in owner_events.values():
-        owner_scope = (
-            "expected_opaque"
-            if operators
-            and all(_is_expected_opaque_dispatch(operator, owner) for operator in operators)
-            else owner.census_scope
-        )
-        decompositions.append(
-            {
-                "guard_pass_index": state.guard_pass_index,
-                "owner_wrapper": owner.wrapper_name,
-                "owner_func_name": owner.func_name,
-                "owner_func_call_id": owner.func_call_id,
-                "owner_barcode": _barcode_text(owner.call_barcode),
-                "capture_accounted": owner.capture_accounted,
-                "capture_accounted_boundary_labels": tuple(
-                    raw_label for _, raw_label in owner.capture_accounted_outputs.values()
-                ),
-                "scope": owner_scope,
-                "aten_ops": tuple(operators),
-                "in_replacement_hook": owner_in_replacement_hook.get(id(owner), False),
-            }
-        )
-    reports = trace.__dict__.setdefault("completeness_diagnostics", [])
-    reports.extend(diagnostics)
-    trace.completeness_witness_event_count = int(
-        getattr(trace, "completeness_witness_event_count", 0)
-    ) + len(state.events)
-    trace.completeness_witness_accounted_count = (
-        int(getattr(trace, "completeness_witness_accounted_count", 0)) + accounted_count
-    )
-    trace.completeness_witness_expected_opaque_count = (
-        int(getattr(trace, "completeness_witness_expected_opaque_count", 0)) + expected_opaque_count
-    )
-    trace.completeness_witness_unaccounted_count = int(
-        getattr(trace, "completeness_witness_unaccounted_count", 0)
-    ) + len(diagnostics)
-    trace.completeness_witness_callback_ns = (
-        int(getattr(trace, "completeness_witness_callback_ns", 0)) + state.callback_ns
-    )
-    trace.completeness_witness_verified = not reports
-    if reports:
-        trace.capture_verified = False
-        trace.capture_verification_reason = (
-            "dispatch_witness_unaccounted_ops"
-            if diagnostics or _reports_include_non_input_boundary(reports)
-            else "input_boundary_unverifiable"
-        )
-        if diagnostics:
-            first = diagnostics[0]
-            warnings.warn(
-                "TorchLens completeness witness observed "
-                f"{len(diagnostics)} unaccounted aten dispatch event(s); first: "
-                f"{first['operator']} ({first['reason']}). The Trace is marked "
-                "capture_verified=False; inspect trace.completeness_diagnostics.",
-                TorchLensCaptureGapWarning,
-                stacklevel=3,
-            )
-        return
-    if getattr(trace, "_raw_dynamo_region_detected", False):
-        # More specific than either reason below: the transform-escape flag is shared with
-        # the functorch boundary, and a shadow-mode escape report is a downstream symptom
-        # of the same bypassed compiled region.
-        trace.capture_verified = False
-        trace.capture_verification_reason = "dynamo_region_not_logged"
-    elif getattr(trace, "escape_detector_verified", None) is False:
-        trace.capture_verified = False
-        trace.capture_verification_reason = "callable_escape_shadow_report"
-    elif getattr(trace, "_raw_transform_escape_detected", False):
-        trace.capture_verified = False
-        trace.capture_verification_reason = "transform_call_route_unverified"
-    else:
-        trace.capture_verified = True
-        detector_verified = getattr(trace, "escape_detector_verified", None)
-        trace.capture_verification_reason = (
-            "dispatch_witness_and_detector_verified"
-            if detector_verified is True
-            else "dispatch_witness_verified"
-        )
-
-
-def _reports_include_non_input_boundary(reports: Any) -> bool:
-    """Return whether accumulated reports include a non-input-boundary gap.
-
-    Parameters
-    ----------
-    reports:
-        Sequence of previously accumulated completeness diagnostics.
-
-    Returns
-    -------
-    bool
-        ``True`` when any report is not an ``input_boundary``-scoped entry.
-    """
-
-    return any(
-        not isinstance(report, Mapping) or report.get("scope") != "input_boundary"
-        for report in reports
-    )
-
-
-def _finalize_input_semantics_without_census(trace: Any) -> None:
-    """Apply input-boundary fail-closed state when the dispatch census is off.
-
-    Parameters
-    ----------
-    trace:
-        Trace or Recording runtime trace carrying private input-gap diagnostics.
-
-    Returns
-    -------
-    None
-        Ceilings ``capture_verified`` without claiming that the disabled dispatch
-        witness itself ran.
-    """
-
-    reports = getattr(trace, "completeness_diagnostics", ())
-    if not any(
-        isinstance(report, Mapping) and report.get("scope") == "input_boundary"
-        for report in reports
-    ):
-        return
-    trace.capture_verified = False
-    trace.capture_verification_reason = "input_boundary_unverifiable"
-
-
-@contextmanager
-def capture_completeness_witness(trace: Any) -> Iterator[None]:
-    """Optionally run an aten census around one active-logging forward.
-
-    Parameters
-    ----------
-    trace:
-        Trace or Recording runtime trace receiving diagnostics.
-
-    Yields
-    ------
-    None
-        The backend enters active logging inside this context.
-    """
-
-    mode = _effective_mode()
-    trace.completeness_witness_mode = mode
-    if not hasattr(trace, "completeness_witness_verified"):
-        trace.completeness_witness_verified = None
-    trace.__dict__.setdefault("completeness_diagnostics", [])
-    trace.__dict__.setdefault("completeness_decompositions", [])
-    for counter_field in (
-        "completeness_witness_event_count",
-        "completeness_witness_accounted_count",
-        "completeness_witness_expected_opaque_count",
-        "completeness_witness_unaccounted_count",
-        "completeness_witness_callback_ns",
-    ):
-        trace.__dict__.setdefault(counter_field, 0)
-    # A runnable-eligible (``intervention_ready``) capture always records
-    # tensor->host escape sources so the sparse descriptor can witness the escape
-    # by its producing op, keyed on the ESCAPE EVENT. This is a passive observer:
-    # it records raw op labels only and never alters a captured op, so goldens are
-    # unchanged. The default (non-runnable) capture path installs nothing.
-    record_escapes = bool(getattr(trace, "intervention_ready", False))
-    if mode == "off" and not record_escapes:
-        try:
-            yield
-        finally:
-            _finalize_input_semantics_without_census(trace)
-        return
-    guard_passes = getattr(trace, "capture_guard_passes", [])
-    guard_pass_index = len(guard_passes) if guard_passes else 1
-    state = _WitnessState(
-        trace,
-        threading.get_ident(),
-        guard_pass_index,
-        census=(mode == "shadow"),
-        record_escapes=record_escapes,
-        ledger=record_escapes,
-    )
-    mode_context = _CompletenessDispatchMode(state)
-    # A runnable capture additionally observes census-INVISIBLE ``.tolist()`` /
-    # ``.numpy()`` / ``__array__`` escapes via a scoped method patch so every escape
-    # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
-    # restored unconditionally, and is skipped entirely for the non-runnable census path.
-    if record_escapes:
-        # r35 I2: arm wrapper ownership tokens so raised / host-returning dispatch
-        # events can be attributed to their exact wrapper owner (the ledger's
-        # owner-accounted discharge rule) even with both shadow modes off.
-        prior_ledger_armed = _state._runnable_ledger_armed
-        _state._runnable_ledger_armed = True
-        # r43: publish the witness state so the wrappers.py string-hook interception can
-        # classify owner vs non-owner (the ONE place a non-owner thread must not flip the
-        # global ``pause_logging`` toggle). Cleared FIRST on exit.
-        global _ACTIVE_WITNESS_STATE
-        prior_active_state = _ACTIVE_WITNESS_STATE
-        _ACTIVE_WITNESS_STATE = state
-        try:
-            with _observe_invisible_host_escapes(state), mode_context:
-                try:
-                    yield
-                finally:
-                    if mode == "shadow":
-                        _finalize_census(state)
-                    else:
-                        _finalize_input_semantics_without_census(trace)
-                    _finalize_runnable_ledger(state)
-        finally:
-            _ACTIVE_WITNESS_STATE = prior_active_state
-            _state._runnable_ledger_armed = prior_ledger_armed
-        return
-    with mode_context:
-        try:
-            yield
-        finally:
-            if mode == "shadow":
-                _finalize_census(state)
-            else:
-                _finalize_input_semantics_without_census(trace)
-
-
 # Import-time roster collection for the witness's internal-caller
 # authorization (see ``_caller_frame_is_torchlens_internal``). Runs at the
 # BOTTOM of the module so every function above is already defined, and before
@@ -6730,15 +1562,421 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
 # whose functions legitimately call ``_raw_storage_ptr_no_observe`` (the
 # journaled-write alias prefilter); this module imports from it at the top,
 # so its namespace is guaranteed complete here.
-def _collect_authorized_internal_caller_modules() -> None:
-    """Register the witness and buffer-write modules' own code objects."""
 
-    from . import buffer_writes as _buffer_writes_module
 
-    _register_authorized_caller_namespace(globals(), __file__)
-    buffer_writes_file = _buffer_writes_module.__file__
-    assert buffer_writes_file is not None, "a real source module always has a file"
-    _register_authorized_caller_namespace(vars(_buffer_writes_module), buffer_writes_file)
+# Private implementation slices; public names remain owned by this module.
+_in_replacement_hook_frame = _rebind_function(
+    _completeness_boundaries._in_replacement_hook_frame, globals()
+)
+_is_expected_opaque_dispatch = _rebind_function(
+    _completeness_boundaries._is_expected_opaque_dispatch, globals()
+)
+completeness_scope_for_wrapper = _rebind_function(
+    _completeness_boundaries.completeness_scope_for_wrapper, globals()
+)
+record_runnable_input_storage_sites = _rebind_function(
+    _completeness_boundaries.record_runnable_input_storage_sites, globals()
+)
+_classify_input_storage_alias = _rebind_function(
+    _completeness_boundaries._classify_input_storage_alias, globals()
+)
+_input_base_tensor = _rebind_function(_completeness_boundaries._input_base_tensor, globals())
+_record_input_metadata_read_at_site = _rebind_function(
+    _completeness_boundaries._record_input_metadata_read_at_site, globals()
+)
+_record_input_metadata_read = _rebind_function(
+    _completeness_boundaries._record_input_metadata_read, globals()
+)
+_observe_input_metadata_read = _rebind_function(
+    _completeness_boundaries._observe_input_metadata_read, globals()
+)
+_observe_input_derived_layout_read = _rebind_function(
+    _completeness_metadata._observe_input_derived_layout_read, globals()
+)
+_resolve_layout_rooting_labels = _rebind_function(
+    _completeness_metadata._resolve_layout_rooting_labels, globals()
+)
+_layout_storage_rooting_labels = _rebind_function(
+    _completeness_metadata._layout_storage_rooting_labels, globals()
+)
+record_storage_rebind_barrier = _rebind_function(
+    _completeness_metadata.record_storage_rebind_barrier, globals()
+)
+storage_rebind_barrier_labels = _rebind_function(
+    _completeness_metadata.storage_rebind_barrier_labels, globals()
+)
+_layout_ancestry_tainted = _rebind_function(
+    _completeness_metadata._layout_ancestry_tainted, globals()
+)
+_state_derived_addresses = _rebind_function(
+    _completeness_metadata._state_derived_addresses, globals()
+)
+_observe_state_metadata_read = _rebind_function(
+    _completeness_metadata._observe_state_metadata_read, globals()
+)
+host_escape_state_metadata_reads = _rebind_function(
+    _completeness_metadata.host_escape_state_metadata_reads, globals()
+)
+_state_direct_address = _rebind_function(_completeness_metadata._state_direct_address, globals())
+_observe_state_metadata_read_direct = _rebind_function(
+    _completeness_metadata._observe_state_metadata_read_direct, globals()
+)
+_expand_state_alias_addresses = _rebind_function(
+    _completeness_metadata._expand_state_alias_addresses, globals()
+)
+_record_state_metadata_read = _rebind_function(
+    _completeness_metadata._record_state_metadata_read, globals()
+)
+_record_state_metadata_observation = _rebind_function(
+    _completeness_metadata._record_state_metadata_observation, globals()
+)
+host_escape_state_metadata_observations = _rebind_function(
+    _completeness_metadata.host_escape_state_metadata_observations, globals()
+)
+_observe_state_placement_read = _rebind_function(
+    _completeness_metadata._observe_state_placement_read, globals()
+)
+_placement_read_witnessed = _rebind_function(
+    _completeness_metadata._placement_read_witnessed, globals()
+)
+_discharge_placement_dispatch = _rebind_function(
+    _completeness_metadata._discharge_placement_dispatch, globals()
+)
+_observe_state_metadata_fact = _rebind_function(
+    _completeness_metadata._observe_state_metadata_fact, globals()
+)
+host_escape_state_metadata_facts = _rebind_function(
+    _completeness_metadata.host_escape_state_metadata_facts, globals()
+)
+_observe_state_property_read = _rebind_function(
+    _completeness_metadata._observe_state_property_read, globals()
+)
+_tensor_receiver_origin = _rebind_function(
+    _completeness_metadata._tensor_receiver_origin, globals()
+)
+_register_storage_handle_origin = _rebind_function(
+    _completeness_metadata._register_storage_handle_origin, globals()
+)
+_register_storage_origin = _rebind_function(
+    _completeness_metadata._register_storage_origin, globals()
+)
+_lazy_storage_state_ptr_names = _rebind_function(
+    _completeness_metadata._lazy_storage_state_ptr_names, globals()
+)
+_resolve_storage_origin = _rebind_function(
+    _completeness_metadata._resolve_storage_origin, globals()
+)
+_record_input_storage_nbytes = _rebind_function(
+    _completeness_metadata._record_input_storage_nbytes, globals()
+)
+input_metadata_view_read = _rebind_function(
+    _completeness_escape_state.input_metadata_view_read, globals()
+)
+host_escape_source_labels = _rebind_function(
+    _completeness_escape_state.host_escape_source_labels, globals()
+)
+host_escape_state_source_names = _rebind_function(
+    _completeness_escape_state.host_escape_state_source_names, globals()
+)
+host_escape_has_unattributable_bool = _rebind_function(
+    _completeness_escape_state.host_escape_has_unattributable_bool, globals()
+)
+host_escape_has_unattributable_opaque = _rebind_function(
+    _completeness_escape_state.host_escape_has_unattributable_opaque, globals()
+)
+host_escape_state_source_labels = _rebind_function(
+    _completeness_escape_state.host_escape_state_source_labels, globals()
+)
+host_escape_bool_source_labels = _rebind_function(
+    _completeness_escape_state.host_escape_bool_source_labels, globals()
+)
+host_escape_bool_consumer_locations = _rebind_function(
+    _completeness_escape_state.host_escape_bool_consumer_locations, globals()
+)
+host_escape_label_leaf_origins = _rebind_function(
+    _completeness_escape_state.host_escape_label_leaf_origins, globals()
+)
+_record_escape_label_fallback = _rebind_function(
+    _completeness_escape_state._record_escape_label_fallback, globals()
+)
+pruned_rng_control_source_labels = _rebind_function(
+    _completeness_escape_state.pruned_rng_control_source_labels, globals()
+)
+record_pruned_rng_control_source = _rebind_function(
+    _completeness_escape_state.record_pruned_rng_control_source, globals()
+)
+alias_mutation_candidate_labels = _rebind_function(
+    _completeness_escape_state.alias_mutation_candidate_labels, globals()
+)
+record_alias_mutation_candidate = _rebind_function(
+    _completeness_escape_state.record_alias_mutation_candidate, globals()
+)
+pruned_alias_mutation_source_labels = _rebind_function(
+    _completeness_escape_state.pruned_alias_mutation_source_labels, globals()
+)
+record_pruned_alias_mutation_source = _rebind_function(
+    _completeness_escape_state.record_pruned_alias_mutation_source, globals()
+)
+data_alias_mutation_detected = _rebind_function(
+    _completeness_escape_state.data_alias_mutation_detected, globals()
+)
+record_data_alias_mutation = _rebind_function(
+    _completeness_escape_state.record_data_alias_mutation, globals()
+)
+host_escape_has_mutable_writeback = _rebind_function(
+    _completeness_escape_state.host_escape_has_mutable_writeback, globals()
+)
+host_escape_has_raw_pointer = _rebind_function(
+    _completeness_escape_state.host_escape_has_raw_pointer, globals()
+)
+host_escape_has_cross_thread_captured_tensor = _rebind_function(
+    _completeness_escape_state.host_escape_has_cross_thread_captured_tensor, globals()
+)
+_register_authorized_caller_namespace = _rebind_function(
+    _completeness_escape_state._register_authorized_caller_namespace, globals()
+)
+_caller_frame_is_torchlens_internal = _rebind_function(
+    _completeness_escape_state._caller_frame_is_torchlens_internal, globals()
+)
+_raw_storage_ptr_no_observe = _rebind_function(
+    _completeness_escape_state._raw_storage_ptr_no_observe, globals()
+)
+_nonowner_ptr_is_captured = _rebind_function(
+    _completeness_cross_thread._nonowner_ptr_is_captured, globals()
+)
+_nonowner_touch_is_captured = _rebind_function(
+    _completeness_cross_thread._nonowner_touch_is_captured, globals()
+)
+_nonowner_escape_observe = _rebind_function(
+    _completeness_cross_thread._nonowner_escape_observe, globals()
+)
+observe_nonowner_operands = _rebind_function(
+    _completeness_cross_thread.observe_nonowner_operands, globals()
+)
+_torch_ops_call_classes = _rebind_function(
+    _completeness_cross_thread._torch_ops_call_classes, globals()
+)
+_make_nonowner_ops_call = _rebind_function(
+    _completeness_cross_thread._make_nonowner_ops_call, globals()
+)
+_private_c_forward_op_modules = _rebind_function(
+    _completeness_cross_thread._private_c_forward_op_modules, globals()
+)
+_private_c_module_callables = _rebind_function(
+    _completeness_cross_thread._private_c_module_callables, globals()
+)
+_make_nonowner_private_c_callable = _rebind_function(
+    _completeness_cross_thread._make_nonowner_private_c_callable, globals()
+)
+string_escape_is_owner_thread = _rebind_function(
+    _completeness_cross_thread.string_escape_is_owner_thread, globals()
+)
+host_escape_observer_install_failed = _rebind_function(
+    _completeness_cross_thread.host_escape_observer_install_failed, globals()
+)
+record_host_string_escape_source = _rebind_function(
+    _completeness_cross_thread.record_host_string_escape_source, globals()
+)
+audit_disable_current_modes_sites = _rebind_function(
+    _completeness_cross_thread.audit_disable_current_modes_sites, globals()
+)
+_internal_read_active = _rebind_function(
+    _completeness_cross_thread._internal_read_active, globals()
+)
+internal_scalar_read = _rebind_contextmanager(_completeness_origins.internal_scalar_read, globals())
+_escape_source_is_torchlens_internal = _rebind_function(
+    _completeness_origins._escape_source_is_torchlens_internal, globals()
+)
+_output_is_host_value = _rebind_function(_completeness_origins._output_is_host_value, globals())
+_iter_tensor_operands = _rebind_function(_completeness_origins._iter_tensor_operands, globals())
+_record_host_escape_source = _rebind_function(
+    _completeness_origins._record_host_escape_source, globals()
+)
+_escape_storage_ptr = _rebind_function(_completeness_origins._escape_storage_ptr, globals())
+_param_derived_addresses = _rebind_function(
+    _completeness_origins._param_derived_addresses, globals()
+)
+_iter_tensors_deep = _rebind_function(_completeness_origins._iter_tensors_deep, globals())
+_operand_origins = _rebind_function(_completeness_origins._operand_origins, globals())
+_operand_leaf_origins = _rebind_function(_completeness_origins._operand_leaf_origins, globals())
+_operator_is_seeded_rng = _rebind_function(_completeness_origins._operator_is_seeded_rng, globals())
+_operator_uninit_family_tail = _rebind_function(
+    _completeness_origins._operator_uninit_family_tail, globals()
+)
+_python_tensor_method_uninit_family_tail = _rebind_function(
+    _completeness_origins._python_tensor_method_uninit_family_tail, globals()
+)
+_operator_is_growth_resize = _rebind_function(
+    _completeness_origins._operator_is_growth_resize, globals()
+)
+_operator_total_writer_destination = _rebind_function(
+    _completeness_origins._operator_total_writer_destination, globals()
+)
+_live_deterministic_fill_governs = _rebind_function(
+    _completeness_origins._live_deterministic_fill_governs, globals()
+)
+_register_dispatch_result_origins = _rebind_function(
+    _completeness_origins._register_dispatch_result_origins, globals()
+)
+_resolved_dispatch_origins = _rebind_function(
+    _completeness_dispatch_names._resolved_dispatch_origins, globals()
+)
+_record_escape_source_tensor = _rebind_function(
+    _completeness_dispatch_names._record_escape_source_tensor, globals()
+)
+_operator_name = _rebind_function(_completeness_dispatch_names._operator_name, globals())
+_operator_base_name = _rebind_function(_completeness_dispatch_names._operator_base_name, globals())
+_is_aten_operator = _rebind_function(_completeness_dispatch_names._is_aten_operator, globals())
+_is_mutating_operator = _rebind_function(
+    _completeness_dispatch_names._is_mutating_operator, globals()
+)
+_is_buffer_state_view_dispatch = _rebind_function(
+    _completeness_dispatch_names._is_buffer_state_view_dispatch, globals()
+)
+_dispatch_callsite = _rebind_function(_completeness_dispatch_names._dispatch_callsite, globals())
+record_uncaptured_owner_callsite = _rebind_function(
+    _completeness_dispatch.record_uncaptured_owner_callsite, globals()
+)
+_dispatch_result_holds_tensor = _rebind_function(
+    _completeness_dispatch._dispatch_result_holds_tensor, globals()
+)
+_event_is_capture_accounted = _rebind_function(
+    _completeness_dispatch._event_is_capture_accounted, globals()
+)
+runnable_ledger_facts = _rebind_function(_completeness_dispatch.runnable_ledger_facts, globals())
+_tensor_abs_byte_span = _rebind_function(_completeness_dispatch._tensor_abs_byte_span, globals())
+_as_strided_result_contained = _rebind_function(
+    _completeness_dispatch._as_strided_result_contained, globals()
+)
+_finalize_runnable_ledger = _rebind_function(
+    _completeness_dispatch._finalize_runnable_ledger, globals()
+)
+_whole_storage_uint8 = _rebind_function(_completeness_dispatch._whole_storage_uint8, globals())
+_snapshot_writeback_source = _rebind_function(
+    _completeness_dispatch._snapshot_writeback_source, globals()
+)
+_iter_dispatch_tensors = _rebind_function(_completeness_dispatch._iter_dispatch_tensors, globals())
+_sample_writeback_at_consumption = _rebind_function(
+    _completeness_dispatch._sample_writeback_at_consumption, globals()
+)
+_has_state_toctou_watch = _rebind_function(
+    _completeness_dispatch._has_state_toctou_watch, globals()
+)
+_sample_state_toctou_at_consumption = _rebind_function(
+    _completeness_dispatch._sample_state_toctou_at_consumption, globals()
+)
+_split_consumed_state_items = _rebind_function(
+    _completeness_dispatch._split_consumed_state_items, globals()
+)
+_sample_param_toctou_at_consumption = _rebind_function(
+    _completeness_dispatch._sample_param_toctou_at_consumption, globals()
+)
+_param_baseline_differs = _rebind_function(
+    _completeness_dispatch._param_baseline_differs, globals()
+)
+_sample_buffer_toctou_at_consumption = _rebind_function(
+    _completeness_dispatch._sample_buffer_toctou_at_consumption, globals()
+)
+_buffer_expected_differs = _rebind_function(
+    _completeness_dispatch._buffer_expected_differs, globals()
+)
+_make_invisible_escape_wrapper = _rebind_function(
+    _completeness_dispatch._make_invisible_escape_wrapper, globals()
+)
+_nonowner_storage_observe = _rebind_function(
+    _completeness_storage._nonowner_storage_observe, globals()
+)
+_record_state_value_escape = _rebind_function(
+    _completeness_storage._record_state_value_escape, globals()
+)
+_attribute_storage_placement = _rebind_function(
+    _completeness_storage._attribute_storage_placement, globals()
+)
+_make_storage_metadata_wrapper = _rebind_function(
+    _completeness_storage._make_storage_metadata_wrapper, globals()
+)
+_make_storage_property_wrapper = _rebind_function(
+    _completeness_storage._make_storage_property_wrapper, globals()
+)
+_make_storage_raw_pointer_wrapper = _rebind_function(
+    _completeness_storage._make_storage_raw_pointer_wrapper, globals()
+)
+_completeness_census_active = _rebind_function(
+    _completeness_storage._completeness_census_active, globals()
+)
+_make_host_value_escape_method = _rebind_function(
+    _completeness_storage._make_host_value_escape_method, globals()
+)
+_first_scalar_escape_source = _rebind_function(
+    _completeness_storage._first_scalar_escape_source, globals()
+)
+_record_bool_consumer_location = _rebind_function(
+    _completeness_storage._record_bool_consumer_location, globals()
+)
+_make_plain_scalar_escape_method = _rebind_function(
+    _completeness_storage._make_plain_scalar_escape_method, globals()
+)
+_external_warning_stacklevel = _rebind_function(
+    _completeness_storage._external_warning_stacklevel, globals()
+)
+capture_scalar_escape_warning = _rebind_contextmanager(
+    _completeness_storage.capture_scalar_escape_warning, globals()
+)
+_make_host_value_predicate_module_wrapper = _rebind_function(
+    _completeness_storage._make_host_value_predicate_module_wrapper, globals()
+)
+_make_module_escape_wrapper = _rebind_function(
+    _completeness_storage._make_module_escape_wrapper, globals()
+)
+_make_invisible_escape_property = _rebind_function(
+    _completeness_storage._make_invisible_escape_property, globals()
+)
+_make_input_metadata_wrapper = _rebind_function(
+    _completeness_patches._make_input_metadata_wrapper, globals()
+)
+_make_input_metadata_bool_method = _rebind_function(
+    _completeness_patches._make_input_metadata_bool_method, globals()
+)
+_make_input_metadata_grad_property = _rebind_function(
+    _completeness_patches._make_input_metadata_grad_property, globals()
+)
+_observe_invisible_host_escapes = _rebind_contextmanager(
+    _completeness_patches._observe_invisible_host_escapes, globals()
+)
+_STORAGE_RAW_POINTER_TARGETS = _rebind_function(
+    _completeness_finalize._STORAGE_RAW_POINTER_TARGETS, globals()
+)
+_MODULE_ESCAPE_TARGETS = _rebind_function(_completeness_finalize._MODULE_ESCAPE_TARGETS, globals())
+_check_writeback_watch = _rebind_function(_completeness_finalize._check_writeback_watch, globals())
+_effective_mode = _rebind_function(_completeness_finalize._effective_mode, globals())
+_barcode_text = _rebind_function(_completeness_finalize._barcode_text, globals())
+_finalize_census = _rebind_function(_completeness_finalize._finalize_census, globals())
+_reports_include_non_input_boundary = _rebind_function(
+    _completeness_finalize._reports_include_non_input_boundary, globals()
+)
+_finalize_input_semantics_without_census = _rebind_function(
+    _completeness_finalize._finalize_input_semantics_without_census, globals()
+)
+capture_completeness_witness = _rebind_contextmanager(
+    _completeness_finalize.capture_completeness_witness, globals()
+)
+_collect_authorized_internal_caller_modules = _rebind_function(
+    _completeness_finalize._collect_authorized_internal_caller_modules, globals()
+)
 
+_split_namespace = {name: value for name, value in globals().items() if not name.startswith("__")}
+for _split_module in (
+    _completeness_boundaries,
+    _completeness_metadata,
+    _completeness_escape_state,
+    _completeness_cross_thread,
+    _completeness_origins,
+    _completeness_dispatch_names,
+    _completeness_dispatch,
+    _completeness_storage,
+    _completeness_patches,
+    _completeness_finalize,
+):
+    _split_module.__dict__.update(_split_namespace)
 
 _collect_authorized_internal_caller_modules()
