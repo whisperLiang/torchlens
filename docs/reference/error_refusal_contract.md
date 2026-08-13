@@ -66,7 +66,8 @@ add names to the top-level `torchlens` namespace:
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
-| `collapse_mode_invalid` | Collapse mode is unsupported | Choose `none`, `auto`, `max`, or a float |
+| `collapse_mode_invalid` | Collapse mode is unsupported | Rendering `collapse=`: choose `none`, `auto`, `max`, or a float; `collapse_plan(mode=)`: choose `auto`, `max`, or a float |
+| `collapse_order_mode_invalid` | `collapse_order(mode=)` is not a landmark policy | Pass `mode='auto'` or `'max'` |
 | `collapse_plan_unavailable` | Collapse optimizer declined the render context | Use a supported render context and mode |
 | `container_leaf_not_saved` | Container leaf value was not retained | Re-run with `save=` covering the leaves |
 | `container_not_reconstructable` | Container spec or backend support is absent | Capture with `capture_container_structure=True` |
@@ -147,6 +148,7 @@ add names to the top-level `torchlens` namespace:
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
+| `save_predicate_type_invalid` | `save=` is neither SaveOptions, predicate, selector, nor `None` (`save='all'` lands here) | Pass a predicate or SaveOptions; use `layers_to_save='all'` for exhaustive saves |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
 | `skip_fn_boundary_invalid` | `skip_fn` tried to skip an input or output layer | Return False for boundary layers |

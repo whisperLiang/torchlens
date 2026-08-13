@@ -835,6 +835,45 @@ def test_actionable_refusal_pickle_round_trip(
     assert restored.severity == original.severity
 
 
+def test_save_argument_door_is_typed_and_redirects_save_all() -> None:
+    """The ``save=`` type door refuses typed and names the `'all'` remedy.
+
+    ``save='all'`` was documented as a valid spelling while the door raised a
+    raw ``TypeError`` with no code or remedy; only ``layers_to_save`` accepts
+    ``'all'``. Historical ``TypeError`` lineage is preserved.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        tl.trace(nn.Identity(), torch.randn(2), save="all")
+
+    assert exc_info.value.fields["code"] == "save_predicate_type_invalid"
+    assert isinstance(exc_info.value, TypeError)
+    assert "layers_to_save='all'" in exc_info.value.fields["remedy"]
+    assert "Remedy:" in str(exc_info.value)
+
+
+def test_collapse_order_mode_door_has_its_own_code() -> None:
+    """The collapse_order diagnostic surface refuses under its own code.
+
+    ``collapse_order(mode=)`` accepts only the two landmark policies, so it no
+    longer shares ``collapse_mode_invalid`` with the render surfaces whose
+    documented remedy (``'none'``, floats) would refuse again here.
+    """
+
+    from torchlens.visualization.auto_collapse import collapse_order
+
+    with pytest.raises(errors.InvalidArgumentError) as exc_info:
+        collapse_order(object(), mode="none")  # type: ignore[arg-type]
+
+    assert exc_info.value.fields["code"] == "collapse_order_mode_invalid"
+    assert "auto" in exc_info.value.fields["remedy"]
+
+
 def test_code_panel_doors_split_render_from_config_refusals() -> None:
     """The two code-panel refusals carry distinct codes and builtins.
 
