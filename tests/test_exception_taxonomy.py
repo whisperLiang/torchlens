@@ -693,7 +693,7 @@ TOP_REFUSAL_CASES: tuple[tuple[str, Callable[[], object]], ...] = (
         lambda: merge_capture_options(capture=CaptureOptions(name="one"), name="two"),
     ),
     (
-        "option_group_conflict",
+        "option_group_keyword_conflict",
         lambda: merge_visualization_options(
             function_default_mode="none",
             visualization=VisualizationOptions(layout="dot"),
@@ -773,6 +773,33 @@ def test_actionable_refusal_pickle_round_trip(
     assert str(restored) == str(original)
     assert restored.fields == original.fields
     assert restored.severity == original.severity
+
+
+def test_option_group_conflict_doors_split_by_site_history() -> None:
+    """Each grouped/flat conflict door keeps its historical builtin, per code.
+
+    The five merge entrypoints historically raised ``raise
+    ValueError(conflict_message)`` and now raise ``ArgumentConflictError``
+    under ``option_group_conflict``; the visualization merge historically
+    raised a raw ``TypeError`` and now raises ``KeywordConflictError`` under
+    ``option_group_keyword_conflict``. One code maps to one catchable builtin.
+    """
+
+    with pytest.raises(errors.ArgumentConflictError) as value_info:
+        merge_capture_options(capture=CaptureOptions(name="one"), name="two")
+    assert value_info.value.fields["code"] == "option_group_conflict"
+    assert isinstance(value_info.value, ValueError)
+    assert not isinstance(value_info.value, TypeError)
+
+    with pytest.raises(errors.KeywordConflictError) as keyword_info:
+        merge_visualization_options(
+            function_default_mode="none",
+            visualization=VisualizationOptions(layout="dot"),
+            layout="rank",
+        )
+    assert keyword_info.value.fields["code"] == "option_group_keyword_conflict"
+    assert isinstance(keyword_info.value, TypeError)
+    assert not isinstance(keyword_info.value, ValueError)
 
 
 def test_intervention_direction_doors_split_by_site_history() -> None:
