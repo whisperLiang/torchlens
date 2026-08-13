@@ -90,6 +90,7 @@ add names to the top-level `torchlens` namespace:
 | `layers_not_logged` | Rendering requires a fully-logged trace | Capture with full layer logging |
 | `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
+| `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
 | `intervention_predicate_type_invalid` | `intervene` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass `tl.when(...)`, another predicate, or `None` |
@@ -137,6 +138,7 @@ add names to the top-level `torchlens` namespace:
 | `recording_option_duplicate` | Recording option was specified twice | Pass each option exactly once |
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
+| `renderer_capability_unsupported` | RenderIR requires a capability its renderer lacks (`UnsupportedRendererCapabilityError`, `RuntimeError` lineage) | Use the graphviz renderer or drop the option needing the capability |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
 | `run_input_missing` | Legacy rerun received no forward input | Pass the input as `log.run(model, x)` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |

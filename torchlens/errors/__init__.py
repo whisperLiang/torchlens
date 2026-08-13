@@ -215,6 +215,14 @@ _LAZY_EXCEPTION_PATHS = {
     ),
     "SaveBudgetExceededError": ("torchlens._save_budget", "SaveBudgetExceededError"),
     "CaptureOutcomeError": ("torchlens.capture.outcome", "CaptureOutcomeError"),
+    "GraphvizRenderError": (
+        "torchlens.visualization._render_common",
+        "GraphvizRenderError",
+    ),
+    "UnsupportedRendererCapabilityError": (
+        "torchlens.visualization.renderers.base",
+        "UnsupportedRendererCapabilityError",
+    ),
     "StopSignalSwallowedError": ("torchlens.capture.outcome", "StopSignalSwallowedError"),
     "PartialCaptureLookupError": ("torchlens.partial", "PartialCaptureLookupError"),
 }
