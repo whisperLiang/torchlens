@@ -26,6 +26,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from .._io import _json
 from ._engine import derive_merge
 from ._enums import (
     MERGED_BUNDLE_FORMAT,
@@ -240,7 +241,12 @@ def load_merged(path: str | Path) -> MergedTrace:
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise _schema_refusal(f"{root} has no manifest.json")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = _json.loads_bounded(manifest_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _schema_refusal(f"root manifest does not parse ({exc})") from exc
+    if not isinstance(manifest, dict):
+        raise _schema_refusal("root manifest is not a JSON object")
     if manifest.get("bundle_format") != MERGED_BUNDLE_FORMAT:
         raise _schema_refusal(
             f"bundle_format {manifest.get('bundle_format')!r} is not "
@@ -260,9 +266,11 @@ def load_merged(path: str | Path) -> MergedTrace:
     if hashlib.sha256(descriptor_bytes).hexdigest() != recorded_sha:
         raise _tamper("descriptor bytes do not match the root-manifest checksum")
     try:
-        descriptor = json.loads(descriptor_bytes.decode("utf-8"))
+        descriptor = _json.loads_bounded(descriptor_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _schema_refusal(f"descriptor does not parse ({exc})") from exc
+    if not isinstance(descriptor, dict):
+        raise _schema_refusal("descriptor is not a JSON object")
     if descriptor.get("descriptor_kind") != MERGED_DESCRIPTOR_KIND:
         raise _schema_refusal(
             f"descriptor_kind {descriptor.get('descriptor_kind')!r} is not "

@@ -1042,7 +1042,7 @@ def load(
         merged_manifest_path = bundle_path / "manifest.json"
         if merged_manifest_path.is_file() and not merged_manifest_path.is_symlink():
             try:
-                candidate = json.loads(merged_manifest_path.read_text(encoding="utf-8"))
+                candidate = _json.loads_bounded(merged_manifest_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 candidate = None
             if isinstance(candidate, dict) and candidate.get("bundle_format") == "merged-directory":
