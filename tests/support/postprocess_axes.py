@@ -24,6 +24,13 @@ import torchlens as tl
 
 _SEED = 20260812
 
+# Fallback tmp dirs for callers that omit ``tmp_dir``. Each ``iter_axes()`` call
+# gets a FRESH directory (axis callables embed bundle paths, so sharing one dir
+# across calls collides), and the handles are held here so their finalizers
+# remove the directories at interpreter exit -- a bare ``mkdtemp`` leaked one
+# directory per call, created as early as collection time.
+_FALLBACK_TMP_DIRS: list[tempfile.TemporaryDirectory] = []
+
 
 def _seed_everything() -> None:
     """Seed every RNG the fixtures consume."""
@@ -375,7 +382,9 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
     """
 
     if tmp_dir is None:
-        tmp_dir = tempfile.mkdtemp(prefix="tl-ppdag-axes-")
+        handle = tempfile.TemporaryDirectory(prefix="tl-ppdag-axes-")
+        _FALLBACK_TMP_DIRS.append(handle)
+        tmp_dir = handle.name
     axes: list[tuple[str, Callable[[], Any]]] = [
         (f"oracle:{model_axis}", _axis_oracle(model_axis))
         for model_axis in (

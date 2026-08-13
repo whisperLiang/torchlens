@@ -24,7 +24,6 @@ import dataclasses
 import os
 import subprocess  # noqa: F401 -- ensure it is in sys.modules for the tamper test
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -87,14 +86,14 @@ def test_shared_resolver_is_the_ir_container_one() -> None:
     assert resolve_container_type is _ir_container._resolve_container_type
 
 
-def test_legit_multi_output_type_resolves_live_and_after_load() -> None:
+def test_legit_multi_output_type_resolves_live_and_after_load(tmp_path) -> None:
     """A real ``torch.max`` structseq resolves to ``torch.return_types.max`` and round-trips."""
 
     trace = _trace_max_model()
     live_type = _multi_output_op(trace).multi_output_type
     assert live_type is torch.return_types.max
 
-    bundle = os.path.join(tempfile.mkdtemp(), "m.tlspec")
+    bundle = os.path.join(str(tmp_path), "m.tlspec")
     tl.save(trace, bundle, level="runnable")
     loaded = tl.load(bundle)
     loaded_type = _multi_output_op(loaded).multi_output_type
@@ -142,21 +141,24 @@ def test_multi_output_type_denies_loaded_but_inadmissible_type() -> None:
         _ = op.multi_output_type
 
 
-def test_end_to_end_tampered_bundle_property_read_is_safe() -> None:
+def test_end_to_end_tampered_bundle_property_read_is_safe(tmp_path) -> None:
     """Full flow: tamper the saved bundle's metadata, load, read property -> no code exec."""
 
-    sentinel = os.path.join(tempfile.mkdtemp(), "r11_pwned_sentinel")
+    sentinel = os.path.join(str(tmp_path / "sentinel_dir"), "r11_pwned_sentinel")
+    os.makedirs(os.path.dirname(sentinel), exist_ok=True)
     if os.path.exists(sentinel):
         os.remove(sentinel)
     evil = "evil_pwn_module_xx"  # 18 chars == len("torch.return_types")
     assert len(evil) == len("torch.return_types")
-    drop = tempfile.mkdtemp()
+    drop = str(tmp_path / "drop")
+    os.makedirs(drop, exist_ok=True)
     with open(os.path.join(drop, evil + ".py"), "w") as handle:
         handle.write(f"import os\nopen({sentinel!r}, 'w').write('pwned')\n")
     sys.path.insert(0, drop)
     try:
         trace = _trace_max_model()
-        bundle = os.path.join(tempfile.mkdtemp(), "m.tlspec")
+        bundle = os.path.join(str(tmp_path / "bundle_dir"), "m.tlspec")
+        os.makedirs(os.path.dirname(bundle), exist_ok=True)
         tl.save(trace, bundle, level="runnable")
 
         pkl = os.path.join(bundle, "metadata.pkl")
