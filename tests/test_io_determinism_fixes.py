@@ -242,3 +242,18 @@ def test_defaultdict_factory_survives_bundle_round_trip(tmp_path: Path) -> None:
     mapping = loaded.output_ops[0].module_entry_arg_keys
     assert isinstance(mapping, defaultdict)
     assert mapping["unseen"] == []
+
+
+def test_explicit_unknown_resolver_status_is_not_upgraded() -> None:
+    """A persisted None resolver status remains unknown rather than becoming resolved."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    op = trace.output_ops[0]
+    op.resolver_status = None
+    layer = trace.layer_logs[op.layer_label]
+    layer.resolver_status = None
+
+    restored_op = pickle.loads(pickle.dumps(op))
+    restored_layer = pickle.loads(pickle.dumps(layer))
+    assert restored_op.resolver_status is None
+    assert restored_layer.resolver_status is None

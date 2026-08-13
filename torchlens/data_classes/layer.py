@@ -1265,6 +1265,7 @@ class Layer:
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
         read_tlspec_version(state, cls_name=type(self).__name__)
+        resolver_status_was_present = "resolver_status" in state
         layer_setstate_defaults: dict[str, Any] = {
             **_LAYER_LOG_CONTAINER_DEFAULTS,
             "_source_trace_ref": None,
@@ -1293,7 +1294,7 @@ class Layer:
         coerce_container_typed_state(state, layer_setstate_defaults)
         if state.get("dtype_ref") is None:
             state["dtype_ref"] = DtypeRef.from_value(state.get("dtype"))
-        if state.get("resolver_status") is None:
+        if not resolver_status_was_present:
             state["resolver_status"] = "resolved"
         for field_name in (
             "activation_memory",
