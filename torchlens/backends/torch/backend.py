@@ -1097,42 +1097,51 @@ class TorchBackend:
                 failed_fastlog_events = CaptureEvents()
                 failed_fastlog_events.concat(events)
                 setattr(session, "_failed_fastlog_capture_events", failed_fastlog_events)
+        # Partial diagnostics are BEST EFFORT; the model-session teardown is not.
+        # The arms below catch ``Exception``, so an interruption (KeyboardInterrupt,
+        # SystemExit) raised while building or attaching the partial trace used to
+        # escape straight past ``cleanup_model_session`` -- leaving the user's model
+        # with TorchLens-forced ``requires_grad``, ``tl_*`` metadata and an
+        # installed buffer tracker. The ``finally`` guarantees teardown without
+        # swallowing the interruption.
         try:
-            partial_log = PartialTrace.from_trace(cast("Trace", session), exc)
-        except Exception as construction_error:
-            warnings.warn(
-                "TorchLens could not construct partial-trace recovery after the "
-                f"forward failed: {type(construction_error).__name__}: "
-                f"{construction_error}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            with contextlib.suppress(Exception):
-                exc.add_note(
-                    "TorchLens partial-trace construction also failed: "
-                    f"{type(construction_error).__name__}: {construction_error}"
-                )
-        else:
             try:
-                exc.partial_log = partial_log  # type: ignore[attr-defined]
-            except Exception as attachment_error:
-                _register_failed_capture(exc, partial_log)
+                partial_log = PartialTrace.from_trace(cast("Trace", session), exc)
+            except Exception as construction_error:
                 warnings.warn(
-                    "The forward exception rejected TorchLens partial_log attachment; "
-                    "recovery remains available through "
-                    "torchlens.partial.from_failed_capture(exception). "
-                    f"Attachment error: {type(attachment_error).__name__}: "
-                    f"{attachment_error}",
+                    "TorchLens could not construct partial-trace recovery after the "
+                    f"forward failed: {type(construction_error).__name__}: "
+                    f"{construction_error}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 with contextlib.suppress(Exception):
                     exc.add_note(
-                        "TorchLens retained partial capture recovery in its bounded "
-                        "exception-identity registry; call "
-                        "torchlens.partial.from_failed_capture(exception)."
+                        "TorchLens partial-trace construction also failed: "
+                        f"{type(construction_error).__name__}: {construction_error}"
                     )
-        self.cleanup_model_session(session, prepared_model)
+            else:
+                try:
+                    exc.partial_log = partial_log  # type: ignore[attr-defined]
+                except Exception as attachment_error:
+                    _register_failed_capture(exc, partial_log)
+                    warnings.warn(
+                        "The forward exception rejected TorchLens partial_log attachment; "
+                        "recovery remains available through "
+                        "torchlens.partial.from_failed_capture(exception). "
+                        f"Attachment error: {type(attachment_error).__name__}: "
+                        f"{attachment_error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    with contextlib.suppress(Exception):
+                        exc.add_note(
+                            "TorchLens retained partial capture recovery in its bounded "
+                            "exception-identity registry; call "
+                            "torchlens.partial.from_failed_capture(exception)."
+                        )
+        finally:
+            self.cleanup_model_session(session, prepared_model)
         # F5: a postprocess-tail failure (step 18-20 or the relation freeze)
         # arrives here AFTER the transient-state seam popped the raw-graph
         # workspace. The unguarded read used to double-fault with

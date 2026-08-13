@@ -1683,12 +1683,16 @@ def run_and_log_inputs_through_model(
             )
             return halted_output
         try:
-            if capture_session is not None and not postprocess:
-                capture_session.snapshot_recording_projection(self)
-                self._fastlog_captured_run_core = capture_session.seal()
-            backend.cleanup_halted_forward_session(
-                self, (model, input_tensors, (input_args, input_kwargs))
-            )
+            # Same double-fault fence as the failed-forward arm below: a raising
+            # seal must not skip the model-session teardown.
+            try:
+                if capture_session is not None and not postprocess:
+                    capture_session.snapshot_recording_projection(self)
+                    self._fastlog_captured_run_core = capture_session.seal()
+            finally:
+                backend.cleanup_halted_forward_session(
+                    self, (model, input_tensors, (input_args, input_kwargs))
+                )
         except Exception as secondary_exc:
             self.__dict__.pop("_capture_producer_policy", None)
             settle_failed(
@@ -1717,12 +1721,19 @@ def run_and_log_inputs_through_model(
         # the stamp in ``finally`` must still carry the committed-op count.
         committed_ops = count_committed_ops(self)
         try:
-            if capture_session is not None and not postprocess:
-                capture_session.snapshot_recording_projection(self)
-                self._fastlog_captured_run_core = capture_session.seal()
-            backend.cleanup_failed_forward_session(
-                self, (model, input_tensors, (input_args, input_kwargs)), e
-            )
+            # The seal runs FIRST (it reads live capture state that cleanup
+            # strips) but must not be able to SKIP cleanup: a raising seal used
+            # to bypass requires_grad restore, tl_* metadata stripping, buffer
+            # tracker uninstall and end_label_session, leaving the user's model
+            # permanently altered by a failed capture.
+            try:
+                if capture_session is not None and not postprocess:
+                    capture_session.snapshot_recording_projection(self)
+                    self._fastlog_captured_run_core = capture_session.seal()
+            finally:
+                backend.cleanup_failed_forward_session(
+                    self, (model, input_tensors, (input_args, input_kwargs)), e
+                )
             self.__dict__.pop("_capture_producer_policy", None)
         finally:
             # Guaranteed settlement: a cleanup double-fault still stamps the

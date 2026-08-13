@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Any, Literal
@@ -25,7 +27,41 @@ class PartialCaptureLookupError(TorchLensError, ValueError):
 
 
 _FAILED_CAPTURE_REGISTRY_LIMIT = 128
-_FAILED_CAPTURE_REGISTRY: OrderedDict[int, tuple[BaseException, PartialTrace]] = OrderedDict()
+_FAILED_CAPTURE_REGISTRY: OrderedDict[
+    int, tuple[weakref.ref[BaseException] | BaseException, Trace]
+] = OrderedDict()
+"""Fallback recovery table for exceptions that reject ``partial_log`` assignment.
+
+Keyed by ``id(exception)``; the exception is retained WEAKLY and the stored
+value is the partial ``Trace`` alone, never a ``PartialTrace``. The entry-count
+cap was not by itself a real bound: an entry that reached the exception
+strongly kept its ``__traceback__`` alive, and that pins every frame local --
+the model, the inputs, the partial outputs -- so retained large-model failures
+could pin GBs with no byte bound and no time eviction. Holding only the trace
+breaks that chain (a partial trace records string-only error metadata and never
+references the exception object).
+
+Weak retention is sound because the only route to an entry is
+``from_failed_capture(exc)``, whose caller must be HOLDING that exception; once
+it dies the entry is unreachable garbage and the weakref callback drops it.
+Keying on ``id()`` stays safe across id reuse for the reason it already was:
+lookup re-checks referent identity, and a dead referent can never satisfy it.
+Exception types that do not support weak references (C-extension types; note
+that builtin exceptions and ``__slots__`` subclasses never reach this table,
+since BaseException always carries a dict and accepts the attachment) fall back
+to strong retention under the same entry cap.
+"""
+
+_FAILED_CAPTURE_RESULTS: weakref.WeakValueDictionary[int, PartialTrace] = (
+    weakref.WeakValueDictionary()
+)
+"""Identity memo so repeated lookups of one exception return the same wrapper.
+
+Weak-VALUED, so it adds no retention of its own: the wrapper it hands back does
+reference the exception strongly, but only for as long as the CALLER keeps that
+wrapper. Entries are re-derived on demand and re-checked against exception
+identity, so a reused ``id()`` can never serve a foreign wrapper.
+"""
 
 
 @dataclass(frozen=True)
@@ -252,11 +288,39 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     partial_log = getattr(exception, "partial_log", None)
     if isinstance(partial_log, PartialTrace):
         return partial_log
-    registry_entry = _FAILED_CAPTURE_REGISTRY.get(id(exception))
-    if registry_entry is not None and registry_entry[0] is exception:
-        _FAILED_CAPTURE_REGISTRY.move_to_end(id(exception))
-        return registry_entry[1]
+    exception_id = id(exception)
+    registry_entry = _FAILED_CAPTURE_REGISTRY.get(exception_id)
+    if registry_entry is not None and _registry_referent(registry_entry[0]) is exception:
+        _FAILED_CAPTURE_REGISTRY.move_to_end(exception_id)
+        memoized = _FAILED_CAPTURE_RESULTS.get(exception_id)
+        if memoized is not None and memoized.original_exception is exception:
+            return memoized
+        recovered = PartialTrace(trace=registry_entry[1], original_exception=exception)
+        _FAILED_CAPTURE_RESULTS[exception_id] = recovered
+        return recovered
     raise PartialCaptureLookupError("exception does not contain a TorchLens partial capture")
+
+
+def _registry_referent(
+    held: weakref.ref[BaseException] | BaseException,
+) -> BaseException | None:
+    """Resolve a registry slot to its exception, or ``None`` once collected.
+
+    Parameters
+    ----------
+    held:
+        Either a weak reference to the registered exception or, for types that
+        do not support weak references, the exception itself.
+
+    Returns
+    -------
+    BaseException | None
+        The registered exception while it is alive, else ``None``.
+    """
+
+    if isinstance(held, weakref.ref):
+        return held()
+    return held
 
 
 def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:
@@ -272,14 +336,52 @@ def _register_failed_capture(exception: BaseException, partial_log: PartialTrace
     Returns
     -------
     None
-        Stores a bounded strong-reference entry for :func:`from_failed_capture`.
+        Stores a bounded, weakly-held entry for :func:`from_failed_capture`.
     """
 
     exception_id = id(exception)
-    _FAILED_CAPTURE_REGISTRY[exception_id] = (exception, partial_log)
+    held: weakref.ref[BaseException] | BaseException
+    try:
+        held = weakref.ref(exception, _drop_failed_capture_entry(exception_id))
+    except TypeError:
+        # Exception type does not support weak references: retain strongly,
+        # still under the entry cap. This keeps the traceback alive, which is
+        # exactly what the weak path avoids, so it is the rare fallback.
+        held = exception
+    # Store the TRACE, not the wrapper: a stored wrapper reaches the exception
+    # strongly and would keep its own weak key alive forever (and with it the
+    # traceback's frame locals).
+    _FAILED_CAPTURE_REGISTRY[exception_id] = (held, partial_log.trace)
+    _FAILED_CAPTURE_RESULTS[exception_id] = partial_log
     _FAILED_CAPTURE_REGISTRY.move_to_end(exception_id)
     while len(_FAILED_CAPTURE_REGISTRY) > _FAILED_CAPTURE_REGISTRY_LIMIT:
         _FAILED_CAPTURE_REGISTRY.popitem(last=False)
+
+
+def _drop_failed_capture_entry(exception_id: int) -> Callable[[weakref.ref[Any]], None]:
+    """Build the weakref callback that evicts one collected registry entry.
+
+    Parameters
+    ----------
+    exception_id:
+        ``id()`` of the registered exception, used as the registry key.
+
+    Returns
+    -------
+    Callable[[weakref.ref[Any]], None]
+        Callback that drops the entry if that exact weak reference still owns it.
+    """
+
+    def _drop(reference: weakref.ref[Any]) -> None:
+        """Evict the entry this dead reference owned, if it is still current."""
+
+        entry = _FAILED_CAPTURE_REGISTRY.get(exception_id)
+        # Guard against id reuse: only evict when this very reference is the
+        # one recorded, never a newer entry that happens to share the key.
+        if entry is not None and entry[0] is reference:
+            del _FAILED_CAPTURE_REGISTRY[exception_id]
+
+    return _drop
 
 
 def _materialize_failed_capture_events(trace: Trace) -> None:

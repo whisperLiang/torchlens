@@ -49,9 +49,28 @@ __all__ = ["RescueTorchFunctionMode", "capture_with_rescue"]
 
 
 _thread_local = threading.local()
+"""Per-thread rescue state: the mode's ``busy`` token and the re-run guard.
 
-_rescue_active = False
-"""Reentrancy guard: a rescue re-run must never trigger a nested rescue."""
+Both are thread-local for the same reason. ``busy`` guards reentrancy of a
+handler that fires on EVERY thread's torch calls. ``rescue_active`` guards
+against a rescue re-run triggering a nested rescue, which is a property of one
+call stack -- and as a process global it also let an unrelated thread's capture
+inherit the suppression and silently lose its own safety net, while a capture
+that is mid-rescue is doing model prep outside ``active_logging`` where the
+admission refusal does not apply.
+"""
+
+
+def _rescue_is_active() -> bool:
+    """Return whether this thread is already inside a rescue re-run.
+
+    Returns
+    -------
+    bool
+        ``True`` while this thread runs a rescue re-run.
+    """
+
+    return bool(getattr(_thread_local, "rescue_active", False))
 
 
 class RescueTorchFunctionMode(TorchFunctionMode):
@@ -231,8 +250,7 @@ def capture_with_rescue(
         no signal fired.
     """
 
-    global _rescue_active
-    if _rescue_active or not eligible:
+    if _rescue_is_active() or not eligible:
         return run_capture()
 
     rng_snapshot = log_current_rng_states()
@@ -254,7 +272,7 @@ def capture_with_rescue(
             return primary
         trigger = signal
 
-    _rescue_active = True
+    _thread_local.rescue_active = True
     try:
         set_rng_from_saved_states(rng_snapshot)
         with _suppress_repeated_warnings(emitted_warnings), RescueTorchFunctionMode():
@@ -275,7 +293,7 @@ def capture_with_rescue(
         )
         return primary
     finally:
-        _rescue_active = False
+        _thread_local.rescue_active = False
 
     if primary_error is not None:
         # The primary could not even attribute its output; a completed rescue

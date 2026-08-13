@@ -10,6 +10,7 @@ import json
 import os
 import types
 import warnings
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -53,7 +54,15 @@ def _clone_state_dict_with_metadata(model: nn.Module) -> OrderedDict[str, torch.
     return cloned_state
 
 
-_VALIDATION_DEEPCOPY_WARNING_TYPES: set[type[nn.Module]] = set()
+_VALIDATION_DEEPCOPY_WARNING_TYPES: weakref.WeakSet[type[nn.Module]] = weakref.WeakSet()
+"""Model classes already warned about for the un-deepcopyable validation fallback.
+
+Weak so the warn-once bookkeeping never PINS a user model class (and, through
+it, its code objects and closures) for the life of the process. Semantics are
+unchanged while a class is alive; a class that has been collected can no longer
+be the subject of a duplicate warning, since any later model is by definition a
+different type.
+"""
 _PLAIN_ATTR_IGNORED_NAMES = frozenset({"_parameters", "_buffers", "_modules"})
 _PLAIN_ATTR_MAX_CONTAINER_ITEMS = 128
 _PLAIN_ATTR_MAX_TENSOR_NUMEL = 4096
