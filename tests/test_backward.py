@@ -603,6 +603,40 @@ def test_backward_tail_failure_restores_globals_and_closes_journal(
     assert any(isinstance(event, BackwardPassEnd) for event in trace.backward_events)
 
 
+def test_backward_walk_failure_removes_partial_hooks_and_disarms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException during graph-hook arming removes its registered prefix."""
+    from torchlens import _state
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+
+    class _Handle:
+        """Minimal removable hook-handle probe."""
+
+        removed = False
+
+        def remove(self) -> None:
+            """Record that cleanup reached this partial handle."""
+            self.removed = True
+
+    handle = _Handle()
+
+    def fail_walk(_trace: tl.Trace, _loss: torch.Tensor, handles: list[object]) -> list[object]:
+        """Register one synthetic handle and interrupt graph walking."""
+        handles.append(handle)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", fail_walk)
+    with pytest.raises(KeyboardInterrupt):
+        trace.log_backward(_output_loss(trace))
+
+    assert handle.removed is True
+    assert trace._tl_backward_triggers_disarmed is True
+    assert _state._active_trace is None
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""

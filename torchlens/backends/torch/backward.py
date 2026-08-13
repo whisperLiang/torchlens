@@ -2376,7 +2376,11 @@ def _layer_by_grad_fn_id(trace: Any) -> dict[int, str]:
     return mapping
 
 
-def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
+def _walk_and_hook_backward_graph(
+    trace: Any,
+    loss: torch.Tensor,
+    handles: list[Any] | None = None,
+) -> list[Any]:
     """Walk ``loss.grad_fn`` and register hooks on every reachable grad_fn_handle.
 
     Parameters
@@ -2385,6 +2389,9 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
         Trace that owns the flat backward fields.
     loss:
         Scalar or tensor loss whose backward graph should be captured.
+    handles:
+        Caller-owned hook-handle list. Passing this list lets the caller
+        remove partially registered hooks when graph walking is interrupted.
 
     Returns
     -------
@@ -2397,7 +2404,8 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
     layer_lookup = _layer_by_grad_fn_id(trace)
     queue: deque[Any] = deque([loss.grad_fn])
     seen: set[int] = set()
-    handles: list[Any] = []
+    if handles is None:
+        handles = []
     type_counter: dict[str, int] = {}
     source_metadata_by_class: dict[type[Any], dict[str, Any]] = {}
     # Keep strong refs to every discovered grad_fn_handle for the trace's lifetime so
@@ -2929,8 +2937,9 @@ def _run_backward_with_capture(
         timestamp=time.time(),
     )
     events.append_backward(start_event)
+    handles: list[Any] = []
     try:
-        handles = _walk_and_hook_backward_graph(trace, loss)
+        _walk_and_hook_backward_graph(trace, loss, handles)
     except BaseException:
         # The graph walk can fail after the start event and global capture
         # state have been installed. Restore the global state so a failed
@@ -2938,7 +2947,9 @@ def _run_backward_with_capture(
         # record: a failed attempted pass is evidence, and it closes with a
         # terminal failed End so the bracket invariant holds exactly (the
         # same convention the engine-failure path below already follows).
-        # Restore process-global and per-pass scratch state before any fallible cleanup.
+        # Restore process-global and per-pass scratch state before any fallible
+        # cleanup. The graph walk can be interrupted after registering only a
+        # prefix of hooks, so unwind those handles and disarm fail-closed.
         _state._active_trace = previous_trace
         _state._active_hook_plan = previous_plan
         _state._active_intervention_spec = previous_spec
@@ -2958,8 +2969,13 @@ def _run_backward_with_capture(
             )
         )
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
+        for handle in handles:
+            with contextlib.suppress(BaseException):
+                handle.remove()
         with contextlib.suppress(BaseException):
             _clear_forward_grad_fn_refs(trace)
+        with contextlib.suppress(BaseException):
+            disarm_triggers(trace)
         with contextlib.suppress(BaseException):
             _materialize_backward_projections(trace)
         raise
