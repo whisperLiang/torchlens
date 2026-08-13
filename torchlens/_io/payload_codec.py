@@ -1738,12 +1738,7 @@ def _jax_prng_dtag_from_dtype(dtype: str) -> str | None:
 def _json_ready_mapping(values: dict[str, Any]) -> dict[str, Any]:
     """Return a mapping with only JSON-friendly values."""
 
-    cleaned: dict[str, Any] = {}
-    for key, value in values.items():
-        if value is None:
-            continue
-        cleaned[key] = _json_ready_value(value)
-    return cleaned
+    return {key: _json_ready_value(value) for key, value in values.items()}
 
 
 def _json_ready_value(value: Any) -> Any:
@@ -1752,9 +1747,7 @@ def _json_ready_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
-        return {
-            str(key): _json_ready_value(item) for key, item in value.items() if item is not None
-        }
+        return {str(key): _json_ready_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_ready_value(item) for item in value]
     return str(value)

@@ -502,3 +502,14 @@ def test_jax_codec_restores_weak_type() -> None:
     assert value.weak_type is True
     assert restored.weak_type is True
     assert jax.device_get(restored) == jax.device_get(value)
+
+
+def test_codec_metadata_preserves_explicit_none_values() -> None:
+    """Codec audit metadata distinguishes explicit null from absent fields."""
+
+    from torchlens._io.payload_codec import _json_ready_mapping
+
+    assert _json_ready_mapping({"outer": None, "nested": {"inner": None}}) == {
+        "outer": None,
+        "nested": {"inner": None},
+    }
