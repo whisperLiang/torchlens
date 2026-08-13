@@ -179,7 +179,9 @@ def test_mlx_depth_parity() -> None:
     trace = tl.trace(
         M(), mx.ones((1, 4)), backend="mlx", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=3)
+    # MLX runs the neutral recurrence grouper by default (parity wave 2); this
+    # model has no recurrence and all layers stay single-pass.
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=3)
     assert _depth_by_prefix(trace, "linear_1") == (1, 1)
     assert _depth_by_prefix(trace, "relu_1") == (2, 2)
     assert _depth_by_prefix(trace, "linear_2") == (3, 3)

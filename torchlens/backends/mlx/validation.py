@@ -310,17 +310,30 @@ def _ops_by_label(trace: Any) -> dict[str, Any]:
     -------
     dict[str, Any]
         Operations keyed by raw, layer, and pass labels.
+
+    Notes
+    -----
+    Key precedence is load-bearing under recurrence grouping: a group
+    leader's RAW label doubles as the shared ``layer_label`` of every later
+    pass, so naive last-writer insertion would silently rebind a capture
+    record's raw label to the wrong pass. Raw labels are the immutable
+    capture identity and always win; pass labels are unique; the ambiguous
+    layer label resolves to its first pass.
     """
 
     result: dict[str, Any] = {}
     for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
+        layer_label = getattr(op, "layer_label", None)
+        if isinstance(layer_label, str) and layer_label not in result:
+            result[layer_label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label = getattr(op, "label", None)
+        if isinstance(label, str):
+            result[label] = op
+    for op in getattr(trace, "layer_list", ()):
+        label_raw = getattr(op, "_label_raw", None)
+        if isinstance(label_raw, str):
+            result[label_raw] = op
     return result
 
 
