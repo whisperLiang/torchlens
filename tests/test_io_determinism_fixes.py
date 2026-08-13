@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import pickle
 from collections import defaultdict
 from pathlib import Path
@@ -293,3 +294,33 @@ def test_backup_cleanup_failure_does_not_fail_completed_save(
 
     loaded = tl.load(path)
     assert torch.equal(loaded.output_ops[0].out, second.output_ops[0].out)
+
+
+def test_intervention_overwrite_rename_failure_restores_previous_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed intervention swap restores the old artifact from its backup."""
+
+    trace = tl.trace(
+        _LinearModel(),
+        torch.ones(1, 2),
+        capture=tl.options.CaptureOptions(intervention_ready=True),
+    )
+    path = tmp_path / "intervention.tlspec"
+    trace.save_intervention(path, level="audit")
+    original_spec = (path / "spec.json").read_bytes()
+    original_rename = os.rename
+
+    def fail_replacement(source: str | Path, target: str | Path) -> None:
+        """Fail only the staged replacement's final installation."""
+
+        if Path(source).name.startswith("tmp.") and Path(target) == path:
+            raise OSError("simulated intervention swap refusal")
+        original_rename(source, target)
+
+    monkeypatch.setattr("torchlens.intervention.save.os.rename", fail_replacement)
+    with pytest.raises(OSError, match="swap refusal"):
+        trace.save_intervention(path, level="audit", overwrite=True)
+
+    assert (path / "spec.json").read_bytes() == original_spec

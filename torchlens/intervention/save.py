@@ -230,6 +230,7 @@ def save_intervention(
     target_path = Path(path)
     _reject_symlink_path(target_path, context="intervention spec target")
     tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
+    backup_path: Path | None = None
     tensor_entries: list[TensorEntry] = []
     state = _SerializedState(tensor_entries=tensor_entries, tensor_refs={})
 
@@ -274,12 +275,20 @@ def save_intervention(
         _write_text_file(tmp_path / _README_FILE, _readme_text(spec_json, tensor_entries))
         _fsync_directory(tmp_path)
         if target_path.exists():
-            shutil.rmtree(target_path)
+            backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
+            os.rename(target_path, backup_path)
         os.rename(tmp_path, target_path)
         _fsync_directory(target_path.parent)
-    except Exception:
+        if backup_path is not None:
+            shutil.rmtree(backup_path, ignore_errors=True)
+    except BaseException:
         if tmp_path.exists():
             shutil.rmtree(tmp_path, ignore_errors=True)
+        if backup_path is not None and not target_path.exists() and backup_path.exists():
+            try:
+                os.rename(backup_path, target_path)
+            except OSError:
+                pass
         raise
 
 
