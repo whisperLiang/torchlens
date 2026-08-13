@@ -179,20 +179,22 @@ def _legacy_param_state(address: str) -> dict[str, object]:
     }
 
 
-def test_legacy_param_restore_gets_independent_co_parent_list() -> None:
-    """Legacy Param states do not share a class-level co_parent_params list."""
+def test_legacy_param_restore_refuses_below_floor() -> None:
+    """Pre-floor Param states refuse typed instead of resurrecting.
+
+    Flipped from the pre-2.33-floor resurrection pin (which asserted the
+    DeprecationWarning restore path and co_parent_params isolation): species-1
+    deletion 3 makes unversioned legacy state refuse with the floor named.
+    The co-parent isolation behavior it used to pin is covered for supported
+    states by the strict-binder suites.
+    """
+
+    from torchlens._io import ArtifactVersionBelowFloorError
 
     first = Param.__new__(Param)
-    second = Param.__new__(Param)
 
-    with pytest.warns(DeprecationWarning):
+    with pytest.raises(ArtifactVersionBelowFloorError, match="tlspec_version=6"):
         first.__setstate__(_legacy_param_state("left.weight"))
-    with pytest.warns(DeprecationWarning):
-        second.__setstate__(_legacy_param_state("right.weight"))
-    first.co_parent_params.append("other.weight")
-
-    assert first.co_parent_params == ["other.weight"]
-    assert second.co_parent_params == []
 
 
 def test_ambiguous_op_lookup_error_remains_value_error_compatible() -> None:
