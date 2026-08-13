@@ -33,7 +33,11 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_relationship_model_id"),
         ("torchlens/_state.py", "_relationship_weight_fingerprint"),
         ("torchlens/backends/torch/_tl.py", "_ACTIVE_LABEL_SESSION"),
-        ("torchlens/backends/torch/completeness_witness.py", "_ACTIVE_WITNESS_STATE"),
+        # The ``global`` statement is LEXICALLY in the split fragment, while the name it
+        # binds lives in ``completeness_witness``: the fragment's functions are rebound to
+        # that module's globals dict (``_rebind_function(..., globals())``). This inventory
+        # keys on the lexical site, which is what the AST detector can see.
+        ("torchlens/backends/torch/_completeness_finalize.py", "_ACTIVE_WITNESS_STATE"),
         ("torchlens/backends/torch/rescue.py", "_rescue_active"),
         ("torchlens/capture/projections.py", "_active_recording_state"),
         ("torchlens/capture/trace.py", "_ACTIVE_CAPTURE_BACKEND"),
