@@ -68,6 +68,15 @@ class MLXOpCapture:
     kwarg_leaf_labels:
         The same per-leaf parent labels for keyword arguments, keyed by
         keyword name.
+    interventions:
+        Declared genuine user interventions as ``(output_leaf_index,
+        hook_identity)`` pairs. Mirrored into the emit-time inventory
+        fingerprint, so a post-hoc claim cannot steer hook re-application.
+    appliers:
+        Runtime hook appliers as ``(output_leaf_index, callable)`` pairs,
+        used by replay to reproduce the declared substitution. Never part of
+        the fingerprint; a record whose declared interventions lack a
+        matching applier fails closed.
     """
 
     labels_raw: tuple[str, ...]
@@ -78,6 +87,8 @@ class MLXOpCapture:
     output: Any = None
     arg_leaf_labels: tuple[tuple[str | None, ...], ...] = ()
     kwarg_leaf_labels: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
+    interventions: tuple[tuple[int, str], ...] = ()
+    appliers: tuple[tuple[int, Any], ...] = ()
 
 
 def build_capture_template(
@@ -545,8 +556,9 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
             tuple(labels),
             tuple(tuple(slot) for slot in arg_labels),
             tuple((key, tuple(slot)) for key, slot in kwarg_labels),
+            tuple(interventions),
         )
-        for name, labels, arg_labels, kwarg_labels in tuple(inventory)
+        for name, labels, arg_labels, kwarg_labels, interventions in tuple(inventory)
     )
     observed = sorted(
         (
@@ -556,6 +568,7 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
             tuple(
                 sorted((key, tuple(slot)) for key, slot in capture.kwarg_leaf_labels.items())
             ),
+            tuple(capture.interventions),
         )
         for capture in captures
     )
@@ -564,7 +577,9 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
         expected_only = [call for call in expected if call not in observed]
         observed_only = [call for call in observed if call not in expected]
         failures += max(1, len(expected_only) + len(observed_only))
-    inventoried_labels = {label for _name, labels, _args, _kwargs in expected for label in labels}
+    inventoried_labels = {
+        label for _name, labels, _args, _kwargs, _fires in expected for label in labels
+    }
     for op in getattr(trace, "layer_list", ()):
         if getattr(op, "is_input", False):
             continue
@@ -617,14 +632,32 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
             if len(replayed) != len(capture.labels_raw) or not replayed:
                 failed_count += 1
                 continue
+            final = list(replayed)
+            if capture.interventions:
+                # Genuine-intervention carve-out, scoped by the emit-time
+                # inventory fingerprint (coverage above): replay recomputes
+                # the RAW producer output, re-applies the declared hook, and
+                # the saved payload must equal hook(raw). A record whose
+                # declared interventions lack a matching applier fails
+                # closed; a plain capture never reaches this branch.
+                declared = dict(capture.interventions)
+                appliers = dict(capture.appliers)
+                if set(declared) != set(appliers) or any(
+                    index < 0 or index >= len(final) for index in declared
+                ):
+                    failed_count += 1
+                    continue
+                for index, apply in appliers.items():
+                    final[index] = apply(final[index])
+                mx.eval(*final)
             expected = tuple(
                 _saved_payload(trace, ops_by_label, label)
                 for label in capture.labels_raw
             )
             mx.eval(*expected)
             if any(
-                not _payloads_close(r_out, e_out)
-                for r_out, e_out in zip(replayed, expected)
+                not _payloads_close(f_out, e_out)
+                for f_out, e_out in zip(final, expected)
             ):
                 failed_count += 1
                 continue

@@ -162,25 +162,26 @@ def test_mlx_validation_branch_merge_healthy_passes() -> None:
     assert MLXBackend().validate_trace(trace) is True
 
 
-def test_mlx_end_to_end_bare_interventions_flip_refuses_typed() -> None:
-    """Sol probe, live: interventions=True flipped in place on the registered MLX
-    spec must refuse typed at trace() — never return a trace with the
-    intervention silently ignored."""
+def test_mlx_end_to_end_bare_streaming_flip_refuses_typed() -> None:
+    """Sol probe, live: a gated flag flipped True in place on the registered MLX
+    spec must refuse typed at trace() — never capture while silently ignoring
+    the option. (Interventions are genuinely lifted on MLX now, so the probe
+    uses streaming, which remains gated.)"""
 
     from torchlens.backends import BackendCapabilityConformanceError, get_backend_spec
 
     spec = get_backend_spec("mlx")
-    object.__setattr__(spec.capabilities, "interventions", True)
+    object.__setattr__(spec.capabilities, "streaming", True)
     try:
         with pytest.raises(BackendCapabilityConformanceError):
             tl.trace(
                 _TwoLayerMLP(),
                 mx.ones((1, 4)),
                 backend="mlx",
-                intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+                storage=object(),
             )
     finally:
-        object.__setattr__(spec.capabilities, "interventions", False)
+        object.__setattr__(spec.capabilities, "streaming", False)
 
 
 def test_mlx_validation_loaded_payload_stripped_trace_is_unavailable() -> None:
