@@ -283,6 +283,45 @@ class TestTraceGC:
         gc.collect()
         assert ref() is None
 
+    def test_trace_reclamation_is_cyclic_gc_not_prompt_refcount(self):
+        """Traces are reclaimed by the CYCLIC collector, and that is the contract.
+
+        Deliberately pinned, because the docs claimed the opposite. Every capture
+        populates ``module_calls`` through the saved-summary refresh, and
+        ``ModuleCall._source_trace`` is a STRONG owner edge (kept on purpose --
+        see ``test_held_module_call_still_keeps_its_trace_alive``, and the module
+        accessor cache above reasons from it). That closes
+        Trace -> accessor -> ModuleCall -> Trace, so a dropped Trace and its saved
+        activations are freed at the next ``gc.collect()``, NOT at zero refcount.
+
+        Every other assertion in this file calls ``gc.collect()`` first, so
+        nothing here observed the difference; this arm runs with the collector
+        DISABLED so the real behavior is stated and cannot drift silently.
+        """
+
+        model = _TwoLayerNet()
+        gc.collect()
+        gc.disable()
+        try:
+            trace = tl.trace(model, torch.randn(1, 5), layers_to_save="all")
+            activation = trace["relu_1_2"].out
+            trace_ref = weakref.ref(trace)
+            activation_ref = weakref.ref(activation)
+
+            del trace, activation
+            assert trace_ref() is not None, (
+                "Trace became refcount-reclaimable: the ModuleCall owner edge or "
+                "the saved-summary refresh changed, so the documented lifetime "
+                "contract needs updating (and this test with it)"
+            )
+            assert activation_ref() is not None
+        finally:
+            gc.enable()
+
+        gc.collect()
+        assert trace_ref() is None, "Trace survived a cyclic collection"
+        assert activation_ref() is None, "saved activation survived a cyclic collection"
+
     def test_last_captures_model_class_is_not_pinned_after_the_epilogue(self):
         """A dynamically created module class dies with its last capture.
 
@@ -489,6 +528,128 @@ class TestTraceGC:
         assert "_raw_graph_ws" not in trace.__dict__
         assert "_module_capture_ws" not in trace.__dict__
         assert "_wrapper_runtime_ws" not in trace.__dict__
+
+
+class TestLifetimeCoverageGaps:
+    """Lifetime arms for products the file did not observe (B20).
+
+    The pre-existing arms were strict about the plain-capture path and blind
+    everywhere the sprint added mass: pickle round-trips, forks, failed and
+    partial captures, repeated failure/success cycles, and loaded archived
+    activations all had no lifetime assertion at all.
+    """
+
+    def test_pickled_round_trip_trace_is_collectible(self):
+        """A trace rebuilt by pickle owns no extra roots."""
+
+        import pickle
+
+        trace = tl.trace(_TwoLayerNet(), torch.randn(1, 5), layers_to_save="all")
+        restored = pickle.loads(pickle.dumps(trace))
+        assert len(restored) > 0
+        restored_ref = weakref.ref(restored)
+
+        del restored
+        gc.collect()
+        assert restored_ref() is None
+        trace.cleanup()
+
+    def test_forked_trace_and_its_parent_are_both_collectible(self):
+        """A fork does not keep its parent alive, nor the parent the fork."""
+
+        parent = tl.trace(_TwoLayerNet(), torch.randn(1, 5), layers_to_save="all")
+        fork = parent.fork()
+        fork_ref = weakref.ref(fork)
+        parent_ref = weakref.ref(parent)
+
+        del fork
+        gc.collect()
+        assert fork_ref() is None, "the fork was pinned by its parent"
+        assert parent_ref() is not None
+
+        del parent
+        gc.collect()
+        assert parent_ref() is None, "the parent was pinned after its fork died"
+
+    def test_failed_capture_partial_is_collectible_with_its_exception(self):
+        """A failed capture's partial trace dies with the exception holding it.
+
+        The capture and the recovery MUST happen inside a helper whose frame is
+        gone before the assertion: an ``except`` block in the test body leaves the
+        exception reachable from the test frame (which pytest keeps alive), and
+        the partial trace hangs off ``exc.partial_log``. That is a measurement
+        artifact, not a leak — this arm is structured so it cannot report one.
+        """
+
+        from torchlens import partial as partial_module
+
+        class _Boom(nn.Module):
+            def forward(self, x):
+                _ = torch.relu(x)
+                raise ValueError("failed-capture lifetime probe")
+
+        def capture_and_recover():
+            """Fail a capture, recover its partial, return only a weak handle."""
+
+            try:
+                tl.trace(_Boom(), torch.ones(2))
+            except ValueError as error:
+                return weakref.ref(partial_module.from_failed_capture(error).trace)
+            return None  # pragma: no cover - the model always raises
+
+        partial_ref = capture_and_recover()
+        assert partial_ref is not None, "the failing capture did not raise"
+        gc.collect()
+
+        assert partial_ref() is None, (
+            "the partial trace outlived both the exception and the wrapper"
+        )
+
+    def test_repeated_failure_and_success_cycles_do_not_accumulate(self):
+        """Alternating failed and successful captures leave nothing behind."""
+
+        class _Boom(nn.Module):
+            def forward(self, x):
+                _ = torch.relu(x)
+                raise ValueError("cycle probe")
+
+        model = _TwoLayerNet()
+        refs = []
+        for _ in range(3):
+            with pytest.raises(ValueError, match="cycle probe"):
+                tl.trace(_Boom(), torch.ones(2))
+            trace = tl.trace(model, torch.randn(1, 5))
+            refs.append(weakref.ref(trace))
+            del trace
+            gc.collect()
+
+        assert [ref() for ref in refs] == [None, None, None]
+
+    def test_loaded_archived_activations_die_with_their_trace(self, tmp_path):
+        """A loaded runnable trace's archived activations are not process state."""
+
+        model = _TwoLayerNet().eval()
+        x = torch.randn(1, 5)
+        trace = tl.trace(
+            model,
+            x,
+            layers_to_save="all",
+            capture=tl.options.CaptureOptions(intervention_ready=True, cache=False),
+        )
+        path = tmp_path / "gc_archived.tlspec"
+        trace.save(path, level="runnable", include_weights=True, include_activations=True)
+        del trace
+        gc.collect()
+
+        loaded = tl.load(path)
+        assert loaded.archived_activations, "no archived activations were loaded"
+        loaded_ref = weakref.ref(loaded)
+
+        del loaded
+        gc.collect()
+        assert loaded_ref() is None, (
+            "a loaded trace carrying archived activations was pinned by process state"
+        )
 
 
 def test_delattr_capture_events_releases_the_working_projection():
