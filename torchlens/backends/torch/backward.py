@@ -3049,6 +3049,14 @@ def _run_backward_with_capture(
             memory_error = exc
             after = before
         peak_delta = max(0, after - before)
+        # The higher-order rewalk EMITS journal events (GradFnDiscovered), so it
+        # must run inside the pass bracket; the bracket close is guaranteed even
+        # if the rewalk fails, preserving the never-start-only-pass invariant.
+        rewalk_error: BaseException | None = None
+        try:
+            _rewalk_higher_order_grad_fns(trace)
+        except BaseException as exc:
+            rewalk_error = exc
         events.append_backward(
             BackwardPassEnd(
                 pass_index=pass_index,
@@ -3058,6 +3066,8 @@ def _run_backward_with_capture(
                 order_attribution_coverage=None,
             )
         )
+        if rewalk_error is not None:
+            raise rewalk_error
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
         _clear_pending_accumulate_grad_records(trace)
         for handle in handles:
@@ -3070,7 +3080,6 @@ def _run_backward_with_capture(
         trace.total_param_gradient_memory = Bytes(
             sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
         )
-        _rewalk_higher_order_grad_fns(trace)
         _materialize_backward_projections(trace)
         if status == "ok":
             _warn_zero_match_backward_interventions(trace)
