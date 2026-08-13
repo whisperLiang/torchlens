@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
+from .._errors import ArgumentConflictError, ArgumentTypeError, InvalidArgumentError
 from ..bundle import Bundle
 from .hooks import HookContext
 from .predicates import when
@@ -68,33 +69,64 @@ def sweep(
 
     # Resolve deprecated `param=` kwarg alias
     if param is not MISSING and at is not MISSING:
-        raise TypeError("sweep() received both `at` and `param`; `param` is deprecated, use `at`.")
+        raise ArgumentConflictError(
+            "sweep() received deprecated param and replacement at together",
+            code="deprecated_argument_conflict",
+            remedy="remove param and pass only at",
+            arguments=("param", "at"),
+        )
     if param is not MISSING:
         warn_deprecated_alias("param", "at")
         resolved_at = param
     elif at is MISSING:
-        raise TypeError("sweep() requires the `at` argument (site target).")
+        raise ArgumentTypeError(
+            "sweep() is missing its required at site target",
+            code="sweep_site_missing",
+            remedy="pass at as a label, selector, or predicate callable",
+            argument="at",
+        )
     else:
         resolved_at = at
 
     # Resolve positional `values` (may be MISSING if it was skipped when param was keyword-only)
     if values is MISSING:
-        raise TypeError("sweep() requires the `values` argument.")
+        raise ArgumentTypeError(
+            "sweep() is missing its required values iterable",
+            code="sweep_values_missing",
+            remedy="pass a non-empty iterable as values",
+            argument="values",
+        )
 
     if "intervene" in trace_kwargs:
-        raise ValueError(f"{SWEEP_NAME} owns intervene= and cannot combine another predicate.")
+        raise InvalidArgumentError(
+            "sweep() received intervene even though it constructs its own intervention",
+            code="sweep_intervention_conflict",
+            remedy="remove intervene and express the target with the at argument",
+            argument="intervene",
+        )
 
     # At this point both resolved_at and values are fully resolved (not MISSING).
-    from typing import cast, Iterable as _Iterable
+    from collections.abc import Iterable as _Iterable
+    from typing import cast
 
     resolved_at_typed = cast("str | BaseSelector | Callable[[Any], bool]", resolved_at)
     resolved_values = cast("_Iterable[Any]", values)
 
     swept_values = list(resolved_values)
     if not swept_values:
-        raise ValueError(f"{SWEEP_NAME} requires at least one value.")
+        raise InvalidArgumentError(
+            "sweep() received an empty values iterable",
+            code="sweep_values_empty",
+            remedy="pass at least one replacement value",
+            argument="values",
+        )
     if names is not None and len(names) != len(swept_values):
-        raise ValueError("names length must match values length.")
+        raise InvalidArgumentError(
+            f"sweep() received {len(names)} names for {len(swept_values)} values",
+            code="sweep_names_length_mismatch",
+            remedy="pass exactly one name per replacement value or omit names",
+            argument="names",
+        )
 
     site = _coerce_sweep_site(resolved_at_typed)
     member_names = list(names) if names is not None else _default_member_names(len(swept_values))
@@ -135,7 +167,13 @@ def _coerce_sweep_site(param: str | BaseSelector | Callable[[Any], bool]) -> Cal
         return label(param) | func(param)
     if callable(param):
         return param
-    raise TypeError("param must be a string, selector, or predicate callable.")
+    raise ArgumentTypeError(
+        f"sweep() site target has unsupported type {type(param).__name__}",
+        code="sweep_site_type_invalid",
+        remedy="pass a string, selector, or predicate callable as at",
+        argument="at",
+        received_type=type(param).__name__,
+    )
 
 
 def _replacement_hook(value: Any) -> Callable[..., torch.Tensor]:

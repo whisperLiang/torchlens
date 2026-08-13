@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, overload
 
+from .._errors import ArgumentTypeError
 from .types import TargetSpec
 
 SelectorKind: TypeAlias = Literal[
@@ -829,9 +830,7 @@ class CompositeSelector(BaseSelector):
     operator: Literal["and", "or"]
     selectors: tuple[SelectorLike, ...]
 
-    def __init__(
-        self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, ...]
-    ) -> None:
+    def __init__(self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, ...]) -> None:
         """Create a composite selector.
 
         Parameters
@@ -966,8 +965,12 @@ def func(name: str, *, output: int | str | None = None) -> FuncSelector:
     """
 
     if not isinstance(name, str):
-        raise TypeError(
-            "func() pattern must be a string function name, for example tl.func('relu')."
+        raise ArgumentTypeError(
+            f"func() pattern has unsupported type {type(name).__name__}",
+            code="selector_function_pattern_type_invalid",
+            remedy="pass a string function name such as tl.func('relu')",
+            argument="name",
+            received_type=type(name).__name__,
         )
     return FuncSelector(name, output=output)
 
@@ -1384,7 +1387,14 @@ def _classify_selector_direction(
 
     if isinstance(sel, TargetSpec):
         kind = sel.selector_kind
-        if kind in {"grad_fn", "grad_fn_label", "grad_kind", "backward_pass", "intervening", "without_op"}:
+        if kind in {
+            "grad_fn",
+            "grad_fn_label",
+            "grad_kind",
+            "backward_pass",
+            "intervening",
+            "without_op",
+        }:
             return "backward"
         if kind in {"func", "func_transform"}:
             return "forward"

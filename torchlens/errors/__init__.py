@@ -9,6 +9,7 @@ from ._base import (
     CaptureError,
     CompatibilityError,
     ConfigurationError,
+    DiagnosticSeverityError,
     InterventionError,
     ScalarEscapeWarning,
     Severity,
@@ -18,20 +19,21 @@ from ._base import (
     ValidationError,
 )
 from .runnable import (
+    CollectiveBoundaryReplayError,
     NumericAttestationError,
     PathDivergenceError,
-    CollectiveBoundaryReplayError,
     PoisonedRunError,
     ReattachError,
     RunCapabilityUnavailableError,
-    RunPreconditionError,
     RunnablePreflightError,
     RunnableTLSPECError,
+    RunPreconditionError,
     RuntimeSignatureDriftError,
     StateBindingError,
 )
 
 _LEGACY_EXCEPTION_PATHS = {
+    "AmbiguousOpLookupError": ("torchlens._errors", "AmbiguousOpLookupError"),
     "MutatedReferenceError": ("torchlens._errors", "MutatedReferenceError"),
     "OutputAttributionError": ("torchlens._errors", "OutputAttributionError"),
     "TorchLensCaptureGapError": ("torchlens._errors", "TorchLensCaptureGapError"),
@@ -152,6 +154,27 @@ _LAZY_EXCEPTION_PATHS = {
     # defining modules import ``errors._base``, so eagerly importing them here
     # would create a cycle.
     "ArtifactVersionBelowFloorError": ("torchlens._io", "ArtifactVersionBelowFloorError"),
+    "ArgumentConflictError": ("torchlens._errors", "ArgumentConflictError"),
+    "ArgumentTypeError": ("torchlens._errors", "ArgumentTypeError"),
+    "BackendAmbiguityError": ("torchlens.backends", "BackendAmbiguityError"),
+    "BackendCapabilityConformanceError": (
+        "torchlens.backends",
+        "BackendCapabilityConformanceError",
+    ),
+    "BackendMismatchError": ("torchlens.backends", "BackendMismatchError"),
+    "BackendPayloadUnsupportedError": (
+        "torchlens.backends",
+        "BackendPayloadUnsupportedError",
+    ),
+    "BackendRegistryError": ("torchlens.backends", "BackendRegistryError"),
+    "BackendRuntimeCompatibilityError": (
+        "torchlens.backends",
+        "BackendRuntimeCompatibilityError",
+    ),
+    "BackendUnsupportedError": ("torchlens.backends", "BackendUnsupportedError"),
+    "CaptureContextError": ("torchlens._errors", "CaptureContextError"),
+    "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
+    "UnknownBackendError": ("torchlens.backends", "UnknownBackendError"),
     "DistributedCaptureUnsupportedError": (
         "torchlens._distributed",
         "DistributedCaptureUnsupportedError",
@@ -205,6 +228,7 @@ __all__ = [
     "CaptureError",
     "CompatibilityError",
     "ConfigurationError",
+    "DiagnosticSeverityError",
     "InterventionError",
     "NumericAttestationError",
     "PathDivergenceError",

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias, cast
 
+from ..errors._base import ConfigurationError
 from ._protocol import CaptureBackend
-
 
 BackendName: TypeAlias = Literal["torch", "mlx", "jax", "tinygrad", "paddle", "tf", "fake"] | str
 """Backend name accepted by public APIs.
@@ -20,6 +20,34 @@ CaptureTraceFn: TypeAlias = Callable[..., Any]
 ValidateEntryFn: TypeAlias = Callable[..., bool]
 ValidateTraceFn: TypeAlias = Callable[..., Any]
 CaptureBackendFactory: TypeAlias = Callable[[], CaptureBackend]
+
+
+def _restore_backend_error(
+    error_type: type[BaseException],
+    args: tuple[object, ...],
+    state: dict[str, object],
+) -> BaseException:
+    """Rebuild a backend error without appending its remedy a second time.
+
+    Parameters
+    ----------
+    error_type:
+        Concrete backend error class stored by pickle.
+    args:
+        Already-formatted ``BaseException.args`` tuple.
+    state:
+        Instance dictionary containing structured diagnostic fields.
+
+    Returns
+    -------
+    BaseException
+        Restored backend error with its exact message and fields.
+    """
+
+    error = error_type.__new__(error_type)
+    BaseException.__init__(error, *args)
+    error.__dict__.update(state)
+    return error
 
 
 TRACE_OPTION_CAPABILITY_EPOCHS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -82,46 +110,96 @@ TF_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options")
 """Trace options implemented by the TensorFlow preview backend."""
 
 
-class BackendRegistryError(ValueError):
+class BackendRegistryError(ConfigurationError, ValueError):
     """Base class for backend registry failures."""
 
     code: str = "backend_error"
+    default_remedy: str = "pass an explicitly registered backend compatible with the operation"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize a backend refusal with its stable code and remedy.
+
+        Parameters
+        ----------
+        message:
+            Description of the rejected backend request and its cause.
+        remedy:
+            Concrete caller action. The class-specific default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        message_text = message.rstrip()
+        if not message_text.endswith((".", "!", "?", ":", ";")):
+            message_text = f"{message_text}."
+        super().__init__(
+            f"{message_text} Remedy: {resolved_remedy.rstrip().rstrip('.')}.",
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
+
+    def __reduce__(
+        self,
+    ) -> tuple[
+        object,
+        tuple[type[BaseException], tuple[object, ...], dict[str, object]],
+    ]:
+        """Return a pickle reconstruction recipe preserving structured fields."""
+
+        return (
+            _restore_backend_error,
+            (type(self), self.args, dict(self.__dict__)),
+        )
 
 
 class UnknownBackendError(BackendRegistryError):
     """Raised when an explicit backend name is not registered."""
 
     code = "unknown_backend"
+    default_remedy = "pass one of the backend names listed by torchlens.backends"
 
 
 class BackendMismatchError(BackendRegistryError):
     """Raised when an explicit backend cannot handle the supplied model/input."""
 
     code = "backend_mismatch"
+    default_remedy = "select the backend that owns the supplied model and tensor inputs"
 
 
 class BackendAmbiguityError(BackendRegistryError):
     """Raised when backend auto-resolution has multiple equal-priority matches."""
 
     code = "backend_ambiguity"
+    default_remedy = "pass backend= explicitly to select one matching backend"
 
 
 class BackendUnsupportedError(BackendRegistryError, NotImplementedError):
     """Raised when a backend lacks a requested capability."""
 
     code = "backend_unsupported"
+    default_remedy = "omit the unsupported option or use a backend that implements it"
 
 
 class BackendPayloadUnsupportedError(BackendUnsupportedError):
     """Raised when an audit-only backend payload cannot materialize."""
 
     code = "backend_payload_unsupported"
+    default_remedy = "save metadata only or use a backend with a supported payload codec"
 
 
 class BackendRuntimeCompatibilityError(BackendRegistryError):
     """Raised when a backend runtime is incompatible with serialized metadata."""
 
     code = "backend_runtime_compatibility"
+    default_remedy = "install a compatible backend runtime or load the artifact for analysis only"
 
 
 class BackendCapabilityConformanceError(BackendUnsupportedError):
@@ -134,6 +212,7 @@ class BackendCapabilityConformanceError(BackendUnsupportedError):
     """
 
     code = "backend_capability_conformance"
+    default_remedy = "disable the advertised capability or register its implementing surface"
 
 
 GATED_CAPABILITY_FLAGS: frozenset[str] = frozenset(

@@ -16,11 +16,12 @@ from typing import Any, Literal
 import torch
 from safetensors.torch import save_file
 
+from .. import __version__ as TORCHLENS_VERSION
+from .._errors import InvalidArgumentError
+from ..backends import get_backend_spec
 from . import TLSPEC_VERSION, TorchLensIOError
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .paths import reject_symlink_path
-from .. import __version__ as TORCHLENS_VERSION
-from ..backends import get_backend_spec
 
 
 def _reject_symlink_path(path: Path, *, context: str) -> None:
@@ -169,7 +170,12 @@ class _TlSpecWriter:
         """
 
         if save_level == "runnable":
-            raise ValueError("save_level='runnable' is supported only for Trace artifacts.")
+            raise InvalidArgumentError(
+                "Intervention artifacts do not support save_level='runnable'",
+                code="artifact_save_level_unsupported",
+                remedy="use 'audit', 'executable_with_callables', or 'portable'",
+                artifact_kind="intervention",
+            )
         intervention_metadata = cls._intervention_compat_metadata(spec_json)
         manifest = {
             "format_version": legacy_format_version,
@@ -212,7 +218,12 @@ class _TlSpecWriter:
 
         level = coerce_tlspec_save_level(save_level)
         if level == "runnable":
-            raise ValueError("save_level='runnable' is supported only for Trace artifacts.")
+            raise InvalidArgumentError(
+                "Bundle artifacts do not support save_level='runnable'",
+                code="artifact_save_level_unsupported",
+                remedy="use 'audit', 'executable_with_callables', or 'portable'",
+                artifact_kind="bundle",
+            )
         target_path = Path(path)
         _reject_symlink_path(target_path, context="bundle tlspec target")
         tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
@@ -831,8 +842,11 @@ def coerce_tlspec_save_level(save_level: str) -> TlspecSaveLevel:
 
     if save_level not in TLSPEC_VALID_SAVE_LEVELS:
         levels = ", ".join(repr(level) for level in TLSPEC_VALID_SAVE_LEVELS)
-        raise ValueError(
-            f"Unsupported .tlspec save level {save_level!r}; expected one of {levels}."
+        raise InvalidArgumentError(
+            f".tlspec save level {save_level!r} is unsupported",
+            code="artifact_save_level_invalid",
+            remedy=f"set the save level to one of {levels}",
+            argument="save_level",
         )
     return save_level  # type: ignore[return-value]
 
