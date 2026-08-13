@@ -1,5 +1,6 @@
 """Smoke tests for first-class backward-pass capture."""
 
+import dataclasses
 import warnings
 from types import MethodType
 from unittest import mock
@@ -1692,23 +1693,32 @@ def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
     first_op = stream.op_events[0]
     second_op = stream.op_events[1]
 
+    # ``OpRecord.seq`` is a read-only view over the frozen core, so a plant
+    # forges a whole record (``dataclasses.replace`` on the core) and splices
+    # it into the journal lane -- ``core.seq`` is unpatchable through the
+    # amendment channel by design, and the invariant must still catch a
+    # forged record that bypassed the writer entirely.
+    def plant_op_seq(index: int, seq_value: int) -> None:
+        record = stream.op_events[index]
+        forged_core = dataclasses.replace(record.core, seq=seq_value)
+        stream.op_events[index] = dataclasses.replace(record, core=forged_core)
+
     # Unstamped event (bypassed the writer).
     original_seq = first_op.seq
-    object.__setattr__(first_op, "seq", 0)
+    plant_op_seq(0, 0)
     with pytest.raises(MetadataInvariantError, match="missing a writer-stamped seq"):
         check()
-    object.__setattr__(first_op, "seq", original_seq)
+    stream.op_events[0] = first_op
     check()
 
     # Lane reorder (strictly-increasing violated).
-    original_second_seq = second_op.seq
-    object.__setattr__(second_op, "seq", original_seq)
+    plant_op_seq(1, original_seq)
     with pytest.raises(MetadataInvariantError, match="appears in both|does not increase"):
         check()
-    object.__setattr__(second_op, "seq", original_seq - 1 if original_seq > 1 else 0)
+    plant_op_seq(1, original_seq - 1 if original_seq > 1 else 0)
     with pytest.raises(MetadataInvariantError):
         check()
-    object.__setattr__(second_op, "seq", original_second_seq)
+    stream.op_events[1] = second_op
     check()
 
     # Cross-lane duplicate (module lane forging an op's seq).
