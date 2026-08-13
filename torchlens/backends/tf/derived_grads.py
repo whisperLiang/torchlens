@@ -569,9 +569,7 @@ def _normalize_tf_input_grad_argnums(
     normalized = tuple(int(index) for index in input_grad_argnums)
     for index in normalized:
         if index < 0 or index >= len(args):
-            raise ValueError(
-                f"TensorFlow input_grad_argnums contains out-of-range argnum {index}."
-            )
+            raise ValueError(f"TensorFlow input_grad_argnums contains out-of-range argnum {index}.")
     return normalized
 
 
@@ -697,7 +695,7 @@ def _records_for_tf_leaf_grads(
     """
 
     records: dict[str, DerivedGradRecord] = {}
-    for leaf, grad in zip(leaves, grads):
+    for leaf, grad in zip(leaves, grads, strict=True):
         if grad is None:
             continue
         records[leaf.path] = DerivedGradRecord(
@@ -793,9 +791,7 @@ def _is_float_tf_tensor(value: Any, tf: Any) -> bool:
         True when ``value`` is a floating TensorFlow tensor or variable.
     """
 
-    return _is_tf_tensor_like(value, tf) and _is_float_dtype_text(
-        str(getattr(value, "dtype", ""))
-    )
+    return _is_tf_tensor_like(value, tf) and _is_float_dtype_text(str(getattr(value, "dtype", "")))
 
 
 def _is_float_dtype_text(dtype: str) -> bool:
@@ -863,9 +859,13 @@ def _tf_trees_close(tf: Any, left: Any, right: Any) -> bool:
             and _tf_values_close(left, right)
         )
     if isinstance(left, tuple) and isinstance(right, tuple) and len(left) == len(right):
-        return all(_tf_trees_close(tf, l_item, r_item) for l_item, r_item in zip(left, right))
+        return all(
+            _tf_trees_close(tf, l_item, r_item) for l_item, r_item in zip(left, right, strict=True)
+        )
     if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
-        return all(_tf_trees_close(tf, l_item, r_item) for l_item, r_item in zip(left, right))
+        return all(
+            _tf_trees_close(tf, l_item, r_item) for l_item, r_item in zip(left, right, strict=True)
+        )
     if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
         return all(_tf_trees_close(tf, left[key], right[key]) for key in left)
     return bool(left == right)

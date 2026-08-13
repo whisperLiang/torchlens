@@ -1,6 +1,9 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    # v6.0.0 removed check-byte-order-marker and fix-encoding-pragma and raised the
+    # hook-env floor to python>=3.9; none of the five hooks used below are affected,
+    # and the local hooks already use the non-deprecated `stages` names v5 required.
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -20,7 +23,12 @@ repos:
         # belong in it. Excluded from scanning like the other data catalogs.
         exclude: ^menagerie/data/crawl_roster\.jsonl$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.7
+    # PIN AUTHORITY: this rev MUST equal the `ruff==` pin in pyproject.toml's dev
+    # extra and in .github/workflows/lint.yml. The formatter that WRITES the code
+    # and the gate that JUDGES it have to be the same ruff, or pre-commit happily
+    # formats to a style CI then rejects. Enforced by tests/
+    # test_packaging_diet.py::test_ruff_pin_is_identical_across_declaration_sites.
+    rev: v0.15.4
     hooks:
       - id: ruff-format
       - id: ruff

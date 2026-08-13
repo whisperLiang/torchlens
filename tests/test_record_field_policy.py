@@ -277,6 +277,7 @@ def test_trace_runnable_field_order_slots_are_live_and_loaded_values_override(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_contract_assertions_run_over_standard_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -292,6 +293,7 @@ def test_postprocess_contract_assertions_run_over_standard_model(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_enforces_declared_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -308,6 +310,7 @@ def test_postprocess_write_audit_enforces_declared_columns(
     trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_covers_save_code_context_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,6 +342,7 @@ def test_postprocess_write_audit_covers_save_code_context_axis(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_covers_streaming_axis(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -384,6 +388,7 @@ class _OrphanEquivalenceModel(nn.Module):
         return x**2
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_covers_orphan_keep_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -404,6 +409,7 @@ def test_postprocess_write_audit_covers_orphan_keep_axis(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_covers_orphan_removal_scrub_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -424,6 +430,7 @@ def test_postprocess_write_audit_covers_orphan_removal_scrub_axis(
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_trips_on_undeclared_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -447,6 +454,7 @@ def test_postprocess_write_audit_trips_on_undeclared_column(
         tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_catches_in_place_container_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -469,15 +477,14 @@ def test_postprocess_write_audit_catches_in_place_container_mutation(
         first_op.annotations["smuggled_in_place"] = 1
 
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
-    monkeypatch.setattr(
-        postprocess_mod, "_rename_model_history_layer_names", smuggling_rename
-    )
+    monkeypatch.setattr(postprocess_mod, "_rename_model_history_layer_names", smuggling_rename)
     with pytest.raises(
         AssertionError, match=r"Step 10 .* undeclared op-store columns.*annotations"
     ):
         tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_allows_sanctioned_row_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,6 +506,7 @@ def test_postprocess_write_audit_allows_sanctioned_row_removal(
     trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -561,8 +569,6 @@ def test_write_audit_fingerprint_is_order_canonical() -> None:
 
     # Real content changes are still caught, including nested ones.
     assert _cell_content_fingerprint({8, 16}) != _cell_content_fingerprint({8, 17})
-    assert _cell_content_fingerprint([1, [2, 3]]) != _cell_content_fingerprint(
-        [1, [2, 4]]
-    )
+    assert _cell_content_fingerprint([1, [2, 3]]) != _cell_content_fingerprint([1, [2, 4]])
     # Lists stay ORDER-SENSITIVE (list equality is positional).
     assert _cell_content_fingerprint([1, 2]) != _cell_content_fingerprint([2, 1])

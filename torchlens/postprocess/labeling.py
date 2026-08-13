@@ -920,7 +920,10 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
         setattr(
             self,
             field,
-            [self._raw_graph_ws.raw_layer_dict[tensor_label].layer_label for tensor_label in tensor_labels],
+            [
+                self._raw_graph_ws.raw_layer_dict[tensor_label].layer_label
+                for tensor_label in tensor_labels
+            ],
         )
 
     # Remap halt provenance from raw to final labels, exactly as the special

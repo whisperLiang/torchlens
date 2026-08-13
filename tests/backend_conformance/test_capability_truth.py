@@ -152,8 +152,7 @@ def test_every_capability_flag_has_a_production_consumer() -> None:
 
     gated_fields = set(TRACE_OPTION_CAPABILITY_GATES.values())
     source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(_TORCHLENS_ROOT.rglob("*.py"))
+        path.read_text(encoding="utf-8") for path in sorted(_TORCHLENS_ROOT.rglob("*.py"))
     )
     for field in dataclasses.fields(BackendCapabilities):
         directly_read = f"capabilities.{field.name}" in source
@@ -188,8 +187,11 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
     spec = get_backend_spec(name)
     policy = _EXTRA_POLICIES[name]
     sentinel = object()
-    for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
-                         ("streaming", "streaming")):
+    for option, flag in (
+        ("intervene", "interventions"),
+        ("storage", "streaming"),
+        ("streaming", "streaming"),
+    ):
         if EXPECTED_GATED_CAPABILITIES[name][flag]:
             # Lifted capability: the flag is True with a real binding, the
             # capture path pops the option before extra-kwarg rejection (so the
@@ -368,9 +370,7 @@ def test_backward_accessor_guard_without_derived_surface_has_no_redirect(
     original = get_backend_spec("tf")
     flipped = dataclasses.replace(
         original,
-        capabilities=dataclasses.replace(
-            original.capabilities, intermediate_derived_grads=False
-        ),
+        capabilities=dataclasses.replace(original.capabilities, intermediate_derived_grads=False),
     )
     monkeypatch.setattr(guards, "get_backend_spec", lambda _name: flipped)
     with pytest.raises(ValueError, match="declares no derived-gradient surface"):
@@ -383,9 +383,7 @@ def test_backward_accessor_guard_torch_passes_unknown_refuses() -> None:
 
     raise_if_no_backward_capture(_StubTrace("torch"), plural_subject="backward_passes")
     with pytest.raises(ValueError, match="not a registered backend"):
-        raise_if_no_backward_capture(
-            _StubTrace("not-a-backend"), plural_subject="backward_passes"
-        )
+        raise_if_no_backward_capture(_StubTrace("not-a-backend"), plural_subject="backward_passes")
 
 
 def test_backward_accessors_raise_for_all_non_backward_backends() -> None:

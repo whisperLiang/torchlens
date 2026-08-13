@@ -152,11 +152,24 @@ Homepage = "https://github.com/johnmarktaylor91/torchlens"
 Repository = "https://github.com/johnmarktaylor91/torchlens"
 
 [tool.setuptools.packages.find]
-include = ["torchlens*", "menagerie*"]
+# menagerie* is deliberately NOT distributed. It is a dated reference corpus (the
+# model atlas + its crawler), not part of the importable library: it depends on
+# torchlens rather than the reverse, nothing in torchlens imports it, and
+# including it shipped 2886 of the wheel's 3316 members (~13.5 MB) into every
+# `pip install torchlens` while squatting `menagerie` as a top-level import name.
+# It stays in the repo and the sdist-from-git; consumers use it from a checkout.
+# Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
+include = ["torchlens*"]
 
 [tool.setuptools.package-data]
-torchlens = ["autoroute/data/*.json", "autoroute/data/*.md", "schemas/*.json"]
-menagerie = ["crawler/prompts/pool/*"]
+# py.typed is REQUIRED for PEP 561: without it downstream mypy silently ignores
+# every annotation in the package.
+torchlens = [
+    "py.typed",
+    "autoroute/data/*.json",
+    "autoroute/data/*.md",
+    "schemas/*.json",
+]
 
 [tool.pytest.ini_options]
 markers = [
@@ -166,6 +179,7 @@ markers = [
     "serial: marks load-sensitive tests that should run away from parallel worker load",
     "rare: marks tests that are always excluded unless explicitly requested (select with '-m rare')",
     "optional: marks tests that require optional dependencies",
+    "requires_assertions: marks tests that need `assert` to execute (skipped under python -O)",
     "backend_parity: marks active backend substrate parity gates",
     "backend_jax: marks tests that require the optional JAX backend runtime",
     "backend_mlx: marks tests that require the optional MLX backend runtime",
@@ -246,6 +260,20 @@ disallow_untyped_defs = false
 
 [tool.ruff]
 line-length = 100
+
+# EXCLUDE AUTHORITY: the judged file set lives here, not in CLI flags, so that
+# pre-commit (which passes explicit staged filenames) and CI (which passes
+# directories) reach the SAME verdict. `extend-exclude` participates in
+# --force-exclude, which the ruff-pre-commit hooks pass by default.
+#   menagerie/            - vendored/ported real model source + generated recipes
+#                           (see the per-file-ignores rationale below)
+#   tests/crawler/        - menagerie crawler harness, same provenance
+#   tests/test_menagerie_*- menagerie-only test surface
+extend-exclude = [
+    "menagerie",
+    "tests/crawler",
+    "tests/test_menagerie_*.py",
+]
 
 [tool.ruff.lint]
 ignore = []

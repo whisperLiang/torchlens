@@ -141,9 +141,7 @@ def resolve_mlx_intervention_plan(
     if intervene is not None:
         selector = getattr(intervene, "selector", None)
         decision = getattr(intervene, "decision", None)
-        if not isinstance(selector, BaseSelector) or not isinstance(
-            decision, InterventionDecision
-        ):
+        if not isinstance(selector, BaseSelector) or not isinstance(decision, InterventionDecision):
             raise BackendUnsupportedError(
                 "MLX backend supports trace(intervene=...) only as "
                 "tl.when(static_selector, action). Value-dependent intervention "
@@ -270,9 +268,7 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
         return MLXHookApplier(identity, lambda out: out * factor)
     if name == "add":
         delta = spec.args[0]
-        if not isinstance(delta, (int, float)) and not isinstance(
-            delta, getattr(mx, "array", ())
-        ):
+        if not isinstance(delta, (int, float)) and not isinstance(delta, getattr(mx, "array", ())):
             raise BackendUnsupportedError(
                 "MLX backend tl.add(...) interventions accept a Python scalar or "
                 f"mx.array delta; got {type(delta).__name__}. Torch tensors cannot "

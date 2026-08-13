@@ -145,10 +145,7 @@ def test_tf_leaf_input_and_param_grads_match_direct_reference() -> None:
     _assert_close(trace.derived_grads["inputs.0"].grad, expected[0])
     _assert_close(trace.derived_grads[f"params.{kernel_address}"].grad, expected[1])
     _assert_close(trace.derived_grads[f"params.{bias_address}"].grad, expected[2])
-    assert (
-        trace.params[kernel_address].grad
-        is trace.derived_grads[f"params.{kernel_address}"].grad
-    )
+    assert trace.params[kernel_address].grad is trace.derived_grads[f"params.{kernel_address}"].grad
     record = trace.derived_grads["inputs.0"]
     assert record.provenance["backend"] == "tf"
     assert record.provenance["mechanism"] == "tf.GradientTape"
@@ -190,9 +187,7 @@ def test_tf_intermediate_grads_match_direct_oracle_and_skip_disconnected() -> No
     records = trace.intermediate_derived_grads
     relu_op = next(op for op in trace.layer_list if op.func_name == "Relu")
     _assert_close(records[relu_op.label].grad, np.ones((2, 2), dtype="float32"))
-    stop_gradient_op = next(
-        op for op in trace.layer_list if op.func_name == "StopGradient"
-    )
+    stop_gradient_op = next(op for op in trace.layer_list if op.func_name == "StopGradient")
     assert stop_gradient_op.label not in records
     assert records[relu_op.label].provenance["status"] == "exact"
 

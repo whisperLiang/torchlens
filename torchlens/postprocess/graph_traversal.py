@@ -149,9 +149,7 @@ def _resolve_output_parent_labels(
             event = capture_events.op_event_by_label_raw.get(parent_label)
             if event is not None:
                 capture_events.append_amendment(
-                    amend_late_buffer_output_parent(
-                        event.seq, parent_label, is_output_parent=True
-                    )
+                    amend_late_buffer_output_parent(event.seq, parent_label, is_output_parent=True)
                 )
         parent_labels.append(parent_label)
     return parent_labels
@@ -212,12 +210,21 @@ def _add_output_layers(
     if output_parent_labels is None:
         # Legacy alignment: callers that predate per-tensor parent resolution
         # paired ``self.output_layers`` positionally with the output tensors.
-        output_parent_labels = list(self.output_layers)
+        # That list may be SHORTER than the outputs (unattributed outputs have
+        # no entry), so normalize it to one slot per output tensor here. Padding
+        # with None is behavior-identical to the truncating zip this replaces:
+        # the padded slots are dropped by the ``is not None`` filter below, and
+        # surplus labels were already discarded. Normalizing lets the pairing be
+        # strict, which is what actually matters -- a labels/tensors/addresses
+        # length mismatch on the modern path must fail loud rather than yield a
+        # silently shorter, entirely plausible set of output nodes.
+        legacy_labels = list(self.output_layers)[: len(output_tensors)]
+        output_parent_labels = legacy_labels + [None] * (len(output_tensors) - len(legacy_labels))
 
     paired_outputs = [
         (parent_label, output_tensor, output_address)
         for parent_label, output_tensor, output_address in zip(
-            output_parent_labels, output_tensors, output_addresses
+            output_parent_labels, output_tensors, output_addresses, strict=True
         )
         if parent_label is not None
     ]
@@ -369,17 +376,12 @@ def _add_output_layers(
             # traces keep the graph-attached output — it is the very handle
             # log_backward() differentiates through.
             _parent_payload = (
-                output_node.out
-                if output_node.out is not None
-                else output_node.transformed_out
+                output_node.out if output_node.out is not None else output_node.transformed_out
             )
             _detach_payload = not (
-                torch.is_tensor(_parent_payload)
-                and _parent_payload.grad_fn is not None
+                torch.is_tensor(_parent_payload) and _parent_payload.grad_fn is not None
             )
-            actual_output_raw = safe_copy(
-                output_tensor, detach_tensor=_detach_payload
-            )
+            actual_output_raw = safe_copy(output_tensor, detach_tensor=_detach_payload)
             if output_node.output_device not in [str(actual_output_raw.device), "same"]:
                 actual_output_raw = safe_to(actual_output_raw, output_node.output_device)
             actual_output_transformed = None
@@ -396,9 +398,7 @@ def _add_output_layers(
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
             raw_retained = output_node.out is not None
-            new_output_node._internal_set(
-                "out", actual_output_raw if raw_retained else None
-            )
+            new_output_node._internal_set("out", actual_output_raw if raw_retained else None)
             new_output_node._internal_set("transformed_out", actual_output_transformed)
             new_output_node.transformed_out_shape = _shape_or_none(actual_output_transformed)
             new_output_node.transformed_out_dtype = _dtype_or_none(actual_output_transformed)
@@ -407,9 +407,7 @@ def _add_output_layers(
             )
 
             comparison_output = output_node.out if raw_retained else output_node.transformed_out
-            actual_comparison = (
-                actual_output_raw if raw_retained else actual_output_transformed
-            )
+            actual_comparison = actual_output_raw if raw_retained else actual_output_transformed
             if (
                 comparison_output is not None
                 and actual_comparison is not None
@@ -485,8 +483,12 @@ def _remove_orphan_nodes(self: "Trace") -> None:
 
     nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
     orphan_nodes = orig_nodes - nodes_seen
-    self._orphan_labels = [label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes]
-    self._orphan_logs = tuple(self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels)
+    self._orphan_labels = [
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes
+    ]
+    self._orphan_logs = tuple(
+        self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels
+    )
     self.orphan_records = [
         {
             "raw_label": orphan._label_raw,
@@ -524,7 +526,9 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     self._orphan_pruned_func_call_ids = {
         func_call_id
         for label in orphan_nodes
-        for func_call_id in (getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),)
+        for func_call_id in (
+            getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),
+        )
         if isinstance(func_call_id, int)
     }
 

@@ -221,7 +221,9 @@ class PaddleInterventionRuntime:
             raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
         return result
 
-    def record_fired_spec(self, trace: Any, target_label: str, decision: InterventionDecision) -> None:
+    def record_fired_spec(
+        self, trace: Any, target_label: str, decision: InterventionDecision
+    ) -> None:
         """Persist a fired decision on the trace-owned intervention spec.
 
         Mirrors the torch predicate path: the armed spec is trace-level

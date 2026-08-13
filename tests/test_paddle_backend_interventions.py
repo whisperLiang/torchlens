@@ -17,15 +17,15 @@ import pytest
 
 paddle = pytest.importorskip("paddle")
 
-import numpy as np
+import numpy as np  # noqa: E402
 
-import torchlens as tl
-from torchlens.backends import (
+import torchlens as tl  # noqa: E402
+from torchlens.backends import (  # noqa: E402
     BackendUnsupportedError,
     get_backend_spec,
     require_capability_implementation,
 )
-from torchlens.backends.paddle import PaddleBackend
+from torchlens.backends.paddle import PaddleBackend  # noqa: E402
 
 pytestmark = pytest.mark.backend_paddle
 
@@ -112,9 +112,7 @@ def test_paddle_zero_ablate_e2e_changes_downstream_and_validates() -> None:
     assert fire_records and fire_records[0].replaced is True
     assert fire_records[0].helper_name == "zero_ablate"
 
-    downstream_delta = np.abs(
-        _output_op(plain).out.numpy() - _output_op(ablated).out.numpy()
-    ).max()
+    downstream_delta = np.abs(_output_op(plain).out.numpy() - _output_op(ablated).out.numpy()).max()
     assert downstream_delta > 1.0
 
     backend = PaddleBackend()
@@ -134,9 +132,7 @@ def test_paddle_intervention_helper_roster() -> None:
         backend="paddle",
         intervene=tl.when(tl.func("functional.relu"), tl.scale(0.5)),
     )
-    np.testing.assert_allclose(
-        _relu_op(scaled).out.numpy(), relu_plain * 0.5, rtol=1e-6
-    )
+    np.testing.assert_allclose(_relu_op(scaled).out.numpy(), relu_plain * 0.5, rtol=1e-6)
 
     shifted = tl.trace(
         _mlp,
@@ -144,9 +140,7 @@ def test_paddle_intervention_helper_roster() -> None:
         backend="paddle",
         intervene=tl.when(tl.func("functional.relu"), tl.add(1.0)),
     )
-    np.testing.assert_allclose(
-        _relu_op(shifted).out.numpy(), relu_plain + 1.0, rtol=1e-6
-    )
+    np.testing.assert_allclose(_relu_op(shifted).out.numpy(), relu_plain + 1.0, rtol=1e-6)
 
     replacement = paddle.ones_like(paddle.to_tensor(relu_plain)) * 7.0
     replaced = tl.trace(
@@ -175,9 +169,7 @@ def test_paddle_plain_callable_hook_applies() -> None:
         backend="paddle",
         intervene=tl.when(tl.func("functional.relu"), lambda out: -out),
     )
-    np.testing.assert_allclose(
-        _relu_op(negated).out.numpy(), -_relu_op(plain).out.numpy()
-    )
+    np.testing.assert_allclose(_relu_op(negated).out.numpy(), -_relu_op(plain).out.numpy())
     assert PaddleBackend().validate_trace(negated) is True
 
 
@@ -209,9 +201,7 @@ def test_paddle_halt_stops_execution_at_frontier() -> None:
         executed.append("post-frontier")
         return paddle.nn.functional.linear(hidden, w2, b2)
 
-    trace = tl.trace(
-        mlp_with_flag, _inputs(), backend="paddle", halt=tl.func("functional.relu")
-    )
+    trace = tl.trace(mlp_with_flag, _inputs(), backend="paddle", halt=tl.func("functional.relu"))
     assert executed == []
     assert trace.halted is True
     assert "relu" in str(trace.halt_reason)
@@ -247,9 +237,7 @@ def test_paddle_tamper_stripped_evidence_fails_validation() -> None:
 
     trace = _ablated_trace()
     captures = trace._paddle_op_captures
-    index = next(
-        i for i, capture in enumerate(captures) if capture.intervention is not None
-    )
+    index = next(i for i, capture in enumerate(captures) if capture.intervention is not None)
     captures[index] = dataclasses.replace(captures[index], intervention=None)
     relu = _relu_op(trace)
     relu.intervention_replaced = False

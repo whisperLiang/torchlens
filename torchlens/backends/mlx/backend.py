@@ -1002,7 +1002,9 @@ class MLXBackend:
         events: list[OpEvent] = []
         policy = self._capture_policy(session)
         output_by_site = tuple(output_sites)
-        for site_index, (output, reserved) in enumerate(zip(output_by_site, reserved_block)):
+        for site_index, (output, reserved) in enumerate(
+            zip(output_by_site, reserved_block, strict=True)
+        ):
             if not self.is_tensor(output):
                 continue
             self.tensor_store.set_label(output, reserved.label_raw)
@@ -1225,9 +1227,7 @@ class MLXBackend:
             if halt_signal is not None:
                 trace.raw_output = None
             else:
-                trace.raw_output = (
-                    output_transform(output) if callable(output_transform) else None
-                )
+                trace.raw_output = output_transform(output) if callable(output_transform) else None
             self.finalize_forward_session(trace, trace._raw_graph_ws)
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
@@ -1289,9 +1289,7 @@ class MLXBackend:
             for barcode in (getattr(op, "_param_barcodes", None) or ())
         }
         kept = {
-            address: param
-            for address, param in trace.params.items()
-            if param.barcode in attached
+            address: param for address, param in trace.params.items() if param.barcode in attached
         }
         trace.param_logs = ParamAccessor(kept)
         trace.num_param_tensors = len(kept)
@@ -1424,7 +1422,7 @@ class MLXBackend:
                 )
             grad_trees = grads if len(differentiated_argnums) != 1 else (grads,)
             records: dict[str, DerivedGradRecord] = {}
-            for value_argnum, grad_tree in zip(differentiated_argnums, grad_trees):
+            for value_argnum, grad_tree in zip(differentiated_argnums, grad_trees, strict=True):
                 records.update(
                     _records_for_mlx_grad_tree(
                         grad_tree=grad_tree,
@@ -1661,9 +1659,7 @@ class MLXBackend:
                 # Perturbation gaps are honest UNVERIFIED evidence, never a
                 # silent pass: a constant producer's parent dependency cannot
                 # be perturbation-proven.
-                unverified_count = count_importer_region_annotations(trace) + len(
-                    perturbation_gaps
-                )
+                unverified_count = count_importer_region_annotations(trace) + len(perturbation_gaps)
                 if perturbation_gaps:
                     reason_counts = {
                         "mlx_perturbation_no_perturbable_input": len(perturbation_gaps)
@@ -1754,11 +1750,9 @@ class MLXBackend:
             replacements: dict[int, Any] = {}
             slots: list[tuple[int, str]] = []
             appliers: list[tuple[int, Any]] = []
-            for index, (leaf, entry) in enumerate(zip(outputs, reserved)):
+            for index, (leaf, entry) in enumerate(zip(outputs, reserved, strict=True)):
                 record_ctx = self.build_record_context(trace, entry, func_event_input, leaf)
-                if plan is not None and selector_matches_capture_context(
-                    plan.selector, record_ctx
-                ):
+                if plan is not None and selector_matches_capture_context(plan.selector, record_ctx):
                     replacement = self._apply_mlx_intervention(plan, leaf)
                     replacements[id(leaf)] = replacement
                     fire_results_by_site[index] = (
@@ -1896,9 +1890,9 @@ class MLXBackend:
                 f"MLX intervention {plan.applier.identity!r} returned "
                 f"{type(replacement).__name__}; hooks must return an mx.array."
             )
-        if self._shape(replacement) != self._shape(leaf) or self._dtype(
-            replacement
-        ) != self._dtype(leaf):
+        if self._shape(replacement) != self._shape(leaf) or self._dtype(replacement) != self._dtype(
+            leaf
+        ):
             raise BackendUnsupportedError(
                 f"MLX intervention {plan.applier.identity!r} changed the output "
                 f"from shape={self._shape(leaf)} dtype={self._dtype(leaf)} to "
@@ -2965,8 +2959,7 @@ def _mlx_trace_intermediate_signatures(
             op_name=str(op.func_name or op.layer_type),
             call_ordinal=int(op.func_call_id or 0),
             parent_labels=tuple(
-                final_to_raw.get(str(parent), str(parent))
-                for parent in getattr(op, "parents", ())
+                final_to_raw.get(str(parent), str(parent)) for parent in getattr(op, "parents", ())
             ),
             shape=tuple(getattr(op, "shape", ()) or ()),
             dtype=str(getattr(op, "dtype", "")),
@@ -3310,13 +3303,15 @@ def _mlx_trees_close(left: Any, right: Any) -> bool:
         if not (isinstance(left, tuple) and isinstance(right, tuple)):
             return False
         return len(left) == len(right) and all(
-            _mlx_trees_close(left_item, right_item) for left_item, right_item in zip(left, right)
+            _mlx_trees_close(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if isinstance(left, list) or isinstance(right, list):
         if not (isinstance(left, list) and isinstance(right, list)):
             return False
         return len(left) == len(right) and all(
-            _mlx_trees_close(left_item, right_item) for left_item, right_item in zip(left, right)
+            _mlx_trees_close(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if isinstance(left, dict) or isinstance(right, dict):
         if not (isinstance(left, dict) and isinstance(right, dict)):

@@ -213,9 +213,7 @@ def test_mlx_split_container_outputs_wire_into_graph() -> None:
     """
 
     trace = tl.trace(_SplitMergeNet(), mx.ones((1, 4)), backend="mlx")
-    split_labels = [
-        op._label_raw for op in trace.layer_list if op._label_raw.startswith("split")
-    ]
+    split_labels = [op._label_raw for op in trace.layer_list if op._label_raw.startswith("split")]
     assert len(split_labels) == 2, "both split output arrays must materialize as ops"
     add_op = next(op for op in trace.layer_list if op._label_raw.startswith("add"))
     assert set(add_op.parents) == set(split_labels)
@@ -289,15 +287,9 @@ def test_mlx_capture_records_slot_labeled_leaves_instead_of_retaining() -> None:
     slotted = 0
     for capture in trace._mlx_op_captures:
         for index, value in enumerate(capture.args):
-            labels = (
-                capture.arg_leaf_labels[index]
-                if index < len(capture.arg_leaf_labels)
-                else ()
-            )
+            labels = capture.arg_leaf_labels[index] if index < len(capture.arg_leaf_labels) else ()
             leaves = [
-                leaf
-                for leaf in _leaves(value)
-                if isinstance(leaf, mx.array) or leaf is REPLAY_SLOT
+                leaf for leaf in _leaves(value) if isinstance(leaf, mx.array) or leaf is REPLAY_SLOT
             ]
             for leaf, label in zip(leaves, labels):
                 if label is not None:

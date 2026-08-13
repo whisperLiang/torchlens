@@ -1941,9 +1941,7 @@ def probe_c10d_capabilities(*, force_probe: bool = False) -> dict[str, bool]:
             process_group_type = _nested_getattr_or_none(
                 torch, ("_C", "_distributed_c10d", "ProcessGroup")
             )
-            HAS_C10D_GROUP_SEQ = hasattr(
-                process_group_type, "_get_sequence_number_for_group"
-            )
+            HAS_C10D_GROUP_SEQ = hasattr(process_group_type, "_get_sequence_number_for_group")
             _C10D_GROUP_SEQ_PROBED = True
             if not HAS_C10D_GROUP_SEQ:
                 mark_torch_capability_missing(

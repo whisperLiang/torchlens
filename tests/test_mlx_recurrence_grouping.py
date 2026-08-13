@@ -161,9 +161,7 @@ def test_mlx_tamper_swapped_capture_labels_fail_validation() -> None:
     trace = _repeated_trace()
     captures = trace._mlx_op_captures
     matmul_indices = [
-        index
-        for index, capture in enumerate(captures)
-        if capture.op_name == "matmul"
+        index for index, capture in enumerate(captures) if capture.op_name == "matmul"
     ]
     assert len(matmul_indices) == 2
     first, second = matmul_indices
@@ -180,12 +178,8 @@ def test_mlx_tamper_dangling_capture_label_fails_validation() -> None:
 
     trace = _repeated_trace()
     captures = trace._mlx_op_captures
-    target = next(
-        index for index, capture in enumerate(captures) if capture.op_name == "matmul"
-    )
-    captures[target] = dataclasses.replace(
-        captures[target], labels_raw=("matmul_9_99_raw",)
-    )
+    target = next(index for index, capture in enumerate(captures) if capture.op_name == "matmul")
+    captures[target] = dataclasses.replace(captures[target], labels_raw=("matmul_9_99_raw",))
 
     assert MLXBackend().validate_trace(trace) is False
 
@@ -195,11 +189,7 @@ def test_mlx_tamper_stale_parent_leaf_label_fails_validation() -> None:
 
     trace = _repeated_trace()
     captures = trace._mlx_op_captures
-    relu_indices = [
-        index
-        for index, capture in enumerate(captures)
-        if capture.op_name == "maximum"
-    ]
+    relu_indices = [index for index, capture in enumerate(captures) if capture.op_name == "maximum"]
     pass1_index, pass2_index = relu_indices
     # Point pass 2's parent leaves at pass 1's parents: the replay then
     # reconstructs pass-2 relu from pass-1 matmul output and mismatches.

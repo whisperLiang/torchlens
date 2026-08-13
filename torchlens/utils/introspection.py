@@ -290,7 +290,9 @@ def get_vars_of_type_from_obj(
         depth_exceeded_paths.extend(str(address) for _, address, _ in this_stack)
 
     if return_addresses:
-        return list(zip(found_items, found_addresses, found_addresses_full))
+        # The three accumulators are appended together in lockstep by the walker,
+        # so they pair exactly.
+        return list(zip(found_items, found_addresses, found_addresses_full, strict=True))
     else:
         return found_items
 

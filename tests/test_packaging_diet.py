@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import importlib.util
+import re
 import subprocess
 import sys
 from unittest.mock import patch
@@ -211,14 +212,100 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
 
     assert "ruff format --check torchlens tests scripts" in lint_text
     assert "ruff check torchlens tests scripts" in lint_text
-    assert "--exclude menagerie" in lint_text
-    assert "--exclude tests/crawler" in lint_text
-    assert "--exclude tests/test_menagerie_*.py" in lint_text
+
+    # The excluded set moved from lint.yml CLI flags into pyproject's
+    # `[tool.ruff] extend-exclude` so that pre-commit -- which passes explicit
+    # staged filenames and therefore ignores CLI --exclude -- reaches the same
+    # verdict as this gate. Assert the boundary at its single authority, and that
+    # it has NOT drifted back into duplicate CLI flags.
+    pyproject_text = project_root.joinpath("pyproject.toml").read_text()
+    extend_exclude = re.search(
+        r"^\s*extend-exclude\s*=\s*\[(.*?)\]", pyproject_text, re.DOTALL | re.MULTILINE
+    )
+    assert extend_exclude is not None, "pyproject [tool.ruff] must declare extend-exclude"
+    excluded = set(re.findall(r'"([^"]+)"', extend_exclude.group(1)))
+    assert excluded == {"menagerie", "tests/crawler", "tests/test_menagerie_*.py"}
+    assert "--exclude" not in lint_text
+
+
+def test_ruff_pin_is_identical_across_declaration_sites() -> None:
+    """The ruff that WRITES the code and the ruff that JUDGES it must be one version.
+
+    Three files independently name a ruff version: pyproject's dev extra, the Lint
+    workflow's install step, and the ruff-pre-commit ``rev``. When they drift, the
+    pre-commit formatter rewrites code to a style CI then rejects -- which is exactly
+    how the repo accumulated 147 format-stale files under a v0.9.7 hook while CI
+    judged with 0.15.4.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    pyproject_text = project_root.joinpath("pyproject.toml").read_text()
+    lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
+    precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
+
+    dev_pins = set(re.findall(r'"ruff==([0-9]+\.[0-9]+\.[0-9]+)"', pyproject_text))
+    ci_pins = set(re.findall(r"ruff==([0-9]+\.[0-9]+\.[0-9]+)", lint_text))
+    hook_revs = set(
+        re.findall(
+            r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit\s*\n"
+            r"(?:\s*#.*\n)*"
+            r"\s*rev:\s*v([0-9]+\.[0-9]+\.[0-9]+)",
+            precommit_text,
+        )
+    )
+
+    assert len(dev_pins) == 1, f"expected exactly one ruff dev pin, got {dev_pins}"
+    assert len(ci_pins) == 1, f"expected exactly one ruff CI pin, got {ci_pins}"
+    assert len(hook_revs) == 1, f"expected exactly one ruff-pre-commit rev, got {hook_revs}"
+    assert dev_pins == ci_pins == hook_revs, (
+        "ruff version drift: pyproject dev extra "
+        f"{dev_pins}, lint.yml {ci_pins}, .pre-commit-config.yaml {hook_revs}. "
+        "The formatter and the gate must be the same ruff."
+    )
+
+
+def test_third_party_actions_are_sha_pinned() -> None:
+    """Every third-party Action ref is SHA-pinned, with one documented exception.
+
+    A mutable tag like ``@v4`` means whoever controls that tag controls what runs
+    in CI, including in the job that publishes to PyPI. The one allowed exception
+    is PyPA's publishing action, whose own guidance is to track ``release/v1``;
+    the rationale is recorded inline at the call site in release.yml.
+    """
+
+    workflow_dir = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+    allowed_unpinned = {"pypa/gh-action-pypi-publish@release/v1"}
+
+    unpinned: list[str] = []
+    pinned_count = 0
+    for workflow in sorted(workflow_dir.glob("*.yml")):
+        for ref in re.findall(r"uses:\s*(\S+)", workflow.read_text()):
+            if ref.startswith("./"):  # local reusable workflow, not third-party
+                continue
+            if re.search(r"@[0-9a-f]{40}$", ref):
+                pinned_count += 1
+                continue
+            if ref in allowed_unpinned:
+                continue
+            unpinned.append(f"{workflow.name}: {ref}")
+
+    assert not unpinned, (
+        "third-party Action refs must be pinned to a full 40-char commit SHA "
+        f"(add a documented exception only with a reason): {unpinned}"
+    )
+    assert pinned_count > 0, "expected to find SHA-pinned action refs"
 
 
 @pytest.mark.slow
-def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
-    """Built wheels must ship the public ``torchlens/schemas/*.json`` files."""
+def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
+    """Assert the built wheel's manifest: schemas in, py.typed in, menagerie OUT.
+
+    Nothing used to test the wheel manifest, and it had drifted three ways at
+    once: ``menagerie*`` was in the distributed package set (2886 of 3316
+    members, ~13.5 MB, plus ``menagerie`` squatting as a top-level import name),
+    ``torchlens/py.typed`` was missing so downstream mypy ignored every
+    annotation in the package (PEP 561), and only the schema files were checked.
+    """
 
     project_root = Path(__file__).resolve().parent.parent
     wheel_dir = tmp_path / "wheelhouse"
@@ -236,10 +323,26 @@ def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
     assert len(wheels) == 1
 
     with zipfile.ZipFile(wheels[0]) as wheel_zip:
-        schema_members = [
-            member
-            for member in wheel_zip.namelist()
-            if member.startswith("torchlens/schemas/") and member.endswith(".json")
-        ]
+        members = wheel_zip.namelist()
+        top_level_members = [m for m in members if m.endswith("top_level.txt")]
+        assert len(top_level_members) == 1
+        top_level = wheel_zip.read(top_level_members[0]).decode().split()
 
+    schema_members = [
+        m for m in members if m.startswith("torchlens/schemas/") and m.endswith(".json")
+    ]
     assert schema_members, "expected at least one torchlens/schemas/*.json wheel member"
+
+    # PEP 561: without this marker file downstream type checkers treat the
+    # package as untyped and skip every annotation it ships.
+    assert "torchlens/py.typed" in members, "wheel must ship the PEP 561 py.typed marker"
+
+    # The menagerie corpus is repo/sdist-only, never part of the installed library.
+    menagerie_members = [m for m in members if m.startswith("menagerie")]
+    assert not menagerie_members, (
+        f"wheel ships {len(menagerie_members)} menagerie member(s); the corpus is "
+        "not part of the distributed library (see [tool.setuptools.packages.find])"
+    )
+    assert top_level == ["torchlens"], (
+        f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
+    )

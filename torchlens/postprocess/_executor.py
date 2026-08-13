@@ -373,11 +373,7 @@ class DerivedEdge:
 def _registry_contracts() -> dict[str, PostprocessStepContract]:
     """Return the registry-step contracts (step "0" excluded)."""
 
-    return {
-        step: contract
-        for step, contract in POSTPROCESS_STEP_CONTRACTS.items()
-        if step != "0"
-    }
+    return {step: contract for step, contract in POSTPROCESS_STEP_CONTRACTS.items() if step != "0"}
 
 
 def _op_touching(contract: PostprocessStepContract) -> bool:
@@ -389,10 +385,7 @@ def _op_touching(contract: PostprocessStepContract) -> bool:
     """
 
     return bool(
-        contract.writes
-        or contract.reads
-        or contract.placeholder_probes
-        or contract.row_effects
+        contract.writes or contract.reads or contract.placeholder_probes or contract.row_effects
     )
 
 
@@ -570,8 +563,7 @@ def classify_declared_reads(
             elif column in contract.writes and _discharges(step, column):
                 classified[(step, column)] = "self_write"
             elif any(
-                rank[w] < rank[step] and _discharges(w, column)
-                for w in writers.get(column, ())
+                rank[w] < rank[step] and _discharges(w, column) for w in writers.get(column, ())
             ):
                 classified[(step, column)] = "earlier_writer"
             else:
@@ -598,9 +590,7 @@ def execution_order(rank: "dict[str, int] | None" = None) -> tuple[str, ...]:
         if edge.dst not in successors[edge.src]:
             successors[edge.src].add(edge.dst)
             indegree[edge.dst] += 1
-    heap = [
-        (rank[step], step) for step, degree in indegree.items() if degree == 0
-    ]
+    heap = [(rank[step], step) for step, degree in indegree.items() if degree == 0]
     heapq.heapify(heap)
     order: list[str] = []
     while heap:
@@ -678,10 +668,7 @@ def _iter_structural_violations(
     # 7.1-4 (R2): the derived order reproduces the registry.
     derived = execution_order(rank)
     if derived != registry_order:
-        yield (
-            f"derived execution order diverges from the registry (R2): "
-            f"derived={derived!r}"
-        )
+        yield (f"derived execution order diverges from the registry (R2): derived={derived!r}")
 
 
 def _validate_derivation() -> None:
@@ -689,10 +676,7 @@ def _validate_derivation() -> None:
 
     violations = list(_iter_structural_violations())
     if violations:
-        raise ValueError(
-            "Postprocess DAG structural checks failed:\n- "
-            + "\n- ".join(violations)
-        )
+        raise ValueError("Postprocess DAG structural checks failed:\n- " + "\n- ".join(violations))
 
 
 _validate_derivation()

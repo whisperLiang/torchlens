@@ -130,7 +130,7 @@ __all__ = [
     "group_recurrent_nodes",
     "postprocess",
 ]
-from ..utils.display import _vprint, _vtimed
+from ..utils.display import _vprint, _vtimed, user_stacklevel
 
 #: The executor resolves every step callable through THIS module namespace
 #: at call time (late binding, design-ppdag-v3 §5.2) — the names below are
@@ -164,21 +164,39 @@ _EXECUTOR_STEP_NAMESPACE: tuple[object, ...] = (
 )
 
 
-
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
-
 
 
 def _postprocess_assertions_enabled() -> bool:
     """Return whether postprocess boundary assertions are enabled.
 
+    Refuses under ``python -O``. Every check in this audit -- undeclared column
+    writes, unsanctioned row releases, out-of-contract reads -- is spelled as an
+    ``assert``, and ``-O`` strips all of them. An audit that runs its windows,
+    checks nothing, and reports clean is worse than one that does not run: it
+    reads as evidence. So arming it in an environment that cannot execute it is a
+    hard error rather than a silent no-op.
+
     Returns
     -------
     bool
         ``True`` when ``TORCHLENS_POSTPROCESS_ASSERTIONS`` is set to a truthy value.
+
+    Raises
+    ------
+    RuntimeError
+        When the audit is armed but assertions are disabled (``-O`` / ``-OO``).
     """
 
-    return os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    enabled = os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    if enabled and not __debug__:
+        raise RuntimeError(
+            f"{_POSTPROCESS_ASSERT_ENV} is set but Python assertions are disabled "
+            "(-O / -OO), so every postprocess contract check would be stripped and "
+            "the audit would report clean without verifying anything. Re-run "
+            "without -O, or unset the variable to capture without the audit."
+        )
+    return enabled
 
 
 _WRITE_AUDIT_RECORD_ENV = "TORCHLENS_POSTPROCESS_WRITE_AUDIT"
@@ -306,9 +324,7 @@ def _check_postprocess_contract(
             )
         read_mode = _read_audit_mode()
         if read_mode == "record":
-            RECORDED_STEP_READS.setdefault(step, set()).update(
-                audit_result.read_columns
-            )
+            RECORDED_STEP_READS.setdefault(step, set()).update(audit_result.read_columns)
             RECORDED_STEP_CLONE_READS.setdefault(step, set()).update(
                 audit_result.clone_read_columns
             )
@@ -325,10 +341,7 @@ def _check_postprocess_contract(
                 "derivation authority — root-cause the dependency and land it "
                 "as a reviewed contract diff, never a silent widen."
             )
-            assert (
-                not audit_result.clone_read_columns
-                or "creates" in contract.row_effects
-            ), (
+            assert not audit_result.clone_read_columns or "creates" in contract.row_effects, (
                 f"Step {step} ({contract.name}) performed row-clone reads "
                 "without a 'creates' row_effects sanction; cloning is only "
                 "legal as part of row creation (design-ppdag-v3 §2.4d)."
@@ -352,8 +365,7 @@ def _check_postprocess_contract(
             # model and unreachable outside the debug env flag.
             resolved = self.layer_dict_all_keys[op.layer_label]
             assert resolved.layer_label == op.layer_label, (
-                f"Step 11 mapped layer label {op.layer_label!r} to a foreign "
-                f"op {resolved.label!r}"
+                f"Step 11 mapped layer label {op.layer_label!r} to a foreign op {resolved.label!r}"
             )
     elif step == "15.5":
         assert self.layer_logs, "Step 15.5 must build aggregate layer logs"
@@ -551,7 +563,11 @@ def postprocess(
     if len(self._raw_graph_ws.raw_layer_labels_list) == 0:
         import warnings
 
-        warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
+        # This is about the user's model, so blame the user's line, not this one.
+        warnings.warn(
+            "No layers were logged during the forward pass; skipping postprocessing.",
+            stacklevel=user_stacklevel(),
+        )
         _set_tracing_finished(self)
         _drop_transient_capture_state(self)
         if capture_events is not None:
@@ -626,8 +642,7 @@ def postprocess(
         for _kind_store in _core.kind_rows.values():
             _kind_store.freeze()
 
-    if getattr(self, "verbose", False):
-        print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
+    _vprint(self, f"Postprocessing complete ({time.time() - _post_t0:.2f}s)")
     _drop_transient_capture_state(self)
     if capture_events is not None:
         capture_events.release_runtime_sidecars()

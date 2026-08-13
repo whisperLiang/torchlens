@@ -63,26 +63,58 @@ EXPECTED_PHANTOM_READS = {
 #: 5/9 elif-else and 11.5 var_names rows exactly that way, and the
 #: depths-off buffer_from_input axis retired ("6", "has_input_ancestor")).
 PINNED_NOOP_WRITERS = {
-    "1": frozenset((
-        "activation_memory", "bytes_delta_at_call", "bytes_peak_at_call",
-        "container_path", "container_spec", "dropped_edge_tensor_args",
-        "dtype", "func_duration", "has_out_variations",
-        "input_to_module_calls", "is_buffer", "is_input",
-        "is_internal_source", "is_transform", "non_tensor_kwargs",
-        "num_kwargs", "num_params_frozen", "num_passes", "out",
-        "out_versions_by_child", "param_memory", "pass_index",
-        "recurrent_ops", "shape", "transform_chain", "transform_fn_name",
-        "transform_fn_qualname", "transform_fn_source", "transform_kind",
-        "transformed_activation_memory", "transformed_out",
-        "transformed_out_dtype", "transformed_out_shape",
-        "unattributed_tensor_args", "var_names",
-    )),
-    "3": frozenset((
-        "_edge_uses", "args_template", "conditional_arm_children",
-        "conditional_elif_children", "conditional_else_children",
-        "conditional_entry_children", "conditional_then_children",
-        "interventions", "kwargs_template",
-    )),
+    "1": frozenset(
+        (
+            "activation_memory",
+            "bytes_delta_at_call",
+            "bytes_peak_at_call",
+            "container_path",
+            "container_spec",
+            "dropped_edge_tensor_args",
+            "dtype",
+            "func_duration",
+            "has_out_variations",
+            "input_to_module_calls",
+            "is_buffer",
+            "is_input",
+            "is_internal_source",
+            "is_transform",
+            "non_tensor_kwargs",
+            "num_kwargs",
+            "num_params_frozen",
+            "num_passes",
+            "out",
+            "out_versions_by_child",
+            "param_memory",
+            "pass_index",
+            "recurrent_ops",
+            "shape",
+            "transform_chain",
+            "transform_fn_name",
+            "transform_fn_qualname",
+            "transform_fn_source",
+            "transform_kind",
+            "transformed_activation_memory",
+            "transformed_out",
+            "transformed_out_dtype",
+            "transformed_out_shape",
+            "unattributed_tensor_args",
+            "var_names",
+        )
+    ),
+    "3": frozenset(
+        (
+            "_edge_uses",
+            "args_template",
+            "conditional_arm_children",
+            "conditional_elif_children",
+            "conditional_else_children",
+            "conditional_entry_children",
+            "conditional_then_children",
+            "interventions",
+            "kwargs_template",
+        )
+    ),
     "4": frozenset(("has_output_descendant",)),
     # The elif/else axis retired the ("5","is_terminal_bool") phantom row:
     # the write is now OBSERVED (host-escape witness classification runs)
@@ -92,22 +124,36 @@ PINNED_NOOP_WRITERS = {
     # has_input_ancestor left this row when the buffer_from_input axis
     # (layer depths OFF, so step 4 does not pre-propagate ancestry) made
     # step 6's buffer-source ancestry fallback content-effective.
-    "6": frozenset((
-        "args_template", "conditional_arm_children",
-        "conditional_elif_children", "conditional_else_children",
-        "conditional_entry_children", "conditional_then_children",
-        "has_children", "interventions", "kwargs_template",
-    )),
+    "6": frozenset(
+        (
+            "args_template",
+            "conditional_arm_children",
+            "conditional_elif_children",
+            "conditional_else_children",
+            "conditional_entry_children",
+            "conditional_then_children",
+            "has_children",
+            "interventions",
+            "kwargs_template",
+        )
+    ),
     "7": frozenset(("equivalence_class",)),
     "9": frozenset(("is_buffer", "is_input", "is_output")),
-    "11.75": frozenset((
-        "activation_memory", "dtype", "shape",
-        "transformed_activation_memory", "transformed_out",
-        "transformed_out_dtype", "transformed_out_shape",
-    )),
+    "11.75": frozenset(
+        (
+            "activation_memory",
+            "dtype",
+            "shape",
+            "transformed_activation_memory",
+            "transformed_out",
+            "transformed_out_dtype",
+            "transformed_out_shape",
+        )
+    ),
 }
 
 
+@pytest.mark.requires_assertions
 @pytest.mark.parametrize(("axis_name", "axis_fn"), _AXES, ids=_AXIS_IDS)
 def test_axis_passes_read_and_write_enforcement(
     axis_name: str,
@@ -150,18 +196,17 @@ def test_buffer_duplicate_axis_actually_merges(
         assert merges, "the buffer_duplicate axis must reach _merge_buffer_entries"
         survivor_label, removed_label = merges[0]
         repointed = [
-            op
-            for op in trace.layer_list
-            if op.is_buffer and op.buffer_source == survivor_label
+            op for op in trace.layer_list if op.is_buffer and op.buffer_source == survivor_label
         ]
         assert repointed, "the scalar buffer_source repoint must have fired"
-        assert all(
-            op.buffer_source != removed_label for op in trace.layer_list
-        ), "no surviving op may still reference the merged-away buffer"
+        assert all(op.buffer_source != removed_label for op in trace.layer_list), (
+            "no surviving op may still reference the merged-away buffer"
+        )
     finally:
         trace.cleanup()
 
 
+@pytest.mark.requires_assertions
 def test_buffer_from_input_axis_makes_ancestry_writes_effective(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,6 +251,7 @@ def test_buffer_from_input_axis_makes_ancestry_writes_effective(
             sink.clear()
 
 
+@pytest.mark.requires_assertions
 def test_reads_before_release_mark_still_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -275,6 +321,7 @@ def test_write_effectiveness_classifier_is_finding_favoring() -> None:
     assert not _write_is_content_effective(torch.zeros(2), torch.ones(2))
 
 
+@pytest.mark.requires_assertions
 @pytest.mark.heavy
 def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
     """Phantom-declaration and no-op-writer reports over the full matrix."""
@@ -308,9 +355,7 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
             observed_reads = pp.RECORDED_STEP_READS.get(step, set())
             for column in contract.writes - observed:
                 phantom.add((step, column))
-            for column in (
-                contract.reads | contract.placeholder_probes
-            ) - observed_reads:
+            for column in (contract.reads | contract.placeholder_probes) - observed_reads:
                 phantom_reads.add((step, column))
             never_effective = frozenset((observed & contract.writes) - effective)
             if never_effective:
