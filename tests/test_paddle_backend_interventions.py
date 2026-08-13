@@ -17,15 +17,15 @@ import pytest
 
 paddle = pytest.importorskip("paddle")
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-import torchlens as tl  # noqa: E402
-from torchlens.backends import (  # noqa: E402
+import torchlens as tl
+from torchlens.backends import (
     BackendUnsupportedError,
     get_backend_spec,
     require_capability_implementation,
 )
-from torchlens.backends.paddle import PaddleBackend  # noqa: E402
+from torchlens.backends.paddle import PaddleBackend
 
 pytestmark = pytest.mark.backend_paddle
 

@@ -442,7 +442,11 @@ class PaddleBackend:
         trace.backend_runtime_config = {"version": trace.backend_runtime_version}
         trace.backend_runtime_device_summary = {}
         trace._pre_forward_rng_states = None
-        trace.random_seed = cast(int, random_seed) if random_seed is not None else random.randint(1, 4294967294)
+        setattr(
+            trace,
+            "random_seed",
+            cast(int, random_seed) if random_seed is not None else random.randint(1, 4294967294),
+        )
         self.tensor_store.clear()
         args = self._normalize_input_args(input_args)
         kwargs = {} if input_kwargs is None else dict(input_kwargs)
@@ -1068,13 +1072,13 @@ class PaddleBackend:
                 is_input=False,
                 container_path=path,
             )
-            fire_result = fire_results_by_index.get(output_index)
-            if fire_result is not None:
+            site_fire = fire_results_by_index.get(output_index)
+            if site_fire is not None:
                 event = replace(
                     event,
                     intervention_fired=True,
-                    intervention_replaced=fire_result.replaced,
-                    fire_results=(fire_result,),
+                    intervention_replaced=site_fire.replaced,
+                    fire_results=(site_fire,),
                 )
             emitted.append(event)
             self.tensor_store.set_label_if_unlabeled(tensor, site.label_raw)
