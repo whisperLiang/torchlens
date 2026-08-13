@@ -78,7 +78,11 @@ def test_gated_mlp_recipe_degrades_when_projection_children_missing() -> None:
     _Partial.__qualname__ = "LlamaMLP"
 
     torch.manual_seed(14)
-    log = tl.trace(_GatedModel(_Partial()), torch.randn(2, 8), capture=tl.options.CaptureOptions(layers_to_save="all"))
+    log = tl.trace(
+        _GatedModel(_Partial()),
+        torch.randn(2, 8),
+        capture=tl.options.CaptureOptions(layers_to_save="all"),
+    )
     view = log.modules["mlp"].facets
 
     # up_proj is absent, so up_out and the computed intermediate cannot exist.

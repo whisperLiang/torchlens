@@ -136,9 +136,7 @@ def test_procrustes_align_recovers_rotation_without_reflection() -> None:
     rng = np.random.default_rng(4)
     target = rng.normal(size=(6, 2))
     angle = 0.7
-    rotation = np.array(
-        [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
-    )
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
     source = target @ rotation.T + 3.0
 
     aligned = tl.repgeom.procrustes_align(source, target)

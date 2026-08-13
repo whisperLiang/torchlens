@@ -162,9 +162,9 @@ def test_aggregate_eval_fast_path_matches_exact_full_trace_path() -> None:
     assert fast["output"] == pytest.approx(exact["output"], rel=1e-9)
 
     with torch.no_grad():
-        relu_values = torch.cat(
-            [torch.relu(model[0](batch)).reshape(-1) for batch in batches]
-        ).to(dtype=torch.float64)
+        relu_values = torch.cat([torch.relu(model[0](batch)).reshape(-1) for batch in batches]).to(
+            dtype=torch.float64
+        )
     assert fast["relu"] == pytest.approx(float(relu_values.mean().item()))
 
 
@@ -195,9 +195,7 @@ def test_aggregate_fast_path_falls_back_exactly_on_fingerprint_drift() -> None:
     negative = -torch.ones(1, 3)
     batches = [positive, positive, negative, positive]
 
-    result = tl.aggregate(
-        model, batches, {"relu": tl.stats.Mean(), "output": tl.stats.Mean()}
-    )
+    result = tl.aggregate(model, batches, {"relu": tl.stats.Mean(), "output": tl.stats.Mean()})
 
     expected_relu = torch.cat([torch.relu(batch).reshape(-1) for batch in batches]).to(
         dtype=torch.float64

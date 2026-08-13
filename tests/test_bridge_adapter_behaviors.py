@@ -66,9 +66,7 @@ def test_bridge_utils_error_contracts(conv_log) -> None:
         bridge_utils.source_model(SimpleNamespace())
 
     with pytest.raises(ValueError, match="does not have a saved tensor out"):
-        bridge_utils.out_at(
-            conv_log, SimpleNamespace(out="not a tensor", layer_label="fake_1_1")
-        )
+        bridge_utils.out_at(conv_log, SimpleNamespace(out="not a tensor", layer_label="fake_1_1"))
 
     with pytest.raises(ValueError, match="tensor input"):
         bridge_utils.first_input_tensor(SimpleNamespace(layer_list=[]))
@@ -120,9 +118,7 @@ def test_gradcam_cam_runs_context_manager_runner_with_resolved_inputs(
             calls["targets"] = targets
             return "cam-output"
 
-    monkeypatch.setitem(
-        sys.modules, "pytorch_grad_cam", SimpleNamespace(GradCAM=_StubCam)
-    )
+    monkeypatch.setitem(sys.modules, "pytorch_grad_cam", SimpleNamespace(GradCAM=_StubCam))
 
     payload = gradcam.cam(conv_log, "conv")
 
@@ -134,9 +130,7 @@ def test_gradcam_cam_runs_context_manager_runner_with_resolved_inputs(
     assert calls["entered"] and calls["exited"]
 
 
-def test_gradcam_missing_dependency_names_extra(
-    conv_log, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gradcam_missing_dependency_names_extra(conv_log, monkeypatch: pytest.MonkeyPatch) -> None:
     """cam() raises ImportError naming the gradcam extra when the package is absent."""
 
     from torchlens.bridge import gradcam
