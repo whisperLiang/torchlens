@@ -338,6 +338,25 @@ class Recorder:
             session.recording_state = self._state
             session.captured_run_cores = self._captured_run_cores
             self._recording = Recording.from_capture_events(session)
+            # Settle the finalized product (path 14). A construction failure
+            # above propagates productless -- the raise is the signal.
+            from ..capture.outcome import (
+                CaptureOutcome,
+                CaptureStatus,
+                stamp_recording_outcome,
+            )
+
+            if getattr(self._recording, "_outcome", None) is None:
+                recording = self._recording
+                if recording.halted:
+                    stamped = CaptureOutcome(
+                        status=CaptureStatus.HALTED,
+                        reason=recording.halt_reason,
+                        boundary_label=recording.halt_reason,
+                    )
+                else:
+                    stamped = CaptureOutcome(status=CaptureStatus.COMPLETE)
+                stamp_recording_outcome(recording, stamped)
         else:
             self._state.abort_storage(str(exc_value))
         self._entered = False
@@ -529,6 +548,17 @@ class Recorder:
         if self._state is None:
             raise RecorderStateError("Recorder.log() requires an active with-block")
         _mark_recording_halted(self._state.recording, pass_index, halt_exc.reason)
+        from ..capture.outcome import CaptureOutcome, CaptureStatus, stamp_recording_outcome
+
+        stamp_recording_outcome(
+            self._state.recording,
+            CaptureOutcome(
+                status=CaptureStatus.HALTED,
+                reason=halt_exc.reason,
+                boundary_kind=getattr(halt_exc, "boundary_kind", None),
+                boundary_label=getattr(halt_exc, "boundary_label", None) or halt_exc.reason,
+            ),
+        )
 
     def _mark_recording_failed(self, trace: Trace, exc: BaseException) -> Recording:
         """Build and stamp a failed partial recording for a forward exception.
@@ -631,6 +661,37 @@ class Recorder:
         recoverable_path = self._recoverable_temp_bundle_path()
         if recoverable_path is not None:
             object.__setattr__(recording, "bundle_path", recoverable_path)
+        # Settle the failed product: mirror the scratch trace's settled record
+        # (the orchestrator's finally already classified phase/origin) with
+        # the recorder-level committed-op count.
+        from dataclasses import replace as dataclass_replace
+
+        from ..capture.outcome import (
+            CaptureOutcome,
+            CaptureStatus,
+            classify_failure_origin,
+            outcome_for,
+            stamp_recording_outcome,
+        )
+
+        runtime_trace = self._state.runtime_trace if self._state is not None else None
+        settled = outcome_for(runtime_trace) if runtime_trace is not None else None
+        if settled is not None and settled.status in (
+            CaptureStatus.FAILED,
+            CaptureStatus.ABORTED_NONFINITE,
+        ):
+            stamped = dataclass_replace(
+                settled, n_ops_committed=recording.n_ops_completed
+            )
+        else:
+            stamped = CaptureOutcome(
+                status=CaptureStatus.FAILED,
+                origin=classify_failure_origin(exc),
+                reason=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+                n_ops_committed=recording.n_ops_completed,
+            )
+        stamp_recording_outcome(recording, stamped)
 
     def _recoverable_temp_bundle_path(self) -> Path | None:
         """Return the fastlog temp bundle path when it has a recoverable index."""

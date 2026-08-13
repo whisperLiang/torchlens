@@ -539,7 +539,13 @@ def resolve_loaded_outcome(state: Mapping[str, Any]) -> CaptureOutcome:
     if payload is None:
         return derive_outcome_from_structural_state(state)
     try:
-        outcome = parse_outcome_payload(payload)
+        # In-process restores may hand back an already-typed record; it still
+        # passes through the same coherence matrix below.
+        outcome = (
+            payload
+            if isinstance(payload, CaptureOutcome)
+            else parse_outcome_payload(payload)
+        )
     except ValueError as exc:
         warnings.warn(
             f"TorchLens could not parse this artifact's capture-outcome attestation ({exc}); "
@@ -761,6 +767,9 @@ def settle_halted(
 
     frontier: tuple[str, ...] | None = None
     reason = getattr(halt_exc, "reason", None)
+    boundary_label = getattr(halt_exc, "boundary_label", None) or (
+        reason if isinstance(reason, str) else None
+    )
     if finalize_partial and postprocess_ran:
         try:
             frontier = tuple(str(label) for label in getattr(trace, "output_layers", ()))
@@ -768,10 +777,14 @@ def settle_halted(
             frontier = None
         # The labeling remap rewrote the persisted halt fields to FINAL labels
         # during the halted postprocess; the settled record mirrors them so
-        # the boundary resolves through ``trace[...]`` on the finished product.
-        remapped = getattr(trace, "halt_reason", None)
-        if isinstance(remapped, str):
-            reason = remapped
+        # the boundary resolves through ``trace[...]`` on the finished
+        # product. Raw-label boundaries stay only where postprocess never ran.
+        remapped_reason = getattr(trace, "halt_reason", None)
+        if isinstance(remapped_reason, str):
+            reason = remapped_reason
+        remapped_frontier = getattr(trace, "halt_frontier", None)
+        if isinstance(remapped_frontier, str):
+            boundary_label = remapped_frontier
     return _stamp(
         trace,
         session,
@@ -779,8 +792,7 @@ def settle_halted(
             status=CaptureStatus.HALTED,
             reason=reason if isinstance(reason, str) else None,
             boundary_kind=getattr(halt_exc, "boundary_kind", None),
-            boundary_label=getattr(halt_exc, "boundary_label", None)
-            or (reason if isinstance(reason, str) else None),
+            boundary_label=boundary_label,
             frontier_labels=frontier,
             n_ops_committed=count_committed_ops(trace),
             inference_only=bool(getattr(trace, "inference_only", False)),
@@ -812,6 +824,9 @@ def settle_failed(
         isinstance(stop_request, StopRequest)
         and stop_request.kind == "nonfinite"
         and isinstance(exc, CaptureError)
+        # A SWALLOWED nonfinite abort is a FAILED capture, never a clean
+        # ABORTED_NONFINITE: the abort did not actually stop the forward.
+        and not isinstance(exc, StopSignalSwallowedError)
         and not interrupted
     ):
         return _stamp(
@@ -912,6 +927,13 @@ def stamp_cooked(
     return _stamp(trace, None, outcome)
 
 
+def stamp_recording_outcome(recording: object, outcome: CaptureOutcome) -> CaptureOutcome:
+    """Stamp one settled outcome onto a frozen Recording (paths 11-14)."""
+
+    object.__setattr__(recording, "_outcome", outcome)
+    return outcome
+
+
 def stamp_backend_finalized(trace: object) -> CaptureOutcome:
     """Settle one preview-backend capture at its true product boundary (path 20).
 
@@ -961,4 +983,5 @@ __all__ = [
     "settle_halted",
     "stamp_backend_finalized",
     "stamp_cooked",
+    "stamp_recording_outcome",
 ]

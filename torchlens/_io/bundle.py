@@ -273,7 +273,33 @@ def save(
     from ..runnable import refuse_poisoned_trace
 
     refuse_poisoned_trace(trace, "export")
+    # N1: the settled capture outcome gates every export. FAILED, aborted, and
+    # UNKNOWN captures never produce a portable artifact (the historical
+    # ungated pass-through of failed partials was the hole this closes);
+    # HALTED and legacy UNATTESTED re-export stay open.
+    from ..capture.outcome import CaptureOutcomeError, require_capture_capability
+
+    require_capture_capability(trace, "save_analysis")
     save_level = coerce_tlspec_save_level(level)
+    if save_level == "runnable":
+        # N4: a halted capture records a PREFIX of the forward, and the sparse
+        # runnable contract requires the complete taken path. Refusal surfaces
+        # through the runnable error vocabulary.
+        try:
+            require_capture_capability(trace, "save_runnable")
+        except CaptureOutcomeError as outcome_exc:
+            if outcome_exc.fields.get("code") == "N4":
+                from ..errors import RunnablePreflightError
+                from ..runnable import RunnableErrorCode
+
+                raise RunnablePreflightError(
+                    "Runnable save refuses a HALTED capture: the recorded graph "
+                    "is an honest prefix of the forward, not the complete taken "
+                    "path the sparse runnable contract requires. Re-capture "
+                    "without halt= to produce a runnable artifact.",
+                    code=RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value,
+                ) from outcome_exc
+            raise
     sparse_run_descriptor = None
     sparse_run_json = None
     weight_blob_specs: list[BlobSpec] = []

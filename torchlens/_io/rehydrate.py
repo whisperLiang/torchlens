@@ -307,6 +307,12 @@ def _normalize_legacy_trace_state(state: dict[str, Any], source_version: int) ->
         State suitable for ``Trace.__setstate__``.
     """
 
+    if source_version < 7:
+        # v7 added the persisted capture-outcome attestation. Legacy artifacts
+        # carry no evidence of settlement, so the key is EXPLICITLY absent and
+        # ``Trace.__setstate__``'s load-derivation lattice classifies them
+        # (finished-not-halted -> UNATTESTED, never COMPLETE).
+        state.setdefault("_capture_outcome", None)
     if source_version >= 4:
         return state
     return {key: value for key, value in state.items() if key not in _LEGACY_CAPTURE_TRACE_KEYS}

@@ -143,7 +143,28 @@ class StopDirective:
         if not isinstance(result, bool):
             raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
         if result:
-            raise HaltSignal(ctx.label, frontier_output=frontier_output)
+            # F6 stop-request latch + settlement boundary facts. The boundary
+            # label prefers ``raw_label`` so the recorded label resolves
+            # through ``trace[...]`` even on the prefix-alias compatibility
+            # retry, where ``ctx.label`` is a bare prefix.
+            boundary_label = getattr(ctx, "raw_label", None) or ctx.label
+            from .. import _state
+            from .outcome import StopRequest
+
+            active_trace = _state._active_trace
+            if active_trace is not None:
+                active_trace.__dict__["_stop_requested"] = StopRequest(
+                    kind="halt",
+                    reason=ctx.label,
+                    boundary_kind=getattr(ctx, "kind", None),
+                    boundary_label=boundary_label,
+                )
+            raise HaltSignal(
+                ctx.label,
+                frontier_output=frontier_output,
+                boundary_kind=getattr(ctx, "kind", None),
+                boundary_label=boundary_label,
+            )
 
     def raise_nonfinite(
         self,

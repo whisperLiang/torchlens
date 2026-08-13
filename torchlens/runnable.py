@@ -274,6 +274,7 @@ class RunnableErrorCode(str, Enum):
     CONTEXT_FIELD_INVALID = "context_field_invalid"
     NUMERIC_ATTESTATION_FAILED = "numeric_attestation_failed"
     POISONED_RUN_REFUSED = "poisoned_run_refused"
+    HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
 
 
 class LiteralAtomKind(str, Enum):

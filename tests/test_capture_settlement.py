@@ -194,11 +194,12 @@ def test_postprocess_failure_settles_failed_postprocess(monkeypatch) -> None:
     # classifier honestly reads as user code, so no origin assertion here.
 
 
-def test_freeze_failure_stamps_despite_cleanup_double_fault(monkeypatch) -> None:
-    """Post-seam failures stamp FAILED/POSTPROCESS even while cleanup masks.
+def test_freeze_failure_stamps_failed_postprocess(monkeypatch) -> None:
+    """Post-seam failures stamp FAILED/POSTPROCESS and propagate unmasked.
 
-    The settle runs in a ``finally`` so the cleanup double-fault (pinned in
-    the P0 characterization, fixed by F5) cannot lose the settled truth.
+    The settle runs in a ``finally`` so no cleanup fault can lose the settled
+    truth, and F5's guarded cleanup lets the ORIGINAL exception propagate
+    (the P0 characterization pinned the pre-F5 AttributeError masking).
     """
 
     captured: list = []
@@ -208,7 +209,7 @@ def test_freeze_failure_stamps_despite_cleanup_double_fault(monkeypatch) -> None
         raise ValueError("planted freeze")
 
     monkeypatch.setattr(pp, "_freeze_relation_views", _boom)
-    with pytest.raises(AttributeError, match="_raw_graph_ws"):
+    with pytest.raises(ValueError, match="planted freeze"):
         tl.trace(ThreeStageModel(), torch.ones(1, 3))
     assert captured
     outcome = captured[0].outcome
@@ -343,14 +344,10 @@ def test_teardown_failure_demotes_settled_outcome(monkeypatch) -> None:
         raise RuntimeError("planted teardown failure")
 
     monkeypatch.setattr(capture_trace, "_clear_saved_activation_dedup_caches", _boom)
-    # CURRENT BEHAVIOR (pre-F5): user_funcs' failed-forward handler reads
-    # ``trace._out_writer`` unguarded, and postprocess already popped it, so
-    # the teardown exception propagates masked as AttributeError with the
-    # planted RuntimeError chained. F5 flips this to the bare RuntimeError.
-    with pytest.raises(AttributeError, match="_out_writer") as exc_info:
+    # F5: user_funcs' failed-forward handler tolerates the popped
+    # ``_out_writer``, so the teardown exception propagates unmasked.
+    with pytest.raises(RuntimeError, match="planted teardown failure"):
         tl.trace(ThreeStageModel(), torch.ones(1, 3))
-    assert isinstance(exc_info.value.__context__, RuntimeError)
-    assert "planted teardown failure" in str(exc_info.value.__context__)
     trace = captured[0]
     outcome = trace.outcome
     assert outcome is not None

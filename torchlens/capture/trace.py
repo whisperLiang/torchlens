@@ -1533,6 +1533,26 @@ def run_and_log_inputs_through_model(
                                 self._runnable.rng_monitor_uncertain = True
                                 self._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
+        # F6 boundary checkpoint: a "normal" forward return with the
+        # stop-request latch set means user code swallowed the control signal
+        # (halt or nonfinite abort) in a broad except. The capture must never
+        # be blessed COMPLETE; the typed error settles FAILED through the
+        # normal failure arm. Covers tl.trace and every Recorder pass.
+        swallowed_stop = self.__dict__.get("_stop_requested")
+        if swallowed_stop is not None:
+            from .outcome import StopSignalSwallowedError
+
+            raise StopSignalSwallowedError(
+                "TorchLens raised a "
+                f"{'halt' if swallowed_stop.kind == 'halt' else 'non-finite abort'} "
+                "stop signal during this forward, but the forward returned "
+                "normally: user code swallowed the control signal (typically a "
+                "broad `except:` or `except BaseException:` around the model "
+                "body). The capture cannot be trusted as complete. Stop "
+                f"boundary: {swallowed_stop.boundary_label or swallowed_stop.reason!r}.",
+                kind=swallowed_stop.kind,
+                boundary_label=swallowed_stop.boundary_label,
+            )
         set_capture_phase(self, CapturePhase.FINALIZE)
         backend.finalize_forward_session(self, self._raw_graph_ws)
 

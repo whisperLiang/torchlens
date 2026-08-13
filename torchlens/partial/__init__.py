@@ -8,11 +8,20 @@ from html import escape
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..data_classes._nonfinite import first_nonfinite_layer
+from ..errors import TorchLensError
 
 if TYPE_CHECKING:
     from torchlens.debug._audit import TraceAudit
     from torchlens.data_classes.op import Op
     from torchlens.data_classes.trace import Trace
+
+
+class PartialCaptureLookupError(TorchLensError, ValueError):
+    """The exception carries no TorchLens partial capture state (R10).
+
+    Subclasses ``ValueError`` so callers of the historical
+    ``from_failed_capture`` contract keep working unchanged.
+    """
 
 
 _FAILED_CAPTURE_REGISTRY_LIMIT = 128
@@ -34,6 +43,14 @@ class PartialTrace:
 
     trace: Trace
     original_exception: BaseException
+
+    @property
+    def outcome(self) -> Any | None:
+        """Forward the inner trace's settled capture outcome sidecar."""
+
+        from ..capture.outcome import outcome_for
+
+        return outcome_for(self.trace)
 
     @classmethod
     def from_trace(cls, trace: Trace, exception: BaseException) -> "PartialTrace":
@@ -227,8 +244,9 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
 
     Raises
     ------
-    ValueError
-        If the exception does not carry TorchLens partial capture state.
+    PartialCaptureLookupError
+        If the exception does not carry TorchLens partial capture state
+        (a ``ValueError`` subclass, preserving the historical contract).
     """
 
     partial_log = getattr(exception, "partial_log", None)
@@ -238,7 +256,7 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     if registry_entry is not None and registry_entry[0] is exception:
         _FAILED_CAPTURE_REGISTRY.move_to_end(id(exception))
         return registry_entry[1]
-    raise ValueError("exception does not contain a TorchLens partial capture")
+    raise PartialCaptureLookupError("exception does not contain a TorchLens partial capture")
 
 
 def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:

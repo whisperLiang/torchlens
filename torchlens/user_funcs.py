@@ -1242,8 +1242,13 @@ def _run_model_and_save_specified_outs(
     except (PredicateError, SaveBudgetExceededError, TorchLensIOError, TorchLensPostfuncError):
         raise
     except Exception as exc:
-        if trace._out_writer is not None:
-            trace._out_writer.abort(str(exc))
+        # F5: postprocess pops ``_out_writer`` at its transient-state seam, so
+        # a post-seam failure (teardown, streaming tail) reaches this handler
+        # on a trace WITHOUT the attribute; the unguarded read used to mask
+        # the real exception with AttributeError.
+        out_writer = trace.__dict__.get("_out_writer")
+        if out_writer is not None:
+            out_writer.abort(str(exc))
             raise TorchLensIOError("Streaming out save failed during forward pass.") from exc
         raise
     finally:

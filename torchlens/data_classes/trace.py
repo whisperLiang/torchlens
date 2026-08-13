@@ -1102,11 +1102,12 @@ class Trace(
         # diagnostics never mistake a cooked projection for a live exhaustive
         # capture. Session-only; not a portable fact.
         "_cooked_from": FieldPolicy.DROP,
-        # Settlement-authority sidecars (torchlens/capture/outcome.py). The
-        # outcome record becomes a KEEP schema field in the persistence phase
-        # of the early-stopping unification; the phase marker and stop-request
+        # Settlement-authority state (torchlens/capture/outcome.py). The
+        # settled outcome is a PERSISTED portable fact (tlspec v7): saved as
+        # its string-only payload, parsed against closed vocabularies and the
+        # status coherence matrix at load. The phase marker and stop-request
         # latch are strictly session-transient.
-        "_capture_outcome": FieldPolicy.DROP,
+        "_capture_outcome": FieldPolicy.KEEP,
         "_capture_phase": FieldPolicy.DROP,
         "_settlement_ops_committed": FieldPolicy.DROP,
         "_stop_requested": FieldPolicy.DROP,
@@ -2614,6 +2615,15 @@ class Trace(
         # cannot be pickled/deepcopied. Preserve tensor identity while replacing
         # only those mapping proxies with ordinary dictionaries.
         state["_runnable"] = runnable_trace_state(self).pickle_safe_copy()
+        # The settled capture outcome persists as its STRING-ONLY payload dict
+        # (tlspec v7): loads parse it against the closed vocabularies and the
+        # status coherence matrix, so a stale or forged record can only ever
+        # degrade to UNKNOWN, never upgrade. A pre-settlement live object
+        # persists None and loads derive from the structural lattice.
+        outcome = state.get("_capture_outcome")
+        state["_capture_outcome"] = (
+            outcome.to_payload() if hasattr(outcome, "to_payload") else None
+        )
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
@@ -2859,6 +2869,15 @@ class Trace(
                 if op_passes is not None and hasattr(op_passes, "values"):
                     for layer_pass in op_passes.values():
                         layer_pass.grad_fn_handle = grad_fn_handle
+        # Resolve the settled capture outcome BEFORE core rehydration: adopt a
+        # coherent persisted attestation, else derive from the structural
+        # lattice (fail-closed to UNKNOWN on parse/coherence violations). The
+        # helper reads only the restored __dict__ and never consults
+        # rehydration side effects; rehydration keys on the same truthiness
+        # convention independently.
+        from ..capture.outcome import resolve_loaded_outcome
+
+        self.__dict__["_capture_outcome"] = resolve_loaded_outcome(self.__dict__)
         # F9: adopt the restored detached records into a fresh sealed core so
         # loaded traces rejoin the single-truth store (best-effort — an abort
         # preserves the coreless-island behavior; backward records stay

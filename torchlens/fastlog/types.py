@@ -368,6 +368,55 @@ class Recording(CapturedRun):
     _captured_run_cores: tuple["CapturedRunCore", ...] = field(
         default=(), repr=False, compare=False
     )
+    # Settled capture outcome stamped by the recorder settlement adapter
+    # (torchlens/capture/outcome.py); ``outcome`` below derives conservatively
+    # for unstamped legacy/recovered recordings.
+    _outcome: Any | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def outcome(self) -> Any:
+        """Return the settled (or conservatively derived) capture outcome.
+
+        Stamped recordings return the settlement authority's record. Legacy
+        pickles (whose ``_outcome`` slot may be unset) and recovered/unstamped
+        recordings derive from the construction status: finalized ``complete``
+        / ``halted`` are construction-time proofs, ``partial_error`` is
+        FAILED, and ``recovered`` is UNKNOWN (or reconstructed HALTED where
+        the halt markers survived) with ``recovered=True`` -- all
+        ``derived=True``, never a settle-stamp upgrade.
+        """
+
+        from ..capture.outcome import CaptureOutcome, CaptureStatus, FailureOrigin
+
+        stamped = getattr(self, "_outcome", None)
+        if isinstance(stamped, CaptureOutcome):
+            return stamped
+        status = self.status
+        if status == "partial_error":
+            return CaptureOutcome(
+                status=CaptureStatus.FAILED,
+                origin=FailureOrigin.UNKNOWN,
+                reason=self.error_repr,
+                n_ops_committed=self.n_ops_completed,
+                derived=True,
+            )
+        if status == "halted" or (status == "recovered" and self.halted):
+            return CaptureOutcome(
+                status=CaptureStatus.HALTED,
+                reason=self.halt_reason,
+                boundary_label=self.halt_reason,
+                recovered=status == "recovered",
+                derived=True,
+            )
+        if status == "recovered":
+            return CaptureOutcome(
+                status=CaptureStatus.UNKNOWN,
+                recovered=True,
+                derived=True,
+            )
+        if status == "complete":
+            return CaptureOutcome(status=CaptureStatus.COMPLETE, derived=True)
+        return CaptureOutcome(status=CaptureStatus.UNKNOWN, derived=True)
 
     @property
     def n_passes(self) -> int:

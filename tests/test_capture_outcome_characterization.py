@@ -87,14 +87,9 @@ def test_tracing_finished_writer_inventory_is_exact() -> None:
     new region through the settlement authority.
     """
 
-    expected = {
-        # torch step 17 (and the no-layers early return) both call this.
-        ("postprocess/finalization.py", "_set_tracing_finished"),
-        # shared preview finalize: finish_before_module_logs both arms.
-        ("backends/_finalize.py", "finalize_preview_backend_trace"),
-        # JAX finalizes through its own recurrence-grouping path.
-        ("backends/jax/backend.py", None),
-    }
+    # The sanctioned writers: postprocess/finalization.py::_set_tracing_finished
+    # (torch step 17 + the no-layers early return), the shared preview finalize
+    # (both finish_before_module_logs arms), and JAX's own finalize path.
     writer_files: dict[str, int] = {}
     for path in TORCHLENS_DIR.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
@@ -138,30 +133,27 @@ def test_planted_step1_failure_survives_with_partial_log(monkeypatch) -> None:
     assert partial.trace.__dict__.get("_tracing_finished") is False
 
 
-def test_planted_freeze_failure_current_double_fault(monkeypatch) -> None:
-    """CURRENT BEHAVIOR (pre-F5): a post-seam freeze failure is masked.
+def test_planted_freeze_failure_propagates_original(monkeypatch) -> None:
+    """FLIPPED (F5): a post-seam freeze failure propagates the ORIGINAL error.
 
-    The freeze runs after the step-17 transient-state pops, so
-    ``cleanup_failed_forward_session`` double-faults on the missing
-    ``_raw_graph_ws`` and the ORIGINAL planted error survives only as
-    ``__context__``. F5 (settlement phase P3) flips this pin: the original
-    exception must propagate directly and settlement must still stamp
-    FAILED/POSTPROCESS.
+    The P0 characterization pinned the double-fault: the freeze runs after
+    the step-17 transient-state pops, and the unguarded
+    ``cleanup_failed_forward_session`` workspace read masked the planted
+    error with ``AttributeError: _raw_graph_ws`` (original only as
+    ``__context__``). F5 guards the cleanup so the original exception
+    survives, and settlement still stamps FAILED/POSTPROCESS.
     """
 
     def _boom(*args: object, **kwargs: object) -> None:
         raise ValueError("planted freeze")
 
     monkeypatch.setattr(pp, "_freeze_relation_views", _boom)
-    with pytest.raises(AttributeError, match="_raw_graph_ws") as exc_info:
+    with pytest.raises(ValueError, match="planted freeze"):
         tl.trace(ThreeStageModel(), torch.ones(1, 3))
-    context = exc_info.value.__context__
-    assert isinstance(context, ValueError)
-    assert "planted freeze" in str(context)
 
 
-def test_planted_step20_failure_current_double_fault(monkeypatch) -> None:
-    """CURRENT BEHAVIOR (pre-F5): a step-20 failure is masked identically."""
+def test_planted_step20_failure_propagates_original(monkeypatch) -> None:
+    """FLIPPED (F5): a step-20 failure propagates the original error."""
 
     from torchlens.data_classes.trace import Trace
 
@@ -169,11 +161,8 @@ def test_planted_step20_failure_current_double_fault(monkeypatch) -> None:
         raise ValueError("planted step20")
 
     monkeypatch.setattr(Trace, "release_param_refs", _boom)
-    with pytest.raises(AttributeError, match="_raw_graph_ws") as exc_info:
+    with pytest.raises(ValueError, match="planted step20"):
         tl.trace(ThreeStageModel(), torch.ones(1, 3))
-    context = exc_info.value.__context__
-    assert isinstance(context, ValueError)
-    assert "planted step20" in str(context)
 
 
 # ---------------------------------------------------------------------------
@@ -239,53 +228,63 @@ def test_halted_trace_has_no_transient_attribution_leak() -> None:
     assert "_output_attribution_input_tensors" not in trace.__dict__
 
 
-def test_halted_trace_refresh_currently_raises_graph_changed() -> None:
-    """CURRENT BEHAVIOR (pre-N5): halted refresh dies with a misleading error.
+def test_halted_trace_refresh_refuses_typed() -> None:
+    """FLIPPED (N5): halted refresh refuses with the typed live-provider gate.
 
-    ``save_new_outs`` on a halted trace fails the graph-consistency check
-    ("computational graph changed") because the recorded graph is a prefix.
-    N5 (P3) converts this crash into a typed HALTED live-provider refusal.
+    The P0 characterization pinned the misleading "computational graph
+    changed" crash; N5 converts it into a typed HALTED refusal naming the
+    re-arm follow-on.
     """
+
+    from torchlens.capture.outcome import CaptureOutcomeError
 
     model = ThreeStageModel()
     x = torch.ones(1, 3)
     trace = tl.trace(model, x, halt=_halt_on_relu)
-    with pytest.raises(ValueError, match="computational graph changed"):
+    with pytest.raises(CaptureOutcomeError) as exc_info:
         trace.save_new_outs(model, x)
+    assert exc_info.value.fields["code"] == "N5"
 
 
-def test_halted_trace_fast_run_currently_succeeds_silently() -> None:
-    """CURRENT BEHAVIOR (pre-N5): fast=True silently accepts a halted trace.
+def test_halted_trace_fast_run_refuses_typed() -> None:
+    """FLIPPED (N5): fast=True no longer silently accepts a halted trace.
 
-    This is the false-blessing hole N5 closes: the guarded static-loop path
-    re-executes the NATIVE forward (the full graph) against a prefix trace.
-    N5 (P3) refuses HALTED on every live provider, flipping this pin to a
-    typed error.
+    The P0 characterization pinned the false-blessing hole: the guarded
+    static-loop path re-executed the NATIVE forward (the full graph) against
+    a prefix trace and reported success. N5 refuses HALTED on every live
+    provider.
     """
+
+    from torchlens.capture.outcome import CaptureOutcomeError
 
     model = ThreeStageModel()
     x = torch.ones(1, 3)
     trace = tl.trace(model, x, halt=_halt_on_relu)
-    result = trace.run(inputs=x, fast=True)
-    assert result is not None
+    with pytest.raises(CaptureOutcomeError) as exc_info:
+        trace.run(inputs=x, fast=True)
+    assert exc_info.value.fields["code"] == "N5"
 
 
-def test_halted_trace_runnable_save_currently_fails_preflight() -> None:
-    """CURRENT BEHAVIOR (pre-N4): halted runnable save fails preflight.
+def test_halted_trace_runnable_save_refuses_typed() -> None:
+    """FLIPPED (N4): halted runnable save is a typed runnable refusal.
 
-    N4 is therefore a crash->typed-error conversion, not a removed
-    capability: no legacy workflow successfully saved a halted runnable.
+    The P0 characterization proved no legacy workflow successfully saved a
+    halted runnable (preflight already failed), so N4 is a crash->typed
+    conversion, surfacing through the runnable error vocabulary.
     """
+
+    from torchlens.errors import RunnablePreflightError
+    from torchlens.runnable import RunnableErrorCode
 
     model = ThreeStageModel()
     x = torch.ones(1, 3)
     trace = tl.trace(model, x, halt=_halt_on_relu)
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(RunnablePreflightError) as exc_info:
         tl.save(trace, "/tmp/tl_p0_halted_runnable.tlspec", level="runnable", overwrite=True)
-    assert type(exc_info.value).__name__ in {
-        "RunnablePreflightError",
-        "TorchLensIOError",
-    }
+    assert (
+        exc_info.value.fields.get("code")
+        == RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -149,9 +149,13 @@ class TraceValidationMixin(_TraceMixinBase):
             Forwarded unchanged to
             :func:`torchlens.capture.trace.save_new_outs`.
         """
+        from ..capture.outcome import require_capture_capability
         from ..capture.trace import save_new_outs as _impl
         from .._capture_state_helpers import unwrap_compiled_model
 
+        # N3/N5: a live refresh re-drives the FULL native forward against the
+        # recorded graph, which a halted/failed/unproven capture cannot honor.
+        require_capture_capability(self, "live_replay")
         model = unwrap_compiled_model(model)
 
         return _impl(
@@ -217,9 +221,15 @@ class TraceValidationMixin(_TraceMixinBase):
             unavailable status instead of a pass/fail bool.
         """
         from ..backends import get_backend_spec
+        from ..capture.outcome import require_capture_capability
         from ..runnable import refuse_poisoned_trace
 
         refuse_poisoned_trace(self, "validation")
+        # N2: refusing ENTRY for failed/unproven captures is not a check
+        # exemption -- the tripwire bodies stay byte-untouched, the halted
+        # exemption neither widens nor narrows, and legacy UNATTESTED
+        # artifacts deliberately keep entry OPEN (the tripwire stays armed).
+        require_capture_capability(self, "validation_entry")
         status = self.validation_replay_status
         if bool(getattr(self, "_loaded_from_bundle", False)) and not status.available:
             setattr(self, "_validation_replay_status", status)
@@ -293,6 +303,9 @@ class TraceValidationMixin(_TraceMixinBase):
             This model log, mutated in place.
         """
 
+        from ..capture.outcome import require_capture_capability
+
+        require_capture_capability(self, "live_replay")
         replay_options = merge_replay_options(
             replay=replay,
             strict=strict,
@@ -351,6 +364,9 @@ class TraceValidationMixin(_TraceMixinBase):
             This model log, mutated in place.
         """
 
+        from ..capture.outcome import require_capture_capability
+
+        require_capture_capability(self, "live_replay")
         replay_options = merge_replay_options(replay=replay, strict=strict)
 
         from ..intervention.replay import push_from as _impl
@@ -492,7 +508,14 @@ class TraceValidationMixin(_TraceMixinBase):
                 raise ValueError(
                     "fast=True always fails closed and requires on_divergence='raise'."
                 )
+            from ..capture.outcome import require_capture_capability
+
             if loaded_provider is RunProvider.LOADED_SPARSE:
+                # N3 (loaded-sparse split): HALTED stays ALLOWED here -- the
+                # loaded provider executes exactly the recorded taken-path
+                # prefix DAG under pause_logging(), so the live-replay failure
+                # mode cannot occur; failed/unproven captures still refuse.
+                require_capture_capability(self, "loaded_sparse_run")
                 if fast:
                     from .._fast_run import run_fast_loaded_trace
 
@@ -509,6 +532,10 @@ class TraceValidationMixin(_TraceMixinBase):
                 from .._runnable_execution import raise_analysis_run_unavailable
 
                 raise_analysis_run_unavailable(self)
+            # N3/N5 (live provider): the live run -- fast=True included --
+            # re-drives the full native forward, which halted/failed/unproven
+            # captures cannot honor.
+            require_capture_capability(self, "live_replay")
             from .._runnable_execution import run_live_trace
 
             source_ref = getattr(self, "_source_model_ref", None)
@@ -530,6 +557,11 @@ class TraceValidationMixin(_TraceMixinBase):
 
         if fast:
             raise TypeError("fast=True is available only with the unified inputs= surface.")
+
+        # N3/N5 (legacy live rerun surface): same live-provider rule.
+        from ..capture.outcome import require_capture_capability
+
+        require_capture_capability(self, "live_replay")
 
         run_model: nn.Module | None
         if isinstance(model, nn.Module):
@@ -681,6 +713,12 @@ class TraceValidationMixin(_TraceMixinBase):
         bool
             ``True`` if all invariants pass.
         """
+        # N2: refusing ENTRY for failed/unproven captures is not a check
+        # exemption -- the tripwire bodies stay byte-untouched, and legacy
+        # UNATTESTED artifacts deliberately keep entry OPEN.
+        from ..capture.outcome import require_capture_capability
+
+        require_capture_capability(self, "validation_entry")
         from ..validation.invariants import check_metadata_invariants as _impl
 
         return _impl(self)
@@ -790,7 +828,12 @@ class TraceValidationMixin(_TraceMixinBase):
             This model log, for chaining.
         """
         from ..backends import BackendUnsupportedError, get_backend_spec
+        from ..capture.outcome import require_capture_capability
 
+        # N3: the backward projection assumes a structurally complete captured
+        # forward graph; HALTED stays allowed (the autograd graph of a halted
+        # capture IS the captured prefix).
+        require_capture_capability(self, "backward")
         spec = get_backend_spec(getattr(self, "backend", "torch"))
         if not spec.capabilities.backward_capture:
             raise BackendUnsupportedError(
@@ -829,7 +872,9 @@ class TraceValidationMixin(_TraceMixinBase):
             Backward recording context manager.
         """
         from ..backends import BackendUnsupportedError, get_backend_spec
+        from ..capture.outcome import require_capture_capability
 
+        require_capture_capability(self, "backward")
         spec = get_backend_spec(getattr(self, "backend", "torch"))
         if not spec.capabilities.backward_capture:
             raise BackendUnsupportedError(

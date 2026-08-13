@@ -156,6 +156,7 @@ _LAZY_EXCEPTION_PATHS = {
     "SaveBudgetExceededError": ("torchlens._save_budget", "SaveBudgetExceededError"),
     "CaptureOutcomeError": ("torchlens.capture.outcome", "CaptureOutcomeError"),
     "StopSignalSwallowedError": ("torchlens.capture.outcome", "StopSignalSwallowedError"),
+    "PartialCaptureLookupError": ("torchlens.partial", "PartialCaptureLookupError"),
 }
 
 
