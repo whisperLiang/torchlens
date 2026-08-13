@@ -1416,6 +1416,20 @@ class Trace(
         "backward_peak_memory": FieldPolicy.KEEP,
         "backward_memory_backend": FieldPolicy.KEEP,
         "_backward_gradfn_refs": FieldPolicy.DROP,
+        # Session-time semantic-output scratch (B1-02). Written at capture
+        # entry, consumed only by ``decode_outputs_for_trace``, and dropped on
+        # every settlement path (``capture/trace.py``'s
+        # ``_drop_semantic_output_transients`` plus the postprocess seam).
+        # Declared here so the runtime-declaration lockstep gate can SEE them
+        # on the halted axis and so the portable scrub is policy-driven rather
+        # than a hand-maintained name list in ``_io/scrub.py``:
+        # ``_output_tokenizer`` holds a LIVE user tokenizer and
+        # ``_semantic_output_metadata`` a model-derived key, so a surviving
+        # copy leaks vocab/merges into a plain pickle of the Trace.
+        "_output_style": FieldPolicy.DROP,
+        "_output_head": FieldPolicy.DROP,
+        "_output_tokenizer": FieldPolicy.DROP,
+        "_semantic_output_metadata": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         MODEL_LOG_FIELD_ORDER,
@@ -2601,6 +2615,18 @@ class Trace(
         state["_code_context_cache"] = {}
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
+        # B1-02: the semantic-output scratch never serializes. Plain pickle
+        # legitimately carries most session-time DROP state (in-process
+        # round-trips need `backward_ready`, `save_budget`, ...), but these two
+        # hold LIVE USER OBJECTS -- an HF tokenizer and a model-derived
+        # metadata key. A surviving copy reconstructs the tokenizer on load and
+        # bakes its vocab/merges into an artifact the user believes is a graph
+        # (measured 47KB -> 238KB). Capture drops them at every settlement
+        # path; this is the serialization boundary's own belt.
+        state.pop("_output_style", None)
+        state.pop("_output_head", None)
+        state.pop("_output_tokenizer", None)
+        state.pop("_semantic_output_metadata", None)
         state.pop("_raw_graph_ws", None)
         state.pop("_module_capture_ws", None)
         state.pop("_wrapper_runtime_ws", None)

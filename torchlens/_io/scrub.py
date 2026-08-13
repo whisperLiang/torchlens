@@ -744,10 +744,12 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "jax_outvar_key_to_capture_index",
         "jax_static_argnums",
         "_selective_save_hidden_payloads",
-        "_output_style",
-        "_output_head",
-        "_output_tokenizer",
-        "_semantic_output_metadata",
+        # B1-02: the four semantic-output scratch names moved OUT of this
+        # allowance and into `Trace.PORTABLE_STATE_SPEC` as declared
+        # `FieldPolicy.DROP` rows. This allowance is consulted BEFORE the spec,
+        # so an entry here makes the declared policy dead code -- a policy
+        # flipped to KEEP would still be silently dropped. Declared rows keep
+        # one authority.
         "tinygrad_payload_policy",
         "tinygrad_uop_captures",
         "_mlx_op_captures",

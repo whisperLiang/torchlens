@@ -1071,6 +1071,43 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
         runnable_trace_state(trace).module_training_modes = modes
 
 
+#: Session-time semantic-output scratch (B1-02). Written at capture entry
+#: (``user_funcs.py``) and consumed ONLY by ``decode_outputs_for_trace`` on the
+#: normal forward-return arm. Two of the four pin LIVE USER OBJECTS -- an HF
+#: tokenizer (``bridge/hf.py``) and a model-derived metadata key -- so a copy
+#: surviving onto a settled product is both a retention leak and a privacy leak:
+#: plain ``pickle``/``torch.save`` of the Trace serializes the tokenizer's
+#: vocab/merges into an artifact the user believes is a graph. Declared
+#: ``FieldPolicy.DROP`` on ``Trace`` and dropped on EVERY settlement path.
+_SEMANTIC_OUTPUT_TRANSIENT_FIELDS: tuple[str, ...] = (
+    "_output_style",
+    "_output_head",
+    "_output_tokenizer",
+    "_semantic_output_metadata",
+)
+
+
+def _drop_semantic_output_transients(self: "Trace") -> None:
+    """Drop the session-time semantic-output scratch from one trace.
+
+    Idempotent, and safe on every arm: the sole consumer
+    (``decode_outputs_for_trace``) runs on the normal forward-return arm
+    strictly before this, and the halted/failed arms never decode at all.
+
+    Parameters
+    ----------
+    self:
+        Trace whose semantic-output scratch should be discarded.
+
+    Returns
+    -------
+    None. Mutates ``self.__dict__``.
+    """
+
+    for attr_name in _SEMANTIC_OUTPUT_TRANSIENT_FIELDS:
+        self.__dict__.pop(attr_name, None)
+
+
 def _extract_and_mark_outputs(
     self: "Trace",
     outputs: Any,
@@ -1582,13 +1619,10 @@ def run_and_log_inputs_through_model(
             output_style=getattr(self, "_output_style", None),
             output_head=getattr(self, "_output_head", None),
         )
-        for attr_name in (
-            "_output_style",
-            "_output_head",
-            "_output_tokenizer",
-            "_semantic_output_metadata",
-        ):
-            self.__dict__.pop(attr_name, None)
+        # Tight window on the normal arm: drop immediately after the only
+        # consumer. The outer ``finally`` repeats this for the arms that never
+        # reach here (halt, failure, interrupt) -- see B1-02.
+        _drop_semantic_output_transients(self)
 
         self.forward_duration = Duration(
             time.time() - self.capture_start_time - self.setup_duration
@@ -1764,6 +1798,13 @@ def run_and_log_inputs_through_model(
         raise
 
     finally:
+        # B1-02: the ONE site every settlement path passes through. The pop
+        # block above lives only on the normal forward-return arm, so a halt
+        # (or a failure, or a KeyboardInterrupt) used to exit with the live
+        # tokenizer and metadata key still pinned to the escaping product.
+        # Placed before the teardown ladder so a teardown double-fault cannot
+        # skip it.
+        _drop_semantic_output_transients(self)
         try:
             try:
                 _clear_saved_activation_dedup_caches(self)
