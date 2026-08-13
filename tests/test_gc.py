@@ -319,6 +319,93 @@ class TestTraceGC:
             "epilogue (class-metadata cache not released)"
         )
 
+    def test_failed_capture_registry_does_not_pin_a_dead_exception(self):
+        """The partial-recovery fallback table holds its exception weakly.
+
+        The table is keyed by ``id(exception)`` and was capped at 128 ENTRIES
+        with no byte bound and no time eviction — but each retained exception
+        keeps its ``__traceback__``, and that pins every frame local (the model,
+        the inputs, the partial outputs). Recovery only ever reaches an entry
+        through ``from_failed_capture(exc)``, which requires the caller to hold
+        that exception, so once it dies the entry is unreachable garbage.
+        """
+
+        from torchlens import partial as partial_module
+
+        class _FrameLocalMarker:
+            """Stands in for the model/inputs a traceback frame keeps alive."""
+
+        class _RejectsAttachment(Exception):
+            """The realistic shape that reaches this fallback at all.
+
+            Builtin exceptions and ``__slots__`` subclasses both ACCEPT
+            ``exc.partial_log = ...`` (BaseException always carries a dict), so
+            the registry is only ever reached by types that refuse attribute
+            assignment outright — which are user-defined and weak-referenceable.
+            """
+
+            def __setattr__(self, name, value):
+                raise AttributeError("read-only exception")
+
+        def raise_holding_a_local():
+            """Raise an exception whose traceback frame holds a marker object."""
+
+            marker = _FrameLocalMarker()
+            marker_ref = weakref.ref(marker)
+            try:
+                raise _RejectsAttachment("registry retention probe")
+            except _RejectsAttachment as error:
+                return error, marker_ref
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        exception, marker_ref = raise_holding_a_local()
+        partial_log = partial_module.PartialTrace(trace=trace, original_exception=exception)
+        key = id(exception)
+        partial_module._register_failed_capture(exception, partial_log)
+
+        # Recovery works for as long as the caller holds the exception, and
+        # repeated lookups hand back the same wrapper.
+        recovered = partial_module.from_failed_capture(exception)
+        assert recovered.original_exception is exception
+        assert recovered.trace is trace
+        assert partial_module.from_failed_capture(exception) is recovered
+        assert key in partial_module._FAILED_CAPTURE_REGISTRY
+
+        del exception, partial_log, recovered
+        gc.collect()
+
+        assert key not in partial_module._FAILED_CAPTURE_REGISTRY, (
+            "the registry kept an entry for a collected exception"
+        )
+        assert marker_ref() is None, (
+            "the registry pinned the dead exception's traceback frame locals"
+        )
+
+    def test_failed_capture_registry_falls_back_for_unweakrefable_exceptions(self):
+        """A non-weak-referenceable exception still recovers, under the entry cap.
+
+        Builtin exception instances cannot be weak-referenced. They never reach
+        this table (they accept ``partial_log`` attachment), but a C-extension
+        exception type could, so the fallback must keep working rather than
+        losing recovery.
+        """
+
+        from torchlens import partial as partial_module
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        exception = RuntimeError("unweakrefable probe")
+        with pytest.raises(TypeError):
+            weakref.ref(exception)  # the precondition this arm exists for
+        partial_log = partial_module.PartialTrace(trace=trace, original_exception=exception)
+        partial_module._register_failed_capture(exception, partial_log)
+        try:
+            assert partial_module.from_failed_capture(exception) is partial_log
+            assert len(partial_module._FAILED_CAPTURE_REGISTRY) <= (
+                partial_module._FAILED_CAPTURE_REGISTRY_LIMIT
+            )
+        finally:
+            partial_module._FAILED_CAPTURE_REGISTRY.pop(id(exception), None)
+
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 
