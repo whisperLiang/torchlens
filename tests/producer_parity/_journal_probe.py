@@ -1,8 +1,14 @@
 """Shared journal-grabbing probe for the P4 test files.
 
 Intercepts step-0 materialization to hand tests the REAL journal entries a
-tiny capture produced (per producer leg), without depending on postprocess
-internals beyond the one compat seam every path routes through.
+tiny capture produced, without depending on postprocess internals beyond the
+one compat seam every path routes through.
+
+Since P7 there is ONE torch producer (decomposed ``OpRecord``). The
+``"legacy"`` leg models the compat ``OpEvent`` journal shape that preview
+backends still emit until S15: its templates are genuine ``OpEvent``s
+synthesized from a decomposed capture through the retained inverse adapter
+(``op_event_from_record``), which dies with ``OpEvent`` in S15.
 """
 
 from __future__ import annotations
@@ -15,7 +21,8 @@ from torch import nn
 
 import torchlens as tl
 
-_PRODUCER_ENV = "TORCHLENS_CAPTURE_PRODUCER"
+from ._oracle_adapter import op_event_from_record
+
 _SEED = 20260812
 
 
@@ -39,9 +46,15 @@ def probe_input() -> torch.Tensor:
 
 
 def grab_journal_events(monkeypatch: Any, producer: str) -> list[Any]:
-    """Return raw journal entries from a tiny capture at the step-0 seam."""
+    """Return raw journal entries from a tiny capture at the step-0 seam.
 
-    monkeypatch.setenv(_PRODUCER_ENV, producer)
+    ``producer`` selects the journal SHAPE: ``"decomposed"`` returns the
+    captured ``OpRecord`` rows; ``"legacy"`` returns genuine compat
+    ``OpEvent``s projected through the inverse adapter (the preview-journal
+    stand-in until S15).
+    """
+
+    assert producer in ("legacy", "decomposed"), producer
     postprocess_module = importlib.import_module("torchlens.postprocess")
     materialize_module = importlib.import_module("torchlens.postprocess._materialize")
     original = materialize_module.materialize_from_events
@@ -55,6 +68,7 @@ def grab_journal_events(monkeypatch: Any, producer: str) -> list[Any]:
     monkeypatch.setattr(postprocess_module, "materialize_from_events", observing)
     monkeypatch.setattr(materialize_module, "materialize_from_events", observing)
     tl.trace(ProbeCNN(), probe_input())
-    monkeypatch.delenv(_PRODUCER_ENV, raising=False)
     assert grabbed, "journal interception grabbed no events"
+    if producer == "legacy":
+        return [op_event_from_record(entry) for entry in grabbed]
     return grabbed

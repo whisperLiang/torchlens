@@ -12,12 +12,14 @@ three comparison layers the design-of-record names:
   SHA256 digests.
 
 Volatile identity tokens are NOT compared by value: each occurrence becomes a
-``TokenSite`` row (bucket, layer, anchor, path, token) consumed by Check A
-(structural comparison) and Check B (within-leg attestation). Non-token
-volatile values (timing, memory, RNG state) are canonicalized per named path
-to presence + type. Every canonicalizer entry is a reviewed row in this
-module, seeded empirically by the legacy-vs-legacy control (a control diff is
-either a genuine nondeterminism to canonicalize BY NAME here, or a bug).
+``TokenSite`` row (bucket, layer, anchor, path, token). Non-token volatile
+values (timing, memory, RNG state) are canonicalized per named path to
+presence + type. Every canonicalizer entry is a reviewed row in this module,
+seeded empirically by the P0 legacy-vs-legacy control (a control diff is
+either a genuine nondeterminism to canonicalize BY NAME here, or a bug). The
+two-check cross-leg comparator and its attestation shims died with the P7
+deletion (transient campaign tooling); the snapshot machinery survives for
+the remaining harness consumers.
 """
 
 from __future__ import annotations
@@ -564,10 +566,9 @@ def _journal_interception(
 
 @dataclass
 class RunResult:
-    """Snapshot plus attestation ground truth for one scenario run."""
+    """Snapshot plus live objects for one scenario run."""
 
     snapshot: Snapshot
-    attestation: Any  # AttestationLog
     model: Any
     trace: Any
 
@@ -577,25 +578,20 @@ def run_scenario(
     tmp_path: Path,
     *,
     with_artifact: bool = True,
-    arm_shims: bool = True,
     post_capture: Callable[[Any], None] | None = None,
     journal_mutator: Callable[[Any], None] | None = None,
 ) -> RunResult:
-    """Run one scenario with the shims armed and produce its snapshot."""
-
-    from ._shims import AttestationLog, attestation_shims
+    """Run one scenario and produce its three-layer snapshot."""
 
     snapshot = Snapshot(scenario=scenario.name)
     model, inputs = scenario.build()
 
-    shim_context = attestation_shims() if arm_shims else contextlib.nullcontext(AttestationLog())
-    with shim_context as attestation_log:
-        with _journal_interception(snapshot, journal_mutator):
-            captured = scenario.capture(model, inputs)
-            if scenario.kind == "record":
-                captured = captured.to_trace()
-        if post_capture is not None:
-            post_capture(captured)
+    with _journal_interception(snapshot, journal_mutator):
+        captured = scenario.capture(model, inputs)
+        if scenario.kind == "record":
+            captured = captured.to_trace()
+    if post_capture is not None:
+        post_capture(captured)
 
     store_snapshot(snapshot, captured)
     if with_artifact:
@@ -603,4 +599,4 @@ def run_scenario(
             artifact_snapshot(snapshot, captured, tmp_path)
         except Exception as error:  # artifact layer optional per scenario
             snapshot.artifact = {"__unsupported__": type(error).__qualname__}
-    return RunResult(snapshot=snapshot, attestation=attestation_log, model=model, trace=captured)
+    return RunResult(snapshot=snapshot, model=model, trace=captured)

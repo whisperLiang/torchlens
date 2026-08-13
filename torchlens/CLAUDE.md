@@ -240,6 +240,19 @@ module-containment-refactor).
 4. `postprocess/` removes orphans, marks conditionals, detects loops, labels nodes, builds logs.
 5. `Trace` exposes lookup, visualization, validation, save/load, intervention, and summary helpers.
 
+### Journal Producer (single since producer unification P7)
+Torch captures journal decomposed `OpRecord` rows (`ir/op_record.py`: `OpCore` + typed
+facets, strict protocol with legacy flat-name properties) through the ONE commit tail
+`capture/projections.py::commit_op`; step 0 ingests them via the generated scatter
+(`ingest_op_records`). The op lane is genuinely append-only: post-commit knowledge rides
+the typed `OpAmendment` lane (nine exact-set families, `append_amendment` the single
+writer) and every amended-state read folds through `CaptureEvents.amended_op_records()`.
+grad-fn handles live only in the journal side index (`grad_fn_handles_by_label_raw`).
+The legacy `OpEvent` torch producer and its `TORCHLENS_CAPTURE_PRODUCER` switch were
+deleted (P7); preview backends keep emitting compat `OpEvent`s until S15 and adapt at the
+one ingest boundary (`op_record_from_event`), with `PATH_TO_FLAT` as the amendment fold
+guard and `_clone_op_event_for_replay` record-shape-aware, all retained-with-schedule.
+
 ### Portable Artifacts
 `tl.save()` and `tl.load()` route through `_io/bundle.py`. Unified `.tlspec` directories have
 `manifest.json` plus safetensors blobs; public schema validation lives in `validation/__init__.py`.

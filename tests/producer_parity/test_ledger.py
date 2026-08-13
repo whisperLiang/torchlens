@@ -78,7 +78,7 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     with runtime_read_recorder() as reads:
         for scenario in SCENARIOS:
             with tempfile.TemporaryDirectory() as tmp:
-                run_scenario(scenario, Path(tmp), with_artifact=False, arm_shims=False)
+                run_scenario(scenario, Path(tmp), with_artifact=False)
     (_LEDGER_DIR / "runtime_reads.json").write_text(
         json.dumps(
             {field: sorted(callers) for field, callers in sorted(reads.items())},
@@ -110,7 +110,6 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
                 scenario_by_name("cnn_exhaustive"),
                 Path(tmp),
                 with_artifact=False,
-                arm_shims=False,
             )
     assert observed, "step-0 recorder observed nothing (hook broken)"
     (_LEDGER_DIR / "step0_trace_reads.json").write_text(

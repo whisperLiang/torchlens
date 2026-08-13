@@ -724,101 +724,6 @@ def _sparse_output_ref(
     )
 
 
-def _event_from_record(
-    ctx: RecordContext,
-    spec: CaptureSpec,
-    *,
-    tensor: torch.Tensor | None = None,
-    ram_payload: torch.Tensor | None = None,
-    transformed_ram_payload: torch.Tensor | None = None,
-    predicate_matched: bool,
-    backend_semantics: BackendSemantics | None = None,
-    function: FunctionCallRef | None = None,
-    container_path: tuple[Any, ...] = (),
-    module_fields: tuple[
-        tuple[ModuleFrame, ...],
-        tuple[tuple[str, int], ...],
-    ]
-    | None = None,
-) -> OpEvent:
-    """Build a lightweight fastlog ``OpEvent`` without materializing an Op."""
-
-    values = _sparse_freeze_values(
-        ctx,
-        tensor=tensor,
-        ram_payload=ram_payload,
-        transformed_ram_payload=transformed_ram_payload,
-        module_fields=module_fields,
-    )
-    label_raw = values.label_raw
-    module_stack = values.module_stack
-    modules = values.modules
-    is_scalar_bool = values.is_scalar_bool
-    bool_value = values.bool_value
-    event = OpEvent(
-        kind=ctx.kind,
-        label_raw=label_raw,
-        layer_label_raw=label_raw,
-        layer_type=ctx.layer_type or ctx.kind,
-        raw_index=ctx.raw_index or ctx.event_index,
-        type_index=ctx.type_index or 0,
-        step_index=ctx.step_index or 0,
-        source_trace=None,
-        source_trace_id=None,
-        tracing_finished=False,
-        construction_done=True,
-        function=_sparse_function_ref(ctx, function),
-        output=_sparse_output_ref(
-            ctx, spec, values, ram_payload=ram_payload, container_path=container_path
-        ),
-        templates=_EMPTY_ARG_TEMPLATE_REF,
-        parents=tuple(
-            ParentEdge(parent_label_raw=parent, arg_position=None, edge_use="unknown")
-            for parent in ctx.parent_labels
-        ),
-        parent_arg_positions={"args": {}, "kwargs": {}},
-        _edge_uses=(),
-        params=(),
-        parent_params=(),
-        module_stack=module_stack,
-        modules=modules,
-        backend_semantics=backend_semantics
-        if backend_semantics is not None
-        else _EMPTY_BACKEND_SEMANTICS,
-        policy=_capture_policy_from_spec(spec),
-        predicate_matched=predicate_matched,
-        pass_index=ctx.pass_index,
-        grad_fn_class_qualname=None,
-        grad_fn_handle=None,
-        equivalence_class=None,
-        is_transform=False,
-        transform_kind=None,
-        transform_chain=(),
-        transform_config={"_tl_annotations": _reference_annotations(spec.save_mode, ram_payload)},
-        transform_fn_name=None,
-        transform_fn_qualname=None,
-        transform_fn_source=None,
-        unattributed_tensor_args=(),
-        dropped_edge_tensor_args=(),
-        is_output_parent=ctx.is_output_parent,
-        has_internal_source_ancestor=False,
-        internal_source_ancestors=frozenset(),
-        input_ancestors=frozenset(),
-        root_ancestors=frozenset(),
-        func_call_id=ctx.func_call_id,
-        is_bottom_level=bool(ctx.is_bottom_level_func),
-        is_scalar_bool=is_scalar_bool,
-        bool_value=bool_value,
-        intervention_fired=False,
-        intervention_replaced=False,
-        fire_results=(),
-        intervention_template_ref=None,
-        record_context=ctx,
-        capture_spec=spec,
-    )
-    return event
-
-
 def _record_from_record_context(
     ctx: RecordContext,
     spec: CaptureSpec,
@@ -838,8 +743,7 @@ def _record_from_record_context(
 ) -> "OpRecord":
     """Sparse-pipeline decomposed freeze: ``OpCore`` + facets, no ``OpEvent``.
 
-    Value computation is shared with ``_event_from_record`` through
-    ``_sparse_freeze_values``; facet PRESENCE mirrors ``op_record_from_event``
+    Value computation routes through ``_sparse_freeze_values``; facet PRESENCE mirrors ``op_record_from_event``
     applied to the equivalent compat event (S5: an absent facet is never
     fabricated empty, and a facet is present exactly when the legacy event
     carries non-default values — plus ``graph``/``policy``, which the adapter
@@ -961,26 +865,12 @@ COMMIT_STAGE_MATRIX: dict[str, tuple[str, ...]] = {
 }
 
 
-def record_producer_for(trace: Any) -> str:
-    """Return the journal record shape active for ``trace``.
-
-    Resolved ONCE per capture at session setup onto the producer policy; a
-    trace with no compiled policy (preview projections, detached partial
-    recovery, cooked fastlog postprocess) stays on the legacy shape.
-    """
-
-    policy = getattr(trace, "_capture_producer_policy", None)
-    if policy is None:
-        return "legacy"
-    return cast(str, policy.record_producer)
-
-
 class OpDraft(Protocol):
     """A finished pre-commit pipeline's draft, ready for freeze -> append."""
 
     pipeline: str
 
-    def freeze(self, producer: str) -> Any: ...
+    def freeze(self) -> Any: ...
 
 
 @dataclass(slots=True)
@@ -1003,13 +893,10 @@ class SparseOpDraft:
 
     pipeline: str = field(default="sparse", init=False)
 
-    def freeze(self, producer: str) -> Any:
+    def freeze(self) -> Any:
         """Construct the journal record ONCE from the final draft state."""
 
-        freeze_record = (
-            _record_from_record_context if producer == "decomposed" else _event_from_record
-        )
-        return freeze_record(
+        return _record_from_record_context(
             self.ctx,
             self.spec,
             tensor=self.tensor,
@@ -1026,14 +913,15 @@ class SparseOpDraft:
 def commit_op(trace: Any, draft: OpDraft) -> "LiveOpView | None":
     """The ONE commit tail: freeze -> atomic append (+ exhaustive stages).
 
-    Freeze constructs the journal record ONCE from the final draft under the
-    trace's resolved producer; append is the single sequencing authority. The
+    Freeze constructs the journal record ONCE from the final draft (the
+    decomposed producer is the only producer since P7); append is the single
+    sequencing authority. The
     two post-tail stages (grad-handle side index, ``LiveOpView``) exist only
     on the exhaustive pipeline per ``COMMIT_STAGE_MATRIX`` — the sparse
     pipeline returns ``None`` and pays neither.
     """
 
-    record = draft.freeze(record_producer_for(trace))
+    record = draft.freeze()
     trace.capture_events.append(record)
     if draft.pipeline != "exhaustive":
         return None

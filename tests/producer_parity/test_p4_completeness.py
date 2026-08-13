@@ -58,7 +58,10 @@ from torchlens.ir.op_record import (
 
 pytestmark = pytest.mark.smoke
 
-_PRODUCER_ENV = "TORCHLENS_CAPTURE_PRODUCER"
+# Journal SHAPES for the fold-routing tests (P7 deleted the legacy torch
+# producer): "decomposed" = captured OpRecord rows; "legacy" = genuine compat
+# OpEvent rows (preview stand-in until S15), synthesized via the retained
+# inverse adapter.
 _LEGS = ("legacy", "decomposed")
 _SEED = 20260812
 
@@ -347,13 +350,9 @@ _BATTERY: tuple[tuple[str, Callable[[], tuple[nn.Module, Any]], Callable[..., An
 )
 
 
-@pytest.mark.parametrize("producer", _LEGS)
-def test_live_legacy_sites_completeness(
-    monkeypatch: pytest.MonkeyPatch, producer: str
-) -> None:
+def test_live_legacy_sites_completeness() -> None:
     """Layers 1-3: pair-wise identity, value round-trip, reached-family >= 1."""
 
-    monkeypatch.setenv(_PRODUCER_ENV, producer)
     observations: list[_Observation] = []
     failures: list[str] = []
     with _spy_append_amendment(observations, failures):
@@ -380,13 +379,12 @@ def test_live_legacy_sites_completeness(
         "silently non-triggering scenario proves nothing"
     )
 
-    expected_shape = "OpRecord" if producer == "decomposed" else "OpEvent"
     wrong_shape = {
         (o.site, o.record_type)
         for o in observations
-        if o.record_type != expected_shape
+        if o.record_type != "OpRecord"
     }
-    assert not wrong_shape, f"{producer} leg produced foreign record shapes: {wrong_shape}"
+    assert not wrong_shape, f"foreign record shapes in the journal: {wrong_shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +394,12 @@ def test_live_legacy_sites_completeness(
 
 
 def _journal_templates(monkeypatch: pytest.MonkeyPatch, producer: str) -> list[Any]:
-    """Return raw journal entries from a tiny capture at the step-0 seam."""
+    """Return raw journal entries from a tiny capture at the step-0 seam.
 
-    monkeypatch.setenv(_PRODUCER_ENV, producer)
+    ``producer`` selects the journal SHAPE; the ``"legacy"`` (OpEvent) shape
+    is synthesized through the retained inverse adapter (S15 stand-in).
+    """
+
     postprocess_module = importlib.import_module("torchlens.postprocess")
     materialize_module = importlib.import_module("torchlens.postprocess._materialize")
     original = materialize_module.materialize_from_events
@@ -414,6 +415,10 @@ def _journal_templates(monkeypatch: pytest.MonkeyPatch, producer: str) -> list[A
     model, inputs = _SmallCNN(), _img()
     tl.trace(model, inputs)
     assert grabbed, "journal interception grabbed no events"
+    if producer == "legacy":
+        from ._oracle_adapter import op_event_from_record
+
+        return [op_event_from_record(entry) for entry in grabbed]
     return grabbed
 
 

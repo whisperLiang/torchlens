@@ -124,17 +124,17 @@ contract. Physical journal storage, private class layout, object identity, and t
 are not compatibility surfaces. Events do not serialize into `.tlspec` under this
 contract.
 
-## Implementation status (2026-08-11, backend megasprint phases 0-6)
+## Implementation status (2026-08-13, backend megasprint phases 0-6 + producer unification P0-P7)
 
 | Clause | Status |
 |---|---|
 | S1 | Shipped (phases 2-3: registries deleted, `_EVENT_STREAMS` deleted, typed refusal). |
 | S2 | Shipped for the torch backend (one writer-stamped seq across every lane; journal-seq invariant + mutation tests). Preview lanes: ports phase. |
-| S3 | Shipped for backward (failed walks keep evidence). Forward amendment records: with the producer decomposition. |
+| S3 | Shipped for backward (failed walks keep evidence) AND forward: the typed `OpAmendment` lane (nine exact-set families, lane-local seq domain, single writer `append_amendment`, one reducer `amended_op_records()`) landed with the producer decomposition (P4); `replace_op_event` deleted. |
 | S4 | Shipped as stated; node-uid substitution deferred while dossier-#2 conservative pinning holds. |
-| S5 | Gated measurement DONE (F1 verdict: DECOMPOSE, `benchmarks/perf/f1_facet_indirection.json`); the producer rewrite (dual-path, one release cycle) is the next backend session's work. |
-| S6 | Torch op events trace-backref-free from birth; full native-handle sidecar (grad_fn handles, payload leases) remains with the producer rewrite. |
-| S7 | Followed by both producers (phase-1 straight-line commit path); conformance assertions ride the ports phase. |
+| S5 | SHIPPED: decomposed `OpRecord` (`OpCore` + typed facets) is the ONE torch producer (dual-path transition P3-P6; legacy producer, `_op_event_from_log`, `_event_from_record`, and the `TORCHLENS_CAPTURE_PRODUCER` switch deleted in P7). Previews adapt at the one ingest boundary until S15. |
+| S6 | Shipped: records trace-backref-free from birth; grad-fn handles live ONLY in the journal side index (`grad_fn_handles_by_label_raw`) — records never carry a handle attribute (single ownership, P2/P3). |
+| S7 | Shipped for torch: ONE commit tail (`commit_op`: freeze -> atomic append) at every exhaustive and sparse site, stage matrix conformance-tested; preview conformance rides the ports phase. |
 | S8 | Shipped (`InterventionAppliedEvent`, kind vocabulary cleaned, side ledger deleted, carve-out journal-backed). |
 | S9 | Shipped (`concat` + total `LANE_MERGE_POLICIES` + total `_LANE_APPENDERS`, fail-closed on unwired lanes; chronological clone merge; recorder and failed-fastlog snapshot splices routed through `concat`). |
 | S10 | Shipped (writer methods; direct lane appends routed, including the failed-fastlog snapshot; invariant enforces counter consistency). |

@@ -139,22 +139,26 @@ def test_strict_protocol_refusal_type() -> None:
 
 
 def _journal_events(model, inputs) -> list:
-    """Capture a LEGACY journal (compat OpEvents) for adapter-input tests."""
+    """Return genuine compat OpEvents for adapter-input tests.
 
-    import os
+    The legacy torch producer died in P7; compat ``OpEvent`` journals (the
+    ingest adapter's input shape, still emitted by preview backends until
+    S15) are synthesized from a decomposed capture through the retained
+    inverse adapter.
+    """
 
     import torchlens.postprocess as postprocess_module
     import torchlens.postprocess._materialize as materialize_module
 
+    from ._oracle_adapter import op_event_from_record
+
     captured: list = []
     original = materialize_module.materialize_from_events
-    producer_before = os.environ.get("TORCHLENS_CAPTURE_PRODUCER")
 
     def spy(trace, events):
         captured.extend(events.op_events)
         original(trace, events)
 
-    os.environ["TORCHLENS_CAPTURE_PRODUCER"] = "legacy"
     postprocess_module.materialize_from_events = spy
     materialize_module.materialize_from_events = spy
     try:
@@ -162,11 +166,7 @@ def _journal_events(model, inputs) -> list:
     finally:
         postprocess_module.materialize_from_events = original
         materialize_module.materialize_from_events = original
-        if producer_before is None:
-            os.environ.pop("TORCHLENS_CAPTURE_PRODUCER", None)
-        else:
-            os.environ["TORCHLENS_CAPTURE_PRODUCER"] = producer_before
-    return captured
+    return [op_event_from_record(entry) for entry in captured]
 
 
 @pytest.mark.heavy
@@ -209,7 +209,6 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
                     scenario,
                     Path(tmp),
                     with_artifact=False,
-                    arm_shims=False,
                     journal_mutator=collect,
                 )
         finally:

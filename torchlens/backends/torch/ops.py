@@ -6,7 +6,6 @@ interventions, and saves or streams activation payloads for torch captures.
 
 import copy
 import dataclasses
-import os
 import time
 import warnings
 from collections import OrderedDict, defaultdict, deque
@@ -89,7 +88,6 @@ from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
     ModuleFrame,
-    OpEvent,
     OutputRef,
     OutputVersionEvent,
     ParentEdge,
@@ -556,27 +554,11 @@ def _label_version_baseline(t: Any) -> int | None:
 
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
-RecordProducer = Literal["legacy", "decomposed"]
 
-# Internal dual-path switch (producer unification 6.1). Read ONCE per capture
-# at session setup (`set_capture_producer_policy`); never consulted on the
-# hot path — the resolved value rides the policy object. The decomposed
-# producer is the default since P6; ``legacy`` is the escape hatch until the
-# P7 deletion retires it.
-_RECORD_PRODUCER_ENV = "TORCHLENS_CAPTURE_PRODUCER"
-_RECORD_PRODUCERS: tuple[str, ...] = ("legacy", "decomposed")
-
-
-def _resolve_record_producer() -> RecordProducer:
-    """Resolve the journal record producer from the internal environment switch."""
-
-    value = os.environ.get(_RECORD_PRODUCER_ENV, "decomposed")
-    if value not in _RECORD_PRODUCERS:
-        raise ValueError(
-            f"{_RECORD_PRODUCER_ENV}={value!r} is not a known capture producer; "
-            f"expected one of {_RECORD_PRODUCERS}"
-        )
-    return cast(RecordProducer, value)
+# The producer-unification dual-path switch (TORCHLENS_CAPTURE_PRODUCER) died
+# with the legacy producer in P7: every torch capture freezes decomposed
+# ``OpRecord`` rows. Preview backends keep emitting compat ``OpEvent``s until
+# S15 and adapt at the one ingest boundary (``op_record_from_event``).
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,15 +569,11 @@ class CaptureProducerPolicy:
     ----------
     mode
         Capture mode represented by this policy.
-    record_producer
-        Journal record shape the freeze stage constructs (``legacy`` compat
-        ``OpEvent`` vs ``decomposed`` ``OpRecord``).
     emit
         Callable that emits operation events for the mode.
     """
 
     mode: CaptureProducerMode
-    record_producer: RecordProducer
     emit: Callable[
         [
             "Trace",
@@ -614,9 +592,7 @@ class CaptureProducerPolicy:
     ]
 
 
-_CAPTURE_PRODUCER_POLICIES: dict[
-    tuple[CaptureProducerMode, RecordProducer], CaptureProducerPolicy
-] = {}
+_CAPTURE_PRODUCER_POLICIES: dict[CaptureProducerMode, CaptureProducerPolicy] = {}
 
 _EMIT_BY_MODE: dict[CaptureProducerMode, str] = {
     "exhaustive": "_emit_exhaustive_operation_events",
@@ -624,17 +600,13 @@ _EMIT_BY_MODE: dict[CaptureProducerMode, str] = {
 }
 
 
-def get_capture_producer_policy(
-    mode: CaptureProducerMode, record_producer: RecordProducer | None = None
-) -> CaptureProducerPolicy:
-    """Return the precomputed producer policy for ``(mode, record_producer)``.
+def get_capture_producer_policy(mode: CaptureProducerMode) -> CaptureProducerPolicy:
+    """Return the precomputed producer policy for ``mode``.
 
     Parameters
     ----------
     mode
         Capture mode to route.
-    record_producer
-        Journal record shape; ``None`` resolves the environment switch.
 
     Returns
     -------
@@ -642,22 +614,18 @@ def get_capture_producer_policy(
         Cached policy object used on the decorated-operation hot path.
     """
 
-    if record_producer is None:
-        record_producer = _resolve_record_producer()
-    key = (mode, record_producer)
-    policy = _CAPTURE_PRODUCER_POLICIES.get(key)
+    policy = _CAPTURE_PRODUCER_POLICIES.get(mode)
     if policy is None:
         emit = globals()[_EMIT_BY_MODE[mode]]
-        policy = CaptureProducerPolicy(mode, record_producer, emit)
-        _CAPTURE_PRODUCER_POLICIES[key] = policy
+        policy = CaptureProducerPolicy(mode, emit)
+        _CAPTURE_PRODUCER_POLICIES[mode] = policy
     return policy
 
 
 def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> None:
     """Attach a precomputed producer policy to ``trace``.
 
-    The ONE per-capture read of the internal ``TORCHLENS_CAPTURE_PRODUCER``
-    switch happens here (session setup); the hot path only ever touches the
+    Compiled once at session setup; the hot path only ever touches the
     precompiled policy object.
 
     Parameters
@@ -1075,8 +1043,8 @@ def _op_record_from_log(
 ) -> "OpRecord":
     """Exhaustive-pipeline decomposed freeze: ``OpCore`` + facets.
 
-    Reads the same final draft (``fields_dict``) as ``_op_event_from_log``
-    through the same shared ref builders; facet PRESENCE mirrors
+    Reads the final exhaustive draft (``fields_dict``) through the shared
+    ref builders; facet PRESENCE mirrors
     ``op_record_from_event`` applied to the equivalent compat event (S5:
     absent facet != fabricated empty facet).
     """
@@ -1264,11 +1232,10 @@ class ExhaustiveOpDraft:
 
         return self.fields_dict["grad_fn_handle"]
 
-    def freeze(self, producer: str) -> Any:
+    def freeze(self) -> Any:
         """Construct the journal record ONCE from the final draft state."""
 
-        freeze_record = _op_record_from_log if producer == "decomposed" else _op_event_from_log
-        return freeze_record(
+        return _op_record_from_log(
             self.trace,
             self.fields_dict,
             self.tensor,
@@ -1276,117 +1243,6 @@ class ExhaustiveOpDraft:
             module_stack=self.module_stack,
             call_ref_box=self.call_ref_box,
         )
-
-
-def _op_event_from_log(
-    trace: "Trace",
-    fields_dict: dict[str, Any],
-    tensor: torch.Tensor,
-    fire_results: tuple[FireResult, ...] = (),
-    module_stack: tuple[ModuleFrame, ...] | None = None,
-    call_ref_box: list[FunctionCallRef] | None = None,
-) -> OpEvent:
-    """Build an ``OpEvent`` that mirrors a just-constructed ``Op``.
-
-    Parameters
-    ----------
-    fields_dict
-        Raw field mapping used to construct ``op_log``.
-    tensor
-        Live output tensor for backend metadata.
-    fire_results
-        Live intervention fire results associated with this output.
-    module_stack
-        Precomputed immutable module frames shared by outputs from the call.
-    call_ref_box
-        Per-call one-element box sharing ONE ``FunctionCallRef`` across the
-        sibling outputs of a multi-output call (M7).
-
-    Returns
-    -------
-    OpEvent
-        Frozen operation event appended to ``CaptureEvents``.
-    """
-
-    tensor_ref, module_stack, transformed_ref, backend_semantics = _exhaustive_freeze_refs(
-        fields_dict, tensor, module_stack
-    )
-    return OpEvent(
-        kind="source" if fields_dict["is_input"] or fields_dict["is_buffer"] else "op",
-        label_raw=fields_dict["_label_raw"],
-        layer_label_raw=fields_dict["_layer_label_raw"],
-        layer_type=fields_dict["type"],
-        raw_index=fields_dict["raw_index"],
-        type_index=fields_dict["type_index"],
-        step_index=fields_dict["step_index"] or 0,
-        # Durable records are trace-backref-free from birth: every consumer of
-        # OpEvent.source_trace resolves ``event.source_trace or trace`` with the
-        # materializing trace in scope, so the backref carried no information on
-        # the torch path and only created Trace<->event cycles (the reason the
-        # sealed stream needed a weak side registry). Preview backends still
-        # populate the compatibility field; its deletion is ports-phase work.
-        source_trace=None,
-        source_trace_id=None,
-        tracing_finished=fields_dict["_tracing_finished"],
-        construction_done=fields_dict["_construction_done"],
-        function=_resolve_call_function_ref(fields_dict, call_ref_box),
-        output=_exhaustive_output_ref(fields_dict, tensor_ref, transformed_ref),
-        templates=ArgTemplateRef(
-            saved_args=fields_dict["saved_args"],
-            saved_kwargs=fields_dict["saved_kwargs"],
-            args_template=fields_dict["args_template"],
-            kwargs_template=fields_dict["kwargs_template"],
-            has_saved_args=fields_dict["has_saved_args"],
-        ),
-        parents=_parent_edges_from_fields(fields_dict),
-        parent_arg_positions=copy.deepcopy(fields_dict["parent_arg_positions"]),
-        _edge_uses=tuple(
-            fields_dict["_edge_uses"]
-            or _build_edge_use_records(
-                trace,
-                fields_dict["parent_arg_positions"],
-                fields_dict["_label_raw"],
-                fields_dict["func_call_id"],
-            )
-        ),
-        params=_param_refs_from_fields(fields_dict),
-        parent_params=tuple(fields_dict["parent_params"]),
-        module_stack=module_stack,
-        modules=tuple(fields_dict["modules"]),
-        backend_semantics=backend_semantics,
-        policy=_exhaustive_capture_policy(trace, fields_dict),
-        predicate_matched=True,
-        pass_index=fields_dict["pass_index"],
-        grad_fn_class_qualname=fields_dict["grad_fn_class_qualname"],
-        grad_fn_handle=fields_dict["grad_fn_handle"],
-        equivalence_class=fields_dict["equivalence_class"],
-        is_transform=bool(fields_dict.get("is_transform", False)),
-        transform_kind=fields_dict.get("transform_kind"),
-        transform_chain=tuple(fields_dict.get("transform_chain") or ()),
-        transform_config={
-            **dict(fields_dict.get("transform_config") or {}),
-            "_tl_annotations": dict(fields_dict.get("annotations") or {}),
-        },
-        transform_fn_name=fields_dict.get("transform_fn_name"),
-        transform_fn_qualname=fields_dict.get("transform_fn_qualname"),
-        transform_fn_source=fields_dict.get("transform_fn_source"),
-        unattributed_tensor_args=tuple(fields_dict.get("unattributed_tensor_args") or ()),
-        dropped_edge_tensor_args=tuple(fields_dict.get("dropped_edge_tensor_args") or ()),
-        is_output_parent=fields_dict["is_output_parent"],
-        has_internal_source_ancestor=fields_dict["has_internal_source_ancestor"],
-        internal_source_ancestors=frozenset(fields_dict["internal_source_ancestors"]),
-        input_ancestors=frozenset(fields_dict["input_ancestors"]),
-        root_ancestors=frozenset(fields_dict["root_ancestors"]),
-        func_call_id=fields_dict["func_call_id"],
-        is_bottom_level=True,
-        is_scalar_bool=fields_dict["is_scalar_bool"],
-        bool_value=fields_dict["bool_value"],
-        input_was_parameter=bool(fields_dict.get("input_was_parameter", False)),
-        intervention_fired=bool(fire_results),
-        intervention_replaced=fields_dict["intervention_replaced"],
-        fire_results=fire_results,
-        intervention_template_ref=None,
-    )
 
 
 def _is_namedtuple_instance(value: Any) -> bool:

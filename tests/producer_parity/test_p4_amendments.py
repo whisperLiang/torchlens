@@ -46,6 +46,11 @@ from ._journal_probe import grab_journal_events
 
 pytestmark = pytest.mark.smoke
 
+# Journal SHAPES, not producers (P7 deleted the legacy torch producer):
+# "decomposed" = captured OpRecord rows; "legacy" = genuine compat OpEvent
+# rows (the preview-journal stand-in until S15), synthesized by the probe
+# through the retained inverse adapter. The dual-shape fold legs guard
+# PATH_TO_FLAT until it dies with OpEvent in S15.
 _LEGS = ("legacy", "decomposed")
 
 
@@ -425,10 +430,7 @@ class _RecordModel(nn.Module):
         return torch.relu(self.fc(x))
 
 
-@pytest.mark.parametrize("leg", _LEGS)
-def test_seal_dual_stamps_live_journal_and_projection_clone(
-    monkeypatch: pytest.MonkeyPatch, leg: str
-) -> None:
+def test_seal_dual_stamps_live_journal_and_projection_clone() -> None:
     """S-N2 integration: the pre-seal snapshot clone carries the watermark.
 
     ``snapshot_recording_projection`` clones the journal BEFORE ``seal()``
@@ -438,7 +440,6 @@ def test_seal_dual_stamps_live_journal_and_projection_clone(
     with the carried lane filtered empty (nothing folded twice).
     """
 
-    monkeypatch.setenv("TORCHLENS_CAPTURE_PRODUCER", leg)
     torch.manual_seed(20260812 + 71)
     recording = tl.record(_RecordModel(), torch.randn(2, 4), save=tl.func("relu"))
     cores = object.__getattribute__(recording, "_captured_run_cores")

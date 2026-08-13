@@ -2057,7 +2057,7 @@ def _record_predicate_module_boundary_outputs(
     """
 
     from ...capture.predicates import _evaluate_keep_op
-    from ...capture.projections import _event_from_record
+    from ...capture.projections import _record_from_record_context
     from ...fastlog.types import ActivationRecord
     from ...intervention.selectors import BaseSelector
     from ...ir.selector_eval import selector_contains_kind
@@ -2141,7 +2141,7 @@ def _record_predicate_module_boundary_outputs(
                 transformed_disk_payload=transformed_disk,
             )
         )
-        selected_event = _event_from_record(
+        selected_event = _record_from_record_context(
             boundary_ctx,
             decision,
             tensor=tensor,
@@ -2150,6 +2150,9 @@ def _record_predicate_module_boundary_outputs(
             predicate_matched=True,
             container_path=tuple(container_path),
         )
+        selected_policy = selected_event.policy
+        if selected_policy is None:  # pragma: no cover - sparse freeze always stamps one
+            raise RuntimeError("sparse freeze produced a record without a policy facet")
         boundary_label = boundary_ctx.raw_label or boundary_ctx.label
         boundary_event = trace.capture_events.op_event_by_label_raw.get(boundary_label)
         if boundary_event is not None:
@@ -2158,7 +2161,7 @@ def _record_predicate_module_boundary_outputs(
                     boundary_event.seq,
                     boundary_label,
                     output=selected_event.output,
-                    policy=selected_event.policy,
+                    policy=selected_policy,
                     predicate_matched=True,
                     capture_spec=decision,
                     record_context=boundary_ctx,
