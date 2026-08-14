@@ -179,6 +179,10 @@ _LAZY_EXCEPTION_PATHS = {
     # Resolved lazily like the legacy names, but for the opposite reason: the
     # defining modules import ``errors._base``, so eagerly importing them here
     # would create a cycle.
+    "AmbiguousGroupLifetimeError": (
+        "torchlens.distributed._lifecycle",
+        "AmbiguousGroupLifetimeError",
+    ),
     "ArtifactSchemaAgeWarning": ("torchlens._io", "ArtifactSchemaAgeWarning"),
     "ArtifactVersionBelowFloorError": ("torchlens._io", "ArtifactVersionBelowFloorError"),
     "ArgumentConflictError": ("torchlens._errors", "ArgumentConflictError"),
@@ -214,8 +218,18 @@ _LAZY_EXCEPTION_PATHS = {
     # lazy binding keeps this module importable at every commit interleaving.
     "SparseCorePayloadError": ("torchlens.errors.runnable", "SparseCorePayloadError"),
     "StructuralHashMismatchError": ("torchlens.hash", "StructuralHashMismatchError"),
+    "TorchCapabilityWarning": ("torchlens.utils._torch_compat", "TorchCapabilityWarning"),
+    "TorchLensDeprecationWarning": ("torchlens._deprecations", "TorchLensDeprecationWarning"),
+    "UncapturedCollectiveOpError": (
+        "torchlens.distributed._recognizer",
+        "UncapturedCollectiveOpError",
+    ),
     "UnknownBackendError": ("torchlens.backends", "UnknownBackendError"),
     "VariantScanTruncationWarning": ("torchlens._robustness", "VariantScanTruncationWarning"),
+    "WildcardRecvUnsupportedError": (
+        "torchlens.backends.torch.collectives",
+        "WildcardRecvUnsupportedError",
+    ),
     "DistributedCaptureUnsupportedError": (
         "torchlens._distributed",
         "DistributedCaptureUnsupportedError",
