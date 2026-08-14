@@ -20,6 +20,7 @@ from .. import __version__ as TORCHLENS_VERSION
 from .._errors import InvalidArgumentError
 from ..backends import get_backend_spec
 from . import TLSPEC_VERSION, TorchLensIOError
+from ._durability import fsync_dir, fsync_tree
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .paths import reject_symlink_path
 
@@ -270,6 +271,10 @@ class _TlSpecWriter:
                 }
             ]
             cls.write_json(tmp_path / TLSPEC_MANIFEST_FILENAME, manifest)
+            # Durability before publish: fsync every written file and
+            # directory so a power/OS crash after the rename below cannot
+            # publish a bundle holding zero-length or partial members.
+            fsync_tree(tmp_path)
             # Atomic overwrite. Never ``rmtree`` the only good bundle before
             # the replacement is known installed: move the existing target
             # ASIDE to a sibling backup (rename, not delete), swap the freshly
@@ -284,6 +289,10 @@ class _TlSpecWriter:
                 backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
                 os.replace(target_path, backup_path)
             os.replace(tmp_path, target_path)
+            # Make the rename(s) themselves durable: one parent-directory
+            # fsync after the final swap persists both the aside-rename and
+            # the publish (they are entries of the same directory).
+            fsync_dir(target_path.parent)
             if backup_path is not None:
                 # The overwrite is complete; discarding the backup can never
                 # lose the new bundle, so a cleanup failure must not fail the
@@ -411,7 +420,10 @@ class _TlSpecWriter:
         """
 
         text = json.dumps(data, indent=2, sort_keys=False, allow_nan=False)
-        path.write_text(text + "\n", encoding="utf-8")
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     @staticmethod
     def _backend_runtime(source: Any, *, backend_name: str) -> dict[str, Any]:

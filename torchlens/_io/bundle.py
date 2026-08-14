@@ -45,6 +45,7 @@ from . import (
     TorchLensIOError,
     _json,
 )
+from ._durability import fsync_dir, fsync_tree
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
 from .manifest import Manifest, Provenance, TensorEntry, enforce_version_policy, sha256_of_file
@@ -535,7 +536,13 @@ def save(
             pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
         _restrict_mode(tmp_path / "metadata.pkl", 0o600)
 
+        # Durability before publish: fsync every written blob/sidecar and the
+        # bundle directories so a power/OS crash after the rename below cannot
+        # publish a bundle holding zero-length or partial files.
+        fsync_tree(tmp_path)
         tmp_path.rename(bundle_path)
+        # Make the rename itself durable before declaring the save complete.
+        fsync_dir(bundle_path.parent)
         if backup_path is not None:
             try:
                 _remove_path(backup_path)
@@ -3829,9 +3836,7 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _restore_backup(
-    backup_path: Path, bundle_path: Path, *, warn_on_failure: bool = True
-) -> bool:
+def _restore_backup(backup_path: Path, bundle_path: Path, *, warn_on_failure: bool = True) -> bool:
     """Best-effort restore an overwritten bundle after a failed replacement.
 
     On a DOUBLE fault (the save failed AND this restore also fails -- permissions,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import warnings
 from dataclasses import asdict, dataclass
@@ -222,14 +223,10 @@ def _json_ready_codec_metadata_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {
-            str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()
-        }
+        return {str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return {
-            _CODEC_METADATA_TUPLE_TAG: [
-                _json_ready_codec_metadata_value(item) for item in value
-            ]
+            _CODEC_METADATA_TUPLE_TAG: [_json_ready_codec_metadata_value(item) for item in value]
         }
     if isinstance(value, list):
         return [_json_ready_codec_metadata_value(item) for item in value]
@@ -585,7 +582,12 @@ class Manifest:
                 sort_keys=False,
                 allow_nan=False,
             )
-            manifest_path.write_text(text + "\n", encoding="utf-8")
+            with manifest_path.open("w", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+                handle.flush()
+                # Durability: a crash after the enclosing publish rename must
+                # not leave a zero-length/partial manifest behind it.
+                os.fsync(handle.fileno())
         except (OSError, ValueError) as exc:
             raise TorchLensIOError(f"Failed to write manifest at {manifest_path}.") from exc
 
