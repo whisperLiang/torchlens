@@ -30,6 +30,7 @@ All other 78+ fields use the first pass's values only.
 (correct because same-layer grouping requires identical structural position).
 """
 
+import copy
 import weakref
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -914,7 +915,16 @@ class Layer:
         # initialized a fresh empty dict here rather than copying from the
         # first pass, so layer annotations must not alias ``ops[0]``'s dict
         # (mirroring leaked op annotations into the layer and vice versa).
+        # The ONE exception is the reserved "collective" namespace (R18-7):
+        # a collective boundary layer surfaces its first pass's portable
+        # collective_boundary_v1 payload, seeded here as an independent
+        # deep copy so neither side can mutate the other. Other op
+        # annotation keys (user keys, save_mode/saved_out_version) stay
+        # op-only.
         self.annotations: dict[str, Any] = {}
+        first_pass_annotations = getattr(first_pass, "annotations", None)
+        if isinstance(first_pass_annotations, dict) and "collective" in first_pass_annotations:
+            self.annotations["collective"] = copy.deepcopy(first_pass_annotations["collective"])
 
         # Pass management
         self.ops = OpAccessor()
