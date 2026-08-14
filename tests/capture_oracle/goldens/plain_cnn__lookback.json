@@ -157,15 +157,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "defaulted_false",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -309,15 +303,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "defaulted_false",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -540,20 +528,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 451122,
+      "python_peak_memory_median_bytes": 486292,
       "sample_count": 3,
       "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 50.30672399880132
+      "wall_time_median_ms": 190.69912200211547
     }
   },
   "sha256_chunks": [
-    "b1017b88",
-    "36331cfc",
-    "e52c7d10",
-    "60af001b",
-    "f05897d4",
-    "c9d334a5",
-    "994e9c28",
-    "a31bb887"
+    "376253b7",
+    "efafa43c",
+    "bbe5fddf",
+    "b40b978c",
+    "07ce69fe",
+    "50ccc0d8",
+    "23d45b79",
+    "d1e154e0"
   ]
 }

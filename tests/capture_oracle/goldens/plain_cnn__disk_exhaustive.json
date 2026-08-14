@@ -164,15 +164,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "populated",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -316,15 +310,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "populated",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -616,20 +604,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 1567758,
+      "python_peak_memory_median_bytes": 1596358,
       "sample_count": 3,
       "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 89.47123899997678
+      "wall_time_median_ms": 236.39839600218693
     }
   },
   "sha256_chunks": [
-    "961c2570",
-    "7a5345c0",
-    "9bc323e5",
-    "976bec01",
-    "9afdb749",
-    "5ad31e31",
-    "aaa3a75a",
-    "3fb83744"
+    "929dca30",
+    "ae9599d2",
+    "651b8f35",
+    "9949f420",
+    "ba4f1848",
+    "1e421a26",
+    "e9fc2155",
+    "7714bf9e"
   ]
 }
