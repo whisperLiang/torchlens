@@ -25,7 +25,12 @@ derivation. When present, `phase` is one of (`FORWARD` — the model forward rai
 raised; `POSTPROCESS` — the postprocess pipeline or the core freeze raised;
 `TEARDOWN` — teardown failed AFTER settlement, demoting the outcome) and a
 diagnostic-only `origin` (`user_op` / `torchlens` / `interrupt` / `unknown`)
-that never steers a capability gate.
+that never steers a capability gate. `phase` is FAILED-*only*, not
+FAILED-*required*: two writers legitimately emit `FAILED` with
+`phase=None` — the recorder fallback stamp (when the scratch trace's settled
+record is unavailable or non-failed) and the legacy `partial_error`
+derivation on deserialized recordings. The coherence matrix permits the
+absent phase; no gate consults it.
 
 ## Where to read it
 
@@ -181,11 +186,17 @@ sits inside a region whose only success exit reaches an authority stamp.
 - `TerminalState` / `RunOutcome.state` is the first-transition log; it and
   the outcome may legitimately disagree only in the demotion direction,
   disclosed by `settlement_note`.
-- Preview asymmetry (MLX/Paddle): those backends run `cleanup_model_session`
-  in a `finally` positioned after the return expression, so a post-stamp
-  cleanup failure escapes with an unreachable object still carrying an
-  undemoted `COMPLETE` stamp — net semantics equal the teardown-failure path
-  minus the demotion. Disclosed residual, not a gate hole.
+- Preview cleanup asymmetry vs the torch orchestrator: MLX and Paddle run
+  `cleanup_model_session` in a `finally` positioned BEFORE their settlement
+  stamp (settlement is the last act, per the path-20 contract), so a
+  cleanup/teardown failure there is a PRODUCTLESS escape — the exception
+  propagates with no settled record at all, and a hypothetical pickle of the
+  escaped object derives UNATTESTED. The torch orchestrator instead settles
+  FAILED in its `finally` (and demotes on post-settlement teardown failure),
+  so the same failure class on torch yields a settled FAILED product with
+  `exc.partial_log`. Net semantics are equivalent on the never-COMPLETE
+  guarantee (path 7 minus the demoted record); the missing settled record on
+  previews is the disclosed residual.
 
 ## Public surface added by this design
 
