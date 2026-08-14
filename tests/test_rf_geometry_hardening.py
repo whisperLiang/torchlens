@@ -930,3 +930,49 @@ def test_non_antialiased_interpolate_regression() -> None:
         truth = true_receptive_support(model, x, (0, 0, 1, 1), deltas=(0.5, -0.5))
         box = interp.receptive_field.at((1, 1))
         assert_box_against_truth(box, truth, (2, 3), context=f"non-AA {mode} ac={align}")
+
+
+def test_float_ambiguity_margin_scales_with_magnitude() -> None:
+    """The interpolation ambiguity margin grows with the compared quantity.
+
+    ATen evaluates tap centers and window bounds in float64, whose rounding
+    error is RELATIVE (~ULP of the value), while the historical margin was a
+    fixed absolute 2^-40. Beyond extent ~4k a real float64 rounding could land
+    outside that margin and the ``exact=True`` containment stamp would lie.
+    The margin is now max(2^-40, |value| * 2^-48).
+    """
+
+    from fractions import Fraction
+
+    from torchlens.receptive_field.rules.interpolation import (
+        _FLOAT_AMBIGUITY_MARGIN,
+        _ambiguity_margin,
+        _antialias_filter_verdict,
+        _floor_with_margin,
+    )
+
+    # Small quantities keep the historical absolute floor exactly.
+    assert _ambiguity_margin(Fraction(3, 2)) == _FLOAT_AMBIGUITY_MARGIN
+
+    # Large quantities get a proportionally larger margin.
+    big = Fraction(2**20)
+    assert _ambiguity_margin(big) == big * Fraction(1, 2**48)
+
+    # A window bound 2^-30 away from an integer at magnitude 2^20 is within
+    # float64 ambiguity there; the fixed absolute margin called it exact.
+    near_boundary = big + Fraction(1, 2**30)
+    value, exact = _floor_with_margin(near_boundary, prefer_low=True)
+    assert exact is False
+    assert value == 2**20 - 1  # containment: the widened (lower) bound.
+
+    # The same offset at small magnitude is genuinely unambiguous.
+    small_value, small_exact = _floor_with_margin(Fraction(5) + Fraction(1, 2**30), prefer_low=True)
+    assert small_exact is True
+    assert small_value == 5
+
+    # Filter verdicts near a zero use the center-scaled margin: with a
+    # large-extent margin the tap is kept and exactness downgraded
+    # (containment), never silently dropped.
+    t = Fraction(1) + Fraction(1, 2**30)
+    assert _antialias_filter_verdict("bilinear", t, _ambiguity_margin(big)) == "ambiguous"
+    assert _antialias_filter_verdict("bilinear", t, _ambiguity_margin(Fraction(1))) == "zero"
