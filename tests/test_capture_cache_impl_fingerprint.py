@@ -336,3 +336,30 @@ def test_tensor_content_hash_covers_device_and_requires_grad() -> None:
     flagged = torch.ones(3).requires_grad_(True)
     assert _hash_tensor_content(base) != _hash_tensor_content(flagged)
     assert _hash_tensor_content(base) == _hash_tensor_content(torch.ones(3))
+
+
+def test_sibling_package_forward_is_not_torchlens_instrumentation() -> None:
+    """A ``torchlens_contrib`` install must not be classified as TorchLens'.
+
+    grind-r2 b4-fable R39-3: the bare prefix match claimed any sibling path
+    that string-extends the package dir, so a user forward override defined
+    in ``.../site-packages/torchlens_contrib/model.py`` was EXCLUDED from the
+    implementation signature and its edits silently hit the stale cache.
+    """
+
+    from torchlens._capture_state_helpers import (
+        _TORCHLENS_PACKAGE_DIR,
+        _is_torchlens_instrumentation,
+    )
+
+    def _function_with_filename(filename: str):
+        code = compile("def shim(x):\n    return x\n", filename, "exec")
+        namespace: dict = {}
+        exec(code, namespace)  # noqa: S102 - test-owned source
+        return namespace["shim"]
+
+    sibling = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "_contrib/model.py")
+    assert _is_torchlens_instrumentation(sibling) is False
+
+    interior = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "/wrapped.py")
+    assert _is_torchlens_instrumentation(interior) is True

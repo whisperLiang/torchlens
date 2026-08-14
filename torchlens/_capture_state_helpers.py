@@ -1845,7 +1845,11 @@ def _is_torchlens_instrumentation(func: Any) -> bool:
     code = getattr(target, "__code__", None)
     if not isinstance(code, types.CodeType):
         return False
-    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR)
+    # The separator matters: a bare prefix match also claimed sibling installs
+    # such as ``site-packages/torchlens_contrib/model.py``, silently EXCLUDING
+    # a user-owned forward override from the implementation signature (edits
+    # then hit the stale cache).
+    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR + os.sep)
 
 
 def _capture_cache_dir(cache_dir: str | Path | None) -> Path:
