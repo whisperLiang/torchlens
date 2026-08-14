@@ -281,6 +281,34 @@ def _assert_record_matches_golden(
     _assert_tracking_is_relative(actual, golden)
 
 
+def _recording_torch_matches(recorded: str | None, current: str) -> bool:
+    """Return whether the golden's recording torch matches the running torch.
+
+    The build tag is stripped from both sides, mirroring
+    ``_oracle_env.env_fingerprint``: a ``2.13.0+cu130``-recorded golden IS
+    enforceable on a ``2.13.0+cpu`` CI runtime (same source version, same CPU
+    kernels), and comparing full build strings made the nightly enforcement
+    leg skip the whole matrix forever (T13.2). Kernel float drift the gate
+    exists for happens across VERSIONS, which still mismatch after the strip.
+
+    Parameters
+    ----------
+    recorded:
+        ``tracking.torch_version`` from the committed golden, if present.
+    current:
+        ``torch.__version__`` of the running interpreter.
+
+    Returns
+    -------
+    bool
+        True when both name the same torch source version.
+    """
+
+    if recorded is None:
+        return False
+    return recorded.split("+", 1)[0] == current.split("+", 1)[0]
+
+
 def _forward_invocation_count(record: dict[str, Any]) -> int:
     """Return the recorded user-forward invocation count.
 
@@ -318,7 +346,7 @@ def test_capture_characterization_matches_golden(case: CaseSpec) -> None:
     assert "".join(golden_payload["sha256_chunks"]) == _digest_payload(golden)
     recorded_torch = golden["tracking"].get("torch_version")
     current_torch = actual["tracking"]["torch_version"]
-    if recorded_torch != current_torch:
+    if not _recording_torch_matches(recorded_torch, current_torch):
         # The goldens embed raw float-byte digests: on a different torch the
         # comparison cannot distinguish real capture regression from expected
         # kernel drift (b10 R78-7). A visible skip, never a red that trains

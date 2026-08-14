@@ -44,7 +44,6 @@ jobs:
             torchvision: "0.23.0+cpu"
             numpy: numpy
             scope: smoke
-            render_byte_oracle: "1"
           - track: newest-admitted
             python: "3.10"
             torch: "2.13.0+cpu"
@@ -59,6 +58,13 @@ jobs:
             # golden cases (T13.1). Lockstep with the ENV markers is pinned by
             # tests/test_ci_packaging_gates.py.
             oracle_enforce: "1"
+            # DOT-byte enforcement of the render-identity oracle runs here too:
+            # the byte golden was recorded on this same py3.10 environment (the
+            # byte compare is sensitive to py-minor qualname drift). The flag
+            # previously sat on a row whose smoke selection never runs the
+            # heavy-marked consumer test, so byte identity was enforced on NO
+            # CI leg (T13.2); a dedicated step below executes it explicitly.
+            render_byte_oracle: "1"
           - track: newest-admitted
             python: "3.11"
             torch: "2.13.0+cpu"
@@ -119,7 +125,6 @@ jobs:
       - name: Run smoke tests and compatibility coverage
         if: matrix.scope == 'smoke'
         env:
-          TORCHLENS_RENDER_BYTE_ORACLE: ${{ matrix.render_byte_oracle }}
           TORCHLENS_ORACLE_ENFORCE: ${{ matrix.oracle_enforce }}
         run: |
           # The menagerie build subsystem is excluded from the smoke matrix on
@@ -148,6 +153,21 @@ jobs:
         # mass-skip regression always does.
         run: |
           python scripts/check_ci_executed_tests.py "${{ runner.temp }}/smoke.junit.xml" 1900
+
+      - name: Enforce the render byte oracle
+        if: matrix.render_byte_oracle == '1'
+        # The byte half of the render-identity oracle is heavy-marked, so the
+        # smoke selection never executes it — the historical row-level env
+        # flag was dead config and DOT-byte identity ran on NO CI leg (T13.2).
+        # Run the consumer test explicitly on the recording-environment row
+        # (measured ~6s) and attest that it EXECUTED rather than skipped.
+        env:
+          TORCHLENS_RENDER_BYTE_ORACLE: "1"
+        run: |
+          pytest tests/test_viz_render_identity_oracle.py -m heavy --tb=short -q \
+            --junitxml="${{ runner.temp }}/render-byte-oracle.junit.xml"
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/render-byte-oracle.junit.xml" 1
 
   crawler-round21-linux-release:
     name: Crawler Round 21 Linux committed-lock release proofs

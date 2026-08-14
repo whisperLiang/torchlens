@@ -104,3 +104,71 @@ def test_precommit_ruff_fix_runs_before_ruff_format() -> None:
         "reverse order lets a lint autofix produce unformatted code that the "
         "CI `ruff format --check` gate rejects"
     )
+
+
+def test_render_byte_oracle_executes_on_a_ci_leg() -> None:
+    """A dedicated step actually RUNS the heavy render byte-oracle test.
+
+    The byte half of the render-identity oracle is heavy-marked, so setting
+    ``TORCHLENS_RENDER_BYTE_ORACLE`` on a row whose selection is ``-m smoke``
+    was dead config: DOT-byte identity was enforced on no CI leg while the
+    flag looked wired (T13.2). The dedicated step must select the heavy
+    marker and attest execution through the junit floor.
+    """
+
+    smoke = _smoke_job()
+    rows = [
+        row
+        for row in smoke["strategy"]["matrix"]["include"]
+        if str(row.get("render_byte_oracle", "")) == "1"
+    ]
+    assert len(rows) == 1, "exactly one smoke row must carry the render byte oracle"
+    step = next(
+        (
+            step
+            for step in smoke["steps"]
+            if "test_viz_render_identity_oracle.py" in step.get("run", "")
+        ),
+        None,
+    )
+    assert step is not None, "no smoke step executes the render byte-oracle test"
+    assert step.get("if") == "matrix.render_byte_oracle == '1'"
+    assert step["env"]["TORCHLENS_RENDER_BYTE_ORACLE"] == "1"
+    assert "-m heavy" in step["run"], (
+        "the byte-oracle consumer is heavy-marked; without selecting the "
+        "heavy marker the step executes nothing"
+    )
+    assert "check_ci_executed_tests.py" in step["run"], (
+        "the byte-oracle step must attest the test EXECUTED rather than skipped"
+    )
+
+
+def test_capture_oracle_matrix_enforces_on_a_nightly_leg() -> None:
+    """Nightly runs the slow capture-characterization matrix with a floor."""
+
+    nightly = _load_yaml(_WORKFLOWS / "nightly.yml")["jobs"]
+    job = nightly.get("capture-byte-oracle")
+    assert job is not None, "nightly lost the capture-byte-oracle job (T13.2)"
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "tests/capture_oracle/" in runs and "-m slow" in runs
+    assert "check_ci_executed_tests.py" in runs, (
+        "the capture-oracle leg must attest executed tests: the version gate "
+        "skips the whole matrix on any non-recording torch, which is exactly "
+        "the silent-green this leg exists to prevent"
+    )
+
+
+def test_capture_oracle_version_gate_strips_the_build_tag() -> None:
+    """The golden version gate compares torch SOURCE versions, not build tags.
+
+    A ``+cu130``-recorded golden must enforce on a ``+cpu`` CI runtime of the
+    same torch version; comparing full build strings made every CI leg skip
+    the capture-characterization matrix forever (T13.2).
+    """
+
+    from capture_oracle.test_capture_oracle import _recording_torch_matches
+
+    assert _recording_torch_matches("2.13.0+cu130", "2.13.0+cpu")
+    assert _recording_torch_matches("2.13.0", "2.13.0+cpu")
+    assert not _recording_torch_matches("2.12.0+cpu", "2.13.0+cpu")
+    assert not _recording_torch_matches(None, "2.13.0+cpu")
