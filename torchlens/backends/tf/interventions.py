@@ -607,7 +607,9 @@ def _fire_site(
     )
     if label is not None:
         _mark_intervention_event(session, label, fire_result)
-        plan.fired_site_labels.append((site.plan_id, label))
+    # Accounting is UNCONDITIONAL: a fire whose producer label could not be
+    # resolved still fired, and the zero-match audit must not misreport it.
+    plan.fired_site_labels.append((site.plan_id, label or "<unresolved>"))
     return replacement
 
 
@@ -692,6 +694,26 @@ def audit_tf_site_reachability(plan: TFInterventionPlan, session: Any) -> None:
                 "callbacks are read-only, so only calls through the curated python "
                 "entry points (tf.nn/tf.math core) or module boundaries can be "
                 "substituted; refusing instead of silently not intervening."
+            )
+    # Zero-match disclosure (the preview half of the torch-side fix): the
+    # reachability refusal above covers matched-but-unpresented ops only, so a
+    # selector matching NOTHING -- or a module site whose boundary the exit
+    # hook never reached (module sites get no reachability audit by
+    # construction) -- produced a trace byte-identical to plain capture with
+    # no signal. ``fired_site_labels`` is the accounting the fire path already
+    # writes; a planned site with zero fires warns, mirroring the torch
+    # forward/backward and paddle disclosures.
+    import warnings as _warnings
+
+    fired_plan_ids = {plan_id for plan_id, _label in plan.fired_site_labels}
+    for planned_site in (*plan.op_sites, *plan.module_sites):
+        if planned_site.plan_id not in fired_plan_ids:
+            _warnings.warn(
+                f"tf intervention site {planned_site.plan_id} fired at zero sites during "
+                "the forward; the capture is byte-identical to plain capture for that "
+                "entry (check the selector's op/module name).",
+                UserWarning,
+                stacklevel=2,
             )
 
 

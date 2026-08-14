@@ -1026,8 +1026,9 @@ def _warn_zero_match_capture_selectors(
     save_selector: Any,
     intervene_selector: Any,
     intervene_direction: str | None,
+    halt_selector: Any = None,
 ) -> None:
-    """Warn when a capture-time save or intervention selector matched no sites.
+    """Warn when a capture-time save/intervention/halt selector matched no sites.
 
     Parameters
     ----------
@@ -1039,6 +1040,14 @@ def _warn_zero_match_capture_selectors(
         Capture-time intervention selector, if configured.
     intervene_direction:
         Intervention direction whose live phase determines warning timing.
+    halt_selector:
+        Capture-time halt predicate, if configured. ``halt=`` was the one
+        selector slot outside the zero-match disclosure family: a typo'd
+        label selector silently ran the FULL forward (spending the memory/
+        latency the halt was meant to avoid) and handed back the model's
+        real outputs where the caller expected a frontier. Only ``BaseSelector``
+        halts are judged -- an arbitrary value-dependent callable legitimately
+        never firing is data, not a typo.
 
     Returns
     -------
@@ -1072,6 +1081,14 @@ def _warn_zero_match_capture_selectors(
             warnings.warn(
                 f"Capture-time intervention selector {intervene_selector!r} matched zero sites; "
                 "no intervention fired.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if isinstance(halt_selector, BaseSelector) and not bool(getattr(trace, "halted", False)):
+            warnings.warn(
+                f"Capture-time halt selector {halt_selector!r} matched zero sites; "
+                "the capture ran the full forward and completed without halting, so "
+                "the outputs are the model's real outputs, not the intended frontier.",
                 UserWarning,
                 stacklevel=3,
             )
@@ -1710,6 +1727,7 @@ def _run_model_and_save_specified_outs(
             module_intervene_selector or getattr(intervene_predicate, "selector", None)
         ),
         intervene_direction=getattr(warning_intervene_decision, "direction", None),
+        halt_selector=halt_predicate,
     )
     return trace
 
