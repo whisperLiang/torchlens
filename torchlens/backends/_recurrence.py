@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from ..ir.events import is_control_edge_use
 from ..postprocess.loop_detection import _module_site, _structural_arg_signature
 from ..postprocess.loop_grouping_adapter import (
+    _PSEUDO_FUNC_NAME,
     RecurrenceAssignment,
     RecurrenceGroupingGraph,
     RecurrenceNode,
@@ -37,12 +38,6 @@ from ..postprocess.loop_grouping_adapter import (
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
-
-# Backend marker the grouper's param-free topological pass treats as a pseudo-op
-# (never a recurrent pass of anything). Kept in sync with
-# ``loop_grouping_adapter._PSEUDO_FUNC_NAME``.
-_PSEUDO_FUNC_NAME = "none"
-
 
 def compute_preview_recurrence_assignments(
     trace: Trace,

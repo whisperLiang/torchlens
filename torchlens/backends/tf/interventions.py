@@ -32,12 +32,12 @@ from ...intervention.selectors import BaseSelector
 from ...intervention.types import HelperSpec, InterventionDecision
 from ...ir.intervention import FireResult
 from ...ir.op_record import amend_module_exit_intervention
-from .._selective_save import reject_selector_outside_kinds
+from .._selective_save import _STATIC_INTERVENTION_SELECTOR_KINDS, reject_selector_outside_kinds
 from ..registry import BackendUnsupportedError
 
-_TF_INTERVENTION_SELECTOR_KINDS = frozenset(
-    {"label", "func", "module", "contains", "in_module", "and", "or", "not"}
-)
+# Alias of the neutral authority table (the ``output`` drop is declared
+# there) -- never re-spell the kinds here.
+_TF_INTERVENTION_SELECTOR_KINDS = _STATIC_INTERVENTION_SELECTOR_KINDS
 _MODULE_ONLY_KINDS = frozenset({"module", "in_module", "and", "or", "not"})
 
 _CURATED_WRAP_ENTRIES: tuple[tuple[str, str], ...] = (

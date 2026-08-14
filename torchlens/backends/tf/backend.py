@@ -32,16 +32,15 @@ from .._options import (
     reject_extra_trace_kwargs,
     reject_unsupported_trace_options,
 )
-from .._selective_save import reject_selector_outside_kinds
+from .._selective_save import _STATIC_SELECTOR_KINDS, reject_selector_outside_kinds
 from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
 from .modules import TFModuleTree, discover_tf_module_tree, tf_param_logs
 from .op_callback_capture import TFEagerCaptureSession, warm_up_tf_callable
 
 TFExecutionMode = Literal["eager", "graph_only"]
-_TF_STATIC_SAVE_SELECTOR_KINDS = frozenset(
-    {"label", "func", "module", "output", "contains", "in_module", "and", "or", "not"}
-)
+# Alias of the neutral authority table -- never re-spell the kinds here.
+_TF_STATIC_SAVE_SELECTOR_KINDS = _STATIC_SELECTOR_KINDS
 
 
 @dataclass(frozen=True)

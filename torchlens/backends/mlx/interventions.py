@@ -24,12 +24,15 @@ from ...intervention.hooks import make_hook_context, normalize_hook
 from ...intervention.selectors import BaseSelector
 from ...intervention.types import HelperSpec, InterventionDecision
 from ...ir.selector_eval import first_selector_kind_outside, selector_contains_kind
+from .._selective_save import _STATIC_INTERVENTION_SELECTOR_KINDS
 from ..registry import BackendUnsupportedError
 
-MLX_STATIC_INTERVENTION_SELECTOR_KINDS = frozenset(
-    {"label", "func", "module", "contains", "in_module", "and", "or", "not"}
-)
-"""Selector kinds resolvable from static capture-time labels on MLX."""
+MLX_STATIC_INTERVENTION_SELECTOR_KINDS = _STATIC_INTERVENTION_SELECTOR_KINDS
+"""Selector kinds resolvable from static capture-time labels on MLX.
+
+Alias of the neutral authority table (the ``output`` drop is declared
+there) -- never re-spell the kinds here.
+"""
 
 #: Selector kinds that may target the short ``{layer_type}_{type_index}``
 #: alias, which is only visible through a second evaluation with the label
