@@ -1927,6 +1927,12 @@ def _record_module_exit_metadata(
     mod_id = id(module)
     module_call_index = trace._module_capture_ws.mod_call_index[mod_id]
     trace._module_capture_ws.mod_call_labels[mod_id].pop()
+    from ...intervention.runtime import (
+        _peek_module_intervention_parent_labels,
+        _peek_tensor_live_fire_results,
+        _record_module_intervention_parent_labels,
+        _record_tensor_live_fire_results,
+    )
     from .ops import _walk_output_tensors_with_paths
 
     output_entries = list(_walk_output_tensors_with_paths(out))
@@ -1966,34 +1972,27 @@ def _record_module_exit_metadata(
         # as input) need _decorated_identity() to create a distinct log entry
         # so the graph correctly shows the module boundary.
         tensor_label = get_live_tensor_label(t, trace.capture_events.live_index.by_raw_label)
-        fire_results = tuple(getattr(t, "_tl_live_fire_results", ()))
+        # Peek through BOTH evidence channels (plain attribute + the
+        # storage-owned side table): a replacement tensor that rejects dynamic
+        # attributes must not read as evidence-free here, or the fresh value
+        # below is silently misclassified as an internal source.
+        fire_results = _peek_tensor_live_fire_results(t)
         if (_module_type(module).lower() == "identity") or (
             tensor_label is not None and tensor_label in input_tensor_labels
         ):
             intervention_parent_labels: list[str] = list(
-                getattr(t, "_tl_module_intervention_parent_labels", ())
+                _peek_module_intervention_parent_labels(t, trace)
             )
             t = cast(Callable[[torch.Tensor], torch.Tensor], _state._decorated_identity)(t)
             if fire_results:
-                try:
-                    setattr(t, "_tl_live_fire_results", fire_results)
-                    setattr(
-                        t,
-                        "_tl_module_intervention_parent_labels",
-                        tuple(intervention_parent_labels),
-                    )
-                except Exception as exc:
-                    # Losing the fire metadata means the replacement op minted
-                    # downstream carries no intervention provenance -- disclose
-                    # instead of silently swallowing (B1-13a).
-                    import warnings
-
-                    warnings.warn(
-                        "TorchLens could not attach intervention fire metadata "
-                        f"to a module output tensor ({type(exc).__name__}: "
-                        f"{exc}); the replacement op will carry no "
-                        "intervention provenance.",
-                        stacklevel=2,
+                # Re-attach through the robust recorders: the side channels
+                # absorb attr-rejecting tensors, and a tensor writable through
+                # NEITHER channel refuses typed instead of silently losing the
+                # intervention provenance (B1-13a, strengthened).
+                _record_tensor_live_fire_results(t, fire_results)
+                if intervention_parent_labels:
+                    _record_module_intervention_parent_labels(
+                        t, tuple(intervention_parent_labels), trace
                     )
             tensor_label = get_live_tensor_label(t, trace.capture_events.live_index.by_raw_label)
         if tensor_label is None:
@@ -2002,9 +2001,7 @@ def _record_module_exit_metadata(
             # that value as an explicit replacement op. Without fire metadata, an
             # untagged module return remains an internal source whose construction
             # TorchLens could not trace (for example, inside ``torch.vmap``).
-            intervention_parent_labels = list(
-                getattr(t, "_tl_module_intervention_parent_labels", ())
-            )
+            intervention_parent_labels = list(_peek_module_intervention_parent_labels(t, trace))
             boundary_label = _ensure_module_output_tensor_logged(
                 trace,
                 t,
@@ -2110,6 +2107,7 @@ def _record_predicate_module_boundary_outputs(
     from ...capture.predicates import _evaluate_keep_op
     from ...capture.projections import _record_from_record_context
     from ...fastlog.types import ActivationRecord
+    from ...intervention.runtime import _peek_module_intervention_parent_labels
     from ...intervention.selectors import BaseSelector
     from ...ir.predicate import RetroactiveCaptureDecision
     from ...ir.selector_eval import selector_contains_kind
@@ -2135,9 +2133,7 @@ def _record_predicate_module_boundary_outputs(
         walked_leaf_count += 1
         raw_label = get_tensor_label(tensor)
         if raw_label is None:
-            parent_labels = tuple(
-                getattr(tensor, "_tl_module_intervention_parent_labels", ()) or ()
-            )
+            parent_labels = _peek_module_intervention_parent_labels(tensor, trace)
             raw_label = parent_labels[0] if parent_labels else None
         if raw_label is not None:
             labeled_outputs.append((tensor, tuple(container_path), raw_label))
