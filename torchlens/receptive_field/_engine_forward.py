@@ -105,30 +105,6 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
     return solution
 
 
-def lookup_projective(
-    trace: Trace, source: Op | str, target_ops: Iterable[Op | str]
-) -> Mapping[str, ReceptiveField]:
-    """Return all target-space descriptors for one source operation.
-
-    Parameters
-    ----------
-    trace:
-        Captured TorchLens trace.
-    source:
-        Source operation or exact pass-qualified label.
-    target_ops:
-        Target operations passed to :func:`solve_projective`.
-
-    Returns
-    -------
-    collections.abc.Mapping
-        Mapping from reachable target result key to projective descriptor.
-    """
-
-    source_op = resolve_graph_point(trace, source)
-    return solve_projective(trace, target_ops).per_op.get(source_op.label, MappingProxyType({}))
-
-
 def _canonical_targets(trace: Trace, target_ops: Iterable[Op | str]) -> tuple[Op, ...]:
     """Resolve, deduplicate, and trace-order one target set."""
 
