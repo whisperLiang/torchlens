@@ -396,3 +396,31 @@ def test_clear_capture_cache_is_public(tmp_path: Path) -> None:
     assert len(list((tmp_path / "capture").glob("*.pkl"))) == 1
     assert tl.clear_capture_cache(tmp_path) == 1
     assert list((tmp_path / "capture").glob("*.pkl")) == []
+
+
+def test_predicate_keys_cover_keyword_only_defaults() -> None:
+    """kwonly-default redefinition must change the key (r2 b4-fable R39-4).
+
+    ``def p(ctx, *, thr=0.5)`` redefined with ``thr=0.9`` has identical
+    co_code, an empty closure, and ``__defaults__ is None``: both selector
+    key lanes collided the two definitions onto one key, serving the stale
+    cached trace.
+    """
+
+    from torchlens._trace_selector_helpers import _stable_cache_fragment
+
+    namespace_low: dict = {}
+    namespace_high: dict = {}
+    exec("def predicate(ctx, *, thr=0.5):\n    return ctx > thr\n", namespace_low)  # noqa: S102
+    exec("def predicate(ctx, *, thr=0.9):\n    return ctx > thr\n", namespace_high)  # noqa: S102
+    low, high = namespace_low["predicate"], namespace_high["predicate"]
+    assert low.__code__.co_code == high.__code__.co_code
+    assert low.__defaults__ is None and high.__defaults__ is None
+
+    assert _predicate_cache_key(low) != _predicate_cache_key(high)
+    assert _stable_cache_fragment(low) != _stable_cache_fragment(high)
+    # Identical definitions still agree (no false misses).
+    namespace_same: dict = {}
+    exec("def predicate(ctx, *, thr=0.5):\n    return ctx > thr\n", namespace_same)  # noqa: S102
+    assert _predicate_cache_key(low) == _predicate_cache_key(namespace_same["predicate"])
+    assert _stable_cache_fragment(low) == _stable_cache_fragment(namespace_same["predicate"])
