@@ -24,6 +24,8 @@ unwrapped eager torch. Flag gates use ``getattr`` so the module also imports
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
@@ -226,8 +228,12 @@ class TestDisclosedResiduals:
         # identity shims (default-constructed and pre-wrap-constructed layers
         # always stored the original); fixing it would require restoring the
         # namespace between captures -- a wrapper-lifecycle design change, not
-        # a shim. unwrap_torch() or a fresh process pickles fine. This test
-        # pins the residual's shape so a silent change gets noticed.
+        # a shim. For THIS stored-ORIGINAL shape, unwrap_torch() or a fresh
+        # process pickles fine (the namespace read matches the original
+        # again). The MIRROR shape -- a user-held plain attribute read taken
+        # WHILE wrapped, which stores the WRAPPER -- is NOT recovered by
+        # unwrap_torch(); see test_user_held_wrapper_survives_unwrap below.
+        # This test pins the residual's shape so a silent change gets noticed.
         import io
         import pickle
 
@@ -240,6 +246,10 @@ class TestDisclosedResiduals:
             pickle.dump(layer, io.BytesIO())
 
     def test_pickle_after_unwrap_succeeds(self):
+        # Recovery claim scoped to the stored-ORIGINAL shape only: the shim
+        # stores the original torch function, so once unwrap_torch() restores
+        # the namespace the identity comparison matches again. This does NOT
+        # generalize to user-held wrapper references (next test).
         import io
         import pickle
 
@@ -256,6 +266,45 @@ class TestDisclosedResiduals:
             assert buffer.getvalue()
         finally:
             wrap_torch()
+
+    def test_user_held_wrapper_survives_unwrap(self):
+        # DISCLOSED RESIDUAL (honest shape): a plain attribute read of a
+        # wrapped function taken WHILE wrappers are installed (``held =
+        # F.relu``) hands the user the WRAPPER object, and unwrap_torch()
+        # cannot repair it -- TorchLens never crawls or mutates user objects
+        # (the sys.modules crawler is deleted by design). After unwrap the
+        # held reference stays callable (it delegates to the original) but is
+        # identity-poisoned: ``held is F.relu`` is False and pickling it (or
+        # any object holding it) fails, because save_global resolves the
+        # qualname to the restored ORIGINAL and identity-compares. Recovery
+        # requires re-reading the attribute (or a fresh process), never
+        # unwrap alone. The migration doc must disclose this exactly.
+        import pickle
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        held = F.relu
+        assert _resolve(held) is not held, "namespace read while wrapped must be the wrapper"
+        try:
+            unwrap_torch()
+            assert held is not F.relu, "unwrap_torch() does not repair user-held references"
+            assert torch.equal(held(torch.tensor([-1.0, 1.0])), torch.tensor([0.0, 1.0]))
+            with pytest.raises(pickle.PicklingError, match="relu"):
+                pickle.dumps(held)
+        finally:
+            wrap_torch()
+        doc = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "migration"
+            / "scoped_detached_patching.md"
+        )
+        text = doc.read_text(encoding="utf-8")
+        assert "does not repair user-held wrapper references" in text, (
+            "the migration doc must disclose that unwrap_torch() cannot recover "
+            "plain attribute reads taken while wrapped"
+        )
 
 
 class TestCausalBiasImportWindow:
