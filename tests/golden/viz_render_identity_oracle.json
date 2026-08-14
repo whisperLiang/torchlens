@@ -1764,7 +1764,7 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleBatchNorm {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleBatchNorm</B><br align='left'/>9 tensors total (2.6 KB)<br align='left'/>8 params (all trainable, 32 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 1, 6, 6), 288 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> conv2d_1_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tconv2d_1_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 1, 1) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tconv2d_1_1pass1 -> batchnorm_1_2pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tbatchnorm_1_2pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>batchnorm_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">eps=1e-05, momentum=0.1</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2,) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@norm</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out peripheries=2 shape=box style=\"filled,solid\" tooltip=\"Hidden buffers: norm.running_mean, norm.running_var\"]\n\tbatchnorm_1_2pass1 -> relu_1_3pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_1_3pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\trelu_1_3pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph cluster_norm_pass1 {\n\t\tfillcolor=white label=<<B>@norm</B><br align='left'/>(BatchNorm2d)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleBatchNorm {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleBatchNorm</B><br align='left'/>9 tensors total (2.6 KB)<br align='left'/>8 params (all trainable, 32 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 1, 6, 6), 288 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> conv2d_1_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tconv2d_1_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 1, 1) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tconv2d_1_1pass1 -> batchnorm_1_2pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tbatchnorm_1_2pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>batchnorm_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">eps=1e-05, momentum=0.1</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2,) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@norm</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out peripheries=2 shape=box style=\"filled,solid\" tooltip=\"Hidden buffers: norm.running_mean, norm.running_var\"]\n\tbatchnorm_1_2pass1 -> relu_1_3pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_1_3pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\trelu_1_3pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(2, 2, 6, 6), 576 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=5, raw_op=5)",
           "0.75": "CollapsePlan(total=5, raw_op=5)",
@@ -1979,22 +1979,6 @@
                 "path": [
                   "OracleBatchNorm",
                   ""
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@norm</B><br align='left'/>(BatchNorm2d)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleBatchNorm",
-                  "cluster_norm_pass1"
                 ]
               }
             ],
@@ -6280,7 +6264,7 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleNested {\n\tgraph [bgcolor=white colorscheme=paired12 label=<<FONT COLOR='#111111'><B>OracleNested</B><br align='left'/>7 tensors total (96 B)<br align='left'/>50 params (all trainable, 200 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [fontname=Helvetica ordering=out]\n\tedge [fontname=Helvetica]\n\tencoderpass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@encoder</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#D9D9D9\" fontcolor=\"#111111\" ordering=out shape=box3d style=\"filled,solid\"]\n\t__module_focus_input_input_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input</B></TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#98FB98\" fontcolor=\"#111111\" ordering=out shape=oval style=\"filled,solid\"]\n\t__module_focus_output_linear_2_3 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output</B></TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#ff9999\" fontcolor=\"#111111\" ordering=out shape=oval style=\"filled,solid\"]\n\tsubgraph cluster_encoder_pass1 {\n\t\tfillcolor=white label=<<B>@encoder</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,solid\"\n\t\tencoderpass1 -> __module_focus_output_linear_2_3 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\t__module_focus_input_input_1 -> encoderpass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t}\n\tsubgraph cluster_head_pass1 {\n\t\tfillcolor=white label=<<B>@head</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph cluster_encoder_pass1 {\n\t}\n\tsubgraph cluster_encoder_pass1 {\n\t}\n\tsubgraph cluster_head_pass1 {\n\t}\n\tsubgraph cluster_head_pass1 {\n\t}\n\tsubgraph cluster_head_pass1 {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleNested {\n\tgraph [bgcolor=white colorscheme=paired12 label=<<FONT COLOR='#111111'><B>OracleNested</B><br align='left'/>7 tensors total (96 B)<br align='left'/>50 params (all trainable, 200 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [fontname=Helvetica ordering=out]\n\tedge [fontname=Helvetica]\n\tencoderpass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@encoder</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#D9D9D9\" fontcolor=\"#111111\" ordering=out shape=box3d style=\"filled,solid\"]\n\t__module_focus_input_input_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input</B></TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#98FB98\" fontcolor=\"#111111\" ordering=out shape=oval style=\"filled,solid\"]\n\t__module_focus_output_linear_2_3 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output</B></TD></TR></TABLE>> color=\"#222222\" fillcolor=\"#ff9999\" fontcolor=\"#111111\" ordering=out shape=oval style=\"filled,solid\"]\n\tsubgraph cluster_encoder_pass1 {\n\t\tfillcolor=white label=<<B>@encoder</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,solid\"\n\t\tencoderpass1 -> __module_focus_output_linear_2_3 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\t__module_focus_input_input_1 -> encoderpass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t}\n\tsubgraph cluster_encoder_pass1 {\n\t}\n\tsubgraph cluster_encoder_pass1 {\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=7, raw_op=7)",
           "0.75": "CollapsePlan(total=7, raw_op=7)",
@@ -6427,49 +6411,6 @@
                 "path": [
                   "OracleNested",
                   "cluster_encoder_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@head</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleNested",
-                  "cluster_head_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleNested",
-                  "cluster_head_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleNested",
-                  "cluster_head_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleNested",
-                  "cluster_head_pass1"
                 ]
               }
             ],
@@ -6766,7 +6707,7 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.0.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_1_1pass1 -> linear_2_3pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_2_3pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_2_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.1.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_2_3pass1 -> linear_3_5pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_3_5pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_3_5</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.2.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_3_5pass1 -> linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_4_7</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.3.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_4_7pass1 -> linear_5_9pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_5_9pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_5_9</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.4.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_5_9pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.0.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_1_1pass1 -> linear_2_3pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_2_3pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_2_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.1.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_2_3pass1 -> linear_3_5pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_3_5pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_3_5</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.2.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_3_5pass1 -> linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_4_7</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.3.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_4_7pass1 -> linear_5_9pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_5_9pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_5_9</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_features=4, out_features=4</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (4, 4) \u00b7 bias (4,)</TD></TR><TR><TD ALIGN=\"CENTER\">@blocks.4.0</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tlinear_5_9pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=12, raw_op=12)",
           "0.75": "CollapsePlan(total=12, raw_op=12)",
@@ -7058,176 +6999,6 @@
                   "OracleRepeat",
                   ""
                 ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
               }
             ],
             "members": [
@@ -7260,7 +7031,7 @@
             1
           ]
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> \"blocks.0pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.0</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.0pass1\" -> \"blocks.1pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.1pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.1</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.1pass1\" -> \"blocks.2pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.2pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.2</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.2pass1\" -> \"blocks.3pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.3pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.3</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.3pass1\" -> \"blocks.4pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.4pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.4</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.4pass1\" -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> \"blocks.0pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.0</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.0pass1\" -> \"blocks.1pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.1pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.1</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.1pass1\" -> \"blocks.2pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.2pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.2</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.2pass1\" -> \"blocks.3pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.3pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.3</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.3pass1\" -> \"blocks.4pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.4pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.4</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out penwidth=2.25 shape=box3d style=\"filled,solid\"]\n\t\"blocks.4pass1\" -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=12, raw_op=12)",
           "0.75": "CollapsePlan(total=12, raw_op=12)",
@@ -7558,176 +7329,6 @@
                 "path": [
                   "OracleRepeat",
                   ""
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
                 ]
               }
             ],
@@ -9135,7 +8736,7 @@
             1
           ]
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> \"blocks.0pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.0</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box3d style=\"filled,solid\"]\n\t\"blocks.0pass1___runfoldellipsis\" [label=\"... +4 more Sequential\" fontcolor=\"#777777\" shape=plaintext]\n\t\"blocks.0pass1\" -> \"blocks.0pass1___runfoldellipsis\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1___runfoldellipsis\" -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> \"blocks.0pass1\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1\" [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>@blocks.0</B></TD></TR><TR><TD ALIGN=\"CENTER\">Sequential</TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">2 ops</TD></TR><TR><TD ALIGN=\"CENTER\">20 params (all trainable)</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box3d style=\"filled,solid\"]\n\t\"blocks.0pass1___runfoldellipsis\" [label=\"... +4 more Sequential\" fontcolor=\"#777777\" shape=plaintext]\n\t\"blocks.0pass1\" -> \"blocks.0pass1___runfoldellipsis\" [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\t\"blocks.0pass1___runfoldellipsis\" -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out penwidth=1.75 shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=12, raw_op=12)",
           "0.75": "CollapsePlan(total=12, raw_op=12)",
@@ -9308,176 +8909,6 @@
                   "OracleRepeat",
                   ""
                 ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
               }
             ],
             "members": [
@@ -9498,7 +8929,7 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1pass1__segment__linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1pass1__segment__linear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\tlinear_1_1pass1__segment__linear_4_7pass1 -> relu_4_8pass1__segment__relu_5_10pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_4_8pass1__segment__relu_5_10pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\trelu_4_8pass1__segment__relu_5_10pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1pass1__segment__linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1pass1__segment__linear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops -- spans @blocks.0:1, @blocks.1:1, @blocks.2:1, +1 more</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\tlinear_1_1pass1__segment__linear_4_7pass1 -> relu_4_8pass1__segment__relu_5_10pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_4_8pass1__segment__relu_5_10pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops -- spans @blocks.3:1, @blocks.4:1</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\trelu_4_8pass1__segment__relu_5_10pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=12, raw_op=12)",
           "0.75": "CollapsePlan(total=12, raw_op=12)",
@@ -9596,13 +9027,13 @@
                 "color": "#666666",
                 "fillcolor": "#f7f7f7",
                 "fontcolor": "#222222",
-                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>>",
+                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops -- spans @blocks.0:1, @blocks.1:1, @blocks.2:1, +1 more</B></TD></TR></TABLE>>",
                 "ordering": "out",
                 "shape": "box",
                 "style": "rounded,dashed,filled"
               },
               "kind": "repeat_ellipsis",
-              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>>",
+              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops -- spans @blocks.0:1, @blocks.1:1, @blocks.2:1, +1 more</B></TD></TR></TABLE>>",
               "name": "linear_1_1pass1__segment__linear_4_7pass1",
               "ordinal": 1,
               "region": [
@@ -9614,13 +9045,13 @@
                 "color": "#666666",
                 "fillcolor": "#f7f7f7",
                 "fontcolor": "#222222",
-                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>>",
+                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops -- spans @blocks.3:1, @blocks.4:1</B></TD></TR></TABLE>>",
                 "ordering": "out",
                 "shape": "box",
                 "style": "rounded,dashed,filled"
               },
               "kind": "repeat_ellipsis",
-              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>>",
+              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops -- spans @blocks.3:1, @blocks.4:1</B></TD></TR></TABLE>>",
               "name": "relu_4_8pass1__segment__relu_5_10pass1",
               "ordinal": 2,
               "region": [
@@ -9673,176 +9104,6 @@
                   "OracleRepeat",
                   ""
                 ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.0_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.1_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.2_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.3_pass1"
-                ]
-              },
-              {
-                "attrs": {
-                  "fillcolor": "white",
-                  "label": "<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>>",
-                  "labelloc": "b",
-                  "margin": "20",
-                  "penwidth": "5.0",
-                  "style": "filled,dashed"
-                },
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
-              },
-              {
-                "attrs": {},
-                "children": [],
-                "members": [],
-                "path": [
-                  "OracleRepeat",
-                  "cluster_blocks.4_pass1"
-                ]
               }
             ],
             "members": [
@@ -9862,13 +9123,13 @@
     "schema_version": 1
   },
   "sha256_chunks": [
-    "79b9b67d",
-    "fffe7452",
-    "f9e20629",
-    "f6e11940",
-    "66d1dca8",
-    "18a3af6a",
-    "37d2a41e",
-    "8b081905"
+    "bf27c167",
+    "46850739",
+    "12081d44",
+    "56c05926",
+    "81fc95fc",
+    "79b81263",
+    "db36ea18",
+    "b0a2bfc8"
   ]
 }
