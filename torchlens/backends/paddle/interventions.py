@@ -28,7 +28,7 @@ from ...ir.intervention import FireResult
 from ...ir.predicate import RecordContext
 from ..registry import BackendUnsupportedError
 
-_SUPPORTED_HELPER_NAMES = ("add", "replace_with", "scale", "zero_ablate")
+_PADDLE_SUPPORTED_HELPER_NAMES = ("add", "replace_with", "scale", "zero_ablate")
 """Builtin helper specs with a Paddle-native adapter, sorted."""
 
 
@@ -356,7 +356,7 @@ class PaddleInterventionRuntime:
                 return replacement.astype(out.dtype)
 
             return _replace
-        supported = ", ".join(_SUPPORTED_HELPER_NAMES)
+        supported = ", ".join(_PADDLE_SUPPORTED_HELPER_NAMES)
         raise BackendUnsupportedError(
             f"paddle backend preview has no adapter for intervention helper "
             f"{name!r}; supported builtin helpers: {supported}. Pass a callable "

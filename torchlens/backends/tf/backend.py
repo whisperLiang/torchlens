@@ -16,13 +16,15 @@ from ...data_classes.param import ParamAccessor
 from ...data_classes.trace import Trace
 from ...intervention.selectors import BaseSelector
 from ...ir.capture_events import CaptureEvents
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
 from .._finalize import (
     attach_function_root_module,
+    attach_module_owned_op_params,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mark_output_label,
+    normalize_op_module_calls,
 )
 from .._options import (
     TF_EXTRA_KWARG_POLICY,
@@ -32,16 +34,15 @@ from .._options import (
     reject_extra_trace_kwargs,
     reject_unsupported_trace_options,
 )
-from .._selective_save import reject_selector_outside_kinds
+from .._selective_save import _STATIC_SELECTOR_KINDS, reject_selector_outside_kinds
 from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
 from .modules import TFModuleTree, discover_tf_module_tree, tf_param_logs
 from .op_callback_capture import TFEagerCaptureSession, warm_up_tf_callable
 
 TFExecutionMode = Literal["eager", "graph_only"]
-_TF_STATIC_SAVE_SELECTOR_KINDS = frozenset(
-    {"label", "func", "module", "output", "contains", "in_module", "and", "or", "not"}
-)
+# Alias of the neutral authority table -- never re-spell the kinds here.
+_TF_STATIC_SAVE_SELECTOR_KINDS = _STATIC_SELECTOR_KINDS
 
 
 @dataclass(frozen=True)
@@ -671,7 +672,7 @@ class TFBackend:
             module_tree=module_tree,
             attach_function_root_module=attach_function_root_module,
             attach_object_module_logs=_attach_object_module_logs,
-            attach_op_params=_attach_tf_op_params_for_finalize,
+            attach_op_params=attach_module_owned_op_params,
             update_param_usage=False,
             count_layers_with_attached_params=True,
             recurrence_detection=recurrence_detection,
@@ -1135,13 +1136,7 @@ def _mark_outputs(trace: Trace, output: object, producer_by_ref: Mapping[object,
             continue
         if label is None:
             continue
-        trace.output_layers.append(label)
-        event = trace.capture_events.op_event_by_label_raw.get(label)
-        if event is None:
-            continue
-        trace.capture_events.append_amendment(
-            amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-        )
+        mark_output_label(trace, label)
 
 
 def _mark_static_outputs(trace: Trace, output_label_raws: Sequence[str]) -> None:
@@ -1162,13 +1157,7 @@ def _mark_static_outputs(trace: Trace, output_label_raws: Sequence[str]) -> None
 
     for label in output_label_raws:
         if label not in trace.output_layers:
-            trace.output_layers.append(label)
-        event = trace.capture_events.op_event_by_label_raw.get(label)
-        if event is None:
-            continue
-        trace.capture_events.append_amendment(
-            amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-        )
+            mark_output_label(trace, label)
 
 
 def _iter_output_tensors(value: object) -> list[Any]:
@@ -1200,74 +1189,6 @@ def _iter_output_tensors(value: object) -> list[Any]:
     return []
 
 
-def _attach_tf_op_params(
-    op_log: Any,
-    param_logs: ParamAccessor,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach TensorFlow module-owned parameters to finalized op logs.
-
-    Parameters
-    ----------
-    op_log
-        Operation log.
-    param_logs
-        Trace parameter accessor.
-    seen_param_barcodes
-        Barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates the operation log.
-    """
-
-    module_calls = _tf_op_module_calls(getattr(op_log, "modules", ()))
-    if not module_calls:
-        return
-    owner = module_calls[-1][0]
-    params = [
-        param
-        for param in param_logs
-        if param.module_address == owner and param.barcode not in seen_param_barcodes
-    ]
-    if not params:
-        return
-    op_log._param_logs = params
-    op_log._param_barcodes = [param.barcode for param in params]
-    op_log.param_shapes = [param.shape for param in params]
-    op_log.num_params = sum(param.num_params for param in params)
-    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
-    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
-    seen_param_barcodes.update(param.barcode for param in params)
-
-
-def _attach_tf_op_params_for_finalize(
-    op_log: Any,
-    trace: Trace,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach TensorFlow params through the shared finalization hook.
-
-    Parameters
-    ----------
-    op_log:
-        Operation log being finalized.
-    trace:
-        Trace whose parameter accessor owns TensorFlow param logs.
-    seen_param_barcodes:
-        Param barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates ``op_log`` in place when new params are attached.
-    """
-
-    _attach_tf_op_params(op_log, trace.param_logs, seen_param_barcodes)
-
-
 def _attach_object_module_logs(trace: Trace, tree: TFModuleTree) -> None:
     """Build public object-module logs for a TensorFlow trace.
 
@@ -1287,38 +1208,11 @@ def _attach_object_module_logs(trace: Trace, tree: TFModuleTree) -> None:
     attach_object_module_logs(
         trace,
         tree,
-        normalize_module_calls=_tf_op_module_calls,
+        normalize_module_calls=normalize_op_module_calls,
         metadata_top_level=_tf_metadata_top_level,
         op_top_level=_tf_op_top_level,
         training_mode=_tf_training_mode,
     )
-
-
-def _tf_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's module-call records.
-
-    Parameters
-    ----------
-    value
-        Raw module-call values.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized address/call-index pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _tf_metadata_top_level(

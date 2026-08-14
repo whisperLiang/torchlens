@@ -42,7 +42,6 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.predicate import _DEFERRED_VALUE, RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -52,8 +51,17 @@ from ...quantities import Duration
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus  # noqa: TC001
 from .._finalize import (
     attach_function_root_module,
+    attach_module_owned_op_params,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    join_module_address as _join_module_address,
+    mark_output_label,
+    mirror_param_derived_grads,
+    nearest_metadata_parent,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
@@ -1275,11 +1283,18 @@ class MLXBackend:
             if hasattr(trace, "_mlx_module_stack"):
                 delattr(trace, "_mlx_module_stack")
             freeze_trace_relation_views(trace)
-            stamp_backend_finalized(trace)
-            return trace
         finally:
-            self.cleanup_model_session(trace, model)
-            self.unwrap(model)
+            # Independently-owned resources: a raising session cleanup must
+            # not leave the process-global MLX wrappers installed.
+            try:
+                self.cleanup_model_session(trace, model)
+            finally:
+                self.unwrap(model)
+        # Settlement is the LAST act, after ALL teardown (the path-20 stamp
+        # contract): a teardown raise escapes productless -- the object
+        # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
+        stamp_backend_finalized(trace)
+        return trace
 
     def _restrict_halted_param_logs(self, trace: Trace) -> None:
         """Restrict a halted trace's parameter accounting to captured ops.
@@ -1464,7 +1479,7 @@ class MLXBackend:
                 if callable(update):
                     update(original_params)
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _records_for_intermediate_mlx_grads(
         self,
@@ -1566,35 +1581,6 @@ class MLXBackend:
                 },
             )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self,
-        trace: Trace,
-        records: Mapping[str, DerivedGradRecord],
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing MLX module-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
         """Capture then validate an MLX forward pass.
@@ -2208,13 +2194,7 @@ class MLXBackend:
             label = self.tensor_store.get_label(value)
             if label is None:
                 continue
-            trace.output_layers.append(label)
-            event = trace.capture_events.op_event_by_label_raw.get(label)
-            if event is None:
-                continue
-            trace.capture_events.append_amendment(
-                amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-            )
+            mark_output_label(trace, label)
 
     def _finish_trace(self, trace: Trace, module_tree: MLXModuleTree | None = None) -> None:
         """Finalize a manually captured MLX Trace.
@@ -2243,7 +2223,7 @@ class MLXBackend:
             module_tree=module_tree,
             attach_function_root_module=attach_function_root_module,
             attach_object_module_logs=self._attach_object_module_logs,
-            attach_op_params=_attach_mlx_op_params_for_finalize,
+            attach_op_params=attach_module_owned_op_params,
             count_layers_with_attached_params=True,
             recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
@@ -2267,7 +2247,7 @@ class MLXBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_mlx_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_mlx_metadata_top_level,
             op_top_level=_mlx_op_top_level,
             training_mode=_mlx_training_mode,
@@ -2380,74 +2360,6 @@ def mlx_param_logs(tree: MLXModuleTree, trace: Trace) -> dict[str, Param]:
         )
         param_logs[existing_address] = param
     return param_logs
-
-
-def _attach_mlx_op_params(
-    op_log: Any,
-    param_logs: ParamAccessor,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach MLX module-owned parameters to a finalized op log.
-
-    Parameters
-    ----------
-    op_log
-        Op log being finalized.
-    param_logs
-        Trace parameter accessor.
-    seen_param_barcodes
-        Mutable set of parameter barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Parameter fields are updated in place.
-    """
-
-    module_calls = _mlx_op_module_calls(getattr(op_log, "modules", ()))
-    if not module_calls:
-        return
-    owner = module_calls[-1][0]
-    params = [
-        param
-        for param in param_logs
-        if param.module_address == owner and param.barcode not in seen_param_barcodes
-    ]
-    if not params:
-        return
-    op_log._param_logs = params
-    op_log._param_barcodes = [param.barcode for param in params]
-    op_log.param_shapes = [param.shape for param in params]
-    op_log.num_params = sum(param.num_params for param in params)
-    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
-    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
-    seen_param_barcodes.update(param.barcode for param in params)
-
-
-def _attach_mlx_op_params_for_finalize(
-    op_log: Any,
-    trace: Trace,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach MLX params through the shared finalization hook.
-
-    Parameters
-    ----------
-    op_log:
-        Operation log being finalized.
-    trace:
-        Trace whose parameter accessor owns MLX param logs.
-    seen_param_barcodes:
-        Param barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates ``op_log`` in place when new params are attached.
-    """
-
-    _attach_mlx_op_params(op_log, trace.param_logs, seen_param_barcodes)
 
 
 def _iter_mlx_parameter_candidates(tree: MLXModuleTree) -> list[MLXParameterCandidate]:
@@ -2592,33 +2504,6 @@ def _alias_to_primary(tree: MLXModuleTree) -> dict[str, str]:
     return aliases
 
 
-def _mlx_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list.
-
-    Parameters
-    ----------
-    value
-        Materialized op ``modules`` field.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized ``(address, call_index)`` pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
-
-
 def _mlx_metadata_top_level(
     address: str,
     metadata: dict[str, Any],
@@ -2642,7 +2527,7 @@ def _mlx_metadata_top_level(
     """
 
     del metadata
-    return address != "self" and _nearest_metadata_parent(address, metadata_by_address) == "self"
+    return address != "self" and nearest_metadata_parent(address, metadata_by_address) == "self"
 
 
 def _mlx_op_top_level(address: str) -> bool:
@@ -2710,96 +2595,6 @@ def _resolve_mlx_module_identity_mode(
     if value == "function_root":
         return False
     return module_tree is not None
-
-
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``.
-
-    Parameters
-    ----------
-    address
-        Child address.
-    metadata
-        Module metadata keyed by address.
-
-    Returns
-    -------
-    str | None
-        Parent address, or ``None`` for root.
-    """
-
-    if address == "self":
-        return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return MLX array memory in bytes.
-
-    Parameters
-    ----------
-    value
-        MLX array-like value.
-
-    Returns
-    -------
-    int | None
-        Memory in bytes, if known.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    if nbytes is not None:
-        return int(nbytes)
-    size = getattr(value, "size", None)
-    itemsize = getattr(value, "itemsize", None)
-    if size is not None and itemsize is not None:
-        return int(size) * int(itemsize)
-    return None
 
 
 def _normalize_mlx_input_grad_argnums(
@@ -3362,25 +3157,6 @@ def _mlx_values_close(left: Any, right: Any) -> bool:
     ):
         return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in derived-gradient provenance.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 __all__ = ["GradOptions", "MLXBackend"]

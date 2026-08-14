@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from ..data_classes._compaction import compact_op_metadata
 from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
+from ..ir.op_record import amend_preview_output_parent_mark
 from ..postprocess.finalization import _build_module_logs, _build_root_module_log
 from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
 from ..quantities import Bytes
@@ -685,3 +687,537 @@ def _update_param_totals_from_layers(trace: Trace) -> None:
         trace.num_layers_with_params = len(
             {op.layer_label for op in trace.layer_list if op.uses_params}
         )
+
+
+def numel_from_shape(shape: Any) -> int:
+    """Return the number of elements implied by ``shape``.
+
+    Parameters
+    ----------
+    shape:
+        Shape sequence; empty means scalar.
+
+    Returns
+    -------
+    int
+        Product of dimensions (``1`` for a scalar shape).
+    """
+
+    result = 1
+    for dim in shape:
+        result *= int(dim)
+    return result
+
+
+def value_nbytes(value: object) -> int | None:
+    """Return byte size for any preview-backend tensor-like value.
+
+    One neutral ladder covering every preview backend's native spelling:
+    ``nbytes`` attribute (jax/mlx) or method (tinygrad), ``size * itemsize``
+    (mlx fallback), ``numel() * element_size()`` (paddle),
+    ``numel() * dtype.itemsize`` (tinygrad fallback), and
+    ``shape x dtype.size`` (tf). Each rung is guarded, so a backend value
+    settles on exactly the rung its API supports.
+
+    Parameters
+    ----------
+    value:
+        Backend tensor/array-like value.
+
+    Returns
+    -------
+    int | None
+        Byte size when any rung resolves, else ``None``.
+    """
+
+    nbytes = getattr(value, "nbytes", None)
+    if nbytes is not None:
+        try:
+            return int(nbytes() if callable(nbytes) else nbytes)
+        except Exception:
+            pass
+    size = getattr(value, "size", None)
+    itemsize = getattr(value, "itemsize", None)
+    if size is not None and itemsize is not None and not callable(size):
+        try:
+            return int(size) * int(itemsize)
+        except (TypeError, ValueError):
+            pass
+    numel = getattr(value, "numel", None)
+    if callable(numel):
+        element_size = getattr(value, "element_size", None)
+        if callable(element_size):
+            try:
+                return int(numel()) * int(element_size())
+            except (AttributeError, TypeError, ValueError):
+                pass
+        dtype_itemsize = getattr(getattr(value, "dtype", None), "itemsize", None)
+        if dtype_itemsize is not None:
+            try:
+                return int(numel()) * int(dtype_itemsize)
+            except (TypeError, ValueError):
+                pass
+    dtype_size = getattr(getattr(value, "dtype", None), "size", None)
+    if dtype_size is not None:
+        try:
+            shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
+        except (TypeError, ValueError):
+            return None
+        return numel_from_shape(shape) * int(dtype_size)
+    return None
+
+
+def session_callable_identity(fn: Callable[..., Any] | None) -> str | None:
+    """Return a session-unique best-effort callable identity.
+
+    Includes ``id(fn)``, so the string distinguishes two callables with equal
+    qualified names within one process but is NOT stable across sessions.
+    Use :func:`stable_callable_name` for persisted provenance.
+
+    Parameters
+    ----------
+    fn:
+        Callable or ``None``.
+
+    Returns
+    -------
+    str | None
+        Identity string used in fingerprints and session provenance.
+    """
+
+    if fn is None:
+        return None
+    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
+
+
+def stable_callable_name(fn: Callable[..., Any] | None) -> str | None:
+    """Return a stable human-readable callable name.
+
+    No ``id()`` component: equal across sessions for importable callables,
+    which is what persisted provenance needs.
+
+    Parameters
+    ----------
+    fn:
+        Callable or ``None``.
+
+    Returns
+    -------
+    str | None
+        Qualified name, or ``repr`` when module/qualname are unavailable.
+    """
+
+    if fn is None:
+        return None
+    module = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if module and qualname:
+        return f"{module}.{qualname}"
+    return repr(fn)
+
+
+def mirror_param_derived_grads(trace: Trace, records: Any) -> None:
+    """Mirror unambiguous param derived gradients onto param records.
+
+    The ONE five-backend implementation (R17-3): every backend records the
+    full superset metadata -- payload, record path, ``has_grad``,
+    ``grad_shape``, ``grad_dtype``, and ``gradient_memory``. (mlx/paddle/tf
+    historically stopped at ``grad_shape``; that drift is exactly why this
+    body is hoisted.)
+
+    Parameters
+    ----------
+    trace:
+        Trace containing backend-derived params.
+    records:
+        Derived gradient records keyed by leaf path (``params.<address>``).
+
+    Returns
+    -------
+    None
+        Matching ``trace.params`` entries receive the same gradient payload.
+    """
+
+    for address, param in trace.params.items():
+        record = records.get(f"params.{address}")
+        if record is None:
+            continue
+        param._derived_grad_payload = record.grad
+        param._derived_grad_record_path = record.path
+        param.has_grad = True
+        param.grad_shape = tuple(getattr(record.grad, "shape", ()))
+        param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
+        param.gradient_memory = value_nbytes(record.grad) or 0
+
+
+def normalize_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
+    """Normalize an op's raw module-call records to ``(address, call_index)``.
+
+    The ONE five-backend normalizer (R17-6). Accepted spellings:
+    ``(address, call_index)`` tuples, single-element tuples (call index
+    defaults to ``1``), ``"address:index"`` strings, and bare address strings
+    (legacy, call index ``1``). A string with a ``":"`` whose tail is not a
+    digit is REFUSED -- module attribution is a correctness surface, and the
+    historical per-backend copies silently DROPPED such entries (four
+    backends) or crashed on multi-colon strings (jax's first-colon split).
+
+    Parameters
+    ----------
+    value:
+        Materialized op ``modules`` field entries.
+
+    Returns
+    -------
+    tuple[tuple[str, int], ...]
+        Normalized module-call pairs.
+
+    Raises
+    ------
+    ValueError
+        On an entry no accepted spelling matches (malformed capture-side
+        module attribution must fail loudly, never vanish from attribution).
+    """
+
+    calls: list[tuple[str, int]] = []
+    for item in value:
+        if isinstance(item, tuple):
+            if len(item) >= 2:
+                calls.append((str(item[0]), int(item[1])))
+                continue
+            if len(item) == 1:
+                calls.append((str(item[0]), 1))
+                continue
+            raise ValueError("module-call entry is an empty tuple")
+        text = str(item)
+        address, separator, index_text = text.rpartition(":")
+        if separator:
+            if not index_text.isdigit():
+                raise ValueError(
+                    f"unparseable module-call entry {text!r}: expected 'address:index' "
+                    "with a digit index"
+                )
+            calls.append((address, int(index_text)))
+            continue
+        calls.append((text, 1))
+    return tuple(calls)
+
+
+def nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
+    """Return the closest existing parent address for ``address``.
+
+    Parameters
+    ----------
+    address:
+        Child module address.
+    metadata:
+        Module metadata keyed by address.
+
+    Returns
+    -------
+    str | None
+        Parent address, or ``None`` for root.
+    """
+
+    if address == "self":
+        return None
+    parts = address.split(".")
+    while len(parts) > 1:
+        parts.pop()
+        candidate = ".".join(parts)
+        if candidate in metadata:
+            return candidate
+    return "self" if "self" in metadata else None
+
+
+def mark_output_label(trace: Trace, label: str) -> None:
+    """Mark one resolved output label on a preview trace.
+
+    The shared tail of every preview backend's output marking: append the
+    label to ``output_layers`` and amend the producing op event's
+    ``is_output_parent`` flag. Backends keep only their native output-tensor
+    iteration and label resolution.
+
+    Parameters
+    ----------
+    trace:
+        Trace with live capture events.
+    label:
+        Resolved raw producer label for one output tensor.
+
+    Returns
+    -------
+    None
+        Mutates ``trace.output_layers`` and the event stream.
+    """
+
+    trace.output_layers.append(label)
+    event = trace.capture_events.op_event_by_label_raw.get(label)
+    if event is None:
+        return
+    trace.capture_events.append_amendment(
+        amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+    )
+
+
+def attach_module_owned_op_params(
+    op_log: Any,
+    trace: Trace,
+    seen_param_barcodes: set[str],
+) -> None:
+    """Attach module-owned parameters to one finalized op log.
+
+    The ONE implementation of the mlx/tf/paddle triplet: the op's owning
+    module is its innermost normalized module call, and each parameter
+    barcode attaches to the FIRST op of its owner.
+
+    Parameters
+    ----------
+    op_log:
+        Operation log being finalized.
+    trace:
+        Trace whose parameter accessor owns the backend param logs.
+    seen_param_barcodes:
+        Mutable set of parameter barcodes already attached to earlier ops.
+
+    Returns
+    -------
+    None
+        Mutates ``op_log`` in place when new params are attached.
+    """
+
+    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
+    if not module_calls:
+        return
+    owner = module_calls[-1][0]
+    params = [
+        param
+        for param in trace.param_logs
+        if param.module_address == owner and param.barcode not in seen_param_barcodes
+    ]
+    if not params:
+        return
+    op_log._param_logs = params
+    op_log._param_barcodes = [param.barcode for param in params]
+    op_log.param_shapes = [param.shape for param in params]
+    op_log.num_params = sum(param.num_params for param in params)
+    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
+    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
+    op_log.param_memory = sum(int(param.param_memory) for param in params)
+    seen_param_barcodes.update(param.barcode for param in params)
+
+
+def new_preview_function_trace(
+    *,
+    backend_name: str,
+    model: Callable[..., Any],
+    keep_orphans: bool,
+    num_context_lines: int,
+    recurrence_detection: bool,
+    verbose: bool,
+    name: str | None,
+    raw_input: object | None,
+    save_raw_input: str | bool,
+    batch_render: str,
+    output_transform: object | None,
+    save_raw_output: str | bool,
+    param_source: str,
+    compute_input_output_distances: bool = True,
+) -> Trace:
+    """Construct an empty function-root preview trace shell.
+
+    The shared jax/tinygrad constructor (their copies differed only in
+    ``param_source``); tf keeps its own richer shell because it honors more
+    public options.
+
+    Parameters
+    ----------
+    backend_name:
+        Canonical backend name.
+    model:
+        Captured callable.
+    keep_orphans:
+        Whether orphan ops are retained.
+    num_context_lines:
+        Source context line count.
+    recurrence_detection:
+        Recurrence-detection setting.
+    verbose:
+        Verbose flag.
+    name:
+        Optional trace label.
+    raw_input:
+        Original user input.
+    save_raw_input:
+        Raw-input save policy.
+    batch_render:
+        Raw-input render policy.
+    output_transform:
+        Optional output transform.
+    save_raw_output:
+        Raw-output save policy.
+    param_source:
+        Backend parameter provenance (``"pytree-derived"``, ``"none"``, ...).
+    compute_input_output_distances:
+        Whether the layer-depth flood is requested.
+
+    Returns
+    -------
+    Trace
+        Empty trace initialized for the preview backend.
+    """
+
+    trace = Trace(
+        model_class_name=getattr(model, "__name__", type(model).__name__),
+        output_device="same",
+        activation_transform=None,
+        grad_transform=None,
+        save_raw_activations=True,
+        save_raw_gradients=True,
+        keep_orphans=keep_orphans,
+        save_arg_values=False,
+        save_grads=None,
+        detach_saved_activations=False,
+        mark_layer_depths=compute_input_output_distances,
+        num_context_lines=num_context_lines,
+        optimizer=None,
+        save_code_context=False,
+        save_rng_states=False,
+        recurrence_detection=recurrence_detection,
+        verbose=verbose,
+        backward_ready=False,
+        module_filter=None,
+        emit_nvtx=False,
+        transform=None,
+        raw_input=raw_input,
+        save_raw_input=save_raw_input,
+        batch_render=batch_render,
+        output_transform=cast("Callable[[Any], Any] | None", output_transform),
+        save_raw_output=save_raw_output,
+        layer_visualizers=None,
+        save_visualizations=False,
+    )
+    trace.trace_label = name
+    trace.backend = cast(BackendName, backend_name)
+    trace.module_identity_mode = "function_root"
+    trace.param_source = param_source
+    trace.model_label = trace.model_class_name
+    trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
+    trace._pre_forward_rng_states = None
+    return trace
+
+
+def module_source_metadata(module: Any) -> dict[str, Any]:
+    """Return best-effort source metadata for a preview module-like object.
+
+    Parameters
+    ----------
+    module
+        Module-like object.
+
+    Returns
+    -------
+    dict[str, Any]
+        Source metadata compatible with TorchLens module logs.
+    """
+
+    cls = type(module)
+    init = getattr(cls, "__init__", None)
+    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
+    return {
+        "class_source_file": safe_source_file(cls),
+        "classsource_line": source_line(cls),
+        "init_source_file": safe_source_file(init) if init is not None else None,
+        "initsource_line": source_line(init),
+        "forward_source_file": safe_source_file(call) if call is not None else None,
+        "forwardsource_line": source_line(call),
+        "class_docstring": inspect.getdoc(cls),
+        "init_signature": signature_string(init),
+        "init_docstring": inspect.getdoc(init) if init is not None else None,
+        "forward_signature": signature_string(call),
+        "forward_docstring": inspect.getdoc(call) if call is not None else None,
+    }
+
+
+def safe_source_file(obj: Any) -> str | None:
+    """Return the source file for ``obj`` when inspectable.
+
+    Parameters
+    ----------
+    obj
+        Object to inspect.
+
+    Returns
+    -------
+    str | None
+        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
+        a class defined without a backing source file, such as one built
+        via ``exec``/``compile`` or implemented as a builtin).
+    """
+
+    try:
+        return inspect.getsourcefile(obj)
+    except (OSError, TypeError):
+        return None
+
+
+def source_line(obj: Any) -> int | None:
+    """Return the first source line for ``obj`` when available.
+
+    Parameters
+    ----------
+    obj
+        Object to inspect.
+
+    Returns
+    -------
+    int | None
+        First source line, or ``None``.
+    """
+
+    if obj is None:
+        return None
+    try:
+        return inspect.getsourcelines(obj)[1]
+    except (OSError, TypeError):
+        return None
+
+
+def signature_string(obj: Any) -> str | None:
+    """Return ``obj``'s signature string when inspectable.
+
+    Parameters
+    ----------
+    obj
+        Callable object.
+
+    Returns
+    -------
+    str | None
+        Signature string, or ``None``.
+    """
+
+    if obj is None:
+        return None
+    try:
+        return str(inspect.signature(obj))
+    except (TypeError, ValueError):
+        return None
+
+
+def join_module_address(parent: str, child_name: str) -> str:
+    """Return a TorchLens child module address.
+
+    Parameters
+    ----------
+    parent
+        Parent module address.
+    child_name
+        Child field name.
+
+    Returns
+    -------
+    str
+        Joined child address.
+    """
+
+    return child_name if parent == "self" else f"{parent}.{child_name}"

@@ -5,7 +5,12 @@ from __future__ import annotations
 import inspect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
+
+from .._finalize import (
+    join_module_address as _join_module_address,
+    module_source_metadata as _module_source_metadata,
+)
 
 
 @dataclass
@@ -403,128 +408,4 @@ def _is_mlx_array(value: object) -> bool:
     return isinstance(value, mx.array)
 
 
-def _module_source_metadata(module: object) -> dict[str, Any]:
-    """Return best-effort source metadata for an MLX module.
 
-    Parameters
-    ----------
-    module
-        MLX module object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Source metadata compatible with TorchLens module logs.
-    """
-
-    cls = type(module)
-    init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
-    return {
-        "class_source_file": _safe_source_file(cls),
-        "class_source_line": _source_line(cls),
-        "init_source_file": _safe_source_file(init) if init is not None else None,
-        "init_source_line": _source_line(init),
-        "forward_source_file": _safe_source_file(call) if call is not None else None,
-        "forward_source_line": _source_line(call),
-        "class_docstring": inspect.getdoc(cls),
-        "init_signature": _signature_string(init),
-        "init_docstring": inspect.getdoc(init) if init is not None else None,
-        "forward_signature": _signature_string(call),
-        "forward_docstring": inspect.getdoc(call) if call is not None else None,
-    }
-
-
-def _safe_source_file(obj: object) -> str | None:
-    """Return the source file for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
-        a class defined without a backing source file, such as one built
-        via ``exec``/``compile`` or implemented as a builtin).
-    """
-
-    try:
-        return inspect.getsourcefile(cast(Any, obj))
-    except (OSError, TypeError):
-        return None
-
-
-def _source_line(obj: object) -> int | None:
-    """Return the first source line for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    int | None
-        First source line, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return inspect.getsourcelines(cast(Any, obj))[1]
-    except (OSError, TypeError):
-        return None
-
-
-def _signature_string(obj: object) -> str | None:
-    """Return ``obj``'s signature string when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Signature string, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return str(inspect.signature(cast(Any, obj)))
-    except (TypeError, ValueError):
-        return None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child attribute name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
-
-
-__all__ = [
-    "MLXModuleTree",
-    "cleanup_model_session",
-    "discover_mlx_module_tree",
-    "iter_named_modules",
-    "prepare_model_once",
-    "prepare_model_session",
-]

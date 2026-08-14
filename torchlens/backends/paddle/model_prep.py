@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...ir.events import ModuleFrame
+from .._finalize import join_module_address as _join_module_address, nearest_metadata_parent
 
 
 @dataclass
@@ -196,11 +197,21 @@ def cleanup_model_session(
     del session, prepared_model
     if tree is None:
         return
+    # Every handle is removed even if one raises; the first failure re-raises
+    # after the sweep so one fallible remove() cannot strand later hooks.
+    first_failure: BaseException | None = None
     for handle in tree.hook_handles:
         remove = getattr(handle, "remove", None)
-        if callable(remove):
+        if not callable(remove):
+            continue
+        try:
             remove()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
     tree.hook_handles.clear()
+    if first_failure is not None:
+        raise first_failure
 
 
 def _make_pre_hook(tree: PaddleModuleTree, address: str) -> Any:
@@ -349,61 +360,9 @@ def _direct_children(address: str, metadata: dict[str, dict[str, Any]]) -> list[
     children = [
         candidate
         for candidate in metadata
-        if candidate != address and _nearest_metadata_parent(candidate, metadata) == address
+        if candidate != address and nearest_metadata_parent(candidate, metadata) == address
     ]
     return sorted(children, key=_address_sort_key)
 
 
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``.
 
-    Parameters
-    ----------
-    address
-        Child address.
-    metadata
-        Module metadata keyed by address.
-
-    Returns
-    -------
-    str | None
-        Parent address, or ``None`` for root.
-    """
-
-    if address == "self":
-        return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
-
-
-__all__ = [
-    "PaddleModuleTree",
-    "cleanup_model_session",
-    "discover_paddle_module_tree",
-    "prepare_model_once",
-    "prepare_model_session",
-]

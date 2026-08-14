@@ -24,12 +24,15 @@ from ...intervention.hooks import make_hook_context, normalize_hook
 from ...intervention.selectors import BaseSelector
 from ...intervention.types import HelperSpec, InterventionDecision
 from ...ir.selector_eval import first_selector_kind_outside, selector_contains_kind
+from .._selective_save import _STATIC_INTERVENTION_SELECTOR_KINDS
 from ..registry import BackendUnsupportedError
 
-MLX_STATIC_INTERVENTION_SELECTOR_KINDS = frozenset(
-    {"label", "func", "module", "contains", "in_module", "and", "or", "not"}
-)
-"""Selector kinds resolvable from static capture-time labels on MLX."""
+MLX_STATIC_INTERVENTION_SELECTOR_KINDS = _STATIC_INTERVENTION_SELECTOR_KINDS
+"""Selector kinds resolvable from static capture-time labels on MLX.
+
+Alias of the neutral authority table (the ``output`` drop is declared
+there) -- never re-spell the kinds here.
+"""
 
 #: Selector kinds that may target the short ``{layer_type}_{type_index}``
 #: alias, which is only visible through a second evaluation with the label
@@ -40,7 +43,7 @@ _ALIAS_RETRY_KINDS = ("label", "contains", "regex")
 #: hooks over ``torch.*`` calls that reject MLX arrays, so the curated
 #: appliers below are the genuine mechanism — anything outside this table
 #: refuses typed rather than half-working.
-_SUPPORTED_HELPER_NAMES = (
+_MLX_SUPPORTED_HELPER_NAMES = (
     "zero_ablate",
     "scale",
     "add",
@@ -299,7 +302,7 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
         return MLXHookApplier(identity, _replace)
     raise BackendUnsupportedError(
         f"MLX backend has no native application for intervention helper {name!r}; "
-        f"supported helpers are {', '.join(_SUPPORTED_HELPER_NAMES)}, plus callable "
+        f"supported helpers are {', '.join(_MLX_SUPPORTED_HELPER_NAMES)}, plus callable "
         "transforms written against mx.array. The torch helper factories build "
         "torch-only hooks that reject MLX arrays, so admitting them would silently "
         "fail; use a callable transform instead."

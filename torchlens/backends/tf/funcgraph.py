@@ -20,7 +20,7 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.predicate import RecordContext
-from ...ir.refs import DeviceRef, DtypeRef, TensorRef
+from ...ir.refs import DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...validation.status import (
     REGION_REPLAY_CLASS,
@@ -29,13 +29,18 @@ from ...validation.status import (
     REGION_REPLAY_PROVENANCE_KEY,
 )
 from ..registry import BackendUnsupportedError
-from .op_callback_capture import TFCaptureResult, TFInputCapture, TFOpCapture, TFSourceRecord
+from .op_callback_capture import (
+    _MAX_SNAPSHOT_BYTES,
+    TFCaptureResult,
+    TFInputCapture,
+    TFOpCapture,
+    TFSourceRecord,
+)
 
 _CONTROL_FLOW_OP_TYPES = frozenset(
     {"If", "StatelessIf", "While", "StatelessWhile", "Case", "Switch", "Merge"}
     | {"StatefulPartitionedCall"}
 )
-_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -1425,7 +1430,9 @@ def _record_context_for_symbolic(
         input_output_address=None,
         shape=_shape_tuple(output),
         dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-        tensor_device=DeviceRef(backend="tf", name=""),
+        # Static FuncGraph import has no runtime placement; unknown stays None
+        # (an empty DeviceRef would be malformed under the metadata invariant).
+        tensor_device=None,
         tensor_requires_grad=None,
         output_index=output_index,
         is_bottom_level_func=True,

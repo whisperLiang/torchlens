@@ -20,10 +20,10 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.predicate import RecordContext
-from ...ir.refs import DeviceRef, DtypeRef, TensorRef
+from ...ir.refs import DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ._tf_compat import get_op_callbacks_module
-from .modules import TFModuleTree, patched_tf_module_stack
+from .modules import TFModuleTree, device_ref_from_tf_device, patched_tf_module_stack
 
 _INIT_OP_TYPES = frozenset(
     {
@@ -602,7 +602,7 @@ class TFEagerCaptureSession:
             input_output_address=None,
             shape=_shape_tuple(output),
             dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-            tensor_device=DeviceRef(backend="tf", name=str(getattr(output, "device", ""))),
+            tensor_device=device_ref_from_tf_device(getattr(output, "device", "")),
             tensor_requires_grad=None,
             output_index=output_index,
             is_bottom_level_func=True,

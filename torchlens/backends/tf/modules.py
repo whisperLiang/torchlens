@@ -13,6 +13,7 @@ from typing import Any
 from ...data_classes.param import Param
 from ...ir.events import ModuleFrame
 from ...ir.refs import DeviceRef, DtypeRef
+from .._finalize import numel_from_shape as _numel, value_nbytes as _nbytes
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="tf", name=dtype)
-        param.device_ref = DeviceRef(backend="tf", name=_variable_device(variable))
+        param.device_ref = device_ref_from_tf_device(_variable_device(variable))
         param.backend_address = f"object:{address}"
         param.resolver_status = "resolved"
         param._param_ref = variable
@@ -223,6 +224,38 @@ def _variable_device(variable: Any) -> str:
         if inner_device:
             return str(inner_device)
     return ""
+
+
+def device_ref_from_tf_device(text: object) -> DeviceRef | None:
+    """Build a vocabulary-honest ``DeviceRef`` from a TensorFlow device string.
+
+    ``DeviceRef.backend`` is the HARDWARE device class (``"cpu"``, ``"gpu"``),
+    never the framework namespace. TensorFlow spells placement as a full path
+    (``"/job:localhost/replica:0/task:0/device:CPU:0"``); the canonical device
+    string is the lowercased tail after the last ``"device:"`` marker, routed
+    through :meth:`DeviceRef.from_value` like every other preview backend.
+
+    Parameters
+    ----------
+    text
+        TensorFlow device path, bare device string, or falsey when unknown.
+
+    Returns
+    -------
+    DeviceRef | None
+        Neutral device reference, or ``None`` when placement is unknown.
+    """
+
+    if not text:
+        return None
+    canonical = str(text)
+    marker = canonical.rfind("device:")
+    if marker != -1:
+        canonical = canonical[marker + len("device:") :]
+    canonical = canonical.strip("/").lower()
+    if not canonical:
+        return None
+    return DeviceRef.from_value(canonical)
 
 
 def _patch_class_call(
@@ -595,48 +628,6 @@ def _safe_address_part(value: str) -> str:
 
     cleaned = value.replace("/", ".").replace(":", "_")
     return cleaned or "module"
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return the number of elements represented by ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: Any) -> int | None:
-    """Return TensorFlow tensor memory in bytes when available.
-
-    Parameters
-    ----------
-    value
-        TensorFlow variable or tensor.
-
-    Returns
-    -------
-    int | None
-        Byte size, or ``None`` when unavailable.
-    """
-
-    shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
-    dtype = getattr(value, "dtype", None)
-    size = getattr(dtype, "size", None)
-    if size is None:
-        return None
-    return _numel(shape) * int(size)
 
 
 def monotonic_time() -> float:

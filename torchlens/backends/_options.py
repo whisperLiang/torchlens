@@ -428,6 +428,12 @@ MLX_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
         )
     },
     output_device_message="MLX backend only supports output_device='same' in technical preview.",
+    # DECLARED CAPABILITY (not an omission): MLX honors
+    # ``save_raw_activations=False`` at its capture-policy seam (payloads
+    # dropped, shape/dtype metadata preserved), so it carries no
+    # ``save_raw_activations_false_message`` while the four full-save-only
+    # previews refuse. Pinned by tests/test_mlx_option_policy.py.
+    save_raw_activations_false_message=None,
 )
 """Unsupported public trace-option policy for the MLX backend object entry."""
 

@@ -25,6 +25,12 @@ _STATIC_SELECTOR_KINDS = frozenset(
     }
 )
 
+# Intervention selectors resolve against ops that can be REWRITTEN mid-forward;
+# the synthetic ``output`` pseudo-op only exists after the forward returns, so
+# it is deliberately excluded here. Backends alias this set instead of
+# re-spelling the 8 kinds (the drop of ``output`` is intent, not drift).
+_STATIC_INTERVENTION_SELECTOR_KINDS = _STATIC_SELECTOR_KINDS - frozenset({"output"})
+
 
 def reject_selector_outside_kinds(
     predicate: Callable[[Any], Any] | BaseSelector,

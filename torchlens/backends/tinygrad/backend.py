@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from ..._deprecations import MISSING, MissingType
 from ..._trace_core.relation_views import freeze_trace_relation_views
-from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...backends import BackendUnsupportedError, get_backend_spec
 from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
@@ -47,6 +47,14 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    join_module_address as _join_module_address,
+    mirror_param_derived_grads,
+    module_source_metadata as _module_source_metadata,
+    new_preview_function_trace,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import (
     TINYGRAD_EXTRA_KWARG_POLICY,
@@ -637,77 +645,24 @@ class TinygradBackend:
         save_raw_output: str | bool,
         compute_input_output_distances: bool = True,
     ) -> Trace:
-        """Construct an empty tinygrad trace.
+        """Construct an empty trace shell via the shared preview constructor."""
 
-        Parameters
-        ----------
-        model
-            Captured callable.
-        keep_orphans
-            Whether orphan ops are retained.
-        num_context_lines
-            Source context line count.
-        recurrence_detection
-            Recurrence-detection setting.
-        verbose
-            Verbose flag.
-        name
-            Optional trace label.
-        raw_input
-            Original user input.
-        save_raw_input
-            Raw-input save policy.
-        batch_render
-            Raw-input render policy.
-        output_transform
-            Optional output transform.
-        save_raw_output
-            Raw-output save policy.
-
-        Returns
-        -------
-        Trace
-            Empty trace initialized for tinygrad.
-        """
-
-        trace = Trace(
-            model_class_name=getattr(model, "__name__", type(model).__name__),
-            output_device="same",
-            activation_transform=None,
-            grad_transform=None,
-            save_raw_activations=True,
-            save_raw_gradients=True,
+        return new_preview_function_trace(
+            backend_name=self.name,
+            model=model,
             keep_orphans=keep_orphans,
-            save_arg_values=False,
-            save_grads=None,
-            detach_saved_activations=False,
-            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
-            optimizer=None,
-            save_code_context=False,
-            save_rng_states=False,
             recurrence_detection=recurrence_detection,
             verbose=verbose,
-            backward_ready=False,
-            module_filter=None,
-            emit_nvtx=False,
-            transform=None,
+            name=name,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
             batch_render=batch_render,
-            output_transform=cast("Callable[[Any], Any] | None", output_transform),
+            output_transform=output_transform,
             save_raw_output=save_raw_output,
-            layer_visualizers=None,
-            save_visualizations=False,
+            param_source="none",
+            compute_input_output_distances=compute_input_output_distances,
         )
-        trace.trace_label = name
-        trace.backend = cast(BackendName, self.name)
-        trace.module_identity_mode = "function_root"
-        trace.param_source = "none"
-        trace.model_label = trace.model_class_name
-        trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
-        trace._pre_forward_rng_states = None
-        return trace
 
     def _emit_input_sources(self, trace: Trace, args: Sequence[Any]) -> dict[int, str]:
         """Emit source events for positional tinygrad tensor inputs.
@@ -1219,7 +1174,7 @@ class TinygradBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_tinygrad_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_tinygrad_metadata_top_level,
             op_top_level=_tinygrad_op_top_level,
             training_mode=_tinygrad_training_mode,
@@ -1307,7 +1262,7 @@ class TinygradBackend:
         finally:
             _restore_tinygrad_grads(snapshots)
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _derive_intermediate_grads_no_realize(
         self,
@@ -1386,35 +1341,6 @@ class TinygradBackend:
             },
         )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self, trace: Trace, records: Mapping[str, DerivedGradRecord]
-    ) -> None:
-        """Mirror unambiguous tinygrad param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing optional parameter metadata.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-            param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-            param.gradient_memory = _nbytes(record.grad) or 0
 
     def _validate_uops(self, trace: Trace) -> bool:
         """Validate saved tinygrad payloads against replayed UOps.
@@ -2088,123 +2014,6 @@ def _is_tinygrad_tensor(value: Any) -> bool:
     return isinstance(value, Tensor)
 
 
-def _module_source_metadata(module: Any) -> dict[str, Any]:
-    """Return best-effort source metadata for a tinygrad module-like object.
-
-    Parameters
-    ----------
-    module
-        Module-like object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Source metadata compatible with TorchLens module logs.
-    """
-
-    cls = type(module)
-    init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
-    return {
-        "class_source_file": _safe_source_file(cls),
-        "class_source_line": _source_line(cls),
-        "init_source_file": _safe_source_file(init) if init is not None else None,
-        "init_source_line": _source_line(init),
-        "forward_source_file": _safe_source_file(call) if call is not None else None,
-        "forward_source_line": _source_line(call),
-        "class_docstring": inspect.getdoc(cls),
-        "init_signature": _signature_string(init),
-        "init_docstring": inspect.getdoc(init) if init is not None else None,
-        "forward_signature": _signature_string(call),
-        "forward_docstring": inspect.getdoc(call) if call is not None else None,
-    }
-
-
-def _safe_source_file(obj: Any) -> str | None:
-    """Return the source file for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
-        a class defined without a backing source file, such as one built
-        via ``exec``/``compile`` or implemented as a builtin).
-    """
-
-    try:
-        return inspect.getsourcefile(obj)
-    except (OSError, TypeError):
-        return None
-
-
-def _source_line(obj: Any) -> int | None:
-    """Return the first source line for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    int | None
-        First source line, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return inspect.getsourcelines(obj)[1]
-    except (OSError, TypeError):
-        return None
-
-
-def _signature_string(obj: Any) -> str | None:
-    """Return ``obj``'s signature string when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Signature string, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return str(inspect.signature(obj))
-    except (TypeError, ValueError):
-        return None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child attribute name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent == "self" else f"{parent}.{child_name}"
-
-
 def _module_stack_for_uop(
     uop: Any,
     observed_module_stacks: Mapping[int, tuple[TinygradModuleFrame, ...]],
@@ -2365,33 +2174,6 @@ def _synthetic_stack_for_address(
     return tuple(frames)
 
 
-def _tinygrad_op_module_calls(value: Sequence[Any]) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list.
-
-    Parameters
-    ----------
-    value
-        Materialized op ``modules`` field.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized ``(address, call_index)`` pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
-
-
 def _enrich_tinygrad_op(op_log: Any) -> None:
     """Attach tinygrad backend identity refs to one finalized op log.
 
@@ -2530,26 +2312,6 @@ def _resolve_tinygrad_module_identity_mode(
     if value == "function_root":
         return False
     return module_tree is not None
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
 
 
 class _observe_tensor_ops:
@@ -2967,29 +2729,6 @@ def _identity(tensor: Any) -> str:
         f"obj={id(tensor)};uop={id(uop)};lineage={lineage_hash};"
         f"buffer={id(base)};view={id(view)};mutation=0"
     )
-
-
-def _nbytes(tensor: Any) -> int | None:
-    """Return tinygrad tensor byte size when available.
-
-    Parameters
-    ----------
-    tensor
-        tinygrad Tensor.
-
-    Returns
-    -------
-    int | None
-        Estimated byte size.
-    """
-
-    try:
-        return int(tensor.nbytes())
-    except Exception:
-        try:
-            return int(tensor.numel() * tensor.dtype.itemsize)
-        except Exception:
-            return None
 
 
 def _payload_list(tensor: Any) -> Any:
@@ -3513,25 +3252,6 @@ def _is_scalar_tinygrad_value(value: Any) -> bool:
     """
 
     return tuple(getattr(value, "shape", ())) == ()
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in derived-gradient provenance.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:

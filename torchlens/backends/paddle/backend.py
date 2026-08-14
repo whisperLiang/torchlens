@@ -35,7 +35,6 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -44,8 +43,16 @@ from ...quantities import Duration
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
 from .._finalize import (
     attach_function_root_module,
+    attach_module_owned_op_params,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mark_output_label,
+    mirror_param_derived_grads,
+    nearest_metadata_parent,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    stable_callable_name as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import (
     PADDLE_EXTRA_KWARG_POLICY,
@@ -508,11 +515,20 @@ class PaddleBackend:
             if hasattr(trace, "_paddle_intervention_runtime"):
                 delattr(trace, "_paddle_intervention_runtime")
             freeze_trace_relation_views(trace)
-            stamp_backend_finalized(trace)
-            return trace
         finally:
-            cleanup_model_session(trace, prepared_model, module_tree if use_object_module else None)
-            unwrap_paddle()
+            # Independently-owned resources: a raising hook cleanup must not
+            # leave the process-global Paddle wrappers installed.
+            try:
+                cleanup_model_session(
+                    trace, prepared_model, module_tree if use_object_module else None
+                )
+            finally:
+                unwrap_paddle()
+        # Settlement is the LAST act, after ALL teardown (the path-20 stamp
+        # contract): a teardown raise escapes productless -- the object
+        # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
+        stamp_backend_finalized(trace)
+        return trace
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
         """Capture then validate a Paddle forward pass.
@@ -667,7 +683,7 @@ class PaddleBackend:
         trace.derived_grads = DerivedGradAccessor(records)
         if grad_options.intermediate_grads:
             trace.intermediate_derived_grads = intermediate_accessor
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _records_for_intermediate_paddle_grads(
         self,
@@ -774,35 +790,6 @@ class PaddleBackend:
                 f"{len(records)}."
             )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self,
-        trace: Trace,
-        records: Mapping[str, DerivedGradRecord],
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing Paddle module-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
     def validate_trace(
         self,
@@ -1149,7 +1136,7 @@ class PaddleBackend:
             input_output_address=None,
             shape=self._shape(output),
             dtype=DtypeRef(backend="paddle", name=str(self._dtype(output))),
-            tensor_device=DeviceRef(backend="paddle", name=str(self._device(output))),
+            tensor_device=_device_ref_from_paddle_place(self._device(output)),
             tensor_requires_grad=requires_grad,
             output_index=None,
             is_bottom_level_func=func_event_input.is_bottom_level_func,
@@ -1268,7 +1255,11 @@ class PaddleBackend:
 
         return CapturePolicy(
             must_keep_topology=True,
-            save_payload=bool(getattr(session, "save_raw_activations", True)),
+            # Paddle preview is full-save only: entry policy refuses
+            # save_raw_activations=False, so payload saving is unconditional
+            # here (a dynamic read would be dead code implying a capability
+            # the entry gate denies).
+            save_payload=True,
             requires_isolation=False,
             save_args=False,
             save_code=bool(getattr(session, "save_code_context", False)),
@@ -1593,13 +1584,7 @@ class PaddleBackend:
             label = self.tensor_store.get_label(value)
             if label is None:
                 continue
-            trace.output_layers.append(label)
-            event = trace.capture_events.op_event_by_label_raw.get(label)
-            if event is None:
-                continue
-            trace.capture_events.append_amendment(
-                amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-            )
+            mark_output_label(trace, label)
 
     def _finish_trace(self, trace: Trace, module_tree: PaddleModuleTree | None = None) -> None:
         """Finalize a manually captured Paddle Trace."""
@@ -1615,7 +1600,7 @@ class PaddleBackend:
             module_tree=module_tree,
             attach_function_root_module=attach_function_root_module,
             attach_object_module_logs=self._attach_object_module_logs,
-            attach_op_params=_attach_paddle_op_params_for_finalize,
+            attach_op_params=attach_module_owned_op_params,
             count_layers_with_attached_params=True,
             recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
@@ -1626,7 +1611,7 @@ class PaddleBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_paddle_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_paddle_metadata_top_level,
             op_top_level=_paddle_op_top_level,
             training_mode=_paddle_training_mode,
@@ -1740,7 +1725,7 @@ def paddle_param_logs(tree: PaddleModuleTree, trace: Trace) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="paddle", name=dtype)
-        param.device_ref = DeviceRef(backend="paddle", name=str(getattr(value, "place", None)))
+        param.device_ref = _device_ref_from_paddle_place(getattr(value, "place", None))
         param.backend_address = f"object:{existing_address}"
         param.resolver_status = "resolved"
         param._param_ref = cast(Any, value)
@@ -1750,75 +1735,6 @@ def paddle_param_logs(tree: PaddleModuleTree, trace: Trace) -> dict[str, Param]:
         )
         param_logs[existing_address] = param
     return param_logs
-
-
-def _attach_paddle_op_params(
-    op_log: Any,
-    param_logs: ParamAccessor,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach Paddle module-owned parameters to a finalized op log."""
-
-    module_calls = _paddle_op_module_calls(getattr(op_log, "modules", ()))
-    if not module_calls:
-        return
-    owner = module_calls[-1][0]
-    params = [
-        param
-        for param in param_logs
-        if param.module_address == owner and param.barcode not in seen_param_barcodes
-    ]
-    if not params:
-        return
-    op_log._param_logs = params
-    op_log._param_barcodes = [param.barcode for param in params]
-    op_log.param_shapes = [param.shape for param in params]
-    op_log.num_params = sum(param.num_params for param in params)
-    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
-    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
-    seen_param_barcodes.update(param.barcode for param in params)
-
-
-def _attach_paddle_op_params_for_finalize(
-    op_log: Any,
-    trace: Trace,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach Paddle params through the shared finalization hook.
-
-    Parameters
-    ----------
-    op_log:
-        Operation log being finalized.
-    trace:
-        Trace whose parameter accessor owns Paddle param logs.
-    seen_param_barcodes:
-        Param barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates ``op_log`` in place when new params are attached.
-    """
-
-    _attach_paddle_op_params(op_log, trace.param_logs, seen_param_barcodes)
-
-
-def _paddle_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list."""
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _paddle_metadata_top_level(
@@ -1844,7 +1760,7 @@ def _paddle_metadata_top_level(
     """
 
     del metadata
-    return address != "self" and _nearest_metadata_parent(address, metadata_by_address) == "self"
+    return address != "self" and nearest_metadata_parent(address, metadata_by_address) == "self"
 
 
 def _paddle_op_top_level(address: str) -> bool:
@@ -1901,18 +1817,34 @@ def _resolve_paddle_module_identity_mode(
     return module_tree is not None
 
 
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``."""
+def _device_ref_from_paddle_place(place: object) -> DeviceRef | None:
+    """Build a vocabulary-honest ``DeviceRef`` from a Paddle place.
 
-    if address == "self":
+    ``DeviceRef.backend`` is the HARDWARE device class (``"cpu"``, ``"gpu"``),
+    never the framework namespace. Paddle spells placement as ``Place(cpu)``
+    or ``Place(gpu:0)``; the canonical device string is the interior, routed
+    through :meth:`DeviceRef.from_value` like every other preview backend.
+
+    Parameters
+    ----------
+    place
+        Paddle place object, its string form, or ``None`` when unknown.
+
+    Returns
+    -------
+    DeviceRef | None
+        Neutral device reference, or ``None`` when placement is unknown.
+    """
+
+    if place is None:
         return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
+    text = str(place)
+    if text.startswith("Place(") and text.endswith(")"):
+        text = text[len("Place(") : -1]
+    text = text.strip().lower()
+    if not text:
+        return None
+    return DeviceRef.from_value(text)
 
 
 def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
@@ -1923,24 +1855,6 @@ def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
         for alias in metadata.get("all_addresses", [primary]):
             aliases[str(alias)] = primary
     return aliases
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``."""
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return Paddle tensor memory in bytes."""
-
-    try:
-        return int(value.numel()) * int(value.element_size())  # type: ignore[attr-defined]
-    except (AttributeError, TypeError, ValueError):
-        return None
 
 
 def _paddle_intervention_corroborated(trace: Trace, capture: Any, op: Any) -> bool:
@@ -2755,29 +2669,6 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
     if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
         return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(func: Callable[..., Any] | None) -> str | None:
-    """Return a stable best-effort callable identity string.
-
-    Parameters
-    ----------
-    func
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Human-readable callable identity.
-    """
-
-    if func is None:
-        return None
-    module = getattr(func, "__module__", None)
-    qualname = getattr(func, "__qualname__", None)
-    if module and qualname:
-        return f"{module}.{qualname}"
-    return repr(func)
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]
