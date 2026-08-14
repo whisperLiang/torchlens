@@ -409,11 +409,8 @@ def save(
     backup_path: Path | None = None
     tmp_path = _make_tmp_bundle_path(bundle_path)
     try:
-        if bundle_path.exists():
-            if not overwrite:
-                raise FileExistsError(f"Bundle path already exists: {bundle_path}")
-            backup_path = _make_backup_path(bundle_path)
-            bundle_path.rename(backup_path)
+        if bundle_path.exists() and not overwrite:
+            raise FileExistsError(f"Bundle path already exists: {bundle_path}")
 
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.mkdir()
@@ -540,6 +537,18 @@ def save(
         # bundle directories so a power/OS crash after the rename below cannot
         # publish a bundle holding zero-length or partial files.
         fsync_tree(tmp_path)
+        # Move the existing target aside only NOW, immediately before the
+        # swap (mirroring ``_TlSpecWriter.write_bundle``). Doing it at save
+        # start left the target with NO bundle for the whole (potentially
+        # minutes-long) scrub/blob write: the Python exception nets below
+        # restore it, but SIGKILL/power loss mid-save stranded the old data
+        # under an undocumented ``.bak.<uuid>`` name, and concurrent readers
+        # saw the bundle vanish for the entire save.
+        if bundle_path.exists():
+            if not overwrite:
+                raise FileExistsError(f"Bundle path already exists: {bundle_path}")
+            backup_path = _make_backup_path(bundle_path)
+            bundle_path.rename(backup_path)
         tmp_path.rename(bundle_path)
         # Make the rename itself durable before declaring the save complete.
         fsync_dir(bundle_path.parent)

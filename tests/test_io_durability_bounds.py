@@ -34,6 +34,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io import bundle as bundle_mod
 from torchlens._io.manifest import Manifest
 
 pytestmark = pytest.mark.smoke
@@ -115,3 +116,40 @@ def test_manifest_write_fsyncs_the_file(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "standalone-manifest.json"
     manifest.write(destination)
     assert destination in synced
+
+
+# --------------------------------------------------------------------------- #
+# MED2: overwrite aside-rename happens at the swap, not at save start          #
+# --------------------------------------------------------------------------- #
+
+
+def test_overwrite_save_keeps_old_bundle_at_target_until_swap(tmp_path: Path, monkeypatch) -> None:
+    """The existing bundle stays AT its path for the whole write phase.
+
+    Fail-before: the trace-save writer renamed the old bundle aside to
+    ``.bak.<uuid>`` at save START, before the minutes-long scrub/blob write.
+    Python exception paths restored it, but SIGKILL/power loss mid-save left
+    the target with NO bundle (old data stranded under an undocumented backup
+    name), and concurrent readers saw the bundle vanish for the entire save.
+    The SIGKILL window is the whole span between the early aside-rename and
+    the swap; observing the target mid-save (at ``_build_manifest``, after
+    blob writes) is the RED discriminator for that ordering.
+    """
+
+    spec = tmp_path / "b.tlspec"
+    tl.save(_trace(), str(spec))
+    real_build_manifest = bundle_mod._build_manifest
+    observed: dict[str, bool] = {}
+
+    def observing_build_manifest(*args, **kwargs):
+        observed["target_exists_mid_save"] = spec.exists()
+        observed["target_loadable_mid_save"] = (spec / "manifest.json").is_file()
+        return real_build_manifest(*args, **kwargs)
+
+    monkeypatch.setattr(bundle_mod, "_build_manifest", observing_build_manifest)
+    tl.save(_trace(), str(spec), overwrite=True)
+    assert observed["target_exists_mid_save"], "old bundle was moved aside at save start"
+    assert observed["target_loadable_mid_save"]
+    # The overwrite itself still completed and left no backup debris.
+    tl.load(str(spec))
+    assert not list(tmp_path.glob("*.bak.*"))
