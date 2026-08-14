@@ -55,3 +55,27 @@ def test_mlx_preview_rejects_random_seed() -> None:
 
     with pytest.raises(BackendUnsupportedError, match="random_seed"):
         tl.trace(lambda x: x + 1, mx.array([1.0]), backend="mlx", random_seed=123)
+
+
+@pytest.mark.optional
+def test_mlx_save_raw_activations_false_drops_payloads_keeps_metadata() -> None:
+    """MLX's declared save_raw_activations=False capability is real (R17-5)."""
+
+    class Tiny(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.l1 = nn.Linear(4, 4)
+
+        def __call__(self, x: mx.array) -> mx.array:
+            return nn.relu(self.l1(x))
+
+    model = Tiny()
+    x = mx.random.normal((2, 4))
+    log = tl.trace(model, x, backend="mlx", save_raw_activations=False)
+
+    assert log.num_ops > 0
+    for op_label in log.op_labels:
+        op = log[op_label]
+        assert op.out is None
+        assert op.shape is not None
+        assert op.dtype is not None

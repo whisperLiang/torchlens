@@ -1277,7 +1277,11 @@ class PaddleBackend:
 
         return CapturePolicy(
             must_keep_topology=True,
-            save_payload=bool(getattr(session, "save_raw_activations", True)),
+            # Paddle preview is full-save only: entry policy refuses
+            # save_raw_activations=False, so payload saving is unconditional
+            # here (a dynamic read would be dead code implying a capability
+            # the entry gate denies).
+            save_payload=True,
             requires_isolation=False,
             save_args=False,
             save_code=bool(getattr(session, "save_code_context", False)),
