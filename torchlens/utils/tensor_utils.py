@@ -116,10 +116,132 @@ REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE = _DTYPE_FLOAT_TOLERA
 # NaN handling at every consumer follows tensor_nanequal's doctrine: identical
 # NaN patterns compare EQUAL (``equal_nan=True``), so a correct NaN-bearing
 # gradient can never false-FAIL, while NaN-vs-number still fails.
+#
+# These four constants are the FP32 ROW of that error model.  Applying them to
+# other dtypes is wrong in both directions: fp64 gradients get an rtol worth
+# ~4.5e11 of their own ULPs (masking corruption far above fp64 round-off),
+# while fp16 gradients get an rtol two orders BELOW their own eps (false-
+# failing every non-bitwise agreement).  Dtype-resolving consumers call
+# ``param_grad_tolerances_for_dtype`` / ``layer_grad_tolerances_for_dtype``,
+# whose fp32 rows are bit-identical to these constants.
 PARAM_GRAD_VALIDATION_RTOL = 1e-4
 PARAM_GRAD_VALIDATION_ATOL = 1e-5
 LAYER_GRAD_VALIDATION_RTOL = 1e-5
 LAYER_GRAD_VALIDATION_ATOL = 1e-6
+
+# Storage-rounding ULP headroom for low-precision (eps > fp32 eps) gradient
+# comparisons.  Both pipelines under comparison compute the same op sequence
+# in the same dtype (kernels widen internally and round ONCE to storage), so
+# the legitimate difference is a few storage ULPs; reductions (param grads)
+# get double the elementwise (layer grad) budget for reorder noise.
+_PARAM_GRAD_LOW_PRECISION_ULP_HEADROOM = 8.0
+_LAYER_GRAD_LOW_PRECISION_ULP_HEADROOM = 4.0
+
+
+def _grad_tolerances_for_dtype(
+    dtype: torch.dtype,
+    fp32_rtol: float,
+    fp32_atol: float,
+    low_precision_ulp_headroom: float,
+) -> tuple[float, float]:
+    """Derive a gradient-validation ``(rtol, atol)`` row for one dtype.
+
+    Accumulating dtypes (eps <= fp32's) rescale the legacy fp32 decimal
+    budget by the eps ratio, so every dtype gets the SAME strictness measured
+    in its own ULPs -- fp32 reproduces the legacy constants exactly, fp64
+    tightens by ~9 orders of magnitude.  Storage-rounding dtypes (fp16/bf16)
+    get a few-ULP budget in their own eps.  The absolute floor scales with
+    the same ratio, keeping the legacy fp32 rtol/atol proportion: gradient
+    reductions carry absolute cancellation noise near zero, so a
+    subnormal-scale atol would false-fail legitimate near-zero grads.
+    Complex dtypes derive from their component real dtype (``torch.finfo``
+    reports component precision).
+
+    Parameters
+    ----------
+    dtype:
+        Gradient dtype being compared.
+    fp32_rtol:
+        Legacy fp32 relative tolerance anchoring the accumulating budget.
+    fp32_atol:
+        Legacy fp32 absolute floor anchoring the accumulating budget.
+    low_precision_ulp_headroom:
+        ULP budget for storage-rounding (low-precision) dtypes.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(rtol, atol)`` pair for ``torch.allclose``.
+    """
+
+    eps32 = float(torch.finfo(torch.float32).eps)
+    try:
+        eps = float(torch.finfo(dtype).eps)
+    except (TypeError, ValueError):
+        # Non-float dtype (no finfo): exact comparison paths handle these;
+        # return the strictest float row so a misrouted call stays strict.
+        eps = float(torch.finfo(torch.float64).eps)
+    if eps > eps32:
+        rtol = low_precision_ulp_headroom * eps
+        return rtol, rtol / 10.0
+    scale = eps / eps32
+    return fp32_rtol * scale, fp32_atol * scale
+
+
+def param_grad_tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
+    """Return the parameter-gradient validation tolerances for ``dtype``.
+
+    Parameter grads are REDUCTIONS (summed over batch and spatial/sequence
+    positions), so they carry accumulation-order round-off proportional to
+    that depth; the fp32 row is exactly the legacy
+    ``PARAM_GRAD_VALIDATION_RTOL`` / ``PARAM_GRAD_VALIDATION_ATOL`` pair.
+
+    Parameters
+    ----------
+    dtype:
+        Gradient dtype being compared.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(rtol, atol)`` pair for ``torch.allclose``.
+    """
+
+    return _grad_tolerances_for_dtype(
+        dtype,
+        PARAM_GRAD_VALIDATION_RTOL,
+        PARAM_GRAD_VALIDATION_ATOL,
+        _PARAM_GRAD_LOW_PRECISION_ULP_HEADROOM,
+    )
+
+
+def layer_grad_tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
+    """Return the layer-gradient validation tolerances for ``dtype``.
+
+    Layer (module-output) grads and receptive-field empirical-adjoint probes
+    compare ELEMENTWISE with no cross-element reduction between the two
+    pipelines, so they earn a 10x tighter budget than parameter grads; the
+    fp32 row is exactly the legacy ``LAYER_GRAD_VALIDATION_RTOL`` /
+    ``LAYER_GRAD_VALIDATION_ATOL`` pair.
+
+    Parameters
+    ----------
+    dtype:
+        Gradient dtype being compared.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(rtol, atol)`` pair for ``torch.allclose``.
+    """
+
+    return _grad_tolerances_for_dtype(
+        dtype,
+        LAYER_GRAD_VALIDATION_RTOL,
+        LAYER_GRAD_VALIDATION_ATOL,
+        _LAYER_GRAD_LOW_PRECISION_ULP_HEADROOM,
+    )
+
 
 # Cached result of torch.cuda.is_available().  Evaluated once per process
 # because CUDA availability cannot change at runtime.  Avoids repeated
