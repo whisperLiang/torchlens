@@ -263,7 +263,7 @@ def test_feature_map_node_spec_renders_one_image_and_overlay_differs_from_fallba
         alpha=0.55,
         cmap="magma",
         cell_size=72,
-        more_count=0,
+        cap_text=None,
     )
     fallback_image = _render_feature_map_grid(
         maps[:1],
@@ -274,7 +274,7 @@ def test_feature_map_node_spec_renders_one_image_and_overlay_differs_from_fallba
         alpha=0.55,
         cmap="magma",
         cell_size=72,
-        more_count=0,
+        cap_text=None,
     )
     assert ImageChops.difference(overlay_image, fallback_image).getbbox() is not None
     assert int(counts[2].item()) == 2
@@ -364,7 +364,7 @@ def test_render_grid_cap_marker_is_contained() -> None:
         alpha=0.55,
         cmap="magma",
         cell_size=32,
-        more_count=4,
+        cap_text="+4 more",
     )
 
     assert image.size == (68, 68)
@@ -456,7 +456,7 @@ def test_constant_cells_are_labeled_and_distinct_from_zero() -> None:
         "alpha": 0.55,
         "cmap": "magma",
         "cell_size": 72,
-        "more_count": 0,
+        "cap_text": None,
     }
     stimuli = torch.tensor([0])
     channels = torch.tensor([[0]])
@@ -465,3 +465,25 @@ def test_constant_cells_are_labeled_and_distinct_from_zero() -> None:
     zero_image = _render_feature_map_grid(all_zero, stimuli, channels, **kwargs)
 
     assert ImageChops.difference(five_image, zero_image).getbbox() is not None
+
+
+def test_tooltip_reports_true_totals_not_capped_counts(tmp_path: Path) -> None:
+    """A 4-of-6 stimuli x 4-of-8 channel grid must say so, not '4 stimuli'."""
+
+    wide = nn.Sequential(nn.Conv2d(1, 8, kernel_size=1, bias=False)).eval()
+    with torch.no_grad():
+        wide[0].weight.copy_(torch.arange(1.0, 9.0).reshape(8, 1, 1, 1))
+    trace = tl.trace(wide, _input_batch(6), save=tl.func("conv2d"))
+    feature_map_evolution(trace, channels="top", top_k=8, max_stimuli=4, max_channels=4)
+
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "true_totals"),
+    )
+
+    assert "4 of 6 stimuli" in dot
+    assert "4 of 8 channels" in dot
+    # The capped count must never masquerade as the total.
+    assert "4 stimuli" not in dot

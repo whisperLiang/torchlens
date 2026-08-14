@@ -241,15 +241,23 @@ def feature_map_node_spec(
         maps = maps[:shown_rows, :shown_cols]
         stimulus_indices = stimulus_indices[:shown_rows]
         channel_ids = channel_ids[:shown_rows, :shown_cols]
-        more_count = max(0, int(counts[2].item()) - shown_rows) + max(
-            0, int(counts[3].item()) - shown_cols
-        )
+        # Disclose against the TRUE totals (counts[0]=batch size,
+        # counts[1]=channel count), never the already-capped stored counts:
+        # a 4-of-32 grid must say "4 of 32", and the storage cap hides
+        # subsetting from the display cap's arithmetic.
+        total_stimuli = int(counts[0].item())
+        mode_id = int(counts[4].item())
+        total_channels = int(counts[1].item())
+        cap_parts = []
+        if shown_rows < total_stimuli:
+            cap_parts.append(f"{shown_rows}/{total_stimuli} stim")
+        if mode_id != _MODE_AGGREGATE and shown_cols < total_channels:
+            cap_parts.append(f"{shown_cols}/{total_channels} ch")
+        cap_text = ", ".join(cap_parts) if cap_parts else None
 
         from ..repgeom import _matching_pil_image_batch
 
-        raw_images = _matching_pil_image_batch(
-            getattr(trace, "raw_input", None), int(counts[0].item())
-        )
+        raw_images = _matching_pil_image_batch(getattr(trace, "raw_input", None), total_stimuli)
         overlay_available = overlay and raw_images is not None
         grid = _render_feature_map_grid(
             maps,
@@ -260,19 +268,21 @@ def feature_map_node_spec(
             alpha=alpha,
             cmap=cmap,
             cell_size=cell_size,
-            more_count=more_count,
+            cap_text=cap_text,
         )
         image_path = _write_feature_map_image(trace, key, grid)
         caption = str(getattr(layer, "layer_label", None) or getattr(layer, "label", key))
-        mode_name = _mode_name(int(counts[4].item()))
+        mode_name = _mode_name(mode_id)
+        stimulus_clause = f"showing {shown_rows} of {total_stimuli} stimuli"
+        channel_clause = (
+            "" if mode_id == _MODE_AGGREGATE else f" x {shown_cols} of {total_channels} channels"
+        )
         tooltip = (
-            f"Feature maps for {key}: {mode_name}, {int(counts[2].item())} stimuli"
+            f"Feature maps for {key}: {mode_name}, {stimulus_clause}{channel_clause}"
             "; cells independently normalized"
         )
         if overlay and not overlay_available:
             tooltip = f"{tooltip}; overlay unavailable"
-        if more_count > 0:
-            tooltip = f"{tooltip}; +{more_count} more"
         return spec.replace(
             lines=[caption],
             image=str(image_path),
@@ -670,7 +680,7 @@ def _render_feature_map_grid(
     alpha: float,
     cmap: str,
     cell_size: int,
-    more_count: int,
+    cap_text: str | None,
 ) -> Image.Image:
     """Render stored maps as one bounded small-multiples image.
 
@@ -692,8 +702,9 @@ def _render_feature_map_grid(
         Colormap name.
     cell_size:
         Cell side length in pixels.
-    more_count:
-        Number of omitted row/column entries to mark.
+    cap_text:
+        Optional shown-of-total disclosure marker (e.g. ``"4/32 stim"``),
+        or ``None`` when the grid shows everything.
 
     Returns
     -------
@@ -736,8 +747,8 @@ def _render_feature_map_grid(
                 y=y,
                 cell_size=cell_size,
             )
-    if more_count > 0:
-        _draw_more_marker(draw, width=width, height=height, text=f"+{more_count} more")
+    if cap_text is not None:
+        _draw_more_marker(draw, width=width, height=height, text=cap_text)
     return canvas
 
 
