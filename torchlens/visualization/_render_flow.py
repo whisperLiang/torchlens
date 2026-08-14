@@ -548,7 +548,11 @@ def _base_rendered_node_emission(
             fold=_run_fold_for_address(address, repeat_folds),
         )
     name = _render_node_label(node, vis_mode).replace(":", "pass")
-    if show_containers in {"collapsed", "auto"} and name in collapsed_container_nodes:
+    # Map membership is the ONE collapse predicate: _collapsed_container_leaf_nodes
+    # owns the mode decision ({"collapsed", "auto", "nodes"}), and the edge pass
+    # reroutes every mapped leaf's edges to the summary box. Re-checking the mode
+    # here orphaned the leaves in "nodes" mode (drawn, but edges stolen).
+    if name in collapsed_container_nodes:
         return None
     if isinstance(node, BoundaryNode):
         return RenderedNodeEmission(

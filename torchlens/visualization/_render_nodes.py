@@ -626,11 +626,10 @@ def _build_layer_node(
         if raw_output_attrs is not None:
             node_args.update(raw_output_attrs)
     node_args["name"] = _render_node_label(node, vis_mode).replace(":", "pass")
-    if (
-        show_containers in {"collapsed", "auto"}
-        and collapsed_container_nodes is not None
-        and node_args["name"] in collapsed_container_nodes
-    ):
+    # Map membership is the ONE collapse predicate (the map builder owns the
+    # mode decision); the edge pass reroutes mapped leaves' edges to the
+    # summary box, so drawing a mapped leaf would orphan it.
+    if collapsed_container_nodes is not None and node_args["name"] in collapsed_container_nodes:
         return node_color
     hidden_buffer_addresses = _get_hidden_parent_buffer_addresses(self, node, show_buffer_layers)
     if hidden_buffer_addresses and not (node.is_input or node.is_output or node.is_buffer):
