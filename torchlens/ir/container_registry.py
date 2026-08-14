@@ -130,6 +130,22 @@ class ContainerSnapshot:
     # (only the first site's index survived in ``observed_at_event_index``).
     site_alias_event_indices: tuple[int, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Validate the declared parallel-field pairing at construction.
+
+        ``site_aliases`` / ``site_alias_event_indices`` are positionally
+        parallel persisted fields; a length mismatch is corrupt parallel
+        state and must be NAMED here, not surface later as a silently
+        dropped alias in ``observed_index_for_site`` (R23-4).
+        """
+
+        if len(self.site_aliases) != len(self.site_alias_event_indices):
+            raise ValueError(
+                "ContainerSnapshot parallel fields are corrupt: "
+                f"{len(self.site_aliases)} site_aliases vs "
+                f"{len(self.site_alias_event_indices)} site_alias_event_indices."
+            )
+
     def observed_index_for_site(self, site: Site) -> int:
         """Return the observation event index recorded for ``site``.
 
@@ -157,7 +173,7 @@ class ContainerSnapshot:
 
         if site == self.site:
             return self.observed_at_event_index
-        for alias, index in zip(self.site_aliases, self.site_alias_event_indices):
+        for alias, index in zip(self.site_aliases, self.site_alias_event_indices, strict=True):
             if alias == site:
                 return index
         raise ValueError(f"Snapshot was not observed at site {site!r}.")
