@@ -41,11 +41,11 @@ def test_preview_and_dry_run_contexts_match_field_by_field() -> None:
     model = StaticGraph()
     x = torch.randn(1, 4)
     trace = tl.trace(model, x)
-    trace = tl.fastlog.dry_run(model, x, save=lambda ctx: True, include_source_events=True)
+    dry = tl.fastlog.dry_run(model, x, save=lambda ctx: True, include_source_events=True)
     preview_nodes = _build_preview_nodes(trace, lambda ctx: True)
     preview_contexts = [node.ctx for node in dict.fromkeys(preview_nodes.values())]
     real_contexts = [
-        ctx for ctx in trace.contexts if ctx.kind in {"input", "op"} and ctx.layer_type != "output"
+        ctx for ctx in dry.contexts if ctx.kind in {"input", "op"} and ctx.layer_type != "output"
     ]
 
     assert [asdict(ctx) for ctx in preview_contexts] == [asdict(ctx) for ctx in real_contexts]

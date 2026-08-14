@@ -2893,6 +2893,22 @@ def _round21_release_nodes(target: str) -> tuple[str, ...]:
     return tuple(nodes)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the release-proof markers applied below.
+
+    These markers are selected with ``-m`` by the round21 CI legs; registering
+    them here (their only application site) rather than in pyproject keeps the
+    crawler suite self-contained and silences PytestUnknownMarkWarning.
+    """
+
+    for target, marker_name in _ROUND21_RELEASE_MARKERS.items():
+        config.addinivalue_line(
+            "markers",
+            f"{marker_name}: round21 {target} release-proof node "
+            "(applied from the checked-in registry)",
+        )
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Apply release markers from exact checked-in registries.
