@@ -144,7 +144,11 @@ def _record_emitted_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        # Identity-checked restore (the profile-slot standard): a user or
+        # callback that installed its own showwarning during the window must
+        # not be silently reverted.
+        if warnings.showwarning is recorder:
+            warnings.showwarning = forward
 
 
 @contextmanager
@@ -164,7 +168,8 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        if warnings.showwarning is dedup:
+            warnings.showwarning = forward
 
 
 @contextmanager
@@ -193,7 +198,8 @@ def _defer_capture_failed_warnings(
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        if warnings.showwarning is hold:
+            warnings.showwarning = forward
 
 
 def _flush_deferred_warnings(
@@ -424,26 +430,45 @@ def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, .
     return tuple(dict.fromkeys(changed))
 
 
+# Verification reasons carrying MORE-SPECIFIC diagnostic content than the
+# generic rescue stamps: a recovered rescue must not demote any of these to
+# ``mode_rescue_rerun`` (b6-fable/b3-fable: only dynamo was protected, so an
+# armed detector/witness verdict on the rescued run -- or a teardown failure
+# -- was clobbered into the generic reason).
+_SPECIFIC_VERIFICATION_REASONS = frozenset(
+    {
+        "dynamo_region_not_logged",
+        "callable_escape_shadow_report",
+        "dispatch_witness_unaccounted_ops",
+        "input_boundary_unverifiable",
+        "transform_call_route_unverified",
+        "owner_thread_tripwire_changed",
+        "escape_detector_teardown_failed",
+    }
+)
+
+
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """Stamp the rescue disclosure onto a trace (session-time facts).
 
-    An unrecovered escape must never SILENCE a more specific verdict: when
-    the primary already carries a verification reason (dispatch witness,
-    shadow detector, dynamo boundary), that reason stays authoritative and
-    the rescue attempt is disclosed only through ``rescue_rerun``. The
-    ``escape_rescue_unrecovered`` reason is reserved for the formerly-silent
-    class where the primary made no claim at all.
+    A rescue stamp must never SILENCE a more specific verdict: when the trace
+    already carries a specific verification reason (dispatch witness, shadow
+    detector, dynamo boundary, thread tripwire, teardown failure), that
+    reason stays authoritative and the rescue attempt is disclosed only
+    through ``rescue_rerun``. The ``escape_rescue_unrecovered`` reason is
+    reserved for the formerly-silent class where the primary made no claim at
+    all; ``mode_rescue_rerun`` replaces only a generic or absent reason.
     """
 
     trace.capture_verified = False
     existing_reason = getattr(trace, "capture_verification_reason", None)
-    if getattr(trace, "_raw_dynamo_region_detected", False) or existing_reason == (
-        "dynamo_region_not_logged"
+    if getattr(trace, "_raw_dynamo_region_detected", False) or (
+        existing_reason in _SPECIFIC_VERIFICATION_REASONS
     ):
-        # R16-3: the dynamo-region verdict has TOP precedence at both finalize
-        # sites (compile threads and unaccounted dispatches are symptoms of
-        # that same region); a recovered rescue must not clobber it. The
-        # rescue attempt stays disclosed through ``rescue_rerun`` below.
+        # R16-3 generalized: a specific verdict (dynamo top precedence, an
+        # armed detector/witness report, the thread tripwire) outranks both
+        # generic rescue stamps. The rescue attempt stays disclosed through
+        # ``rescue_rerun`` below.
         pass
     elif reason == "mode_rescue_rerun" or not existing_reason:
         trace.capture_verification_reason = reason
@@ -585,9 +610,13 @@ def capture_with_rescue(
     # only — so the re-run below can be byte-audited and undone.
     state_snapshot = _snapshot_declared_state(model)
 
-    _thread_local.rescue_active = True
     rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
+        # Armed INSIDE the try (the house set-inside-try standard): a
+        # KeyboardInterrupt between an outside arm and the try's first line
+        # leaked rescue_active=True for the thread's lifetime, silently
+        # disabling every later rescue on it.
+        _thread_local.rescue_active = True
         set_rng_from_saved_states(rng_snapshot)
         # The rescue run's own capture-failed advisory is deferred too: its
         # exception never propagates (the primary's error or trace does), so

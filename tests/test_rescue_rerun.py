@@ -473,7 +473,11 @@ def test_escape_detector_diagnostic_triggers_rescue(raw_cos: Any) -> None:
             trace = tl.trace(_stale_closure_model(raw_cos), torch.tensor([0.25, 0.5]))
         info = trace.rescue_rerun
         assert info is not None and info["recovered"] is True
-        assert trace.capture_verification_reason == "mode_rescue_rerun"
+        # REVIEWED FLIP (b3-fable R02-2 / b6-fable R16-3): the rescued run's
+        # own shadow-detector report is a MORE specific verdict than the
+        # generic mode_rescue_rerun stamp and is no longer clobbered by it;
+        # the rerun stays disclosed through ``rescue_rerun`` above.
+        assert trace.capture_verification_reason == "callable_escape_shadow_report"
         assert info["primary_escape_diagnostics"]
         assert "cos" in [op.func_name for op in trace.ops]
     finally:
@@ -667,3 +671,50 @@ def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
 
     assert calls["intervene"] == 1
     assert trace.rescue_rerun is None
+
+
+def test_recovered_rescue_preserves_specific_verification_reasons() -> None:
+    """A recovered rescue must not demote a specific verdict to the generic stamp.
+
+    Only the dynamo reason was protected; an armed detector/witness verdict on
+    the rescued run (owner_thread_tripwire_changed, callable_escape_shadow_report,
+    dispatch_witness_unaccounted_ops, ...) was clobbered into mode_rescue_rerun.
+    """
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    primary = _stub_trace(["none", "linear"], signal=True)
+    rescued = _stub_trace(
+        ["cos", "linear"],
+        capture_verification_reason="owner_thread_tripwire_changed",
+    )
+    traces = iter([primary, rescued])
+
+    result = capture_with_rescue(lambda: next(traces))
+
+    assert result is rescued
+    assert result.capture_verification_reason == "owner_thread_tripwire_changed"
+    assert result.rescue_rerun["recovered"] is True
+
+
+def test_warning_recorder_leaves_a_user_installed_handler_in_place() -> None:
+    """The rescue driver's showwarning swaps restore identity-checked.
+
+    A user or callback that installs its own ``warnings.showwarning`` during
+    the recorded window must not be silently reverted at window exit.
+    """
+
+    import warnings as warnings_module
+
+    from torchlens.backends.torch.rescue import _record_emitted_warnings
+
+    def user_handler(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    before = warnings_module.showwarning
+    try:
+        with _record_emitted_warnings(set()):
+            warnings_module.showwarning = user_handler
+        assert warnings_module.showwarning is user_handler
+    finally:
+        warnings_module.showwarning = before
