@@ -1805,7 +1805,11 @@ seed) reports `unverifiable` + `not_applicable`:
 4. the `secrets` family (funnels through `SystemRandom` and the import-time `random._urandom`
    alias -- monitored directly because `secrets.token_bytes` bypasses the `os.urandom`
    attribute);
-5. `os.urandom` / `os.getrandom` and `uuid.uuid4` (feeds through `os.urandom`);
+5. `os.urandom` / `os.getrandom` and `uuid.uuid4` (feeds through `os.urandom`); `uuid.uuid1`
+   through BOTH resolutions: the Python fallback (feeds through getrandbits/clocks) and the
+   platform C funnels `uuid._generate_time_safe` (libuuid: wall clock + clock-seq entropy + node,
+   touching no other monitored surface) / `uuid._UuidCreate` (Windows), patched directly and
+   marked as the `uuid.uuid1` channel;
 6. the clock family (a classified bounded-namespace inventory, r39): the current-clock `time.*`
    counters (`time`, `time_ns`, `monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns`,
    `process_time`, `process_time_ns`, `thread_time`, `thread_time_ns`, `clock_gettime`,
@@ -1945,8 +1949,10 @@ leafed (frame-side parity, r38: a non-provably-empty opaque queue flags
 forwards every other read through the referent's attribute machinery -- flags the same).
 Recognition itself is the structural boundary (r39): **a numpy
 `Generator`/`BitGenerator`/`RandomState` reachable ONLY through a C-implemented holder whose
-accessor path contains no Python frame is outside the consumption witness's scope on numpy>=2 +
-CPython<3.12** -- the holder kinds are an open set (arbitrary C-extension/Cython holders with
+accessor path contains no Python frame is outside the consumption witness's scope on numpy>=2 --
+on EVERY currently-supported CPython, including 3.12+ (probed: nothing 3.12-specific engages
+today; the `sys.monitoring` classifier below is what would close it there and is not
+implemented)** -- the holder kinds are an open set (arbitrary C-extension/Cython holders with
 C-level accessors), so a capture drawing through an unrecognized member of this class can report
 VERIFIED that a fresh oracle-1 run would not reproduce. This is the same threat-model-boundary
 family as the pre-existing-foreign-thread clause above, NOT a closure-by-enumeration claim: the

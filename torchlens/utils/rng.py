@@ -36,6 +36,7 @@ import random
 import sys as _sys_module
 import threading as _threading_module
 import time as _time_module
+import uuid as _uuid_module
 import warnings as _warnings_module
 import weakref as _weakref_module
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence, Set as AbstractSet
@@ -1509,6 +1510,14 @@ class _NotADigestableRng(Exception):
     """Internal sentinel: the value is not a digestable numpy/`random` generator."""
 
 
+_UNCERTAIN_DETAIL_CAP: int = 64
+"""Max DISTINCT ``uncertain_detail`` reasons retained per monitoring window.
+
+The boolean ``uncertain`` verdict is unconditional; the detail is a diagnostic.
+Past the cap one ``uncertain_detail_capped`` marker discloses the suppression.
+"""
+
+
 class HostRngMonitorResult:
     """Outcome of one capture-scoped host-nondeterminism monitoring window."""
 
@@ -2057,6 +2066,10 @@ class host_nondeterminism_monitor:
         # thread-independent digest belt) -- NOT a process-wide ``gc.get_objects()`` scan.
         self._model = model
         self.result = HostRngMonitorResult()
+        # O(1) dedupe for ``_flag_uncertain``: per-frame failure paths repeat
+        # one reason millions of times on a persistently-raising profiled
+        # object; without this set each repeat re-copied the detail tuple.
+        self._uncertain_seen: set[str] = set()
         self._restores: list[Callable[[], None]] = []
         self._owner_thread = _threading_module.get_ident()
         self._previous_sys_profile: Any = None
@@ -2217,11 +2230,30 @@ class host_nondeterminism_monitor:
         Uncertainty is never read as absence of consumption: install, chain,
         restore, and inventory failures all land here so the verdict degrades
         instead of silently blessing the capture.
+
+        Detail accumulation is DEDUPED and CAPPED: several callers fire PER
+        PROFILE EVENT (``profile_rng_state_read_failed``,
+        ``profile_classifier_error``, ...), so a persistently-raising profiled
+        object used to grow ``uncertain_detail`` by a full tuple copy per frame
+        -- measured O(N^2), turning a real forward (~1e5-1e6 profiled frames)
+        into minutes-to-hours of tuple-copy churn while the verdict was already
+        settled INCOMPLETE by the boolean. A repeated reason is dropped in
+        O(1); past the distinct-reason cap one overflow marker records that
+        further DISTINCT reasons were suppressed. The ``uncertain`` boolean --
+        the only verdict-steering output -- is stamped unconditionally first.
         """
 
         self.result.uncertain = True
-        if reason:
-            self.result.uncertain_detail = (*self.result.uncertain_detail, reason)
+        if not reason or reason in self._uncertain_seen:
+            return
+        if len(self._uncertain_seen) >= _UNCERTAIN_DETAIL_CAP:
+            overflow = "uncertain_detail_capped"
+            if overflow not in self._uncertain_seen:
+                self._uncertain_seen.add(overflow)
+                self.result.uncertain_detail = (*self.result.uncertain_detail, overflow)
+            return
+        self._uncertain_seen.add(reason)
+        self.result.uncertain_detail = (*self.result.uncertain_detail, reason)
 
     def _patch_attr(self, holder: Any, name: str, wrapper: Any) -> None:
         """Patch one module or class attribute and queue its exact restoration.
@@ -2309,6 +2341,34 @@ class host_nondeterminism_monitor:
 
             self._mark(channel)
             return original(*args, **kwargs)
+
+        return wrapper
+
+    def _raw_thread_spawn_wrapper(self, original: Any) -> Any:
+        """Build a passthrough spawn wrapper that profile-hooks the NEW thread.
+
+        ``_thread.start_new_thread`` / ``start_joinable_thread`` bootstrap the
+        target directly (no ``threading.Thread`` bootstrap, so
+        ``threading.setprofile`` never fires for them). The wrapped target
+        installs this window's threading hook on the new thread before running,
+        making an in-window raw-thread host draw witnessed exactly like a
+        ``threading.Thread`` one. Everything else passes through untouched.
+        """
+
+        monitor = self
+
+        def wrapper(function: Any, *rest: Any, **spawn_kwargs: Any) -> Any:
+            """Spawn with the target wrapped to self-install the profile hook."""
+
+            def hooked_target(*fargs: Any, **fkwargs: Any) -> Any:
+                """Install the in-window threading hook, then run the target."""
+
+                hook = monitor._threading_hook
+                if hook is not None and not monitor._torn_down:
+                    _sys_module.setprofile(hook)
+                return function(*fargs, **fkwargs)
+
+            return original(hooked_target, *rest, **spawn_kwargs)
 
         return wrapper
 
@@ -4478,6 +4538,24 @@ class host_nondeterminism_monitor:
                 "_urandom",
                 self._entropy_wrapper(random._urandom, "random._urandom"),
             )
+        # entropy: uuid1's platform C funnels. On Linux ``uuid.uuid1`` resolves
+        # ``uuid._generate_time_safe`` (libuuid: wall clock + clock-seq entropy
+        # + node) and touches NO other monitored surface, so an in-window
+        # ``uuid.uuid1()`` was a clean false-VERIFIED escape; the Python
+        # fallback path IS caught through getrandbits/clocks. Windows routes
+        # through ``uuid._UuidCreate``. ``uuid.uuid1`` reads these as module
+        # globals at call time, so a pre-window ``from uuid import uuid1``
+        # alias cannot bypass the patch.
+        for uuid_funnel_name in ("_generate_time_safe", "_UuidCreate"):
+            uuid_funnel = getattr(_uuid_module, uuid_funnel_name, None)
+            if uuid_funnel is None or not callable(uuid_funnel):
+                continue
+            self._register_held_ref(uuid_funnel, "uuid.uuid1")
+            self._patch_attr(
+                _uuid_module,
+                uuid_funnel_name,
+                self._entropy_wrapper(uuid_funnel, "uuid.uuid1"),
+            )
 
     def _install_construction_surfaces(self) -> None:
         """Patch the NumPy generator factory and the unseeded-construction entropy alias."""
@@ -4608,3 +4686,20 @@ class host_nondeterminism_monitor:
         )
         _threading_module.setprofile(self._threading_hook)
         self._threading_profile_installed = True
+        # Raw ``_thread`` spawns bypass ``threading.setprofile`` entirely (that
+        # hook rides ``threading.Thread``'s bootstrap), so an in-window
+        # ``_thread.start_new_thread`` thread drawing an externally-held
+        # generator was a clean false-VERIFIED escape -- outside the documented
+        # residual, which covers only PRE-EXISTING threads. Patch the spawn
+        # entry points to install this window's hook on the new thread before
+        # the target runs; the hook self-uninstalls on its first event after
+        # teardown, so a spawned thread outliving the window sheds it.
+        # ``threading`` itself holds a pre-patch ``_start_new_thread`` ref, so
+        # Thread starts are unaffected (no double hook).
+        for spawn_name in ("start_new_thread", "start_joinable_thread"):
+            if hasattr(_c_thread_module, spawn_name):
+                self._patch_attr(
+                    _c_thread_module,
+                    spawn_name,
+                    self._raw_thread_spawn_wrapper(getattr(_c_thread_module, spawn_name)),
+                )
