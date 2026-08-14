@@ -1369,6 +1369,22 @@ def _add_persistent_buffer_slot_drafts(
             # snapshot admitted tensor-only values, so the complement IS the persistent
             # buffer set.
             buffer_names = tuple(name for name in snapshot if name not in parameter_names)
+            # Mirror the live lane's isinstance(torch.Tensor) admission (its
+            # ``buffer_names`` comprehension filters non-tensor state): a
+            # non-tensor entry in a loaded/embedded snapshot must refuse typed
+            # here, not crash with AttributeError on ``.shape`` mid-save.
+            non_tensor_names = sorted(
+                name for name in buffer_names if not isinstance(snapshot[name], torch.Tensor)
+            )
+            if non_tensor_names:
+                raise TorchLensIOError(
+                    "Runnable save found non-tensor persistent-buffer state entries "
+                    f"in the capture-time snapshot: {', '.join(non_tensor_names)}. "
+                    "The embedded state snapshot admits tensors only; refusing to "
+                    "re-save an incoherent runnable artifact.",
+                    code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
+                    detection_stage="runnable_resave_state_snapshot",
+                )
             geometry_by_name = {
                 name: (
                     tuple(int(dim) for dim in cast(torch.Tensor, snapshot[name]).shape),

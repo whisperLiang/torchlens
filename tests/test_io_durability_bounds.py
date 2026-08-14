@@ -36,7 +36,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import bundle as bundle_mod, manifest as manifest_mod
+from torchlens._io import bundle as bundle_mod, manifest as manifest_mod, runnable as runnable_mod
 from torchlens._io.manifest import Manifest
 from torchlens.errors import TorchLensIOError
 
@@ -277,3 +277,31 @@ def test_resave_include_source_true_keeps_loaded_provenance(tmp_path: Path) -> N
     provenance = json.loads((spec / "manifest.json").read_text(encoding="utf-8")).get("provenance")
     assert provenance is not None
     assert "forged_engine" in provenance.get("rng_state_digests", {})
+
+
+# --------------------------------------------------------------------------- #
+# MED6: runnable dead-model fallback refuses non-tensor state typed            #
+# --------------------------------------------------------------------------- #
+
+
+def test_runnable_dead_model_fallback_refuses_non_tensor_state_typed() -> None:
+    """A non-tensor snapshot entry fails typed, not with AttributeError.
+
+    Fail-before: the dead-model fallback cast every snapshot complement entry
+    to ``torch.Tensor`` without the live lane's isinstance guard, so a
+    non-tensor embedded_state entry on a runnable->load->runnable resave
+    crashed with an uncontrolled ``AttributeError`` (``.shape`` on a str)
+    mid-save instead of a typed refusal.
+    """
+
+    from types import SimpleNamespace
+
+    stub_trace = SimpleNamespace(
+        _runnable=SimpleNamespace(
+            capture_state={"weight": torch.zeros(2), "running_junk": "not-a-tensor"},
+            embedded_state=None,
+        ),
+        param_logs=(),
+    )
+    with pytest.raises(TorchLensIOError, match="non-tensor persistent-buffer"):
+        runnable_mod._add_persistent_buffer_slot_drafts(stub_trace, {})
