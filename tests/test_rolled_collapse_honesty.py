@@ -111,3 +111,16 @@ def test_unrolled_collapsed_boxes_exclude_surfaced_exit_layers(split_trace: tl.T
     }
     ops_rows = re.findall(r">(\d+ ops?)<", source)
     assert ops_rows == ["1 op"] * 5, f"call boxes double-represent surfaced exits: {ops_rows}"
+
+
+def test_rolled_multicall_box_discloses_shape_variation(split_trace: tl.Trace) -> None:
+    """A shape-varying rolled box carries a shapes line, not one false shape (V5)."""
+
+    source = _dot(split_trace, vis_mode="rolled", collapse_fn=lambda m: m.address == "b")
+
+    # Calls 1-3 output (1, 8, 8, 8); calls 4-5 output (1, 8, 4, 4). The box
+    # header shows the first call's shape, so the variation must be disclosed.
+    assert "shapes" in source
+    assert re.search(r"shapes[^<]*8,\s*8[^<]*-&gt;[^<]*4,\s*4|shapes[^<]*8, 8[^<]*4, 4", source), (
+        "rolled multi-call box asserts one output shape for shape-varying call sites"
+    )

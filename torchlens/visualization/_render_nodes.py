@@ -1233,6 +1233,50 @@ def _truncate_raw_input_text(text: str, *, limit: int) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _rolled_multicall_shape_note(
+    trace: "Trace",
+    address: str,
+    num_calls: int,
+) -> str | None:
+    """Return a shape-variation disclosure line for a rolled multi-call box.
+
+    Parameters
+    ----------
+    trace:
+        Trace owning the module calls.
+    address:
+        Pass-free module address rendered as one rolled box.
+    num_calls:
+        Number of calls the box represents.
+
+    Returns
+    -------
+    str | None
+        ``"shapes A->B"`` when the call sites' output shapes differ
+        (first-to-last, matching the fold disclosure idiom), a generic
+        variation note when first and last agree but an interior call
+        differs, or ``None`` when every call outputs one shape.
+    """
+
+    shapes: list[tuple[Any, ...]] = []
+    for call_index in range(1, num_calls + 1):
+        try:
+            module_call = trace.module_calls[f"{address}:{call_index}"]
+            output_op = trace.ops[module_call.output_ops[-1]]
+        except (KeyError, IndexError):
+            return None
+        shape = getattr(output_op, "shape", None)
+        if shape is None:
+            shape = getattr(output_op, "out_shape", None)
+        shapes.append(tuple(shape or ()))
+    if len(set(shapes)) <= 1:
+        return None
+    first, last = shapes[0], shapes[-1]
+    if first != last:
+        return f"shapes {format_shape(first)}->{format_shape(last)}"
+    return "shapes vary across calls"
+
+
 def _build_collapsed_module_node(
     self: "Trace",
     node: GraphNode,
@@ -1404,6 +1448,14 @@ def _build_collapsed_module_node(
     ]
     if fold is not None and fold.shape_summary is not None:
         lines.append(f"shapes {fold.shape_summary}")
+    elif vis_mode == "rolled" and module_num_calls > 1:
+        # A rolled multi-call box shows ONE output shape (resolved from one
+        # call) for every call site; when the sites output different shapes
+        # that line is false for some of them, so disclose the variation the
+        # same way folds do.
+        shape_note = _rolled_multicall_shape_note(self, address, module_num_calls)
+        if shape_note is not None:
+            lines.append(shape_note)
     lines.extend(
         [format_collapsed_module_contents(module_num_tensors, module_num_buffers), param_detail]
     )
