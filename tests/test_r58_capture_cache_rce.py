@@ -268,6 +268,11 @@ def test_no_bare_pickle_read_in_the_package() -> None:
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
+            if "pickle.loads(pickle.dumps(" in line:
+                # Same-expression in-process round-trip (Trace.__deepcopy__):
+                # the loaded bytes are produced by the adjacent dumps of a live
+                # object, so no external/attacker bytes can ever reach loads.
+                continue
             if "pickle.load(" in line or "pickle.loads(" in line:
                 offenders.append(f"{relative}:{lineno}: {stripped}")
     assert not offenders, (

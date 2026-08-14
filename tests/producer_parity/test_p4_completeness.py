@@ -68,10 +68,28 @@ _SEED = 20260812
 
 # The seven torch families; the two preview families are characterized on the
 # preview acceptance leg below.
-_TORCH_FAMILIES = frozenset(AMENDMENT_FAMILIES) - {
-    "preview_output_parent_mark",
-    "preview_output_parent_rebind",
+#
+# Reason-bearing retirement ledger: families that remain in the registry (the
+# amendments lane still exercises them; artifact-safe — amendments are
+# capture-session journal only) but deliberately have ZERO live emit sites.
+# The vacuity guard skips exactly these; an unlisted dead family stays red.
+_RETIRED_FAMILIES: dict[str, str] = {
+    # 8858793e: a raw forward hook that recontainers an ALREADY-TRACED tensor
+    # rewires the module boundary but does not replace the producing op's
+    # value, so it must not mint replacement evidence that would exempt the
+    # native op from replay validation (tripwire strengthening). The fresh-
+    # tensor branch stamps intervention_replaced at record construction and
+    # never used this amendment.
+    "raw_hook_intervention": "emit site removed by 8858793e (recontainer hooks must not mint replacement evidence)",
 }
+_TORCH_FAMILIES = (
+    frozenset(AMENDMENT_FAMILIES)
+    - {
+        "preview_output_parent_mark",
+        "preview_output_parent_rebind",
+    }
+    - frozenset(_RETIRED_FAMILIES)
+)
 
 # (caller file basename, enclosing function) -> intended family. The spy
 # resolves every observed call through this map; an unmapped caller is red.
@@ -80,7 +98,6 @@ _TORCH_FAMILIES = frozenset(AMENDMENT_FAMILIES) - {
 _SITE_FAMILIES: dict[tuple[str, str], str] = {
     ("_ops_retention.py", "_replace_event_with_retained_payload"): "lookback_retention",
     ("user_funcs.py", "_register_live_tensor_connection"): "graph_edge_insertion",
-    ("model_prep.py", "wrapped_hook"): "raw_hook_intervention",
     ("model_prep.py", "_record_module_exit_metadata"): "module_exit_intervention",
     (
         "model_prep.py",
@@ -181,19 +198,6 @@ def _spy_append_amendment(observations: list[_Observation], failures: list[str])
 # Family scenario battery (each scenario is a fresh model + deterministic
 # input + one capture call; the battery jointly reaches all seven families).
 # ---------------------------------------------------------------------------
-
-
-class _HookReplaceModel(nn.Module):
-    """User forward hook returns a NEW traced tensor (raw_hook_intervention)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        torch.manual_seed(_SEED + 30)
-        self.fc = nn.Linear(4, 4)
-        self.fc.register_forward_hook(lambda module, args, out: out * 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc(x)
 
 
 class _FCOnly(nn.Module):
@@ -299,11 +303,6 @@ _BATTERY: tuple[tuple[str, Callable[[], tuple[nn.Module, Any]], Callable[..., An
     (
         "graph_edge_insertion",
         lambda: (_ManualEdge(), _vec4()),
-        lambda m, x: tl.trace(m, x),
-    ),
-    (
-        "raw_hook_intervention",
-        lambda: (_HookReplaceModel(), _vec4()),
         lambda m, x: tl.trace(m, x),
     ),
     (
@@ -506,7 +505,7 @@ _GUARDED_CALLEES = frozenset(
     {
         "amend_lookback_retention",
         "amend_graph_edge_insertion",
-        "amend_raw_hook_intervention",
+        "amend_raw_hook_intervention",  # retired family: must stay at ZERO sites (8858793e)
         "amend_module_exit_intervention",
         "amend_module_boundary_retention",
         "amend_output_parent_promotion",
@@ -516,9 +515,9 @@ _GUARDED_CALLEES = frozenset(
         "replace_op_event",  # must stay at ZERO sites in these files
     }
 )
-# 7 torch sites + 6 preview promotion sites (tf x2, mlx, paddle, jax,
-# tinygrad).
-_EXPECTED_SITE_COUNT = 13
+# 6 torch sites (raw_hook_intervention's wrapped_hook site retired by
+# 8858793e) + 6 preview promotion sites (tf x2, mlx, paddle, jax, tinygrad).
+_EXPECTED_SITE_COUNT = 12
 
 
 def _call_name(node: ast.Call) -> str | None:
