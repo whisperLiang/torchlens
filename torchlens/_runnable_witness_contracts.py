@@ -53,6 +53,32 @@ __all__ = (
 )
 
 
+def _hybrid_registered_flatten_children(value: Any) -> list[Any] | None:
+    """Flatten children for a GENERIC-TYPED registered container, else ``None``.
+
+    ``_registered_flatten_children`` deliberately short-circuits Mapping /
+    ``list`` / ``tuple`` instances before the registry lookup, so a HYBRID
+    registered container (a registered namedtuple, list, dict, or tuple
+    subclass) never reached the registered lane at run time while the
+    capture-side ``ContainerSpec`` builder dispatches registered-FIRST with
+    no generic exclusion (T11.6). This covers exactly that excluded slice; a
+    throwing flatten returns ``None`` (the caller falls back to the generic
+    walk, same as the sibling helper).
+    """
+
+    if not isinstance(value, (Mapping, list, tuple)):
+        return None
+    from torchlens.ir.container import get_registered_container
+
+    registration = get_registered_container(type(value))
+    if registration is None:
+        return None
+    try:
+        return list(registration.flatten(value)[0])
+    except Exception:
+        return None
+
+
 def _tensor_leaf_paths(
     value: Any, path: tuple[str | int, ...] = ()
 ) -> tuple[tuple[str | int, ...], ...]:
@@ -61,6 +87,17 @@ def _tensor_leaf_paths(
     if isinstance(value, torch.Tensor):
         return (path,)
     registered_children = _registered_flatten_children(value)
+    if registered_children is None:
+        # T11.6: _registered_flatten_children excludes generic-typed values
+        # (Mapping/list/tuple), but a HYBRID registered container must walk its
+        # registration's OWN flatten children exactly as capture did -- generic
+        # indexing only matches when flatten happens to preserve order. Local
+        # import: this function is rebound into _runnable_execution's globals.
+        from torchlens._runnable_witness_contracts import (
+            _hybrid_registered_flatten_children,
+        )
+
+        registered_children = _hybrid_registered_flatten_children(value)
     if registered_children is not None:
         paths: list[tuple[str | int, ...]] = []
         for index, child in enumerate(registered_children):
@@ -225,6 +262,14 @@ def _container_leaf_paths(
     if isinstance(value, torch.Tensor):
         return (path,)
     registered_children = _registered_flatten_children(value)
+    if registered_children is None:
+        # T11.6: same hybrid registered-first rule (and same rebind-safe local
+        # import) as _tensor_leaf_paths.
+        from torchlens._runnable_witness_contracts import (
+            _hybrid_registered_flatten_children,
+        )
+
+        registered_children = _hybrid_registered_flatten_children(value)
     if registered_children is not None:
         paths: list[tuple[str | int, ...]] = []
         for index, child in enumerate(registered_children):
@@ -259,10 +304,26 @@ def _container_leaf_paths(
 
 
 def _container_kind(value: Any) -> str:
-    """Return the sparse witness vocabulary name for a runtime container."""
+    """Return the sparse witness vocabulary name for a runtime container.
+
+    Dispatch order mirrors the capture-side ``ContainerSpec`` builder
+    (T11.6): REGISTERED wins over every generic kind, exactly as it does at
+    capture and in the sibling leaf-path walkers above. The r67 C2 fix added
+    the registered branch BELOW the generic kinds, so a HYBRID registered
+    container (a registered dataclass/namedtuple/tuple subclass) recorded
+    ``"registered"`` at capture but reported its generic kind here -- an
+    honest identical run then false-DIVERGED with OUTPUT_STRUCTURE_MISMATCH.
+    """
+
+    from torchlens.ir.container import get_registered_container
 
     if isinstance(value, torch.Tensor):
         return "tensor"
+    # Registration is checked by TYPE (mirroring classify_input_container and the
+    # capture-side spec builder), NOT through _registered_flatten_children, whose
+    # generic-type exclusion (Mapping/list/tuple) is exactly what hid hybrids.
+    if not isinstance(value, type) and get_registered_container(type(value)) is not None:
+        return "registered"
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return "dataclass"
     if _is_hf_model_output(value):
@@ -275,11 +336,6 @@ def _container_kind(value: Any) -> str:
         return "list"
     if isinstance(value, Mapping):
         return "dict"
-    # r67 C2 (corr1-3): a registered container reports the SAME vocabulary name the
-    # capture-side ContainerSpec records, so the legacy structure witness compares
-    # kind-for-kind instead of class-name-vs-"registered" false-diverging.
-    if _registered_flatten_children(value) is not None:
-        return "registered"
     return type(value).__name__
 
 
