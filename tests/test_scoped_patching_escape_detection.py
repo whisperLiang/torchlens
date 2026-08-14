@@ -912,3 +912,40 @@ def test_detector_teardown_failure_demotes_and_discloses(
         diagnostic.get("kind") == "detector_teardown_failed"
         for diagnostic in second.escape_diagnostics
     )
+
+
+def test_owner_thread_scalar_only_stale_escape_is_shadow_reported() -> None:
+    """The owner-thread scalar-only stale crossing is observable via shadow mode.
+
+    On DEFAULT captures this class (``stale_norm(x).item() > t`` -- no
+    intermediate tensor op consumes the stale output) is a DECLARED silent
+    residual (docs/migration/scoped_detached_patching.md, Honest boundaries):
+    the scalar-protocol read of the untracked intermediate emits no record,
+    and unlabeled receivers cannot be flagged without false-positives on
+    parameter/attribute scalar reads. This pin proves the opt-in shadow
+    detector reports the stale CALL itself, so the documented remediation
+    path is real (b3-fable R02-1).
+    """
+
+    unwrap_torch()
+    stale_norm = torch.linalg.norm
+    wrap_torch(escape_detector="shadow")
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            if stale_norm(x).item() > 0.001:
+                return torch.relu(self.lin(x))
+            return torch.sigmoid(self.lin(x))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(Model(), torch.randn(3, 4))
+
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "callable_escape_shadow_report"
+    assert trace.escape_diagnostics
+    assert _gap_warnings(caught)
