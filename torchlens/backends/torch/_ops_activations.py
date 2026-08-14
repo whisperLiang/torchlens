@@ -543,6 +543,13 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
     if writer is None or not trace._wrapper_runtime_ws.in_exhaustive_pass:
         return
 
+    # R36: serializing a cpu_async payload to disk is a host-side byte read;
+    # the pinned buffer may still be in flight. No-op unless async fence
+    # events are pending.
+    from ...utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    synchronize_pending_cpu_async_copies()
+
     label = fields_dict["_label_raw"]
     for tensor_field, pending_field, kind in (
         ("out", "_pending_blob_id", "out"),

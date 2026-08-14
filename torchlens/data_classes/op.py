@@ -1276,6 +1276,12 @@ def apply_transform(
         Value returned by ``transform``.
     """
 
+    # R36: a cpu_async payload may still be an in-flight pinned buffer; a
+    # user transform is a host-side byte read and must never observe partial
+    # bytes. No-op unless async fence events are actually pending.
+    from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    synchronize_pending_cpu_async_copies()
     try:
         with pause_logging():
             return transform(tensor)
@@ -1599,6 +1605,12 @@ def _dedup_saved_activation_out(
         if hash_cache is None:
             hash_cache = {}
             setattr(trace, "_out_hash_cache", hash_cache)
+        # R36: the content digest is a host-side byte read; a cpu_async
+        # payload may still be an in-flight pinned buffer. No-op unless
+        # async fence events are pending.
+        from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+        synchronize_pending_cpu_async_copies()
         out_hash = _tensor_content_hash(raw_out)
         if out_hash in hash_cache:
             annotations["dedup_out_hash"] = out_hash

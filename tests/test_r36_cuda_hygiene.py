@@ -76,3 +76,79 @@ def test_forward_peak_bracket_never_resets_cuda_peak_counter() -> None:
         "reset_peak_memory_stats clobbers the caller's process-wide peak "
         f"counter; snapshot instead (R36-2). Offenders: {offenders}"
     )
+
+
+def test_mps_style_no_arg_synchronize_does_not_typeerror() -> None:
+    """A backend synchronize that takes no device argument drains cleanly (R36).
+
+    ``torch.mps.synchronize()`` takes no device argument, so the drain's
+    ``sync(entry)`` raised TypeError -- and on the failure-scrub arms that
+    TypeError MASKED the original capture exception with a drain traceback.
+    """
+
+    from torchlens.utils import tensor_utils as tu
+
+    calls = {"noarg": 0}
+
+    class _NoArgSyncModule:
+        @staticmethod
+        def synchronize() -> None:
+            calls["noarg"] += 1
+
+    saved_torch_attr = tu.torch_attr
+    try:
+        tu.torch_attr = lambda name: _NoArgSyncModule if name == "meta" else saved_torch_attr(name)
+        tu._CPU_ASYNC_PENDING_EVENTS.append(torch.device("meta"))
+        tu.synchronize_pending_cpu_async_copies()  # must not raise
+    finally:
+        tu.torch_attr = saved_torch_attr
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+    assert calls["noarg"] == 1
+
+
+def test_cpu_async_pending_events_are_bounded() -> None:
+    """The fence-event registry is hard-bounded, never unbounded cross-capture (R36).
+
+    A capture that never reaches a drain seam must not grow the pending list
+    without limit; crossing the bound drains inline (a fence -- correctness
+    neutral).
+    """
+
+    from torchlens.utils import tensor_utils as tu
+
+    assert tu._CPU_ASYNC_PENDING_EVENTS == []
+    try:
+        for _ in range(tu._CPU_ASYNC_PENDING_EVENTS_MAX + 10):
+            tu._record_cpu_async_copy_event(torch.device("meta"))
+        assert len(tu._CPU_ASYNC_PENDING_EVENTS) <= tu._CPU_ASYNC_PENDING_EVENTS_MAX
+    finally:
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+
+
+def test_cleanup_does_not_flush_cuda_for_cpu_capture() -> None:
+    """cleanup() must not flush the CUDA allocator for a CPU-only capture (R36-3).
+
+    This was the THIRD empty_cache site; the backend teardown and postprocess
+    step-13 sites were already gated on capture_touched_cuda. A CPU-only trace
+    cleaned up inside a GPU training loop flushed the caller's allocator.
+    """
+
+    import torch.nn as nn
+
+    import torchlens as tl
+    from torchlens.data_classes import cleanup as cleanup_module
+
+    trace = tl.trace(nn.Sequential(nn.Linear(4, 4)), torch.randn(2, 4))
+    assert getattr(trace, "forward_memory_backend", None) in ("cpu", "mps")
+
+    calls = {"flush": 0}
+    saved_available = cleanup_module._is_cuda_available
+    saved_flush = torch.cuda.empty_cache
+    try:
+        cleanup_module._is_cuda_available = lambda: True
+        torch.cuda.empty_cache = lambda: calls.__setitem__("flush", calls["flush"] + 1)
+        trace.cleanup()
+    finally:
+        cleanup_module._is_cuda_available = saved_available
+        torch.cuda.empty_cache = saved_flush
+    assert calls["flush"] == 0

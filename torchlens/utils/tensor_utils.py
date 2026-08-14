@@ -1263,6 +1263,12 @@ def disarm_deferred_payload_window() -> None:
 #: observe partial bytes from an unfinished ``non_blocking=True`` copy.
 _CPU_ASYNC_PENDING_EVENTS: list[Any] = []
 
+#: Hard bound on accumulated fence events (R36): a capture that never reaches
+#: a drain seam (or an exotic failure path) must not grow the list without
+#: limit across captures. Crossing it drains inline — a fence, so strictly
+#: correctness-neutral; it only reduces async overlap for that one copy.
+_CPU_ASYNC_PENDING_EVENTS_MAX = 512
+
 
 def _record_cpu_async_copy_event(device: torch.device) -> None:
     """Record a stream event fencing one ``cpu_async`` D2H copy (R36-1).
@@ -1281,6 +1287,8 @@ def _record_cpu_async_copy_event(device: torch.device) -> None:
         _CPU_ASYNC_PENDING_EVENTS.append(event)
     else:
         _CPU_ASYNC_PENDING_EVENTS.append(device)
+    if len(_CPU_ASYNC_PENDING_EVENTS) > _CPU_ASYNC_PENDING_EVENTS_MAX:
+        synchronize_pending_cpu_async_copies()
 
 
 def synchronize_pending_cpu_async_copies() -> None:
@@ -1304,7 +1312,15 @@ def synchronize_pending_cpu_async_copies() -> None:
                 torch_module = torch_attr(entry.type)
                 sync = getattr(torch_module, "synchronize", None)
                 if sync is not None:
-                    sync(entry)
+                    try:
+                        sync(entry)
+                    except TypeError:
+                        # torch.mps.synchronize() (and kin) take no device
+                        # argument. The unguarded call raised TypeError from
+                        # the drain — on the failure-scrub arms that masked
+                        # the ORIGINAL capture exception with a drain
+                        # traceback.
+                        sync()
         else:
             entry.synchronize()
 

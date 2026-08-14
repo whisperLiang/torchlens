@@ -30,7 +30,7 @@ from ..constants import MODEL_LOG_FIELD_ORDER
 from ..intervention.types import ParentRef, Unsupported
 from ..utils.collections import remove_entry_from_list
 from ..utils.display import cleanup_trace_visualizer_dir
-from ..utils.tensor_utils import _is_cuda_available
+from ..utils.tensor_utils import _is_cuda_available, capture_touched_cuda
 from ._state_adapter import state_items
 from .op import Op
 
@@ -54,6 +54,10 @@ def cleanup(self: "Trace") -> None:
     _purge_trace_from_backward_registry(self)
     forget_event_stream(self)
     cleanup_trace_visualizer_dir(self)
+    # Snapshot the CUDA gate BEFORE the attribute deletions below drop
+    # ``forward_memory_backend`` (after which the fact reads as unknown and
+    # fails toward the historical flush).
+    touched_cuda = capture_touched_cuda(self)
     # GC-1: Release parameter references to allow model GC.
     if hasattr(self, "param_logs"):
         for pl in self.param_logs:
@@ -108,8 +112,12 @@ def cleanup(self: "Trace") -> None:
     # the autograd engine (which would kill an unrelated user backward).
     self._tl_backward_triggers_disarmed = True
     # Gated behind cached cuda.is_available() so CPU-only runs don't pay the
-    # CUDA driver / NVML probe cost (per profiling audit 2026-04-27 finding #4).
-    if _is_cuda_available():
+    # CUDA driver / NVML probe cost (per profiling audit 2026-04-27 finding #4),
+    # AND on the capture having touched CUDA (R36-3): a CPU-only trace cleaned
+    # up inside a GPU training loop must not flush the caller's allocator.
+    # This was the third empty_cache site; the backend teardown and
+    # postprocess step-13 sites were already gated.
+    if _is_cuda_available() and touched_cuda:
         torch.cuda.empty_cache()
 
 
