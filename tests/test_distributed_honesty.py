@@ -223,6 +223,32 @@ def test_unreadable_state_scan_refuses_instead_of_passing(monkeypatch) -> None:
     assert [finding.kind for finding in excinfo.value.fields["findings"]] == ["scan_incomplete"]
 
 
+def test_failed_initialized_probe_refuses_instead_of_skipping_mesh_scan(monkeypatch) -> None:
+    """A failed is_initialized() probe is a scan gap, never "not initialized".
+
+    The probe's catch-all used to swallow EVERY exception and return False,
+    which silently disabled the device-mesh attribute scan FAIL-OPEN: a
+    process whose distributed runtime was broken mid-probe reported zero
+    findings instead of disclosing that absence of sharded state could not
+    be established.
+    """
+
+    def broken_probe() -> bool:
+        raise RuntimeError("capability probe failed")
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", broken_probe)
+    findings = detect_distributed_state(TinyModel(), torch.randn(2, 4))
+    scan = _find(findings, "scan_incomplete")
+    assert scan.refuses_capture is True
+    assert "torch.distributed.is_initialized()" in scan.sites
+
+    import torchlens._distributed as distributed_mod
+
+    with pytest.raises(DistributedCaptureUnsupportedError) as excinfo:
+        distributed_mod.check_distributed_capture(TinyModel(), torch.randn(2, 4))
+    assert "scan_incomplete" in [finding.kind for finding in excinfo.value.fields["findings"]]
+
+
 def test_unreadable_module_scan_refuses_instead_of_root_only_fallback(monkeypatch) -> None:
     """A failed child-module traversal cannot be treated as a complete root scan."""
 
