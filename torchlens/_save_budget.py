@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -243,6 +244,14 @@ def resolve_save_budget(value: SaveBudgetOption) -> _BudgetSpec | None:
 
 
 @dataclass
+class _RetainedStorageEntry:
+    """One charged physical storage and the count of live retained payloads on it."""
+
+    physical_bytes: int
+    live_refs: int = 0
+
+
+@dataclass
 class _DeviceLedger:
     """Per-device running total and resolved limit."""
 
@@ -251,7 +260,7 @@ class _DeviceLedger:
     limit_bytes: int | None = None
     available_bytes: int | None = None
     measured: bool = False
-    retained_storage_keys: set[tuple[Any, ...]] = field(default_factory=set)
+    retained_storage: dict[tuple[Any, ...], _RetainedStorageEntry] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -283,6 +292,11 @@ class SaveBudget:
     spec: _BudgetSpec
     ledgers: dict[str, _DeviceLedger] = field(default_factory=dict)
     tripped: bool = False
+    # Keyed by id(watcher): weakref containers hash/compare through the live
+    # referent, and tensor ``==`` is elementwise (and wrapped during capture).
+    _payload_watchers: dict[int, weakref.ref] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def from_option(cls, value: SaveBudgetOption) -> SaveBudget | None:
@@ -400,6 +414,11 @@ class SaveBudget:
         before user code runs. The source-sized reservation protects the first retained
         allocation; reconciliation then charges any additional transform storage. That
         transform-only delta is necessarily post-allocation and is disclosed publicly.
+
+        Each committed payload is watched with a weakref: when the last retained
+        payload on a physical storage is released, the charge is credited back and the
+        storage-identity key is pruned, so a later allocation that recycles the same
+        ``data_ptr`` at the same size is charged rather than deduplicated to zero.
         """
 
         if reservation is None:
@@ -412,10 +431,17 @@ class SaveBudget:
             if not isinstance(payload, torch.Tensor):
                 continue
             identity, physical_bytes = _retained_storage_identity(payload)
+            ledger_key = str(payload.device)
             ledger = self._ledger_for(payload.device)
-            if identity in ledger.retained_storage_keys:
+            entry = ledger.retained_storage.get(identity)
+            if entry is not None:
+                entry.live_refs += 1
+                self._watch_payload(payload, ledger_key, identity)
                 continue
-            ledger.retained_storage_keys.add(identity)
+            ledger.retained_storage[identity] = _RetainedStorageEntry(
+                physical_bytes=physical_bytes, live_refs=1
+            )
+            self._watch_payload(payload, ledger_key, identity)
             ledger.committed_bytes += physical_bytes
             ledger.num_saved += 1
             self._raise_if_over_budget(
@@ -424,6 +450,69 @@ class SaveBudget:
                 ledger,
                 phase="post_transform_reconciliation",
             )
+
+    def _watch_payload(
+        self,
+        payload: torch.Tensor,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> None:
+        """Arm a release watcher that credits this payload's storage when it dies.
+
+        Parameters
+        ----------
+        payload:
+            Retained tensor payload just committed against ``identity``.
+        ledger_key:
+            Ledger key of the device the payload was charged on.
+        identity:
+            Storage identity the payload holds a live reference on.
+
+        Notes
+        -----
+        The watcher holds the budget weakly so the accountant never keeps itself
+        alive through its own callbacks. A payload that cannot be weak-referenced
+        keeps the historical permanent charge (conservative: never a zero-commit).
+        """
+
+        budget_ref = weakref.ref(self)
+
+        def _on_release(ref: weakref.ref) -> None:
+            budget = budget_ref()
+            if budget is None:
+                return
+            budget._payload_watchers.pop(id(ref), None)
+            budget._credit_release(ledger_key, identity)
+
+        try:
+            watcher = weakref.ref(payload, _on_release)
+        except TypeError:
+            return
+        self._payload_watchers[id(watcher)] = watcher
+
+    def _credit_release(self, ledger_key: str, identity: tuple[Any, ...]) -> None:
+        """Credit one payload release; prune and refund on the last release.
+
+        Parameters
+        ----------
+        ledger_key:
+            Ledger key of the device the storage was charged on.
+        identity:
+            Storage identity whose live reference count drops by one.
+        """
+
+        ledger = self.ledgers.get(ledger_key)
+        if ledger is None:
+            return
+        entry = ledger.retained_storage.get(identity)
+        if entry is None:
+            return
+        entry.live_refs -= 1
+        if entry.live_refs > 0:
+            return
+        del ledger.retained_storage[identity]
+        ledger.committed_bytes -= entry.physical_bytes
+        ledger.num_saved -= 1
 
     def charge(self, label: str, device: torch.device, num_bytes: int) -> None:
         """Charge retained payload bytes and refuse when the budget is crossed.

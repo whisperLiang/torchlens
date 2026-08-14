@@ -20,6 +20,7 @@ Two properties matter as much as the refusal itself and are tested explicitly:
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import pytest
@@ -415,6 +416,106 @@ def test_zero_byte_payloads_are_not_counted() -> None:
     assert budget is not None
     budget.charge("a", torch.device("cpu"), 0)
     assert budget.ledgers == {}
+
+
+# ---------------------------------------------------------------------------
+# Storage identity survives pointer reuse: release credits, prune, recharge
+# ---------------------------------------------------------------------------
+
+
+def test_released_payload_is_credited_and_its_identity_pruned() -> None:
+    """Releasing the last retained payload refunds its charge and prunes the key.
+
+    Without pruning, a later allocation recycling the same ``data_ptr`` at the
+    same size would deduplicate against the dead key and commit ZERO bytes.
+    """
+
+    budget = SaveBudget.from_option(1000)
+    assert budget is not None
+    payload = torch.randn(100)  # 400 bytes
+    budget.commit(budget.admit("a", torch.device("cpu"), 400), (payload,))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 400
+    assert len(ledger.retained_storage) == 1
+    assert ledger.num_saved == 1
+
+    del payload
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+    assert ledger.num_saved == 0
+
+
+def test_recycled_storage_pointer_recharges_instead_of_committing_zero() -> None:
+    """A freed-then-recycled pointer is a new storage and must be charged."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    cpu = torch.device("cpu")
+    first = torch.randn(64)  # 256 bytes; small blocks are readily recycled
+    budget.commit(budget.admit("a", cpu, 256), (first,))
+    assert budget.ledgers["cpu"].committed_bytes == 256
+
+    del first
+    gc.collect()
+    second = torch.randn(64)
+    budget.commit(budget.admit("b", cpu, 256), (second,))
+    # Whether or not the allocator recycled the exact pointer, the live retained
+    # footprint is one 256-byte storage, never zero.
+    assert budget.ledgers["cpu"].committed_bytes == 256
+    assert budget.ledgers["cpu"].num_saved == 1
+
+
+def test_shared_storage_credit_waits_for_the_last_live_alias() -> None:
+    """Aliases charge once and the refund waits until every alias is released."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    cpu = torch.device("cpu")
+    base = torch.randn(64)
+    view = base[:32]
+    budget.commit(budget.admit("a", cpu, 256), (base,))
+    budget.commit(budget.admit("b", cpu, 128), (view,))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 256, "one physical storage, charged once"
+
+    del base
+    gc.collect()
+    assert ledger.committed_bytes == 256, "the view still pins the whole storage"
+
+    del view
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+
+
+def test_identity_transform_double_reference_credits_once() -> None:
+    """The same payload committed in both slots refunds exactly once at death."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    payload = torch.randn(8)  # 32 bytes
+    budget.commit(budget.admit("a", torch.device("cpu"), 32), (payload, payload))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 32
+
+    del payload
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+
+
+def test_dead_accountant_does_not_break_payload_release() -> None:
+    """Payloads may outlive the budget; their release callbacks must be inert."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    payload = torch.randn(8)
+    budget.commit(budget.admit("a", torch.device("cpu"), 32), (payload,))
+    del budget
+    gc.collect()
+    del payload  # must not raise from a stale watcher
+    gc.collect()
 
 
 # ---------------------------------------------------------------------------
