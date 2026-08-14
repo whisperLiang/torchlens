@@ -77,6 +77,8 @@ def _capture(witness: str = "digest"):
 
 
 class TestLiveMerge:
+    pytestmark = pytest.mark.smoke
+
     def test_live_merge_aligned_and_attested(self, gloo_world):
         merged = tl.merge_ranks([_capture()])
         assert merged.alignment.value == "aligned"
@@ -154,6 +156,8 @@ class TestLiveMerge:
 
 
 class TestArtifact:
+    pytestmark = pytest.mark.smoke
+
     def test_round_trip_rederives_and_exposes_ranks(self, gloo_world, tmp_path):
         merged = tl.merge_ranks([_capture()])
         art = tmp_path / "merged.tlspec"
@@ -248,6 +252,7 @@ class TestArtifact:
 
 
 class TestTamperMatrix:
+    pytestmark = pytest.mark.smoke
     """The descriptor is a CACHE; edits refuse typed, never degrade to gaps."""
 
     def _saved(self, tmp_path):
@@ -344,6 +349,7 @@ def _append_unparseable_member(art: Path) -> Path:
 
 
 class TestDegradedLoadCoherence:
+    pytestmark = pytest.mark.smoke
     """R18-5: the degraded branch is typed and demote-only, never cache-trusting."""
 
     def _degraded(self, tmp_path: Path) -> Path:
@@ -522,6 +528,7 @@ class TestDegradedLoadCoherence:
 
 
 class TestArtifactHardening:
+    pytestmark = pytest.mark.smoke
     """b4-P slice items: platform coarsening and double-fault disclosure."""
 
     def test_manifest_platform_is_coarse(self, gloo_world, tmp_path):
@@ -569,6 +576,7 @@ class TestArtifactHardening:
 
 
 class TestRefusedSurfacesTyped:
+    pytestmark = pytest.mark.smoke
     """R18-9 presenter half: contract-promised refusals are typed, never bare."""
 
     @pytest.mark.parametrize(

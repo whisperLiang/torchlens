@@ -12,9 +12,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.distributed.is_available(), reason="torch.distributed unavailable"
-)
+pytestmark = [
+    pytest.mark.smoke,
+    pytest.mark.skipif(
+        not torch.distributed.is_available(), reason="torch.distributed unavailable"
+    ),
+]
 
 from torchlens.distributed import (  # noqa: E402
     AmbiguousGroupLifetimeError,

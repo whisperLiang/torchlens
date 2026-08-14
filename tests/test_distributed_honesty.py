@@ -25,6 +25,7 @@ are ordinary Python objects that the real classifier inspects.
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import types
 from collections.abc import Iterator
@@ -678,7 +679,13 @@ def single_rank_cpu_mesh() -> Iterator[object]:
         key: os.environ.get(key) for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
     }
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ["MASTER_PORT"] = "29577"
+    # OS-assigned ephemeral port: a hardcoded port (29577 historically)
+    # collides across parallel lanes/worktrees on one box, and the collision
+    # lands in the except-skip below -- distributed coverage silently degrades
+    # to SKIP instead of failing loudly (T14-3).
+    with socket.socket() as _probe:
+        _probe.bind(("127.0.0.1", 0))
+        os.environ["MASTER_PORT"] = str(_probe.getsockname()[1])
     try:
         torch_distributed.init_process_group(backend="gloo", rank=0, world_size=1)
     except Exception as exc:  # pragma: no cover - sandboxes without loopback

@@ -15,6 +15,8 @@ import torch
 
 import torchlens as tl
 
+pytestmark = pytest.mark.smoke
+
 
 class _TiedReprKey:
     """Hashable key whose repr intentionally collides with peer keys."""

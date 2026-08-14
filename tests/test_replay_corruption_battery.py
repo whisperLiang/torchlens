@@ -17,6 +17,8 @@ is the battery's size, not one incidental diagnostics test.
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 import torch
 import torch.nn as nn
@@ -40,7 +42,12 @@ def _capture(model: nn.Module, x: torch.Tensor):
     Returns
     -------
     tuple
-        ``(trace, ground_truth_outputs)`` for ``validate_saved_outs``.
+        ``(trace, ground_truth_outputs, model)``. The model MUST be kept
+        alive by the caller for the trace's lifetime: post-trace parameter
+        access holds only a weak reference, so an inline model whose last
+        strong owner is this frame dies at the next cyclic-GC pass and
+        replay raises ``PostTraceParamUnavailable`` -- an order-dependent
+        red under multi-file composition (b9/T14).
     """
 
     model = model.eval()
@@ -48,7 +55,7 @@ def _capture(model: nn.Module, x: torch.Tensor):
     with torch.no_grad():
         ground_truth = model(x)
     outputs = list(ground_truth) if isinstance(ground_truth, (tuple, list)) else [ground_truth]
-    return log, outputs
+    return log, outputs, model
 
 
 def _base_label(label: str) -> str:
@@ -106,8 +113,12 @@ def _corrupt_and_assert(model: nn.Module, x: torch.Tensor, func_name: str) -> No
         Function name of the op whose FIRST occurrence gets corrupted.
     """
 
-    log, outputs = _capture(model, x)
+    log, outputs, model = _capture(model, x)
     try:
+        # Force the cyclic-GC pass that composition pressure used to trigger
+        # nondeterministically: with the strong model ref above this is inert,
+        # and without it the pristine control below reds 100% of the time.
+        gc.collect()
         # (a) pristine control: an already-red baseline would make the
         # corruption verdict meaningless (the b9 lesson).
         assert log.validate_saved_outs(outputs), "pristine trace failed validation"
@@ -280,8 +291,11 @@ def test_corrupted_matmul_payload_fails_replay():
 def test_corrupted_output_payload_fails_ground_truth():
     """Corrupting the OUTPUT op's saved value trips the ground-truth seed check."""
 
-    log, outputs = _capture(_MLP(), torch.randn(2, 6))
+    log, outputs, model = _capture(_MLP(), torch.randn(2, 6))
     try:
+        # Same forced-GC arming as _corrupt_and_assert: `model` is the strong
+        # ref that keeps post-trace parameter access alive across this pass.
+        gc.collect()
         assert log.validate_saved_outs(outputs), "pristine trace failed validation"
         target = log.output_ops[0]
         # The output op's ``out`` mirrors its producer and is not assignable;

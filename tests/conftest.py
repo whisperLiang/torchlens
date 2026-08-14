@@ -49,6 +49,7 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens.data_classes.op", "_WARNED_REFERENCE_SAVE_MODE", False),
     ("torchlens.distributed._lifecycle", "_AUTO_ARM_WARNED", False),
     ("torchlens.fastlog._storage_resolver", "_WARNED_REFERENCE_SAVE_MODE", False),
+    ("torchlens.postprocess.ast_branches", "_source_drift_warned", set()),
     ("torchlens.utils._torch_compat", "_warned_missing_capabilities", set()),
     ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
     ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),

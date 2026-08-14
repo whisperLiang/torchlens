@@ -63,6 +63,12 @@ class HandRolledTP(nn.Module):
 
 
 class TestBoundaryNode:
+    # NOT smoke-marked yet (2026-08-14, fix-testinfra T14-4): every test here
+    # measures well under the smoke budget, but
+    # test_boundary_carries_collective_boundary_v1_payload is red on main
+    # (layer.annotations lacks the op's "collective" mirror -- relayed
+    # source-side defect). Smoke-mark this class WITH that fix so the
+    # commit-tier gate does not inherit a known red.
     def test_allreduce_becomes_boundary_node_with_provenance(self, gloo_world):
         lifecycle.arm()
         log = tl.trace(HandRolledTP(), torch.randn(2, 4))
@@ -261,6 +267,8 @@ class TestBoundaryNode:
 
 
 class TestWitnessPolicy:
+    pytestmark = pytest.mark.smoke
+
     def test_digest_witness_records_byte_exact_digests(self, gloo_world):
         from torchlens.backends.torch.collectives import _digest_tensor
 
@@ -335,6 +343,7 @@ class TestWitnessPolicy:
 
 
 class TestReplayRefusals:
+    pytestmark = pytest.mark.smoke
     """A collective-crossing rank core refuses runnable save + forward replay.
 
     Design v5 3.4: re-issuing a collective outside its communicator hangs or

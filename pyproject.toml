@@ -226,6 +226,16 @@ filterwarnings = [
     # from mis-promoting them; genuine TorchLens-originated UserWarnings still error.
     "default:Converting a tensor with requires_grad=True to a scalar.*:UserWarning:torchlens(\\.|$)",
     "default:Sparse invariant checks are implicitly disabled.*:UserWarning:torchlens(\\.|$)",
+    # STRUCTURAL exemption for the same class (grind p3, B2P3-8): every C++-originated
+    # TORCH_WARN/TORCH_WARN_ONCE carries the "(Triggered internally at <file>:<line>)"
+    # suffix that no TorchLens-authored warning ever emits. After the first capture wraps
+    # torch, ANY first-firing torch C++ warning reached through a wrapped call is
+    # attributed to torchlens.backends.torch.wrappers and was promoted to a hard error by
+    # the broad rule above -- a one-shot order-sensitive landmine per warning (run alone,
+    # the same warning fires pre-wrap in the test module and stays benign). Keying on the
+    # torch-internal suffix exempts the whole third-party class without listing messages;
+    # genuine TorchLens-originated UserWarnings still error.
+    "default:(?s).*\\(Triggered internally at :UserWarning:torchlens(\\.|$)",
     # Public compatibility aliases are exercised deliberately across legacy tests,
     # so the alias-deprecation message shape stays visible-not-fatal. QUALIFIED to
     # the TorchLens category (grind b4, R48-4): the unqualified rule matched ANY

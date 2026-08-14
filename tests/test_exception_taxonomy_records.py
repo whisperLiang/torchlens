@@ -21,6 +21,8 @@ import torchlens as tl
 from torchlens import errors
 from torchlens._errors import PayloadUnavailableError, RecordBindingError
 
+pytestmark = pytest.mark.smoke
+
 
 @pytest.fixture(scope="module")
 def small_trace() -> Iterator[Any]:

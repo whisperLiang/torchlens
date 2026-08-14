@@ -27,7 +27,7 @@ from torchlens.backends import (  # noqa: E402
 )
 from torchlens.backends.paddle import PaddleBackend  # noqa: E402
 
-pytestmark = pytest.mark.backend_paddle
+pytestmark = [pytest.mark.backend_paddle, pytest.mark.smoke]
 
 
 def _inputs() -> tuple[Any, Any, Any, Any, Any]:
