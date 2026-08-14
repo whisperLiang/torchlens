@@ -781,3 +781,79 @@ def test_import_time_membership_tables_holding_wrapped_originals_are_reviewed() 
         f"callables: {unreviewed}. Review each (shim it like the expanded-weights "
         "tables, or add a reasoned entry to _MEMBERSHIP_TABLE_REVIEWED)."
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. R02 per-SITE post-wrap audit — object-keyed inventory blindness (b3-opus)
+# ---------------------------------------------------------------------------
+
+# Public module-namespace attribute sites that legitimately keep their ORIGINAL
+# callable while wrapped: torch.functional re-exports outside torch.__all__,
+# so only the torch.functional.<name> twin is repointed. Each is a pure-Python
+# COMPOSITE over wrapped interiors -- traces are byte-identical under either
+# spelling (verified b3-opus /tmp/p3.py). A NEW name appearing here (e.g. a
+# torch release re-exporting a LEAF op into torch outside __all__) must be
+# reviewed, not silently unwrapped.
+_ORIGINAL_HOLDING_SITE_ALLOWLIST = {
+    # The four public composites: torch.functional re-exports outside
+    # torch.__all__, so only the torch.functional.<name> twin is repointed.
+    # Each is a pure-Python COMPOSITE over wrapped interiors -- traces are
+    # byte-identical under either spelling (verified, b3-opus /tmp/p3.py).
+    ("torch", "unique"),
+    ("torch", "pca_lowrank"),
+    ("torch", "svd_lowrank"),
+    ("torch", "lu"),
+    # Private-underscore alias spellings of wrapped objects: the public /
+    # canonical site is repointed; these private twins are not called by the
+    # eager public surface.
+    ("torch", "_segment_reduce"),
+    ("torch", "_sym_sqrt"),
+    ("torch.functional", "_add_docstr"),
+    ("torch.functional", "overload"),
+}
+
+
+def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> None:
+    """Post-wrap, no UNREVIEWED public module attribute may hold an original.
+
+    The wrap-inventory completeness gate was OBJECT-keyed (torch's override
+    registry is keyed by function object and built from ``torch.__all__``),
+    so an attribute SITE keeping its original callable was structurally
+    invisible to it -- a disarmed tripwire for the exact
+    "invisible capture-gap generator on a version boundary" class (b3-opus
+    R02-3). This audit is per (namespace, attribute) SITE: every public
+    callable attr whose OBJECT has a wrapper must be repointed or reviewed.
+    """
+
+    import torch.fft
+    import torch.linalg
+    import torch.nn.init
+    import torch.special
+
+    _ensure_wrapped()
+    namespaces = [
+        ("torch", torch),
+        ("torch.functional", torch.functional),
+        ("torch.nn.functional", F),
+        ("torch.nn.init", torch.nn.init),
+        ("torch.linalg", torch.linalg),
+        ("torch.fft", torch.fft),
+        ("torch.special", torch.special),
+    ]
+    unreviewed: list[tuple[str, str]] = []
+    for ns_name, ns in namespaces:
+        for attr in dir(ns):
+            try:
+                obj = getattr(ns, attr)
+            except (AttributeError, RuntimeError):
+                continue
+            if id(obj) in _state._orig_to_decorated and (
+                (ns_name, attr) not in _ORIGINAL_HOLDING_SITE_ALLOWLIST
+            ):
+                unreviewed.append((ns_name, attr))
+    assert unreviewed == [], (
+        "Public module attribute sites hold a wrapped ORIGINAL callable "
+        f"(unwrapped spelling of a wrapped op): {unreviewed}. Repoint the site "
+        "in decoration, or review it into _ORIGINAL_HOLDING_SITE_ALLOWLIST "
+        "with a composite-over-wrapped-interiors verification."
+    )
