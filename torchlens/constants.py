@@ -986,8 +986,57 @@ IGNORED_FUNCS = [
     ("torch", "randperm"),
     ("torch", "range"),
     ("torch", "scalar_tensor"),
+    # The modern DLPack interop boundary. ``torch.from_dlpack`` (the same object as
+    # ``torch.utils.dlpack.from_dlpack``) is absent from BOTH of torch's override
+    # registries, so it was never decorated and the op vanished from the trace
+    # entirely: ``z = torch.from_dlpack(y); return z + 1`` recorded no dlpack node. In
+    # the aliasing variant the safety net at least disclosed
+    # ``escape_rescue_unrecovered``, but in the common cross-library direction
+    # (numpy/cupy/jax capsule -> torch, a fresh storage with no captured-tensor alias)
+    # there is no provenance signal at all and both detectors default off, so the
+    # freshly-created tensor read as an unattributed literal -- exactly the silent class
+    # the ``rand_like`` / ``.mH`` re-adds fixed. Protocol-invisible like ``from_numpy``,
+    # so it is also a mechanical-belt candidate (see backends/torch/belt.py).
+    ("torch", "from_dlpack"),
+    ("torch.utils.dlpack", "from_dlpack"),
+    # The PUBLIC sparse-compressed constructors. Only the PRIVATE
+    # ``torch._sparse_csr_tensor`` was re-added, so the whole public family was
+    # undecorated: sparse inputs/params refuse at capture entry, but IN-FORWARD sparse
+    # creation was ungated.
     ("torch", "sparse_coo_tensor"),
+    ("torch", "sparse_csr_tensor"),
+    ("torch", "sparse_csc_tensor"),
+    ("torch", "sparse_bsr_tensor"),
+    ("torch", "sparse_bsc_tensor"),
+    ("torch", "sparse_compressed_tensor"),
     ("torch", "_sparse_csr_tensor"),
+    # The MODERN documented window-factory namespace. Only the legacy top-level twins
+    # (``hann_window``, ``bartlett_window``, ...) were re-added, so a model using
+    # ``torch.signal.windows.hann`` silently recorded its window as an unattributed
+    # literal -- the same shape as the fixed ``rand_like`` gap, and silent with
+    # detectors off. Pure factories, so no tensor edge is dropped, only the node.
+    *(
+        ("torch.signal.windows", _window_name)
+        for _window_name in (
+            "bartlett",
+            "blackman",
+            "cosine",
+            "exponential",
+            "gaussian",
+            "general_cosine",
+            "general_hamming",
+            "hamming",
+            "hann",
+            "kaiser",
+            "nuttall",
+        )
+    ),
+    # The public FP8/MoE entry points. Each delegates to a wrapped ``torch._VF``
+    # interior, so capture stayed COMPLETE, but the op recorded under the private v2
+    # name rather than what the user called (mislabel only).
+    ("torch.nn.functional", "scaled_mm"),
+    ("torch.nn.functional", "grouped_mm"),
+    ("torch.nn.functional", "scaled_grouped_mm"),
     ("torch", "tril_indices"),
     ("torch", "triu_indices"),
     ("torch", "vander"),

@@ -262,14 +262,39 @@ def _check_op_log_fields(ml: Trace) -> None:
                 f"Layer {label}: raw_index={lpl.raw_index} < 1",
             )
 
-        # Module nesting depth
-        if lpl.module_call_depth != len(lpl.modules):
+        # Module attribution coherence. The historical check compared
+        # ``module_call_depth`` against ``len(modules)`` -- but ``module_call_depth`` IS
+        # ``return len(self.modules)``, so it was a TAUTOLOGY that could never fire and
+        # the "module nesting depth" tripwire provided zero coverage.
+        #
+        # The real cross-field constraint is between the two INDEPENDENTLY stored
+        # attribution surfaces: ``module`` is derived as ``modules[-1] if modules else
+        # None``, so `module` non-None with an EMPTY roster is a state an honest capture
+        # cannot produce -- and it is exactly what a lost module-enter/exit event, a pop
+        # without a push, or an op emitted after a frame pop produces. That direction was
+        # entirely unguarded (``_check_module_containment_logic`` early-continues on an
+        # empty roster), so the whole "TorchLens lost an op's module attribution" class
+        # was invisible.
+        if not lpl.modules and lpl.module is not None:
             raise MetadataInvariantError(
                 name,
-                f"Layer {label}: module_call_depth={lpl.module_call_depth} != "
-                f"len(modules)="
-                f"{len(lpl.modules)}",
+                f"Layer {label}: modules=() but module={lpl.module!r}; `module` is "
+                f"derived as modules[-1], so an empty roster with a named module means "
+                f"the module attribution was DROPPED",
             )
+        # ``module_call_stack`` is otherwise unvalidated: a stack naming module
+        # addresses that do not exist in the trace passes silently. Membership is the
+        # only claim checked here -- the field's ENTRY-vs-ACTIVE semantics are a
+        # separate spec question (O-B3-R02-1, a JMT fork).
+        known_module_addresses = {module.address for module in ml.modules}
+        for entry in lpl.module_call_stack:
+            address = str(entry).rsplit(":", 1)[0]
+            if address not in known_module_addresses:
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {label}: module_call_stack names {entry!r}, which is not a "
+                    f"module address recorded on this trace",
+                )
 
         # Label format: pass-qualified label has ":" iff multi-pass
         if lpl.num_passes > 1 and ":" not in lpl.label:

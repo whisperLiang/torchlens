@@ -111,6 +111,12 @@ PROBE_RECIPES: dict[tuple[str, str], Callable[[], tuple[tuple[Any, ...], dict[st
     # a recipe for a mode-visible function (e.g. from_file on builds where it
     # dispatches) is harmless and self-excluding.
     ("torch", "from_numpy"): lambda: ((np.array([0.25, 0.5], dtype=np.float32),), {}),
+    # The modern DLPack interop boundary is protocol-invisible for the same reason
+    # ``from_numpy`` is: it builds a tensor from a FOREIGN buffer, so no
+    # ``__torch_function__`` mode ever sees the call. It was not even a belt CANDIDATE
+    # before, because candidacy is derived from ORIG_TORCH_FUNCS and the function was
+    # absent from both of torch's override registries (see constants.py).
+    ("torch", "from_dlpack"): lambda: ((np.array([0.25, 0.5], dtype=np.float32),), {}),
     ("torch", "frombuffer"): lambda: (
         (bytearray(np.array([0.25, 0.5], dtype=np.float32).tobytes()),),
         {"dtype": torch.float32},
