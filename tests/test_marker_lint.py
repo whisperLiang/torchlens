@@ -332,3 +332,34 @@ def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
         "Root tests import the ambiguous bare `conftest` module; use the session output "
         f"environment or a real helper module instead: {violations}"
     )
+
+
+def test_no_module_level_facet_registration_in_tests() -> None:
+    """Test modules must not mutate the facet registry at IMPORT time.
+
+    A module-level ``@tl.facets.register`` fires at pytest COLLECTION --
+    before any fixture can isolate it -- so a full collection left extra
+    recipes in the process-global registry for the whole session while a
+    targeted run did not: the same trace hashed different recipe/provenance
+    state depending on how pytest was invoked (hunt-b2-sol R76/R77). Register
+    inside a module-scoped fixture that restores ``_REGISTRY`` on teardown.
+    """
+
+    tests_root = Path(__file__).resolve().parent
+    violations: list[str] = []
+    for path in tests_root.rglob("test*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                call = decorator if isinstance(decorator, ast.Call) else None
+                func = call.func if call is not None else decorator
+                if isinstance(func, ast.Attribute) and func.attr == "register":
+                    base = func.value
+                    if isinstance(base, ast.Attribute) and base.attr == "facets":
+                        violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
+    assert not violations, (
+        "module-level @tl.facets.register mutates the public registry at "
+        f"collection time; register inside a restoring fixture: {violations}"
+    )

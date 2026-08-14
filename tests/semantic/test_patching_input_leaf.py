@@ -19,6 +19,7 @@ Four coupled defects in the input-facet patching path of
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -129,11 +130,6 @@ def _input_facet(trace: Any, io_role: str) -> FacetSpec:
     return FacetSpec.from_home(home, recipe_id="test_input_leaf_patching")
 
 
-@tl.facets.register(
-    class_name="MixedLeafReader",
-    target_scope="module",
-    facets=("leaf_a", "leaf_b", "leaf_c"),
-)
 def mixed_leaf_reader(module: Any) -> dict[str, Any]:
     """Expose one facet per mixed-nesting input leaf."""
 
@@ -145,26 +141,50 @@ def mixed_leaf_reader(module: Any) -> dict[str, Any]:
     }
 
 
-@tl.facets.register(
-    class_name="AliasLeafReader",
-    target_scope="module",
-    facets=("shared_leaf",),
-)
 def alias_leaf_reader(module: Any) -> dict[str, Any]:
     """Expose the single deduped aliased input leaf as a facet."""
 
     return {"shared_leaf": _input_facet(module.trace, "input.x.0")}
 
 
-@tl.facets.register(
-    class_name="MappingLeafReader",
-    target_scope="module",
-    facets=("key_leaf",),
-)
 def mapping_leaf_reader(module: Any) -> dict[str, Any]:
     """Expose the mapping's key leaf as a facet."""
 
     return {"key_leaf": _input_facet(module.trace, "input.x.k")}
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _register_module_facet_recipes() -> Iterator[None]:
+    """Register this module's recipes at RUN time, restoring the registry after.
+
+    A module-level ``@tl.facets.register`` fires at pytest COLLECTION and
+    polluted the process-global registry outside any fixture's reach
+    (hunt-b2-sol R76/R77).
+    """
+
+    from torchlens.semantic import facets as _facets
+
+    saved = list(_facets._REGISTRY)
+    tl.facets.register(
+        class_name="MixedLeafReader",
+        target_scope="module",
+        facets=("leaf_a", "leaf_b", "leaf_c"),
+    )(mixed_leaf_reader)
+    tl.facets.register(
+        class_name="AliasLeafReader",
+        target_scope="module",
+        facets=("shared_leaf",),
+    )(alias_leaf_reader)
+    tl.facets.register(
+        class_name="MappingLeafReader",
+        target_scope="module",
+        facets=("key_leaf",),
+    )(mapping_leaf_reader)
+    try:
+        yield
+    finally:
+        _facets._REGISTRY[:] = saved
+        _facets._REGISTRY_VERSION += 1
 
 
 def _metric(log: Any) -> torch.Tensor:
