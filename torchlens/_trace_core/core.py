@@ -317,6 +317,8 @@ class TraceCore:
                 continue
 
             def _restore_store(snapshot: dict, _store: Any = store) -> None:
+                """Restore one store's overlay in place from a transaction snapshot."""
+
                 _store._overlay = dict(snapshot)
 
             txn.stash(("store", index), dict(store._overlay), _restore_store)
@@ -327,6 +329,8 @@ class TraceCore:
             if rows is not None and store.frozen:
 
                 def _restore_rows(snapshot: list, _store: Any = store) -> None:
+                    """Restore a sealed store's row cells from a transaction snapshot."""
+
                     _store._rows = [list(cells) for cells in snapshot]
 
                 txn.stash(

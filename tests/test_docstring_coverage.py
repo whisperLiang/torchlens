@@ -32,7 +32,18 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1] / "torchlens"
 #: Adding an entry is a last resort -- write the docstring. The staleness test
 #: keeps the ledger from rotting into a permanent exemption in either
 #: direction.
-DEFERRED: dict[tuple[str, str], str] = {}
+DEFERRED: dict[tuple[str, str], str] = {
+    # Sites newly VISIBLE when the gate learned to descend into loop/match
+    # bodies (b9 R69-1). Both files are other-lane territory in fixwave-2
+    # (identity_shims.py -> FW2-WRAP, _save_budget.py -> FW2-CAPTURE), so the
+    # docstrings ride those lanes; the ledger rows keep the gate exact until
+    # they land.
+    ("_save_budget.py", "SaveBudget._on_release"): "FW2-CAPTURE owns _save_budget.py",
+    ("backends/torch/identity_shims.py", "causal_bias_shim"): "FW2-WRAP owns identity_shims.py",
+    ("backends/torch/identity_shims.py", "conv_picker_shim"): "FW2-WRAP owns identity_shims.py",
+    ("backends/torch/identity_shims.py", "ctor_shim"): "FW2-WRAP owns identity_shims.py",
+    ("backends/torch/identity_shims.py", "expanded_weight_shim"): "FW2-WRAP owns identity_shims.py",
+}
 
 _PROPERTY_DECORATORS = frozenset({"property", "cached_property", "functools.cached_property"})
 
@@ -106,7 +117,23 @@ def _undocumented(path: pathlib.Path) -> list[tuple[str, int]]:
                 # function's: closure names are not stable identifiers, so the
                 # ledger keys on module + name and covers every occurrence.
                 walk(child, prefix)
-            elif isinstance(child, (ast.If, ast.Try, ast.With, ast.AsyncWith)):
+            elif isinstance(
+                child,
+                (
+                    ast.If,
+                    ast.Try,
+                    ast.With,
+                    ast.AsyncWith,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.Match,
+                ),
+            ):
+                # Loop and match bodies hold real defs too (a def under a
+                # ``for`` in TraceCore.transaction() shipped undocumented while
+                # its sibling outside the loop was caught -- the gate's exact
+                # blind spot).
                 walk(child, prefix)
 
     walk(tree, "")
