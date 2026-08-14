@@ -260,6 +260,29 @@ def test_packaging_tripwires_run_on_the_nightly_wheel_leg() -> None:
     )
 
 
+def test_release_job_python_satisfies_requires_python() -> None:
+    """The release job builds the shipped artifacts on a supported Python.
+
+    semantic-release's build_command builds the published sdist/wheel on the
+    release job's interpreter; a 3.9 builder produced release artifacts on a
+    Python the package's own requires-python (>=3.10) refuses (T13.7).
+    """
+
+    import re
+
+    pyproject = (_PROJECT_ROOT / "pyproject.toml").read_text()
+    match = re.search(r'requires-python\s*=\s*">=([0-9]+)\.([0-9]+)"', pyproject)
+    assert match is not None, "pyproject must declare a parseable requires-python floor"
+    floor = (int(match.group(1)), int(match.group(2)))
+
+    release = _load_yaml(_WORKFLOWS / "release.yml")["jobs"]["release"]
+    setup = next(step for step in release["steps"] if "setup-python" in step.get("uses", ""))
+    version = tuple(int(part) for part in str(setup["with"]["python-version"]).split("."))
+    assert version >= floor, (
+        f"the release job builds on Python {version} but the package requires >= {floor}"
+    )
+
+
 @pytest.mark.slow
 def test_built_sdist_manifest_is_governed(tmp_path: Path) -> None:
     """Assert the built sdist's manifest: package + metadata in, half-suites OUT.
