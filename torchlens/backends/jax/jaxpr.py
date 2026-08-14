@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeAlias, cast
 
 from ...ir.events import JaxEquationKind
+from ..registry import BackendUnsupportedError
 from .modules import decode_module_call_scope, decode_module_scope
 
 SAFE_JIT_NAMES = frozenset(
@@ -553,9 +554,19 @@ def interpret_closed_jaxpr_with_inlining(
             inputs = tuple(_read_env(env, var, core) for var in eqn.invars)
             if nested is not None:
                 if not _can_inline_call(eqn, core):
-                    raise ValueError(
-                        f"unsupported nested call primitive: {primitive_name} "
-                        f"name={eqn.params.get('name')!r}"
+                    raise BackendUnsupportedError(
+                        "JAX backend cannot capture nested call primitive "
+                        f"{primitive_name!r} (name={eqn.params.get('name')!r}): "
+                        "its nested jaxpr is not provably pure and inlinable "
+                        "(equation effects, closed-over constants, donated "
+                        "inputs, explicit shardings, or unaudited call "
+                        "parameters block capture-faithful inlining)",
+                        remedy=(
+                            "keep the nested call free of donation, explicit "
+                            "shardings, effects, and closed-over constants, or "
+                            "move it outside the traced function"
+                        ),
+                        primitive=primitive_name,
                     )
                 inlined_calls.append(primitive_name)
                 outputs = interpret_inner(
@@ -2268,8 +2279,20 @@ def _has_nested_jaxpr(eqn: Any, core: Any) -> bool:
     return any(contains(value) for value in eqn.params.values())
 
 
-def _is_library_custom_jvp_call(eqn: Any, core: Any) -> bool:
-    """Return whether ``custom_jvp_call`` is a recognized library wrapper.
+def _custom_jvp_call_is_inlinable(eqn: Any, core: Any) -> bool:
+    """Return whether a ``custom_jvp_call`` primal is safe to inline.
+
+    A ``jax.custom_jvp`` wrapper customizes DERIVATIVES only; the equation's
+    ``call_jaxpr`` is the exact forward primal, so interpreting it inline is
+    forward-faithful by construction.  Inlining is accepted when the primal
+    frame is recursively effect-free and closes over no constants -- the same
+    purity bar nested JIT calls must pass.  This covers both library shapes
+    in the wild: a jit/pjit-wrapped primal (``jax.nn.relu``; the former
+    name-allowlist check required the literal primitive name ``"jit"``, which
+    modern JAX spells ``"pjit"``) and a flat primitive primal
+    (``jax.nn.softplus``).  The replay oracle still validates every inlined
+    equation numerically, so a primal whose forward disagreed with the
+    wrapper would fail validation rather than pass silently.
 
     Parameters
     ----------
@@ -2281,17 +2304,13 @@ def _is_library_custom_jvp_call(eqn: Any, core: Any) -> bool:
     Returns
     -------
     bool
-        True for allowlisted library-internal custom JVP calls.
+        True when the custom-JVP primal is provably pure and const-free.
     """
 
     nested = _closed_jaxpr_param(eqn, core)
     if eqn.primitive.name != "custom_jvp_call" or nested is None:
         return False
-    nested_eqns = nested.jaxpr.eqns
-    return bool(nested_eqns) and all(
-        child.primitive.name == "jit" and child.params.get("name") in SAFE_JIT_NAMES
-        for child in nested_eqns
-    )
+    return _closed_jaxpr_is_effect_free_and_const_free(nested, core)
 
 
 def _can_inline_call(eqn: Any, core: Any) -> bool:
@@ -2318,7 +2337,7 @@ def _can_inline_call(eqn: Any, core: Any) -> bool:
     if eqn.primitive.name in PURE_JIT_CALL_PRIMITIVES:
         return _nested_jaxpr_is_pure_inlinable(eqn, nested, core)
     if eqn.primitive.name == "custom_jvp_call":
-        return _is_library_custom_jvp_call(eqn, core)
+        return _custom_jvp_call_is_inlinable(eqn, core)
     return False
 
 
