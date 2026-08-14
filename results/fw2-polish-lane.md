@@ -7,7 +7,7 @@ b5-ledger viz C901 item. TRIPWIRE LOCKED honored: no check weakened, no toleranc
 widened; the one golden rebaseline (rank semantic golden) has its root cause fixed in
 the SAME commit and used the golden's documented regen flag.
 
-## Commits (9)
+## Commits (10)
 
 | sha | scope |
 |---|---|
@@ -19,7 +19,8 @@ the SAME commit and used the golden's documented regen flag.
 | 04284e78 | R19-1 fold-uniformity signature + R19-2 per-pass rank geometry (+ golden rebaseline, root cause in-commit) |
 | 5249dec2 | R19-3 empty-husk suppression + R19-4 dashed-cluster truthfulness + R19-5 segment span disclosure |
 | b8ffdd9d | R19-6 image paths relativized to one imagepath attr; marker-lint split; stub kwarg |
-| (tail)   | R42-5 orphaned `_filter_conditional_elif_children` deletion + this results file |
+| 3606dcf2 | R42-5 orphaned `_filter_conditional_elif_children` deletion |
+| cbdb8f93 | viz render-identity oracle rebaseline (drift = the R19 change) + this results file |
 
 ## Item disposition
 
