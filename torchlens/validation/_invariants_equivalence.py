@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         _EQUIVALENT_OPS_UNAVAILABLE,
+        _RAW_LABEL_BEARING_DICT_FIELDS,
         _RAW_LABEL_BEARING_LIST_FIELDS,
         _RAW_LABEL_BEARING_SCALAR_FIELDS,
         _RAW_LABEL_PATTERN,
@@ -289,6 +290,21 @@ def _check_graph_ordering(ml: Trace) -> None:
                     name,
                     f"Raw label {item!r} survived postprocessing in {lpl.layer_label}.{field}",
                 )
+        for field in _RAW_LABEL_BEARING_DICT_FIELDS:
+            mapping = getattr(lpl, field, None) or {}
+            for key, values in mapping.items():
+                candidates = [key]
+                if isinstance(values, str):
+                    candidates.append(values)
+                elif isinstance(values, (list, tuple, set, frozenset)):
+                    candidates.extend(values)
+                for item in candidates:
+                    if isinstance(item, str) and _RAW_LABEL_PATTERN.search(item):
+                        raise MetadataInvariantError(
+                            name,
+                            f"Raw label {item!r} survived postprocessing in "
+                            f"{lpl.layer_label}.{field}",
+                        )
 
 
 def _check_loop_detection_invariants(ml: Trace) -> None:

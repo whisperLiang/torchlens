@@ -95,14 +95,11 @@ SKIP_PERTURBATION_ENTIRELY: dict[str, str] = {
         "same shared-zipped-parent limitation as meshgrid; retained with the same "
         "replay-side guard and the same pending narrowing"
     ),
-    # torchvision C++ ops (PyCapsule): perturbed coordinates can segfault
-    # these native extensions since they bypass Python exception handling.
-    "nms": "torchvision PyCapsule op; perturbed coordinates can segfault the native kernel",
-    "deform_conv2d": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "ps_roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "ps_roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    # The six torchvision PyCapsule ops moved to ``STRUCTURAL_ARG_POSITIONS``
+    # keyed on their coordinate/offset arg only (b1p2 D2 adjudication, all
+    # three labs converged): the whole-op skip was wider than its segfault
+    # justification, so feature/score value edges return under perturbation
+    # with zero segfault exposure.
     "exponential_": "in-place RNG draw; the output is determined by RNG state, not inputs",
 }
 
@@ -146,6 +143,19 @@ STRUCTURAL_ARG_POSITIONS: dict[str, set[int]] = {
     "newzeros": {0},
     "new_ones": {0},
     "newones": {0},
+    # torchvision C++ ops (PyCapsule): NARROWED from whole-op perturbation
+    # skips (b1p2 D2 adjudication). Only the coordinate/offset arg is skipped
+    # -- perturbed box coordinates / sampling offsets can index out of bounds
+    # inside the native kernel and segfault past Python exception handling --
+    # while feature and score args are genuine value edges that stay
+    # perturbation-tested. This is a SAFETY skip, not a value-irrelevance
+    # proof; the value edge through the coordinates stays guarded by replay.
+    "nms": {0},  # boxes; scores (arg 1) stay tested
+    "deform_conv2d": {1},  # sampling offsets; input/weight/bias/mask stay tested
+    "roi_align": {1},  # boxes; the feature map (arg 0) stays tested
+    "roi_pool": {1},  # boxes
+    "ps_roi_align": {1},  # boxes
+    "ps_roi_pool": {1},  # boxes
 }
 
 
@@ -153,6 +163,12 @@ STRUCTURAL_ARG_KWARG_ALIASES: dict[str, dict[int, set[str]]] = {
     "_pack_padded_sequence": {1: {"lengths"}},
     "_pad_packed_sequence": {1: {"lengths"}},
     "type_as": {1: {"tensor", "other"}},
+    "nms": {0: {"boxes"}},
+    "deform_conv2d": {1: {"offset"}},
+    "roi_align": {1: {"boxes", "rois"}},
+    "roi_pool": {1: {"boxes", "rois"}},
+    "ps_roi_align": {1: {"boxes", "rois"}},
+    "ps_roi_pool": {1: {"boxes", "rois"}},
 }
 
 
