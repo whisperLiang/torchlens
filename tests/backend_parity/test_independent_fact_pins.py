@@ -48,9 +48,12 @@ def test_linear_trace_facts_hold_from_first_principles():
         expected = model.weight.detach().sum(dim=1) + model.bias.detach()
         linear_op = next(op for op in log.compute_ops if op.func_name == "linear")
         assert torch.allclose(linear_op.out.squeeze(0), expected, atol=1e-6)
-        # The linear op consumed the model's two parameters.
-        params = getattr(linear_op, "params", None)
-        if params is not None:
-            assert len(tuple(params)) == 2
+        # The linear op consumed the model's two parameters. Unconditional
+        # (b9-opus R75-2): the former `if params is not None:` guard made this
+        # pin vacuously green if the attribute disappeared or read None.
+        assert hasattr(linear_op, "params"), "Op.params attribute is gone"
+        params = linear_op.params
+        assert params is not None, "linear op recorded no consumed parameters"
+        assert len(tuple(params)) == 2
     finally:
         log.cleanup()
