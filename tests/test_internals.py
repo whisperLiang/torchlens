@@ -849,3 +849,53 @@ class TestAliasContractPositionScan:
         assert not parent_label_has_alias_contract("parent_3", positions, (4,))
         # Parent present only at a non-contract position.
         assert not parent_label_has_alias_contract("parent_7", positions, (3, "out"))
+
+
+class TestStorageAliasBucketLayout:
+    """SF-52: the per-storage alias index single-alias fast path."""
+
+    def test_single_alias_is_one_weakref_and_upgrades_on_second(self) -> None:
+        """One labeled tensor per storage stores a bare ref; two upgrade.
+
+        A full WeakIdKeyDictionary per bucket cost ~6 marginal objects per op
+        (measured -6.95 obj/op on the pinned linear602 census after this
+        change). Candidate reads must be identical across both layouts.
+        """
+
+        import weakref
+
+        from torch.utils.weak import WeakIdKeyDictionary
+
+        from torchlens.backends.torch import _tl
+
+        session = _tl._LabelSession(token=1)
+        t1 = torch.randn(4)
+        t2 = t1.view(2, 2)  # distinct object, same storage
+        ptr = t1.untyped_storage().data_ptr()
+
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+        # Idempotent re-registration keeps the slim layout.
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+
+        saved_session = _tl._ACTIVE_LABEL_SESSION
+        try:
+            _tl._ACTIVE_LABEL_SESSION = session
+            assert _tl.session_storage_alias_candidates(ptr) == [t1]
+
+            # Second live distinct alias upgrades in place.
+            _tl._register_storage_alias(session, ptr, t2)
+            assert isinstance(session.by_storage_ptr[ptr], WeakIdKeyDictionary)
+            candidates = _tl.session_storage_alias_candidates(ptr)
+            assert {id(c) for c in candidates} == {id(t1), id(t2)}
+
+            # A dead single-alias entry reads as no candidates and is
+            # replaced by the next registration.
+            t3 = torch.randn(4)
+            ptr3 = t3.untyped_storage().data_ptr()
+            _tl._register_storage_alias(session, ptr3, t3)
+            del t3
+            assert _tl.session_storage_alias_candidates(ptr3) == []
+        finally:
+            _tl._ACTIVE_LABEL_SESSION = saved_session

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import weakref
 from collections.abc import Iterable
 from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, cast
@@ -416,7 +417,11 @@ class _LabelSession:
         # O(aliases) instead of scanning every stamped object. Keyed by the
         # stamp-time ``UntypedStorage.data_ptr()``; consumers re-validate the
         # LIVE storage before acting, so a stale (rebound/dead) entry is inert.
-        self.by_storage_ptr: dict[int, WeakIdKeyDictionary] = {}
+        # SF-52: almost every storage has exactly ONE labeled tensor, and a
+        # full ``WeakIdKeyDictionary`` per bucket cost ~6 marginal objects per
+        # op. The single-alias case stores one bare ``weakref.ref``; a second
+        # live distinct alias upgrades the bucket to a WeakIdKeyDictionary.
+        self.by_storage_ptr: dict[int, weakref.ref | WeakIdKeyDictionary] = {}
 
 
 _ACTIVE_LABEL_SESSION: _LabelSession | None = None
@@ -533,6 +538,59 @@ def session_labeled_tensors() -> list[Any]:
     return list(session.stamped.keys())
 
 
+def _register_storage_alias(session: _LabelSession, storage_ptr: int, t: Any) -> None:
+    """Register one stamped tensor in the per-storage alias index.
+
+    Parameters
+    ----------
+    session : _LabelSession
+        Active label session owning the index.
+    storage_ptr : int
+        Stamp-time ``UntypedStorage.data_ptr()``.
+    t : Any
+        Tensor being stamped.
+
+    Notes
+    -----
+    SF-52 layout: the overwhelmingly common single-alias bucket is one bare
+    ``weakref.ref`` (a full per-bucket ``WeakIdKeyDictionary`` cost ~6
+    marginal objects per op); a second live distinct alias upgrades the
+    bucket in place. Registration stays idempotent per object, and a
+    non-weak-referenceable tensor is skipped exactly as the historical
+    ``bucket[t] = True`` ``TypeError`` arm skipped it.
+    """
+
+    bucket = session.by_storage_ptr.get(storage_ptr)
+    if bucket is None:
+        try:
+            session.by_storage_ptr[storage_ptr] = weakref.ref(t)
+        except TypeError:
+            pass
+        return
+    if isinstance(bucket, weakref.ref):
+        existing = bucket()
+        if existing is t:
+            return
+        if existing is None:
+            try:
+                session.by_storage_ptr[storage_ptr] = weakref.ref(t)
+            except TypeError:
+                del session.by_storage_ptr[storage_ptr]
+            return
+        upgraded: WeakIdKeyDictionary = WeakIdKeyDictionary()
+        upgraded[existing] = True
+        try:
+            upgraded[t] = True
+        except TypeError:
+            pass
+        session.by_storage_ptr[storage_ptr] = upgraded
+        return
+    try:
+        bucket[t] = True
+    except TypeError:
+        pass
+
+
 def session_storage_alias_candidates(storage_ptr: int) -> list[Any]:
     """Return live tensors this session stamped whose stamp-time storage base matches.
 
@@ -557,6 +615,9 @@ def session_storage_alias_candidates(storage_ptr: int) -> list[Any]:
     bucket = session.by_storage_ptr.get(storage_ptr)
     if bucket is None:
         return []
+    if isinstance(bucket, weakref.ref):
+        entry = bucket()
+        return [] if entry is None else [entry]
     return list(bucket.keys())
 
 
@@ -902,11 +963,7 @@ def set_tensor_label(t: Any, label: str) -> None:
         except Exception:
             storage_ptr = None
         if storage_ptr is not None:
-            bucket = session.by_storage_ptr.setdefault(storage_ptr, WeakIdKeyDictionary())
-            try:
-                bucket[t] = True
-            except TypeError:
-                pass
+            _register_storage_alias(session, storage_ptr, t)
 
 
 def get_tensor_label(t: Any) -> str | None:
