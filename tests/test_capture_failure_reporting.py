@@ -47,11 +47,18 @@ def test_failed_capture_emits_routed_warning_not_stdout_banner(capsys):
     routed = [
         record
         for record in records
-        if record.category is RuntimeWarning and "capture attempt failed" in str(record.message)
+        if issubclass(record.category, RuntimeWarning)
+        and "capture attempt failed" in str(record.message)
     ]
     assert len(routed) == 1, [str(record.message) for record in records]
     assert "_BoomError" in str(routed[0].message)
     assert "partial_log" in str(routed[0].message)
+    # The advisory rides a dedicated RuntimeWarning subclass so the rescue
+    # driver can defer it while a rescue re-run may still swallow the failure;
+    # user RuntimeWarning filters keep matching.
+    from torchlens.backends.torch.rescue import CaptureAttemptFailedWarning
+
+    assert routed[0].category is CaptureAttemptFailedWarning
 
 
 @pytest.mark.skipif(

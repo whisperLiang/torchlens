@@ -24,6 +24,8 @@ unwrapped eager torch. Flag gates use ``getattr`` so the module also imports
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
@@ -226,8 +228,12 @@ class TestDisclosedResiduals:
         # identity shims (default-constructed and pre-wrap-constructed layers
         # always stored the original); fixing it would require restoring the
         # namespace between captures -- a wrapper-lifecycle design change, not
-        # a shim. unwrap_torch() or a fresh process pickles fine. This test
-        # pins the residual's shape so a silent change gets noticed.
+        # a shim. For THIS stored-ORIGINAL shape, unwrap_torch() or a fresh
+        # process pickles fine (the namespace read matches the original
+        # again). The MIRROR shape -- a user-held plain attribute read taken
+        # WHILE wrapped, which stores the WRAPPER -- is NOT recovered by
+        # unwrap_torch(); see test_user_held_wrapper_survives_unwrap below.
+        # This test pins the residual's shape so a silent change gets noticed.
         import io
         import pickle
 
@@ -240,6 +246,10 @@ class TestDisclosedResiduals:
             pickle.dump(layer, io.BytesIO())
 
     def test_pickle_after_unwrap_succeeds(self):
+        # Recovery claim scoped to the stored-ORIGINAL shape only: the shim
+        # stores the original torch function, so once unwrap_torch() restores
+        # the namespace the identity comparison matches again. This does NOT
+        # generalize to user-held wrapper references (next test).
         import io
         import pickle
 
@@ -256,6 +266,102 @@ class TestDisclosedResiduals:
             assert buffer.getvalue()
         finally:
             wrap_torch()
+
+    def test_user_held_wrapper_survives_unwrap(self):
+        # DISCLOSED RESIDUAL (honest shape): a plain attribute read of a
+        # wrapped function taken WHILE wrappers are installed (``held =
+        # F.relu``) hands the user the WRAPPER object, and unwrap_torch()
+        # cannot repair it -- TorchLens never crawls or mutates user objects
+        # (the sys.modules crawler is deleted by design). After unwrap the
+        # held reference stays callable (it delegates to the original) but is
+        # identity-poisoned: ``held is F.relu`` is False and pickling it (or
+        # any object holding it) fails, because save_global resolves the
+        # qualname to the restored ORIGINAL and identity-compares. Recovery
+        # requires re-reading the attribute (or a fresh process), never
+        # unwrap alone. The migration doc must disclose this exactly.
+        import pickle
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        held = F.relu
+        assert _resolve(held) is not held, "namespace read while wrapped must be the wrapper"
+        try:
+            unwrap_torch()
+            assert held is not F.relu, "unwrap_torch() does not repair user-held references"
+            assert torch.equal(held(torch.tensor([-1.0, 1.0])), torch.tensor([0.0, 1.0]))
+            with pytest.raises(pickle.PicklingError, match="relu"):
+                pickle.dumps(held)
+        finally:
+            wrap_torch()
+        doc = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "migration"
+            / "scoped_detached_patching.md"
+        )
+        text = doc.read_text(encoding="utf-8")
+        assert "does not repair user-held wrapper references" in text, (
+            "the migration doc must disclose that unwrap_torch() cannot recover "
+            "plain attribute reads taken while wrapped"
+        )
+
+
+class TestCausalBiasImportWindow:
+    # A torch module first imported WHILE wrappers are installed used to
+    # escape the shims until the NEXT capture entry re-ran
+    # install_identity_shims -- and in that window a CausalBias sdpa OUTSIDE
+    # any capture silently dropped the causal mask (wrong numbers). The
+    # import hook closes the window: the shim installs the moment the module
+    # executes.
+
+    @pytest.mark.skipif(
+        not _flag("HAS_ATTENTION_CAUSAL_BIAS"),
+        reason="torch build lacks torch.nn.attention.bias.CausalBias",
+    )
+    def test_post_wrap_import_is_shimmed_immediately(self):
+        import sys
+
+        _ensure_wrapped()
+        module_name = "torch.nn.attention.bias"
+        saved_module = sys.modules.pop(module_name, None)
+        parent = sys.modules.get("torch.nn.attention")
+        saved_attr = getattr(parent, "bias", None) if parent is not None else None
+        if parent is not None and saved_attr is not None:
+            delattr(parent, "bias")
+        try:
+            # Fresh import under wrap, with NO capture entry in between:
+            # exactly the historical coverage window.
+            import torch.nn.attention.bias as bias_module
+
+            tf_method = vars(bias_module.CausalBias).get("__torch_function__")
+            shimmed = bool(
+                getattr(
+                    getattr(tf_method, "__func__", tf_method),
+                    "_torchlens_identity_shim",
+                    False,
+                )
+            )
+            assert shimmed, "the shim must install at import time, not at the next capture"
+
+            # And the numbers must be right OUTSIDE any capture: the sdpa
+            # dispatch must apply the causal mask, matching an explicit mask.
+            torch.manual_seed(0)
+            q = torch.randn(1, 2, 6, 8)
+            k = torch.randn(1, 2, 6, 8)
+            v = torch.randn(1, 2, 6, 8)
+            bias = bias_module.causal_lower_right(q.shape[-2], k.shape[-2])
+            explicit = torch.tril(torch.ones(q.shape[-2], k.shape[-2], dtype=torch.bool))
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            reference = F.scaled_dot_product_attention(q, k, v, attn_mask=explicit)
+            assert torch.allclose(out, reference, atol=1e-6), (
+                "CausalBias sdpa outside a capture dropped the causal mask"
+            )
+        finally:
+            if saved_module is not None:
+                sys.modules[module_name] = saved_module
+            if parent is not None and saved_attr is not None:
+                parent.bias = saved_attr
 
 
 class TestSubclassCtorUnderWitness:

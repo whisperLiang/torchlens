@@ -20,6 +20,13 @@ repair stale bindings. Coverage is now:
    `torchlens.backends.torch.wrappers.wrap_torch()` before creating aliases, closures, partials,
    or object-held torch callables.
    Then those bindings capture the wrappers directly and no rescue is needed.
+   The MIRROR direction is a declared residual: a plain attribute read taken WHILE wrappers are
+   installed (`held = F.relu`) hands the user the wrapper object, and
+   `torchlens.backends.torch.wrappers.unwrap_torch()` does not repair user-held wrapper references
+   — TorchLens never crawls or mutates user objects. The held reference stays callable (it
+   delegates to the original) but is identity-poisoned after unwrap: `held is F.relu` is `False`
+   and pickling it (or any object holding it) fails. Recovery requires re-reading the attribute
+   after unwrap, or a fresh process.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
    `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`
@@ -45,13 +52,22 @@ repair stale bindings. Coverage is now:
   (for example an `autograd.grad` boundary is a known no-provenance source); no rescue runs.
 - Streaming saves, `out_sink` captures, and halt-predicate partials are not re-runnable; they
   report the escape and skip the rescue.
-- A rescue re-run executes the user's forward a SECOND time. When the primary forward WROTE
-  module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`, in-forward
-  buffer counters), the re-run is refused — RNG is restored between runs, module state is not —
-  and the escape stands disclosed (`skipped_reason == "buffer_writes_double_forward"`,
-  `forward_runs == 1`). On rescued (eval-mode) captures, a custom in-forward PYTHON-attribute
-  counter (not a registered buffer) still mutates twice: a declared residual of the double
-  forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
+- A rescue re-run executes the user's forward a SECOND time. When the primary forward ACTUALLY
+  WROTE module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`,
+  in-forward buffer counters), the re-run is refused — RNG is restored between runs, module state
+  is not — and the escape stands disclosed (`skipped_reason == "buffer_writes_double_forward"`,
+  `forward_runs == 1`). The refusal keys on a VALUE-CHANGING write, not on journal presence:
+  fused norm mutators are journaled unconditionally, so eval-mode BN/IN/GN captures carry
+  `buffer_value_changed == False` records and stay rescuable; an unknown change status refuses
+  fail-closed. The refusal covers EVERY trigger, including an output-attribution failure — there
+  the re-run is refused, the failure propagates with its `exc.partial_log`, and the skip is
+  disclosed on the partial's trace (`rescue_rerun`). On rescued (eval-mode) captures, a custom
+  in-forward PYTHON-attribute counter (not a registered buffer) still mutates twice: a declared
+  residual of the double forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
+- The capture-attempt-failed advisory ("Partial diagnostics ride the exception") is emitted on a
+  dedicated `RuntimeWarning` subclass and DEFERRED while a rescue re-run may still swallow the
+  failure: a successful rescue drops it (the rescue is disclosed on the returned trace), and
+  every re-raising path flushes it, so it never points at an exception the user does not receive.
 - A rescue that would count as recovery must produce a strict SUPERSET of the primary's op
   multiset. Mode presence can de-fuse fused fast paths; any op LOSS keeps the mode-free primary
   authoritative, with both deltas disclosed (`recovered_ops` / `lost_ops`).

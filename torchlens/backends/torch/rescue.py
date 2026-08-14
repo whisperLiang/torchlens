@@ -45,7 +45,24 @@ from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
-__all__ = ["RescueTorchFunctionMode", "capture_with_rescue"]
+__all__ = [
+    "CaptureAttemptFailedWarning",
+    "RescueTorchFunctionMode",
+    "capture_with_rescue",
+]
+
+
+class CaptureAttemptFailedWarning(RuntimeWarning):
+    """Warning category for the one capture-attempt-failed advisory.
+
+    A dedicated category (still a ``RuntimeWarning``, so user filters keep
+    matching) lets the rescue driver DEFER the advisory while a rescue re-run
+    is still possible: the warning tells the user diagnostics ride the
+    exception (``exc.partial_log``), which is only truthful when that
+    exception actually propagates. A successful rescue swallows the failure,
+    so the deferred advisory is dropped; every path that re-raises flushes it
+    first.
+    """
 
 
 _thread_local = threading.local()
@@ -149,6 +166,45 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
         warnings.showwarning = forward
 
 
+@contextmanager
+def _defer_capture_failed_warnings(
+    deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]],
+) -> Iterator[None]:
+    """Hold back capture-attempt-failed advisories; forward everything else.
+
+    The advisory points the user at ``exc.partial_log`` — truthful only when
+    the exception propagates. While a rescue re-run may still swallow the
+    failure, the advisory is parked in ``deferred``; the driver flushes it on
+    every re-raising path and drops it when the rescue succeeds.
+    """
+
+    forward = warnings.showwarning
+
+    def hold(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Park capture-failed advisories in ``deferred``; forward the rest."""
+
+        if isinstance(category, type) and issubclass(category, CaptureAttemptFailedWarning):
+            deferred.append((message, category, args, kwargs))
+            return
+        forward(message, category, *args, **kwargs)
+
+    warnings.showwarning = hold
+    try:
+        yield
+    finally:
+        warnings.showwarning = forward
+
+
+def _flush_deferred_warnings(
+    deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]],
+) -> None:
+    """Re-emit parked advisories through the current warning handler."""
+
+    for message, category, args, kwargs in deferred:
+        warnings.showwarning(message, category, *args, **kwargs)
+    deferred.clear()
+
+
 def _escape_signal(trace: Trace) -> str | None:
     """Return the escape-signal kind carried by a finished trace, if any.
 
@@ -213,7 +269,7 @@ def _disclosure(
 
 
 def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
-    """Labels of primary-forward ops that WROTE module buffer state.
+    """Labels of primary-forward ops that ACTUALLY wrote module buffer state.
 
     A rescue re-run executes the user's forward a SECOND time. When the
     primary forward wrote buffers (train-mode BatchNorm running stats and
@@ -223,14 +279,65 @@ def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
     refuse the re-run. A custom in-forward PYTHON-attribute counter (not a
     registered buffer) still mutates twice on rescued captures -- the
     documented residual (see docs/migration/scoped_detached_patching.md).
+
+    The refusal keys on an ACTUAL write, not on journal presence: fused norm
+    mutators (``batch_norm``, ``instance_norm``, ``native_group_norm``) are
+    journaled unconditionally, so every EVAL-mode BN/IN/GN capture carries
+    ``buffer_write_kind`` records whose ``buffer_value_changed`` is ``False``
+    (bytes provably unchanged; re-running is state-neutral). Only a record
+    whose value changed -- or whose change status is unknown (fail closed) --
+    refuses the re-run.
     """
 
     labels: list[str] = []
     for op in getattr(trace, "ops", ()) or ():
-        if getattr(op, "buffer_write_kind", None) is not None:
-            label = getattr(op, "label_raw", None) or getattr(op, "layer_label", None)
-            labels.append(str(label or getattr(op, "func_name", "?")))
+        if getattr(op, "buffer_write_kind", None) is None:
+            continue
+        if getattr(op, "buffer_value_changed", None) is False:
+            continue
+        label = getattr(op, "label_raw", None) or getattr(op, "layer_label", None)
+        labels.append(str(label or getattr(op, "func_name", "?")))
     return tuple(labels)
+
+
+def _partial_buffer_write_labels(exc: BaseException) -> tuple[str, ...] | None:
+    """Buffer addresses ACTUALLY written by a FAILED primary forward.
+
+    The failed-capture cleanup stamps the value-changing journal record on
+    the exception (``_torchlens_actual_buffer_writes``) while the journal is
+    still live — postprocess never ran, so materialized op fields do not
+    exist, and session cleanup clears ``capture_events`` before the driver
+    sees the partial. Mirrors :func:`_buffer_write_labels`: only
+    value-changing (or unknown-change, fail closed) events count. The live
+    partial journal is read as a fallback for paths that skipped the stamp.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        Addresses of actual writes (empty tuple = provably none), or ``None``
+        when the write record is unreachable/unarmed — the caller must treat
+        ``None`` as unprovable and refuse the re-run.
+    """
+
+    stamped = getattr(exc, "_torchlens_actual_buffer_writes", None)
+    if stamped is not None:
+        return tuple(str(address) for address in stamped)
+    partial = getattr(exc, "partial_log", None)
+    trace = getattr(partial, "trace", None)
+    if trace is None:
+        return None
+    if getattr(trace, "capture_mode", None) != "exhaustive":
+        # The buffer-write tracker only arms exhaustive sessions; an empty
+        # journal on any other mode proves nothing.
+        return None
+    events = getattr(getattr(trace, "capture_events", None), "buffer_write_events", None)
+    if events is None:
+        return None
+    return tuple(
+        str(getattr(event, "address", None) or "?")
+        for event in events
+        if getattr(event, "value_changed", None) is not False
+    )
 
 
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
@@ -292,14 +399,55 @@ def capture_with_rescue(
     primary: Trace | None = None
     primary_error: OutputAttributionError | None = None
     emitted_warnings: set[tuple[type, str]] = set()
+    primary_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
-        with _record_emitted_warnings(emitted_warnings):
+        with (
+            _record_emitted_warnings(emitted_warnings),
+            _defer_capture_failed_warnings(primary_deferred),
+        ):
             primary = run_capture()
     except OutputAttributionError as exc:
         primary_error = exc
+    except BaseException:
+        # No rescue for this failure class: the parked advisory is truthful
+        # (the exception propagates with its diagnostics), so re-emit it.
+        _flush_deferred_warnings(primary_deferred)
+        raise
 
     if primary_error is not None:
         trigger = "output_attribution_failed"
+        # R16-2 applies to EVERY trigger: an attribution-failed rescue also
+        # runs the forward a second time, so a primary that WROTE buffer
+        # state (train-mode BatchNorm counters and running stats) refuses the
+        # re-run here too — the failed capture's journal is the write record.
+        # An unreadable record is unprovable and refuses fail-closed.
+        partial_writes = _partial_buffer_write_labels(primary_error)
+        if partial_writes is None or partial_writes:
+            _flush_deferred_warnings(primary_deferred)
+            shown = (
+                ", ".join(partial_writes[:3]) if partial_writes else "buffer-write state unprovable"
+            )
+            warnings.warn(
+                "TorchLens skipped the rescue re-run after the output-attribution "
+                f"failure: the forward wrote module buffer state ({shown}), and "
+                "re-running it would double-apply those writes. Call model.eval() "
+                "(or fix the stale torch reference) and re-capture.",
+                UserWarning,
+                stacklevel=3,
+            )
+            partial_trace = getattr(getattr(primary_error, "partial_log", None), "trace", None)
+            if partial_trace is not None:
+                try:
+                    partial_trace.rescue_rerun = _disclosure(
+                        trigger=trigger,
+                        recovered=False,
+                        primary_error=str(primary_error),
+                        skipped_reason="buffer_writes_double_forward",
+                        forward_runs=1,
+                    )
+                except Exception:  # noqa: BLE001 — disclosure is best-effort
+                    pass
+            raise primary_error
     else:
         assert primary is not None
         signal = _escape_signal(primary)
@@ -339,12 +487,23 @@ def capture_with_rescue(
             return primary
 
     _thread_local.rescue_active = True
+    rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
         set_rng_from_saved_states(rng_snapshot)
-        with _suppress_repeated_warnings(emitted_warnings), RescueTorchFunctionMode():
+        # The rescue run's own capture-failed advisory is deferred too: its
+        # exception never propagates (the primary's error or trace does), so
+        # an advisory pointing at ITS exc.partial_log would always be untrue.
+        with (
+            _suppress_repeated_warnings(emitted_warnings),
+            _defer_capture_failed_warnings(rescue_deferred),
+            RescueTorchFunctionMode(),
+        ):
             rescued = run_capture()
     except Exception as exc:
         if primary_error is not None:
+            # The primary's failure propagates with its diagnostics attached,
+            # so its parked advisory is truthful again — re-emit it.
+            _flush_deferred_warnings(primary_deferred)
             raise primary_error from None
         assert primary is not None
         _mark(

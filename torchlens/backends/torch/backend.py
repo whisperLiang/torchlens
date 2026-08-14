@@ -1105,6 +1105,23 @@ class TorchBackend:
         # partially-constructed tensor entries to avoid stale references (#110).
         from ...partial import PartialTrace, _register_failed_capture
 
+        # Stamp the failed forward's ACTUAL buffer-write record (value-changing
+        # journal events) on the exception while the journal is still live —
+        # ``cleanup_model_session`` below clears ``capture_events``, and the
+        # rescue driver needs this record to refuse a double-forward re-run
+        # after an output-attribution failure (R16-2 for the failed-primary
+        # trigger). Only an exhaustive session arms the tracker, so only there
+        # is an empty journal proof of "no writes".
+        if getattr(session, "capture_mode", None) == "exhaustive":
+            events = getattr(getattr(session, "capture_events", None), "buffer_write_events", None)
+            if events is not None:
+                with contextlib.suppress(Exception):
+                    exc._torchlens_actual_buffer_writes = tuple(  # type: ignore[attr-defined]
+                        str(getattr(event, "address", None) or "?")
+                        for event in events
+                        if getattr(event, "value_changed", None) is not False
+                    )
+
         if getattr(session, "capture_mode", None) == "predicate":
             from ...ir import CaptureEvents
 
@@ -1190,13 +1207,19 @@ class TorchBackend:
         # return_partial flows, corrupted machine-readable stdout, and was
         # unfilterable. One accurate ROUTED warning replaces it, naming what
         # actually happened and where the diagnostics live; stacklevel targets
-        # the user's tl.trace call through the driver frames.
+        # the user's tl.trace call through the driver frames. The dedicated
+        # category (a RuntimeWarning subclass, so user filters keep matching)
+        # lets the rescue driver defer it while a rescue re-run can still
+        # swallow this failure — a successful rescue drops the advisory
+        # instead of pointing users at an exception they never receive.
+        from .rescue import CaptureAttemptFailedWarning
+
         warnings.warn(
             "TorchLens capture attempt failed "
             f"({type(exc).__name__}); the model and torch environment were "
             "restored. Partial diagnostics ride the exception (exc.partial_log "
             "/ torchlens.partial.from_failed_capture).",
-            RuntimeWarning,
+            CaptureAttemptFailedWarning,
             stacklevel=4,
         )
 
