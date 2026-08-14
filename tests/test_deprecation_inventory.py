@@ -48,6 +48,25 @@ _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
 #: to prevent.
 _DEPRECATION_CATEGORY_NAMES = frozenset({"DeprecationWarning", "TorchLensDeprecationWarning"})
 
+#: Docstring-summary phrasings by which a surface declares ITSELF deprecated.
+#: Matched against the first line of a function/property docstring only, so
+#: prose further down cannot manufacture a row, and deliberately narrow enough
+#: to exclude helpers whose summary merely mentions deprecation ("Synchronize
+#: one deprecated wrapper...", "Return lazy package attributes or deprecated
+#: moved names..."). "Deprecated alias for X" is the exact phrasing the
+#: silent option properties use.
+_DEPRECATED_DOC_PREFIXES = ("deprecated",)
+_DEPRECATED_DOC_PHRASES = ("deprecated alias for", "legacy alias for", "deprecated: use")
+
+#: Prefilter tokens: cheap literal check deciding which files get parsed.
+_DEPRECATED_DOC_TOKENS = ("Deprecated", "deprecated", "Legacy alias", "legacy alias")
+
+#: The package's own deprecation-emitting helpers. A function that calls one of
+#: these DOES warn, even though it contains no literal ``warnings.warn``, so the
+#: silent-site detector must treat all three as emissions or every moved-name
+#: wrapper reads as silent.
+_WARN_HELPERS = frozenset({"warn_deprecated_alias", "_warn_moved_name", "_warn_legacy_api_name"})
+
 #: How the deprecated spelling reaches the user.
 _KINDS = frozenset(
     {
@@ -149,14 +168,55 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
         remove_in="pending_maintainer_signoff",
         deprecated_in="unrecorded",
         sites=("torchlens/_deprecations.py::warn_deprecated_alias",),
-        members=("mode", "node_mode", "max_module_depth", "layout_engine"),
+        members=("mode", "node_mode", "max_module_depth", "layout_engine", "vis_opt"),
         note=(
             "The largest family by far. Membership is derived from the shipped "
             "_*_FLAT_TO_GROUP tables, minus the visualization names that are NOT "
             "in _VISUALIZATION_DEPRECATED_FLAT and minus save.grad_transform, "
-            "which the resolver excludes from warning. The four explicitly listed "
+            "which the resolver excludes from warning. The explicitly listed "
             "members are the pre-2.x draw() spellings resolved outside those "
-            "tables (options.py _normalize_visualization_kwargs)."
+            "tables (options.py _normalize_visualization_kwargs). 'vis_opt' is "
+            "the oldest generation of the vis_opt -> vis_mode -> view chain and "
+            "began warning in grind b4 (R48-1); the vis_mode -> view hop is "
+            "forked to the maintainer because Trace.draw() has no canonical "
+            "spelling for most of the vis_* family yet."
+        ),
+    ),
+    DeprecationFamily(
+        name="option_alias_property_reads",
+        kind="attr_alias",
+        replacement="the canonical grouped-option field (visualization.view / .depth / ...)",
+        remove_in="pending_maintainer_signoff",
+        deprecated_in="2.34.1",
+        sites=("torchlens/_deprecations.py::warn_deprecated_alias",),
+        members=(
+            "visualization.max_module_depth",
+            "visualization.layout_engine",
+            "visualization.node_mode",
+        ),
+        note=(
+            "READS of the four documented 'Deprecated alias' properties on "
+            "VisualizationOptions emitted nothing (grind b4, R48-1). Three now "
+            "warn. The fourth, visualization.mode, stays SILENT on purpose and "
+            "is recorded in SILENT_DEPRECATION_LEDGER: torchlens reads it "
+            "internally, so warning would make the package deprecate itself."
+        ),
+    ),
+    DeprecationFamily(
+        name="legacy_buffer_visibility_bools",
+        kind="kwarg_value",
+        replacement="show_buffers='always' / show_buffers='never'",
+        remove_in="pending_maintainer_signoff",
+        deprecated_in="2.34.1",
+        sites=("torchlens/_deprecations.py::warn_deprecated_alias",),
+        members=("show_buffers=True", "show_buffers=False"),
+        note=(
+            "A deprecated VALUE. The docstring called the bools legacy from the "
+            "moment the tri-state landed, but _validate_buffer_visibility "
+            "accepted them in silence (grind b4, R48-1). Spelled through an "
+            "f-string at the call site, so the literal-name scanner cannot see "
+            "them -- enumerated here instead. No caller inside torchlens passes "
+            "a bool, so announcing this originates no self-deprecation."
         ),
     ),
     DeprecationFamily(
@@ -258,6 +318,33 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
 _FAMILIES_BY_NAME = {family.name: family for family in DEPRECATION_FAMILIES}
 
 
+#: Surfaces that DECLARE themselves deprecated in their docstring and emit
+#: nothing, each with the reason it is allowed to stay quiet. Closed and
+#: shrink-only: :func:`test_silent_deprecations_are_exactly_the_declared_ledger`
+#: fails on any new entry.
+#:
+#: This ledger is the R48-1 root cause closed structurally. Every other closure
+#: in this file derives membership from warning EMISSION, so a deprecation that
+#: never warns is invisible to the census *by construction* -- which is how
+#: ``Trace.draw()`` came to honor a 17-name deprecated kwarg family, and
+#: ``draw_combined()`` its entire flat-override set, in total silence while the
+#: identical spellings warned through ``merge_visualization_options``.
+SILENT_DEPRECATION_LEDGER: dict[str, str] = {
+    "torchlens/io/__init__.py::get_model_metadata": (
+        "Pass-through: delegates to user_funcs.get_model_metadata, which warns. "
+        "Warning here too would double-report one user call."
+    ),
+    "torchlens/options.py::mode": (
+        "Its three sibling alias properties now warn on read; this one cannot "
+        "yet. torchlens reads visualization.mode internally when validating the "
+        "MLX visualization mode (user_funcs.py), so warning would make TorchLens "
+        "deprecate itself on a canonical path -- the R48-3 defect. The read site "
+        "is outside the R48 fix lane's territory; fix it there, then delete this "
+        "row and let the property warn."
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Derived side: emission sites and alias membership, read from the package.
 # ---------------------------------------------------------------------------
@@ -274,10 +361,20 @@ class _PackageScan:
         calls.
     alias_names:
         Literal old names passed to ``warn_deprecated_alias``.
+    alias_sites:
+        ``path::function`` keys of ``warn_deprecated_alias`` CALLS. Separate from
+        ``sites`` (raw ``warnings.warn``) because the two closures differ: raw
+        sites are closed by site, helper callers by name.
+    documented_deprecated:
+        ``path::function`` keys of functions/properties whose DOCSTRING calls
+        something deprecated or legacy. Independent of emission, which is the
+        point: see :func:`silently_deprecated_sites`.
     """
 
     sites: frozenset[str]
     alias_names: frozenset[str]
+    alias_sites: frozenset[str]
+    documented_deprecated: frozenset[str]
 
 
 @lru_cache(maxsize=8)
@@ -303,16 +400,26 @@ def scan_package(package_root: Path, base: Path) -> _PackageScan:
 
     sites: set[str] = set()
     alias_names: set[str] = set()
+    alias_sites: set[str] = set()
+    documented: set[str] = set()
     for path in sorted(package_root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
-        # Cheap prefilter: an emission is impossible unless one of the two tokens
-        # appears literally in the source, so only those files are parsed. This
-        # is what keeps a whole-package AST audit inside the smoke budget.
-        if "DeprecationWarning" not in text and "warn_deprecated_alias" not in text:
+        # Cheap prefilter: nothing this scan looks for is possible unless one of
+        # these tokens appears literally in the source, so only those files are
+        # parsed. This is what keeps a whole-package AST audit inside the smoke
+        # budget.
+        if not any(
+            token in text
+            for token in ("DeprecationWarning", "warn_deprecated_alias", *_DEPRECATED_DOC_TOKENS)
+        ):
             continue
         relative = path.relative_to(base).as_posix()
-        _visit(ast.parse(text), relative, "<module>", sites, alias_names)
-    return _PackageScan(frozenset(sites), frozenset(alias_names))
+        tree = ast.parse(text)
+        _visit(tree, relative, "<module>", sites, alias_names, alias_sites)
+        _visit_docstrings(tree, relative, documented)
+    return _PackageScan(
+        frozenset(sites), frozenset(alias_names), frozenset(alias_sites), frozenset(documented)
+    )
 
 
 def _visit(
@@ -321,6 +428,7 @@ def _visit(
     enclosing: str,
     sites: set[str],
     alias_names: set[str],
+    alias_sites: set[str],
 ) -> None:
     """Collect deprecation facts under ``node``, tracking the enclosing function.
 
@@ -336,6 +444,8 @@ def _visit(
         Accumulator for ``path::function`` emission sites.
     alias_names:
         Accumulator for literal deprecated spellings.
+    alias_sites:
+        Accumulator for ``path::function`` of ``warn_deprecated_alias`` calls.
     """
 
     if isinstance(node, ast.Call):
@@ -347,19 +457,98 @@ def _visit(
                 for value in categories
             ):
                 sites.add(f"{relative}::{enclosing}")
-        elif (
-            isinstance(func, ast.Name)
-            and func.id == "warn_deprecated_alias"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        ):
-            alias_names.add(node.args[0].value)
+        elif isinstance(func, ast.Name) and func.id in _WARN_HELPERS:
+            alias_sites.add(f"{relative}::{enclosing}")
+            if func.id == "warn_deprecated_alias" and (
+                node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                alias_names.add(node.args[0].value)
     for child in ast.iter_child_nodes(node):
         child_enclosing = (
             child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else enclosing
         )
-        _visit(child, relative, child_enclosing, sites, alias_names)
+        _visit(child, relative, child_enclosing, sites, alias_names, alias_sites)
+
+
+def _visit_docstrings(node: ast.AST, relative: str, documented: set[str]) -> None:
+    """Collect ``path::function`` for functions documented as deprecated.
+
+    Walks every function/property definition and inspects only its own
+    docstring, so a mention inside an unrelated module-level comment cannot
+    manufacture a row.
+
+    Parameters
+    ----------
+    node:
+        Node to descend from.
+    relative:
+        Repo-relative path of the module being scanned.
+    documented:
+        Accumulator for ``path::function`` keys.
+    """
+
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        docstring = (ast.get_docstring(child) or "").strip()
+        if not docstring:
+            continue
+        summary = docstring.splitlines()[0].lower()
+        declares = summary.startswith(_DEPRECATED_DOC_PREFIXES) or any(
+            phrase in summary for phrase in _DEPRECATED_DOC_PHRASES
+        )
+        if declares:
+            documented.add(f"{relative}::{child.name}")
+
+
+def documented_deprecated_sites(package_root: Path, base: Path | None = None) -> set[str]:
+    """Return ``file::function`` for every function DOCUMENTED as deprecated.
+
+    Parameters
+    ----------
+    package_root:
+        Root of the shipped package.
+    base:
+        Base directory reported paths are relative to.
+
+    Returns
+    -------
+    set[str]
+        ``path::function`` keys whose docstring summary says deprecated/legacy.
+    """
+
+    scan = scan_package(package_root, base if base is not None else _REPO_ROOT)
+    return set(scan.documented_deprecated)
+
+
+def silently_deprecated_sites(package_root: Path, base: Path | None = None) -> set[str]:
+    """Return sites documented as deprecated that emit NOTHING.
+
+    This is the R48-1 root cause made checkable. The rest of this inventory
+    derives membership from warning EMISSION, so a deprecation that never warns
+    is invisible to it *by construction* -- which is exactly how ``draw()``
+    came to accept a 17-name deprecated kwarg family, and ``draw_combined()``
+    its whole flat-override set, in total silence while the same spellings
+    warned through ``merge_visualization_options``.
+
+    Parameters
+    ----------
+    package_root:
+        Root of the shipped package.
+    base:
+        Base directory reported paths are relative to.
+
+    Returns
+    -------
+    set[str]
+        ``path::function`` keys that claim a deprecation but never emit one.
+    """
+
+    scan = scan_package(package_root, base if base is not None else _REPO_ROOT)
+    emitting = set(scan.sites) | set(scan.alias_sites)
+    return set(scan.documented_deprecated) - emitting
 
 
 def deprecation_emission_sites(package_root: Path, base: Path | None = None) -> set[str]:
@@ -522,6 +711,42 @@ def test_every_literal_alias_name_is_registered() -> None:
     assert not unregistered, f"deprecated spellings with no inventory entry: {sorted(unregistered)}"
 
 
+def test_silent_deprecations_are_exactly_the_declared_ledger() -> None:
+    """A deprecation that warns NOTHING must be declared, with a reason.
+
+    The gate the census could not have (grind b4, R48-1): membership everywhere
+    else in this file is derived from emission, so silence was invisible. A new
+    "Deprecated alias for X" property or wrapper that forgets to warn now fails
+    here instead of shipping as an undocumented removal hazard.
+    """
+
+    silent = silently_deprecated_sites(_PACKAGE_ROOT)
+    undeclared = silent - set(SILENT_DEPRECATION_LEDGER)
+    assert not undeclared, (
+        "surface documents itself as deprecated but emits no warning -- route it "
+        "through warn_deprecated_alias, or add it to SILENT_DEPRECATION_LEDGER "
+        f"with the reason it must stay quiet: {sorted(undeclared)}"
+    )
+    healed = set(SILENT_DEPRECATION_LEDGER) - silent
+    assert not healed, f"ledger rows that now warn (delete the row): {sorted(healed)}"
+
+
+def test_documented_deprecated_surface_is_mostly_wired_to_a_warning() -> None:
+    """The scanner sees real deprecated surfaces, and nearly all of them warn.
+
+    Guards the detector against silently matching nothing: a typo in the
+    docstring phrasings would make the ledger test vacuously pass.
+    """
+
+    documented = documented_deprecated_sites(_PACKAGE_ROOT)
+    assert len(documented) > 20, (
+        f"the docstring scanner found only {len(documented)} deprecated surfaces; "
+        "it has probably stopped matching the package's phrasing"
+    )
+    assert "torchlens/options.py::mode" in documented
+    assert len(silently_deprecated_sites(_PACKAGE_ROOT)) < len(documented) / 2
+
+
 def test_flat_kwarg_family_membership_is_derived_not_transcribed() -> None:
     """The flat-kwarg family reads the shipped tables, so it cannot go stale."""
 
@@ -579,13 +804,20 @@ def test_census_matches_the_recorded_baseline() -> None:
 
     A new shim is not forbidden -- the house rule is "no NEW shims", and this is
     how that rule becomes checkable instead of aspirational.
+
+    Rebased in grind b4 (R48-1) for +6 spellings, none of them a new shim: they
+    are pre-existing shims that were being honored in SILENCE and now warn.
+    ``flat_option_kwargs`` 80 -> 81 (``vis_opt``), plus the two new families for
+    the alias property reads (3) and the legacy buffer-visibility bools (2).
     """
 
     assert deprecated_spelling_census() == {
         "moved_top_level_names": 50,
         "paper_era_api_shims": 9,
-        "flat_option_kwargs": 80,
+        "flat_option_kwargs": 81,
         "renamed_public_callables": 21,
+        "option_alias_property_reads": 3,
+        "legacy_buffer_visibility_bools": 2,
         "crawler_era_noop_functions": 2,
         "crawler_era_noop_kwargs": 2,
         "domain_node_styles": 2,
@@ -659,6 +891,45 @@ class TestInventoryMechanismIsRedCapable:
         unregistered, phantom = inventory_gaps({"new"}, {"old"})
         assert unregistered == {"new"}
         assert phantom == {"old"}
+
+    def test_silent_scanner_finds_a_planted_silent_deprecation(self, tmp_path: Path) -> None:
+        """A deprecated-documented surface that never warns is reported."""
+
+        package = tmp_path / "torchlens"
+        package.mkdir()
+        (package / "mod.py").write_text(
+            'def f():\n    """Deprecated alias for g."""\n    return 1\n',
+            encoding="utf-8",
+        )
+        assert silently_deprecated_sites(package, base=tmp_path) == {"torchlens/mod.py::f"}
+
+    def test_silent_scanner_clears_a_surface_that_warns_via_the_helper(
+        self, tmp_path: Path
+    ) -> None:
+        """Routing the same surface through the helper clears it."""
+
+        package = tmp_path / "torchlens"
+        package.mkdir()
+        (package / "mod.py").write_text(
+            'def f():\n    """Deprecated alias for g."""\n'
+            "    warn_deprecated_alias('f', 'g')\n    return 1\n",
+            encoding="utf-8",
+        )
+        assert silently_deprecated_sites(package, base=tmp_path) == set()
+
+    def test_silent_scanner_ignores_helpers_that_merely_mention_deprecation(
+        self, tmp_path: Path
+    ) -> None:
+        """A summary ABOUT deprecation is not a deprecated surface."""
+
+        package = tmp_path / "torchlens"
+        package.mkdir()
+        (package / "mod.py").write_text(
+            'def f():\n    """Synchronize one deprecated wrapper on first access."""\n'
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        assert silently_deprecated_sites(package, base=tmp_path) == set()
 
     def test_removal_vocabulary_rejects_free_text(self) -> None:
         """``remove_in`` is closed, so 'soon' cannot masquerade as metadata."""

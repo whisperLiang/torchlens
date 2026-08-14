@@ -21,7 +21,10 @@ _VISUALIZATION_CASES = [
     ("container_path", "vis_outpath", "custom.gv", "vis_outpath"),
     ("save_only", "vis_save_only", True, "vis_save_only"),
     ("file_format", "vis_fileformat", "svg", "vis_fileformat"),
-    ("show_buffers", "vis_buffers", True, "show_buffer_layers"),
+    # Canonical tri-state value on purpose: the legacy bools are themselves a
+    # deprecated VALUE now (grind b4, R48-1), and these two cases assert the
+    # routing of the NAME, so a bool here would smuggle a second warning in.
+    ("show_buffers", "vis_buffers", "always", "show_buffer_layers"),
     ("direction", "vis_direction", "leftright", "direction"),
     ("graph_overrides", "vis_graph_overrides", {"ranksep": "2.0"}, "vis_graph_overrides"),
     ("edge_overrides", "vis_edge_overrides", {"color": "red"}, "vis_edge_overrides"),
@@ -188,13 +191,20 @@ def test_get_model_metadata_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert first is sentinel
     assert second is sentinel
+    # Both calls now report both warnings: suppression is Python's per-call-site
+    # registry, not a once-per-process set inside torchlens, so `simplefilter
+    # ("always")` genuinely means always (grind b4, R48-6). The window is quoted
+    # from the single `_deprecations.REMOVED_IN` constant, so the alias route no
+    # longer advertises a vaguer window than the moved-name route beside it.
     assert _deprecation_messages(records) == [
         "torchlens.get_model_metadata is deprecated; use torchlens.io.get_model_metadata "
         "instead. Removed in a future 2.x release.",
         "`get_model_metadata` is deprecated; use `log_model_metadata` instead. "
-        "The old name continues to work but will be removed in a future release.",
+        "The old name continues to work but will be removed in a future 2.x release.",
         "torchlens.get_model_metadata is deprecated; use torchlens.io.get_model_metadata "
         "instead. Removed in a future 2.x release.",
+        "`get_model_metadata` is deprecated; use `log_model_metadata` instead. "
+        "The old name continues to work but will be removed in a future 2.x release.",
     ]
 
 
@@ -441,7 +451,10 @@ def test_trace_validate_saved_outs_warns_once(
 
     assert first is True
     assert second is True
-    assert len(_deprecation_messages(records)) == 1
+    # Two calls, two warnings: `simplefilter("always")` now genuinely means
+    # always (grind b4, R48-6 -- the once-per-process set that swallowed the
+    # second one is gone; dedup is Python's per-call-site registry).
+    assert len(_deprecation_messages(records)) == 2
 
 
 @pytest.mark.parametrize(
@@ -564,7 +577,7 @@ def test_activation_transform_flat_kwarg_warns_and_routes_to_transform(
     assert captured["activation_transform"] is transform
     assert _deprecation_messages(records)[0] == (
         "`activation_transform` is deprecated; use `save.activation_transform` instead. "
-        "The old name continues to work but will be removed in a future release."
+        "The old name continues to work but will be removed in a future 2.x release."
     )
 
 
@@ -611,10 +624,20 @@ def test_trace_mixing_old_and_new_renamed_kwargs_raises(
         )
 
 
-def test_old_kwarg_warning_deduplicates_per_process(
+def test_old_kwarg_warning_honours_the_active_warning_filter(
     stubbed_runner: tuple[dict[str, Any], _DummyLog],
 ) -> None:
-    """Repeated use of the same deprecated kwarg should only warn once."""
+    """Deprecated-kwarg suppression is Python's, not a hand-rolled process set.
+
+    Rewritten in grind b4 (R48-6). This previously asserted once-per-process
+    dedup, which was the defect: a module-level set inside
+    ``warn_deprecated_alias`` swallowed every repeat, so ``-W always`` and
+    ``simplefilter("always")`` could not get the warnings they explicitly asked
+    for, and a second call site never got its own attribution. Suppression now
+    belongs to Python's per-call-site ``__warningregistry__``, which honours the
+    active filter -- so under "always" both uses warn, and each warning is
+    attributed to the line that made it.
+    """
 
     del stubbed_runner
     with warnings.catch_warnings(record=True) as records:
@@ -632,7 +655,21 @@ def test_old_kwarg_warning_deduplicates_per_process(
             num_context_lines=4,
         )
 
-    assert len(_deprecation_messages(records)) == 1
+    messages = _deprecation_messages(records)
+    assert len(messages) == 2, "simplefilter('always') must not be overridden by torchlens"
+    assert messages[0] == messages[1]
+    # Both blamed on THIS file rather than on a torchlens internal frame or on
+    # `sys:1` -- the whole point of resolving stacklevel per call.
+    alias_records = [
+        record
+        for record in records
+        if issubclass(record.category, DeprecationWarning)
+        and "num_context_lines" in str(record.message)
+    ]
+    assert alias_records
+    assert all(Path(record.filename) == Path(__file__) for record in alias_records), [
+        record.filename for record in alias_records
+    ]
 
 
 def test_show_model_graph_new_recurrence_detection_has_no_warning(

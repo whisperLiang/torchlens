@@ -347,7 +347,9 @@ def show_model_graph(
         order_siblings=order_siblings,
     )
 
-    if visualization_options.mode not in ["none", "rolled", "unrolled"]:
+    # Reads the canonical `view`, not the deprecated `mode` alias: torchlens must
+    # not consume its own deprecated spellings (grind b4, R48-3).
+    if visualization_options.view not in ["none", "rolled", "unrolled"]:
         raise ValueError("Visualization option must be either 'none', 'rolled', or 'unrolled'.")
 
     trace = _run_model_and_save_specified_outs(
@@ -456,17 +458,27 @@ def draw_backward(
         edge_overrides = visualization.edge_overrides
         node_mode = visualization.node_style
 
+    # Six of these seven flat overrides warned nowhere, so `draw_backward` was a
+    # silent-removal surface while the SAME spellings warned through
+    # `merge_visualization_options` (grind b4, R48-1). The canonical replacement
+    # exists and works here: pass `visualization=VisualizationOptions(...)`.
     if vis_outpath is not MISSING:
+        warn_deprecated_alias("vis_outpath", "visualization.container_path")
         container_path = cast(str, vis_outpath)
     if vis_save_only is not MISSING:
+        warn_deprecated_alias("vis_save_only", "visualization.save_only")
         save_only = cast(bool, vis_save_only)
     if vis_fileformat is not MISSING:
+        warn_deprecated_alias("vis_fileformat", "visualization.file_format")
         file_format = cast(str, vis_fileformat)
     if vis_direction is not MISSING:
+        warn_deprecated_alias("vis_direction", "visualization.direction")
         direction = cast(VisDirectionLiteral, vis_direction)
     if vis_graph_overrides is not MISSING:
+        warn_deprecated_alias("vis_graph_overrides", "visualization.graph_overrides")
         graph_overrides = cast(dict[str, Any] | None, vis_graph_overrides)
     if vis_edge_overrides is not MISSING:
+        warn_deprecated_alias("vis_edge_overrides", "visualization.edge_overrides")
         edge_overrides = cast(dict[str, Any] | None, vis_edge_overrides)
     if vis_node_mode is not MISSING:
         warn_deprecated_alias("vis_node_mode", "node_style")
@@ -562,17 +574,25 @@ def draw_combined(
         graph_overrides = visualization.graph_overrides
         edge_overrides = visualization.edge_overrides
 
+    # `draw_combined` warned on NOTHING at all (grind b4, R48-1); same canonical
+    # replacement as `draw_backward` above.
     if vis_outpath is not MISSING:
+        warn_deprecated_alias("vis_outpath", "visualization.container_path")
         container_path = cast(str, vis_outpath)
     if vis_save_only is not MISSING:
+        warn_deprecated_alias("vis_save_only", "visualization.save_only")
         save_only = cast(bool, vis_save_only)
     if vis_fileformat is not MISSING:
+        warn_deprecated_alias("vis_fileformat", "visualization.file_format")
         file_format = cast(str, vis_fileformat)
     if vis_direction is not MISSING:
+        warn_deprecated_alias("vis_direction", "visualization.direction")
         direction = cast(VisDirectionLiteral, vis_direction)
     if vis_graph_overrides is not MISSING:
+        warn_deprecated_alias("vis_graph_overrides", "visualization.graph_overrides")
         graph_overrides = cast(dict[str, Any] | None, vis_graph_overrides)
     if vis_edge_overrides is not MISSING:
+        warn_deprecated_alias("vis_edge_overrides", "visualization.edge_overrides")
         edge_overrides = cast(dict[str, Any] | None, vis_edge_overrides)
 
     return trace.draw_combined(

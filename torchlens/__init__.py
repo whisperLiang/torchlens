@@ -17,8 +17,7 @@ import types as _types
 import warnings as _warnings
 from collections.abc import Callable as _Callable, Iterable as _Iterable, Mapping as _Mapping
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Any
-from typing import NamedTuple as _NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple as _NamedTuple
 
 import torch as _torch
 from torch import nn as _nn
