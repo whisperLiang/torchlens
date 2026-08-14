@@ -209,6 +209,10 @@ _LAZY_EXCEPTION_PATHS = {
     "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),
     "RecordBindingError": ("torchlens._errors", "RecordBindingError"),
     "ReentrantTraceError": ("torchlens._state", "ReentrantTraceError"),
+    # Defined beside the eagerly-imported runnable vocabulary but registered
+    # lazily: the class lands in the same fixwave as this registration, and a
+    # lazy binding keeps this module importable at every commit interleaving.
+    "SparseCorePayloadError": ("torchlens.errors.runnable", "SparseCorePayloadError"),
     "StructuralHashMismatchError": ("torchlens.hash", "StructuralHashMismatchError"),
     "UnknownBackendError": ("torchlens.backends", "UnknownBackendError"),
     "VariantScanTruncationWarning": ("torchlens._robustness", "VariantScanTruncationWarning"),

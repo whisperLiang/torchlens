@@ -1144,7 +1144,11 @@ outside the recorded taken path and must never report `verified`.
 `input_alias_topology_unresolved` is an unverifiability CEILING, not a contradiction: the
 three-valued alias engine (section 11) could prove neither overlap nor disjointness for a
 same-storage input pair, so the run reports `unverifiable` with `not_applicable` attestation --
-never `diverged` by assumption and never `verified`. `execution_context_unavailable` is the typed
+never `diverged` by assumption and never `verified`. The code is observable (r25-4): the run
+report carries one PASSED disclosure row in `contract_checks` named
+`input_alias_topology_unresolved` whose diagnostic bears the code (`passed=True` because a
+ceiling is not an observed contradiction -- a failed check would classify DIVERGED).
+`execution_context_unavailable` is the typed
 refusal for a recorded execution context the producer could not capture or the runtime cannot
 enter/restore.
 
@@ -1359,9 +1363,23 @@ Exception classes are `RunnableTLSPECError(TorchLensError)`,
 `RunPreconditionError(ConfigurationError, ValueError)`,
 `RuntimeSignatureDriftError(CompatibilityError, RuntimeError)`,
 `PathDivergenceError(ValidationError, RuntimeError)`,
-`NumericAttestationError(ValidationError, RuntimeError)`, and
-`PoisonedRunError(ValidationError, RuntimeError)`. Each also subclasses `RunnableTLSPECError`. The
-machine code is in its diagnostic/report; exception text is not a compatibility surface.
+`NumericAttestationError(ValidationError, RuntimeError)`,
+`PoisonedRunError(ValidationError, RuntimeError)`, and
+`SparseCorePayloadError(ValidationError, AssertionError)`. Each also subclasses
+`RunnableTLSPECError`. The machine code is in its diagnostic/report; exception text is not a
+compatibility surface.
+
+`SparseCorePayloadError` (r25-2) is the value-free sparse-core tripwire class raised by
+`assert_sparse_core_has_no_tensor_payload` with
+`fields["code"] == "sparse_core_tensor_payload"` and the dotted payload path on
+`fields["payload_path"]`. `AssertionError` stays in its MRO deliberately: the tripwire's
+historical raise class was a bare `AssertionError`, so existing `except AssertionError`
+callers keep working while new callers branch on the stable code.
+
+`RunnablePreflightError` raised with `sparse_preflight_failed` (r25/B8-27) inlines a bounded
+summary of the FIRST producer diagnostic -- its code in brackets, text, detection stage, and
+affected ops -- into the exception message; the complete structured diagnostics remain on
+`exc.fields["diagnostics"]`, which stays the machine surface.
 
 ## 8. Readiness and result shapes
 
@@ -2747,7 +2765,8 @@ Glossary of v2 vocabulary introduced by this amendment (canonical here per the l
   zero RNG; nonempty Kaiming requires finite positive fan-in).
 - `input_alias_topology_unresolved` -- the unverifiability ceiling for an unproven input alias
   relation (r37: absolute device-scoped byte addresses; distinct storage objects are never
-  trivially disjoint).
+  trivially disjoint); surfaced as a PASSED disclosure `contract_checks` row named after the
+  code (r25-4).
 - `execution_context_unavailable` -- the typed refusal for uncapturable/unrestorable context.
 - `state_alias_topology_unsupported` (r37) -- the save-time refusal for distinct-object
   overlapping/unprovable bound-state alias topology (section 5 rule 10).

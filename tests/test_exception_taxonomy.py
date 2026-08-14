@@ -455,6 +455,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "ShapeInferenceError": ("RuntimeError",),
     "SiteAmbiguityError": ("ValueError",),
     "SiteResolutionError": ("ValueError",),
+    "SparseCorePayloadError": ("AssertionError",),
     "SpecMutationError": ("ValueError",),
     "SpecPortabilityError": ("ValueError",),
     "SpliceModuleDeviceError": ("RuntimeError",),

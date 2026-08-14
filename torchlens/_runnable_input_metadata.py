@@ -18,6 +18,7 @@ from .errors import (
 from .runnable import (
     ContractCheck,
     PathFaithfulness,
+    RunnableDiagnostic,
     RunnableErrorCode,
     SparseRunDescriptor,
     TensorSlotDescriptor,
@@ -451,6 +452,37 @@ def _bind_runtime_inputs(
         descriptor, input_slots, raw_values
     )
     checks.extend(alias_checks)
+    if input_alias_unresolved:
+        # r25-4: the unresolved-topology ceiling was previously an unnamed boolean
+        # threaded to the faithfulness classifier, so a caller told to branch on the
+        # documented ``input_alias_topology_unresolved`` code could never observe it.
+        # Surface the code on a PASSED disclosure row in ``report.contract_checks``:
+        # ``passed=True`` because unresolved is a ceiling (UNVERIFIABLE), never an
+        # observed contradiction -- a failed check would wrongly classify DIVERGED.
+        checks.append(
+            ContractCheck(
+                name=RunnableErrorCode.INPUT_ALIAS_TOPOLOGY_UNRESOLVED.value,
+                passed=True,
+                diagnostic=RunnableDiagnostic(
+                    code=RunnableErrorCode.INPUT_ALIAS_TOPOLOGY_UNRESOLVED,
+                    message=(
+                        "The three-valued alias engine could prove neither overlap "
+                        "nor disjointness for a same-storage model-input pair; the "
+                        "run verdict is capped at UNVERIFIABLE "
+                        "(input_alias_topology_unresolved), never DIVERGED by "
+                        "assumption and never VERIFIED."
+                    ),
+                    registry_id=None,
+                    affected_op_labels=(),
+                    recorded_runtime=None,
+                    current_runtime=str(torch.__version__),
+                    detection_stage="run_honesty_contract",
+                    resolver_provenance=None,
+                    analysis_load_available=True,
+                    details=(),
+                ),
+            )
+        )
     # Phase 4: clone only ACCEPTED (executable) tensors.
     for slot in input_slots:
         raw = raw_values.get(slot.slot_id)
