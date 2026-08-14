@@ -2946,11 +2946,12 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     # b1p2 D2 adjudication: the six torchvision PyCapsule ops left this
     # whole-op registry for coordinate-arg-only rows in
     # STRUCTURAL_ARG_POSITIONS (a NARROWING; their feature/score value edges
-    # are perturbation-tested again).
+    # are perturbation-tested again). R08-2 narrowing: meshgrid /
+    # broadcast_tensors left it for CUSTOM_EXEMPTION_CHECKS per-output
+    # parent projection (only cross-member zipped siblings stay exempt;
+    # each output's own value edge is perturbation-tested again).
     assert sorted(SKIP_PERTURBATION_ENTIRELY) == [
-        "broadcast_tensors",
         "exponential_",
-        "meshgrid",
         "new_ones",
         "new_zeros",
         "ones_like",
@@ -2959,6 +2960,8 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
         "zero_",
         "zeros_like",
     ]
+    for zipped_name in ("meshgrid", "broadcast_tensors", "broadcasttensors"):
+        assert zipped_name in CUSTOM_EXEMPTION_CHECKS
     assert "full" not in SKIP_VALIDATION_ENTIRELY
     assert "full" not in SKIP_PERTURBATION_ENTIRELY
     assert "full" not in CUSTOM_EXEMPTION_CHECKS
