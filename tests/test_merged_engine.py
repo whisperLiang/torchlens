@@ -1031,3 +1031,26 @@ class TestContractLockstep:
         assert "8-byte big-endian path length" in doc
         assert re.search(r"8-byte big-endian\s+file\s+size", doc)
         assert "32 raw SHA-256 bytes" in doc
+
+
+class TestModuleLevelSaveRefusesTyped:
+    """tl.save(merged, ...) is a contract-promised typed refusal, not an AttributeError."""
+
+    def test_tl_save_merged_trace_refuses_typed(self, tmp_path):
+        # The module-level bundle save used to reach the runnable poison gate
+        # and die as a bare AttributeError ('MergedTrace' has no '_runnable');
+        # the contract (2.5) promises every merged export surface refuses typed.
+        import torchlens as tl
+        from torchlens.merged._errors import MergedSurfaceUnsupportedError
+        from torchlens.merged._presenter import MergedTrace, _RankHandle
+
+        derivation = derive_merge(
+            {0: evidence(0, [boundary(0, 0)]), 1: evidence(1, [boundary(1, 0)])}
+        )
+        merged = MergedTrace(
+            derivation, {0: _RankHandle(0, trace=None), 1: _RankHandle(1, trace=None)}
+        )
+        with pytest.raises(MergedSurfaceUnsupportedError) as excinfo:
+            tl.save(merged, tmp_path / "merged_refused.tlspec")
+        assert excinfo.value.fields["code"] == "merged_surface_unsupported"
+        assert not (tmp_path / "merged_refused.tlspec").exists()
