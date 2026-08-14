@@ -414,6 +414,68 @@ def _box_membership_contains(box: ReceptiveFieldBox, unit: tuple[int, ...]) -> b
     return True
 
 
+_ADJOINT_CORNER_BUDGET = 16
+
+
+def _complete_corner_choices(
+    descriptor: ReceptiveField,
+    box: ReceptiveFieldBox,
+    complete_unit: tuple[int, ...],
+) -> tuple[tuple[int, ...], ...] | None:
+    """Return per-axis claimed source coordinates for complete corner seeding.
+
+    Every axis must contribute at least one CLAIMED member: windowed and
+    concrete-bounded full axes their hull endpoints, pointwise axes the seed
+    unit's own coordinate (the exact element the same-index claim asserts).
+    ``None`` means some axis has no representable claimed coordinate and the
+    caller falls back to the historical windowed-only enumeration. Full-axis
+    endpoint pairs widen inside a fixed corner budget, narrowest claims
+    first, so wide honest full axes (channel mixing) cannot blow up the probe
+    count; a budget-trimmed axis still probes its start coordinate.
+    """
+
+    assert descriptor.axes is not None
+    choices: list[tuple[int, ...]] = []
+    widenable: list[tuple[int, int, int]] = []
+    count = 1
+    for position, (axis_descriptor, axis) in enumerate(zip(descriptor.axes, box.axes, strict=True)):
+        axis_choices: tuple[int, ...]
+        if axis.kind in {"windowed", "full"}:
+            if (
+                axis.clipped_start is None
+                or axis.clipped_stop is None
+                or axis.clipped_stop <= axis.clipped_start
+            ):
+                return None
+            start, last = axis.clipped_start, axis.clipped_stop - 1
+            if axis.kind == "windowed":
+                axis_choices = (start, last) if last != start else (start,)
+            else:
+                axis_choices = (start,)
+                if last != start:
+                    widenable.append((last - start, position, last))
+        elif axis.kind == "pointwise":
+            output_axis = axis_descriptor.output_axis
+            if output_axis is None or output_axis >= len(complete_unit):
+                return None
+            coordinate = complete_unit[output_axis]
+            if not 0 <= coordinate < axis_descriptor.input_extent:
+                return None
+            axis_choices = (coordinate,)
+        else:
+            return None
+        choices.append(axis_choices)
+        count *= len(axis_choices)
+    if count > _ADJOINT_CORNER_BUDGET:
+        return None
+    for _width, position, last in sorted(widenable):
+        if count * 2 > _ADJOINT_CORNER_BUDGET:
+            break
+        choices[position] = (choices[position][0], last)
+        count *= 2
+    return tuple(choices)
+
+
 def _exact_box_adjoint_violations(
     owner: Op,
     complete_unit: tuple[int, ...],
@@ -438,10 +500,33 @@ def _exact_box_adjoint_violations(
     tightness oracle; tightness of the built-in rules is enforced by the
     saturating-model slack battery in tests. Reverse queries that refuse with
     a typed error are skipped: the check only ever adds failure power.
+
+    Non-windowed axes join the corner enumeration (grind-p3 T7): when every
+    axis of the box yields a claimed source coordinate — windowed hull
+    endpoints, concrete-bounded FULL-axis endpoints, and the POINTWISE
+    same-index coordinate — corners are seeded as COMPLETE far-grid units
+    (``complete_unit=``), so an exact claim over a full or pointwise axis is
+    actually probed instead of silently trusted. The historical windowed-only
+    enumeration was tripwire-blind to asymmetric walk bugs on non-windowed
+    axes (for example a receptive walk serving the full parent extent on an
+    int-selected getitem axis while the projective walk correctly prunes
+    off-index sources). Complete seeding asserts PRODUCT membership, which
+    the documented EXACT contract (per-axis integer hulls) only implies for
+    MERGE-FREE descriptors: along a single chain every axis maps
+    independently, so the support is a product set and each joint corner is
+    a true member. A merged (union) influence set attains its per-axis hull
+    endpoints only axis-wise — the channel-cat projective union is the
+    canonical case — so merged descriptors (``alignment`` other than
+    ``NOT_APPLICABLE``, the enforced ``merge_seen`` mirror) keep the
+    historical windowed-only enumeration and their non-windowed conservatism
+    remains a disclosed residual. Boxes with no windowed axes remain
+    unprobed — the reverse per-unit query refuses them typed — and symmetric
+    two-direction overclaims stay out of scope as documented above.
     """
 
     if not box.exact or box.empty:
         return ()
+    assert descriptor.axes is not None
     windowed_bounds: list[tuple[int, int]] = []
     for axis in box.axes:
         if (
@@ -457,45 +542,81 @@ def _exact_box_adjoint_violations(
     far = next((op for op in trace.layer_list if op.label == descriptor.input_op_label), None)
     if far is None:
         return ()
-    corner_choices = tuple(
-        (start, stop - 1) if stop - 1 != start else (start,) for start, stop in windowed_bounds
-    )
-    violations: list[ReceptiveFieldViolation] = []
-    for raw_corner in product(*corner_choices):
-        corner = tuple(int(value) for value in raw_corner)
+
+    def _reverse_confirms(corner: tuple[int, ...], far_unit: tuple[int, ...] | None) -> bool | None:
+        """Probe one claimed member; ``None`` means the reverse query refused."""
+
         reverse_solution: Any
         try:
             if direction is ReceptiveFieldDirection.RECEPTIVE:
                 reverse_solution = solve_projective(trace, (owner,))
                 reverse = box_for_source_unit(
-                    reverse_solution, far, corner, target=owner, clip=True
+                    reverse_solution,
+                    far,
+                    corner,
+                    target=owner,
+                    clip=True,
+                    complete_unit=far_unit,
+                )
+            elif bool(getattr(owner, "is_input", False)):
+                reverse_solution = _engine.solve(trace)
+                reverse = box_for_unit(
+                    cast(Any, reverse_solution),
+                    far,
+                    corner,
+                    input=owner,
+                    clip=True,
+                    complete_unit=far_unit,
                 )
             else:
-                if bool(getattr(owner, "is_input", False)):
-                    reverse_solution = _engine.solve(trace)
-                    reverse = box_for_unit(
-                        cast(Any, reverse_solution), far, corner, input=owner, clip=True
-                    )
-                else:
-                    reverse_solution = _engine.solve_from(trace, owner)
-                    reverse = box_for_unit(
-                        cast(Any, reverse_solution), far, corner, source=owner, clip=True
-                    )
-        except (ReceptiveFieldError, ValueError):
-            continue
-        if not _box_membership_contains(reverse, complete_unit):
-            violations.append(
-                ReceptiveFieldViolation(
-                    io_role=descriptor.io_role,
-                    index=corner,
-                    magnitude=0.0,
-                    box=box,
-                    reason=(
-                        "exact box corner fails opposite-direction membership: the "
-                        "claimed influence is not confirmed by the reverse engine"
-                    ),
+                reverse_solution = _engine.solve_from(trace, owner)
+                reverse = box_for_unit(
+                    cast(Any, reverse_solution),
+                    far,
+                    corner,
+                    source=owner,
+                    clip=True,
+                    complete_unit=far_unit,
                 )
-            )
+        except (ReceptiveFieldError, ValueError):
+            return None
+        return _box_membership_contains(reverse, complete_unit)
+
+    def _violation(index: tuple[int, ...]) -> ReceptiveFieldViolation:
+        return ReceptiveFieldViolation(
+            io_role=descriptor.io_role,
+            index=index,
+            magnitude=0.0,
+            box=box,
+            reason=(
+                "exact box corner fails opposite-direction membership: the "
+                "claimed influence is not confirmed by the reverse engine"
+            ),
+        )
+
+    violations: list[ReceptiveFieldViolation] = []
+    complete_choices = (
+        _complete_corner_choices(descriptor, box, complete_unit)
+        if descriptor.alignment is ReceptiveFieldAlignment.NOT_APPLICABLE
+        else None
+    )
+    if complete_choices is not None:
+        windowed_positions = tuple(
+            index for index, axis in enumerate(box.axes) if axis.kind == "windowed"
+        )
+        for raw_unit in product(*complete_choices):
+            far_unit = tuple(int(value) for value in raw_unit)
+            corner = tuple(far_unit[position] for position in windowed_positions)
+            if _reverse_confirms(corner, far_unit) is False:
+                violations.append(_violation(far_unit))
+        return tuple(violations)
+    corner_choices = tuple(
+        (start, stop - 1) if stop - 1 != start else (start,) for start, stop in windowed_bounds
+    )
+    for raw_corner in product(*corner_choices):
+        corner = tuple(int(value) for value in raw_corner)
+        if _reverse_confirms(corner, None) is False:
+            violations.append(_violation(corner))
     return tuple(violations)
 
 

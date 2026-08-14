@@ -1,4 +1,5 @@
-"""T7 (grind-p3): getitem mixed-key variants stay oracle-exact.
+"""T7 (grind-p3): getitem mixed-key variants stay oracle-exact, and check()
+probes exact claims on non-windowed axes.
 
 HIGH variant battery: the rank-changing getitem fix (slice affines plus
 recorded selection indices composed through both engines and both query
@@ -7,9 +8,20 @@ variants the original seed battery (``test_rf_getitem_int_slice.py``) left
 uncovered: an int at a non-batch axis, ``None`` inside the key, a negative
 int, and an int with two non-trivial slices. All of these served silently
 wrong exact boxes before that fix (red on its parent commit).
+
+MED tripwire strengthening: the adjoint direction-coherence oracle
+enumerated corners over WINDOWED axes only, so an exact box that
+over-approximated on a full (or pointwise) axis was never probed — gradient
+containment is structurally unable to see over-coverage, so ``check()``
+blessed the lie. The tamper test simulates exactly that regression class (a
+receptive-walk bug re-widening a narrowed full axis under the exact claim)
+and requires ``check()`` to FAIL. RED before the ``_validation.py``
+strengthening: ``check()`` PASSed the tampered box.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 import torch
@@ -131,3 +143,74 @@ def test_int_plus_two_slices_box_matches_gradient_truth() -> None:
         (2, 3),
         pinned_axes=(0, 2, 3),
     )
+
+
+def test_widened_full_axis_exact_claim_fails_check(monkeypatch) -> None:
+    """check() must FAIL an exact box re-widened on a narrowed full axis.
+
+    Simulates the asymmetric walk-regression class: the receptive query walk
+    serves the full parent extent on the int-selected batch axis under the
+    ``exact=True`` claim (the pre-fix getitem behavior), while the projective
+    walk still prunes off-index sources correctly. Gradient containment
+    cannot see the over-coverage (support stays inside the widened bounds),
+    so only the non-windowed-axis adjoint probe can catch it. RED before the
+    strengthening: the corner enumeration probed windowed axes only and
+    check() PASSed this tampered box.
+    """
+
+    torch.manual_seed(0)
+    model = _GetitemConv(lambda x: x[0, :, 3:, :].unsqueeze(0)).eval()
+    x = torch.randn(2, 1, 8, 8)
+    trace = _armed_trace(model, x)
+    op = next(o for o in trace.layer_list if "conv" in o.label)
+
+    from torchlens.receptive_field import _validation as validation_module
+
+    real_box_for_unit = validation_module.box_for_unit
+
+    def widened_box_for_unit(*args, **kwargs):
+        result = real_box_for_unit(*args, **kwargs)
+        axes = []
+        tampered = False
+        for axis, extent in zip(result.axes, result.input_shape, strict=True):
+            if (
+                axis.kind == "full"
+                and axis.clipped_start is not None
+                and axis.clipped_stop is not None
+                and axis.clipped_stop - axis.clipped_start < extent
+            ):
+                axis = replace(
+                    axis,
+                    index_start=0,
+                    index_stop=extent,
+                    clipped_start=0,
+                    clipped_stop=extent,
+                )
+                tampered = True
+            axes.append(axis)
+        return replace(result, axes=tuple(axes)) if tampered else result
+
+    monkeypatch.setattr(validation_module, "box_for_unit", widened_box_for_unit)
+    result = op.receptive_field.check((0, 0, 1, 2))
+    assert result.status.name == "FAIL", (
+        "an exact-claimed box widened on a narrowed full axis must fail the "
+        f"adjoint probe; got {result.status.name}: {result.message}"
+    )
+    assert any("opposite-direction" in violation.reason for violation in result.violations)
+
+
+def test_honest_full_axis_claims_still_pass_check() -> None:
+    """No false positives: honest narrowed-full and pointwise axes PASS.
+
+    The strengthened probe seeds only CLAIMED members (hull endpoints and
+    the pointwise same-index coordinate); for an honest exact box each of
+    those is a true influencer, so the reverse engine must confirm it.
+    """
+
+    torch.manual_seed(0)
+    model = _GetitemConv(lambda x: x[0, :, 3:, :].unsqueeze(0)).eval()
+    x = torch.randn(2, 1, 8, 8)
+    trace = _armed_trace(model, x)
+    op = next(o for o in trace.layer_list if "conv" in o.label)
+    result = op.receptive_field.check((0, 0, 1, 2))
+    assert result.status.name == "PASS", result.message
