@@ -226,6 +226,70 @@ def test_read_bytes_bounded_enforces_the_same_ceiling(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# (e) R33-1: allocation tracks the file, not the ceiling                        #
+# --------------------------------------------------------------------------- #
+
+
+def _peak_bytes_of(fn) -> int:
+    """Return the tracemalloc peak (bytes) of a single call."""
+
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        fn()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        lambda p, mb: _json.read_bytes_bounded(p, max_bytes=mb),
+        lambda p, mb: _json.read_bounded(p, max_bytes=mb),
+    ],
+    ids=["read_bytes_bounded", "read_bounded"],
+)
+def test_bounded_readers_allocate_the_file_not_the_ceiling(tmp_path: Path, reader) -> None:
+    """A tiny file under a huge ceiling must not transiently allocate the ceiling.
+
+    Fail-before (R33-1): the readers did ``handle.read(max_bytes + 1)``, which
+    pre-allocates a ``max_bytes + 1`` buffer regardless of the real file size, so
+    every ``.tlspec`` load transiently requested ~512 MiB no matter how small the
+    manifest -- an allocation DoS under ``RLIMIT_AS``/strict overcommit, invisible to
+    RSS-only audits. The fixed reader stats the open fd and reads only what is there.
+    """
+
+    ceiling = 256 * 1024 * 1024  # 256 MiB, far above the payload
+    payload = tmp_path / "small.json"
+    payload.write_text("[" + ",".join("0" for _ in range(4_000)) + "]")
+    file_size = payload.stat().st_size
+    assert file_size < 1 * 1024 * 1024, "payload must be far below the ceiling"
+
+    peak = _peak_bytes_of(lambda: reader(payload, ceiling))
+
+    # Allow generous headroom for decode/parse overhead but stay FAR below the
+    # ceiling: a ceiling-sized allocation would blow this by orders of magnitude.
+    assert peak < 32 * 1024 * 1024, (
+        f"bounded reader peaked at {peak} bytes on a {file_size}-byte file under a "
+        f"{ceiling}-byte ceiling; it is allocating the ceiling, not the payload"
+    )
+
+
+def test_read_bounded_still_refuses_a_file_that_exceeds_the_ceiling(tmp_path: Path) -> None:
+    """Stat-then-allocate must not weaken the over-size refusal (tripwire intact)."""
+
+    payload = tmp_path / "oversize.json"
+    payload.write_text("[" + ",".join("0" for _ in range(50_000)) + "]")
+    with pytest.raises(json.JSONDecodeError, match="maximum size"):
+        _json.read_bounded(payload, max_bytes=64)
+    with pytest.raises(json.JSONDecodeError, match="maximum size"):
+        _json.read_bytes_bounded(payload, max_bytes=64)
+
+
+# --------------------------------------------------------------------------- #
 # (f) source-scan: no bare json.load(s) anywhere in the package (r58 A3f)       #
 # --------------------------------------------------------------------------- #
 

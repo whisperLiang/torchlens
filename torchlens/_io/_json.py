@@ -21,6 +21,7 @@ below the depth ceiling.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import IO, Any
@@ -56,6 +57,41 @@ def _refuse(detail: str, text: str) -> json.JSONDecodeError:
     """Build a ``JSONDecodeError`` so existing JSON-boundary handlers catch it."""
 
     return json.JSONDecodeError(detail, text if text else " ", 0)
+
+
+def _fd_size(handle: IO[Any]) -> int | None:
+    """Return the size of an open handle's fd, or ``None`` if it cannot be stat'd.
+
+    ``fstat`` on the fd we are about to read (rather than a separate ``path.stat``)
+    keeps the size measurement bound to the exact bytes the read will consume.
+    """
+
+    try:
+        return os.fstat(handle.fileno()).st_size
+    except (OSError, ValueError, AttributeError):  # non-seekable / pipe / no fileno
+        return None
+
+
+def _bounded_read_bytes(handle: IO[bytes], max_bytes: int) -> bytes:
+    """Read up to ``max_bytes`` bytes, allocating the FILE size, not the ceiling.
+
+    ``handle.read(max_bytes + 1)`` pre-allocates a ``max_bytes + 1`` buffer whatever
+    the real file size is, so a tiny manifest under the 512-MiB ceiling still
+    transiently requested ~512 MiB (R33-1). We stat the open fd first: a file already
+    over the ceiling is refused before any allocation, and a file within it reads
+    exactly its own size plus one sentinel byte (to still catch a file that grew after
+    the stat). When the size cannot be determined (a pipe/non-seekable handle) we fall
+    back to the ceiling read, since there is nothing else to bound it by.
+    """
+
+    size = _fd_size(handle)
+    if size is not None and size > max_bytes:
+        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+    read_count = (size + 1) if size is not None else (max_bytes + 1)
+    data = handle.read(read_count)
+    if len(data) > max_bytes:  # grew after the stat, or unbounded fallback
+        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+    return data
 
 
 def _prescan_depth(text: str, *, max_depth: int) -> None:
@@ -166,13 +202,18 @@ def load_bounded(
 
     raw_handle = getattr(handle, "buffer", None)
     if raw_handle is not None:
-        raw = raw_handle.read(max_bytes + 1)
-        if len(raw) > max_bytes:
-            raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+        raw = _bounded_read_bytes(raw_handle, max_bytes)
         encoding = getattr(handle, "encoding", None) or "utf-8"
         text = raw.decode(encoding)
     else:
-        text = handle.read(max_bytes + 1)
+        # Text handle with no binary buffer: read one char past the fd size (or the
+        # ceiling if it cannot be stat'd) rather than the whole ceiling.
+        size = _fd_size(handle)
+        if size is not None and size > max_bytes:
+            raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+        text = handle.read((size + 1) if size is not None else (max_bytes + 1))
+        if len(text.encode("utf-8")) > max_bytes:
+            raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
     return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes)
 
 
@@ -215,9 +256,7 @@ def read_bounded(
     """
 
     with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+        data = _bounded_read_bytes(handle, max_bytes)
     return loads_bounded(data.decode(encoding), max_depth=max_depth, max_bytes=max_bytes)
 
 
@@ -248,7 +287,4 @@ def read_bytes_bounded(path: Path, *, max_bytes: int = _MAX_JSON_BYTES) -> bytes
     """
 
     with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
-    return data
+        return _bounded_read_bytes(handle, max_bytes)
