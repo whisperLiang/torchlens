@@ -203,6 +203,24 @@ class TestArtifact:
         reloaded = tl.load(second)
         assert reloaded.alignment.value == "aligned"
 
+    def test_mutated_inputs_refuse_at_save_not_at_every_future_load(self, gloo_world, tmp_path):
+        """Deep-hunt F12: save re-verifies derivation-vs-members first.
+
+        Fail-before: a live input trace whose distributed annotations were
+        mutated between merge_ranks and save() produced an artifact whose
+        members never rederive to the cached descriptor -- every future load
+        refused as merged_descriptor_tamper, a permanent false tamper
+        accusation for an honest sequence.
+        """
+
+        log = _capture()
+        merged = tl.merge_ranks([log])
+        log.annotations["distributed"]["boundaries"][0]["reduce_op"] = "RedOpType.MAX"
+        with pytest.raises(MergedArtifactError) as excinfo:
+            merged.save(tmp_path / "merged.tlspec")
+        assert excinfo.value.fields["code"] == "merge_input_invalid"
+        assert not (tmp_path / "merged.tlspec").exists()
+
     def test_failed_overwrite_preserves_previous_artifact(
         self,
         gloo_world: Any,

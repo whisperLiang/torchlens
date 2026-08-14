@@ -182,6 +182,31 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
             f"{root} already exists; pass overwrite=True to replace it.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
         )
+    # Re-verify derivation-vs-members BEFORE writing anything (deep-hunt F12):
+    # a live input trace whose distributed annotations were mutated between
+    # merge_ranks and save() would otherwise produce an artifact whose members
+    # never rederive to the cached descriptor -- every future load refuses as
+    # merged_descriptor_tamper, a permanent false tamper accusation for an
+    # honest sequence. The refusal belongs at save time, where it is fixable.
+    reverified = derive_merge(
+        {
+            rank: extract_rank_evidence(merged._handles[rank].trace, f"save-reverify[{rank}]")
+            for rank in merged.rank_ids
+        },
+        merged._derivation.expected_ranks,
+    )
+    if canonical_json_bytes(reverified.to_payload()) != canonical_json_bytes(
+        merged._derivation.to_payload()
+    ):
+        raise MergedArtifactError(
+            "The merge inputs no longer rederive this MergedTrace's derivation "
+            "(their distributed evidence changed after merge_ranks, or this is "
+            "a degraded load whose lost members cannot be re-attested). Saving "
+            "would produce an artifact every future load refuses as tampered; "
+            "re-merge the current inputs and save that result instead.",
+            code=MergedErrorCode.MERGE_INPUT_INVALID,
+        )
+
     staging_root = root.parent / f"{root.name}.tmp.{uuid.uuid4().hex}"
     backup_root: Path | None = None
     try:
