@@ -654,7 +654,7 @@ def resolve_repeat_folds(
         for run in _iter_collapsible_runs(trace, flow_addresses, eligibility_collapse_fn):
             if not _run_fold_is_legal(run, graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -675,7 +675,7 @@ def resolve_repeat_folds(
             )
             if not _run_fold_is_legal(run, run_graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -690,7 +690,7 @@ def resolve_repeat_folds(
                 continue
             if not _run_fold_is_legal(run, graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -935,9 +935,9 @@ def _module_structural_signature(
     """Return a per-module structural fingerprint for fold-honesty checks.
 
     Two modules are only considered structurally interchangeable for the
-    "+N more" repeat-fold ellipsis when this fingerprint matches exactly. It is
-    used to require that the *hidden* members of a fold (every member except
-    the visible representative) share one structure, so a same-class,
+    "+N more" repeat-fold ellipsis when this fingerprint matches exactly. It
+    is used to require that EVERY member of a fold — the visible
+    representative included — shares one structure, so a same-class,
     same-output-shape sibling with genuinely different internals (extra
     layers/params) can never be silently hidden inside a ``+N more`` box that
     claims uniformity.
@@ -994,39 +994,27 @@ def _func_config_digest(func_config: Any) -> str:
         return type(func_config).__name__
 
 
-def _module_trainability_signature(module: Module) -> tuple[bool, bool]:
-    """Return whether a module owns trainable and frozen parameters.
-
-    Parameters
-    ----------
-    module:
-        Module whose parameter trainability should be classified.
-
-    Returns
-    -------
-    tuple[bool, bool]
-        ``(has_trainable, has_frozen)`` for label-honest repeat folding.
-    """
-
-    return (bool(module.num_params_trainable), bool(module.num_params_frozen))
-
-
-def _run_fold_hidden_members_uniform(trace: Trace, addresses: Sequence[str]) -> bool:
-    """Return whether every hidden run member shares one structural signature.
+def _run_fold_members_uniform(trace: Trace, addresses: Sequence[str]) -> bool:
+    """Return whether every run member shares one structural signature.
 
     A run fold renders the first member (``addresses[0]``) as a visible
     representative box and elides the rest behind a ``... +N more <class>``
-    ellipsis. That ellipsis claims the hidden members are interchangeable, so
-    the fold is only honest when every hidden member
-    (``addresses[1:]``) has the same structural fingerprint
-    (:func:`_module_structural_signature`). The representative itself may
-    differ structurally (its own stats stay visible) -- e.g. a MobileNetV2
-    stage whose first block changes channel width before a plateau of
-    identical residual blocks. Its trainability classification must still
-    match every hidden member because the representative's visible parameter
-    label otherwise mischaracterizes the ``+N more`` modules. When a
-    genuinely-different hidden module or a trainability mismatch would be
-    hidden, this returns ``False`` and the fold is rejected.
+    ellipsis. That ellipsis claims the hidden members are interchangeable
+    with the visible representative, so the fold is only honest when EVERY
+    member — representative included — has the same structural fingerprint
+    (:func:`_module_structural_signature`).
+
+    T9 (grind-p3, HIGH): the comparison previously spanned only
+    ``addresses[1:]`` on the theory that the representative's own stats stay
+    visible. That left the reverse direction unproven: a plateau uniformly
+    different from its representative (e.g. every hidden block swapping ReLU
+    for Tanh) folded anyway, and the hidden structure appeared NOWHERE in
+    the render — two different models drew byte-identical DOT. Requiring
+    the representative to match closes that hole; a run with an odd first
+    member splits (both run assemblers retry shorter sub-runs), so the
+    plateau re-folds from its own structurally-matching representative.
+    The former separate trainability screen is subsumed: exact trainable and
+    frozen parameter counts are components of the structural fingerprint.
 
     Parameters
     ----------
@@ -1038,49 +1026,40 @@ def _run_fold_hidden_members_uniform(trace: Trace, addresses: Sequence[str]) -> 
     Returns
     -------
     bool
-        Whether the hidden members are structurally uniform.
+        Whether all members are structurally uniform.
     """
 
     if len(addresses) <= 1:
         return True
-    trainability_signatures = {
-        _module_trainability_signature(cast("Module", trace.modules[address]))
-        for address in addresses
-    }
-    if len(trainability_signatures) != 1:
-        return False
-    hidden = addresses[1:]
-    if len(hidden) <= 1:
-        return True
     signatures = {
-        _module_structural_signature(cast("Module", trace.modules[address])) for address in hidden
+        _module_structural_signature(cast("Module", trace.modules[address]))
+        for address in addresses
     }
     return len(signatures) == 1
 
 
-def _split_run_by_hidden_uniformity(
+def _split_run_by_member_uniformity(
     trace: Trace,
     run: tuple[str, ...],
 ) -> Iterator[tuple[str, ...]]:
-    """Split one grouped run into its maximal hidden-uniform sub-runs.
+    """Split one grouped run into its maximal member-uniform sub-runs.
 
     :func:`_iter_collapsible_runs` groups addresses into a run purely by
     class, stem, and flow/shape adjacency -- that grouping says nothing
-    about whether the *hidden* fold members (everything but the visible
-    representative) are structurally uniform. Without this retry, a single
-    structurally-odd module anywhere inside an otherwise-eligible run would
-    cause the caller to reject the *entire* run wholesale the moment
-    :func:`_run_fold_hidden_members_uniform` failed on it, even though the
-    legal sub-runs on either side of the odd member are still independently
-    foldable.
+    about whether the fold members are structurally uniform. Without this
+    retry, a single structurally-odd module anywhere inside an
+    otherwise-eligible run would cause the caller to reject the *entire*
+    run wholesale the moment :func:`_run_fold_members_uniform` failed on
+    it, even though the legal sub-runs on either side of the odd member are
+    still independently foldable.
 
     This mirrors :func:`collapse_optimizer._maximal_legal_runs`'s
     retry-shorter-subrun approach: grow a candidate window from each
-    unconsumed starting position, keep the longest hidden-uniform prefix,
+    unconsumed starting position, keep the longest member-uniform prefix,
     emit it, and resume scanning from the next unconsumed address. A
-    structurally-odd module becomes the new *representative* of its own
-    retried sub-run (representatives are exempt from the uniformity check)
-    instead of silently sinking every run it happens to sit inside.
+    structurally-odd module stays visible on its own (every fold member,
+    representative included, must match the fingerprint) instead of
+    silently sinking every run it happens to sit inside.
 
     Parameters
     ----------
@@ -1094,7 +1073,7 @@ def _split_run_by_hidden_uniformity(
     ------
     tuple[str, ...]
         Maximal sub-runs of at least :data:`RUN_FOLD_MIN_LENGTH` addresses,
-        each with uniform hidden members.
+        each with structurally uniform members.
     """
 
     total = len(run)
@@ -1103,7 +1082,7 @@ def _split_run_by_hidden_uniformity(
         best: tuple[str, ...] = ()
         for end in range(index + RUN_FOLD_MIN_LENGTH, total + 1):
             candidate = run[index:end]
-            if _run_fold_hidden_members_uniform(trace, candidate):
+            if _run_fold_members_uniform(trace, candidate):
                 best = candidate
         if best:
             yield best
@@ -1122,7 +1101,7 @@ def _iter_collapsible_runs(
     """Yield flow-consecutive same-class runs with equal adjacent output shapes.
 
     Each assembled group is further split by
-    :func:`_split_run_by_hidden_uniformity` into its maximal hidden-uniform
+    :func:`_split_run_by_member_uniformity` into its maximal member-uniform
     sub-runs before being yielded, so a single structurally-odd module
     anywhere inside an otherwise-eligible run only knocks out the sub-run(s)
     that would have hidden it -- the legal sub-runs on either side still
@@ -1148,7 +1127,7 @@ def _iter_collapsible_runs(
     ------
     tuple[str, ...]
         One run of at least :data:`RUN_FOLD_MIN_LENGTH` addresses, with
-        uniform hidden members.
+        structurally uniform members.
     """
 
     current_key: tuple[str, str] | None = None
@@ -1165,7 +1144,7 @@ def _iter_collapsible_runs(
         if not selected:
             if allow_selected_descendant:
                 continue
-            yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+            yield from _split_run_by_member_uniformity(trace, tuple(current_run))
             current_key = None
             current_descendant_only_num_layers = None
             current_has_direct_selection = False
@@ -1193,12 +1172,12 @@ def _iter_collapsible_runs(
             if not current_has_direct_selection:
                 current_descendant_only_num_layers = num_layers
             continue
-        yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+        yield from _split_run_by_member_uniformity(trace, tuple(current_run))
         current_key = key
         current_descendant_only_num_layers = None if directly_selected else num_layers
         current_has_direct_selection = directly_selected
         current_run = [address]
-    yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+    yield from _split_run_by_member_uniformity(trace, tuple(current_run))
 
 
 def _iter_collapsible_child_path_runs(

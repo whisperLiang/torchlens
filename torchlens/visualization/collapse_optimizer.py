@@ -44,9 +44,9 @@ from .auto_collapse import (
     _paired_external_connector,
     _readable_band_high,
     _rendered_module_hidden_counts,
-    _run_fold_hidden_members_uniform,
     _run_fold_is_chain_interval,
     _run_fold_is_legal,
+    _run_fold_members_uniform,
     _shape_channel_dim,
     _shape_spatial_dims,
     analyze_collapse,
@@ -3269,7 +3269,7 @@ def _maximal_legal_runs(
             if (
                 len(run) >= RUN_FOLD_MIN_LENGTH
                 and _run_fold_is_legal(run, graph)
-                and _run_fold_hidden_members_uniform(state.trace, run)
+                and _run_fold_members_uniform(state.trace, run)
             ):
                 best = run
         if best:
