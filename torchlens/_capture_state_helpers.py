@@ -1596,18 +1596,114 @@ def _callable_code_digest(func: Any) -> str:
     return hasher.hexdigest()
 
 
+_ATTRIBUTE_FRAGMENT_DEPTH_CEILING = 4
+_ATTRIBUTE_FRAGMENT_ITEM_CEILING = 256
+
+
+def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
+    """Return a bounded, address-free key fragment for one instance attribute.
+
+    Plain instance attributes routinely determine the traced program
+    (``self.num_layers``, ``self.scale``, ``self.use_checkpoint``), so they
+    must participate in the capture-cache key. Values are reduced to stable
+    primitives: scalars by value, tensors/arrays by content hash, callables by
+    code digest, containers element-wise under depth/size ceilings, and any
+    other object by TYPE identity only -- an opaque object's internal state is
+    a documented boundary of the signature (changing it without changing type
+    keeps the key; conservative for false hits on the covered kinds, never
+    address-churning).
+    """
+
+    if depth > _ATTRIBUTE_FRAGMENT_DEPTH_CEILING:
+        return "<attr-depth-ceiling>"
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        return value
+    if isinstance(value, torch.Tensor):
+        try:
+            return ("tensor", _hash_tensor_content(value))
+        except Exception:
+            return (
+                "tensor-meta",
+                tuple(value.shape),
+                str(value.dtype),
+                str(value.device),
+            )
+    if isinstance(value, (torch.dtype, torch.device, torch.Size)):
+        return ("torch-value", str(value))
+    if isinstance(value, nn.Module):
+        cls = type(value)
+        return ("module", f"{cls.__module__}.{cls.__qualname__}")
+    if isinstance(value, dict):
+        items = list(value.items())[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return (
+            "dict",
+            len(value),
+            tuple(
+                sorted(
+                    (
+                        repr(_attribute_state_fragment(key, depth + 1)),
+                        repr(_attribute_state_fragment(item, depth + 1)),
+                    )
+                    for key, item in items
+                )
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        items = list(value)[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return (
+            "sequence",
+            len(value),
+            tuple(_attribute_state_fragment(item, depth + 1) for item in items),
+        )
+    if isinstance(value, (set, frozenset)):
+        items = sorted(
+            (repr(_attribute_state_fragment(item, depth + 1)) for item in value),
+        )[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return ("set", len(value), tuple(items))
+    if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
+        try:
+            digest = hashlib.sha256(value.tobytes()).hexdigest()
+            return ("ndarray", tuple(getattr(value, "shape", ())), str(value.dtype), digest)
+        except Exception:
+            pass
+    if callable(value):
+        return ("callable", _callable_code_digest(value))
+    cls = type(value)
+    return ("object", f"{cls.__module__}.{cls.__qualname__}")
+
+
+def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, Any]]:
+    """Yield the user-visible plain instance attributes of one module.
+
+    Skips torch-internal underscore state (parameters, buffers, hook dicts --
+    hooks are fingerprinted separately), TorchLens instrumentation (``tl_*``
+    attributes survive across captures by design and must not churn the key),
+    ``training`` (already folded by the content fingerprint), and instance
+    ``forward`` overrides (folded with instrumentation filtering above).
+    """
+
+    for attr_name in sorted(module.__dict__):
+        if attr_name.startswith(("_", "tl_")) or attr_name in ("training", "forward"):
+            continue
+        yield attr_name, module.__dict__[attr_name]
+
+
 def _fingerprint_model_implementation(model: nn.Module) -> str:
     """Fingerprint model IMPLEMENTATION for the capture cache.
 
     ``_fingerprint_model_content`` covers tensor content (``state_dict``
     values, training flags, non-persistent buffers) but says nothing about
-    CODE, so editing ``forward`` between runs used to silently hit the stale
-    cached trace of the old implementation. This signature folds in the module
-    tree structure (registered names in order), each module's class identity
-    (module + qualname), each distinct class's ``forward`` code digest, and
-    any instance-level ``forward`` override, so an implementation change is a
-    cache miss. Closure cell contents and mutated global state referenced by
-    ``forward`` remain outside the signature (documented heuristic boundary).
+    CODE or configuration, so editing ``forward`` between runs used to
+    silently hit the stale cached trace of the old implementation. This
+    signature folds in the module tree structure (registered names in order),
+    each module's class identity (module + qualname), each distinct class's
+    ``forward`` code digest, any instance-level ``forward`` override, and a
+    bounded digest of each module's plain instance attributes (the
+    ``self.num_layers`` / ``self.scale`` axis: same class, same weights,
+    different traced program). Closure cell contents, mutated global state
+    referenced by ``forward``, and the interior state of opaque attribute
+    objects (keyed by type only; see ``_attribute_state_fragment``) remain
+    outside the signature (documented heuristic boundary).
     """
 
     hasher = hashlib.sha256()
@@ -1627,6 +1723,10 @@ def _fingerprint_model_implementation(model: nn.Module) -> str:
         if instance_forward is not None and not _is_torchlens_instrumentation(instance_forward):
             hasher.update(b"<instance-forward>")
             hasher.update(_callable_code_digest(instance_forward).encode("utf-8"))
+        for attr_name, attr_value in _iter_plain_instance_attributes(module):
+            hasher.update(
+                repr((name, attr_name, _attribute_state_fragment(attr_value))).encode("utf-8")
+            )
     return hasher.hexdigest()
 
 
@@ -1696,9 +1796,10 @@ def _capture_cache_key(
     """
 
     payload = {
-        # Schema 3: single-record authenticated entries plus the
-        # model-implementation signature (a changed ``forward`` must miss).
-        "schema": 3,
+        # Schema 4: schema 3 (single-record authenticated entries plus the
+        # model-implementation signature) widened so plain instance
+        # attributes participate in the key (a changed ``self.k`` must miss).
+        "schema": 4,
         "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
         "model": _fingerprint_model_content(model),
