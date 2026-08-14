@@ -40,8 +40,10 @@ and any re-parse anomaly fails closed to empty resolution.
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import tokenize
+import warnings
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -57,6 +59,13 @@ FunctionNode: TypeAlias = ast.FunctionDef | ast.AsyncFunctionDef
 _BRANCH_CONSUMER_KINDS = {"if_test", "elif_test", "ifexp"}
 _FILE_CACHE_MAX_SIZE = 256
 _file_cache: OrderedDict[str, FileIndex] = OrderedDict()
+
+#: First-read source digests, pinned for the process lifetime (NOT LRU-evicted
+#: with the index): a rebuild after eviction must prove the on-disk content
+#: still matches what the running code objects were attributed against, or
+#: fail closed (deep-hunt C4). Cleared only by explicit ``invalidate_cache``.
+_pinned_source_digests: dict[str, bytes] = {}
+_source_drift_warned: set[str] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,7 +378,9 @@ class FileIndex:
     filename:
         Source filename for the parsed module.
     mtime_ns:
-        File modification timestamp used for cache invalidation.
+        File modification timestamp recorded at first index. Informational: a
+        live index is never invalidated by later disk changes (attribution is
+        pinned to the first-read content; see ``get_file_index``).
     source:
         Source text the module was parsed from. Retained: it is the re-parse
         authority for the hot tier after ``release_parsed_asts()``.
@@ -414,8 +425,9 @@ class FileIndex:
         once per query. ``ast.walk`` order is preserved because the downstream
         width sort is stable and callers depend on the pre-sort order for ties.
         Projections stay valid for the index's lifetime: they are span-based (no
-        ast nodes), so ``release_parsed_asts()`` keeps them, and the existing
-        ``mtime_ns`` check plus the file-cache LRU already govern invalidation.
+        ast nodes), so ``release_parsed_asts()`` keeps them; the file-cache LRU
+        and explicit ``invalidate_cache`` govern the index's lifetime (a live
+        index is never invalidated by disk changes).
         """
 
         cache = self._scope_calls
@@ -448,8 +460,8 @@ class FileIndex:
         Notes
         -----
         The re-parse reads ``self.source``, never the file on disk: stored
-        spans keep matching even when the file changed after capture (the
-        ``get_file_index`` mtime check governs disk-level invalidation). A
+        spans keep matching even when the file changed after capture (a live
+        index is pinned to its first-read content; see ``get_file_index``). A
         re-parse of the identical string is deterministic, so the alignment
         check against ``self.scopes`` is defensive only.
         """
@@ -573,6 +585,18 @@ def _scope_accepts_firstlineno(scope: ScopeEntry, code_firstlineno: int) -> bool
 def get_file_index(filename: str) -> FileIndex | None:
     """Return a cached AST index for ``filename``.
 
+    Once a file is indexed, this process serves THAT index for the file's
+    lifetime: runtime line numbers come from code objects loaded before any
+    later on-disk edit, so silently re-parsing changed disk content would
+    re-attribute ops and bools to whatever now happens to occupy those lines
+    (fail-open; deep-hunt C4). A live cached index is therefore returned
+    regardless of the file's current mtime, and a rebuild after LRU eviction
+    verifies the on-disk content still matches the pinned first-read digest —
+    a mismatch warns once and fails closed to ``None`` (honest
+    non-attribution, never mis-attribution). ``invalidate_cache`` is the
+    explicit opt-out: it clears the pin along with the index (a caller who
+    reloaded the module may re-index the new content).
+
     Parameters
     ----------
     filename:
@@ -581,21 +605,39 @@ def get_file_index(filename: str) -> FileIndex | None:
     Returns
     -------
     Optional[FileIndex]
-        Cached or newly parsed file index, or ``None`` when the file cannot be
-        read, parsed, or stated.
+        Cached or newly parsed file index, or ``None`` when the file cannot
+        be read, parsed, or stated, or when its content drifted from the
+        pinned first-read digest.
     """
+
+    cached = _get_cached_file_index(filename)
+    if cached is not None:
+        return cached
 
     try:
         mtime_ns = os.stat(filename).st_mtime_ns
     except OSError:
         return None
 
-    cached = _get_cached_file_index(filename)
-    if cached is not None and cached.mtime_ns == mtime_ns:
-        return cached
-
     source = _read_source_file(filename)
     if source is None:
+        return None
+
+    source_digest = hashlib.sha256(source.encode("utf-8", "surrogatepass")).digest()
+    pinned_digest = _pinned_source_digests.get(filename)
+    if pinned_digest is not None and pinned_digest != source_digest:
+        if filename not in _source_drift_warned:
+            _source_drift_warned.add(filename)
+            warnings.warn(
+                f"TorchLens: source file {filename!r} changed on disk after it was "
+                "first indexed for conditional/source attribution; refusing to "
+                "re-attribute against the new content (line numbers come from the "
+                "already-loaded code objects). Attribution for this file is "
+                "disabled for the rest of the process; call "
+                "torchlens.postprocess.ast_branches.invalidate_cache() after a "
+                "module reload to re-index deliberately.",
+                stacklevel=2,
+            )
         return None
 
     try:
@@ -629,6 +671,7 @@ def get_file_index(filename: str) -> FileIndex | None:
         _heavy=_HeavyAst(module=module, parent_map=parent_map, scope_nodes=scope_nodes),
     )
     _set_cached_file_index(filename, file_index)
+    _pinned_source_digests[filename] = source_digest
     return file_index
 
 
@@ -858,6 +901,10 @@ def resolve_arg_expressions(
 def invalidate_cache(filename: str | None = None) -> None:
     """Invalidate cached AST indexes.
 
+    Also clears the pinned first-read source digests: explicit invalidation
+    is the sanctioned way to re-index a file whose module was deliberately
+    reloaded after an on-disk edit (implicit drift fails closed instead).
+
     Parameters
     ----------
     filename:
@@ -867,8 +914,12 @@ def invalidate_cache(filename: str | None = None) -> None:
 
     if filename is None:
         _file_cache.clear()
+        _pinned_source_digests.clear()
+        _source_drift_warned.clear()
     else:
         _file_cache.pop(filename, None)
+        _pinned_source_digests.pop(filename, None)
+        _source_drift_warned.discard(filename)
 
 
 def release_parsed_asts() -> None:
