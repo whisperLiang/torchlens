@@ -43,6 +43,7 @@ from .utils.rng import (
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
+        _INPUT_CHECK_UNAVAILABLE,
         _ambient_execution_context_restored,
         _bind_call_outputs,
         _call_execution_context_entered,
@@ -483,6 +484,12 @@ def run_live_trace(
         # settle VERIFIED (fresh-refresh semantics); classification happens only at
         # native-failure time below.
         first_failed = _first_failed_live_input_check(trace, input_args, input_kwargs)
+        if first_failed is _INPUT_CHECK_UNAVAILABLE:
+            # This consumer is SOFT (consulted only at native-failure time
+            # below): an unavailable classifier means the failure cannot be
+            # classified as input divergence, so the native error re-raises
+            # raw -- the old ``None`` behavior, now explicit (R22-2).
+            first_failed = None
         try:
             fork.save_new_outs(model, input_args, input_kwargs=input_kwargs, random_seed=seed)
         except Exception as exc:  # not BaseException: KeyboardInterrupt/SystemExit stay raw

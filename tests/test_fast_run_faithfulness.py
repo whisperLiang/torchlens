@@ -326,3 +326,70 @@ def test_close_fast_run_session_retryable_after_raising_close() -> None:
     close_fast_run_session(trace)
     assert "_fast_run_session" not in trace.__dict__
     assert session.calls == 2
+
+
+class _PlainLinear(nn.Module):
+    """Two-op model for the admission fault-injection probes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(3, 2)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Linear then relu."""
+
+        return torch.relu(self.fc(value))
+
+
+def test_fast_live_admission_guard_failure_refuses_not_fail_open(monkeypatch) -> None:
+    """A broken input-contract guard REFUSES the fast path (R22-2 layer 1).
+
+    Opus's fault injection: with the classifier machinery raising internally,
+    the typed refusal used to silently vanish and the forward ran unguarded --
+    guard failure was indistinguishable from inputs-match.
+    """
+
+    import torchlens._runnable_execution as execution
+    from torchlens.errors import RunCapabilityUnavailableError
+
+    model = _PlainLinear().eval()
+    captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
+    captured.run(inputs=torch.ones(2, 3), fast=True)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("injected classifier failure")
+
+    monkeypatch.setattr(execution, "_live_runtime_input_leaves", _boom)
+    with pytest.raises(RunCapabilityUnavailableError):
+        captured.run(inputs=torch.ones(2, 3), fast=True)
+
+
+def test_fast_live_input_refresh_arity_guarded_and_poisons(monkeypatch) -> None:
+    """The input-payload refresh zip guards arity like the output branch (R22-2 layer 2).
+
+    A truncating zip used to keep STALE capture-time activations on the
+    surplus input ops with no disclosure.
+    """
+
+    import torchlens._fast_run as fast_run
+    from torchlens.errors import PathDivergenceError
+
+    model = _PlainLinear().eval()
+    captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
+    captured.run(inputs=torch.ones(2, 3), fast=True)
+
+    # Patch the REFRESH-side binding only (_fast_run's module global); the
+    # admission classifier keeps the real execution-module binding, so the
+    # run is admitted and the refresh sees a truncated leaf list.
+    real = fast_run._live_runtime_input_leaves
+
+    def _truncating(*args, **kwargs):
+        leaves = real(*args, **kwargs)
+        if leaves is not None:
+            return list(leaves)[:-1]
+        return leaves
+
+    monkeypatch.setattr(fast_run, "_live_runtime_input_leaves", _truncating)
+    with pytest.raises(PathDivergenceError) as excinfo:
+        captured.run(inputs=torch.ones(2, 3), fast=True)
+    assert excinfo.value.fields["code"] == "input_tree_mismatch"
