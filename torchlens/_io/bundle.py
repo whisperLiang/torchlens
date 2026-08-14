@@ -302,6 +302,21 @@ def save(
     sources. Loading an untrusted bundle can execute arbitrary code.
     """
 
+    # A MergedTrace is a presenter, never a Trace: tl.save() refuses it typed
+    # (contract 2.5 "merged runnable export ... refused typed") instead of the
+    # historical bare AttributeError from the poison gate. The sys.modules
+    # gate keeps ordinary saves free of any merged import: a MergedTrace can
+    # only exist after its module was imported.
+    merged_presenter = sys.modules.get("torchlens.merged._presenter")
+    if merged_presenter is not None and isinstance(trace, merged_presenter.MergedTrace):
+        from ..merged import MergedErrorCode, MergedSurfaceUnsupportedError
+
+        raise MergedSurfaceUnsupportedError(
+            "tl.save() does not support MergedTrace. Write the merged-directory "
+            "artifact with merged.save(path), or save a single rank core with "
+            "tl.save(merged.ranks[r], path).",
+            code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
+        )
     from ..runnable import refuse_poisoned_trace
 
     refuse_poisoned_trace(trace, "export")

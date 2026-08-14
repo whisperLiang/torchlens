@@ -258,22 +258,30 @@ def _sharded_tensor_namespace_imported() -> bool:
     return any(name in sys.modules for name in _SHARDED_TENSOR_MODULE_SENTINELS)
 
 
-def _distributed_initialized() -> bool:
+def _distributed_initialized() -> bool | None:
     """Return whether a torch distributed process group is initialized.
 
     Returns
     -------
-    bool
-        True when ``torch.distributed`` is available and initialized. False on
-        builds without distributed support, or when the query itself fails.
+    bool | None
+        True when ``torch.distributed`` is available and initialized. False
+        when distributed support is genuinely absent (unavailable build, or no
+        ``torch.distributed`` namespace at all). None when the capability
+        probe ITSELF fails -- unknown state, which the caller must treat as a
+        scan-completeness gap, never as "not initialized" (a silent False
+        here disabled the device-mesh scan fail-open).
     """
 
     try:
         if not torch.distributed.is_available():
             return False
         return bool(torch.distributed.is_initialized())
-    except Exception:
+    except AttributeError:
+        # Builds without distributed support lack the namespace entirely: a
+        # genuine capability absence, not a failed probe.
         return False
+    except Exception:
+        return None
 
 
 def _type_in_namespace(value: Any, prefixes: Sequence[str]) -> bool:
@@ -592,7 +600,13 @@ def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
     # that never refuses capture, so the refusing path stays fully sound while an
     # ordinary trace pays nothing. See FORKS.md ("device-mesh scan gate").
     scan_tensors = _sharded_tensor_namespace_imported()
-    scan_meshes = scan_tensors or _distributed_initialized()
+    initialized = _distributed_initialized()
+    if initialized is None:
+        # The capability probe failed: absence of live distributed state
+        # cannot be established, so disclose the gap (a refusing
+        # scan_incomplete finding) and scan meshes conservatively anyway.
+        evidence.scan_incomplete_sites.append("torch.distributed.is_initialized()")
+    scan_meshes = scan_tensors or initialized is not False
     mesh_type = get_device_mesh_type() if scan_meshes else None
     if (
         not scan_meshes
