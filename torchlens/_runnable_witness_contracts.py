@@ -302,6 +302,16 @@ def _is_hf_model_output(value: Any) -> bool:
 def _container_field_names(value: Any) -> tuple[str, ...]:
     """Return the stable field names for namedtuple-like runtime containers.
 
+    Routes namedtuple field resolution through the ONE capture-side authority,
+    ``_input_walk._instance_fields`` (raw MRO, tuple-of-str required). The historical
+    ``hasattr(value, "_fields")`` + ``tuple(value._fields)`` spelling was a LIVE instance
+    read that executed a user property and accepted any iterable, so the same container
+    was field-addressable to this walker and zero-field to the capture walker: the
+    runtime contract check then crashed with an untyped ``AttributeError`` (only
+    ``KeyError``/``IndexError``/``TypeError`` were guarded downstream), and on shapes
+    that did not crash the two walkers keyed the same leaf under different paths, so the
+    leaf-path set contract compared apples to oranges.
+
     Parameters
     ----------
     value:
@@ -314,10 +324,12 @@ def _container_field_names(value: Any) -> tuple[str, ...]:
         not a field-addressable container.
     """
 
+    from torchlens._input_walk import _instance_fields, declares_namedtuple_fields
+
     if not isinstance(value, tuple):
         return ()
-    if hasattr(value, "_fields"):
-        return tuple(str(name) for name in value._fields)
+    if declares_namedtuple_fields(value):
+        return _instance_fields(value)
     return _torch_structseq_field_names(value)
 
 
