@@ -14,6 +14,8 @@ witnessed under its own path.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 from torch import nn
@@ -76,17 +78,31 @@ def test_trace_recovers_and_accepts_shared_substructure_after_refusal() -> None:
     assert len(log) > 0
 
 
-def test_walk_input_boundary_depth_and_cycle_refuse_typed() -> None:
-    """The normative walker enforces the shared ceiling and the cycle guard."""
+def test_walk_input_boundary_depth_and_cycle_ceiling_the_subtree() -> None:
+    """The normative walker ceilings over-deep and cyclic subtrees, never crashes.
+
+    Post d95ca11f (input-walk union) the WALKER routes a depth/cycle violation
+    to ``on_opaque_key_subtree`` and skips the subtree — the typed refusal
+    guarantee lives at capture entry (``test_trace_refuses_*_typed`` above) and
+    in the snapshot refusals ledger, not here.
+    """
 
     deep = _deep_list(INPUT_TREE_MAX_DEPTH + 10, torch.ones(1))
-    with pytest.raises(InvalidArgumentError) as excinfo:
-        walk_input_boundary(deep, key_component=raw_mapping_key_component)
-    assert excinfo.value.fields["code"] == "input_tree_depth_exceeded"
+    deep_opaque: list[tuple[Any, ...]] = []
+    walk_input_boundary(
+        deep,
+        key_component=raw_mapping_key_component,
+        on_opaque_key_subtree=lambda _child, path: deep_opaque.append(path),
+    )
+    assert len(deep_opaque) == 1, "over-deep subtree must ceiling exactly once"
 
-    with pytest.raises(InvalidArgumentError) as excinfo:
-        walk_input_boundary(_cyclic_list(), key_component=raw_mapping_key_component)
-    assert excinfo.value.fields["code"] == "input_tree_cycle"
+    cyclic_opaque: list[tuple[Any, ...]] = []
+    walk_input_boundary(
+        _cyclic_list(),
+        key_component=raw_mapping_key_component,
+        on_opaque_key_subtree=lambda _child, path: cyclic_opaque.append(path),
+    )
+    assert len(cyclic_opaque) == 1, "cyclic subtree must ceiling exactly once"
 
 
 def test_walk_input_boundary_walks_every_shared_occurrence() -> None:
@@ -107,10 +123,10 @@ def test_snapshot_input_boundary_is_total_and_refuses_in_ledger() -> None:
     """The runnable structure snapshot stays TOTAL: violations join the refusals."""
 
     cyclic_snapshot = snapshot_input_boundary(_cyclic_list())
-    assert "input_tree_cycle" in {r["reason"] for r in cyclic_snapshot["refusals"]}
+    assert "input_container_cycle" in {r["reason"] for r in cyclic_snapshot["refusals"]}
 
     deep_snapshot = snapshot_input_boundary(_deep_list(INPUT_TREE_MAX_DEPTH + 10, 1))
-    assert "input_tree_depth_exceeded" in {r["reason"] for r in deep_snapshot["refusals"]}
+    assert "input_container_too_deep" in {r["reason"] for r in deep_snapshot["refusals"]}
 
 
 def test_snapshot_input_boundary_clean_input_has_no_guard_refusals() -> None:
