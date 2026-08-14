@@ -36,6 +36,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from ..backends.torch.wrappers import CompletenessWitnessMode, EscapeDetectorMode
 
 
 @contextmanager
@@ -64,8 +68,10 @@ def pristine_torch_oracle() -> Iterator[bool]:
         yield True
         return
 
-    detector_mode = _state._escape_detector_mode
-    witness_mode = _state._completeness_witness_mode
+    # _state annotates the modes as bare str; wrap_torch validates against
+    # the closed vocabularies, so the casts only restore the literal types.
+    detector_mode = cast("EscapeDetectorMode", _state._escape_detector_mode)
+    witness_mode = cast("CompletenessWitnessMode", _state._completeness_witness_mode)
 
     from ..backends.torch.wrappers import unwrap_torch, wrap_torch
 
