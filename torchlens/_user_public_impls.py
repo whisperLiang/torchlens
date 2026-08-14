@@ -1203,7 +1203,13 @@ def _validate_forward_pass_torch(
 
     **How it works:**
 
-    1. Run model.forward() *without* TorchLens to get ground-truth output tensors.
+    1. Run model.forward() on PRISTINE torch to get ground-truth output
+       tensors: if torchlens wrappers are installed, they are removed for
+       this one forward (restored from the pre-decoration originals ledger)
+       and reinstalled afterwards, so the ground truth never observes
+       through the wrapper layer it is meant to check (R75-1). If they
+       cannot be removed (a capture is active), validation refuses with
+       ``False`` rather than blessing a wrap-state-dependent ground truth.
     2. Run ``trace`` with ``save_arg_values=True`` and ``layers_to_save='all'``
        to capture every out and its creating function's arguments.
     3. Call ``Trace.validate_forward_pass`` which replays the forward pass
@@ -1351,9 +1357,32 @@ def _validate_forward_pass_torch(
                 stacklevel=2,
             )
             return False
+        from ._errors import CaptureContextError
         from .backends.torch.ops import _walk_output_tensors_with_paths
+        from .validation._pristine import pristine_torch_oracle
 
-        ground_truth_output = ground_truth_model(*input_args_copy, **input_kwargs_copy)
+        # R75-1: the phase-0 ground truth must observe through PRISTINE
+        # torch. In a wrapped process this forward used to run through the
+        # installed pass-through wrapper shells -- the same closures capture
+        # and replay observe through -- so a wrapper-layer numeric
+        # distortion validated clean whenever any capture had run earlier
+        # in the process (probe-proven). The wrappers are removed for this
+        # one forward and reinstalled after; if they cannot be removed (a
+        # capture is active), validation REFUSES rather than blessing a
+        # wrap-state-dependent ground truth.
+        try:
+            with pristine_torch_oracle():
+                ground_truth_output = ground_truth_model(*input_args_copy, **input_kwargs_copy)
+        except CaptureContextError:
+            warnings.warn(
+                "TorchLens validation could not compute a pristine-torch ground "
+                "truth because a capture is active in this process; the verdict "
+                "would depend on the wrapper installation it is meant to check. "
+                "Returning False rather than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         ground_truth_output_all = [
             (tensor, tuple(path))
             for tensor, path, _container_spec in _walk_output_tensors_with_paths(

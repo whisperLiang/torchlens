@@ -516,20 +516,43 @@ def validate_backward_pass(
             input_args, input_kwargs, model_device
         )
         model.zero_grad(set_to_none=True)
-        if validate_layer_grads:
-            from ._stock_layer_grads import _stock_layer_grads
+        # R75-1 sibling site: the "stock autograd" reference pass must run on
+        # PRISTINE torch. In a wrapped process it used to run through the
+        # installed pass-through wrapper shells -- the same closures the
+        # candidate capture observes through -- so a wrapper-layer numeric
+        # distortion corrupted stock and captured gradients IDENTICALLY and
+        # the comparison passed vacuously. Refuse (fail-closed) if the
+        # wrappers cannot be removed because a capture is active.
+        from .._errors import CaptureContextError
+        from ._pristine import pristine_torch_oracle
 
-            stock_module_grads, stock_identity_addresses = _stock_layer_grads(
-                model,
-                stock_inputs,
-                stock_kwargs,
-                loss_fn=loss_fn,
-                random_seed=random_seed,
-                state_dict_snapshot=state_dict,
+        try:
+            with pristine_torch_oracle():
+                if validate_layer_grads:
+                    from ._stock_layer_grads import _stock_layer_grads
+
+                    stock_module_grads, stock_identity_addresses = _stock_layer_grads(
+                        model,
+                        stock_inputs,
+                        stock_kwargs,
+                        loss_fn=loss_fn,
+                        random_seed=random_seed,
+                        state_dict_snapshot=state_dict,
+                    )
+                else:
+                    stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
+                    stock_loss.backward()  # type: ignore[no-untyped-call]
+        except CaptureContextError:
+            warnings.warn(
+                "validate_backward_pass could not compute pristine-torch stock "
+                "gradients because a capture is active in this process; the "
+                "verdict would depend on the wrapper installation it is meant "
+                "to check. Returning False rather than reporting unverified "
+                "success.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        else:
-            stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
-            stock_loss.backward()  # type: ignore[no-untyped-call]
+            return False
         expected_param_grads = _param_grads(model)
 
         model.load_state_dict(state_dict)
