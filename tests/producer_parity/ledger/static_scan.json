@@ -3297,18 +3297,10 @@
  },
  {
   "ambiguous": false,
-  "field": "module_stack",
-  "file": "torchlens/fastlog/types.py",
-  "has_default": false,
-  "sites": 1,
-  "via_getattr": false
- },
- {
-  "ambiguous": false,
   "field": "pass_index",
   "file": "torchlens/fastlog/types.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 5,
   "via_getattr": false
  },
  {
