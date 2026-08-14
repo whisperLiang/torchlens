@@ -210,6 +210,7 @@ def validate_hook_output(
             "expected torch.Tensor"
         )
     if force_shape_change:
+        result = _copy_reused_live_hook_result(out, result)
         _copy_tl_replacement_attrs(out, result)
         return result
     if result.dtype != out.dtype:
@@ -227,8 +228,39 @@ def validate_hook_output(
             f"hook returned shape {tuple(result.shape)} at {_site_name(hook_context)}; "
             f"expected {tuple(out.shape)}"
         )
+    result = _copy_reused_live_hook_result(out, result)
     _copy_tl_replacement_attrs(out, result)
     return result
+
+
+def _copy_reused_live_hook_result(out: torch.Tensor, result: torch.Tensor) -> torch.Tensor:
+    """Copy a hook result that is already a labeled live capture object.
+
+    The commit path OVERWRITES the result's live label metadata in place
+    (:func:`_copy_tl_replacement_attrs` -> ``copy_replacement_meta``). When a
+    hook returns a REUSED tensor object -- another live op's current-session
+    output, or one shared object fired at 2+ matched sites -- each fire stamps
+    its own site label on the same object and the LAST fire steals it:
+    consumers executing afterwards record the last site as parent, the earlier
+    site's children vanish (byte-identical payloads make the misattributed
+    graph validate clean), and chained edits at the orphaned site become
+    silent no-ops. A labeled foreign object is therefore CLONED (autograd
+    graph preserved) so the site label lands on a distinct object, mirroring
+    the raw-module-hook rewire guard. The site's own pass-through result is
+    exempt (the in-place carve-out).
+    """
+
+    if result is out:
+        return result
+    from torchlens.backends.torch import _tl as _tl_meta
+
+    if _tl_meta.get(result) is None:
+        return result
+    # The copy is TorchLens-internal bookkeeping the user's program never
+    # executed; it must not enter the captured graph as a spurious clone op
+    # (this runs OUTSIDE _execute_hook's paused window).
+    with pause_logging():
+        return result.clone()
 
 
 def _copy_tl_replacement_attrs(source: torch.Tensor, replacement: torch.Tensor) -> None:
@@ -334,6 +366,7 @@ def _apply_live_hooks(
         previous_notes = tuple(hook_context.run_ctx.get("ledger_notes", ()))
         pre_hook_shape = tuple(current_out.shape)
         pre_hook_dtype = str(current_out.dtype)
+        version_before = _tensor_version(current_out)
         result = _execute_hook(
             normalized_entry.normalized_callable,
             current_out,
@@ -347,6 +380,18 @@ def _apply_live_hooks(
             call_args=call_args,
             call_kwargs=call_kwargs,
         )
+        if (
+            not replaced
+            and result is current_out
+            and version_before is not None
+            and _tensor_version(current_out) != version_before
+        ):
+            # An in-place-mutating HOOK (``out.mul_(0); return out``) is a
+            # genuine value change: recording replaced=False minted ZERO
+            # replacement evidence, so validation later failed forward replay
+            # in a capture-bug shape on a genuine intervention, and an
+            # unvalidated trace carried the false no-replacement claim.
+            replaced = True
         record = _build_live_fire_record(
             normalized_entry,
             site=site,
@@ -384,6 +429,28 @@ def _apply_live_hooks(
                 )
         current_out = result
     return current_out, tuple(fire_results)
+
+
+def _tensor_version(value: Any) -> int | None:
+    """Return a tensor's in-place mutation counter, or ``None`` when unreadable.
+
+    ``Tensor._version`` is the cheap autograd version counter; inference-mode
+    tensors (no counter) and exotic subclasses read as ``None``, which callers
+    treat as "no in-place evidence" rather than a refusal.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        return int(value._version)
+    except Exception:
+        return None
+
+
+def _tuple_versions(values: tuple[torch.Tensor | None, ...]) -> tuple[int | None, ...]:
+    """Version counters for one grad tuple, ``None`` per non-tensor slot."""
+
+    return tuple(_tensor_version(value) for value in values)
 
 
 def _apply_inplace_replacement_to_mutated_storage(
@@ -1264,6 +1331,7 @@ def _apply_live_backward_hooks(
         ):
             continue
         previous = current
+        versions_before = _tuple_versions(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1281,6 +1349,7 @@ def _apply_live_backward_hooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before,
                 timing="post",
                 previous=previous,
                 current=current,
@@ -1334,6 +1403,7 @@ def _apply_live_backward_prehooks(
         ):
             continue
         previous = current
+        versions_before = _tuple_versions(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1351,6 +1421,7 @@ def _apply_live_backward_prehooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before,
                 timing="pre",
                 previous=previous,
                 current=current,
@@ -1570,6 +1641,7 @@ def _build_live_backward_fire_record(
     timing: str,
     previous: tuple[torch.Tensor | None, ...],
     current: tuple[torch.Tensor | None, ...],
+    inplace_mutated: bool = False,
 ) -> FireRecord:
     """Build an audit record for one live backward hook fire.
 
@@ -1589,6 +1661,10 @@ def _build_live_backward_fire_record(
         Tuple before this helper ran.
     current:
         Tuple after this helper ran.
+    inplace_mutated:
+        Whether the hook mutated a grad slot IN PLACE (version-counter
+        evidence): a hook editing a tensor and returning ``None`` is a
+        genuine value change and must not record ``replaced=False``.
 
     Returns
     -------
@@ -1617,7 +1693,7 @@ def _build_live_backward_fire_record(
         call_index=call_index,
         grad_kind=grad_kind,  # type: ignore[arg-type]
         tuple_index=tuple_index,
-        replaced=tuple_index is not None or current is not previous,
+        replaced=tuple_index is not None or current is not previous or inplace_mutated,
     )
 
 

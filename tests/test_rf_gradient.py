@@ -214,3 +214,34 @@ def test_reachable_but_none_gradient_raises_typed_error() -> None:
 
     with pytest.raises(ReceptiveFieldUnavailableError, match="reachable.*autograd returned no"):
         gradient_for_unit(target, (0, 0), input=input_op)
+
+
+def test_fork_probe_does_not_mint_parent_backward_pass() -> None:
+    """An RF gradient probe on a fork leaves the parent trace untouched.
+
+    Forks preserve tensor identity, so the backward grad-fn registry and the
+    capture-time tensor hooks resolve to the PARENT trace; the per-trace
+    probe flag sat on the fork only, and one fork probe used to mint a full
+    managed ``autograd_grad`` pass with retained gradient payloads on the
+    parent -- indistinguishable from a real user pass, and shifting the
+    user's next ``log_backward`` to pass 2.
+    """
+
+    _register_conv_rule()
+    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+    inputs = torch.ones(1, 1, 5, 5, requires_grad=True)
+    capture = tl.options.CaptureOptions(backward_ready=True, save_grads="all")
+    trace = tl.trace(model, inputs, capture=capture, save_mode="reference")
+    fork = trace.fork()
+
+    fork_target = _op(fork, "conv2d")
+    fork_target.receptive_field.gradient((0, 0, 2, 2), retain_graph=True)
+
+    assert trace.num_backward_passes == 0
+    assert getattr(trace, "has_gradients", False) is False
+    assert len(list(getattr(trace, "backward_events", []))) == 0
+    assert fork.num_backward_passes == 0
+
+    from torchlens import _state
+
+    assert _state._rf_probe_depth == 0

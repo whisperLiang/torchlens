@@ -432,6 +432,12 @@ def _traces_for_roots(roots: Any) -> tuple[Any, ...]:
 
     if not _BACKWARD_GRAD_FN_REGISTRY:
         return ()
+    if _state._rf_probe_depth > 0:
+        # An RF/PF gradient probe is in flight: probes are pure measurements
+        # and must never mint a managed pass on ANY trace. The per-trace
+        # ``_tl_rf_probe_active`` check below cannot cover a probe on a FORK,
+        # whose registry entries resolve to the base trace.
+        return ()
     matched: list[Any] = []
     matched_ids: set[int] = set()
     stale_ids: list[int] = []
@@ -3088,6 +3094,26 @@ def _run_backward_with_capture(
             )
         )
         if rewalk_error is not None:
+            # The graph walk already registered hooks and strong-pinned
+            # grad-fn refs; propagating before cleanup strands live
+            # TorchLens hooks on the user's autograd graph (the next plain
+            # backward re-enters hook code and appends phantom events).
+            # Mirror the walk-failure arm's unconditional cleanup, then
+            # re-raise the rewalk error.
+            trace.num_backward_passes = max(
+                int(getattr(trace, "num_backward_passes", 0)), pass_index
+            )
+            with contextlib.suppress(BaseException):
+                _clear_pending_accumulate_grad_records(trace)
+            for handle in handles:
+                with contextlib.suppress(BaseException):
+                    handle.remove()
+            with contextlib.suppress(BaseException):
+                _clear_forward_grad_fn_refs(trace)
+            with contextlib.suppress(BaseException):
+                synchronize_pending_cpu_async_copies()
+            with contextlib.suppress(BaseException):
+                _materialize_backward_projections(trace)
             raise rewalk_error
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
         _clear_pending_accumulate_grad_records(trace)

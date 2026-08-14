@@ -184,7 +184,17 @@ def replace_with(
 
             del hook
             replacement = value() if callable(value) else value
-            return replacement.to(device=out.device, dtype=out.dtype)
+            converted = replacement.to(device=out.device, dtype=out.dtype)
+            if converted is replacement:
+                # ``.to()`` no-ops to the SAME object when device/dtype already
+                # match, so 2+ matched sites would inject ONE shared live
+                # tensor: each fire stamps its raw label on that object and the
+                # LAST fire steals it -- downstream consumers then hang every
+                # child off the last site (wrong parents that validate clean),
+                # and chained edits at the orphaned site become silent no-ops.
+                # Mint a distinct per-fire object carrying the same value.
+                converted = replacement.clone()
+            return converted
 
         return _hook
 

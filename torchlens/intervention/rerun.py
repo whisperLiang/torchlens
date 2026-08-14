@@ -113,7 +113,7 @@ def run(
     _warn_if_direct_writes_will_be_overlaid(log)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
     old_raw_hash = getattr(log, "_raw_event_shape_hash", None)
@@ -314,7 +314,7 @@ def _append_rerun(
     _warn_if_batch_sensitive_train_modules(model)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     _validate_append_hook_plan(log, hook_plan)
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
@@ -1103,6 +1103,37 @@ def _build_ledger_record(
     }
 
 
+def _assign_unique_plan_ids(hook_plan: list[NormalizedHookEntry]) -> list[NormalizedHookEntry]:
+    """Give every planned entry a unique, stable accounting identifier.
+
+    The fallback identifier ladder (plan id -> hook id -> helper name ->
+    callable qualname) can COLLIDE across entries with different targets, and
+    the fire audit compares ``Counter`` values keyed by that string: two
+    fires of one entry hid the other entry's total miss (``fired=2``,
+    ``unfired=()``), so a partially-applied plan claimed every entry fired
+    (incomplete f9f5b140). Colliding identifiers get a stable occurrence
+    suffix stamped into ``metadata["plan_id"]``, which live execution writes
+    into each ``FireResult``, so the audit is per-entry; unique identifiers
+    are preserved verbatim.
+    """
+
+    import dataclasses as _dataclasses
+
+    counts = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    seen: Counter[str] = Counter()
+    unique_plan: list[NormalizedHookEntry] = []
+    for entry in hook_plan:
+        base = _hook_plan_identifier(entry)
+        if counts[base] > 1:
+            metadata = dict(entry.metadata)
+            metadata["plan_id"] = f"{base}#occ{seen[base]}"
+            metadata["plan_id_base"] = base
+            entry = _dataclasses.replace(entry, metadata=metadata)
+        seen[base] += 1
+        unique_plan.append(entry)
+    return unique_plan
+
+
 def _hook_plan_identifier(entry: NormalizedHookEntry) -> str:
     """Return the identifier written into a live ``FireResult``.
 
@@ -1146,22 +1177,38 @@ def _reconcile_rerun_hook_fires(
         corresponding fire, retaining multiplicity for duplicate plans.
     """
 
-    planned = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    plan_ids = [_hook_plan_identifier(entry) for entry in hook_plan]
+    base_by_id = {
+        plan_id: str(entry.metadata.get("plan_id_base", plan_id))
+        for entry, plan_id in zip(hook_plan, plan_ids)
+    }
+    planned = Counter(plan_ids)
     fired: Counter[str] = Counter()
+    # FireRecord-only ops (no FireResult) carry no plan id, only the helper
+    # NAME: those fires go into a separate base-name pool consumed AFTER the
+    # exact per-entry accounting, capped at the shortfall, so the legacy
+    # channel keeps its multiplicity semantics without letting one entry's
+    # FireResult-channel fires hide another entry's miss.
+    fallback_fired: Counter[str] = Counter()
     for op in getattr(new_log, "layer_list", ()):
         fire_results = tuple(getattr(op, "fire_results", None) or ())
         if fire_results:
             fired.update(str(result.plan_id) for result in fire_results)
             continue
-        fired.update(
+        fallback_fired.update(
             str(record.helper_name)
             for record in (getattr(op, "interventions", None) or ())
             if getattr(record, "direction", None) == "forward"
             and getattr(record, "helper_name", None) is not None
         )
+    total_fired = sum(fired.values()) + sum(fallback_fired.values())
     unfired: list[str] = []
     for plan_id, planned_count in planned.items():
-        unfired.extend([plan_id] * max(0, planned_count - fired[plan_id]))
+        shortfall = max(0, planned_count - fired[plan_id])
+        base = base_by_id[plan_id]
+        consumed = min(shortfall, fallback_fired[base])
+        fallback_fired[base] -= consumed
+        unfired.extend([plan_id] * (shortfall - consumed))
     if unfired:
         warnings.warn(
             "Rerun hook plan entries fired at zero sites on the new inputs: "
@@ -1169,7 +1216,7 @@ def _reconcile_rerun_hook_fires(
             UserWarning,
             stacklevel=3,
         )
-    return sum(fired.values()), tuple(unfired)
+    return total_fired, tuple(unfired)
 
 
 def rerun(

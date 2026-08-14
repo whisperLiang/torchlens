@@ -20,8 +20,11 @@ Field categories (matching the LAYER_PASS_LOG_FIELD_ORDER in constants.py):
 4. **Child tensor variations** - tracks per-child input values for
    validation replay (``out_versions_by_child`` stores RAW values
    because validation compares against ``saved_args``).
-5. **Gradient info** - grad tensor and metadata (stored as a bare
-   reference via ``log_tensor_grad``, not deep-copied).
+5. **Gradient info** - grad tensor and metadata (always stored as a
+   detached SNAPSHOT via ``log_tensor_grad``, even under
+   ``save_mode="reference"``/``"view"`` -- autograd may accumulate into
+   the observed gradient in place, so an alias would silently rewrite
+   the recorded value).
 6. **Function call info** - the applied function, call stack, timing,
    FLOPs, RNG state, arg metadata, grad_fn_handle, inplace flag.
 7. **Param info** - which parameters were used, their shapes and sizes.
@@ -4118,10 +4121,18 @@ class Op:
 
         save_raw_gradients = getattr(trace, "save_raw_gradients", True)
         store_raw = save_raw_gradients or grad_transform is None
+        # Gradient payloads are ALWAYS genuine snapshots: under
+        # save_mode="reference"/"view" an aliased payload would be silently
+        # rewritten by later user mutation of the seed gradient or by
+        # AccumulateGrad accumulating in place on the next backward, and no
+        # wrapped in-place op exists on the grad path to disclose it. Route
+        # through the same chokepoint the event-sidecar path uses.
+        from ..backends.torch.tensor_tracking import _copy_grad_payload
+
         save_mode = cast(SaveMode, getattr(trace, "save_mode", "copy"))
         self._internal_set(
             "grad",
-            safe_copy(raw_grad, detach_tensor=True, save_mode=save_mode) if store_raw else None,
+            _copy_grad_payload(raw_grad, save_mode=save_mode) if store_raw else None,
         )
         self.has_grad = True
         if writer is not None and getattr(trace, "_defer_streaming_bundle_finalization", False):

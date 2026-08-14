@@ -59,7 +59,7 @@ only here:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -245,6 +245,50 @@ def declares_namedtuple_fields(value: Any) -> bool:
     return isinstance(value, tuple) and _raw_mro_attr(value, "_fields") is not None
 
 
+def physical_sequence_len(value: Any) -> int:
+    """Return the CONCRETE builtin arity of a tuple/list/dict-backed container.
+
+    ``len(value)`` dispatches to an overridable instance ``__len__``: hostile user
+    code could both steer the container KIND and forge the recorded physical
+    arity (a zero-field namedtuple subclass with ``__len__() == 0`` physically
+    carrying ``(tensor, "steer")`` classified ``empty`` and dropped its children
+    -- tensors included -- from every walker, with the SAME wrong value computed
+    on the capture and runtime snapshots, i.e. a false-VERIFIED shape). Arity
+    facts therefore read the concrete builtin slot, consistent with how this
+    module already resolves ``_fields``/``__dict__`` through the raw MRO.
+    Containers not backed by a builtin (custom ``Mapping`` implementations) have
+    no physical storage distinct from their methods and keep the instance
+    protocol; their hidden-state honesty is owned by the instance-state proofs.
+    """
+
+    if isinstance(value, tuple):
+        return tuple.__len__(value)
+    if isinstance(value, list):
+        return list.__len__(value)
+    if isinstance(value, dict):
+        return dict.__len__(value)
+    return len(value)
+
+
+def iter_physical_sequence(value: Any) -> Iterator[tuple[int, Any]]:
+    """Yield ``(index, child)`` through the concrete builtin slots (inert descent).
+
+    ``enumerate(value)`` dispatches to an overridable ``__iter__`` -- the same
+    forgery lane as a lying ``__len__`` -- so tuple/list-backed sequences descend
+    by concrete indexed access over :func:`physical_sequence_len`.
+    """
+
+    if isinstance(value, tuple):
+        for index in range(tuple.__len__(value)):
+            yield index, tuple.__getitem__(value, index)
+        return
+    if isinstance(value, list):
+        for index in range(list.__len__(value)):
+            yield index, list.__getitem__(value, index)
+        return
+    yield from enumerate(value)
+
+
 def empty_input_container_kind(value: Any) -> str | None:
     """Return the KIND of an EMPTY non-tensor container, else ``None`` (inert; r29-C2).
 
@@ -260,13 +304,17 @@ def empty_input_container_kind(value: Any) -> str | None:
     """
 
     if declares_namedtuple_fields(value):
-        return "namedtuple" if len(_instance_fields(value)) == 0 and len(value) == 0 else None
+        return (
+            "namedtuple"
+            if len(_instance_fields(value)) == 0 and physical_sequence_len(value) == 0
+            else None
+        )
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return "dataclass" if len(dataclasses.fields(value)) == 0 else None
     if isinstance(value, Mapping):
-        return "mapping" if len(value) == 0 else None
+        return "mapping" if physical_sequence_len(value) == 0 else None
     if isinstance(value, (list, tuple)):
-        return "sequence" if len(value) == 0 else None
+        return "sequence" if physical_sequence_len(value) == 0 else None
     return None
 
 
@@ -295,7 +343,7 @@ def namedtuple_arity_mismatch(value: Any) -> bool:
         # ``undeclared_instance_state`` returned False and the node was recorded as a
         # zero-field namedtuple with every child dropped.
         return True
-    return len(fields) != len(value)
+    return len(fields) != physical_sequence_len(value)
 
 
 def classify_input_container(value: Any) -> str:
@@ -490,7 +538,7 @@ def walk_input_boundary(
                 _descend(child, (*path, component))
             return
         if kind == "sequence":
-            for index, child in enumerate(value):
+            for index, child in iter_physical_sequence(value):
                 _descend(child, (*path, index))
             return
         if on_leaf is not None:
@@ -859,24 +907,41 @@ def inspect_instance_state(value: Any) -> InstanceStateInspection:
     the actual storage names only when the enumeration is inertly total.
     """
 
+    items = _inspect_instance_state_items(value)
+    if items is None:
+        return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+    return InstanceStateInspection(frozenset(items), True, None)
+
+
+def _inspect_instance_state_items(value: Any) -> dict[str, Any] | None:
+    """Inertly enumerate SET instance-state ``name -> value`` pairs, or ``None``.
+
+    The value-bearing spine under :func:`inspect_instance_state`: same inert
+    channels (raw-MRO ``__dict__`` getset invoked directly, all-MRO genuine
+    member-descriptor slots), same fail-closed rules -- ``None`` means the
+    enumeration cannot be inertly proven total (a blinded inspection is never
+    an empty mapping masquerading as "no extra state").
+    """
+
     import types as _types
 
-    names: set[str] = set()
+    items: dict[str, Any] = {}
     dict_descriptor = _raw_mro_attr(value, "__dict__")
     if dict_descriptor is not None:
         if type(dict_descriptor) is not _types.GetSetDescriptorType:
             # A property or non-standard descriptor shadows __dict__: reading it would
             # execute user code and could report attacker-chosen state. Fail closed.
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+            return None
         try:
             instance_dict = dict_descriptor.__get__(value, type(value))
         except Exception:
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+            return None
         if type(instance_dict) is not dict:
             # A dict SUBCLASS (or non-dict) result could carry a custom __iter__ /
             # __contains__ that hides keys: not inertly trustworthy.
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
-        names.update(str(key) for key in instance_dict)
+            return None
+        for key in instance_dict:
+            items[str(key)] = instance_dict[key]
     for cls in type(value).__mro__:
         raw_slots = cls.__dict__.get("__slots__")
         if raw_slots is None:
@@ -898,11 +963,49 @@ def inspect_instance_state(value: Any) -> InstanceStateInspection:
                 # here could execute user code, so the name is skipped (inert).
                 continue
             try:
-                descriptor.__get__(value, cls)
+                slot_value = descriptor.__get__(value, cls)
             except AttributeError:
                 continue  # unset slot: absent
-            names.add(name)
-    return InstanceStateInspection(frozenset(names), True, None)
+            items[name] = slot_value
+    return items
+
+
+def _protocol_container_instance_state_fact(value: Any) -> tuple[list[list[str]], bool]:
+    """Ordered ``(name, token)`` instance-state facts for protocol-container subclasses.
+
+    The exact-type node fact catches a class SWAP but not changed fields on
+    another instance of the SAME class (r66 R1 reopened by r2-B3: a
+    ``ModeBox(dict)`` whose ``box.mode`` flipped ``'a' -> 'b'`` between capture
+    and replay walked to the same tensor-leaf structure and replayed a wrong
+    output VERIFIED). Enumerate the instance state inertly and witness each
+    attribute: a type-strict literal token where the literal grammar can carry
+    the value, else an opaque type-identity token. A changed literal-valued
+    mode flag now diverges structurally, while a well-behaved custom Mapping's
+    backing store (``self.data = {...}``) witnesses as a stable opaque ``dict``
+    token and keeps working. A same-type changed OPAQUE value remains the
+    documented residual (arbitrary object values cannot be compared inertly).
+
+    Returns ``(facts, complete)``; ``complete=False`` means the enumeration is
+    blinded and the caller must refuse (``instance_state_uninspectable``),
+    never read as "no extra state". Exact builtins carry no instance ``__dict__``
+    descriptor, so their nodes are byte-identical to the historical shape.
+    """
+
+    items = _inspect_instance_state_items(value)
+    if items is None:
+        return [], False
+    facts: list[list[str]] = []
+    for name in sorted(items):
+        item_value = items[name]
+        try:
+            token = f"lit:{encode_mapping_key(item_value)!r}"
+        except ValueError:
+            token = (
+                f"{_RESERVED_NAMESPACE_PREFIX}opaque:"
+                f"{type(item_value).__module__}:{type(item_value).__qualname__}"
+            )
+        facts.append([name, token])
+    return facts, True
 
 
 def instance_state_names(value: Any) -> frozenset[str]:
@@ -1034,15 +1137,16 @@ def undeclared_instance_state(value: Any, kind: str) -> bool:
     ``state_complete`` declaration instead (checked by the snapshot's registered
     branch).
 
-    Mapping/sequence SUBCLASSES are deliberately NOT judged here (heavy-gate F7 ruling):
-    their witnessed schema is the protocol view (ordered keys/children) plus the EXACT
-    class identity the snapshot already records and compares, and a custom Mapping
-    legitimately keeps its backing store in ``__dict__`` (``self.data = {...}``) --
-    blanket-refusing it would reject every well-behaved custom Mapping input the
-    incumbent F7 contract admits. A hidden non-protocol attribute steering control flow
-    on such a subclass remains the documented residual (attribute reads are invisible
-    to every Python-level net), never a false structural pass: the class swap itself
-    still diverges through the exact-type node fact.
+    Mapping/sequence SUBCLASSES are NOT judged here: their instance state is not
+    REFUSED (a custom Mapping legitimately keeps its backing store in ``__dict__``,
+    ``self.data = {...}``, and blanket-refusing it would reject every well-behaved
+    custom Mapping input) -- it is WITNESSED instead, by the snapshot's per-node
+    ``instance_state`` fact (:func:`_protocol_container_instance_state_fact`):
+    literal-valued attributes carry type-strict tokens and diverge structurally
+    when changed between capture and replay (the r66 R1 / r2-B3 ``box.mode``
+    class), opaque values carry a type-identity token. A same-type changed
+    OPAQUE attribute value remains the documented residual; the class swap
+    itself still diverges through the exact-type node fact.
     """
 
     import dataclasses as _dc
@@ -1215,15 +1319,22 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         if kind == "empty":
             empty_kind = empty_input_container_kind(item)
             node["empty_kind"] = str(empty_kind)
+            if empty_kind in {"mapping", "sequence"}:
+                state_facts, state_complete = _protocol_container_instance_state_fact(item)
+                if not state_complete:
+                    refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+                elif state_facts:
+                    node["instance_state"] = state_facts
             nodes.append(node)
             return
         if kind == "namedtuple":
             fields = _instance_fields(item)
             node["fields"] = [str(name) for name in fields]
-            # PHYSICAL arity, so a hidden positional payload cannot make two snapshots
+            # PHYSICAL arity through the concrete builtin (never the instance
+            # ``__len__``), so a hidden positional payload cannot make two snapshots
             # compare equal, and a declared schema that does not account for the whole
             # tuple refuses instead of silently dropping the extras (tensors included).
-            node["size"] = len(item)
+            node["size"] = physical_sequence_len(item)
             if namedtuple_arity_mismatch(item):
                 refusals.append({"path": list(path), "reason": "namedtuple_schema_not_total"})
             nodes.append(node)
@@ -1248,6 +1359,14 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
                 _descend(child, (*path, field.name))
             return
         if kind == "mapping":
+            # Same-class instance state on a Mapping subclass is part of the
+            # structure witness (the exact-type fact alone cannot see changed
+            # fields on another instance of the SAME class).
+            state_facts, state_complete = _protocol_container_instance_state_fact(item)
+            if not state_complete:
+                refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+            elif state_facts:
+                node["instance_state"] = state_facts
             keys: list[Any] = []
             encodable = True
             # Derive the ordered-key fact from the SAME ``items()`` traversal that
@@ -1279,9 +1398,14 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
                     _descend(child, (*path, encode_mapping_key(key)))
             return
         if kind == "sequence":
-            node["size"] = len(item)
+            node["size"] = physical_sequence_len(item)
+            state_facts, state_complete = _protocol_container_instance_state_fact(item)
+            if not state_complete:
+                refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+            elif state_facts:
+                node["instance_state"] = state_facts
             nodes.append(node)
-            for index, child in enumerate(item):
+            for index, child in iter_physical_sequence(item):
                 _descend(child, (*path, index))
             return
         # Literal leaf: the VALUE is witnessed by the literal walker, but the scalar

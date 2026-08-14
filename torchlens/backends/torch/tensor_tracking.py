@@ -149,6 +149,11 @@ def _add_tensor_backward_hook(
         refresh_target_ref = getattr(active_trace, "_refresh_projection_target_ref", None)
         if refresh_target_ref is not None:
             active_trace = refresh_target_ref()
+        if _state._rf_probe_depth > 0:
+            # A fork probe resolves here to the BASE trace whose per-trace
+            # flag is unset; the global depth suppresses grad recording on
+            # every trace while any RF/PF probe runs.
+            return
         if active_trace is not None and getattr(active_trace, "_tl_rf_probe_active", False):
             return
         # A managed backward directed at a FORK RELATIVE (a fork's
@@ -184,7 +189,12 @@ def _add_tensor_backward_hook(
                 ):
                     return
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
-            if getattr(active_trace, "save_grads", None) not in (None, False):
+            # Gate the legacy layer-slot write on the ACTIVE per-call policy,
+            # not the deprecated ``save_grads`` attribute: a per-call
+            # ``log_backward(..., save_grads=False)`` sets the policy while
+            # the attribute can stay truthy, and the attribute-keyed gate
+            # kept retaining full grad payloads the caller disabled.
+            if _active_save_grads_policy(active_trace) not in (None, False, "none", []):
                 _log_tensor_grad(active_trace, grad, tensor_label)
 
     # TorchLens bookkeeping: torch's ``register_hook`` reads ``self.grad_fn``

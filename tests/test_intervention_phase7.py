@@ -225,6 +225,69 @@ def test_rerun_matching_sticky_hook_has_no_unfired_warning() -> None:
     assert log.last_run["hooks_unfired"] == 0
 
 
+def test_rerun_colliding_hook_identifiers_do_not_hide_misses() -> None:
+    """Two plan entries sharing one fallback identifier are audited per entry.
+
+    ``_hook_plan_identifier`` falls back through plan id -> hook id -> helper
+    name -> callable qualname, so two entries with different targets but the
+    same callable both keyed the audit Counter with one shared string: two
+    fires of the first entry hid the second entry's total miss (``fired=2``,
+    ``unfired=()``, no warning) -- incomplete f9f5b140.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.intervention.hooks import NormalizedHookEntry
+    from torchlens.intervention.rerun import (
+        _assign_unique_plan_ids,
+        _hook_plan_identifier,
+        _reconcile_rerun_hook_fires,
+    )
+    from torchlens.ir.intervention import FireResult
+
+    def same_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+        """Shared callable planned under two different targets."""
+
+        del hook
+        return out
+
+    entries = [
+        NormalizedHookEntry(site_target=object(), normalized_callable=same_hook),
+        NormalizedHookEntry(site_target=object(), normalized_callable=same_hook),
+    ]
+    raw_ids = [_hook_plan_identifier(entry) for entry in entries]
+    assert raw_ids[0] == raw_ids[1], "precondition: the fallback identifiers collide"
+
+    plan = _assign_unique_plan_ids(entries)
+    plan_ids = [_hook_plan_identifier(entry) for entry in plan]
+    assert len(set(plan_ids)) == 2, "colliding fallbacks must become unique accounting keys"
+
+    def _fire(plan_id: str) -> FireResult:
+        """One synthetic live fire for the given accounting id."""
+
+        return FireResult(
+            plan_id=plan_id,
+            site_label="relu_1_1",
+            fired_at_capture_index=0,
+            pre_hook_shape=(1,),
+            post_hook_shape=(1,),
+            pre_hook_dtype="torch.float32",
+            post_hook_dtype="torch.float32",
+            replaced=True,
+            fire_record=None,
+        )
+
+    # Entry 1 fires twice (two sites), entry 2 never fires: the audit must
+    # report the miss instead of letting the shared string absorb it.
+    stub_log = SimpleNamespace(
+        layer_list=[SimpleNamespace(fire_results=[_fire(plan_ids[0]), _fire(plan_ids[0])])]
+    )
+    with pytest.warns(UserWarning, match="fired at zero sites on the new inputs"):
+        fired, unfired = _reconcile_rerun_hook_fires(stub_log, plan)
+    assert fired == 2
+    assert unfired == (plan_ids[1],)
+
+
 @pytest.mark.smoke
 def test_rerun_failure_leaves_original_log_unchanged() -> None:
     """Fresh-capture failures happen before atomic swap."""

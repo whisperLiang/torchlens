@@ -316,3 +316,173 @@ def test_mapping_ordered_key_fact_comes_from_the_child_traversal():
     root = snapshot_input_boundary({"cfg": value})["nodes"][1]
     assert root["kind"] == "mapping"
     assert root["keys"] == ["a", "b"]
+
+
+class _EvilZeroField(tuple):
+    """Zero-field namedtuple subclass whose ``__len__`` hides a physical payload."""
+
+    _fields: tuple[str, ...] = ()
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 0
+
+
+class _EvilOneField(collections.namedtuple("_EvilOneFieldBase", ["x"])):
+    """One-field namedtuple subclass whose ``__len__`` forges the recorded arity."""
+
+    __slots__ = ()
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 1
+
+
+class _LyingLenList(list):
+    """List subclass whose ``__len__`` claims emptiness over real children."""
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 0
+
+
+def test_hostile_len_cannot_steer_container_kind_or_forge_arity():
+    """Arity facts read the concrete builtin slot, never the instance ``__len__``.
+
+    A zero-field namedtuple subclass with ``__len__() == 0`` physically carrying
+    ``(tensor, "steer")`` classified ``empty`` and every walker dropped its
+    children (tensors included) with no refusal -- and the runtime snapshot
+    computed the SAME wrong value, so the structure tripwire passed on both
+    ends (false VERIFIED). A one-field variant physically carrying two elements
+    recorded ``size == 1`` and snapshots of different hidden payloads compared
+    equal.
+    """
+
+    from torchlens._input_walk import snapshot_input_boundary
+
+    hidden_tensor = torch.ones(2)
+    evil_zero = tuple.__new__(_EvilZeroField, (hidden_tensor, "steer"))
+    assert classify_input_container(evil_zero) == "namedtuple"
+    assert empty_input_container_kind(evil_zero) is None
+    snapshot = snapshot_input_boundary(evil_zero)
+    reasons = [refusal["reason"] for refusal in snapshot.get("refusals", [])]
+    assert "namedtuple_schema_not_total" in reasons
+
+    evil_one = tuple.__new__(_EvilOneField, (torch.ones(2), "hidden"))
+    one_snapshot = snapshot_input_boundary(evil_one)
+    one_reasons = [refusal["reason"] for refusal in one_snapshot.get("refusals", [])]
+    assert "namedtuple_schema_not_total" in one_reasons
+    named_nodes = [node for node in one_snapshot["nodes"] if node.get("kind") == "namedtuple"]
+    assert named_nodes and named_nodes[0]["size"] == 2
+
+
+def test_hostile_len_sequence_still_walks_physical_children():
+    """A lying sequence ``__len__`` cannot classify real children away."""
+
+    from torchlens._input_walk import (
+        raw_mapping_key_component,
+        snapshot_input_boundary,
+        walk_input_boundary,
+    )
+
+    lying = _LyingLenList([torch.ones(2), torch.zeros(2)])
+    assert classify_input_container(lying) == "sequence"
+    snapshot = snapshot_input_boundary(lying)
+    sizes = [node["size"] for node in snapshot["nodes"] if "size" in node]
+    assert sizes == [2]
+
+    seen: list[tuple[Any, ...]] = []
+    walk_input_boundary(
+        lying,
+        key_component=raw_mapping_key_component,
+        on_tensor=lambda _tensor, path: seen.append(tuple(path)),
+    )
+    assert len(seen) == 2
+
+
+class _ModeBox(dict):
+    """Mapping subclass whose non-protocol attribute steers forward control flow."""
+
+
+class _SideChannelList(list):
+    """List subclass carrying a literal side field."""
+
+
+class _BackingStoreMapping(dict):
+    """Well-behaved custom mapping keeping an opaque backing attribute."""
+
+    def __init__(self, data: dict) -> None:
+        super().__init__(data)
+        self.extra_store = dict(data)
+
+
+def test_same_class_instance_state_is_witnessed_on_protocol_subclasses():
+    """Changed same-class instance state diverges the structure snapshot.
+
+    The exact-type node fact catches a class swap but not changed fields on
+    another instance of the SAME class: a ``ModeBox(dict)`` whose ``mode``
+    flipped between capture and replay walked to the same tensor-leaf
+    structure, so a numerically wrong replay reported VERIFIED.
+    """
+
+    from torchlens._input_walk import snapshot_input_boundary
+
+    box_a = _ModeBox({"x": torch.ones(2)})
+    box_a.mode = "a"
+    box_b = _ModeBox({"x": torch.ones(2)})
+    box_b.mode = "b"
+    snap_a = snapshot_input_boundary(box_a)
+    snap_b = snapshot_input_boundary(box_b)
+    assert snap_a != snap_b, "same-class changed literal field must change the snapshot"
+    assert not snap_a.get("refusals")
+
+    seq_a = _SideChannelList([torch.ones(2)])
+    seq_a.flag = 1
+    seq_b = _SideChannelList([torch.ones(2)])
+    seq_b.flag = 2
+    assert snapshot_input_boundary(seq_a) != snapshot_input_boundary(seq_b)
+
+    # A well-behaved custom mapping's opaque backing store witnesses as a
+    # stable type-identity token: two same-shape instances stay comparable.
+    store_a = _BackingStoreMapping({"x": torch.ones(2)})
+    store_b = _BackingStoreMapping({"x": torch.ones(2)})
+    assert snapshot_input_boundary(store_a) == snapshot_input_boundary(store_b)
+    assert not snapshot_input_boundary(store_a).get("refusals")
+
+
+def test_mode_box_changed_field_diverges_runnable_replay(tmp_path):
+    """The r66-R1/ModeBox end-to-end repro: same class, changed field, typed refusal."""
+
+    from torchlens.errors import PathDivergenceError
+    from torchlens.runnable import PathFaithfulness
+
+    class ModeRoutedModel(nn.Module):
+        """Add a mode-selected constant to the boxed tensor."""
+
+        def forward(self, box: _ModeBox) -> torch.Tensor:
+            """Route on the box's non-protocol attribute."""
+
+            return box["x"] + (1 if box.mode == "a" else 2)
+
+    model = ModeRoutedModel().eval()
+    tensor = torch.arange(2.0)
+    box_a = _ModeBox({"x": tensor})
+    box_a.mode = "a"
+    captured = tl.trace(
+        model,
+        box_a,
+        capture=tl.options.CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "m.tlspec"
+    tl.save(captured, path, level="runnable", include_weights=True)
+
+    changed = _ModeBox({"x": tensor})
+    changed.mode = "b"
+    with pytest.raises(PathDivergenceError):
+        tl.load(path).run(inputs=changed)
+
+    same = _ModeBox({"x": tensor})
+    same.mode = "a"
+    result = tl.load(path).run(inputs=same)
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED

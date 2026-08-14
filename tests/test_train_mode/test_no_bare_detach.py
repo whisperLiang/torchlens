@@ -11,7 +11,7 @@ SCANNED_PATHS = (
     REPO_ROOT / "torchlens" / "backends" / "torch",
     REPO_ROOT / "torchlens" / "postprocess",
     REPO_ROOT / "torchlens" / "fastlog",
-    REPO_ROOT / "torchlens" / "data_classes" / "op_log.py",
+    REPO_ROOT / "torchlens" / "data_classes" / "op.py",
 )
 ALLOWLIST = {
     "Op._tensor_contents_str_helper",
@@ -33,8 +33,18 @@ def _python_files(path: Path) -> list[Path]:
     -------
     list[Path]
         Python files covered by the guardrail.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` does not exist. A missing entry previously fell through to
+        the ``rglob`` branch and yielded ``[]`` silently, leaving that leg of
+        the guardrail vacuously green (the ``op_log.py`` -> ``op.py`` rename
+        disarmed the op.py leg for months without a failure).
     """
 
+    if not path.exists():
+        raise FileNotFoundError(f"SCANNED_PATHS entry does not exist: {path}")
     if path.is_file():
         return [path]
     return sorted(candidate for candidate in path.rglob("*.py") if candidate.is_file())

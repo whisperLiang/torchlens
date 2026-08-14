@@ -14,6 +14,9 @@ witnessed under its own path.
 
 from __future__ import annotations
 
+import collections
+import collections.abc
+import dataclasses
 from typing import Any
 
 import pytest
@@ -324,3 +327,117 @@ def test_walkers_still_complete_legal_depths_on_a_healthy_stack() -> None:
     assert snapshot_input_boundary(deep)["refusals"] == []
     assert isinstance(copy_arg_tree(deep), list)
     assert len(_simple_leaves(deep)) == 1
+
+
+class _CycleModel(nn.Module):
+    """Parameterized model whose forward reads one attribute/key of the input."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(2, 2)
+
+    def forward(self, box: Any) -> torch.Tensor:
+        """Consume the boxed tensor."""
+
+        tensor = box["x"] if isinstance(box, collections.abc.Mapping) else box.x
+        return self.lin(tensor)
+
+
+@dataclasses.dataclass
+class _PeerBox:
+    """Dataclass input that can close a reference cycle through ``peer``."""
+
+    x: torch.Tensor
+    peer: Any = None
+
+
+def test_device_move_walker_refuses_cycles_and_depth_typed() -> None:
+    """The device-move walker carries the shared cycle/depth guards.
+
+    It runs FIRST for dataclass and non-``dict``-Mapping trees (the
+    ``_simple_leaves`` entry gate descends only ``dict|tuple|list``), and it
+    fires for every model with at least one parameter, so a cycle closed
+    through a dataclass or a ``UserDict`` killed plain ``tl.trace`` with a
+    raw ``RecursionError`` from library internals (unswept sibling of the
+    95926175 walker-guard fix).
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    cyclic = _PeerBox(x=torch.ones(2))
+    cyclic.peer = cyclic
+    with pytest.raises(InvalidArgumentError):
+        tl.trace(_CycleModel(), cyclic)
+
+    user_dict = collections.UserDict()
+    user_dict["x"] = torch.ones(2)
+    user_dict["self"] = user_dict
+    with pytest.raises(InvalidArgumentError):
+        tl.trace(_CycleModel(), user_dict)
+
+    deep = _PeerBox(x=torch.ones(2))
+    for _ in range(INPUT_TREE_MAX_DEPTH + 10):
+        deep = _PeerBox(x=torch.ones(2), peer=deep)
+    with pytest.raises(InvalidArgumentError):
+        tl.trace(_CycleModel(), deep)
+
+
+def test_device_move_dataclass_rebuild_never_reruns_user_init() -> None:
+    """The dataclass device-move rebuild is inert (no ``__post_init__`` re-run).
+
+    Rebuilding by calling the user's constructor executed ``__init__``/
+    ``__post_init__`` a SECOND time on already-initialized values, so the
+    forward received VALUE-mutated fields (incremented counters, re-drawn
+    RNG, recomputed derived tensors) that the post-move witness then honestly
+    recorded -- a capture of a different program.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    @dataclasses.dataclass
+    class CountingBox:
+        """Dataclass whose ``__post_init__`` observably mutates a field."""
+
+        x: torch.Tensor
+        n: int = 0
+
+        def __post_init__(self) -> None:
+            """Increment the counter (a second run is detectable)."""
+
+            self.n += 1
+
+    original = CountingBox(x=torch.ones(2))
+    assert original.n == 1
+    moved = _move_tensors_to_device(original, "meta")
+    assert moved is not original
+    assert moved.x.device.type == "meta"
+    assert moved.n == 1, "user __init__/__post_init__ ran a second time during the move"
+
+
+def test_device_move_walker_descends_registered_containers() -> None:
+    """Registered containers move through their own flatten/unflatten hooks.
+
+    The walker's docstring claimed registered-container coverage while the
+    implementation fell through every branch and returned the original
+    unmoved -- indistinguishable from "nothing moved", surfacing later as a
+    device-mismatch crash blamed on the user's model.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class WrappedBatch:
+        """Minimal user container holding one tensor."""
+
+        def __init__(self, tensor: torch.Tensor) -> None:
+            self.tensor = tensor
+
+    tl.register_container(
+        WrappedBatch,
+        lambda wrap: ([wrap.tensor], None),
+        lambda aux, children: WrappedBatch(children[0]),
+        state_complete=True,
+    )
+    wrapped = WrappedBatch(torch.ones(2))
+    moved = _move_tensors_to_device(wrapped, "meta")
+    assert moved is not wrapped
+    assert moved.tensor.device.type == "meta"

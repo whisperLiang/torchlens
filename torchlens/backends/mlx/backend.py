@@ -1243,6 +1243,25 @@ class MLXBackend:
             # scrub (they are not in PORTABLE_STATE_SPEC by design).
             del trace._mlx_intervention_plan
             del trace._mlx_halt_selector
+            # Zero-match disclosure (preview half of the torch-side fix): a
+            # selector matching nothing produced a trace byte-identical to
+            # plain capture with no warning and no counter anywhere.
+            if intervention_plan is not None and not trace.__dict__.pop(
+                "_mlx_intervene_fired", False
+            ):
+                warnings.warn(
+                    "Capture-time intervention selector matched zero sites on the mlx "
+                    "forward; no intervention fired (check the selector's op/module name).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if halt_selector is not None and halt_signal is None:
+                warnings.warn(
+                    "Capture-time halt selector matched zero sites on the mlx forward; "
+                    "the capture ran the full forward and completed without halting.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             trace.forward_duration = Duration(time.time() - trace.capture_start_time)
             if halt_signal is not None:
                 trace.raw_output = None
@@ -1752,6 +1771,7 @@ class MLXBackend:
                 record_ctx = self.build_record_context(trace, entry, func_event_input, leaf)
                 if plan is not None and selector_matches_capture_context(plan.selector, record_ctx):
                     replacement = self._apply_mlx_intervention(plan, leaf)
+                    trace._mlx_intervene_fired = True
                     replacements[id(leaf)] = replacement
                     fire_results_by_site[index] = (
                         FireResult(
