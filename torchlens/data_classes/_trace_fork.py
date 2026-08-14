@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from .. import _state
-from .._trace_core.op_store import _MISSING, DetachedOpStore, cow_copy_value
+from .._trace_core.op_store import _MISSING, DetachedOpStore, PooledCell, cow_copy_value
 from .._trace_core.record_rows import CORE_KEY, ROW_KEY
 from ..intervention.types import MODEL_LOG_FIELD_FORK_POLICY, ForkFieldPolicy
 from ._accessor_base import Accessor
@@ -403,9 +403,14 @@ def _fill_detached_record(parent_record: Any, shell: Any, translator: _RecordTra
     detached = DetachedOpStore(layout)
     for fid in range(layout.n_fields):
         value = store.cell_get(row, fid)
-        # Decode compacted singleton-label cells (M14 slice 2) while
-        # copying: a detached shell has no registry to decode them later.
-        if value.__class__ is str and store.compacted_singleton(row, fid, value):
+        # Decode BOTH internal cell encodings (M14) while copying: a detached
+        # shell has no pool/registry to decode them later, and
+        # ``DetachedOpStore.items`` streams cells verbatim — a leaked
+        # ``PooledCell`` would poison the record's pickle state and make every
+        # fork serialization (pickle AND tl.save/tl.load) fail downstream.
+        if value.__class__ is PooledCell:
+            value = value.hydrate()
+        elif value.__class__ is str and store.compacted_singleton(row, fid, value):
             value = [value]
         detached.cell_set(0, fid, cow_copy_value(value, translator))
     shell.__dict__[CORE_KEY] = detached
