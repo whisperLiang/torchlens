@@ -190,8 +190,15 @@ def loads_bounded(
     if len(text) > max_bytes or len(text.encode("utf-8")) > max_bytes:
         raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
     _prescan_depth(text, max_depth=max_depth)
+
+    def _reject_constant(name: str) -> Any:
+        # The writers use ``allow_nan=False``, so NaN/Infinity in an artifact
+        # is a forgery -- and one that loads fine but makes every re-save
+        # raise (a stillborn artifact). Refuse at parse instead.
+        raise _refuse(f"manifest JSON contains the non-finite constant {name}", text)
+
     try:
-        return json.loads(text)
+        return json.loads(text, parse_constant=_reject_constant)
     except RecursionError as exc:  # pragma: no cover - prescan normally fires first
         raise _refuse(
             "manifest JSON nesting exceeded the interpreter recursion limit", text

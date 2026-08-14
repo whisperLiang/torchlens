@@ -36,8 +36,14 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import bundle as bundle_mod, manifest as manifest_mod, runnable as runnable_mod
+from torchlens._io import (
+    _json as json_mod,
+    bundle as bundle_mod,
+    manifest as manifest_mod,
+    runnable as runnable_mod,
+)
 from torchlens._io.manifest import Manifest
+from torchlens._io.paths import resolve_bundle_blob_path
 from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.smoke
@@ -305,3 +311,69 @@ def test_runnable_dead_model_fallback_refuses_non_tensor_state_typed() -> None:
     )
     with pytest.raises(TorchLensIOError, match="non-tensor persistent-buffer"):
         runnable_mod._add_persistent_buffer_slot_drafts(stub_trace, {})
+
+
+# --------------------------------------------------------------------------- #
+# LOW: validation tightenings                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_nul_byte_relative_path_refuses_typed(tmp_path: Path) -> None:
+    """A NUL byte in a manifest relative_path refuses typed, not ValueError.
+
+    Fail-before: ``Path.resolve`` raised a bare ``ValueError`` ("embedded null
+    byte") while every other hostile path shape refused typed.
+    """
+
+    bundle_root = tmp_path / "b.tlspec"
+    (bundle_root / "blobs").mkdir(parents=True)
+    with pytest.raises(TorchLensIOError, match="unresolvable"):
+        resolve_bundle_blob_path(bundle_root, "blobs/a\x00b.safetensors")
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [[-1, 5], [True, 2], [2**60], list(range(300))],
+    ids=["negative-dim", "bool-dim", "huge-dim", "too-many-dims"],
+)
+def test_tensor_entry_refuses_invalid_shape(tmp_path: Path, shape: list) -> None:
+    """Negative/bool/absurd shape dims refuse at parse (latent num_elements feed)."""
+
+    data = _saved_manifest_data(tmp_path)
+    entry = dict(data["tensors"][0])
+    entry["shape"] = shape
+    with pytest.raises(TorchLensIOError, match="shape"):
+        manifest_mod.TensorEntry.from_dict(entry)
+
+
+def test_tensor_entry_refuses_bool_bytes_and_manifest_bool_ints(tmp_path: Path) -> None:
+    """``bytes=True`` and ``n_layers=True`` refuse (bool passes isinstance int)."""
+
+    data = _saved_manifest_data(tmp_path)
+    entry = dict(data["tensors"][0])
+    entry["bytes"] = True
+    with pytest.raises(TorchLensIOError, match="bytes"):
+        manifest_mod.TensorEntry.from_dict(entry)
+    forged = dict(data)
+    forged["n_layers"] = True
+    with pytest.raises(TorchLensIOError, match="n_layers"):
+        Manifest.from_dict(forged)
+
+
+def test_tensor_entry_refuses_malformed_sha256(tmp_path: Path) -> None:
+    """A non-hex 64-char sha256 refuses at parse, not lazily at materialize."""
+
+    data = _saved_manifest_data(tmp_path)
+    entry = dict(data["tensors"][0])
+    entry["sha256"] = "Z" * 64
+    with pytest.raises(TorchLensIOError, match="sha256|SHA-256"):
+        manifest_mod.TensorEntry.from_dict(entry)
+
+
+def test_loads_bounded_refuses_nonfinite_constants() -> None:
+    """NaN/Infinity load-refuse: writers use allow_nan=False, so accepting them
+    at load produced artifacts whose re-save raises (stillborn)."""
+
+    for payload in ('{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}'):
+        with pytest.raises(json.JSONDecodeError, match="non-finite"):
+            json_mod.loads_bounded(payload)

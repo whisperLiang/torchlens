@@ -118,7 +118,15 @@ def resolve_bundle_blob_path(
         # Keep the per-candidate guard when a caller reuses its canonical root:
         # replacing blobs/ with a symlink during an operation must still fail.
         raise TorchLensIOError(f"Refusing symlinked blobs directory: {blobs_dir}.")
-    candidate = (bundle_root / candidate_path).resolve()
+    try:
+        candidate = (bundle_root / candidate_path).resolve()
+    except (ValueError, OSError) as exc:
+        # A NUL byte (or another OS-unrepresentable component) in a hostile
+        # manifest path raised a bare ValueError from ``Path.resolve``; every
+        # other hostile shape refuses typed, so this one must too.
+        raise TorchLensIOError(
+            f"Bundle rejected unresolvable relative_path {relative_path!r}."
+        ) from exc
     allowed_root = (
         resolve_bundle_blobs_dir(bundle_root) if resolved_blobs_dir is None else resolved_blobs_dir
     )

@@ -44,6 +44,20 @@ _CODEC_METADATA_TUPLE_TAG = "__torchlens_codec_tuple_v1__"
 # few entries per layer.
 _MAX_MANIFEST_TENSOR_ENTRIES = 1_000_000
 
+# Structural ceilings for tensor-entry shape metadata. ``shape`` is
+# metadata-only at load, but downstream manifests multiply the dims into a
+# public element count, and bool/negative/absurd dims are forgeries either
+# way. torch tensors max out at 64 dims; per-dim 2**48 elements is far past
+# any real tensor.
+_MAX_TENSOR_DIMS = 256
+_MAX_TENSOR_DIM_VALUE = 2**48
+
+
+def _is_plain_nonnegative_int(value: Any) -> bool:
+    """Return whether ``value`` is a real non-negative int (bools excluded)."""
+
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
 
 @dataclass(frozen=True)
 class TensorEntry:
@@ -149,12 +163,21 @@ class TensorEntry:
                     f"Manifest tensor entry must include non-empty string {field_name!r}."
                 )
 
+        if not _is_sha256(data["sha256"]):
+            raise TorchLensIOError("Manifest tensor entry 'sha256' must be a SHA-256 hex digest.")
+
         shape = data.get("shape")
-        if not isinstance(shape, list) or any(not isinstance(dim, int) for dim in shape):
-            raise TorchLensIOError("Manifest tensor entry 'shape' must be a list of ints.")
+        if not isinstance(shape, list) or any(not _is_plain_nonnegative_int(dim) for dim in shape):
+            raise TorchLensIOError(
+                "Manifest tensor entry 'shape' must be a list of non-negative ints."
+            )
+        if len(shape) > _MAX_TENSOR_DIMS or any(dim > _MAX_TENSOR_DIM_VALUE for dim in shape):
+            raise TorchLensIOError(
+                "Manifest tensor entry 'shape' exceeds the structural dimension ceiling."
+            )
 
         num_bytes = data.get("bytes")
-        if not isinstance(num_bytes, int) or num_bytes < 0:
+        if not _is_plain_nonnegative_int(num_bytes):
             raise TorchLensIOError("Manifest tensor entry 'bytes' must be a non-negative int.")
 
         optional_strings = {
@@ -492,7 +515,7 @@ class Manifest:
 
         for field_name in required_int_fields:
             field_value = data.get(field_name)
-            if not isinstance(field_value, int) or field_value < 0:
+            if not _is_plain_nonnegative_int(field_value):
                 raise TorchLensIOError(
                     f"Manifest field {field_name!r} must be a non-negative integer."
                 )
