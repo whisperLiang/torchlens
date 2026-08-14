@@ -634,3 +634,36 @@ def test_module_consumed_stale_ref_is_disclosed_and_rescued(raw_cos: Any) -> Non
     assert trace.rescue_rerun is not None
     assert trace.rescue_rerun["recovered"] is True
     assert trace.capture_verification_reason == "mode_rescue_rerun"
+
+
+def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
+    """A rescue re-run would invoke user intervention callables a SECOND time.
+
+    Side-effecting user callables (counters, file writes, externally-held
+    state) double-applied invisibly on the rescue path; interventions now
+    refuse the re-run fail-closed, exactly like streaming/halt captures.
+    """
+
+    calls = {"intervene": 0}
+
+    def counting_transform(value: torch.Tensor, *, hook: Any) -> torch.Tensor:
+        calls["intervene"] += 1
+        return value * 0.5
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return torch.relu(raw_cos(self.lin(v)))
+
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(
+            Model(),
+            torch.randn(3, 4),
+            intervene=tl.when(tl.func("linear"), counting_transform),
+        )
+
+    assert calls["intervene"] == 1
+    assert trace.rescue_rerun is None
