@@ -369,13 +369,43 @@ def _module_hierarchy_str(self: "Trace") -> str:
     return s
 
 
-def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int) -> str:
+def _module_hierarchy_str_recursive(
+    self: "Trace",
+    module_pass: str,
+    level: int,
+    _in_progress: set[str] | None = None,
+) -> str:
     """Recursively format child modules at the given indentation level.
 
     If any child has grandchildren (deeper nesting), each child gets its
     own line with recursive expansion.  Otherwise, all children are
     printed compactly on one line with ``_format_list_with_line_breaks``.
+
+    Bounded display walk (r-b4 R27-5): a malformed/cyclic rehydrated
+    ``call_children`` relationship renders a ``<cycle>`` marker, and nesting
+    past 200 levels renders ``<max-depth>``, instead of crashing the display
+    path with a raw ``RecursionError``.
     """
+    if _in_progress is None:
+        _in_progress = set()
+    if level > 200:
+        return f"\n\t\t{'    ' * level}<max-depth>"
+    if module_pass in _in_progress:
+        return f"\n\t\t{'    ' * level}<cycle>"
+    _in_progress.add(module_pass)
+    try:
+        return _module_hierarchy_str_children(self, module_pass, level, _in_progress)
+    finally:
+        _in_progress.discard(module_pass)
+
+
+def _module_hierarchy_str_children(
+    self: "Trace",
+    module_pass: str,
+    level: int,
+    _in_progress: set[str],
+) -> str:
+    """Format one guarded module call's children (body of the above)."""
     s = ""
     module_call_log = self.module_calls[module_pass]
     children = module_call_log.call_children
@@ -388,7 +418,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
             s += f"\n\t\t{'    ' * level}{submodule}"
             if cast(Any, self.modules[submodule]).num_calls > 1:
                 s += f":{call_index}"
-            s += _module_hierarchy_str_recursive(self, submodule_pass, level + 1)
+            s += _module_hierarchy_str_recursive(self, submodule_pass, level + 1, _in_progress)
     else:
         submodule_list = []
         for submodule_pass in children:
