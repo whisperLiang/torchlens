@@ -241,6 +241,99 @@ def test_group_readable_secret_refuses_typed(cache_root: Path) -> None:
         secret.chmod(0o600)
 
 
+# --------------------------------------------------------------------------- #
+# The double-read TOCTOU: authenticate one read, unpickle another               #
+# --------------------------------------------------------------------------- #
+
+
+class _OpenCountingSwapHook:
+    """Audit hook that swaps the cache entry BETWEEN the verify and load reads.
+
+    The vulnerable reader computed the HMAC by streaming one ``open`` of the
+    entry, then performed a SECOND, independent ``open`` for ``pickle.load``.
+    Those two reads resolved the same path at different times, so an attacker who
+    can write the cache directory could substitute the payload after the tag
+    verified over the benign bytes. This hook makes that race deterministic: it
+    counts ``open`` events for the exact entry path and, on the SECOND one,
+    overwrites the file with a code-execution gadget before the read proceeds.
+
+    A correct single-read implementation opens the entry exactly ONCE (it
+    authenticates and unpickles the same in-memory bytes), so the swap is never
+    reachable and ``opens`` never climbs past 1.
+    """
+
+    def __init__(self, entry_path: Path, evil_bytes: bytes) -> None:
+        self._entry_str = str(entry_path)
+        self._entry_path = entry_path
+        self._evil_bytes = evil_bytes
+        self.opens = 0
+        self.swapped = False
+        self._swapping = False
+
+    def __call__(self, event: str, args: tuple) -> None:  # noqa: D401 - audit hook
+        if event != "open" or self._swapping:
+            return
+        raw_path = args[0]
+        if raw_path is None:
+            return
+        try:
+            candidate = os.fspath(raw_path)
+        except TypeError:
+            return
+        if candidate != self._entry_str:
+            return
+        self.opens += 1
+        if self.opens == 2 and not self.swapped:
+            # Second open == the pickle.load read in the vulnerable path. Swap
+            # the bytes now, before the read completes. Guard against the writes
+            # we do here re-entering the hook.
+            self._swapping = True
+            try:
+                with open(self._entry_path, "wb") as handle:
+                    handle.write(self._evil_bytes)
+                self.swapped = True
+            finally:
+                self._swapping = False
+
+
+@pytest.mark.smoke
+def test_authenticated_bytes_are_the_bytes_unpickled(cache_root: Path, tmp_path: Path) -> None:
+    """The entry is read ONCE: what the tag authenticates is what gets unpickled.
+
+    Fail-before (double-read TOCTOU): the HMAC verified the benign bytes on the
+    first read, then a second read of the same path fed a substituted
+    code-execution gadget straight into ``pickle.load``. The tag file was never
+    touched, so the entry authenticated and the gadget still ran.
+    """
+
+    import sys
+
+    model, inputs = _tiny_model(), torch.rand(2, 4)
+    tl.trace(model, inputs, layers_to_save="all", cache=True)
+    entry = _cache_entry(cache_root)
+    marker = tmp_path / _PWN_MARKER_NAME
+    evil = pickle.dumps(_CodeExecPayload(marker))
+
+    hook = _OpenCountingSwapHook(entry, evil)
+    sys.addaudithook(hook)
+
+    refreshed = tl.trace(model, inputs, layers_to_save="all", cache=True)
+
+    assert not marker.exists(), (
+        "the entry was authenticated on one read and unpickled from another: the "
+        "swapped gadget executed"
+    )
+    assert hook.opens == 1, (
+        "the cache entry was opened more than once during a single load; a "
+        "correct reader authenticates and unpickles the SAME single read "
+        f"(observed {hook.opens} opens)"
+    )
+    assert not hook.swapped, "the between-reads swap was reachable"
+    # The benign bytes authenticated and loaded, so this is an ordinary hit.
+    assert refreshed.capture_cache_hit is True
+    assert isinstance(refreshed, tl.Trace)
+
+
 @pytest.mark.smoke
 def test_no_bare_pickle_read_in_the_package() -> None:
     """Standing gate: no bare ``pickle.load``/``loads`` outside the guarded readers.
