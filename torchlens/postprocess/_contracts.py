@@ -1686,6 +1686,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "internal_source_parents",
                     "_edge_uses",
                     "_label_raw",
                     "children",
@@ -1748,7 +1749,10 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "func",
                     "func_name",
                     "has_children",
+                    "internal_source_parents",
                     "interventions",
+                    "is_input",
+                    "is_internal_source",
                     "modules",
                     "out",
                     "out_versions_by_child",
@@ -1807,6 +1811,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "internal_source_parents",
                     "_edge_uses",
                     "_param_barcodes",
                     "activation_memory",
@@ -1993,6 +1998,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "internal_source_parents",
                     "_arg_expressions_cache",
                     "_edge_uses",
                     "_label_raw",
@@ -2379,6 +2385,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "buffer_source",
                     "_edge_uses",
                     "args_template",
                     "children",
@@ -2482,6 +2489,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "has_internal_source_ancestor",
                     "_edge_uses",
                     "address",
                     "args_template",
@@ -2738,6 +2746,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset(
                 (
+                    "buffer_source",
                     "_edge_uses",
                     "args_template",
                     "atomic_module_call",

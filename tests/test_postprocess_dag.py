@@ -114,7 +114,10 @@ MULTI_WRITER_GOLDEN = {
     "input_ancestors": ("4", "6", "9"),
     "input_to_module_calls": ("1", "11"),
     "internal_source_ancestors": ("6", "9"),
-    "internal_source_parents": ("6", "9"),
+    # SF-01 made step 1 a real ancestry writer (ingest-derived parents);
+    # L4's D1 buffer-merge hardening added buffer_source's step-6 write.
+    "buffer_source": ("6", "9"),
+    "internal_source_parents": ("1", "6", "9"),
     "interventions": ("1", "3", "6", "9"),
     "is_buffer": ("1", "9"),
     "is_input": ("1", "9"),

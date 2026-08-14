@@ -127,6 +127,11 @@ PINNED_NOOP_WRITERS = {
     "6": frozenset(
         (
             "args_template",
+            # L4's D1 buffer-merge hardening declares survivor ancestry-flag
+            # propagation; on the recorded axes the flag is already true, so
+            # the write is contract-share-honest but observed no-op (reviewed
+            # 2026-08-14; cannot discharge reads, per this test's doctrine).
+            "has_internal_source_ancestor",
             "conditional_arm_children",
             "conditional_elif_children",
             "conditional_else_children",
@@ -196,13 +201,19 @@ def test_buffer_duplicate_axis_actually_merges(
     try:
         assert merges, "the buffer_duplicate axis must reach _merge_buffer_entries"
         survivor_label, removed_label = merges[0]
+        # buffer_source now rides the raw->final label rename (L4's
+        # _SCALAR_LABEL_FIELDS_TO_RENAME fix), so resolve the survivor's FINAL
+        # label for the comparison; the removed buffer never gets a final label.
+        survivor_final = next(
+            op.label for op in trace.layer_list if op._label_raw == survivor_label
+        )
         repointed = [
-            op for op in trace.layer_list if op.is_buffer and op.buffer_source == survivor_label
+            op for op in trace.layer_list if op.is_buffer and op.buffer_source == survivor_final
         ]
         assert repointed, "the scalar buffer_source repoint must have fired"
-        assert all(op.buffer_source != removed_label for op in trace.layer_list), (
-            "no surviving op may still reference the merged-away buffer"
-        )
+        assert all(
+            op.buffer_source not in (removed_label,) for op in trace.layer_list
+        ), "no surviving op may still reference the merged-away buffer"
     finally:
         trace.cleanup()
 
