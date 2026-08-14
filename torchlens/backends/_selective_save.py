@@ -121,20 +121,42 @@ def apply_static_label_save_policy(
         else:
             _drop_public_activation_payload(op)
     if not matched_any:
-        # A predicate matching ZERO sites used to complete silently -- a
-        # typo'd label or function name produced a trace with no saved
-        # activations and no diagnostic. The trace stays usable (structure
-        # and metadata survive), so this warns rather than refusing; TF's
-        # intervene-side reachability check remains fail-closed separately.
-        warnings.warn(
-            f"{backend_name} trace(save=...) predicate matched zero operations; "
-            "the returned trace retains no saved activation payloads. Check the "
-            "selector against the captured op labels (trace.layer_list) -- a "
-            "mistyped label or function name silently saves nothing.",
-            stacklevel=3,
-        )
+        warn_zero_match_save_predicate(backend_name)
     trace._selective_save_hidden_payloads = hidden_payloads
     _refresh_saved_activation_summary(trace)
+
+
+def warn_zero_match_save_predicate(backend_name: str, *, stacklevel: int = 3) -> None:
+    """Disclose a ``save=`` predicate that matched ZERO operations.
+
+    A predicate matching no sites used to complete silently -- a typo'd label
+    or function name produced a COMPLETE trace with no saved activations and
+    no diagnostic. The trace stays usable (structure and metadata survive),
+    so this warns rather than refusing; TF's intervene-side reachability
+    check remains fail-closed separately. Shared by the post-finalization
+    resolver (jax / paddle / tinygrad / mlx) and TF's per-op retention seams
+    so no backend can drop out of the disclosure family unnoticed.
+
+    Parameters
+    ----------
+    backend_name
+        Backend name used in the diagnostic.
+    stacklevel
+        Forwarded to :func:`warnings.warn`.
+
+    Returns
+    -------
+    None
+        Emits exactly one warning.
+    """
+
+    warnings.warn(
+        f"{backend_name} trace(save=...) predicate matched zero operations; "
+        "the returned trace retains no saved activation payloads. Check the "
+        "selector against the captured op labels (trace.layer_list) -- a "
+        "mistyped label or function name silently saves nothing.",
+        stacklevel=stacklevel,
+    )
 
 
 def _hidden_payloads_by_label(trace: Any) -> dict[str, Any]:

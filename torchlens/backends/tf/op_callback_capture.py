@@ -233,6 +233,11 @@ class TFEagerCaptureSession:
         self.init_op_labels: list[str] = []
         self.op_type_counts: Counter[str] = Counter()
         self.op_captures: list[TFOpCapture] = []
+        # Zero-match disclosure accounting: TF gates payload retention per-op
+        # instead of running the shared post-finalization resolver, so the
+        # capture entry needs this count to warn when a typo'd save= matched
+        # nothing (R17 parity with the sibling previews).
+        self.save_predicate_match_count = 0
         self._source_label_by_ref: dict[object, str] = {}
 
     def run(self) -> TFCaptureResult:
@@ -631,7 +636,10 @@ class TFEagerCaptureSession:
             return False
         if self.save_predicate is None:
             return True
-        return bool(self.save_predicate(record_context))
+        matched = bool(self.save_predicate(record_context))
+        if matched:
+            self.save_predicate_match_count += 1
+        return matched
 
     def _parents_for_inputs(
         self,

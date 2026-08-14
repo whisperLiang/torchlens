@@ -10,6 +10,7 @@ pre-settlement arms, and post-settlement teardown failures demote.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 import torch
@@ -400,7 +401,12 @@ def test_preview_backends_stamp_at_return_boundary() -> None:
         for line in source.splitlines():
             if "stamp_backend_finalized(trace)" in line:
                 break
-        assert "from ...capture.outcome import stamp_backend_finalized" in source, backend
+        # The stamp must come from the settlement authority (halt-capable
+        # backends also import StopRequest on the same line, so pin the
+        # module path and the imported name rather than one exact spelling).
+        assert re.search(
+            r"from \.\.\.capture\.outcome import [^\n]*\bstamp_backend_finalized\b", source
+        ), backend
 
 
 def test_unrelated_capture_error_after_swallowed_nonfinite_settles_failed() -> None:
@@ -439,3 +445,166 @@ def test_unrelated_capture_error_after_swallowed_nonfinite_settles_failed() -> N
     aborted = settle_failed(trace2, None, latched, n_ops_committed=0)
     assert aborted.status is CaptureStatus.ABORTED_NONFINITE
     assert aborted.reason == "nan in relu_1_1"
+
+
+# ---------------------------------------------------------------------------
+# R06 (round 3): hostile exception __str__ never breaks guaranteed settlement
+# ---------------------------------------------------------------------------
+
+
+class _HostileStrError(RuntimeError):
+    """User exception whose stringification itself raises."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("broken __str__")
+
+
+class _HostileReprError(RuntimeError):
+    """User exception whose repr itself raises (str stays benign)."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("broken __repr__")
+
+
+class _HostileStrModel(nn.Module):
+    """Forward that raises the hostile-__str__ exception after real ops."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.add(x, 1)
+        x = torch.relu(x)
+        raise _HostileStrError("boom")
+
+
+class _HostileReprModel(nn.Module):
+    """Forward that raises the hostile-__repr__ exception after real ops."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.add(x, 1)
+        x = torch.relu(x)
+        raise _HostileReprError("boom")
+
+
+def test_safe_exception_str_survives_hostile_str() -> None:
+    from torchlens.capture.outcome import safe_exception_repr, safe_exception_str
+
+    hostile = _HostileStrError("boom")
+    assert safe_exception_str(hostile) == "<unprintable _HostileStrError: __str__ raised>"
+    hostile_repr = _HostileReprError("boom")
+    assert safe_exception_repr(hostile_repr) == (
+        "<unrepresentable _HostileReprError: __repr__ raised>"
+    )
+    # Benign exceptions keep their exact text; empty text falls back to the type name.
+    assert safe_exception_str(ValueError("msg")) == "msg"
+    assert safe_exception_str(ValueError()) == "ValueError"
+    assert safe_exception_repr(ValueError("msg")) == "ValueError('msg')"
+
+
+def test_hostile_str_forward_keeps_identity_and_settles_failed() -> None:
+    """The original exception propagates by IDENTITY with a settled product.
+
+    Before the fix ``settle_failed``'s ``reason=str(exc)`` re-raised inside the
+    guaranteed-settlement ``finally``: the secondary RuntimeError escaped, the
+    user exception survived only as ``__context__``, and no settled product or
+    ``partial_log`` existed.
+    """
+
+    with pytest.raises(_HostileStrError) as exc_info:
+        tl.trace(_HostileStrModel(), torch.ones(1, 3))
+    exc = exc_info.value
+    partial = tl.partial.from_failed_capture(exc)
+    outcome = partial.outcome
+    assert outcome is not None
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.phase is CapturePhase.FORWARD
+    assert outcome.error_type == "_HostileStrError"
+    assert outcome.reason == "<unprintable _HostileStrError: __str__ raised>"
+
+
+def test_hostile_str_fastlog_return_partial_builds_failed_recording() -> None:
+    """The fastlog failed-partial path survives hostile stringification."""
+
+    recording = tl.record(
+        _HostileStrModel(),
+        torch.ones(1, 3),
+        save=lambda ctx: ctx.kind == "op",
+        on_forward_error="return_partial",
+    )
+    assert recording.failed is True
+    assert recording.status == "partial_error"
+    outcome = recording.outcome
+    assert outcome is not None
+    assert outcome.status is CaptureStatus.FAILED
+    assert isinstance(recording.error_repr, str)
+
+
+def test_hostile_repr_fastlog_return_partial_records_fallback_repr() -> None:
+    """``error_repr`` degrades to the typed fallback, never raises."""
+
+    recording = tl.record(
+        _HostileReprModel(),
+        torch.ones(1, 3),
+        save=lambda ctx: ctx.kind == "op",
+        on_forward_error="return_partial",
+    )
+    assert recording.failed is True
+    assert recording.error_repr == "<unrepresentable _HostileReprError: __repr__ raised>"
+
+
+def test_hostile_str_fastlog_raise_path_keeps_identity() -> None:
+    """The default raise disposition aborts storage without a secondary raise."""
+
+    with pytest.raises(_HostileStrError):
+        tl.record(
+            _HostileStrModel(),
+            torch.ones(1, 3),
+            save=lambda ctx: ctx.kind == "op",
+        )
+
+
+def test_hostile_str_teardown_failure_still_demotes(monkeypatch) -> None:
+    """The demotion note survives a hostile-__str__ teardown exception."""
+
+    import torchlens.capture.trace as capture_trace
+
+    captured: list = []
+
+    def _boom(trace: object) -> None:
+        captured.append(trace)
+        raise _HostileStrError("planted hostile teardown")
+
+    monkeypatch.setattr(capture_trace, "_clear_saved_activation_dedup_caches", _boom)
+    with pytest.raises(_HostileStrError):
+        tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    trace = captured[0]
+    outcome = trace.outcome
+    assert outcome is not None
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.phase is CapturePhase.TEARDOWN
+    assert "<unprintable _HostileStrError: __str__ raised>" in (outcome.reason or "")
+
+
+def test_teardown_demotion_carries_the_teardown_error_type(monkeypatch) -> None:
+    """The demoted record's error_type is the teardown exception's type.
+
+    Before the fix the demotion copied the pre-demotion record's error_type
+    -- always None for the only legal inputs (COMPLETE/HALTED) -- so a
+    FAILED/TEARDOWN outcome had no structured exception type and consumers
+    had to string-parse the free-text reason.
+    """
+
+    import torchlens.capture.trace as capture_trace
+
+    captured: list = []
+
+    def _boom(trace: object) -> None:
+        captured.append(trace)
+        raise KeyError("planted teardown failure")
+
+    monkeypatch.setattr(capture_trace, "_clear_saved_activation_dedup_caches", _boom)
+    with pytest.raises(KeyError):
+        tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    outcome = captured[0].outcome
+    assert outcome is not None
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.phase is CapturePhase.TEARDOWN
+    assert outcome.error_type == "KeyError"

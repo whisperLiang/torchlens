@@ -198,3 +198,86 @@ def test_paddle_halted_capture_settles_halted() -> None:
     assert trace.halted is True
     assert trace.outcome is not None
     assert trace.outcome.status is CaptureStatus.HALTED
+
+
+# ---------------------------------------------------------------------------
+# R06 round 3: a SWALLOWED preview halt never settles COMPLETE
+# ---------------------------------------------------------------------------
+
+
+def test_preview_stamp_refuses_swallowed_halt_and_settles_failed() -> None:
+    """A latched stop request with no structural halt is a swallowed signal.
+
+    The halt-capable preview raise sites latch a ``StopRequest`` before
+    raising ``HaltSignal`` (torch ``evaluate_halt`` parity). If user code eats
+    the signal in a broad ``except``, the capture reaches the stamp un-halted;
+    before the fix that took the COMPLETE arm -- a wrongly-blessed settled
+    status for a capture whose halt never actually stopped the forward.
+    """
+
+    from torchlens.capture.outcome import StopRequest
+    from torchlens.errors import StopSignalSwallowedError
+
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    assert bool(getattr(trace, "halted", False)) is False
+    trace.__dict__["_stop_requested"] = StopRequest(
+        kind="halt",
+        reason="relu_1_2",
+        boundary_label="relu_1_2",
+    )
+    with pytest.raises(StopSignalSwallowedError, match="swallowed the control signal"):
+        stamp_backend_finalized(trace)
+    # The capture settled FAILED, never COMPLETE, and the latch was consumed.
+    settled = outcome_for(trace)
+    assert settled is not None
+    assert settled.status is CaptureStatus.FAILED
+    assert "_stop_requested" not in trace.__dict__
+
+
+def test_preview_stamp_consumes_latch_on_the_normal_halted_arm() -> None:
+    """A normally-halted capture (latch + structural halt) stamps HALTED."""
+
+    from torchlens.capture.outcome import StopRequest
+
+    trace = _halted_trace()
+    trace.__dict__["_stop_requested"] = StopRequest(
+        kind="halt",
+        reason=trace.halt_reason,
+        boundary_label=trace.halt_frontier,
+    )
+    outcome = stamp_backend_finalized(trace)
+    assert outcome.status is CaptureStatus.HALTED
+    assert "_stop_requested" not in trace.__dict__
+
+
+@pytest.mark.parametrize("backend", _HALT_CAPABLE_PREVIEW_BACKENDS)
+def test_halt_capable_preview_backend_latches_stop_request_before_raising(backend: str) -> None:
+    """Source lockstep: every preview HaltSignal raise latches the request first.
+
+    The latch write must precede EVERY ``raise HaltSignal`` in the backend so
+    a swallowed signal is detectable at the stamp; a raise without a latch
+    reopens the swallowed-halt COMPLETE blessing for that site.
+    """
+
+    source = (TORCHLENS_DIR / "backends" / backend / "backend.py").read_text(encoding="utf-8")
+    lines = source.splitlines()
+    raise_lines = [index for index, line in enumerate(lines) if "raise HaltSignal(" in line]
+    assert raise_lines, backend
+    latch_lines = [index for index, line in enumerate(lines) if '"_stop_requested"' in line]
+    for raise_line in raise_lines:
+        preceding = [index for index in latch_lines if 0 <= raise_line - index <= 12]
+        assert preceding, (
+            f"{backend}: raise HaltSignal at line {raise_line + 1} has no "
+            "StopRequest latch write within the preceding 12 lines"
+        )
+
+
+def test_preview_stamp_source_checks_the_stop_latch() -> None:
+    """Source lockstep: the one preview stamp consumes and checks the latch."""
+
+    source = (TORCHLENS_DIR / "capture" / "outcome.py").read_text(encoding="utf-8")
+    body = source.split("def stamp_backend_finalized(", 1)[1]
+    body = body.split("\ndef ", 1)[0]
+    assert '"_stop_requested"' in body
+    assert "StopSignalSwallowedError" in body
+    assert "settle_failed" in body

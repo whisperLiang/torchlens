@@ -306,6 +306,32 @@ _REFUSAL_HINTS: dict[str, str] = {
 }
 
 
+def safe_exception_str(exc: BaseException) -> str:
+    """Return ``str(exc)`` without letting a hostile ``__str__`` escape.
+
+    Exception stringification runs arbitrary user code: settlement sits in
+    ``finally`` blocks that promise a settled product and byte-identical
+    exception identity/chaining, so a ``__str__`` that itself raises must
+    degrade to the type name -- never break guaranteed settlement or mask the
+    original exception with the secondary stringification failure.
+    """
+
+    try:
+        text = str(exc)
+    except BaseException:  # noqa: BLE001 -- hostile __str__; disclosed fallback below
+        return f"<unprintable {type(exc).__name__}: __str__ raised>"
+    return text or type(exc).__name__
+
+
+def safe_exception_repr(exc: BaseException) -> str:
+    """Return ``repr(exc)`` with the same hostile-``__repr__`` guarantee."""
+
+    try:
+        return repr(exc)
+    except BaseException:  # noqa: BLE001 -- hostile __repr__; disclosed fallback below
+        return f"<unrepresentable {type(exc).__name__}: __repr__ raised>"
+
+
 def outcome_for(trace: object) -> CaptureOutcome | None:
     """Return the settled outcome sidecar attached to ``trace``, if any."""
 
@@ -985,7 +1011,7 @@ def settle_failed(
             status=CaptureStatus.FAILED,
             phase=current_capture_phase(trace),
             origin=origin,
-            reason=str(exc) or type(exc).__name__,
+            reason=safe_exception_str(exc),
             error_type=type(exc).__name__,
             n_ops_committed=n_ops_committed,
             inference_only=bool(getattr(trace, "inference_only", False)),
@@ -994,7 +1020,13 @@ def settle_failed(
     )
 
 
-def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome | None:
+def demote_outcome(
+    trace: object,
+    session: Any,
+    *,
+    note: str,
+    exc: BaseException | None = None,
+) -> CaptureOutcome | None:
     """Demote an already-settled outcome after a post-settlement teardown failure.
 
     The sole sanctioned post-settlement writer: permitted transitions are
@@ -1002,6 +1034,11 @@ def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome 
     the frozen record in both homes (trace sidecar and the session outcome's
     record slot); the session's ``TerminalState`` first-transition log is
     never revised. Anything already FAILED/ABORTED stays as settled.
+
+    ``exc`` is the teardown exception itself: it populates the demoted
+    record's structured ``error_type`` so consumers branch on the field, not
+    the free-text ``reason`` (the only legal pre-demotion statuses are
+    COMPLETE/HALTED, whose ``error_type`` is always None).
     """
 
     settled = outcome_for(trace)
@@ -1015,7 +1052,7 @@ def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome 
         phase=CapturePhase.TEARDOWN,
         origin=FailureOrigin.TORCHLENS,
         reason=note,
-        error_type=settled.error_type,
+        error_type=type(exc).__name__ if exc is not None else settled.error_type,
         boundary_kind=settled.boundary_kind,
         boundary_label=settled.boundary_label,
         frontier_labels=settled.frontier_labels,
@@ -1118,8 +1155,31 @@ def stamp_backend_finalized(trace: object) -> CaptureOutcome:
     UNKNOWN, taking N1 re-save and N2 validation entry down with it. Backends
     with no halt path are unaffected: ``halted`` is falsey and the COMPLETE
     arm is byte-identical to before.
+
+    SWALLOW-PROOF (F6 parity, R06 round 3). The halt-capable preview raise
+    sites latch a :class:`StopRequest` on the trace before raising their
+    ``HaltSignal`` -- exactly the torch ``evaluate_halt`` contract. A user
+    broad-``except`` that eats the signal leaves the latch set with no
+    structural ``halted`` write, so this stamp is the boundary checkpoint:
+    it settles FAILED and raises :class:`StopSignalSwallowedError`, never
+    blessing the swallowed capture COMPLETE. The latch is consumed on every
+    arm, so a normally-halted capture stamps HALTED exactly as before.
     """
 
+    stop_request = trace.__dict__.pop("_stop_requested", None)
+    if isinstance(stop_request, StopRequest) and not bool(getattr(trace, "halted", False)):
+        swallowed = StopSignalSwallowedError(
+            "TorchLens raised a halt stop signal during this forward, but the "
+            "capture reached its settlement stamp un-halted: user code "
+            "swallowed the control signal (typically a broad `except:` or "
+            "`except BaseException:` around the model body). The capture "
+            "cannot be trusted as complete. Stop boundary: "
+            f"{stop_request.boundary_label or stop_request.reason!r}.",
+            kind=stop_request.kind,
+            boundary_label=stop_request.boundary_label,
+        )
+        settle_failed(trace, None, swallowed)
+        raise swallowed
     if bool(getattr(trace, "halted", False)):
         reason = getattr(trace, "halt_reason", None)
         frontier_label = getattr(trace, "halt_frontier", None)
@@ -1174,6 +1234,8 @@ __all__ = [
     "parse_outcome_payload",
     "require_capture_capability",
     "resolve_loaded_outcome",
+    "safe_exception_repr",
+    "safe_exception_str",
     "set_capture_phase",
     "settle_completed",
     "settle_failed",

@@ -513,3 +513,19 @@ def test_accumulated_predicate_error_still_raises_without_forward_failure() -> N
             halt=module_exit_halt,
             on_predicate_error="accumulate",
         )
+
+
+def test_failed_recording_log_backward_refusal_carries_n3_code() -> None:
+    """The failed-partial refusal mirrors the capability table's N3 code."""
+
+    recording = tl.record(
+        FailingAfterOps(),
+        torch.tensor(1.0, requires_grad=True),
+        save=_save_ops,
+        on_forward_error="return_partial",
+    )
+    with pytest.raises(RecorderStateError) as exc_info:
+        recording.log_backward(torch.tensor(1.0, requires_grad=True))
+    assert exc_info.value.fields["code"] == "N3"
+    assert exc_info.value.fields["capability"] == "backward"
+    assert exc_info.value.fields["status"] == "failed"
