@@ -91,7 +91,14 @@ class _SchemaOperandSlots:
     int_list_positions: frozenset[int]
 
 
-_SCHEMA_OPERAND_SLOTS_CACHE: dict[str, _SchemaOperandSlots | None] = {}
+# Positive entries only (bounded by the aten operator universe); misses live
+# in the bounded FIFO companion below so an unrecognized func name (loaded
+# traces, custom ops, non-aten labels) neither grows this dict without bound
+# NOR re-enters the C++ operator registry on every edge of every solve
+# (~12x slower than a cached read, measured grind-p3).
+_SCHEMA_OPERAND_SLOTS_CACHE: dict[str, _SchemaOperandSlots] = {}
+_SCHEMA_OPERAND_MISS_NAMES: dict[str, None] = {}
+_SCHEMA_OPERAND_MISS_NAMES_MAX_ENTRIES = 1024
 _SCHEMA_METADATA_ONLY_BASE_TYPES = frozenset(
     {
         "int",
@@ -1143,7 +1150,17 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
     """Derive conservative data-versus-metadata slots from an ATen packet."""
 
     packet = getattr(torch.ops.aten, canonical, None)
-    if packet is None:
+    # ``torch.ops.aten`` is a live namespace INSTANCE: plain Python attribute
+    # names ("name", "__module__", ...) resolve to non-packet objects before
+    # any operator lookup, and ``.strip("_")`` maps spellings like ``_name_``
+    # onto them. Anything without a callable ``overloads`` is "no schema"
+    # (fail closed), never a raw AttributeError out of a public engine.
+    overloads_method = getattr(packet, "overloads", None)
+    if packet is None or not callable(overloads_method):
+        return None
+    try:
+        overload_names = list(overloads_method())
+    except Exception:
         return None
     operand_positions: set[int] = set()
     operand_names: set[str] = set()
@@ -1151,7 +1168,7 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
     seen_names: set[str] = set()
     int_list_positions: set[int] = set()
     found_schema = False
-    for overload_name in packet.overloads():
+    for overload_name in overload_names:
         schema = getattr(getattr(packet, overload_name, None), "_schema", None)
         if schema is None:
             continue
@@ -1187,12 +1204,22 @@ def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: objec
     if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
         return False
     canonical = func_name.strip("_")
-    if canonical not in _SCHEMA_OPERAND_SLOTS_CACHE:
-        computed_slots = _compute_schema_operand_slots(canonical)
-        if computed_slots is not None:
-            _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = computed_slots
     slots = _SCHEMA_OPERAND_SLOTS_CACHE.get(canonical)
-    if slots is None or not isinstance(arg_path, tuple) or not arg_path:
+    if slots is None:
+        if canonical in _SCHEMA_OPERAND_MISS_NAMES:
+            return False
+        computed_slots = _compute_schema_operand_slots(canonical)
+        if computed_slots is None:
+            # Bounded negative cache: torch does not memoize a FAILED
+            # ``torch.ops.aten`` lookup, so an uncached miss pays the C++
+            # registry round trip per (edge, arg) on every solve.
+            while len(_SCHEMA_OPERAND_MISS_NAMES) >= _SCHEMA_OPERAND_MISS_NAMES_MAX_ENTRIES:
+                _SCHEMA_OPERAND_MISS_NAMES.pop(next(iter(_SCHEMA_OPERAND_MISS_NAMES)))
+            _SCHEMA_OPERAND_MISS_NAMES[canonical] = None
+            return False
+        _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = computed_slots
+        slots = computed_slots
+    if not isinstance(arg_path, tuple) or not arg_path:
         return False
     top = arg_path[0]
     if arg_kind == "keyword" and isinstance(top, str):
