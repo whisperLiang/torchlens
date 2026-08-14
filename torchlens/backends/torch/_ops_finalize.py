@@ -228,7 +228,6 @@ def _make_layer_log_entry(
         capture_session.escrow_candidate(
             raw_index,
             t,
-            fields_dict,
             retain_activation=not (keep_by_predicate and save_this_activation),
         )
     if keep_by_predicate and save_this_activation:

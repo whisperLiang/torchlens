@@ -82,6 +82,7 @@ from ._trace_selector_helpers import (
     _layers_to_save_live_subset,
     _layers_to_save_mentions_identity,
     _layers_to_save_mentions_output,
+    _layers_to_save_needs_final_resolution,
     _make_layers_to_save_predicate,
     _predicate_cache_key,
     _split_save_options_and_predicate,
@@ -1028,8 +1029,7 @@ def _warn_zero_match_capture_selectors(
         if isinstance(intervene_selector, BaseSelector):
             selector_direction = _selector_resolution_direction(intervene_selector)
             defer_backward_intervention = (
-                selector_direction == "backward"
-                and intervene_direction in {"backward", "both"}
+                selector_direction == "backward" and intervene_direction in {"backward", "both"}
             )
         if (
             isinstance(intervene_selector, BaseSelector)
@@ -2767,6 +2767,10 @@ def _trace_torch_model(
         _layers_to_save_mentions_output(layers_to_save)
         or _layers_to_save_has_negative_index(layers_to_save)
         or _layers_to_save_mentions_identity(layers_to_save)
+        # Integer ordinals and final-label-shaped strings are defined against
+        # FINAL layer numbering, which orphan removal renumbers after capture;
+        # they must resolve post-postprocess, never against raw indexes.
+        or _layers_to_save_needs_final_resolution(layers_to_save)
     )
     live_layers_to_save = (
         _layers_to_save_live_subset(layers_to_save) if uses_deferred_activation else layers_to_save
