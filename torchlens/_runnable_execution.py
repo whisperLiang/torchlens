@@ -380,6 +380,9 @@ run_live_trace = _rebind_function(_runnable_transaction.run_live_trace, globals(
 _live_runtime_input_leaves = _rebind_function(
     _runnable_transaction._live_runtime_input_leaves, globals()
 )
+# The classifier-unavailable sentinel must resolve in THIS module's globals:
+# the rebound function body looks its name up here (R22-2).
+_INPUT_CHECK_UNAVAILABLE = _runnable_input_sites._INPUT_CHECK_UNAVAILABLE
 _first_failed_live_input_check = _rebind_function(
     _runnable_input_sites._first_failed_live_input_check, globals()
 )

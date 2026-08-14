@@ -121,8 +121,15 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     """Record forward-pass peak memory around the model forward call.
 
     Stores the peak on ``trace.forward_peak_memory`` and the backend label on
-    ``trace.forward_memory_backend``. CUDA reports the true device-side peak via
-    ``max_memory_allocated`` after ``reset_peak_memory_stats``.
+    ``trace.forward_memory_backend``. CUDA snapshots ``max_memory_allocated``
+    around the forward WITHOUT ``reset_peak_memory_stats`` (R36-2): resetting
+    clobbered the caller's process-wide high-water counter on every capture
+    (the CPU branch below explicitly refuses the analogous clobber). When the
+    forward pushes a new device peak the reported figure is that exact peak;
+    a forward that fits under the pre-existing high-water mark legitimately
+    reads ``0``, same contract as the CPU/MPS delta below. The figure covers
+    the MODEL device only (single-device heuristic, R36 doc line): a
+    model-parallel forward's peaks on other devices are not measured.
 
     CPU/MPS measure a process resident-set-size (or MPS allocator) delta, which
     captures torch's C++-allocated tensor buffers for sizeable models. That
@@ -173,14 +180,19 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     if device_type == "cuda" and torch_module is not None and torch_module.cuda.is_available():
         backend_label = "cuda"
         cuda_device = device
+        peak_before = 0
         with contextlib.suppress(Exception):
-            torch_module.cuda.reset_peak_memory_stats(cuda_device)
+            peak_before = int(torch_module.cuda.max_memory_allocated(cuda_device))
         try:
             yield
         finally:
             with contextlib.suppress(Exception):
+                peak_after = int(torch_module.cuda.max_memory_allocated(cuda_device))
+                # New device peak -> the forward's exact peak. No new peak ->
+                # the forward stayed under the pre-existing high-water mark
+                # and the figure honestly reads 0 (see docstring, R36-2).
                 trace.forward_peak_memory = Bytes(
-                    max(0, int(torch_module.cuda.max_memory_allocated(cuda_device)))
+                    peak_after if peak_after > peak_before else 0
                 )
             trace.forward_memory_backend = backend_label
         return
@@ -1118,6 +1130,55 @@ def _drop_semantic_output_transients(self: "Trace") -> None:
         self.__dict__.pop(attr_name, None)
 
 
+def _scrub_failed_capture_transients(self: "Trace") -> None:
+    """Failure-axis twin of the success arms' transient drops (R11/R32).
+
+    The success arms pop ``_output_attribution_input_tensors`` (live USER
+    INPUT tensors) and postprocess replaces the mutable ``capture_events``
+    alias with the payload-free ``_capture_events`` home. A failed or
+    interrupted forward reached neither, so the trace escaping on
+    ``exc.partial_log`` pickled the user's input tensors through an
+    undeclared attribute and retained every activation payload and grad_fn
+    handle of the failed run (GB-class on real models).
+
+    Partial diagnostics stay intact: ``PartialTrace.from_trace`` materialized
+    the raw layers during backend cleanup, strictly before this scrub, and
+    sidecar release keeps the structural event facts.
+
+    Predicate (fastlog) captures keep their event buffer untouched apart from
+    the trace-side alias pop: the buffer may be OWNED by the live Recorder
+    (a shared object accumulating prior passes), and the failed-pass snapshot
+    (``_failed_fastlog_capture_events``) already isolated the failing pass.
+
+    Parameters
+    ----------
+    self:
+        Trace settled FAILED whose capture transients should be discarded.
+
+    Returns
+    -------
+    None. Mutates ``self.__dict__``.
+    """
+
+    from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    # A failed forward may leave in-flight cpu_async D2H copies whose
+    # pinned host buffers escape on ``exc.partial_log`` (R36-1): fence them
+    # before anything reads the partial's payloads.
+    synchronize_pending_cpu_async_copies()
+    self.__dict__.pop("_output_attribution_input_tensors", None)
+    events = self.__dict__.pop("capture_events", None)
+    if events is None:
+        return
+    if getattr(self, "capture_mode", None) == "predicate":
+        return
+    if hasattr(events, "release_runtime_sidecars"):
+        events.release_runtime_sidecars()
+        # The trace is the sole strong owner of its (sidecar-released) event
+        # stream, mirroring the postprocess success seam.
+        self.__dict__["_capture_events"] = events
+
+
 def _extract_and_mark_outputs(
     self: "Trace",
     outputs: Any,
@@ -1350,11 +1411,15 @@ def run_and_log_inputs_through_model(
         else contextlib.nullcontext()
     )
     compiled_capture_prep = compiled_capture_context.__enter__()
-    if not isinstance(compiled_capture_prep, CompiledCapturePrep):
-        compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
-    compiled_callable_sites = compiled_capture_prep.sites
 
     try:
+        # B8-25b: everything after ``__enter__`` runs INSIDE the try whose
+        # ``finally`` exits the context -- a KeyboardInterrupt between enter
+        # and try used to strand the compiled-submodule swaps on the user
+        # model with no unwind.
+        if not isinstance(compiled_capture_prep, CompiledCapturePrep):
+            compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
+        compiled_callable_sites = compiled_capture_prep.sites
         global _ACTIVE_CAPTURE_BACKEND
         previous_capture_backend = _ACTIVE_CAPTURE_BACKEND
         _ACTIVE_CAPTURE_BACKEND = backend
@@ -1631,6 +1696,12 @@ def run_and_log_inputs_through_model(
                 boundary_label=swallowed_stop.boundary_label,
             )
         set_capture_phase(self, CapturePhase.FINALIZE)
+        from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+        # Fence every cpu_async D2H copy recorded this forward BEFORE any
+        # host-side consumer (finalize, postprocess digests, ``op.out``,
+        # ``tl.save`` serialization) can observe partial bytes (R36-1).
+        synchronize_pending_cpu_async_copies()
         backend.finalize_forward_session(self, self._raw_graph_ws)
 
         output_transform = getattr(self, "_output_transform", None)
@@ -1730,6 +1801,7 @@ def run_and_log_inputs_through_model(
                         f"{getattr(halt_exc, 'reason', '')!r}"
                     ),
                 )
+                _scrub_failed_capture_transients(self)
                 raise
             self.__dict__.pop("_capture_producer_policy", None)
             settle_halted(
@@ -1761,6 +1833,7 @@ def run_and_log_inputs_through_model(
                     f"halted cleanup failed after halt at {getattr(halt_exc, 'reason', '')!r}"
                 ),
             )
+            _scrub_failed_capture_transients(self)
             raise
         self.__dict__.pop("_capture_producer_policy", None)
         settle_halted(
@@ -1797,8 +1870,11 @@ def run_and_log_inputs_through_model(
             # Guaranteed settlement: a cleanup double-fault still stamps the
             # terminal outcome before the (original or secondary) exception
             # escapes; exception identity/chaining is byte-identical to the
-            # pre-settlement arms.
+            # pre-settlement arms. The transient scrub runs after settlement
+            # (R11/R32: the escaping partial must not pin live input tensors
+            # or the payload-bearing event stream).
             settle_failed(self, capture_session, e, n_ops_committed=committed_ops)
+            _scrub_failed_capture_transients(self)
         raise e
 
     except BaseException as interrupt_exc:
@@ -1809,7 +1885,25 @@ def run_and_log_inputs_through_model(
         compiled_unwrap_exception = sys.exc_info()
         committed_ops = count_committed_ops(self)
         try:
-            backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
+            try:
+                backend.cleanup_model_session(
+                    self, (model, input_tensors, (input_args, input_kwargs))
+                )
+            except Exception as cleanup_exc:
+                # B8-23: the PRIMARY control-flow exception (KeyboardInterrupt /
+                # SystemExit) must propagate. Letting an ordinary cleanup
+                # Exception escape here demoted the KI to ``__context__``, and
+                # a caller's ``except Exception`` retry loop swallowed Ctrl-C
+                # outright. Attach the cleanup failure instead of raising it.
+                note = (
+                    "TorchLens model-session cleanup also failed while handling "
+                    f"this interrupt: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
+                add_note = getattr(interrupt_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
             self.__dict__.pop("_capture_producer_policy", None)
         finally:
             settle_failed(
@@ -1819,6 +1913,7 @@ def run_and_log_inputs_through_model(
                 interrupted=True,
                 n_ops_committed=committed_ops,
             )
+            _scrub_failed_capture_transients(self)
         raise
 
     finally:

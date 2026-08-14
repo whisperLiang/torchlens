@@ -1254,18 +1254,12 @@ class PaddleBackend:
         """Return the Paddle capture policy for one event."""
 
         return CapturePolicy(
-            must_keep_topology=True,
             # Paddle preview is full-save only: entry policy refuses
             # save_raw_activations=False, so payload saving is unconditional
             # here (a dynamic read would be dead code implying a capability
             # the entry gate denies).
             save_payload=True,
-            requires_isolation=False,
-            save_args=False,
-            save_code=bool(getattr(session, "save_code_context", False)),
-            save_rng=False,
             save_grad=False,
-            stream=False,
         )
 
     def _build_source_event(

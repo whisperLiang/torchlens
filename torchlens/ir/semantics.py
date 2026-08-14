@@ -37,14 +37,15 @@ class BackendSemantics:
 
 @dataclass(frozen=True, slots=True)
 class CapturePolicy:
-    """Resolved per-output capture policy."""
+    """Resolved per-output capture policy.
 
-    must_keep_topology: bool
+    R47-2: only the three CONSUMED facts remain. The six former fields
+    (must_keep_topology, requires_isolation, save_args, save_code, save_rng,
+    stream) were declaration-only -- populated at every constructor site,
+    four of them computed per-op on the torch hot path, then never read
+    anywhere (stream was hardcoded False everywhere).
+    """
+
     save_payload: bool
-    requires_isolation: bool
-    save_args: bool
-    save_code: bool
-    save_rng: bool
     save_grad: bool
-    stream: bool
     save_mode: SaveMode = "copy"

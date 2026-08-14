@@ -1166,13 +1166,17 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
                 if ignore:
                     continue
                 if func.__get__ in ignored_funcs_set:
-                    msg = (
-                        "{}.{} is in the tuple returned by torch._overrides.get_ignored_functions "
-                        "but still has an explicit override"
-                    )
-                    assert func.__get__ not in testing_overrides_set, msg.format(
-                        namespace, func.__name__
-                    )
+                    # A real ``raise``, never ``assert`` (R24-4): under
+                    # ``python -O`` a torch release listing an overridable
+                    # descriptor as ignored was silently excluded from the
+                    # wrapper roster -- an invisible capture-gap generator on
+                    # exactly the version boundary this check exists to catch.
+                    if func.__get__ in testing_overrides_set:
+                        raise RuntimeError(
+                            f"{namespace}.{func.__name__} is in the tuple returned by "
+                            "torch._overrides.get_ignored_functions but still has an "
+                            "explicit override"
+                        )
                     continue
                 else:
                     func_names.append((f"{namespace_str}.{func_name}", "__get__"))

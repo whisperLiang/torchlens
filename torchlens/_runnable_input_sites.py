@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "_INPUT_CHECK_UNAVAILABLE",
     "_first_failed_live_input_check",
     "raise_analysis_run_unavailable",
     "_require_loaded_sparse_provider",
@@ -57,18 +58,30 @@ __all__ = (
 )
 
 
+#: Distinguished "the classifier itself failed" result (R22-2): callers with
+#: ADMISSION power (the fast-run pre-forward gate) must fail CLOSED on it —
+#: guard-machinery failure is otherwise indistinguishable from inputs-match.
+#: The soft native-failure-time consumer treats it as unclassifiable and lets
+#: the native error re-raise raw, exactly the old ``None`` behavior there.
+_INPUT_CHECK_UNAVAILABLE: Any = object()
+
+
 def _first_failed_live_input_check(
     trace: Any, input_args: Any, input_kwargs: Any
-) -> ContractCheck | None:
-    """Return the first failed SOFT input-contract check for a live refresh, or ``None``.
+) -> ContractCheck | None | Any:
+    """Return the first failed input-contract check for a live refresh.
 
     r41 hon1_3 (corr2_4 parity): reads the capture-recorded input ops' shape/dtype off
     the live Trace and compares the runtime leaves positionally, mirroring the sparse
     ``_bind_runtime_inputs`` check names (``input_shape:slot:<label>`` /
     ``input_dtype:slot:<label>``) and message text so both providers speak identically.
-    The helper has ZERO admission power (it refuses nothing and is consulted only when
-    the forward already failed natively) and returns ``None`` on ANY internal failure
-    so classification unavailability never masks the native error.
+
+    Sentinel-or-raise contract (R22-2): ``None`` means the checks RAN and
+    passed (or there was legitimately nothing to check); the module-level
+    ``_INPUT_CHECK_UNAVAILABLE`` sentinel means the classifier machinery
+    itself failed and NOTHING was verified. The two used to collapse into
+    ``None``, which let the ``fast=True`` admission gate treat a broken
+    guard as inputs-match and run the forward unguarded.
     """
 
     try:
@@ -80,7 +93,7 @@ def _first_failed_live_input_check(
         for label in input_labels:
             op = layer_dict.get(label)
             if op is None:
-                return None
+                return _INPUT_CHECK_UNAVAILABLE
             shape = getattr(op, "shape", None)
             dtype = getattr(op, "dtype", None)
             recorded.append(
@@ -92,7 +105,7 @@ def _first_failed_live_input_check(
             )
         leaves = _live_runtime_input_leaves(input_args, input_kwargs)
         if leaves is None:
-            return None
+            return _INPUT_CHECK_UNAVAILABLE
         if len(leaves) != len(recorded):
             return _contract_check(
                 "input_arity",
@@ -105,7 +118,7 @@ def _first_failed_live_input_check(
                     ("actual_leaves", str(len(leaves))),
                 ),
             )
-        for (label, expected_shape, expected_dtype), value in zip(recorded, leaves):
+        for (label, expected_shape, expected_dtype), value in zip(recorded, leaves, strict=True):
             try:
                 actual_shape: tuple[int, ...] | None = tuple(value.shape)
             except (RuntimeError, TypeError, NotImplementedError):
@@ -138,7 +151,7 @@ def _first_failed_live_input_check(
                 )
         return None
     except Exception:
-        return None
+        return _INPUT_CHECK_UNAVAILABLE
 
 
 def raise_analysis_run_unavailable(trace: Any) -> None:

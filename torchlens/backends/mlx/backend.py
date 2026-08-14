@@ -1964,14 +1964,8 @@ class MLXBackend:
         """Return the MLX capture policy for one event."""
 
         return CapturePolicy(
-            must_keep_topology=True,
             save_payload=bool(getattr(session, "save_raw_activations", True)),
-            requires_isolation=False,
-            save_args=False,
-            save_code=bool(getattr(session, "save_code_context", False)),
-            save_rng=False,
             save_grad=False,
-            stream=False,
         )
 
     def _build_source_event(

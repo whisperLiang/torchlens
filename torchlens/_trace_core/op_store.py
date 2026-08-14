@@ -535,14 +535,16 @@ def _build_mutable_key_index(store: OpRowStore) -> dict[int, Any]:
 def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
     """Flatten the mutable-cell index into pre-resolved per-fork sweep work.
 
-    Returns ``(alloc_keys, alloc_classes, alloc_values, copy_keys,
-    copy_values, copy_deep)`` — parallel sequences so
+    Returns ``(alloc_entries, copy_entries)`` — two sequences of small
+    RECORD tuples (``(key, cls, value)`` and ``(key, value, deep)``) so
     ``isolate_mutable_cells`` runs a tight guard+copy loop with no per-cell
     backing fetch, key arithmetic, or classification (the F11 small-trace
-    fork constant). Empty mutable containers (the census-dominant case,
-    ~11/op) become bare class allocations; non-empty dict/list/set cells
-    use ``_eager_copy``; nesting tuples/frozensets use the generic
-    translating copier.
+    fork constant). Records, not positionally-correlated parallel arrays: a
+    one-sided append cannot silently truncate the sweep and leave tail fork
+    cells sharing mutable containers with their parent (R23-5). Empty
+    mutable containers (the census-dominant case, ~11/op) become bare class
+    allocations; non-empty dict/list/set cells use ``_eager_copy``; nesting
+    tuples/frozensets use the generic translating copier.
 
     Validity: cell BINDINGS cannot change under a cached plan — columnar
     cells are immutable once ``_cow_shared``, and the sealed row-major
@@ -557,17 +559,11 @@ def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
     the store does not already retain.
     """
 
-    from array import array
-
     index = store._mutable_keys
     assert index is not None
     n_fields = store.layout.n_fields
-    alloc_keys = array("q")
-    alloc_classes: list[type] = []
-    alloc_values: list[Any] = []
-    copy_keys = array("q")
-    copy_values: list[Any] = []
-    copy_deep = bytearray()
+    alloc_entries: list[tuple[int, type, Any]] = []
+    copy_entries: list[tuple[int, Any, bool]] = []
     rows = store._rows
     columns = store._columns
     for fid in sorted(index):
@@ -582,18 +578,12 @@ def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
             cls = value.__class__
             if cls is dict or cls is list or cls is set:
                 if value:
-                    copy_keys.append(row * n_fields + fid)
-                    copy_values.append(value)
-                    copy_deep.append(0)
+                    copy_entries.append((row * n_fields + fid, value, False))
                 else:
-                    alloc_keys.append(row * n_fields + fid)
-                    alloc_classes.append(cls)
-                    alloc_values.append(value)
+                    alloc_entries.append((row * n_fields + fid, cls, value))
             elif (cls is tuple or cls is frozenset) and _contains_mutable_container(value):
-                copy_keys.append(row * n_fields + fid)
-                copy_values.append(value)
-                copy_deep.append(1)
-    return (alloc_keys, alloc_classes, alloc_values, copy_keys, copy_values, copy_deep)
+                copy_entries.append((row * n_fields + fid, value, True))
+    return (tuple(alloc_entries), tuple(copy_entries))
 
 
 def _eager_copy(value: Any, translate: Callable[[Any], Any] | None) -> Any:
@@ -873,7 +863,13 @@ def _value_fingerprint(value: Any) -> int:
     try:
         return hash((0, repr(value)))
     except Exception:
-        return 0
+        # Fail CLOSED (R22-8): a shared sentinel here made every pair of
+        # fingerprint-refusing values compare EQUAL, collapsing a real write
+        # to "no effective write" and laundering the downstream read. The
+        # object id keeps same-object comparisons stable within the audit
+        # window while distinct refusing objects read as changed -- a false
+        # alarm at worst, never a laundering pass.
+        return id(value)
 
 
 def _cell_content_fingerprint(value: Any) -> int | None:
@@ -969,7 +965,11 @@ def _write_is_content_effective(old: Any, new: Any) -> bool:
         try:
             return _value_fingerprint(old) != _value_fingerprint(new)
         except Exception:
-            return False
+            # Fail CLOSED (R22-8): fingerprint machinery failure must read
+            # as an EFFECTIVE write, never collapse to "no-op" -- a no-op
+            # classification here would let the write discharge nothing
+            # while hiding the step's real effect from the audit.
+            return True
     return False
 
 
@@ -1593,15 +1593,15 @@ class OpStoreView:
         # for the staleness contract). Empty containers dominate the census
         # (~11 of ~27 candidate cells per op), hence the dedicated bare
         # class-allocation loop.
-        alloc_keys, alloc_classes, alloc_values, copy_keys, copy_values, copy_deep = plan
-        for key, cls, value in zip(alloc_keys, alloc_classes, alloc_values):
+        alloc_entries, copy_entries = plan
+        for key, cls, value in alloc_entries:
             if key in overlay or key in base_overlay:
                 continue
             # Emptiness re-check: an in-place empty->non-empty mutation of
             # the aliased container fires no maintenance hook, so the alloc
             # classification alone would resurrect an empty cell here.
             overlay[key] = _eager_copy(value, translate) if value else cls()
-        for key, value, deep in zip(copy_keys, copy_values, copy_deep):
+        for key, value, deep in copy_entries:
             if key in overlay or key in base_overlay:
                 continue
             overlay[key] = (

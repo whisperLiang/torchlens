@@ -637,10 +637,13 @@ def test_trace_pickle_strips_process_local_release_watchers() -> None:
     """Whole-trace pickle survives live watchers and never carries them across.
 
     Release watchers are ``weakref.ref`` objects on live payload tensors:
-    process-local and unpicklable. A trace with retained activations must still
-    pickle (deepcopy and spawn-based tests ride the same path); the restored
-    accountant keeps its committed charges permanently while the source
-    accountant's live watchers stay armed.
+    process-local and unpicklable. Regression: the accountant's
+    ``_payload_watchers`` weakrefs made EVERY trace that retained a payload
+    unpicklable (``TypeError: cannot pickle 'weakref.ReferenceType'``), on the
+    success, halted, and failed axes alike. A trace with retained activations
+    must still pickle (deepcopy and spawn-based tests ride the same path); the
+    restored accountant keeps its committed charges permanently while the
+    source accountant's live watchers stay armed.
     """
 
     import pickle
@@ -649,7 +652,7 @@ def test_trace_pickle_strips_process_local_release_watchers() -> None:
     accountant = trace.__dict__["_save_budget_accountant"]
     assert accountant is not None
     n_watchers = len(accountant._payload_watchers)
-    assert n_watchers > 0
+    assert n_watchers > 0, "fixture must have live payload watchers"
 
     restored = pickle.loads(pickle.dumps(trace))
 
@@ -659,3 +662,4 @@ def test_trace_pickle_strips_process_local_release_watchers() -> None:
     assert restored_accountant.ledgers.keys() == accountant.ledgers.keys()
     for key, ledger in accountant.ledgers.items():
         assert restored_accountant.ledgers[key].committed_bytes == ledger.committed_bytes
+    trace.cleanup()

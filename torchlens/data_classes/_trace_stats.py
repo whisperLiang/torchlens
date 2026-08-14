@@ -27,9 +27,9 @@ from ..quantities import Duration, Flops, Macs, as_duration
 from ._accessor_base import Accessor
 from ._backend_capability_guards import raise_if_no_backward_capture
 from ._trace_accessors import (
-    _TRACE_LAYER_ACCESSOR_CACHE,
+    _TRACE_LAYER_ACCESSOR_ATTR,
     _TRACE_MODULE_CALL_ACCESSOR_ATTR,
-    _TRACE_OP_ACCESSOR_CACHE,
+    _TRACE_OP_ACCESSOR_ATTR,
     OrphanAccessor,
     TraceGradFnCallAccessor,
     TraceModuleCallAccessor,
@@ -472,11 +472,14 @@ class TraceStatsMixin(_TraceMixinBase):
     def ops(self: "Trace") -> TraceOpAccessor:
         """Access per-invocation Op records by label or index."""
 
+        # Memoized on the instance, never in a module global: a global
+        # weak-keyed cache value reaches this Trace through the held records
+        # and would pin it forever (the R37 ``trace.run()`` fork leak).
         cache_key = len(self.layer_list)
-        cache_entry = _TRACE_OP_ACCESSOR_CACHE.get(self)
+        cache_entry = self.__dict__.get(_TRACE_OP_ACCESSOR_ATTR)
         if cache_entry is None or cache_entry[0] != cache_key:
             accessor = TraceOpAccessor(self.layer_list, self.layer_num_calls)
-            _TRACE_OP_ACCESSOR_CACHE[self] = (cache_key, accessor)
+            self.__dict__[_TRACE_OP_ACCESSOR_ATTR] = (cache_key, accessor)
             return accessor
         return cache_entry[1]
 
@@ -641,11 +644,14 @@ class TraceStatsMixin(_TraceMixinBase):
         """Access aggregate per-layer metadata by label, index, or pass notation."""
         from .layer import LayerAccessor
 
+        # Memoized on the instance, never in a module global: a global
+        # weak-keyed cache value reaches this Trace through the held records
+        # and would pin it forever (the R37 ``trace.run()`` fork leak).
         cache_key = len(self.layer_logs)
-        cache_entry = _TRACE_LAYER_ACCESSOR_CACHE.get(self)
+        cache_entry = self.__dict__.get(_TRACE_LAYER_ACCESSOR_ATTR)
         if cache_entry is None or cache_entry[0] != cache_key:
             accessor = LayerAccessor(self.layer_logs, source_trace=self)
-            _TRACE_LAYER_ACCESSOR_CACHE[self] = (cache_key, accessor)
+            self.__dict__[_TRACE_LAYER_ACCESSOR_ATTR] = (cache_key, accessor)
             return accessor
         return cast("LayerAccessor", cache_entry[1])
 

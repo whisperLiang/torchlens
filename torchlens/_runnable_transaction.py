@@ -43,6 +43,7 @@ from .utils.rng import (
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
+        _INPUT_CHECK_UNAVAILABLE,
         _ambient_execution_context_restored,
         _bind_call_outputs,
         _call_execution_context_entered,
@@ -298,6 +299,18 @@ def _execute_loaded_sparse_transaction(
                 raise_first_divergence_incremental()
 
             _walk_call_cone(descriptor.calls, execute_call)
+    except BaseException:
+        # R36-7: an escaping call loop (typed divergence raise, signature
+        # drift, native failure) pins this frame inside the exception
+        # traceback, so a caller retaining the exception would pin every
+        # staged device copy indefinitely. Clear the staging containers IN
+        # PLACE before propagating; the caller's rollback owns fork
+        # unregistration.
+        slot_values.clear()
+        call_outputs.clear()
+        attestation_slot_values.clear()
+        witness_source_snapshots.clear()
+        raise
     finally:
         if host_rng_saved is not None:
             restore_host_rng(host_rng_saved)
@@ -483,6 +496,12 @@ def run_live_trace(
         # settle VERIFIED (fresh-refresh semantics); classification happens only at
         # native-failure time below.
         first_failed = _first_failed_live_input_check(trace, input_args, input_kwargs)
+        if first_failed is _INPUT_CHECK_UNAVAILABLE:
+            # This consumer is SOFT (consulted only at native-failure time
+            # below): an unavailable classifier means the failure cannot be
+            # classified as input divergence, so the native error re-raises
+            # raw -- the old ``None`` behavior, now explicit (R22-2).
+            first_failed = None
         try:
             fork.save_new_outs(model, input_args, input_kwargs=input_kwargs, random_seed=seed)
         except Exception as exc:  # not BaseException: KeyboardInterrupt/SystemExit stay raw

@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
-from .._errors import KeywordConflictError, ArgumentTypeError, InvalidArgumentError
+from .._errors import ArgumentTypeError, InvalidArgumentError, KeywordConflictError
 from ..bundle import Bundle
 from .hooks import HookContext
 from .predicates import when

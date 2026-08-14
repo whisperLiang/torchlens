@@ -2224,7 +2224,11 @@ def infer_input_shape(model: nn.Module, **kwargs: Any) -> InferInputShapeResult:
     """
 
     cpu_rng_state = torch.get_rng_state()
-    cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    # Initialized-CUDA-only, latch-guarded (R36-4): the bare is_available()
+    # gate allocated a CUDA context per visible device on CPU-only runs.
+    from ..utils.rng import _snapshot_cuda_rng_states
+
+    cuda_rng_state = _snapshot_cuda_rng_states() or None
     try:
         return _infer_input_shape_impl(model, **kwargs)
     finally:

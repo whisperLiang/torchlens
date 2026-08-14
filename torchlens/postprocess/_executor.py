@@ -230,12 +230,17 @@ def _run_step_12(ctx: StepContext) -> None:
 
 
 def _run_step_13(ctx: StepContext) -> None:
-    """Step 13: clear the CUDA caching allocator when CUDA is available."""
+    """Step 13: clear the CUDA caching allocator for CUDA-touching captures."""
 
     # Unwrapped by _vtimed (historical); the CUDA availability test lives
     # in the body so the contract assert fires unconditionally (§5.4).
+    # R36-3: additionally gated on the CAPTURE having touched CUDA (the
+    # trace-level forward_memory_backend fact) so a CPU-only trace inside a
+    # GPU training loop no longer flushes the caller's allocator.
+    from ..utils.tensor_utils import capture_touched_cuda
+
     module = _pp()
-    if module._is_cuda_available():
+    if module._is_cuda_available() and capture_touched_cuda(ctx.trace):
         module.torch.cuda.empty_cache()
 
 

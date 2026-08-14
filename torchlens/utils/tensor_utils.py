@@ -22,7 +22,7 @@ import weakref
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from math import prod
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 import torch
 
@@ -30,6 +30,10 @@ from ..backends.torch._tl import get_tensor_label, set_tensor_label
 from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
 
 SaveMode = Literal["copy", "reference", "view", "cpu_async"]
+
+#: Runtime authority for SaveMode membership checks: derived from the Literal
+#: (typing.get_args) so a vocabulary change cannot drift from the validators.
+SAVE_MODES: frozenset[str] = frozenset(get_args(SaveMode))
 
 # Replay comparison tolerances are DERIVED from each dtype's machine epsilon
 # rather than spelled as decimal literals, so every dtype gets the same
@@ -741,11 +745,18 @@ def _safe_get_memory_format(t: torch.Tensor) -> torch.memory_format:
 
 # Kill switch: TORCHLENS_EAGER_PAYLOAD_CLONE=1 restores unconditional eager
 # clones (also used by the perf harness for A/B runs).
+# IMPORT-TIME LATCH (R47-4): read once here and value-copied into
+# ``backends/torch/wrappers.py`` at ITS import; a runtime ``setenv`` is a
+# silent no-op. Set the variable BEFORE the process imports torchlens (user
+# guidance must never recommend the runtime spelling). Promotion to a
+# session-time CaptureOptions knob spans options.py + wrappers.py and ships
+# with their owning lanes.
 _DEFER_ENABLED: bool = os.environ.get("TORCHLENS_EAGER_PAYLOAD_CLONE", "0") != "1"
 
 # Opt-in: TORCHLENS_DEFER_GRAD_PAYLOADS=1 extends deferral to graph-connected
 # payloads (the default grad-enabled capture regime). OFF by default because of
 # residual H3 above; H1/H2 are closed unconditionally by the mint and rebind.
+# Same import-time latch caveat as above (R47-4).
 _DEFER_GRAD_ENABLED: bool = os.environ.get("TORCHLENS_DEFER_GRAD_PAYLOADS", "0") == "1"
 
 # storage key -> list of pending aliases. NEVER rebound (only mutated), so the
@@ -916,9 +927,10 @@ def _belt_check_pending_alias(entry: _PendingPayloadAlias, alias: torch.Tensor) 
             "storage was mutated through a path the capture wrapper did not "
             "intercept (autograd version moved between defer and materialize). "
             "The saved payload bytes can no longer be proven identical to the "
-            "capture-time value. Set TORCHLENS_EAGER_PAYLOAD_CLONE=1 to restore "
-            "eager payload clones, and please report the model/op that "
-            "triggered this."
+            "capture-time value. Relaunch with TORCHLENS_EAGER_PAYLOAD_CLONE=1 "
+            "set in the environment BEFORE importing torchlens (the flag is "
+            "read once at import) to restore eager payload clones, and please "
+            "report the model/op that triggered this."
         )
 
 
@@ -1070,6 +1082,86 @@ def disarm_deferred_payload_window() -> None:
         _DEFER_STATE_PTRS = None
 
 
+#: Pending fence events for in-flight ``cpu_async`` D2H copies (R36-1).
+#: Capture-scoped accumulate/drain state: each async pinned-buffer copy
+#: records one event on its source device's current stream, and
+#: ``synchronize_pending_cpu_async_copies()`` drains the list at the capture
+#: finalize seam (and on the failure-scrub arms), so no host-side read
+#: (``op.out``, ``tl.save`` serialization, dedup/attestation digests) can
+#: observe partial bytes from an unfinished ``non_blocking=True`` copy.
+_CPU_ASYNC_PENDING_EVENTS: list[Any] = []
+
+
+def _record_cpu_async_copy_event(device: torch.device) -> None:
+    """Record a stream event fencing one ``cpu_async`` D2H copy (R36-1).
+
+    Parameters
+    ----------
+    device:
+        Source (non-CPU) device of the asynchronous copy. Only CUDA streams
+        expose event fencing; other accelerators' ``non_blocking`` copies
+        fall back to the conservative device synchronize at drain time.
+    """
+
+    if device.type == "cuda":
+        event = torch.cuda.Event()
+        event.record(torch.cuda.current_stream(device))
+        _CPU_ASYNC_PENDING_EVENTS.append(event)
+    else:
+        _CPU_ASYNC_PENDING_EVENTS.append(device)
+
+
+def synchronize_pending_cpu_async_copies() -> None:
+    """Fence every pending ``cpu_async`` D2H copy recorded this capture (R36-1).
+
+    Called at the capture finalize seam and on the failure-scrub arms.
+    Idempotent and cheap when nothing is pending; a completed copy's event
+    synchronizes immediately.
+    """
+
+    if not _CPU_ASYNC_PENDING_EVENTS:
+        return
+    pending = list(_CPU_ASYNC_PENDING_EVENTS)
+    _CPU_ASYNC_PENDING_EVENTS.clear()
+    synced_devices: set[str] = set()
+    for entry in pending:
+        if isinstance(entry, torch.device):
+            key = str(entry)
+            if key not in synced_devices:
+                synced_devices.add(key)
+                torch_module = getattr(torch, entry.type, None)
+                sync = getattr(torch_module, "synchronize", None)
+                if sync is not None:
+                    sync(entry)
+        else:
+            entry.synchronize()
+
+
+def capture_touched_cuda(trace: Any) -> bool:
+    """Return whether this capture's forward plausibly touched CUDA (R36-3).
+
+    Gates the capture-lifecycle ``torch.cuda.empty_cache()`` calls on the
+    CAPTURE having used CUDA, not on process-wide availability: a CPU-only
+    trace inside a GPU training loop must not flush the caller's allocator.
+    Keyed on the trace-level ``forward_memory_backend`` fact stamped by the
+    forward peak-memory bracket from the model device; an unknown or missing
+    value fails toward the historical flush, never toward skipping it.
+
+    Parameters
+    ----------
+    trace:
+        Captured (possibly mid-postprocess) Trace.
+
+    Returns
+    -------
+    bool
+        False only when the capture provably ran on a non-CUDA backend.
+    """
+
+    backend = getattr(trace, "forward_memory_backend", None)
+    return backend not in ("cpu", "mps")
+
+
 def _copy_tensor_payload(
     x: torch.Tensor | torch.nn.Parameter,
     *,
@@ -1110,10 +1202,15 @@ def _copy_tensor_payload(
                     memory_format=_safe_get_memory_format(payload),
                     pin_memory=True,
                 )
-                return cpu_payload.copy_(payload, non_blocking=True)
+                cpu_payload.copy_(payload, non_blocking=True)
+                _record_cpu_async_copy_event(payload.device)
+                return cpu_payload
         except (TypeError, RuntimeError):
             pass
-        return payload.to(device="cpu", non_blocking=True, copy=True)
+        result = payload.to(device="cpu", non_blocking=True, copy=True)
+        if payload.device.type != "cpu":
+            _record_cpu_async_copy_event(payload.device)
+        return result
 
     mem_fmt = _safe_get_memory_format(x)
     if not detach_tensor:
@@ -1174,8 +1271,10 @@ def _clone_tensor_payload(
     from .._state import pause_logging
 
     with pause_logging():
-        if save_mode not in {"copy", "reference", "view", "cpu_async"}:
-            raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        if save_mode not in SAVE_MODES:
+            raise ValueError(
+                "save_mode must be one of " + ", ".join(repr(m) for m in sorted(SAVE_MODES))
+            )
         vals_tensor = None
         if _DEFER_WINDOW_DEPTH and save_mode == "copy":
             # A plain ``detach()`` alias carries NO autograd state, so it may

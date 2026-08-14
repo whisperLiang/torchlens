@@ -249,14 +249,11 @@ TIER_CLASSIFICATION: dict[str, str] = {
     "BackendSemantics.bytes_delta_at_call": "F",
     "BackendSemantics.bytes_peak_at_call": "F",
     # ---- CapturePolicy -----------------------------------------------------
-    "CapturePolicy.must_keep_topology": "F",
+    # R47-2: the six write-only fields (must_keep_topology, requires_isolation,
+    # save_args, save_code, save_rng, stream) were removed with the dataclass;
+    # only the consumed facts stay pinned.
     "CapturePolicy.save_payload": "F",
-    "CapturePolicy.requires_isolation": "F",
-    "CapturePolicy.save_args": "F",
-    "CapturePolicy.save_code": "F",
-    "CapturePolicy.save_rng": "F",
     "CapturePolicy.save_grad": "F",
-    "CapturePolicy.stream": "F",
     "CapturePolicy.save_mode": "F",
     # ---- FireResult --------------------------------------------------------
     "FireResult.plan_id": "F",

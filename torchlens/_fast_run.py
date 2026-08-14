@@ -14,6 +14,7 @@ from torch import nn
 
 from . import _state
 from ._runnable_execution import (
+    _INPUT_CHECK_UNAVAILABLE,
     _VIEW_OP_QUALNAMES,
     _ambient_execution_context_restored,
     _call_execution_context_entered,
@@ -1266,6 +1267,17 @@ class _FastLiveSession:
             input_args = list(args)
             input_kwargs = dict(kwargs)
         failed_input = _first_failed_live_input_check(self.trace, input_args, input_kwargs)
+        if failed_input is _INPUT_CHECK_UNAVAILABLE:
+            # This consultation has ADMISSION power (it runs BEFORE the
+            # forward), so a broken guard must refuse, never read as
+            # inputs-match and run the forward unguarded (R22-2).
+            raise RunCapabilityUnavailableError(
+                "The fast live run's input-contract guard could not classify the "
+                "runtime inputs against the captured input boundary; refusing the "
+                "guarded fast path rather than running unguarded.",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                provider=RunProvider.LIVE,
+            )
         if failed_input is not None:
             _raise_failed_contract_as_divergence(failed_input, fork=None)
         if seed is not None:
@@ -1349,7 +1361,21 @@ class _FastLiveSession:
 
         input_leaves = _live_runtime_input_leaves(input_args, input_kwargs)
         if input_leaves is not None:
-            for label, value in zip(getattr(self.trace, "input_layers", ()), input_leaves):
+            input_labels = tuple(getattr(self.trace, "input_layers", ()))
+            if len(input_leaves) != len(input_labels):
+                # Guard-and-poison exactly like the output branch below:
+                # a truncating zip here silently kept STALE capture-time
+                # activations on the surplus input ops (R22-2 layer 2).
+                failed = _contract_check(
+                    "fast_live_model_input_structure",
+                    False,
+                    RunnableErrorCode.INPUT_TREE_MISMATCH,
+                    f"Native model input tree carries {len(input_leaves)} tensor "
+                    f"leaves; the captured input boundary recorded {len(input_labels)}.",
+                    affected_op_labels=input_labels,
+                )
+                self._poison_and_raise(failed)
+            for label, value in zip(input_labels, input_leaves, strict=True):
                 op = self.trace.layer_dict_all_keys[label]
                 if bool(getattr(op, "has_saved_activation", False)):
                     op.save_activation(value, (), {}, False)

@@ -412,8 +412,22 @@ def _param_refs_from_fields(fields_dict: dict[str, Any]) -> tuple[ParamRef, ...]
     """
 
     refs: list[ParamRef] = []
-    for barcode, param in zip(fields_dict["_param_barcodes"], fields_dict["parent_params"]):
+    # One ref per RAW parent-param occurrence, each carrying ITS OWN barcode
+    # from the param's meta. ``_param_barcodes`` is the DEDUPED key list of
+    # ``parent_param_ops`` (a dict), so zipping it against the raw
+    # ``parent_params`` misaligned every pairing after a repeated param
+    # (weight-tied einsum/hypernetwork class): ``[A, B, A, C]`` persisted
+    # ``ParamRef(barcode=C, geometry-of-A)`` and dropped a ref while
+    # ``num_params`` said four (R23-3).
+    for param in fields_dict["parent_params"]:
         param_meta = get_param_meta(param)
+        if param_meta is None or param_meta.param_barcode is None:
+            raise RuntimeError(
+                "TorchLens internal error: a parent parameter reached ParamRef "
+                "construction without an assigned barcode; param metadata was "
+                "not processed for this op event."
+            )
+        barcode = param_meta.param_barcode
         param_address = (
             ""
             if param_meta is None or param_meta.param_address is None
@@ -599,13 +613,7 @@ def _exhaustive_capture_policy(trace: "Trace", fields_dict: dict[str, Any]) -> C
     """Return the exhaustive freeze's capture policy (shared by both shapes)."""
 
     return CapturePolicy(
-        must_keep_topology=True,
         save_payload=fields_dict["has_saved_activation"],
-        requires_isolation=fields_dict["is_inplace"],
-        save_args=fields_dict["has_saved_args"],
-        save_code=bool(fields_dict["code_context"]),
-        save_rng=bool(fields_dict["func_rng_states"]),
         save_grad=fields_dict["save_grads"],
-        stream=False,
         save_mode=getattr(trace, "save_mode", "copy"),
     )

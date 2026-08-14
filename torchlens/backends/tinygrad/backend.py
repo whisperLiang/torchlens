@@ -839,14 +839,8 @@ class TinygradBackend:
         func_call_id = trace.capture_events.func_call_id_counter + 1
         trace.capture_events.func_call_id_counter = func_call_id
         policy = CapturePolicy(
-            must_keep_topology=True,
             save_payload=True,
-            requires_isolation=False,
-            save_args=False,
-            save_code=False,
-            save_rng=False,
             save_grad=False,
-            stream=False,
         )
         tensor_ref = self._tensor_ref(output, reserved.label_raw)
         event_module_stack = tuple(

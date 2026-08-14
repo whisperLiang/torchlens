@@ -92,9 +92,8 @@ from ..types import ActivationPostfunc, GradientPostfunc
 from ..utils.tensor_utils import SaveMode
 from ._state_adapter import state_items, state_restore
 from ._trace_accessors import (
-    _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_OP_ACCESSOR_CACHE,
     _invalidate_trace_module_call_accessor_cache,
+    _invalidate_trace_op_layer_accessor_caches,
 )
 from .backward_pass import BackwardPass
 from .derived_grad import DerivedGradAccessor
@@ -1058,6 +1057,8 @@ class Trace(
     _annotation_blobs: dict[str, Any] | None
     _last_sibling_ordering_decision: Any
     _module_call_accessor: Any
+    _op_accessor_cache: Any
+    _layer_accessor_cache: Any
     _receptive_field_solution: Any
     _rf_source_solutions: Any
     _rf_target_solutions: Any
@@ -1096,6 +1097,8 @@ class Trace(
         "_tf_validation_result": FieldPolicy.DROP,
         "_tl_save_selector_fire_count": FieldPolicy.DROP,
         "_module_call_accessor": FieldPolicy.DROP,
+        "_op_accessor_cache": FieldPolicy.DROP,
+        "_layer_accessor_cache": FieldPolicy.DROP,
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
@@ -3048,8 +3051,7 @@ class Trace(
         )
         state_restore(self, replacement_state)
         self.__dict__.pop("_validation_replay_status", None)
-        _TRACE_OP_ACCESSOR_CACHE.pop(self, None)
-        _TRACE_LAYER_ACCESSOR_CACHE.pop(self, None)
+        _invalidate_trace_op_layer_accessor_caches(self)
         _invalidate_trace_module_call_accessor_cache(self)
         self._rebind_fork_owner_refs()
 
@@ -3089,8 +3091,7 @@ class Trace(
         self._refresh_rerun_layer_logs_from(new_log)
         self._refresh_rerun_trace_fields_from(new_log)
         self.__dict__.pop("_validation_replay_status", None)
-        _TRACE_OP_ACCESSOR_CACHE.pop(self, None)
-        _TRACE_LAYER_ACCESSOR_CACHE.pop(self, None)
+        _invalidate_trace_op_layer_accessor_caches(self)
         _invalidate_trace_module_call_accessor_cache(self)
         self._rebind_fork_owner_refs()
         return True

@@ -1057,10 +1057,20 @@ def _pure_view(name: str) -> bool:
         # crash import. ``DisableTorchFunction`` does NOT alter the default device, so no
         # state leaks (verified: the caller's default device is untouched).
         with _mode_free_probe_context():
+            # Deterministic constructors, never ``torch.randn`` (B8-7): the
+            # probes used to draw from the user's GLOBAL default generator at
+            # first-capture lazy import, perturbing even a ``random_seed=``-
+            # pinned capture. Distinct element values keep the pure-read
+            # equality checks below meaningful; zero RNG is consumed.
             if use_complex:
-                probe = torch.randn(2, 3, device="cpu", dtype=torch.complex64, requires_grad=True)
+                ramp = torch.arange(6, dtype=torch.float32, device="cpu")
+                probe = torch.complex(ramp, ramp + 1.0).reshape(2, 3).requires_grad_(True)
             else:
-                probe = torch.randn(2, 3, device="cpu", requires_grad=True)
+                probe = (
+                    torch.arange(6, dtype=torch.float32, device="cpu")
+                    .reshape(2, 3)
+                    .requires_grad_(True)
+                )
             before = probe.detach().clone()
             version = probe._version
             try:

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from html import escape
-from typing import TYPE_CHECKING, Any, Literal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from ..data_classes._nonfinite import first_nonfinite_layer
+from ..data_classes.field_policy import FieldPolicy
 from ..errors import TorchLensError
 
 if TYPE_CHECKING:
@@ -79,6 +81,17 @@ class PartialTrace:
 
     trace: Trace
     original_exception: BaseException
+
+    # R11: declared so the runtime field-declaration gates can sweep failed
+    # partial products instead of being structurally blind to them. Failed
+    # partials never persist (`to_trace`/`tl.save` refuse), so both fields
+    # are session-time DROP.
+    FIELD_POLICY: ClassVar[Mapping[str, Any]] = MappingProxyType(
+        {
+            "trace": FieldPolicy.DROP,
+            "original_exception": FieldPolicy.DROP,
+        }
+    )
 
     @property
     def outcome(self) -> Any | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -208,16 +209,8 @@ class StopDirective:
         from .. import _state
         from .outcome import StopRequest
 
-        active_trace = _state._active_trace
-        if active_trace is not None:
-            active_trace.__dict__["_stop_requested"] = StopRequest(
-                kind="nonfinite",
-                reason=message,
-                boundary_kind="op",
-                boundary_label=raw_label,
-            )
         file_path, line_no = _live_user_location()
-        raise CaptureError(
+        error = CaptureError(
             message,
             file_path=file_path,
             line_no=line_no,
@@ -228,6 +221,20 @@ class StopDirective:
             dtype=str(dtype),
             parents=parents,
         )
+        active_trace = _state._active_trace
+        if active_trace is not None:
+            # The latch carries the exact exception's identity (weakly):
+            # settlement classifies ABORTED_NONFINITE only for THIS error, so
+            # an unrelated CaptureError after a swallowed abort keeps its own
+            # FAILED diagnostics (R06).
+            active_trace.__dict__["_stop_requested"] = StopRequest(
+                kind="nonfinite",
+                reason=message,
+                boundary_kind="op",
+                boundary_label=raw_label,
+                error_ref=weakref.ref(error),
+            )
+        raise error
 
     def forward_disposition(self, exc: BaseException) -> ForwardStopDisposition:
         """Return the compiled failed-forward disposition.

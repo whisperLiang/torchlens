@@ -571,6 +571,30 @@ class TestLifetimeCoverageGaps:
         gc.collect()
         assert parent_ref() is None, "the parent was pinned after its fork died"
 
+    def test_run_result_fork_is_collectible(self):
+        """The fork returned by a non-fast live ``trace.run()`` is reclaimable.
+
+        R37: fork record shells used to translate the parent's
+        ``_source_trace_strong`` extra into a STRONG self-edge to the fork, so
+        the module-global weak-keyed op-accessor cache entry populated during
+        ``run()`` strongly reached its own weak key and pinned the entire
+        result fork (activation payloads included) for the process lifetime.
+        """
+
+        model = _TwoLayerNet().eval()
+        source = tl.trace(model, torch.randn(1, 5), layers_to_save="all")
+        result = source.run(inputs=torch.randn(1, 5))
+        fork_ref = weakref.ref(result.trace)
+
+        del result
+        gc.collect()
+        assert fork_ref() is None, "trace.run() leaked its result fork"
+
+        source_ref = weakref.ref(source)
+        del source
+        gc.collect()
+        assert source_ref() is None
+
     def test_failed_capture_partial_is_collectible_with_its_exception(self):
         """A failed capture's partial trace dies with the exception holding it.
 

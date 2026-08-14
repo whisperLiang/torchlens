@@ -336,7 +336,10 @@ def test_unstamped_recording_outcome_derives() -> None:
     recording = tl.record(ThreeStageModel(), torch.ones(1, 3), save=lambda ctx: True)
     object.__setattr__(recording, "_outcome", None)
     derived = recording.outcome
-    assert derived.status is CaptureStatus.COMPLETE
+    # An unstamped ``status == "complete"`` is a plain spoofable string on a
+    # deserialized object: the derivation settles UNATTESTED, never a blessed
+    # COMPLETE (R06 -- same doctrine as the trace-side structural lattice).
+    assert derived.status is CaptureStatus.UNATTESTED
     assert derived.derived is True
 
 

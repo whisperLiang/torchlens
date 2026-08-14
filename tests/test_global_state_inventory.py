@@ -56,6 +56,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         # unwind -- a survivor past monitor exit is exactly the leak class this
         # row exists to catch (d327e3aa's non-LIFO restore bug).
         ("torchlens/utils/rng.py", "_PATCH_STACKS"),
+        # Accumulate/drain fence for in-flight cpu_async D2H copies (R36-1):
+        # armed per copy on the wrapper hot path, drained at the capture
+        # finalize seam and on the failure-scrub arms.
+        ("torchlens/utils/tensor_utils.py", "_CPU_ASYNC_PENDING_EVENTS"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_BUSY"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_PENDING"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_STATE_PTRS"),
@@ -289,8 +293,6 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
-        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_LAYER_ACCESSOR_CACHE"),
-        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_OP_ACCESSOR_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -806,8 +808,6 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
-        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_LAYER_ACCESSOR_CACHE"),
-        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_OP_ACCESSOR_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
