@@ -6,6 +6,7 @@ from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 from ._engine import solve
+from ._errors import ReceptiveFieldConfigurationError
 from ._types import (
     ReceptiveField,
     ReceptiveFieldDirection,
@@ -101,7 +102,7 @@ def _require_input_role(trace: Trace, input_op: Op | None) -> str | None:
             ):
                 return op.io_role
 
-    raise ValueError(
+    raise ReceptiveFieldConfigurationError(
         "input must be a model-input Op (or trace input accessor handle) belonging to this trace."
     )
 
@@ -286,7 +287,7 @@ def build_rf_profile(
     """
 
     if level not in {"op", "layer", "call", "module"}:
-        raise ValueError("level must be 'op', 'layer', 'call', or 'module'.")
+        raise ReceptiveFieldConfigurationError("level must be 'op', 'layer', 'call', or 'module'.")
     resolved_direction = ReceptiveFieldDirection(direction)
     if resolved_direction is ReceptiveFieldDirection.PROJECTIVE and input is not None:
         # In projective mode each row is keyed by its projection TARGET, not a
@@ -295,7 +296,7 @@ def build_rf_profile(
         # lying with an empty result. (The handle is still validated so a bad
         # handle raises the same diagnostic in both directions.)
         _require_input_role(trace, input)
-        raise ValueError(
+        raise ReceptiveFieldConfigurationError(
             "input= filters model inputs and applies only to direction='receptive'; "
             "projective tables are keyed by projection target and cannot be filtered "
             "by a model input."
@@ -356,7 +357,7 @@ def build_rf_profile(
     if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
         columns.extend(["projective_target", "projective_target_op", "projective_direction"])
     if sort_by is not None and sort_by not in columns:
-        raise ValueError(f"sort_by must be one of: {', '.join(columns)}.")
+        raise ReceptiveFieldConfigurationError(f"sort_by must be one of: {', '.join(columns)}.")
     frame = pd.DataFrame(rows, columns=columns)
     semantic_columns = ["status", "alignment", "layout"]
     if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:

@@ -8,6 +8,7 @@ from fractions import Fraction
 from math import ceil, floor
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from ._errors import ReceptiveFieldConfigurationError
 from ._types import ReceptiveFieldStatus
 
 if TYPE_CHECKING:
@@ -236,7 +237,7 @@ def _as_tuple(value: object, rank: int | None = None) -> tuple[int, ...]:
     if rank is not None and len(result) == 1:
         result *= rank
     if rank is not None and len(result) != rank:
-        raise ValueError("Receptive-field rule parameter rank mismatch.")
+        raise ReceptiveFieldConfigurationError("Receptive-field rule parameter rank mismatch.")
     return result
 
 

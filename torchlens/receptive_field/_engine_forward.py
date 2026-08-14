@@ -33,6 +33,7 @@ from ._engine_geometry import (
     _select_full_axes,
     _transpose_mapped,
 )
+from ._errors import ReceptiveFieldConfigurationError
 from ._path import ancestor_labels, resolve_graph_point
 from ._rules import _rf_rules_epoch, _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldDirection, ReceptiveFieldStatus
@@ -110,13 +111,15 @@ def _canonical_targets(trace: Trace, target_ops: Iterable[Op | str]) -> tuple[Op
 
     resolved = {resolve_graph_point(trace, target).label for target in target_ops}
     if not resolved:
-        raise ValueError("Projective descriptor solving requires at least one target operation.")
+        raise ReceptiveFieldConfigurationError(
+            "Projective descriptor solving requires at least one target operation."
+        )
     targets = tuple(
         op for op in trace.layer_list if op.label in resolved and _operation_is_live(op)
     )
     keys = [target.io_role or target.label for target in targets]
     if len(keys) != len(set(keys)):
-        raise ValueError("Projective targets must have distinct result keys.")
+        raise ReceptiveFieldConfigurationError("Projective targets must have distinct result keys.")
     return targets
 
 

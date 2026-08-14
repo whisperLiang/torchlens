@@ -10,7 +10,11 @@ from PIL import Image, ImageDraw
 
 from ..visualization.node_spec import NodeSpec, NodeSpecFn
 from ..viz.node_plots import render_heatmap
-from ._errors import AmbiguousInputError, ReceptiveFieldError
+from ._errors import (
+    AmbiguousInputError,
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
+)
 from ._types import (
     GradientReceptiveField,
     ReceptiveField,
@@ -83,7 +87,7 @@ def show(
     """
 
     if not 0.0 <= alpha <= 1.0:
-        raise ValueError("alpha must be between 0 and 1.")
+        raise ReceptiveFieldConfigurationError("alpha must be between 0 and 1.")
     selected = target if direction is ReceptiveFieldDirection.PROJECTIVE else input
     descriptor = _select_descriptor(view, selected)
     if gradient and unit is None:
@@ -211,7 +215,9 @@ def _view_box(
     if any(axis is None for axis in windowed_axes):
         raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
     # ``at()`` consumes windowed coordinates in ascending output-axis order.
-    coordinates = tuple(unit[cast(int, axis)] for axis in sorted(cast("tuple[int, ...]", windowed_axes)))
+    coordinates = tuple(
+        unit[cast(int, axis)] for axis in sorted(cast("tuple[int, ...]", windowed_axes))
+    )
     try:
         if direction is ReceptiveFieldDirection.RECEPTIVE:
             return cast(ReceptiveFieldBox, view.at(coordinates, input=selected))
