@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -192,9 +193,27 @@ def compare_gate_payloads(
         and not status_failures
         and not regressions
     )
+    # R28: the per-row wall-clock fallback exists for pre-CPU-metric
+    # payloads, but a STALE baseline with zero cpu_* rows silently judged
+    # the ENTIRE run on wall clock -- the noisier metric the CPU statistics
+    # were added to replace. Disclose the degradation at the top level so a
+    # gate run on such a baseline is visibly degraded, never silent.
+    wall_clock_rows = [check for check in checks if check.get("metric") == "wall_clock"]
+    metric_degraded = bool(checks) and bool(wall_clock_rows)
+    if metric_degraded:
+        warnings.warn(
+            f"perf gate judged {len(wall_clock_rows)}/{len(checks)} rows on WALL CLOCK "
+            "because the baseline lacks process-CPU statistics (cpu_median_ms/"
+            "cpu_iqr_ms). Regenerate the baseline with a current perf_suite run; "
+            "wall-clock verdicts are load-sensitive.",
+            UserWarning,
+            stacklevel=2,
+        )
     return {
         "schema": SCHEMA,
         "passed": passed,
+        "metric_degraded_to_wall_clock": metric_degraded,
+        "wall_clock_row_count": len(wall_clock_rows),
         "baseline_sha": baseline.get("source_sha")
         or baseline.get("environment", {}).get("torchlens_git_sha"),
         "current_sha": current.get("source_sha")

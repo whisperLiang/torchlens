@@ -8,6 +8,7 @@ import torch
 from ..._robustness import UnsupportedTensorVariantError
 from ...capture.flops import compute_backward_flops, compute_forward_flops
 from ...data_classes.op import (
+    _dedup_cached_identity_out,
     _dedup_saved_activation_out,
     _dtype_or_none,
     _effective_activation_save_mode,
@@ -430,14 +431,33 @@ def _save_activation_fields(
             ),
             retain_in_ram=True,
         )
-        raw_out = safe_copy(
-            t,
-            fields_dict["detach_saved_activations"],
-            save_mode=save_mode,
+        save_raw_activations = getattr(trace, "save_raw_activations", True)
+        store_raw = save_raw_activations or activation_transform is None
+        # Pre-copy identity probe (dedup-after-copy ordering): a hit reuses
+        # the already-saved payload and skips the clone entirely. Restricted
+        # to plain "copy" mode -- reference/view copies are free and
+        # cpu_async has fence side effects.
+        dedup_cached_out = (
+            _dedup_cached_identity_out(
+                trace,
+                t,
+                fields_dict["annotations"],
+                getattr(trace, "save_arg_values", False),
+            )
+            if store_raw and save_mode == "copy"
+            else None
         )
-        if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
-            raw_out = safe_to(raw_out, fields_dict["output_device"])
-        _stamp_reference_out(fields_dict["annotations"], raw_out, save_mode)
+        if dedup_cached_out is not None:
+            raw_out = dedup_cached_out
+        else:
+            raw_out = safe_copy(
+                t,
+                fields_dict["detach_saved_activations"],
+                save_mode=save_mode,
+            )
+            if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
+                raw_out = safe_to(raw_out, fields_dict["output_device"])
+            _stamp_reference_out(fields_dict["annotations"], raw_out, save_mode)
 
         fields_dict["shape"] = tuple(raw_out.shape)
         fields_dict["dtype"] = raw_out.dtype
@@ -447,17 +467,16 @@ def _save_activation_fields(
             fields_dict["dtype"],
         )
 
-        save_raw_activations = getattr(trace, "save_raw_activations", True)
-        store_raw = save_raw_activations or activation_transform is None
         if store_raw:
-            raw_out = _dedup_saved_activation_out(
-                trace,
-                t,
-                raw_out,
-                fields_dict["_layer_label_raw"],
-                fields_dict["annotations"],
-                getattr(trace, "save_arg_values", False),
-            )
+            if dedup_cached_out is None:
+                raw_out = _dedup_saved_activation_out(
+                    trace,
+                    t,
+                    raw_out,
+                    fields_dict["_layer_label_raw"],
+                    fields_dict["annotations"],
+                    getattr(trace, "save_arg_values", False),
+                )
             if isinstance(raw_out, torch.Tensor):
                 mark_detached_saved_activation(
                     t,

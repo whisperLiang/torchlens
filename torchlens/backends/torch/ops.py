@@ -56,6 +56,7 @@ from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
 from ...data_classes.internal_types import FuncExecutionContext
 from ...data_classes.op import (
     Op,
+    _dedup_cached_identity_out,
     _dedup_saved_activation_out,
     _dtype_or_none,
     _effective_activation_save_mode,

@@ -223,9 +223,11 @@ def _filter_conditional_arm_children(
         filtered_branch_children: dict[str, list[str]] = {}
         for branch_kind, child_labels in branch_children.items():
             kept_children: list[str] = []
+            kept_seen: set[str] = set()
             for child_label in child_labels:
                 mapped = _map_removed_label(child_label, labels_to_remove, replacements)
-                if mapped is not None and mapped not in kept_children:
+                if mapped is not None and mapped not in kept_seen:
+                    kept_seen.add(mapped)
                     kept_children.append(mapped)
             if kept_children:
                 filtered_branch_children[branch_kind] = kept_children
@@ -253,13 +255,15 @@ def _filter_conditional_arm_entry_edges(
     filtered_arm_edges: dict[tuple[int, str], list[tuple[str, str]]] = {}
     for key, edge_list in conditional_arm_entry_edges.items():
         filtered_edges: list[tuple[str, str]] = []
+        filtered_seen: set[tuple[str, str]] = set()
         for parent, child in edge_list:
             mapped_parent = _map_removed_label(parent, labels_to_remove, replacements)
             mapped_child = _map_removed_label(child, labels_to_remove, replacements)
             if mapped_parent is None or mapped_child is None:
                 continue
             mapped_edge = (mapped_parent, mapped_child)
-            if mapped_edge not in filtered_edges:
+            if mapped_edge not in filtered_seen:
+                filtered_seen.add(mapped_edge)
                 filtered_edges.append(mapped_edge)
         if filtered_edges:
             filtered_arm_edges[key] = filtered_edges
@@ -343,18 +347,24 @@ def _project_conditional_child_views(
     return then_children, elif_children, else_children
 
 
-def _append_unique_child_label(child_labels: list[str], child_label: str) -> None:
+def _append_unique_child_label(
+    child_labels: list[str], seen_labels: set[str], child_label: str
+) -> None:
     """Append ``child_label`` to ``child_labels`` if it is not already present.
 
     Parameters
     ----------
     child_labels:
         Ordered child-label list being built.
+    seen_labels:
+        Membership set mirroring ``child_labels`` (the bare list scan made
+        each aggregate projection O(k^2) in its child count -- R52).
     child_label:
         Candidate label to append.
     """
 
-    if child_label not in child_labels:
+    if child_label not in seen_labels:
+        seen_labels.add(child_label)
         child_labels.append(child_label)
 
 
@@ -376,20 +386,24 @@ def _project_aggregate_conditional_child_views(
     """
 
     then_children: list[str] = []
+    then_seen: set[str] = set()
     elif_children: dict[int, list[str]] = {}
+    elif_seen: dict[int, set[str]] = {}
     else_children: list[str] = []
+    else_seen: set[str] = set()
     for branch_children in conditional_arm_children.values():
         for child_label in branch_children.get("then", []):
-            _append_unique_child_label(then_children, child_label)
+            _append_unique_child_label(then_children, then_seen, child_label)
         for branch_kind, child_labels in branch_children.items():
             if not branch_kind.startswith("elif_"):
                 continue
             elif_index = int(branch_kind.split("_", 1)[1])
             aggregate_children = elif_children.setdefault(elif_index, [])
+            aggregate_seen = elif_seen.setdefault(elif_index, set())
             for child_label in child_labels:
-                _append_unique_child_label(aggregate_children, child_label)
+                _append_unique_child_label(aggregate_children, aggregate_seen, child_label)
         for child_label in branch_children.get("else", []):
-            _append_unique_child_label(else_children, child_label)
+            _append_unique_child_label(else_children, else_seen, child_label)
     return then_children, elif_children, else_children
 
 
@@ -406,9 +420,11 @@ def _scrub_layer_entry_conditional_fields(
         replacements: Optional removed-label -> survivor substitutions.
     """
     entry_children: list[str] = []
+    entry_seen: set[str] = set()
     for child_label in layer_entry.conditional_entry_children:
         mapped = _map_removed_label(child_label, labels_to_remove, replacements)
-        if mapped is not None and mapped not in entry_children:
+        if mapped is not None and mapped not in entry_seen:
+            entry_seen.add(mapped)
             entry_children.append(mapped)
     layer_entry.conditional_entry_children = entry_children
     layer_entry.conditional_arm_children = _filter_conditional_arm_children(
@@ -443,9 +459,11 @@ def _scrub_layer_log_conditional_fields(
         # scrub itself preserves the finished-trace immutable relation
         # surface: tuple views in, tuple views out.
         aggregate_entry_children: list[str] = []
+        aggregate_seen: set[str] = set()
         for child_label in layer_log.conditional_entry_children:
             mapped = _map_removed_label(child_label, labels_to_remove_no_pass, replacements_no_pass)
-            if mapped is not None and mapped not in aggregate_entry_children:
+            if mapped is not None and mapped not in aggregate_seen:
+                aggregate_seen.add(mapped)
                 aggregate_entry_children.append(mapped)
         layer_log.conditional_entry_children = tuple(aggregate_entry_children)
         layer_log.conditional_arm_children = _filter_conditional_arm_children(

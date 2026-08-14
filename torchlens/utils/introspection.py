@@ -277,7 +277,14 @@ def get_vars_of_type_from_obj(
     found_addresses: list[Any] = []
     found_addresses_full: list[_AddressPath] = []
     found_ids: set[int] = set()
-    expanded_ids: set[int] | None = set() if depth_exceeded_paths is not None else None
+    # R30: arm the expansion memo whenever results are deduplicated anyway
+    # (allow_repeats=False, the dominant call shape) -- without it a shared
+    # container was re-expanded at EVERY depth level (found_ids dedups the
+    # RESULTS, so the extra traversal was pure waste). allow_repeats=True
+    # keeps the historical repeat traversal, whose repeats are the point.
+    expanded_ids: set[int] | None = (
+        set() if (depth_exceeded_paths is not None or not allow_repeats) else None
+    )
     # BFS: each iteration processes one depth level.
     # Hoist warnings context manager to avoid ~77K per-attribute entries.
     with warnings.catch_warnings():
@@ -411,6 +418,7 @@ def _get_tensors_and_params_from_obj(
     tensors: list[torch.Tensor] = []
     params: list[torch.nn.Parameter] = []
     found_ids: set[int] = set()
+    expanded_ids: set[int] | None = None if allow_repeats else set()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for _ in range(search_depth):
@@ -420,6 +428,7 @@ def _get_tensors_and_params_from_obj(
                 params,
                 found_ids,
                 allow_repeats,
+                expanded_ids,
             )
     return tensors, params
 
@@ -430,6 +439,7 @@ def _search_stack_for_tensors_and_params(
     params: list[torch.nn.Parameter],
     found_ids: set[int],
     allow_repeats: bool,
+    expanded_ids: set[int] | None = None,
 ) -> list[_SearchEntry]:
     """Process one BFS level while partitioning tensors from parameters.
 
@@ -472,6 +482,11 @@ def _search_stack_for_tensors_and_params(
             continue
         if item_class in _NON_CONTAINER_LEAF_TYPES:
             continue
+        if expanded_ids is not None:
+            item_id = id(item)
+            if item_id in expanded_ids:
+                continue
+            expanded_ids.add(item_id)
         # This traversal collects only the objects (not addresses), so skip
         # address construction.
         _extend_search_stack_from_item(item, address, address_full, next_stack, False)
