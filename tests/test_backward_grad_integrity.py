@@ -103,3 +103,43 @@ def test_reentered_recording_backward_restores_tensor_backward() -> None:
             pytest.fail("re-entered recording_backward() leaked a wrapper on torch.Tensor.backward")
     # The backward inside the nested block is still recorded exactly once.
     assert trace.num_backward_passes == 1
+
+
+@pytest.mark.smoke
+def test_op_grad_payloads_charge_the_save_budget() -> None:
+    """Retained op-gradient payloads charge the save-budget accountant.
+
+    Frozen parameters isolate the op/output gradient path (no param grads
+    exist): the committed footprint must grow when backward retains op grad
+    payloads, otherwise the budget's committed-footprint claim is false
+    after any backward.
+    """
+
+    torch.manual_seed(0)
+    model = _TinyModel()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(backward_ready=True, save_grads="all"),
+    )
+    budget = trace._save_budget_accountant
+    assert budget is not None
+    committed_before = sum(ledger.committed_bytes for ledger in budget.ledgers.values())
+
+    trace.log_backward(_loss(trace))
+
+    grad_bytes = sum(
+        int(record.grad.nelement() * record.grad.element_size())
+        for layer in trace.layer_list
+        for record in layer.grads
+        if isinstance(record.grad, torch.Tensor)
+    )
+    assert grad_bytes > 0, "expected retained op gradient payloads"
+    committed_after = sum(ledger.committed_bytes for ledger in budget.ledgers.values())
+    assert committed_after >= committed_before + grad_bytes, (
+        "op gradient payloads bypassed the save-budget accountant: "
+        f"committed {committed_before} -> {committed_after}, grads {grad_bytes}"
+    )

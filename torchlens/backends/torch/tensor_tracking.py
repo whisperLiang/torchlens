@@ -408,12 +408,14 @@ def _build_grad_payloads(
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
     save_mode = _trace_grad_save_mode(trace)
+    reservation = _admit_grad_payload_budget(trace, grad, layer_label, save_mode)
     raw_payload = (
         _copy_grad_payload(grad, save_mode=save_mode)
         if save_raw_gradients or grad_transform is None
         else None
     )
     if grad_transform is None:
+        _commit_grad_payload_budget(trace, reservation, (raw_payload,))
         return raw_payload, None
     writer = getattr(trace, "_out_writer", None)
     transformed_payload = op._apply_transform(
@@ -432,6 +434,7 @@ def _build_grad_payloads(
         transform_kind="grad",
         streaming_active=writer is not None,
     )
+    _commit_grad_payload_budget(trace, reservation, (raw_payload, transformed_payload))
     return raw_payload, transformed_payload
 
 
@@ -477,17 +480,65 @@ def _build_fastlog_grad_payloads(
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
     save_mode = _trace_grad_save_mode(trace)
+    reservation = _admit_grad_payload_budget(trace, grad, "<fastlog grad>", save_mode)
     raw_payload = (
         _copy_grad_payload(grad, save_mode=save_mode)
         if save_raw_gradients or grad_transform is None
         else None
     )
     if grad_transform is None:
+        _commit_grad_payload_budget(trace, reservation, (raw_payload,))
         return raw_payload, None
     transformed_payload = grad_transform(grad)
     if not isinstance(transformed_payload, torch.Tensor):
         raise TypeError("grad_transform must return a torch.Tensor for fastlog gradients")
+    _commit_grad_payload_budget(trace, reservation, (raw_payload, transformed_payload))
     return raw_payload, transformed_payload
+
+
+def _admit_grad_payload_budget(
+    trace: "Trace", grad: torch.Tensor, label: str, save_mode: SaveMode
+) -> Any:
+    """Pre-admit one retained gradient payload against the save budget.
+
+    Gradient payloads are RAM-retained copies exactly like forward primary
+    payloads, so they charge the same per-device accountant; skipping them
+    would falsify the budget's committed-footprint claim after any backward.
+
+    Parameters
+    ----------
+    trace:
+        Trace carrying the optional ``_save_budget_accountant``.
+    grad:
+        Observed gradient tensor whose copy would be retained.
+    label:
+        Operation label named in a refusal.
+    save_mode:
+        Active gradient save mode, used to project the retention device.
+
+    Returns
+    -------
+    Any
+        Opaque reservation reconciled after allocation, or ``None``.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None:
+        return None
+    target_device = torch.device("cpu") if save_mode == "cpu_async" else grad.device
+    num_bytes = int(grad.nelement() * grad.element_size())
+    return budget.admit(str(label), target_device, num_bytes)
+
+
+def _commit_grad_payload_budget(
+    trace: "Trace", reservation: Any, payloads: tuple[Any, ...]
+) -> None:
+    """Reconcile a gradient-payload admission against retained storage."""
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or reservation is None:
+        return
+    budget.commit(reservation, payloads)
 
 
 def _trace_grad_save_mode(trace: "Trace") -> SaveMode:
