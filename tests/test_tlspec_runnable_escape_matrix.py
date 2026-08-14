@@ -735,6 +735,29 @@ def test_to_dlpack_c_binding_export_is_witnessed_as_escape(tmp_path: Path) -> No
     assert changed.report.path_faithfulness is not PathFaithfulness.VERIFIED
 
 
+class _PublicAliasToDlpackExport(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x + 1.0
+        capsule = torch.to_dlpack(y.detach())
+        arr = np.from_dlpack(_DlpackCapsuleShim(capsule))
+        return x + float(arr.sum())
+
+
+def test_public_to_dlpack_alias_export_is_witnessed_as_escape(tmp_path: Path) -> None:
+    """The public ``torch.to_dlpack`` alias is the SAME object at a separate attribute
+    site; it must be observed as a host escape exactly like the covered spellings."""
+    cap_x = torch.tensor([1.0, 0.5, 2.0, 0.25])
+    changed_x = torch.tensor([3.0, 4.0, 5.0, 6.0])
+    original = _save_load(_PublicAliasToDlpackExport(), cap_x.clone(), tmp_path).run(
+        inputs=cap_x.clone(), seed=0, on_divergence="return_diverged"
+    )
+    assert original.report.path_faithfulness is PathFaithfulness.VERIFIED
+    changed = _save_load(_PublicAliasToDlpackExport(), cap_x.clone(), tmp_path).run(
+        inputs=changed_x.clone(), seed=0, on_divergence="return_diverged"
+    )
+    assert changed.report.path_faithfulness is not PathFaithfulness.VERIFIED
+
+
 # ======================================================================================
 # R14 mutation-residual regressions (cross-lab confirmed): host WRITE / mutation paths
 # that slipped the r13 detection and would false-VERIFY with the wrong output (H1/H2/H3),
