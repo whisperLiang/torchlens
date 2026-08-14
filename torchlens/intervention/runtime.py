@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import time
 import warnings
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -565,12 +566,9 @@ def _apply_module_boundary_live_hooks(
             if hooked is not out:
                 parent_label = get_tensor_label(out)
                 if parent_label is not None:
-                    try:
-                        setattr(hooked, "_tl_module_intervention_parent_labels", (parent_label,))
-                    except Exception:
-                        pass
+                    _record_module_intervention_parent_labels(hooked, (parent_label,), trace)
                 clear_tensor_label(hooked)
-            _set_tensor_live_fire_results_if_available(hooked, fire_results)
+            _record_tensor_live_fire_results(hooked, fire_results)
         if hooked is not out:
             replacements[container_path] = hooked
     if not replacements:
@@ -578,10 +576,21 @@ def _apply_module_boundary_live_hooks(
     return _replace_tensor_outputs(out_orig, replacements)
 
 
-def _set_tensor_live_fire_results_if_available(
+_MODULE_INTERVENTION_PARENTS_ATTR = "_tl_module_intervention_parent_labels"
+_MODULE_INTERVENTION_PARENTS_TABLE = "_tl_module_intervention_parents_by_id"
+
+
+def _record_tensor_live_fire_results(
     tensor: torch.Tensor, fire_results: tuple[FireResult, ...]
 ) -> None:
-    """Attach fire results to a tensor when dynamic attributes are available.
+    """Attach module-boundary fire results to a tensor, never dropping them silently.
+
+    A replacement tensor that rejects dynamic attributes used to swallow the
+    evidence (bare ``except: pass``), so the module exit reran with no
+    intervention provenance and the fresh value was misclassified as an
+    ``internal_source``. Delegate to the op-level setter, which falls back to
+    the storage-owned side table and raises a typed ``CompatibilityError``
+    only when NEITHER channel is writable.
 
     Parameters
     ----------
@@ -591,10 +600,113 @@ def _set_tensor_live_fire_results_if_available(
         Fire results emitted by the live hook dispatcher.
     """
 
+    from ..backends.torch._ops_interventions import _set_tensor_live_fire_results
+
+    _set_tensor_live_fire_results(tensor, fire_results)
+
+
+def _peek_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
+    """Return (without consuming) live fire results attached to ``tensor``.
+
+    Checks the plain attribute first, then the storage-owned side table the
+    robust setter falls back to for attr-rejecting replacement tensors. The
+    module-exit consumer gates its replacement-vs-internal-source
+    classification on this peek, so it must see both channels.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor about to be classified at a module exit.
+    """
+
     try:
-        setattr(tensor, "_tl_live_fire_results", fire_results)
+        fire_results = tuple(getattr(tensor, "_tl_live_fire_results", ()) or ())
+    except Exception:
+        fire_results = ()
+    if fire_results:
+        return fire_results
+    from ..backends.torch import _ops_interventions as intervention_state
+
+    try:
+        with pause_logging():
+            storage = tensor.untyped_storage()
+        records = getattr(storage, intervention_state._LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
+    except Exception:
+        return ()
+    if not isinstance(records, dict):
+        return ()
+    entry = records.get(id(tensor))
+    if entry is not None and entry[0]() is tensor:
+        return tuple(entry[1])
+    return ()
+
+
+def _record_module_intervention_parent_labels(
+    tensor: torch.Tensor,
+    parent_labels: tuple[str, ...],
+    trace: Any,
+) -> None:
+    """Record the replaced-parent labels for a module-boundary replacement.
+
+    Falls back to a trace-scoped identity-keyed table (weakly guarded against
+    id reuse, dying with the capture) when the replacement tensor rejects
+    dynamic attributes, so the boundary op minted at module exit keeps its
+    dataflow parents instead of silently losing them.
+
+    Parameters
+    ----------
+    tensor:
+        Replacement tensor produced by a live module-boundary hook.
+    parent_labels:
+        Raw labels of the replaced module-output tensors.
+    trace:
+        Active trace owning the fallback table (``None`` tolerated; the loss
+        is then disclosed with a warning rather than swallowed).
+    """
+
+    labels = tuple(parent_labels)
+    try:
+        setattr(tensor, _MODULE_INTERVENTION_PARENTS_ATTR, labels)
+        return
     except Exception:
         pass
+    if trace is None:
+        warnings.warn(
+            "TorchLens could not record intervention parent provenance for a "
+            "module-boundary replacement tensor (dynamic attributes rejected and "
+            "no active trace); the replacement op will carry no parents.",
+            stacklevel=2,
+        )
+        return
+    table = trace.__dict__.setdefault(_MODULE_INTERVENTION_PARENTS_TABLE, {})
+    table[id(tensor)] = (weakref.ref(tensor), labels)
+
+
+def _peek_module_intervention_parent_labels(tensor: torch.Tensor, trace: Any) -> tuple[str, ...]:
+    """Return the recorded replaced-parent labels for ``tensor``, if any.
+
+    Parameters
+    ----------
+    tensor:
+        Module-output tensor being classified at a module exit.
+    trace:
+        Active trace whose fallback table is consulted when the tensor
+        carries no attribute.
+    """
+
+    try:
+        labels = tuple(getattr(tensor, _MODULE_INTERVENTION_PARENTS_ATTR, ()) or ())
+    except Exception:
+        labels = ()
+    if labels:
+        return labels
+    table = getattr(trace, _MODULE_INTERVENTION_PARENTS_TABLE, None) if trace is not None else None
+    if not isinstance(table, dict):
+        return ()
+    entry = table.get(id(tensor))
+    if entry is not None and entry[0]() is tensor:
+        return tuple(entry[1])
+    return ()
 
 
 def _iter_tensor_outputs(
