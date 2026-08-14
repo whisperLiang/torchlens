@@ -1039,6 +1039,23 @@ def _merge_buffer_entries(
         if parent_layer not in source_buffer.internal_source_parents:
             source_buffer.internal_source_parents.append(parent_layer)
 
+    # Step 5 ran BEFORE this merge: transfer the removed duplicate's
+    # conditional-parent annotations so the survivor keeps parenting the
+    # branch bools / arm-entry children the duplicate parented. The matching
+    # trace-level edges (conditional_branch_edges, conditional_arm_entry_edges,
+    # conditional_edge_call_indices) repoint via ``replacement_labels`` in the
+    # closing reference scrub (deep-hunt C3).
+    for entry_child in buffer_to_remove.conditional_entry_children:
+        if entry_child not in source_buffer.conditional_entry_children:
+            source_buffer.conditional_entry_children.append(entry_child)
+    for cond_id, branch_children in buffer_to_remove.conditional_arm_children.items():
+        survivor_branches = source_buffer.conditional_arm_children.setdefault(cond_id, {})
+        for branch_kind, child_labels in branch_children.items():
+            survivor_children = survivor_branches.setdefault(branch_kind, [])
+            for child_label in child_labels:
+                if child_label not in survivor_children:
+                    survivor_children.append(child_label)
+
     if deferred_removals is not None:
         deferred_removals[buffer_to_remove._label_raw] = (source_buffer, buffer_to_remove)
         return
@@ -1066,7 +1083,11 @@ def _merge_buffer_entries(
             if arg_positions is not None and arg_positions.get(0) == buffer_to_remove._label_raw:
                 arg_positions[0] = source_buffer._label_raw
 
-    self._remove_log_entry(buffer_to_remove, remove_references=True)
+    self._remove_log_entry(
+        buffer_to_remove,
+        remove_references=True,
+        replacement_labels={buffer_to_remove._label_raw: source_buffer._label_raw},
+    )
 
 
 def _finish_deferred_buffer_removals(
@@ -1086,8 +1107,7 @@ def _finish_deferred_buffer_removals(
     if not removals:
         return
     replacement_labels = {
-        removed_label: source._label_raw
-        for removed_label, (source, _removed) in removals.items()
+        removed_label: source._label_raw for removed_label, (source, _removed) in removals.items()
     }
     removed_labels = set(removals)
     for layer in self:
@@ -1110,13 +1130,12 @@ def _finish_deferred_buffer_removals(
                 arg_positions[0] = replacement
 
     self._raw_graph_ws.raw_layer_labels_list[:] = [
-        label
-        for label in self._raw_graph_ws.raw_layer_labels_list
-        if label not in removed_labels
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label not in removed_labels
     ]
     for removed_label in removed_labels:
         self._raw_graph_ws.raw_layer_dict.pop(removed_label, None)
     self._batch_remove_log_entries(
         (removed for _source, removed in removals.values()),
         remove_references=True,
+        replacement_labels=replacement_labels,
     )

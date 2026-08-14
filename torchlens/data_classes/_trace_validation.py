@@ -24,6 +24,7 @@ from .cleanup import (
     _remove_log_entry_references,
     _scrub_conditional_fields_after_removal,
     _scrub_per_op_equivalence_lists,
+    _substitute_conditional_branch_edges,
     cleanup,
 )
 from .op import Op
@@ -933,6 +934,7 @@ class TraceValidationMixin(_TraceMixinBase):
         self: "Trace",
         log_entry: Op,
         remove_references: bool = True,
+        replacement_labels: dict[str, str] | None = None,
     ) -> None:
         """Remove a single layer-pass entry and scrub graph references.
 
@@ -942,17 +944,22 @@ class TraceValidationMixin(_TraceMixinBase):
             Entry to remove.
         remove_references:
             Whether to scrub all graph references to the removed entry.
+        replacement_labels:
+            Optional removed-label -> survivor substitutions for merge-style
+            removals: conditional references repoint to the survivor instead
+            of being dropped.
         """
         tensor_label = _label_for_reference_removal(log_entry, self._tracing_finished)
         _materialize_layer_mirrors_for_removed(self, (log_entry,))
         if remove_references:
-            _remove_log_entry_references(self, tensor_label)
+            _remove_log_entry_references(self, tensor_label, replacement_labels)
         _clear_entry_attributes(log_entry)
 
     def _batch_remove_log_entries(
         self: "Trace",
         entries_to_remove: Iterable[Op],
         remove_references: bool = True,
+        replacement_labels: dict[str, str] | None = None,
     ) -> None:
         """Remove multiple layer-pass entries using single-pass filtering.
 
@@ -962,6 +969,10 @@ class TraceValidationMixin(_TraceMixinBase):
             Entries to remove.
         remove_references:
             Whether to scrub all graph references to the removed entries.
+        replacement_labels:
+            Optional removed-label -> survivor substitutions for merge-style
+            removals: conditional references repoint to the survivor instead
+            of being dropped.
         """
         entries_to_remove = list(entries_to_remove)
         removal_ids = {id(entry) for entry in entries_to_remove}
@@ -977,17 +988,17 @@ class TraceValidationMixin(_TraceMixinBase):
                 _clear_entry_attributes(entry)
             return
 
-        _scrub_conditional_fields_after_removal(self, labels_to_remove, surviving_entries)
+        _scrub_conditional_fields_after_removal(
+            self, labels_to_remove, surviving_entries, replacement_labels
+        )
 
         for field_name in _LIST_FIELDS_TO_CLEAN:
             collection = getattr(self, field_name)
             collection[:] = [label for label in collection if label not in labels_to_remove]
 
-        self.conditional_branch_edges = [
-            edge
-            for edge in self.conditional_branch_edges
-            if edge[0] not in labels_to_remove and edge[1] not in labels_to_remove
-        ]
+        self.conditional_branch_edges = _substitute_conditional_branch_edges(
+            self.conditional_branch_edges, labels_to_remove, replacement_labels
+        )
 
         for param_group, tensor_labels in list(self.layers_with_params.items()):
             self.layers_with_params[param_group] = [
