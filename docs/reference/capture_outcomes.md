@@ -110,6 +110,14 @@ Row rationales, stated once:
   re-capture without `halt=`, or use loaded-sparse `run()`.
 - **N4** is a crash→typed conversion: no legacy workflow successfully saved a
   halted runnable (the producer preflight already failed).
+- **`Recording.log_backward`** refuses a failed partial with the table's N3
+  code (`RecorderStateError`, `fields["code"] == "N3"`) and additionally
+  refuses HALTED with `fields["code"] == "recording_backward_halted"` — a
+  deliberate Recording-scoped strictness beyond the table's HALTED-allow
+  cell, which describes Trace-side backward (a halted Trace holds the prefix
+  autograd graph; a halted Recording is a sparse event product whose frontier
+  pass retained no complete output to root the backward walk, the same
+  boundary that refuses halted-no-payload `to_trace()`).
 
 ## `raise_on_nan`'s honest scope
 

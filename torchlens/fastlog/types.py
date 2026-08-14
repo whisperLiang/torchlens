@@ -705,19 +705,35 @@ class Recording(CapturedRun):
             This recording, mutated with gradient records.
         """
 
+        # Refusals carry stable machine-branchable codes (branch on
+        # exc.fields["code"], never message text). The failed arm mirrors the
+        # capability table's backward/FAILED cell (N3). The halted arm is a
+        # DELIBERATE Recording-scoped strictness beyond the table's
+        # HALTED-allow cell, which describes Trace-side backward (a halted
+        # Trace holds the prefix autograd graph); a halted Recording is a
+        # sparse event product whose frontier pass retained no complete
+        # output to root the backward walk -- the same capability boundary
+        # that refuses halted-no-payload ``to_trace()``. Documented in
+        # docs/reference/capture_outcomes.md.
         if self.failed:
             from .exceptions import RecorderStateError
 
             raise RecorderStateError(
                 "Cannot call log_backward on failed partial Recording; "
                 "user-op failures exclude the failing call; TL-side capture failures may "
-                "include a skipped/partial current-call event."
+                "include a skipped/partial current-call event.",
+                code="N3",
+                capability="backward",
+                status="failed",
             )
         if self.halted:
             from .exceptions import RecorderStateError
 
             raise RecorderStateError(
-                f"Cannot call log_backward on halted Recording (halt_reason={self.halt_reason!r})."
+                f"Cannot call log_backward on halted Recording (halt_reason={self.halt_reason!r}).",
+                code="recording_backward_halted",
+                capability="backward",
+                status="halted",
             )
 
         from ..backends.torch.backward import log_recording_backward

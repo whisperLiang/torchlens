@@ -416,3 +416,19 @@ def test_halt_signal_inherits_from_base_exception_not_exception() -> None:
 
     assert issubclass(HaltSignal, BaseException)
     assert not issubclass(HaltSignal, Exception)
+
+
+def test_recording_log_backward_refusals_carry_stable_codes() -> None:
+    """Refusals are machine-branchable via fields['code'], not message text.
+
+    The failed arm mirrors the capability table's backward/FAILED cell (N3);
+    the halted arm is the documented Recording-scoped strictness code.
+    """
+
+    halted = _as_recording(
+        tl.fastlog.record(FiveOpModel(), torch.tensor(1.0), save=_keep_ops_until_fourth)
+    )
+    with pytest.raises(RecorderStateError) as halted_exc:
+        halted.log_backward(torch.ones((), requires_grad=True))
+    assert halted_exc.value.fields["code"] == "recording_backward_halted"
+    assert halted_exc.value.fields["capability"] == "backward"
