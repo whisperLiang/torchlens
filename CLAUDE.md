@@ -581,9 +581,11 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost (measured 2026-08-13, instrumented `--durations=0` smoke run, 4-core devbox
-under parallel sprint load): `smoke` selects ~3.2k tests and took 1194s (~20 min) wall;
-the same tier measured ~500s on a quieter box earlier the same sprint. Smoke is NOT
+Tiers by cost: `smoke` selects ~4.4k tests (4,412/12,093 collect-only, measured 2026-08-14).
+The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
+devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
+(~500s on a quieter box earlier the same sprint); budget at least that at today's +34%
+larger selection. Smoke is NOT
 sub-minute and NOT a per-step gate — per-step verification is the targeted test files for
 the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
 the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
