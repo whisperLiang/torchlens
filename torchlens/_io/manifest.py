@@ -17,7 +17,7 @@ import warnings
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import torch
 from packaging.version import InvalidVersion, Version
@@ -53,7 +53,7 @@ _MAX_TENSOR_DIMS = 256
 _MAX_TENSOR_DIM_VALUE = 2**48
 
 
-def _is_plain_nonnegative_int(value: Any) -> bool:
+def _is_plain_nonnegative_int(value: Any) -> TypeGuard[int]:
     """Return whether ``value`` is a real non-negative int (bools excluded)."""
 
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
