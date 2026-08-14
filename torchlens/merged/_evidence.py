@@ -10,12 +10,13 @@ closed vocabularies at parse time; a malformed core refuses typed
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..distributed._ledger import GroupLifecycleLedger
+from ..distributed._ledger import GroupLifecycleLedger, membership_digest_for_ranks
 from ._enums import MergedErrorCode
 from ._errors import MergeInputError
 
@@ -60,6 +61,9 @@ P2P_KINDS = frozenset({"send", "recv"})
 _COMPLETION_BINDINGS = frozenset({"issue_sync", "unobserved"})
 _WITNESS_POLICIES = frozenset({"none", "digest"})
 _INSTALL_EPOCHS = frozenset({"armed_before_any_group", "seeded"})
+_ROLE_NAMES = frozenset({"contribution", "destination", "contribution_destination"})
+_VALUE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+"""Byte-exact witness digests are SHA-256 hex, same shape as membership digests."""
 
 
 @dataclass(frozen=True)
@@ -119,12 +123,20 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
         raise _refuse(f"{where} has a malformed correlation key", source=source)
     if not isinstance(correlation["membership_digest"], str):
         raise _refuse(f"{where} membership_digest is not a string", source=source)
-    if not isinstance(correlation["lifetime_ordinal"], int) or isinstance(
-        correlation["lifetime_ordinal"], bool
+    if not isinstance(correlation["channel"], str):
+        raise _refuse(f"{where} correlation channel is not a string", source=source)
+    if (
+        not isinstance(correlation["lifetime_ordinal"], int)
+        or isinstance(correlation["lifetime_ordinal"], bool)
+        or correlation["lifetime_ordinal"] < 0
     ):
-        raise _refuse(f"{where} lifetime_ordinal is not an integer", source=source)
-    if not isinstance(correlation["seq"], int) or isinstance(correlation["seq"], bool):
-        raise _refuse(f"{where} seq is not an integer", source=source)
+        raise _refuse(f"{where} lifetime_ordinal is not a non-negative integer", source=source)
+    if (
+        not isinstance(correlation["seq"], int)
+        or isinstance(correlation["seq"], bool)
+        or correlation["seq"] < 0
+    ):
+        raise _refuse(f"{where} seq is not a non-negative integer", source=source)
     group = entry.get("group")
     if not isinstance(group, dict) or not isinstance(group.get("global_ranks"), list):
         raise _refuse(f"{where} has no group membership record", source=source)
@@ -140,6 +152,46 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             f"{where} claims rank {group['my_global_rank']} outside its group membership",
             source=source,
         )
+    my_group_rank = group.get("my_group_rank")
+    if my_group_rank is not None and (
+        not isinstance(my_group_rank, int) or isinstance(my_group_rank, bool)
+    ):
+        raise _refuse(f"{where} my_group_rank is not an integer or null", source=source)
+    backend = group.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        raise _refuse(f"{where} group backend is not a string or null", source=source)
+    # The membership digest is definitionally sha256(sorted(global_ranks)) and
+    # freely recomputable. A digest bound to a DIFFERENT membership rebinds this
+    # boundary's correlation joins, lifetime ordinals, and pre-join audit row to
+    # another communicator while the presence/relation checks keep reading the
+    # rank list -- the two views are attacker-separable unless tied here.
+    if correlation["membership_digest"] != membership_digest_for_ranks(global_ranks):
+        raise _refuse(
+            f"{where} membership_digest does not equal the digest of its own "
+            f"recorded group membership {sorted(int(r) for r in global_ranks)}",
+            source=source,
+        )
+    roles = entry.get("roles", [])
+    if not isinstance(roles, list):
+        raise _refuse(f"{where} roles is not a list", source=source)
+    for role_index, role in enumerate(roles):
+        if not isinstance(role, dict):
+            raise _refuse(f"{where} role entry {role_index} is not a mapping", source=source)
+        if role.get("role") not in _ROLE_NAMES:
+            raise _refuse(
+                f"{where} role entry {role_index} has role {role.get('role')!r} "
+                "outside the closed vocabulary",
+                source=source,
+            )
+        shape = role.get("shape")
+        if not isinstance(shape, list) or any(
+            not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape
+        ):
+            raise _refuse(
+                f"{where} role entry {role_index} has no well-formed shape "
+                "(a list of non-negative integers)",
+                source=source,
+            )
     events = entry.get("events")
     if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)
@@ -150,8 +202,30 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             "outside the closed vocabulary",
             source=source,
         )
-    if not isinstance(entry.get("op_labels_raw"), list):
+    # Digest fields must be null or a LIST of SHA-256 hex strings. A bare
+    # string here used to char-split through ``tuple(...)`` in the engine and
+    # compare single characters as digests -- two cores carrying the same
+    # garbage string rendered a fabricated ATTESTED verdict.
+    for digest_field in ("contribution_digests", "destination_digests"):
+        digests = witness.get(digest_field)
+        if digests is None:
+            continue
+        if not isinstance(digests, list) or not digests:
+            raise _refuse(
+                f"{where} witness {digest_field} is not null or a non-empty list",
+                source=source,
+            )
+        if any(not isinstance(item, str) or not _VALUE_DIGEST_RE.match(item) for item in digests):
+            raise _refuse(
+                f"{where} witness {digest_field} contains a value that is not a "
+                "lowercase hex SHA-256 digest",
+                source=source,
+            )
+    op_labels_raw = entry.get("op_labels_raw")
+    if not isinstance(op_labels_raw, list):
         raise _refuse(f"{where} lacks op_labels_raw back-references", source=source)
+    if any(not isinstance(label, str) for label in op_labels_raw):
+        raise _refuse(f"{where} op_labels_raw contains a non-string label", source=source)
 
 
 def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:

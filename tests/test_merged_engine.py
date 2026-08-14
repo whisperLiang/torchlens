@@ -392,6 +392,137 @@ class TestScopeAndInputRefusals:
         assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
 
 
+class TestBoundaryParseValidation:
+    """Deep-hunt F2: roles and witness digest fields are validated typed at parse.
+
+    Fail-before: a role entry without ``shape`` passed extraction and escaped
+    ``derive_merge`` as a raw ``KeyError('shape')`` from both ``merge_ranks``
+    and load rederivation; a bare-STRING digest field char-split through
+    ``tuple(...)`` and two cores carrying the same garbage string rendered a
+    fabricated ``attested_complete``.
+    """
+
+    def _extract(self, entry: dict) -> None:
+        extract_rank_evidence(
+            trace_for_boundaries([entry], seeded_ledger()),
+            "forged-boundary",
+        )
+
+    def _assert_refuses(self, entry: dict) -> None:
+        with pytest.raises(MergeInputError) as excinfo:
+            self._extract(entry)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_role_entry_missing_shape_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "contribution_destination", "index": 0}])
+        )
+
+    def test_role_entry_not_a_mapping_refuses_typed(self):
+        self._assert_refuses(boundary(0, 0, roles=["contribution"]))
+
+    def test_roles_not_a_list_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["roles"] = {"role": "contribution"}
+        self._assert_refuses(entry)
+
+    def test_role_name_outside_vocabulary_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "spectator", "index": 0, "shape": [2]}])
+        )
+
+    def test_role_shape_with_non_integer_dim_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "contribution", "index": 0, "shape": [2, "x"]}])
+        )
+
+    def test_string_digest_field_refuses_typed(self):
+        entry = boundary(0, 0, witness_policy="digest")
+        entry["witness"]["contribution_digests"] = "ccdd"
+        entry["witness"]["destination_digests"] = "aabb"
+        self._assert_refuses(entry)
+
+    def test_non_hex_digest_element_refuses_typed(self):
+        entry = boundary(0, 0, witness_policy="digest")
+        entry["witness"]["destination_digests"] = ["not-a-digest"]
+        self._assert_refuses(entry)
+
+    def test_non_string_op_label_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["op_labels_raw"] = ["fine", 7]
+        self._assert_refuses(entry)
+
+    def test_non_integer_my_group_rank_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["group"]["my_group_rank"] = "0"
+        self._assert_refuses(entry)
+
+    def test_non_string_backend_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["group"]["backend"] = 7
+        self._assert_refuses(entry)
+
+    def test_non_string_channel_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["correlation"]["channel"] = 0
+        self._assert_refuses(entry)
+
+    def test_negative_seq_refuses_typed(self):
+        self._assert_refuses(boundary(0, -1))
+
+    def test_valid_sha256_digest_lists_still_parse(self):
+        entry = boundary(
+            0,
+            0,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+            destination_digests=["a" * 64],
+        )
+        self._extract(entry)  # must not raise
+
+    def test_parse_refuses_membership_digest_ranks_incoherence(self):
+        """Deep-hunt F3: the digest must equal sha256(sorted(global_ranks)).
+
+        Fail-before: two cores presenting the digest of a DIFFERENT membership
+        ([5, 6, 7]) over global_ranks [0, 1] merged ALIGNED, rebinding one
+        communicator's boundaries to another membership's digest, ordinal
+        lineage, and audit row.
+        """
+
+        fake = membership_digest_for_ranks([5, 6, 7])
+        self._assert_refuses(boundary(0, 0, digest=fake))
+
+    def test_engine_refuses_membership_digest_ranks_incoherence(self):
+        """Direct-engine evidence receives the same digest-coherence refusal."""
+
+        fake = membership_digest_for_ranks([5, 6, 7])
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge(
+                {
+                    0: evidence(0, [boundary(0, 0, digest=fake)], ledger=seeded_ledger(fake)),
+                    1: evidence(1, [boundary(1, 0, digest=fake)], ledger=seeded_ledger(fake)),
+                }
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_engine_belt_refuses_string_digests_typed(self):
+        """Direct-engine evidence cannot fabricate ATTESTED via char-split.
+
+        Fail-before: consistency rendered ``attested`` and the merge presented
+        ``attested_complete`` from two identical garbage strings.
+        """
+
+        def forged(rank: int) -> dict:
+            entry = boundary(rank, 0, witness_policy="digest")
+            entry["witness"]["contribution_digests"] = "ccdd"
+            entry["witness"]["destination_digests"] = "aabb"
+            return entry
+
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge({0: evidence(0, [forged(0)]), 1: evidence(1, [forged(1)])})
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+
 class TestRelationsAndCrossChecks:
     def test_kind_disagreement_at_joined_key_conflicts(self):
         d = derive_merge(
@@ -437,6 +568,37 @@ class TestRelationsAndCrossChecks:
         )
         assert d.stored_alignment is MergeAlignment.CONFLICTED
 
+    def test_backend_disagreement_conflicts_and_demotes_witness(self):
+        """Deep-hunt F4: cross-rank backend disagreement is never silent.
+
+        Fail-before: ``group_backend.setdefault`` was first-writer-wins in
+        rank order -- rank 0 claiming "gloo" flipped the group into the
+        witness-verdict backends and the join rendered ATTESTED under gloo
+        contract semantics while rank 1 recorded an unknown backend.
+        """
+
+        d = derive_merge(
+            {
+                0: evidence(0, [boundary(0, 0, backend="gloo", **digest_kwargs())]),
+                1: evidence(1, [boundary(1, 0, backend="mystery_backend", **digest_kwargs())]),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.CONFLICTED
+        assert any(f.kind == "relation_violation" and "backend" in f.detail for f in d.findings)
+        # The disputed backend is demoted: never verdict-grade.
+        assert d.joins[0].backend is None
+        assert d.joins[0].consistency is BoundaryConsistency.NOT_APPLICABLE
+
+    def test_backend_agreement_reports_no_finding(self):
+        d = derive_merge(
+            {
+                0: evidence(0, [boundary(0, 0, **digest_kwargs())]),
+                1: evidence(1, [boundary(1, 0, **digest_kwargs())]),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
+        assert d.joins[0].backend == "gloo"
+
     def test_c10d_group_seq_delta_disagreement_conflicts(self):
         d = derive_merge(
             {
@@ -452,6 +614,75 @@ class TestRelationsAndCrossChecks:
         )
         assert d.stored_alignment is MergeAlignment.CONFLICTED
         assert any(f.kind == "correlation_delta_mismatch" for f in d.findings)
+
+    def test_armed_rank_base_misalignment_is_a_correlation_conflict(self):
+        """Deep-hunt F5: differing capture windows cannot fabricate a join.
+
+        Rank 0 recorded absolute seqs {0, 1}; rank 1 recorded {1} only. Delta
+        alignment paired rank 0's seq 0 with rank 1's seq 1 -- two DIFFERENT
+        collectives presented as one honest correspondence (invisible under
+        witness "none", and the c10d cross-check cancels constant offsets).
+        Both ranks are armed before any group, so their counters tick on every
+        issue and equal-seq is provable: the disagreement must conflict.
+        """
+
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 0), boundary(0, 1)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(
+                    1,
+                    [boundary(1, 1)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.CONFLICTED
+        assert any(
+            f.kind == "correlation_delta_mismatch" and "absolute issue sequences" in f.detail
+            for f in d.findings
+        )
+
+    def test_armed_ranks_with_equal_absolute_seqs_stay_aligned(self):
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 3), boundary(0, 4)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(
+                    1,
+                    [boundary(1, 3), boundary(1, 4)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
+
+    def test_seeded_rank_base_offsets_never_compared(self):
+        # Mixed epochs: the seeded rank's absolute base is a rank-local fact
+        # (arm-time histories differ); only armed-before-any-group ranks are
+        # held to equal absolute seqs, so this stays an honest delta join.
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 0)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(1, [boundary(1, 7)], ledger=seeded_ledger()),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
 
     def test_c10d_group_seq_absent_never_demotes(self):
         d = derive_merge(
@@ -683,6 +914,49 @@ class TestWitnessDerivation:
             }
         )
         assert d.stored_value_status is MergeValueStatus.ATTESTED_PARTIAL
+
+
+class TestPresenterLookupNarrowing:
+    """Deep-hunt F7: ``__getitem__``'s rank scan must not swallow core defects.
+
+    Fail-before: ``except Exception`` read a rank core whose lookup raised
+    ``RuntimeError`` as a MISS, so a defective core silently vanished and
+    another rank's hit presented as an unambiguous single-rank result --
+    ``super_op`` directly below was already narrowed (b5 R45-2) for exactly
+    this reason.
+    """
+
+    class _BrokenTrace:
+        def __getitem__(self, item):
+            raise RuntimeError("corrupt core: internal invariant violated")
+
+    class _GoodTrace:
+        def __getitem__(self, item):
+            return f"op<{item}>"
+
+    class _MissTrace:
+        def __getitem__(self, item):
+            raise KeyError(item)
+
+    def _merged(self, trace0, trace1):
+        from torchlens.merged._presenter import MergedTrace, _RankHandle
+
+        derivation = derive_merge(
+            {0: evidence(0, [boundary(0, 0)]), 1: evidence(1, [boundary(1, 0)])}
+        )
+        return MergedTrace(
+            derivation,
+            {0: _RankHandle(0, trace=trace0), 1: _RankHandle(1, trace=trace1)},
+        )
+
+    def test_rank_core_defect_surfaces_from_getitem(self):
+        merged = self._merged(self._BrokenTrace(), self._GoodTrace())
+        with pytest.raises(RuntimeError, match="corrupt core"):
+            merged["relu_1_2"]
+
+    def test_lookup_miss_still_reads_as_a_miss(self):
+        merged = self._merged(self._MissTrace(), self._GoodTrace())
+        assert merged["relu_1_2"] == "op<relu_1_2>"
 
 
 class TestExpectedRanksWidenOnly:

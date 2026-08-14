@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from torchlens.distributed._ledger import GroupLifecycleEvent, GroupLifecycleLedger
+from torchlens.distributed._ledger import (
+    GroupLifecycleEvent,
+    GroupLifecycleLedger,
+    membership_digest_for_ranks,
+)
 from torchlens.merged import (
     BoundaryConsistency,
     MergeAlignment,
@@ -23,7 +27,7 @@ from torchlens.merged._evidence import RankEvidence
 
 pytestmark = pytest.mark.smoke
 
-WORLD = "d" * 64
+WORLD = membership_digest_for_ranks([0, 1])
 
 
 def _seeded_ledger() -> GroupLifecycleLedger:

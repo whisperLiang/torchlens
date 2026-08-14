@@ -12,9 +12,14 @@ unmatched key of it becomes a presence gap.
 
 Correlation alignment is by counting (P3): per ``(group_uid, channel)`` each
 rank's recorded boundaries align as seq DELTAS from that rank's first recorded
-key -- absolute seq bases are rank-local facts (arm-time histories differ) and
-are never compared. Witness digests are redundant byte-exact evidence that can
-only DEMOTE a verdict, never rescue or repair one.
+key -- a SEEDED rank's absolute seq base is a rank-local fact (arm-time
+histories differ) and is never compared. Ranks armed BEFORE any group are the
+exception: their counters tick on every issue from group creation on, so the
+same collective carries the same absolute seq on every such rank, and a
+disagreement at a joined key proves the delta anchors paired non-corresponding
+collectives (a structural ``correlation_delta_mismatch``). Witness digests are
+redundant byte-exact evidence that can only DEMOTE a verdict, never rescue or
+repair one.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from ..distributed._audit import MembershipLineageVerdict, audit_membership_lineages
-from ..distributed._ledger import InstallEpoch
+from ..distributed._ledger import InstallEpoch, membership_digest_for_ranks
 from ._enums import (
     WITNESS_IDENTITY_KINDS,
     WITNESS_NOT_APPLICABLE_KINDS,
@@ -220,12 +225,24 @@ def _role_digests(entry: dict[str, Any]) -> tuple[tuple[str, ...] | None, tuple[
     """Return ``(contribution_digests, destination_digests)`` or ``None`` each."""
 
     witness = entry["witness"]
-    contribution = witness.get("contribution_digests")
-    destination = witness.get("destination_digests")
-    return (
-        None if contribution is None else tuple(contribution),
-        None if destination is None else tuple(destination),
-    )
+    values: list[tuple[str, ...] | None] = []
+    for digest_field in ("contribution_digests", "destination_digests"):
+        digests = witness.get(digest_field)
+        if digests is None:
+            values.append(None)
+            continue
+        # Belt for internal RankEvidence constructors that bypass the parse
+        # boundary: a bare string here would char-split through ``tuple(...)``
+        # and its characters would then be compared as digests, so two cores
+        # carrying the same garbage string fabricated an ATTESTED verdict.
+        if isinstance(digests, str) or not isinstance(digests, (list, tuple)):
+            raise MergeInputError(
+                f"Boundary witness {digest_field} is not a list of digests "
+                f"(got {type(digests).__name__}).",
+                code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+            )
+        values.append(tuple(str(item) for item in digests))
+    return values[0], values[1]
 
 
 def _roles_of(entry: dict[str, Any], role_names: Iterable[str]) -> list[dict[str, Any]]:
@@ -532,6 +549,16 @@ def derive_merge(
                     rank=rank,
                 )
             correlation = entry["correlation"]
+            # The digest is definitionally sha256(sorted(global_ranks)) and freely
+            # recomputable; an incoherent pair rebinds this boundary's joins,
+            # ordinals, and audit row to another communicator's membership.
+            if correlation["membership_digest"] != membership_digest_for_ranks(members):
+                raise MergeInputError(
+                    f"Rank {rank} presents a boundary whose membership_digest does "
+                    f"not equal the digest of its own recorded membership {members}.",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                    rank=rank,
+                )
             correlation_key = (
                 str(correlation["membership_digest"]),
                 int(correlation["lifetime_ordinal"]),
@@ -570,6 +597,7 @@ def derive_merge(
     # 2. Group table from the recorded memberships (rank cores are authority).
     group_members: dict[tuple[str, int], tuple[int, ...]] = {}
     group_backend: dict[tuple[str, int], str | None] = {}
+    backend_disputed: set[tuple[str, int]] = set()
     for rank in input_ranks:
         for index, entry in enumerate(evidence[rank].boundaries):
             correlation = entry["correlation"]
@@ -590,6 +618,33 @@ def derive_merge(
                         ranks=input_ranks,
                     )
                 )
+            # Backend disagreement was silent first-writer-wins: one rank
+            # claiming "gloo" flipped an unknown-backend group into the
+            # WITNESS_VERDICT_BACKENDS set, rendering verdict-grade
+            # attestations under semantics the other ranks never recorded.
+            # Disagreement is a relation violation like the member list, and
+            # the disputed backend demotes to None so every witness verdict
+            # on the group is NOT_APPLICABLE (demote-only, P3).
+            if (
+                uid in group_backend
+                and uid not in backend_disputed
+                and group_backend[uid] != backend
+            ):
+                backend_disputed.add(uid)
+                findings.append(
+                    MergedFinding(
+                        kind="relation_violation",
+                        detail=(
+                            f"rank {rank} records group {uid} with backend "
+                            f"{backend!r} but another rank recorded "
+                            f"{group_backend[uid]!r}; a disputed backend is "
+                            "never verdict-grade."
+                        ),
+                        membership_digest=uid[0],
+                        ranks=input_ranks,
+                    )
+                )
+                group_backend[uid] = None
             group_members.setdefault(uid, members)
             group_backend.setdefault(uid, backend)
 
@@ -683,6 +738,40 @@ def derive_merge(
                         membership_digest=digest,
                         key=key,
                         ranks=tuple(sorted(c10d_deltas)),
+                    )
+                )
+
+            # Absolute-seq cross-check for ranks armed BEFORE any group: their
+            # per-(uid, channel) counters tick on EVERY issue from group
+            # creation on (captured or not), so the same collective carries the
+            # SAME absolute seq on every such rank. Delta alignment anchors at
+            # each rank's first RECORDED key; when capture windows differ, the
+            # anchors name different collectives and the join is fabricated.
+            # The c10d group-seq cross-check is structurally blind to this
+            # class (each rank's base is taken at its own delta 0, so a
+            # constant offset cancels); the absolute counters are not.
+            # Seeded ranks stay out: their arm-time histories differ, so
+            # absolute bases are legitimately rank-local facts (P3).
+            armed_seq_abs = {
+                rank: per_rank[rank].seq_abs
+                for rank in presence
+                if evidence[rank].install_epoch == "armed_before_any_group"
+            }
+            if len(set(armed_seq_abs.values())) > 1:
+                findings.append(
+                    MergedFinding(
+                        kind="correlation_delta_mismatch",
+                        detail=(
+                            f"absolute issue sequences disagree at key {key}: "
+                            f"{dict(sorted(armed_seq_abs.items()))}; every rank armed "
+                            "before any group ticks the same counter on the same "
+                            "collective, so the joined boundaries are not the same "
+                            "collective (the delta anchors name different first "
+                            "captures)."
+                        ),
+                        membership_digest=digest,
+                        key=key,
+                        ranks=tuple(sorted(armed_seq_abs)),
                     )
                 )
 
