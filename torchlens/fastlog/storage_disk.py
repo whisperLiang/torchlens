@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import sys
 import warnings
@@ -68,6 +69,27 @@ def _scrubbed_abort_reason(prefix: str, exc: BaseException) -> _ScrubbedReason:
     return _ScrubbedReason(f"{prefix}: {type(exc).__name__}"[:_MAX_ABORT_REASON_CHARS])
 
 
+def _tighten_bundle_tree(root: Path) -> None:
+    """Apply the core bundle writer's 0600/0700 tightening to a fastlog tree.
+
+    ``mkdir``/``open`` honor the ambient umask, so under the common umask 022
+    the fastlog bundle directory and its metadata sidecars stayed
+    world-readable even though the core ``.tlspec`` writer tightens its own
+    output. Best-effort like the shared helper: a filesystem that ignores
+    mode bits is not a save failure.
+    """
+
+    from .._io.bundle import _restrict_mode
+
+    _restrict_mode(root, 0o700)
+    for current_dir, dir_names, file_names in os.walk(root):
+        base = Path(current_dir)
+        for name in dir_names:
+            _restrict_mode(base / name, 0o700)
+        for name in file_names:
+            _restrict_mode(base / name, 0o600)
+
+
 class DiskStorageBackend:
     """Persist fastlog records to a sync directory bundle."""
 
@@ -94,6 +116,9 @@ class DiskStorageBackend:
         self.disk_only = not options.streaming.retain_in_memory
         self._validate_static_keep_grad()
         self.writer = BundleStreamWriter(options.streaming.bundle_path)
+        # Directories first, so mid-recording contents are already unreachable
+        # to other users; finalize() tightens the files it writes.
+        _tighten_bundle_tree(self.writer.tmp_path)
         self.index_path = self.writer.tmp_path / "fastlog_index.jsonl"
         self._ram_backend = RamStorageBackend(recording)
         self._tensor_entries: list[TensorEntry] = []
@@ -206,6 +231,7 @@ class DiskStorageBackend:
             _write_metadata(self.writer.tmp_path / "metadata.json", self.recording, self.options)
             manifest = _build_fastlog_manifest(self._tensor_entries)
             manifest.write(self.writer.tmp_path / "manifest.json")
+            _tighten_bundle_tree(self.writer.tmp_path)
             self.writer.tmp_path.rename(self.writer.final_path)
         except (OSError, TorchLensIOError, ValueError) as exc:
             self.abort(_scrubbed_abort_reason("Failed to finalize fastlog bundle", exc))
