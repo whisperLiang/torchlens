@@ -18,6 +18,7 @@ from ...data_classes.op import Op
 from ...fastlog.types import CaptureSpec
 from ...intervention.selectors import BaseSelector
 from ...ir.events import BackwardPassStart, OpGradObserved
+from ...utils._torch_compat import get_current_graph_task_id_fn
 from ...utils.display import _record_phase_timing
 from ...utils.hashing import make_random_barcode, make_short_barcode_from_input
 from ...utils.tensor_utils import SaveMode, safe_copy
@@ -321,7 +322,7 @@ def _current_backward_graph_task_id() -> int | None:
         installed torch build exposes no such capability.
     """
 
-    resolver = getattr(torch._C, "_current_graph_task_id", None)
+    resolver = get_current_graph_task_id_fn()
     if resolver is None:
         return None
     try:
@@ -408,12 +409,14 @@ def _build_grad_payloads(
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
     save_mode = _trace_grad_save_mode(trace)
+    reservation = _admit_grad_payload_budget(trace, grad, layer_label, save_mode)
     raw_payload = (
         _copy_grad_payload(grad, save_mode=save_mode)
         if save_raw_gradients or grad_transform is None
         else None
     )
     if grad_transform is None:
+        _commit_grad_payload_budget(trace, reservation, (raw_payload,))
         return raw_payload, None
     writer = getattr(trace, "_out_writer", None)
     transformed_payload = op._apply_transform(
@@ -432,6 +435,7 @@ def _build_grad_payloads(
         transform_kind="grad",
         streaming_active=writer is not None,
     )
+    _commit_grad_payload_budget(trace, reservation, (raw_payload, transformed_payload))
     return raw_payload, transformed_payload
 
 
@@ -444,6 +448,20 @@ def _should_save_grad_payload(trace: "Trace", layer_label: str) -> bool:
     if policy is True or policy == "all":
         return True
     if layer_label not in getattr(trace, "layer_dict_all_keys", {}):
+        param_log = _param_log_for_exact_address(trace, layer_label)
+        if param_log is not None:
+            # Parameter gradients honor selector/callable policies through a
+            # param-shaped context (grad_kind="param_grad") instead of being
+            # silently dropped. Ordinal/label-string selections name OPS;
+            # parameters are outside that vocabulary and stay unsaved there.
+            if callable(policy) or isinstance(policy, BaseSelector):
+                decision = policy(
+                    _ParamGradPayloadContext(
+                        param=param_log, pass_index=_current_backward_pass(trace)
+                    )
+                )
+                return _grad_payload_decision_saves_out(decision)
+            return False
         ctx = getattr(trace, "_fastlog_grad_contexts", {}).get(layer_label)
         if ctx is None:
             return False
@@ -477,17 +495,65 @@ def _build_fastlog_grad_payloads(
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
     save_mode = _trace_grad_save_mode(trace)
+    reservation = _admit_grad_payload_budget(trace, grad, "<fastlog grad>", save_mode)
     raw_payload = (
         _copy_grad_payload(grad, save_mode=save_mode)
         if save_raw_gradients or grad_transform is None
         else None
     )
     if grad_transform is None:
+        _commit_grad_payload_budget(trace, reservation, (raw_payload,))
         return raw_payload, None
     transformed_payload = grad_transform(grad)
     if not isinstance(transformed_payload, torch.Tensor):
         raise TypeError("grad_transform must return a torch.Tensor for fastlog gradients")
+    _commit_grad_payload_budget(trace, reservation, (raw_payload, transformed_payload))
     return raw_payload, transformed_payload
+
+
+def _admit_grad_payload_budget(
+    trace: "Trace", grad: torch.Tensor, label: str, save_mode: SaveMode
+) -> Any:
+    """Pre-admit one retained gradient payload against the save budget.
+
+    Gradient payloads are RAM-retained copies exactly like forward primary
+    payloads, so they charge the same per-device accountant; skipping them
+    would falsify the budget's committed-footprint claim after any backward.
+
+    Parameters
+    ----------
+    trace:
+        Trace carrying the optional ``_save_budget_accountant``.
+    grad:
+        Observed gradient tensor whose copy would be retained.
+    label:
+        Operation label named in a refusal.
+    save_mode:
+        Active gradient save mode, used to project the retention device.
+
+    Returns
+    -------
+    Any
+        Opaque reservation reconciled after allocation, or ``None``.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None:
+        return None
+    target_device = torch.device("cpu") if save_mode == "cpu_async" else grad.device
+    num_bytes = int(grad.nelement() * grad.element_size())
+    return budget.admit(str(label), target_device, num_bytes)
+
+
+def _commit_grad_payload_budget(
+    trace: "Trace", reservation: Any, payloads: tuple[Any, ...]
+) -> None:
+    """Reconcile a gradient-payload admission against retained storage."""
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or reservation is None:
+        return
+    budget.commit(reservation, payloads)
 
 
 def _trace_grad_save_mode(trace: "Trace") -> SaveMode:
@@ -513,6 +579,15 @@ def _copy_grad_payload(grad: torch.Tensor, *, save_mode: SaveMode = "copy") -> t
         Detached tensor copy suitable for storage in gradient records.
     """
 
+    # Gradient payloads are ALWAYS genuine snapshots, even under
+    # save_mode="reference"/"view": autograd's AccumulateGrad may steal the
+    # observed gradient as the leaf's ``.grad`` and accumulate into it IN
+    # PLACE on the next backward, so an aliased payload silently rewrites the
+    # recorded pass-N value (pass-1 record becomes the running sum). Unlike
+    # the forward path, no wrapped in-place op exists here to stamp and
+    # fail-close the mutation, so aliasing cannot be disclosed -- clone.
+    if save_mode in ("reference", "view"):
+        save_mode = "copy"
     copied = safe_copy(grad, detach_tensor=True, save_mode=save_mode)
     if not isinstance(copied, torch.Tensor):
         raise TypeError("safe_copy returned a non-tensor gradient payload")
@@ -559,6 +634,62 @@ class _GradPayloadContext:
         self.shape = op.shape
         self.dtype = op.dtype
         self.tensor_device = getattr(op, "output_device", None)
+
+
+def _param_log_for_exact_address(trace: "Trace", address: str) -> Any | None:
+    """Return the Param record for an exact address, or None.
+
+    Membership is checked against the exact address mapping, never the
+    accessor's fuzzy short-name/substring resolution, so an op label can
+    never accidentally resolve to a parameter.
+    """
+
+    param_logs = getattr(trace, "param_logs", None)
+    if param_logs is None:
+        return None
+    exact = getattr(param_logs, "_dict", None)
+    if exact is not None:
+        return exact.get(address)
+    if isinstance(param_logs, Mapping):
+        return param_logs.get(address)
+    return None
+
+
+class _ParamGradPayloadContext:
+    """Minimal predicate context for parameter gradient retention."""
+
+    def __init__(self, *, param: Any, pass_index: int | None) -> None:
+        """Initialize a parameter gradient predicate context.
+
+        Parameters
+        ----------
+        param:
+            Param record whose gradient was observed.
+        pass_index:
+            One-based backward pass number, when known.
+        """
+
+        self.label = param.address
+        self.layer_label = param.address
+        self.op_label = param.address
+        self.raw_label = None
+        self.param_address = param.address
+        self.param_name = param.name
+        self.func_name = None
+        self.layer_type = "param"
+        self.type = "param"
+        self.module_stack = ()
+        module_address = getattr(param, "module_address", None)
+        self.modules = (module_address,) if module_address else ()
+        self.output_of_module_calls = ()
+        self.has_forward_op = False
+        self.has_op = False
+        self.grad_kind = "param_grad"
+        self.pass_index = pass_index
+        self.backward_pass_index = pass_index
+        self.shape = param.shape
+        self.dtype = param.dtype
+        self.tensor_device = None
 
 
 class _FastlogGradPayloadContext:

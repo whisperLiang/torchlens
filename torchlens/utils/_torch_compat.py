@@ -60,6 +60,7 @@ __all__ = [
     "HAS_C10D_ABORT_PG",
     "HAS_C10D_GROUP_REGISTRY",
     "HAS_C10D_GROUP_SEQ",
+    "HAS_CURRENT_GRAPH_TASK_ID",
     "HAS_DYNAMO_EXPLAIN",
     "apply_ambient_execution_context",
     "read_fill_uninitialized_memory",
@@ -731,6 +732,18 @@ def _probe_accumulate_grad_class() -> bool:
     return _nested_getattr_or_none(torch, ("_C", "_functions", "AccumulateGrad")) is not None
 
 
+def _probe_current_graph_task_id() -> bool:
+    """Return whether torch exposes the autograd graph-task-id resolver.
+
+    Returns
+    -------
+    bool
+        True when ``torch._C._current_graph_task_id`` is present.
+    """
+
+    return _nested_getattr_or_none(torch, ("_C", "_current_graph_task_id")) is not None
+
+
 def _probe_fx_graph_module() -> bool:
     """Return whether torch exposes ``torch.fx.GraphModule``.
 
@@ -1209,6 +1222,7 @@ HAS_JIT_BUILTIN_TABLE: bool = _probe_jit_builtin_table()
 HAS_DEVICE_CONTEXT_DISPATCH: bool = _probe_device_context_dispatch()
 HAS_DEVICE_CONSTRUCTORS: bool = _probe_device_constructors()
 HAS_ACCUMULATE_GRAD_CLASS: bool = _probe_accumulate_grad_class()
+HAS_CURRENT_GRAPH_TASK_ID: bool = _probe_current_graph_task_id()
 HAS_FX_GRAPH_MODULE: bool = _probe_fx_graph_module()
 HAS_NAMED_TENSOR_API: bool = _probe_named_tensor_api()
 HAS_CACHED_UNTYPED_STORAGE_WRAPPER: bool = _probe_cached_untyped_storage_wrapper()
@@ -1302,6 +1316,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
     "HAS_ACCUMULATE_GRAD_CLASS",
+    "HAS_CURRENT_GRAPH_TASK_ID",
     "HAS_FX_GRAPH_MODULE",
     "HAS_NAMED_TENSOR_API",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
@@ -1582,6 +1597,26 @@ def get_accumulate_grad_class() -> Any:
         )
         return ()
     return accumulate_grad_cls
+
+
+def get_current_graph_task_id_fn() -> Callable[[], Any] | None:
+    """Return the autograd engine graph-task-id resolver when available.
+
+    Returns
+    -------
+    Callable[[], Any] | None
+        ``torch._C._current_graph_task_id`` when present, otherwise ``None``.
+    """
+
+    resolver = _nested_getattr_or_none(torch, ("_C", "_current_graph_task_id"))
+    if resolver is None:
+        mark_torch_capability_missing(
+            "HAS_CURRENT_GRAPH_TASK_ID",
+            "implicit backward pass boundaries cannot distinguish separate "
+            "engine invocations and fall back to the open-bracket heuristic",
+        )
+        return None
+    return resolver
 
 
 def get_functorch_maybe_current_level() -> Callable[[], Any] | None:
