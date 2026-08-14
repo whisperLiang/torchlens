@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..backends import TORCH_BACKEND_NAME
+
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
     from ..data_classes.op import Op
@@ -324,7 +326,7 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
         contiguous run anchored at 1 or the seal watermark.
     """
 
-    if getattr(trace, "backend", "torch") != "torch":
+    if getattr(trace, "backend", TORCH_BACKEND_NAME) != TORCH_BACKEND_NAME:
         return
     capture_events = getattr(trace, "_capture_events", None)
     if capture_events is None:

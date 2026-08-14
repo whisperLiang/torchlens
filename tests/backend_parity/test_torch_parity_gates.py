@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io import FieldPolicy
 from torchlens.constants import (
     LAYER_PASS_LOG_FIELD_ORDER,
     MODEL_LOG_FIELD_ORDER,
@@ -433,6 +434,25 @@ def _manifest_projection(bundle_path: Path) -> dict[str, Any]:
     }
 
 
+def _portable_surviving_fields(spec: dict[str, FieldPolicy]) -> list[str]:
+    """Project the portable-SURVIVING field names of one policy spec.
+
+    Parameters
+    ----------
+    spec:
+        ``PORTABLE_STATE_SPEC`` policy mapping for one record class.
+
+    Returns
+    -------
+    list[str]
+        Field names whose policy lets them survive into portable artifacts.
+        ``FieldPolicy.DROP`` fields are session-time state and must never be
+        pinned as part of the portable surface.
+    """
+
+    return [name for name, policy in spec.items() if policy is not FieldPolicy.DROP]
+
+
 def _dataframe_projection(trace: Trace) -> dict[str, Any]:
     """Project the FIELD_ORDER-derived dataframe surface.
 
@@ -468,8 +488,8 @@ def _dataframe_projection(trace: Trace) -> dict[str, Any]:
     return {
         "model_field_order": list(MODEL_LOG_FIELD_ORDER),
         "op_field_order": list(LAYER_PASS_LOG_FIELD_ORDER),
-        "trace_portable_fields": sorted(Trace.PORTABLE_STATE_SPEC),
-        "op_portable_fields": sorted(Op.PORTABLE_STATE_SPEC),
+        "trace_portable_fields": sorted(_portable_surviving_fields(Trace.PORTABLE_STATE_SPEC)),
+        "op_portable_fields": sorted(_portable_surviving_fields(Op.PORTABLE_STATE_SPEC)),
         "dataframe_columns": [column for column in frame.columns if column != "output_role"],
         "stable_rows": rows,
     }
