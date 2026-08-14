@@ -349,10 +349,22 @@ def test_partial_lookup_error_is_typed_and_valueerror() -> None:
     assert issubclass(PartialCaptureLookupError, ValueError)
 
 
-def test_fork_inherits_outcome_sidecar() -> None:
+def test_fork_settles_derived_outcome_not_parent_attestation() -> None:
+    # REBASELINE (fix/fork lane): forks used to inherit the parent's settled
+    # outcome BY IDENTITY, so a hand-edited fork saved as a bit-identical
+    # attested COMPLETE. A fork is the sanctioned mutation surface: it now
+    # settles a DERIVED outcome through the structural lattice (R06 doctrine:
+    # derivation never emits a blessed COMPLETE), with fork provenance in the
+    # settlement note. The parent's attestation is untouched.
     trace = tl.trace(ThreeStageModel(), torch.ones(1, 3))
     fork = trace.fork()
-    assert fork.outcome is trace.outcome
+    assert fork.outcome is not trace.outcome
+    assert fork.outcome.status is CaptureStatus.UNATTESTED
+    assert fork.outcome.derived is True
+    assert fork.outcome.settlement_note == "forked_from=complete"
+    assert fork.outcome.n_ops_committed == trace.outcome.n_ops_committed
+    assert trace.outcome.status is CaptureStatus.COMPLETE
+    assert trace.outcome.derived is False
 
 
 # ---------------------------------------------------------------------------

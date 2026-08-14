@@ -38,6 +38,7 @@ import torch
 from .. import _state
 from .._trace_core.op_store import _MISSING, DetachedOpStore, PooledCell, cow_copy_value
 from .._trace_core.record_rows import CORE_KEY, ROW_KEY
+from ..capture.outcome import stamp_forked
 from ..intervention.types import MODEL_LOG_FIELD_FORK_POLICY, ForkFieldPolicy
 from ._accessor_base import Accessor
 from ._state_adapter import state_items, state_new, state_restore
@@ -655,6 +656,11 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     fork._warned_mutate_in_place = False
     fork._warned_direct_write = False
     fork.__dict__.pop("_validation_replay_status", None)
+    # The fork is the sanctioned mutation surface, so it settles a DERIVED
+    # outcome (UNATTESTED for a complete parent) instead of inheriting the
+    # parent's blessed attestation by identity -- a hand-edited fork must
+    # never save as a bit-identical attested COMPLETE.
+    stamp_forked(fork, parent)
 
     # Phase 3: fill. COW ops rebind their owner weakref and drop session
     # caches in the fork view; detached fallbacks duplicate isolated state.

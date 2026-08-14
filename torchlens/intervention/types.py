@@ -739,12 +739,13 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
             "_source_code_blob",
             "_source_model_ref",
             "_optimizer",
-            # The settled capture outcome is a frozen string-only record;
-            # forks inherit the SAME record by identity (design: fork row =
-            # COW, sidecar inherited).
-            "_capture_outcome",
         },
-        reconstruct={"parent_run"},
+        # A fork never inherits the parent's settled capture outcome: the
+        # fork is the sanctioned MUTATION surface, so carrying the parent's
+        # blessed attestation by identity would let a hand-edited fork save
+        # as a bit-identical attested COMPLETE. ``build_fork`` settles a
+        # DERIVED outcome via ``capture.outcome.stamp_forked`` instead.
+        reconstruct={"parent_run", "_capture_outcome"},
     )
     # `_trace_core` (the columnar op row store) is not in MODEL_LOG_FIELD_ORDER
     # (private runtime storage, FieldPolicy.DROP). The generic field pass
