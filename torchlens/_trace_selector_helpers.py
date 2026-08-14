@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections.abc
 import functools
 import hashlib
+import re
 import types
 from collections.abc import Iterable
 from typing import Any, cast
@@ -72,6 +73,104 @@ def _is_selective_label_save(value: object) -> bool:
     return value not in ("all", "none", None, [])
 
 
+# Numeric label components that depend on FINAL graph numbering only ever
+# appear at the start of a request or after "_" (type index, layer ordinal).
+# Digits embedded in stable text such as ``conv2d``, ``fc1``, or module
+# addresses like ``features.3`` never sit in those positions, so they stay
+# resolvable during the forward, as do ``:<pass>`` qualifiers (capture-time
+# pass indexes are a live fact with a locked absorbed-path contract).
+_FINAL_INDEX_STRING_PATTERN = re.compile(r"^\d|_\d")
+
+
+def _selector_component_is_final_only(component: object) -> bool:
+    """Return whether one selection component needs final graph numbering.
+
+    Parameters
+    ----------
+    component
+        One public ``layers_to_save`` component.
+
+    Returns
+    -------
+    bool
+        ``True`` when the component can only resolve after postprocess.
+
+    Integer components are final layer ordinals, and label-shaped strings
+    (``relu_1_2``, ``relu_1``) embed final type indexes or layer ordinals.
+    Orphan removal renumbers both after capture, so matching them against
+    capture-time raw indexes silently selects the wrong operation or nothing.
+    """
+
+    if isinstance(component, bool):
+        return False
+    if isinstance(component, int):
+        return True
+    if isinstance(component, str):
+        return (
+            component.startswith(("output", "identity"))
+            or _FINAL_INDEX_STRING_PATTERN.search(component) is not None
+        )
+    return False
+
+
+def _layers_to_save_needs_final_resolution(layers_to_save: object) -> bool:
+    """Return whether any selection component needs final graph numbering.
+
+    Parameters
+    ----------
+    layers_to_save
+        Public ``layers_to_save`` selection.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one component must resolve on the deferred
+        post-postprocess path.
+    """
+
+    if isinstance(layers_to_save, (str, int)):
+        return _selector_component_is_final_only(layers_to_save)
+    if isinstance(layers_to_save, collections.abc.Iterable):
+        return any(
+            _layers_to_save_needs_final_resolution(component) for component in layers_to_save
+        )
+    return False
+
+
+def _selector_requires_unwindowed_escrow(selector: object) -> bool:
+    """Return whether a deferred selection forbids tail-window escrow eviction.
+
+    Parameters
+    ----------
+    selector
+        Public ``layers_to_save`` or gradient selection.
+
+    Returns
+    -------
+    bool
+        ``True`` when some component resolves against final graph numbering
+        at an arbitrary graph position, so its escrowed payload must survive
+        until post-postprocess resolution. Negative integers are windowable
+        by construction (they ARE the tail window), ``output``/``identity``
+        requests are served by the live output projection, and digit-free
+        strings are covered by the live single-pass predicate. Any other
+        component type (selector objects, callables) fails safe: retain.
+    """
+
+    if selector is None or isinstance(selector, bool):
+        return False
+    if isinstance(selector, int):
+        return selector >= 0
+    if isinstance(selector, str):
+        return (
+            not selector.startswith(("output", "identity"))
+            and _FINAL_INDEX_STRING_PATTERN.search(selector) is not None
+        )
+    if isinstance(selector, (list, tuple, set, frozenset)):
+        return any(_selector_requires_unwindowed_escrow(component) for component in selector)
+    return True
+
+
 def _label_save_candidates(ctx: RecordContext) -> set[str]:
     """Return legacy lookup-key spellings that can identify ``ctx``.
 
@@ -94,17 +193,15 @@ def _label_save_candidates(ctx: RecordContext) -> set[str]:
     if ctx.layer_type is not None:
         candidates.add(ctx.layer_type)
         if ctx.type_index is not None:
+            # Numeric-indexed candidates carry capture-time numbering only.
+            # Requests that target FINAL numbering (any ``_<digit>`` or
+            # ``:<digit>`` component) never reach this predicate: they route
+            # through the deferred post-postprocess resolution instead, so
+            # no raw-index "prediction" of final ordinals happens here.
             candidates.add(f"{ctx.layer_type}_{ctx.type_index}")
-            candidates.add(f"{ctx.layer_type}_{ctx.type_index}_{ctx.pass_index}")
-            pass_index = ctx.pass_index
-            indexed_candidates = {f"{ctx.layer_type}_{ctx.type_index}_{ctx.pass_index}"}
-            if ctx.raw_index is not None:
-                indexed_candidates.add(f"{ctx.layer_type}_{ctx.type_index}_{ctx.raw_index}")
-                if ctx.raw_index > 0:
-                    indexed_candidates.add(f"{ctx.layer_type}_{ctx.type_index}_{ctx.raw_index - 1}")
-            for candidate in indexed_candidates:
-                candidates.add(candidate)
-                candidates.add(f"{candidate}:{pass_index}")
+            indexed_candidate = f"{ctx.layer_type}_{ctx.type_index}_{ctx.pass_index}"
+            candidates.add(indexed_candidate)
+            candidates.add(f"{indexed_candidate}:{ctx.pass_index}")
     if ctx.func_name is not None:
         candidates.add(ctx.func_name)
         candidates.add(_normalize_func_name(ctx.func_name))
@@ -141,13 +238,25 @@ def _make_layers_to_save_predicate(layers_to_save: object) -> PredicateFn:
         if isinstance(layers_to_save, str)
         else set(cast(Iterable[Any], layers_to_save))
     )
-    requested_ints = {
-        int(item) + 1 for item in requested if isinstance(item, int) and int(item) >= 0
-    }
-    requested_strings = {str(item) for item in requested if not isinstance(item, int)}
+    final_only_components = sorted(
+        (item for item in requested if _selector_component_is_final_only(item)),
+        key=repr,
+    )
+    if final_only_components:
+        # Fail closed: integer ordinals and final-label-shaped strings are
+        # defined against FINAL layer numbering, which is unknowable during
+        # the forward (postprocess orphan removal renumbers ordinals, type
+        # indexes, and passes). Routing must send them through the deferred
+        # post-postprocess resolution; matching them here silently saves the
+        # wrong layer's data.
+        raise RuntimeError(
+            "internal invariant violated: final-numbering layers_to_save components "
+            f"{final_only_components!r} reached the capture-time save predicate; "
+            "they must resolve on the deferred post-postprocess path"
+        )
+    requested_strings = {str(item) for item in requested}
     cache_key = (
         "layers_to_save",
-        tuple(sorted(requested_ints)),
         tuple(sorted(requested_strings)),
     )
 
@@ -174,8 +283,6 @@ def _make_layers_to_save_predicate(layers_to_save: object) -> PredicateFn:
 
         if ctx.kind != "op":
             return False
-        if ctx.raw_index in requested_ints:
-            return True
         candidates = _label_save_candidates(ctx)
         return any(
             string_matches(requested_string, ctx, candidates)
@@ -380,16 +487,16 @@ def _layers_to_save_live_subset(layers_to_save: object) -> object | None:
     Returns
     -------
     object | None
-        Positive integer and ordinary label components, or ``None`` when every
-        component requires final graph structure.
+        Stable-text label components resolvable during the forward, or
+        ``None`` when every component requires final graph structure.
+        Integer ordinals and final-label-shaped strings are never live: they
+        are defined against final layer numbering.
     """
 
     if isinstance(layers_to_save, bool):
         return None
-    if isinstance(layers_to_save, int):
-        return layers_to_save if layers_to_save >= 0 else None
-    if isinstance(layers_to_save, str):
-        if layers_to_save.startswith(("output", "identity")):
+    if isinstance(layers_to_save, (int, str)):
+        if _selector_component_is_final_only(layers_to_save):
             return None
         return layers_to_save
     if isinstance(layers_to_save, collections.abc.Iterable):

@@ -157,7 +157,6 @@ class CaptureSession:
     _activation_escrow_spill_index: int = field(default=0, init=False, repr=False)
     gradient_reference_logical_bytes: int = 0
     gradient_reference_peak_count: int = 0
-    live_gradient_labels: set[str] = field(default_factory=set)
     _activation_spill_dir: tempfile.TemporaryDirectory[str] | None = field(
         default=None, init=False, repr=False
     )
@@ -225,7 +224,6 @@ class CaptureSession:
         self._activation_escrow_spill_index = 0
         self.gradient_reference_logical_bytes = 0
         self.gradient_reference_peak_count = 0
-        self.live_gradient_labels.clear()
         if self._activation_spill_dir is not None:
             try:
                 self._activation_spill_dir.cleanup()
@@ -245,7 +243,6 @@ class CaptureSession:
         self,
         raw_index: int,
         tensor: Any,
-        fields_dict: Mapping[str, Any] | None = None,
         *,
         retain_activation: bool = True,
     ) -> None:
@@ -257,15 +254,11 @@ class CaptureSession:
             Reserved raw operation index.
         tensor
             Live backend tensor for the operation.
-        fields_dict
-            Live event fields, used to identify positive-index gradient targets.
         retain_activation
             Whether this candidate still needs detached deferred retention.
         """
 
         profile = self.plan.retention_profile
-        if raw_index in profile.gradient_live_indices and fields_dict is not None:
-            self.live_gradient_labels.add(str(fields_dict["_label_raw"]))
         if profile.activation_kind is RetentionKind.ACTIVATION and retain_activation:
             with _state.pause_logging():
                 payload = safe_copy(tensor, detach_tensor=True)
@@ -284,6 +277,7 @@ class CaptureSession:
                         self.activation_escrow_ram_bytes -= evicted.nbytes
                     elif evicted.spill_path is not None:
                         evicted.spill_path.unlink(missing_ok=True)
+                        self.activation_escrow_spilled_bytes -= evicted.nbytes
             self._spill_activation_escrow_to_budget()
         if profile.gradient_kind is RetentionKind.GRADIENT_REFERENCE:
             self.gradient_reference_escrow[raw_index] = tensor
@@ -360,7 +354,9 @@ class CaptureSession:
         activation_selector = getattr(trace, "_deferred_retention_selector", None)
         if activation_selector is not None:
             live_output_by_raw_index: dict[int, Any] = {}
-            for output_label, output_tensor in zip(trace.output_layers, output_tensors):
+            for output_label, output_tensor in zip(
+                trace.output_layers, output_tensors, strict=True
+            ):
                 output_op = trace.layer_dict_all_keys[output_label]
                 live_output_by_raw_index[output_op.raw_index] = output_tensor
                 for parent_label in output_op.parents:
@@ -636,10 +632,15 @@ class CaptureSession:
         Raises
         ------
         RuntimeError
-            If a caller attempts a second, conflicting terminal transition.
+            If a caller attempts a second terminal transition. The guard is
+            unconditional: ``RunOutcome.output`` can hold a tensor, so an
+            equality-based "same transition" carve-out would raise the
+            ambiguous-bool ``RuntimeError`` from tensor ``__eq__`` instead.
         """
 
-        candidate = RunOutcome(
+        if self.outcome is not None:
+            raise RuntimeError("CaptureSession already reached a terminal state.")
+        self.outcome = RunOutcome(
             state=state,
             output=output,
             product=product,
@@ -647,11 +648,6 @@ class CaptureSession:
             exception=exception,
             capture_outcome=capture_outcome,
         )
-        if self.outcome is None:
-            self.outcome = candidate
-            return candidate
-        if self.outcome != candidate:
-            raise RuntimeError("CaptureSession already reached a terminal state.")
         return self.outcome
 
 
@@ -699,11 +695,20 @@ def compile_legacy_capture_plan(
     deferred_activation = bool(getattr(trace, "_deferred_retention_selector", None))
     deferred_gradients = bool(getattr(trace, "_deferred_gradient_selector", None))
     graph_connected = bool(getattr(trace, "backward_ready", False))
+    from .._trace_selector_helpers import _selector_requires_unwindowed_escrow
+
     negative_windows = _negative_selector_windows(layers_to_save)
     grad_negative_windows = _negative_selector_windows(grad_layers_to_save)
-    grad_positive_indices = _positive_selector_indices(grad_layers_to_save)
     activation_window = max(negative_windows) if negative_windows else None
     gradient_window = max(grad_negative_windows) if grad_negative_windows else None
+    # Final-numbering components (integer ordinals, indexed labels) resolve
+    # post-postprocess at arbitrary graph positions: a mixed selection such as
+    # ``[1, -1]`` must not let the tail window evict the payload the positive
+    # component needs before deferred resolution runs.
+    if _selector_requires_unwindowed_escrow(layers_to_save):
+        activation_window = None
+    if _selector_requires_unwindowed_escrow(grad_layers_to_save):
+        gradient_window = None
     retention_profile = RetentionProfile(
         activation_kind=(
             RetentionKind.ACTIVATION
@@ -711,15 +716,14 @@ def compile_legacy_capture_plan(
             else RetentionKind.NONE
         ),
         activation_window=activation_window if deferred_activation else 0,
+        # Every deferred gradient selector retains references and installs its
+        # hooks post-postprocess: positive integer ordinals are FINAL layer
+        # numbers, so no raw-index "prediction" can place their hooks live.
         gradient_kind=(
-            RetentionKind.GRADIENT_REFERENCE
-            if deferred_gradients
-            and not _contains_only_positive_integer_selectors(grad_layers_to_save)
-            else RetentionKind.NONE
+            RetentionKind.GRADIENT_REFERENCE if deferred_gradients else RetentionKind.NONE
         ),
         gradient_window=gradient_window if deferred_gradients else 0,
         spillable=deferred_activation and not graph_connected,
-        gradient_live_indices=grad_positive_indices,
     )
     return CapturePlan.compile(
         projection_target=projection_target,
@@ -765,26 +769,6 @@ def _negative_selector_windows(selector: Any) -> tuple[int, ...]:
     if isinstance(selector, (list, tuple, set, frozenset)):
         return tuple(window for item in selector for window in _negative_selector_windows(item))
     return ()
-
-
-def _positive_selector_indices(selector: Any) -> tuple[int, ...]:
-    """Return raw indices declared by positive integer gradient selectors."""
-
-    if isinstance(selector, int) and not isinstance(selector, bool) and selector >= 0:
-        return (selector + 1,)
-    if isinstance(selector, (list, tuple, set, frozenset)):
-        return tuple(index for item in selector for index in _positive_selector_indices(item))
-    return ()
-
-
-def _contains_only_positive_integer_selectors(selector: Any) -> bool:
-    """Return whether a gradient selection can install every hook live."""
-
-    if isinstance(selector, int) and not isinstance(selector, bool):
-        return selector >= 0
-    if isinstance(selector, (list, tuple, set, frozenset)) and selector:
-        return all(_contains_only_positive_integer_selectors(item) for item in selector)
-    return False
 
 
 def attach_legacy_capture_session(

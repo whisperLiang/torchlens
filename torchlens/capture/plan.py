@@ -55,8 +55,6 @@ class RetentionProfile:
         Maximum detached activation bytes retained in memory before temp spill.
     gradient_warning_threshold_bytes
         Logical tensor-byte threshold for warning about unwindowable live references.
-    gradient_live_indices
-        Positive raw indices whose hooks can be installed during the forward.
     """
 
     activation_kind: RetentionKind = RetentionKind.NONE
@@ -66,7 +64,6 @@ class RetentionProfile:
     spillable: bool = False
     activation_ram_budget_bytes: int = 64 * 1024 * 1024
     gradient_warning_threshold_bytes: int = 512 * 1024 * 1024
-    gradient_live_indices: tuple[int, ...] = ()
 
 
 def _freeze_intent(value: Any) -> Any:

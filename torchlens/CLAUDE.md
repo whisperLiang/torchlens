@@ -30,9 +30,14 @@ tl.record(model, input, save=...)
 ```
 
 Selective `layers_to_save` uses a predicate-backed single pass when early labels are
-sufficient and falls back to the two-pass strategy for final-label-only selectors such as
-negative indexes, integer selectors, output labels, identity labels, and gradient
-selection. String selectors keep the legacy substring contract. Unqualified recurrent
+sufficient and falls back to the two-pass strategy for final-numbering selectors:
+negative indexes, integer ordinals, indexed label strings (`relu_1_2`, `relu_1` — any
+`_<digit>` component; orphan removal renumbers ordinals AND type indexes after capture),
+output labels, identity labels, and gradient selection (integer `save_grads` ordinals
+included — deferred grad hooks install post-postprocess from the reference escrow, never
+from raw-index prediction). A mixed selection with a negative tail disables the escrow
+eviction window so early final-numbering components keep their payloads. String
+selectors keep the legacy substring contract. Unqualified recurrent
 labels save all passes; pass-qualified labels such as `"attn:2"` save one 1-based pass.
 Prefer `save=tl.func(...)`, `save=tl.in_module(...)`, and composed predicates for new
 single-pass selective capture. The old `keep_op=`/`keep_module=` `record()` alias

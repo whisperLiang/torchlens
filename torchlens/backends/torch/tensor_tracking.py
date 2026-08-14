@@ -107,14 +107,12 @@ def _add_tensor_backward_hook(
         from .backward import _register_forward_grad_fn
 
         _register_forward_grad_fn(trace, _grad_fn, tensor_label)
+    # Deferred gradient selectors (all selective grad selections, including
+    # positive integer ordinals — FINAL layer numbers unknowable during the
+    # forward) install their hooks post-postprocess from the reference escrow.
     should_defer_hook = getattr(
         trace, "_deferred_gradient_selector", None
     ) is not None and not getattr(trace, "_installing_deferred_gradient_hooks", False)
-    if should_defer_hook:
-        from ...capture.session import capture_session_for
-
-        session = capture_session_for(trace)
-        should_defer_hook = session is None or tensor_label not in session.live_gradient_labels
     if (
         not getattr(trace, "capture_tensor_grad_hooks", True)
         or should_defer_hook
