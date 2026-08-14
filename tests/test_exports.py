@@ -91,11 +91,16 @@ def _assert_netron_structure(payload: dict[str, Any]) -> None:
         )
 
 
-def _assert_or_regenerate_export_golden(name: str, payload: dict[str, Any]) -> None:
+def _assert_or_regenerate_export_golden(name: str, payload: dict[str, Any]) -> bool:
     """Compare an export payload with its golden, with explicit opt-in regeneration.
 
     Set ``TORCHLENS_REGEN_EXPORT_GOLDENS=1`` and run the export test to regenerate
-    fixtures after an intentional contract change.
+    fixtures after an intentional contract change. A regen run WRITES and never
+    compares: the historical behavior compared the payload to the golden it had
+    just written and reported green, blurring "verified" with "just rebaselined"
+    (b7 R53-1, the last unconverted site of the 5-site fix; same doctrine as
+    ``test_selector_semantics_matrix._golden``). The caller must ``pytest.skip``
+    when this returns ``True`` so a regen run never reports a verifying pass.
 
     Parameters
     ----------
@@ -103,14 +108,25 @@ def _assert_or_regenerate_export_golden(name: str, payload: dict[str, Any]) -> N
         Golden fixture filename.
     payload:
         Normalized parsed export payload.
+
+    Returns
+    -------
+    bool
+        ``True`` when the golden was regenerated (no comparison happened).
     """
 
     fixture_path = EXPORT_FIXTURE_DIR / name
     if os.environ.get("TORCHLENS_REGEN_EXPORT_GOLDENS") == "1":
         fixture_path.parent.mkdir(parents=True, exist_ok=True)
         fixture_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return True
+    if not fixture_path.exists():
+        pytest.fail(
+            f"Missing golden {fixture_path}; regenerate with TORCHLENS_REGEN_EXPORT_GOLDENS=1."
+        )
     expected = json.loads(fixture_path.read_text(encoding="utf-8"))
     assert payload == expected
+    return False
 
 
 def _normalize_export_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -383,7 +399,7 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
         "acceptance by any particular external Model Explorer release is not guaranteed"
         in (explorer_payload["disclaimer"])
     )
-    _assert_or_regenerate_export_golden(
+    regenerated = _assert_or_regenerate_export_golden(
         "model_explorer.json", _normalize_export_payload(explorer_payload)
     )
 
@@ -392,7 +408,9 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
     _assert_netron_structure(netron_payload)
     assert "not a real ONNX model" in netron_payload["disclaimer"]
     assert "acceptance by Netron is not guaranteed" in netron_payload["disclaimer"]
-    _assert_or_regenerate_export_golden("netron.json", _normalize_export_payload(netron_payload))
+    regenerated |= _assert_or_regenerate_export_golden(
+        "netron.json", _normalize_export_payload(netron_payload)
+    )
 
     result = tl.bridge.huggingface.push_to_hub(
         export_log,
@@ -407,6 +425,11 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
     assert uploaded["upload_result"].startswith("https://huggingface.co/")
     assert api.created
     assert api.uploaded
+
+    if regenerated:
+        pytest.skip(
+            "regenerated export goldens; re-run without TORCHLENS_REGEN_EXPORT_GOLDENS to verify"
+        )
 
 
 def test_recurrent_static_graph_exports_use_unique_pass_qualified_ids(tmp_path: Path) -> None:
