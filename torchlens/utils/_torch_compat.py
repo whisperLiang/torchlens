@@ -107,6 +107,9 @@ __all__ = [
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
     "HAS_CODE_POSITIONS",
     "HAS_CODE_QUALNAME",
+    "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG",
+    "HAS_ATTENTION_CAUSAL_BIAS",
+    "HAS_EXPANDED_WEIGHTS_CONV_PICKER",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_TORCH_FUNC",
@@ -1114,6 +1117,70 @@ def _probe_set_stance() -> bool:
     return callable(getattr(compiler_module, "set_stance", None))
 
 
+def _probe_transformer_activation_fastpath_flag() -> bool:
+    """Return whether ``TransformerEncoderLayer`` exposes the fastpath flag.
+
+    Returns
+    -------
+    bool
+        ``True`` when a constructed layer carries ``activation_relu_or_gelu``,
+        the identity-checked (``activation is F.relu/F.gelu``) gate for the
+        fused fastpath and nested-tensor paths. The probe constructs a tiny
+        meta-device layer under ``fork_rng`` so it never touches user RNG
+        streams or allocates real storage.
+    """
+
+    layer_cls = getattr(torch.nn, "TransformerEncoderLayer", None)
+    if layer_cls is None:
+        return False
+    try:
+        with torch.random.fork_rng(devices=[]):
+            layer = layer_cls(d_model=2, nhead=1, dim_feedforward=2, device="meta")
+    except Exception:
+        return False
+    return hasattr(layer, "activation_relu_or_gelu")
+
+
+def _probe_attention_causal_bias() -> bool:
+    """Return whether ``torch.nn.attention.bias.CausalBias`` is available.
+
+    Returns
+    -------
+    bool
+        ``True`` when the class exists and defines its own
+        ``__torch_function__`` (the identity-dispatch site the causal-bias
+        identity shim normalizes). Absent on torch builds predating the
+        ``torch.nn.attention`` namespace.
+    """
+
+    causal_bias = _import_module_attr_or_none("torch.nn.attention.bias", "CausalBias")
+    return causal_bias is not None and "__torch_function__" in vars(causal_bias)
+
+
+def _probe_expanded_weights_conv_picker() -> bool:
+    """Return whether the private expanded-weights machinery is available.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``conv_picker`` and ``ExpandedWeight`` (with its own
+        ``__torch_function__``) exist -- the per-sample-grads dispatch sites
+        the expanded-weights identity shims normalize.
+    """
+
+    conv_picker = _import_module_attr_or_none(
+        "torch.nn.utils._expanded_weights.conv_utils", "conv_picker"
+    )
+    expanded_weight = _import_module_attr_or_none(
+        "torch.nn.utils._expanded_weights.expanded_weights_impl", "ExpandedWeight"
+    )
+    return (
+        conv_picker is not None
+        and expanded_weight is not None
+        and "__torch_function__" in vars(expanded_weight)
+    )
+
+
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()
 HAS_TORCH_VF: bool = _probe_torch_vf()
 HAS_TORCH_FUNC: bool = _probe_torch_func()
@@ -1146,6 +1213,11 @@ HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspec
 HAS_SAVED_TENSORS_HOOKS_PATCHABLE: bool = _probe_saved_tensors_hooks_patchable()
 HAS_CODE_POSITIONS: bool = _probe_code_positions()
 HAS_CODE_QUALNAME: bool = _probe_code_qualname()
+HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG: bool = (
+    _probe_transformer_activation_fastpath_flag()
+)
+HAS_ATTENTION_CAUSAL_BIAS: bool = _probe_attention_causal_bias()
+HAS_EXPANDED_WEIGHTS_CONV_PICKER: bool = _probe_expanded_weights_conv_picker()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
 _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
@@ -1250,6 +1322,9 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
     "HAS_CODE_POSITIONS",
     "HAS_CODE_QUALNAME",
+    "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG",
+    "HAS_ATTENTION_CAUSAL_BIAS",
+    "HAS_EXPANDED_WEIGHTS_CONV_PICKER",
     "HAS_FLOAT32_MATMUL_PRECISION",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
     "HAS_CUDA_MATMUL_TF32",
@@ -1276,6 +1351,10 @@ OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
         # torch-private degradation -- CPython 3.10 installs are healthy.
         "HAS_CODE_POSITIONS",
         "HAS_CODE_QUALNAME",
+        # torch.nn.attention.bias.CausalBias postdates the support floor
+        # (namespace added mid-2.x): its absence on older torch is a healthy
+        # install with nothing to shim, not a degradation.
+        "HAS_ATTENTION_CAUSAL_BIAS",
         # Named-tensor API was REMOVED upstream (torch 2.13): its absence tracks
         # torch's own public surface, so there is nothing for TorchLens to
         # degrade on -- named-dim metadata simply cannot exist on such builds.

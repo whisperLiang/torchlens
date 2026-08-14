@@ -1,0 +1,262 @@
+"""Wrap-state identity shims: torch-internal ``x is F.y`` checks stay truthful.
+
+TorchLens wrapping replaces public torch callables with wrapper functions, so
+a torch-internal identity check whose two operands were read at different wrap
+epochs (a class-def-time default or a protocol-passed original on one side, a
+post-wrap namespace read on the other) silently changes answer once wrappers
+are installed. Census 2026-08-14 over the supported eager range found exactly
+these runtime sites:
+
+1. ``nn.TransformerEncoderLayer.__init__`` -- ``activation is F.relu/F.gelu``
+   decides ``activation_relu_or_gelu`` (fused fastpath + nested-tensor path).
+   Post-wrap construction with the DEFAULT activation silently got flag 0.
+2. ``nn.attention.bias.CausalBias.__torch_function__`` -- ``func is F.sdpa``
+   decides mask dispatch; a miss silently DROPPED the causal mask (wrong
+   numbers, broken result subclass).
+3. ``nn.utils._expanded_weights`` -- ``conv_picker`` namespace reads and the
+   ``ExpandedWeight.__torch_function__`` mixed table/namespace bases broke
+   per-sample-grads loudly.
+
+These tests pin the identity shims that keep each site behaving exactly as
+unwrapped eager torch. Flag gates use ``getattr`` so the module also imports
+(and fails RED) on a pre-fix tree without the ``HAS_*`` flags.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import torchlens as tl
+from torchlens import _state
+from torchlens.utils import _torch_compat
+
+pytestmark = pytest.mark.smoke
+
+
+def _flag(name: str) -> bool:
+    """Read a capability flag, defaulting to True on pre-fix trees."""
+
+    value = getattr(_torch_compat, name, None)
+    return True if value is None else bool(value)
+
+
+def _ensure_wrapped() -> None:
+    """Force the lazy torch wrap through the public capture path."""
+
+    tl.trace(nn.Linear(2, 2), torch.randn(1, 2))
+
+
+def _resolve(fn):
+    """Follow the wrapper ledger to the original callable."""
+
+    seen: set[int] = set()
+    while id(fn) in _state._decorated_to_orig and id(fn) not in seen:
+        seen.add(id(fn))
+        fn = _state._decorated_to_orig[id(fn)]
+    return fn
+
+
+@pytest.mark.skipif(
+    not _flag("HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG"),
+    reason="torch build lacks the transformer activation fastpath flag",
+)
+class TestTransformerFastpathFlag:
+    def test_default_activation_flag_survives_wrap(self):
+        # The original defect repro: the class-def-time default activation is
+        # the pre-wrap F.relu; the ctor identity check reads the post-wrap
+        # namespace. Unfixed, the flag silently drops to 0.
+        pre = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        _ensure_wrapped()
+        post = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        assert post.activation_relu_or_gelu == pre.activation_relu_or_gelu == 1
+
+    def test_explicit_prewrap_relu_and_gelu_refs(self):
+        _ensure_wrapped()
+        orig_relu = _resolve(F.relu)
+        orig_gelu = _resolve(F.gelu)
+        assert orig_relu is not F.relu, "wrap must be installed for this test"
+        relu_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, activation=orig_relu)
+        gelu_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, activation=orig_gelu)
+        assert relu_layer.activation_relu_or_gelu == 1
+        assert gelu_layer.activation_relu_or_gelu == 2
+
+    def test_explicit_wrapped_namespace_ref(self):
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, activation=F.relu)
+        assert layer.activation_relu_or_gelu == 1
+
+    def test_positional_activation_spelling(self):
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(8, 2, 16, 0.1, _resolve(F.gelu))
+        assert layer.activation_relu_or_gelu == 2
+
+    def test_non_relu_gelu_activation_keeps_flag_zero(self):
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, activation=F.silu)
+        assert layer.activation_relu_or_gelu == 0
+
+    def test_stored_activation_is_never_a_torchlens_wrapper(self):
+        # Wrap-state invariance of constructed module state: whatever spelling
+        # the user picks, the stored attribute must be the ORIGINAL torch
+        # function (what an unwrapped construction stores), never a wrapper.
+        _ensure_wrapped()
+        orig_relu = _resolve(F.relu)
+        for kwargs in (
+            {},
+            {"activation": "relu"},
+            {"activation": F.relu},
+            {"activation": orig_relu},
+        ):
+            layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, **kwargs)
+            assert layer.activation is orig_relu, f"leak for kwargs={kwargs}"
+        decoder = nn.TransformerDecoderLayer(d_model=8, nhead=2, activation="gelu")
+        assert decoder.activation is _resolve(F.gelu)
+
+    def test_construction_bytes_invariant_across_wrap_state(self):
+        # Same seed, wrappers OFF vs ON: identical parameters, identical flag,
+        # identical stored activation object.
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            unwrap_torch()
+            torch.manual_seed(1234)
+            before = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        finally:
+            wrap_torch()
+        torch.manual_seed(1234)
+        after = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        assert after.activation_relu_or_gelu == before.activation_relu_or_gelu
+        assert after.activation is before.activation
+        for (name_b, p_b), (name_a, p_a) in zip(
+            before.state_dict().items(), after.state_dict().items()
+        ):
+            assert name_b == name_a
+            assert torch.equal(p_b, p_a), f"parameter drift in {name_b}"
+
+    def test_transformer_encoder_nested_tensor_path_stays_enabled(self):
+        # TransformerEncoder(enable_nested_tensor=True) downgrades with a
+        # warning when the layer flag is 0 -- post-wrap construction must not
+        # trigger that downgrade.
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, batch_first=True)
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", UserWarning)
+            encoder = nn.TransformerEncoder(layer, num_layers=1, enable_nested_tensor=True)
+        assert encoder.use_nested_tensor
+
+
+@pytest.mark.skipif(
+    not _flag("HAS_ATTENTION_CAUSAL_BIAS"),
+    reason="torch build lacks torch.nn.attention.bias.CausalBias",
+)
+class TestCausalBiasDispatch:
+    def test_causal_bias_sdpa_matches_materialized_truth(self):
+        from torch.nn.attention.bias import causal_lower_right
+
+        _ensure_wrapped()
+        torch.manual_seed(0)
+        q = torch.randn(1, 2, 8, 4)
+        k = torch.randn(1, 2, 8, 4)
+        v = torch.randn(1, 2, 8, 4)
+        bias = causal_lower_right(8, 8)
+        truth = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=bias._materialize(q.device)
+        )
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        # Unfixed, the identity miss silently dropped the mask AND returned a
+        # broken CausalBias-typed result.
+        assert type(out) is torch.Tensor
+        assert torch.allclose(out, truth, atol=1e-6)
+
+    def test_causal_bias_other_funcs_still_delegate(self):
+        from torch.nn.attention.bias import causal_lower_right
+
+        _ensure_wrapped()
+        bias = causal_lower_right(4, 4)
+        materialized = bias._materialize(torch.device("cpu"))
+        assert materialized.shape == (4, 4)
+
+
+@pytest.mark.skipif(
+    not _flag("HAS_EXPANDED_WEIGHTS_CONV_PICKER"),
+    reason="torch build lacks the private expanded-weights machinery",
+)
+class TestExpandedWeightsDispatch:
+    def test_per_sample_grads_conv_post_wrap(self):
+        from torch.nn.utils._per_sample_grad import call_for_per_sample_grads
+
+        _ensure_wrapped()
+        torch.manual_seed(0)
+        module = nn.Conv2d(3, 4, 3)
+        x = torch.randn(2, 3, 8, 8)
+        call_for_per_sample_grads(module, batch_size=2)(x).sum().backward()
+        grad_sample = module.weight.grad_sample
+        assert grad_sample.shape == (2, 4, 3, 3, 3)
+        # Cross-check per-sample grads against a plain per-sample autograd loop.
+        for i in range(2):
+            ref = nn.Conv2d(3, 4, 3)
+            ref.load_state_dict(module.state_dict())
+            ref(x[i : i + 1]).sum().backward()
+            assert torch.allclose(grad_sample[i], ref.weight.grad, atol=1e-5)
+
+    def test_flatten_weight_special_case_still_short_circuits(self):
+        # The protocol passes the ORIGINAL torch._cudnn_rnn_flatten_weight;
+        # torch's special case compares against the (wrapped) namespace read.
+        # Unfixed, the miss fell through to the loud RuntimeError path.
+        from torch.nn.utils._expanded_weights.expanded_weights_impl import (
+            ExpandedWeight,
+        )
+
+        _ensure_wrapped()
+        orig_flatten = _resolve(torch._cudnn_rnn_flatten_weight)
+        result = ExpandedWeight.__torch_function__(orig_flatten, (), (), None)
+        assert result is None
+
+
+class TestShimLifecycle:
+    def test_shims_removed_on_unwrap_and_reinstalled_on_wrap(self):
+        from torchlens.backends.torch import identity_shims
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        init = vars(nn.TransformerEncoderLayer)["__init__"]
+        assert getattr(init, "_torchlens_identity_shim", False)
+        try:
+            unwrap_torch()
+            init = vars(nn.TransformerEncoderLayer)["__init__"]
+            assert not getattr(init, "_torchlens_identity_shim", False)
+            assert not identity_shims.identity_shims_installed()
+        finally:
+            wrap_torch()
+        init = vars(nn.TransformerEncoderLayer)["__init__"]
+        assert getattr(init, "_torchlens_identity_shim", False)
+        assert identity_shims.identity_shims_installed()
+
+    def test_repeated_wrap_installs_a_single_shim_layer(self):
+        from torchlens.backends.torch.wrappers import wrap_torch
+
+        _ensure_wrapped()
+        wrap_torch()
+        wrap_torch()
+        init = vars(nn.TransformerEncoderLayer)["__init__"]
+        assert getattr(init, "_torchlens_identity_shim", False)
+        inner = getattr(init, "__wrapped__", None)
+        assert inner is not None
+        assert not getattr(inner, "_torchlens_identity_shim", False)
+
+    def test_capability_flags_reported_in_snapshot(self):
+        from torchlens.utils._torch_compat import get_torch_capability_snapshot
+
+        snapshot = get_torch_capability_snapshot()
+        for name in (
+            "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG",
+            "HAS_ATTENTION_CAUSAL_BIAS",
+            "HAS_EXPANDED_WEIGHTS_CONV_PICKER",
+        ):
+            assert name in snapshot

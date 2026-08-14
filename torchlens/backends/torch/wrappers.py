@@ -2571,6 +2571,9 @@ def unwrap_torch() -> None:
     """
     with _wrapper_install_lock:
         _refuse_unwrap_during_active_capture()
+        from .identity_shims import remove_identity_shims
+
+        remove_identity_shims()
         _unwrap_torch_locked()
 
 
@@ -2787,6 +2790,13 @@ def wrap_torch(
             escape_detector=escape_detector,
             completeness_witness=completeness_witness,
         )
+        # Identity shims keep torch-internal `x is F.y` checks truthful while
+        # wrappers are installed (transformer fastpath flag, CausalBias sdpa
+        # dispatch, expanded-weights per-sample-grads). Installed here so every
+        # wrap path (first decoration, already-decorated, re-install) has them.
+        from .identity_shims import install_identity_shims
+
+        install_identity_shims()
 
 
 def _wrap_torch_locked(
