@@ -11,6 +11,8 @@ projective lattice loss, the line-637 bare assert, empty-box ``slices()``).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 import torch
 import torch.nn as nn
@@ -976,3 +978,136 @@ def test_float_ambiguity_margin_scales_with_magnitude() -> None:
     t = Fraction(1) + Fraction(1, 2**30)
     assert _antialias_filter_verdict("bilinear", t, _ambiguity_margin(big)) == "ambiguous"
     assert _antialias_filter_verdict("bilinear", t, _ambiguity_margin(Fraction(1))) == "zero"
+
+
+# ---------------------------------------------------------------------------
+# b6 next-round attack-list oracle rows (fixwave-2, opus attack list):
+# grid_sample, unfold/fold, pixel_shuffle, dilated pooling, batch-axis units.
+# Contract for every row: an exact box equals the brute-force hull, an upper
+# bound contains it, and geometry the engine cannot derive REFUSES typed --
+# never a silently wrong exact claim.
+# ---------------------------------------------------------------------------
+
+
+class _GridSampleConv(nn.Module):
+    """Identity affine grid_sample feeding a convolution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(1, 1, 3, padding=1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        theta = torch.tensor([[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+        grid = F.affine_grid(theta, (1, 1, 8, 8), align_corners=False)
+        return self.conv(F.grid_sample(inputs, grid, align_corners=False))
+
+
+class _UnfoldFold(nn.Module):
+    """unfold -> fold round trip (overlap-add) over a 3x3 window."""
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        unfolded = F.unfold(inputs, kernel_size=3, padding=1)
+        return F.fold(unfolded, output_size=(8, 8), kernel_size=3, padding=1)
+
+
+class _PixelShuffleConv(nn.Module):
+    """Convolution feeding a 2x pixel_shuffle channel-to-space rearrangement."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(1, 4, 3, padding=1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return F.pixel_shuffle(self.conv(inputs), 2)
+
+
+class _BatchMeanMix(nn.Module):
+    """Convolution merged with a batch-mean branch coupling every sample."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(1, 1, 3, padding=1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.conv(inputs) - inputs.mean(dim=0, keepdim=True)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "fragment", "unit"),
+    [
+        (_GridSampleConv, "conv2d", (2, 2)),
+        (_UnfoldFold, "fold", (2, 2)),
+        (_PixelShuffleConv, "pixel_shuffle", (4, 4)),
+    ],
+)
+def test_geometry_refuses_typed_for_underivable_rearrangements(
+    model_type: type[nn.Module], fragment: str, unit: tuple[int, ...]
+) -> None:
+    """grid_sample / unfold+fold / pixel_shuffle refuse per-unit geometry typed."""
+
+    from torchlens.receptive_field import ReceptiveFieldError
+
+    trace = capture(model_type().eval(), torch.randn(1, 1, 8, 8))
+    target = op_named(trace, fragment)
+    with pytest.raises(ReceptiveFieldError, match="use .gradient"):
+        target.receptive_field.at(unit)
+
+
+def test_grid_sample_gradient_fallback_reports_support() -> None:
+    """The advertised gradient() remedy actually works where geometry refuses."""
+
+    trace = capture(_GridSampleConv().eval(), torch.randn(1, 1, 8, 8))
+    target = op_named(trace, "conv2d")
+    results = target.receptive_field.gradient((0, 0, 2, 2))
+    gradient = next(iter(results.values())) if isinstance(results, Mapping) else results
+    assert gradient.support_mask is not None
+    assert bool(gradient.support_mask.any())
+
+
+def test_dilated_max_pool_exact_box_matches_bruteforce() -> None:
+    """Dilated max pooling: exact claim pinned against perturbation truth."""
+
+    model = nn.MaxPool2d(3, stride=2, dilation=2).eval()
+    inputs = torch.randn(1, 1, 12, 12)
+    truth = true_receptive_support(model, inputs, (0, 0, 1, 1))
+    assert hull(truth, 2) == (2, 7)
+    assert hull(truth, 3) == (2, 7)
+
+    trace = capture(model, inputs)
+    target = op_named(trace, "max_pool2d")
+    box = target.receptive_field.at((1, 1))
+    assert box.exact
+    assert_box_against_truth(box, truth, (2, 3), context="dilated max pool")
+    checked = target.receptive_field.check((0, 0, 1, 1))
+    assert checked.status is ReceptiveFieldValidationStatus.PASS
+    assert checked.n_violations == 0
+
+
+def test_batch_mean_mix_claims_full_batch_axis() -> None:
+    """Batch-axis units: batch mixing must surface as a full batch axis."""
+
+    model = _BatchMeanMix().eval()
+    inputs = torch.randn(3, 1, 8, 8)
+
+    # Independent truth: another sample's pixel influences this sample's output.
+    base = _forward(model, inputs)
+    perturbed = inputs.detach().clone()
+    perturbed[2, 0, 2, 2] += 1000.0
+    assert not torch.allclose(_forward(model, perturbed)[1, 0, 2, 2], base[1, 0, 2, 2])
+
+    trace = capture(model, inputs)
+    target = op_named(trace, "sub")
+    box = target.receptive_field.at((2, 2))
+    assert box.exact
+    kinds = {axis.input_axis: axis.kind for axis in box.axes}
+    assert kinds[0] == "full", "batch mixing must not claim a pointwise batch axis"
+    batch_axis = next(axis for axis in box.axes if axis.input_axis == 0)
+    assert (batch_axis.clipped_start, batch_axis.clipped_stop) == (0, 3)
+    truth = true_receptive_support(model, inputs, (1, 0, 2, 2), deltas=(1000.0,))
+    assert hull(truth, 0) == (0, 3)
+    for axis in (2, 3):
+        spatial = next(item for item in box.axes if item.input_axis == axis)
+        assert (spatial.clipped_start, spatial.clipped_stop) == hull(truth, axis)
+    checked = target.receptive_field.check((1, 0, 2, 2))
+    assert checked.status is ReceptiveFieldValidationStatus.PASS
+    assert checked.n_violations == 0
