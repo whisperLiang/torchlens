@@ -285,18 +285,39 @@ def test_suppress_depth_never_rests_negative():
     assert "clock" in monitor.result.channels
 
 
-def test_autocast_restore_unwinds_a_partial_enter():
-    """A failing second device entry must not leave the first autocast entered."""
+def test_autocast_restore_unwinds_a_partial_enter(monkeypatch):
+    """A failing second device entry must not leave the first autocast entered.
 
-    state = {
-        "cpu": {"enabled": True, "dtype": torch.bfloat16},
-        "cuda": {"enabled": True, "dtype": "not-a-dtype"},
-    }
+    The second entry is failed by monkeypatching the constructor rather than by naming an
+    absent device: a real CUDA-less ``torch.amp.autocast("cuda", ...)`` warns before it
+    raises, and this suite runs with warnings promoted to errors, which would test the
+    warning rather than the unwind.
+    """
+
+    real_autocast = torch.amp.autocast
+    calls = {"n": 0}
+
+    def _second_entry_fails(*args, **kwargs):
+        """Build a real cpu autocast first, then fail."""
+
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_autocast("cpu", enabled=True, dtype=torch.bfloat16)
+        raise TypeError("injected second-device autocast failure")
+
+    monkeypatch.setattr(torch.amp, "autocast", _second_entry_fails)
     assert not torch.is_autocast_enabled("cpu")
-    with pytest.raises(TypeError):
-        with AutocastRestore(state):
+    with pytest.raises(TypeError, match="injected second-device autocast failure"):
+        with AutocastRestore(
+            {
+                "cpu": {"enabled": True, "dtype": torch.bfloat16},
+                "second": {"enabled": True, "dtype": torch.bfloat16},
+            }
+        ):
             pass
+    monkeypatch.undo()
     assert not torch.is_autocast_enabled("cpu")
+    assert calls["n"] == 2
 
 
 def test_autocast_restore_exits_outer_contexts_when_inner_raises():
