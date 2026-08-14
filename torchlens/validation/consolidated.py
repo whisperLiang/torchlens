@@ -439,8 +439,12 @@ def validate(
         _LAST_RUN_PEAKS.clear()
         rss_before = _rss_high_water_bytes()
         cuda_armed = torch.cuda.is_available() and torch.cuda.is_initialized()
+        cuda_peak_before = 0
         if cuda_armed:
-            torch.cuda.reset_peak_memory_stats()
+            # R36-2: snapshot the peak instead of reset_peak_memory_stats,
+            # which clobbers the caller's process-wide high-water counter.
+            # A run that stays under the pre-existing peak honestly reads 0.
+            cuda_peak_before = int(torch.cuda.max_memory_allocated())
         try:
             return validate_forward_pass(
                 model,
@@ -456,8 +460,9 @@ def validate(
             if rss_before is not None and rss_after is not None:
                 _LAST_RUN_PEAKS["host_rss_peak_delta_bytes"] = max(0, rss_after - rss_before)
             if cuda_armed:
-                _LAST_RUN_PEAKS["cuda_peak_allocated_bytes"] = int(
-                    torch.cuda.max_memory_allocated()
+                cuda_peak_after = int(torch.cuda.max_memory_allocated())
+                _LAST_RUN_PEAKS["cuda_peak_allocated_bytes"] = (
+                    cuda_peak_after if cuda_peak_after > cuda_peak_before else 0
                 )
     return _intervention_report(
         model,

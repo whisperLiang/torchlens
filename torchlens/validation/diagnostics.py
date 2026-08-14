@@ -188,7 +188,9 @@ def last_validation_peak_memory() -> dict[str, int] | None:
         ``host_rss_peak_delta_bytes`` (growth of the process RSS high-water
         mark across the run -- a lower bound, ``0`` when validation fit in
         already-resident headroom) and, when CUDA ran,
-        ``cuda_peak_allocated_bytes``. ``None`` before any instrumented run.
+        ``cuda_peak_allocated_bytes`` (snapshot-based, R36-2: the exact device
+        peak when the run pushed a new high-water mark, ``0`` when it stayed
+        under the pre-existing peak). ``None`` before any instrumented run.
     """
 
     return dict(_LAST_RUN_PEAKS) if _LAST_RUN_PEAKS else None
