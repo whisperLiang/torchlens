@@ -208,6 +208,7 @@ _LAZY_EXCEPTION_PATHS = {
     "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
     "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),
     "RecordBindingError": ("torchlens._errors", "RecordBindingError"),
+    "ReentrantTraceError": ("torchlens._state", "ReentrantTraceError"),
     "StructuralHashMismatchError": ("torchlens.hash", "StructuralHashMismatchError"),
     "UnknownBackendError": ("torchlens.backends", "UnknownBackendError"),
     "VariantScanTruncationWarning": ("torchlens._robustness", "VariantScanTruncationWarning"),

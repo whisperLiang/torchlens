@@ -26,8 +26,13 @@ class _NestedTraceModel(nn.Module):
 def test_nested_trace_raises_typed_error_with_active_model_name() -> None:
     """Nested tracing should raise the public typed re-entrancy error."""
 
-    with pytest.raises(tl.ReentrantTraceError, match="NestedTraceModel"):
+    with pytest.raises(tl.ReentrantTraceError, match="NestedTraceModel") as exc_info:
         tl.trace(_NestedTraceModel(), torch.ones(1, 2))
+
+    assert exc_info.value.fields["code"] == "reentrant_trace"
+    assert exc_info.value.fields["remedy"]
+    assert exc_info.value.fields["active_model"] is not None
+    assert "Remedy:" in str(exc_info.value)
 
 
 def test_reentrant_trace_error_is_exported() -> None:
@@ -35,3 +40,23 @@ def test_reentrant_trace_error_is_exported() -> None:
 
     assert tl.ReentrantTraceError.__name__ == "ReentrantTraceError"
     assert "ReentrantTraceError" in tl.__all__
+
+
+def test_reentrant_trace_error_joins_the_taxonomy_and_keeps_runtime_error() -> None:
+    """The refusal is a taxonomy member without breaking historical handlers.
+
+    It must be catchable as ``tl.errors.CaptureError`` (typed taxonomy) AND as
+    ``RuntimeError`` (its historical builtin lineage), and it must resolve
+    through the registered ``torchlens.errors`` surface.
+    """
+
+    from torchlens import errors
+
+    assert issubclass(tl.ReentrantTraceError, errors.CaptureError)
+    assert issubclass(tl.ReentrantTraceError, RuntimeError)
+    assert errors.ReentrantTraceError is tl.ReentrantTraceError
+
+    with pytest.raises(RuntimeError):
+        tl.trace(_NestedTraceModel(), torch.ones(1, 2))
+    with pytest.raises(errors.CaptureError):
+        tl.trace(_NestedTraceModel(), torch.ones(1, 2))

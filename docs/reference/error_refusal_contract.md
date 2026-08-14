@@ -141,6 +141,7 @@ add names to the top-level `torchlens` namespace:
 | `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |
 | `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
 | `recording_multipass_not_convertible` | `to_trace()` on a multi-pass Recording | Record one pass per Recording |
+| `reentrant_trace` | `tl.trace` was started while another capture was active (`ReentrantTraceError`, `RuntimeError` lineage) | Finish the outer capture before starting another |
 | `recording_option_duplicate` | Recording option was specified twice | Pass each option exactly once |
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |

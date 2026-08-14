@@ -441,6 +441,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "RecordingConfigError": ("ValueError",),
     "RecoveryError": ("RuntimeError",),
     "RecursiveTracingError": ("RuntimeError",),
+    "ReentrantTraceError": ("RuntimeError",),
     "ReplayPreconditionError": ("RuntimeError",),
     "RunCapabilityUnavailableError": ("RuntimeError",),
     "RunPreconditionError": ("ValueError",),
