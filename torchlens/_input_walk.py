@@ -1324,15 +1324,30 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         compares equal to itself. Sequence nodes carry their exact kind so a
         ``tuple`` aux cannot launder into a ``list`` one.
 
+        Sequence admission is EXACT-TYPE (T11.9): the documented type-strict
+        schema accepted ``list``/``tuple`` SUBCLASSES via ``isinstance`` and
+        encoded them as their plain base kind, erasing the exact class -- the
+        very identity every other input-boundary edge witnesses -- plus any
+        instance state the subclass carries (a namedtuple aux flattened to a
+        bare ``tuple`` row). A subclass now refuses typed
+        (``registered_aux_unsafe``) instead of laundering.
+
         Raises
         ------
         ValueError
-            If the aux tree holds a value outside the canonical atom grammar or
-            nested lists/tuples of those.
+            If the aux tree holds a value outside the canonical atom grammar,
+            an exact-``list``/``tuple`` node of those, or a sequence SUBCLASS
+            carrying semantic type identity.
         """
 
+        if type(aux) in (list, tuple):
+            return ["tuple" if type(aux) is tuple else "list", [_safe_aux(i) for i in aux]]
         if isinstance(aux, (list, tuple)):
-            return ["tuple" if isinstance(aux, tuple) else "list", [_safe_aux(i) for i in aux]]
+            raise ValueError(
+                f"Registered-container aux node {aux!r} is a {type(aux).__name__} "
+                "(a list/tuple SUBCLASS): its exact type and instance state are "
+                "outside the type-strict aux grammar."
+            )
         return ["atom", encode_mapping_key(aux)]
 
     try:
