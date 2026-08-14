@@ -21,6 +21,7 @@ from ..ir.selector_eval import (
 from ..utils._callable_safety import (
     _DENIED_MODULES,
     _matches,
+    _unwrap_capture_wrapper,
     is_denied_operator_gadget,
     is_denied_stdlib_or_builtin_module,
     is_inert_first_party_callable,
@@ -99,7 +100,10 @@ def _internal_torch_builtin_key(
     internal = getattr(get_variable_functions_class(), name, None)
     # r47 secD_1: resolve the public alias through ``torch_attr`` so an attacker callable ``name``
     # reads ``torch.__dict__`` directly and never fires the PEP-562 lazy ``torch.__getattr__``.
-    public = torch_attr(name)
+    # While capture wrappers are installed, ``torch.__dict__`` holds the TorchLens wrapper,
+    # whose provenance stamp (B8-1a pickle fix) claims ``__module__ == "torch"`` for every
+    # module-namespace wrapper -- the direct-builtin-export test must read the ORIGINAL.
+    public = _unwrap_capture_wrapper(torch_attr(name))
     if internal is not func or getattr(public, "__module__", None) == "torch":
         return None
     return FunctionRegistryKey(
