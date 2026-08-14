@@ -2998,7 +2998,7 @@ class host_nondeterminism_monitor:
                 except Exception:
                     self._flag_uncertain("profile_predecessor_error")
 
-        hook._tl_owner = self  # dead-chain restore walks use this (non-LIFO fix).
+        cast(Any, hook)._tl_owner = self  # dead-chain restore walks use this (non-LIFO fix).
         return hook
 
     @staticmethod
