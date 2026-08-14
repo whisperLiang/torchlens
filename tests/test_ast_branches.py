@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import warnings
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -294,6 +295,87 @@ def test_classify_bool_cast_inside_if_test_reports_wrapper(tmp_path: Path) -> No
     assert classification.wrapper_kind == "bool_cast"
     assert classification.branch_test_kind == "then"
     assert classification.conditional_key is not None
+
+
+def test_line_only_arm_body_bool_cast_fails_closed(tmp_path: Path) -> None:
+    """Refuse line-only branch classification when the arm body consumes a bool.
+
+    ``if c: keep = bool(d)`` puts TWO bool consumption sites on one line: the
+    ``if`` test and the arm-body ``bool(...)`` cast. Line-only evidence cannot
+    tell which one consumed a given bool, so classifying either as the branch
+    TEST would let the arm-body bool ``d`` cross-wire into the conditional's
+    public record (deep-hunt C1). Both must fail closed to ``unknown``.
+    """
+
+    path = _write_source(
+        tmp_path,
+        "arm_body_cast.py",
+        """
+        def forward():
+            if cond_test: keep = bool(other_flag)
+            return keep
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_test")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification == BoolClassification("unknown", None, None, None)
+
+
+def test_line_only_assert_wrapping_ternary_fails_closed(tmp_path: Path) -> None:
+    """Refuse line-only classification when an ``assert`` wraps a ternary.
+
+    In ``assert left if cond else right`` the assert operand and the ternary
+    test are distinct same-line consumption sites; classifying line-only
+    evidence as the ternary TEST would wire the asserted VALUE into the
+    ternary's conditional record (deep-hunt C1).
+    """
+
+    path = _write_source(
+        tmp_path,
+        "assert_ternary.py",
+        """
+        def forward():
+            assert left_flag if cond_pick else right_flag
+            return 1
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_pick")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification == BoolClassification("unknown", None, None, None)
+
+
+def test_line_only_bool_cast_inside_test_still_classifies(tmp_path: Path) -> None:
+    """Keep line-only classification when every consumer nests in the test.
+
+    ``if bool(c):`` has a cast consumer INSIDE the test span: whichever site
+    consumed the bool, the branch classification is identical, so the C1
+    fail-close guard must not fire.
+    """
+
+    path = _write_source(
+        tmp_path,
+        "wrapped_if_line_only.py",
+        """
+        def forward():
+            if bool(cond_only):
+                return 1
+            return 0
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_only")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification.kind == "if_test"
+    assert classification.wrapper_kind == "bool_cast"
+    assert classification.branch_test_kind == "then"
 
 
 def test_classify_unknown_when_no_bool_consumer_contains_point(tmp_path: Path) -> None:
@@ -623,8 +705,18 @@ def test_scope_resolution_fails_closed_when_name_match_is_ambiguous(tmp_path: Pa
     assert stack == []
 
 
-def test_get_file_index_reparses_when_file_mtime_changes(tmp_path: Path) -> None:
-    """Reparse a file when its cached modification time no longer matches."""
+def test_get_file_index_never_swaps_a_live_index_for_changed_disk_content(
+    tmp_path: Path,
+) -> None:
+    """Keep serving the first-read index when the file changes on disk.
+
+    Deep-hunt C4 (REVIEWED REBASELINE of the old reparse-on-mtime pin): the
+    runtime line numbers being attributed come from code objects loaded
+    BEFORE the on-disk edit, so re-parsing the new content re-attributes
+    ops/bools to whatever now occupies those lines -- silently WRONG, not
+    stale. A live index is pinned to its first-read content for the process
+    lifetime; ``invalidate_cache`` is the explicit re-index opt-out.
+    """
 
     path = _write_source(
         tmp_path,
@@ -655,11 +747,72 @@ def test_get_file_index_reparses_when_file_mtime_changes(tmp_path: Path) -> None
     os.utime(path, ns=(updated_ns, updated_ns))
 
     second_index = get_file_index(str(path))
-    assert second_index is not None
+    assert second_index is first_index
+    assert second_index.conditionals[0].kind == "if_chain"
 
-    assert second_index is not first_index
-    assert second_index.mtime_ns == updated_ns
-    assert second_index.conditionals[0].kind == "ifexp"
+    invalidate_cache(str(path))
+    reindexed = get_file_index(str(path))
+    assert reindexed is not None
+    assert reindexed is not first_index
+    assert reindexed.conditionals[0].kind == "ifexp"
+
+
+def test_evicted_index_rebuild_fails_closed_on_source_drift(tmp_path: Path) -> None:
+    """Refuse to rebuild from drifted disk content after LRU eviction.
+
+    Deep-hunt C4, second half: the retained-source guarantee is per
+    ``FileIndex``, so LRU eviction used to discard the retained source and
+    the next query silently rebuilt from the (possibly edited) file on disk.
+    The first-read digest is pinned outside the LRU: a rebuild from matching
+    content succeeds, a rebuild from drifted content warns once and fails
+    closed to ``None``.
+    """
+
+    path = _write_source(
+        tmp_path,
+        "evicted_case.py",
+        """
+        def forward():
+            if cond_pinned:
+                return 1
+            return 0
+        """,
+    )
+
+    first_index = get_file_index(str(path))
+    assert first_index is not None
+
+    # Same-content rebuild after eviction succeeds (mtime-only touch).
+    ast_branches._file_cache.pop(str(path))
+    os.utime(path, ns=(first_index.mtime_ns + 1_000_000,) * 2)
+    rebuilt = get_file_index(str(path))
+    assert rebuilt is not None
+    assert rebuilt is not first_index
+
+    # Drifted-content rebuild after eviction fails closed with one warning.
+    ast_branches._file_cache.pop(str(path))
+    path.write_text(
+        dedent(
+            """
+            def forward():
+                if cond_drifted:
+                    return 2
+                return 0
+            """
+        ).lstrip("\n"),
+        encoding="utf-8",
+    )
+    with pytest.warns(UserWarning, match="changed on disk"):
+        assert get_file_index(str(path)) is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert get_file_index(str(path)) is None
+
+    # Explicit invalidation clears the pin and re-indexes deliberately.
+    invalidate_cache(str(path))
+    reindexed = get_file_index(str(path))
+    assert reindexed is not None
+    assert any("cond_drifted" in line for line in reindexed.source.splitlines())
 
 
 def test_invalidate_cache_clears_specific_file_and_global_cache(tmp_path: Path) -> None:
@@ -919,7 +1072,14 @@ def test_scope_call_index_matches_naive_rewalk_at_every_call_site(tmp_path: Path
 
 
 def test_scope_call_index_is_rebuilt_after_source_changes(tmp_path: Path) -> None:
-    """Drop the per-scope call index with the file index when the source changes."""
+    """Drop the per-scope call index with the file index on explicit re-index.
+
+    REVIEWED REBASELINE (deep-hunt C4): implicit mtime-driven reparse is now
+    fail-closed (a live index is pinned to its first-read content), so the
+    sanctioned path to a changed file is ``invalidate_cache``. The invariant
+    under test is unchanged: the projected per-scope call entries never
+    outlive their owning ``FileIndex``.
+    """
 
     path = _write_source(
         tmp_path,
@@ -945,8 +1105,7 @@ def test_scope_call_index_is_rebuilt_after_source_changes(tmp_path: Path) -> Non
         ).lstrip("\n"),
         encoding="utf-8",
     )
-    updated_ns = first_index.mtime_ns + 1_000_000
-    os.utime(path, ns=(updated_ns, updated_ns))
+    invalidate_cache(str(path))
 
     second_index = get_file_index(str(path))
     assert second_index is not None

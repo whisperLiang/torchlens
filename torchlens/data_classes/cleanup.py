@@ -170,32 +170,57 @@ def _label_for_reference_removal(log_entry: Op, pass_finished: bool) -> str:
     return cast(str, log_entry._label_raw)
 
 
+def _map_removed_label(
+    label: str,
+    labels_to_remove: set[str],
+    replacements: dict[str, str] | None,
+) -> str | None:
+    """Return the surviving label for one reference, or ``None`` to drop it.
+
+    Args:
+        label: Referenced label.
+        labels_to_remove: Labels removed in this pass.
+        replacements: Optional removed-label -> survivor substitutions (merge
+            removals repoint references; plain removals drop them).
+
+    Returns:
+        ``label`` itself when it survives, the substituted survivor when a
+        replacement is known, else ``None``.
+    """
+    if label not in labels_to_remove:
+        return label
+    if replacements is not None:
+        return replacements.get(label)
+    return None
+
+
 def _filter_conditional_arm_children(
     conditional_arm_children: dict[int, dict[str, list[str]]],
     labels_to_remove: set[str],
+    replacements: dict[str, str] | None = None,
 ) -> dict[int, dict[str, list[str]]]:
-    """Drop removed labels from ``conditional_arm_children``.
+    """Drop or substitute removed labels in ``conditional_arm_children``.
 
     Args:
         conditional_arm_children: ``cond_id -> branch_kind -> child labels``.
         labels_to_remove: Labels that should be removed.
+        replacements: Optional removed-label -> survivor substitutions.
 
     Returns:
-        A new nested dict with removed labels and empty containers pruned.
+        A new nested dict with removed labels substituted or pruned, empty
+        containers pruned, and substituted duplicates deduplicated in order.
     """
     filtered_children_by_cond: dict[int, dict[str, list[str]]] = {}
     for cond_id, branch_children in conditional_arm_children.items():
-        filtered_branch_children = {
-            branch_kind: [
-                child_label for child_label in child_labels if child_label not in labels_to_remove
-            ]
-            for branch_kind, child_labels in branch_children.items()
-        }
-        filtered_branch_children = {
-            branch_kind: child_labels
-            for branch_kind, child_labels in filtered_branch_children.items()
-            if child_labels
-        }
+        filtered_branch_children: dict[str, list[str]] = {}
+        for branch_kind, child_labels in branch_children.items():
+            kept_children: list[str] = []
+            for child_label in child_labels:
+                mapped = _map_removed_label(child_label, labels_to_remove, replacements)
+                if mapped is not None and mapped not in kept_children:
+                    kept_children.append(mapped)
+            if kept_children:
+                filtered_branch_children[branch_kind] = kept_children
         if filtered_branch_children:
             filtered_children_by_cond[cond_id] = filtered_branch_children
     return filtered_children_by_cond
@@ -204,23 +229,30 @@ def _filter_conditional_arm_children(
 def _filter_conditional_arm_entry_edges(
     conditional_arm_entry_edges: dict[tuple[int, str], list[tuple[str, str]]],
     labels_to_remove: set[str],
+    replacements: dict[str, str] | None = None,
 ) -> dict[tuple[int, str], list[tuple[str, str]]]:
-    """Drop removed labels from ``conditional_arm_entry_edges``.
+    """Drop or substitute removed labels in ``conditional_arm_entry_edges``.
 
     Args:
         conditional_arm_entry_edges: ``(cond_id, branch_kind) -> [(parent, child)]``.
         labels_to_remove: Labels that should be removed.
+        replacements: Optional removed-label -> survivor substitutions.
 
     Returns:
-        A new dict with empty edge lists pruned.
+        A new dict with empty edge lists pruned and substituted duplicate
+        edges deduplicated in order.
     """
     filtered_arm_edges: dict[tuple[int, str], list[tuple[str, str]]] = {}
     for key, edge_list in conditional_arm_entry_edges.items():
-        filtered_edges = [
-            (parent, child)
-            for parent, child in edge_list
-            if parent not in labels_to_remove and child not in labels_to_remove
-        ]
+        filtered_edges: list[tuple[str, str]] = []
+        for parent, child in edge_list:
+            mapped_parent = _map_removed_label(parent, labels_to_remove, replacements)
+            mapped_child = _map_removed_label(child, labels_to_remove, replacements)
+            if mapped_parent is None or mapped_child is None:
+                continue
+            mapped_edge = (mapped_parent, mapped_child)
+            if mapped_edge not in filtered_edges:
+                filtered_edges.append(mapped_edge)
         if filtered_edges:
             filtered_arm_edges[key] = filtered_edges
     return filtered_arm_edges
@@ -229,21 +261,33 @@ def _filter_conditional_arm_entry_edges(
 def _filter_conditional_edge_call_indices(
     conditional_edge_call_indices: dict[tuple[str, str, int, str], list[int]],
     labels_to_remove_no_pass: set[str],
+    replacements_no_pass: dict[str, str] | None = None,
 ) -> dict[tuple[str, str, int, str], list[int]]:
-    """Drop removed labels from ``conditional_edge_call_indices`` keys.
+    """Drop or substitute removed labels in ``conditional_edge_call_indices`` keys.
 
     Args:
         conditional_edge_call_indices: ``(parent_no_pass, child_no_pass, cond_id, branch_kind) -> pass list``.
         labels_to_remove_no_pass: Pass-stripped labels that should be removed.
+        replacements_no_pass: Optional pass-stripped removed-label -> survivor
+            substitutions. A substituted key colliding with an existing key
+            merges the two pass lists (sorted union).
 
     Returns:
-        A new dict with removed-key entries pruned.
+        A new dict with removed-key entries substituted or pruned.
     """
-    return {
-        key: call_indexs
-        for key, call_indexs in conditional_edge_call_indices.items()
-        if key[0] not in labels_to_remove_no_pass and key[1] not in labels_to_remove_no_pass
-    }
+    filtered_indices: dict[tuple[str, str, int, str], list[int]] = {}
+    for key, call_indexs in conditional_edge_call_indices.items():
+        mapped_parent = _map_removed_label(key[0], labels_to_remove_no_pass, replacements_no_pass)
+        mapped_child = _map_removed_label(key[1], labels_to_remove_no_pass, replacements_no_pass)
+        if mapped_parent is None or mapped_child is None:
+            continue
+        mapped_key = (mapped_parent, mapped_child, key[2], key[3])
+        existing = filtered_indices.get(mapped_key)
+        if existing is None:
+            filtered_indices[mapped_key] = list(call_indexs)
+        else:
+            filtered_indices[mapped_key] = sorted(set(existing) | set(call_indexs))
+    return filtered_indices
 
 
 def _project_conditional_child_views(
@@ -344,21 +388,25 @@ def _project_aggregate_conditional_child_views(
 def _scrub_layer_entry_conditional_fields(
     layer_entry: Op,
     labels_to_remove: set[str],
+    replacements: dict[str, str] | None = None,
 ) -> None:
-    """Remove deleted labels from conditional fields on a surviving Op.
+    """Remove or repoint deleted labels in conditional fields on a surviving Op.
 
     Args:
         layer_entry: Surviving layer entry to scrub.
         labels_to_remove: Labels that were removed elsewhere in the log.
+        replacements: Optional removed-label -> survivor substitutions.
     """
-    layer_entry.conditional_entry_children = [
-        child_label
-        for child_label in layer_entry.conditional_entry_children
-        if child_label not in labels_to_remove
-    ]
+    entry_children: list[str] = []
+    for child_label in layer_entry.conditional_entry_children:
+        mapped = _map_removed_label(child_label, labels_to_remove, replacements)
+        if mapped is not None and mapped not in entry_children:
+            entry_children.append(mapped)
+    layer_entry.conditional_entry_children = entry_children
     layer_entry.conditional_arm_children = _filter_conditional_arm_children(
         layer_entry.conditional_arm_children,
         labels_to_remove,
+        replacements,
     )
     (
         layer_entry.conditional_then_children,
@@ -367,12 +415,18 @@ def _scrub_layer_entry_conditional_fields(
     ) = _project_conditional_child_views(layer_entry.conditional_arm_children)
 
 
-def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass: set[str]) -> None:
-    """Remove deleted labels from aggregate Layer conditional fields.
+def _scrub_layer_log_conditional_fields(
+    self: "Trace",
+    labels_to_remove_no_pass: set[str],
+    replacements_no_pass: dict[str, str] | None = None,
+) -> None:
+    """Remove or repoint deleted labels in aggregate Layer conditional fields.
 
     Args:
         self: Trace owning the LayerLogs.
         labels_to_remove_no_pass: Pass-stripped labels that were removed.
+        replacements_no_pass: Optional pass-stripped removed-label -> survivor
+            substitutions.
     """
     for layer_log in getattr(self, "layer_logs", {}).values():
         if "conditional_entry_children" not in getattr(layer_log, "__dict__", {}):
@@ -380,14 +434,16 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
         # Layer is dict-backed (no normalizing descriptors until M8), so the
         # scrub itself preserves the finished-trace immutable relation
         # surface: tuple views in, tuple views out.
-        layer_log.conditional_entry_children = tuple(
-            child_label
-            for child_label in layer_log.conditional_entry_children
-            if child_label not in labels_to_remove_no_pass
-        )
+        aggregate_entry_children: list[str] = []
+        for child_label in layer_log.conditional_entry_children:
+            mapped = _map_removed_label(child_label, labels_to_remove_no_pass, replacements_no_pass)
+            if mapped is not None and mapped not in aggregate_entry_children:
+                aggregate_entry_children.append(mapped)
+        layer_log.conditional_entry_children = tuple(aggregate_entry_children)
         layer_log.conditional_arm_children = _filter_conditional_arm_children(
             layer_log.conditional_arm_children,
             labels_to_remove_no_pass,
+            replacements_no_pass,
         )
         (
             then_children,
@@ -403,6 +459,7 @@ def _scrub_conditional_fields_after_removal(
     self: "Trace",
     labels_to_remove: set[str],
     surviving_entries: Iterable[Op],
+    replacement_labels: dict[str, str] | None = None,
 ) -> None:
     """Scrub conditional references after one or more layer labels are removed.
 
@@ -411,30 +468,97 @@ def _scrub_conditional_fields_after_removal(
         labels_to_remove: Removed layer labels using the same qualification as the
             current removal pass.
         surviving_entries: Surviving Op entries to scrub in-place.
+        replacement_labels: Optional removed-label -> survivor substitutions.
+            Merge-style removals (step-6 buffer dedup) REPOINT conditional
+            references to the value-identical survivor instead of dropping
+            them; plain removals keep the historical drop behavior.
     """
     labels_to_remove_no_pass = {_strip_pass_suffix(layer_label) for layer_label in labels_to_remove}
+    replacements_no_pass = _strip_pass_suffix_replacements(replacement_labels)
 
     for layer_entry in surviving_entries:
-        _scrub_layer_entry_conditional_fields(layer_entry, labels_to_remove)
+        _scrub_layer_entry_conditional_fields(layer_entry, labels_to_remove, replacement_labels)
 
-    _scrub_layer_log_conditional_fields(self, labels_to_remove_no_pass)
+    _scrub_layer_log_conditional_fields(self, labels_to_remove_no_pass, replacements_no_pass)
 
     self.conditional_arm_entry_edges = _filter_conditional_arm_entry_edges(
         self.conditional_arm_entry_edges,
         labels_to_remove,
+        replacement_labels,
     )
     self.conditional_edge_call_indices = _filter_conditional_edge_call_indices(
         self.conditional_edge_call_indices,
         labels_to_remove_no_pass,
+        replacements_no_pass,
     )
     for conditional_event in self.conditional_records:
-        conditional_event.bool_layers = [
-            layer_label
-            for layer_label in conditional_event.bool_layers
-            if layer_label not in labels_to_remove
-        ]
+        if replacement_labels is not None:
+            # Substitute IN PLACE (never drop): ``_arm_bool_indices`` and
+            # ``_bool_layers_raw`` are index-aligned with ``bool_layers``, so
+            # positional substitution keeps them coherent where a drop-filter
+            # would silently shift every later index.
+            conditional_event.bool_layers = [
+                replacement_labels.get(layer_label, layer_label)
+                if layer_label in labels_to_remove
+                else layer_label
+                for layer_label in conditional_event.bool_layers
+                if layer_label not in labels_to_remove
+                or replacement_labels.get(layer_label) is not None
+            ]
+            bool_layers_raw = getattr(conditional_event, "_bool_layers_raw", None)
+            if bool_layers_raw is not None:
+                setattr(
+                    conditional_event,
+                    "_bool_layers_raw",
+                    [
+                        replacement_labels.get(layer_label, layer_label)
+                        if layer_label in labels_to_remove
+                        else layer_label
+                        for layer_label in bool_layers_raw
+                        if layer_label not in labels_to_remove
+                        or replacement_labels.get(layer_label) is not None
+                    ],
+                )
+        else:
+            conditional_event.bool_layers = [
+                layer_label
+                for layer_label in conditional_event.bool_layers
+                if layer_label not in labels_to_remove
+            ]
 
     _scrub_intervention_fields_after_removal(self, labels_to_remove, surviving_entries)
+
+
+def _strip_pass_suffix_replacements(
+    replacement_labels: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Project a replacement map into the pass-stripped label namespace.
+
+    Args:
+        replacement_labels: Removed-label -> survivor substitutions, or ``None``.
+
+    Returns:
+        The pass-stripped projection, dropping keys whose stripped forms
+        collide with conflicting survivors (those fall back to the historical
+        drop behavior), or ``None`` when no map was given.
+    """
+    if replacement_labels is None:
+        return None
+    stripped: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for removed_label, survivor_label in replacement_labels.items():
+        removed_no_pass = _strip_pass_suffix(removed_label)
+        survivor_no_pass = _strip_pass_suffix(survivor_label)
+        # Identity mappings (survivor shares the base label) are recorded so
+        # the no-pass key is KEPT rather than dropped as removed.
+        existing = stripped.get(removed_no_pass)
+        if existing is not None and existing != survivor_no_pass:
+            conflicting.add(removed_no_pass)
+            continue
+        stripped[removed_no_pass] = survivor_no_pass
+    for removed_no_pass in conflicting:
+        stripped.pop(removed_no_pass, None)
+    return stripped
 
 
 def _scrub_intervention_fields_after_removal(
@@ -616,7 +740,11 @@ _OP_LABEL_FIELDS_TO_CLEAN = (
 _OP_GROUP_FIELDS = frozenset({"equivalent_ops", "recurrent_ops"})
 
 
-def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
+def _remove_log_entry_references(
+    self: "Trace",
+    layer_to_remove: str,
+    replacement_labels: dict[str, str] | None = None,
+) -> None:
     """Removes all references to a single Op from the Trace's list/dict fields.
 
     This is the single-entry counterpart to the reference-cleaning logic in
@@ -625,17 +753,20 @@ def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
 
     Args:
         layer_to_remove: The label of the log entry to remove.
+        replacement_labels: Optional removed-label -> survivor substitutions
+            for merge-style removals (conditional references repoint instead
+            of dropping).
     """
     # Clear any fields in Trace referring to the entry.
 
     for field_name in _LIST_FIELDS_TO_CLEAN:
         remove_entry_from_list(getattr(self, field_name), layer_to_remove)
 
-    _scrub_conditional_fields_after_removal(self, {layer_to_remove}, self)
+    _scrub_conditional_fields_after_removal(self, {layer_to_remove}, self, replacement_labels)
 
-    self.conditional_branch_edges = [
-        edge for edge in self.conditional_branch_edges if layer_to_remove not in edge
-    ]
+    self.conditional_branch_edges = _substitute_conditional_branch_edges(
+        self.conditional_branch_edges, {layer_to_remove}, replacement_labels
+    )
     # Now any nested fields.
 
     for _param_group, tensor_labels in self.layers_with_params.items():
@@ -657,6 +788,34 @@ def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
     }
 
     _scrub_per_op_equivalence_lists(self, {layer_to_remove})
+
+
+def _substitute_conditional_branch_edges(
+    conditional_branch_edges: list[tuple[str, str]],
+    labels_to_remove: set[str],
+    replacement_labels: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    """Drop or repoint removed labels in ``conditional_branch_edges``.
+
+    Args:
+        conditional_branch_edges: Trace-level ``(parent, child)`` IF edges.
+        labels_to_remove: Removed labels in the active label namespace.
+        replacement_labels: Optional removed-label -> survivor substitutions.
+
+    Returns:
+        A new edge list with removed labels substituted (merge removals) or
+        dropped, substituted duplicates deduplicated in order.
+    """
+    filtered_edges: list[tuple[str, str]] = []
+    for parent, child in conditional_branch_edges:
+        mapped_parent = _map_removed_label(parent, labels_to_remove, replacement_labels)
+        mapped_child = _map_removed_label(child, labels_to_remove, replacement_labels)
+        if mapped_parent is None or mapped_child is None:
+            continue
+        mapped_edge = (mapped_parent, mapped_child)
+        if mapped_edge not in filtered_edges:
+            filtered_edges.append(mapped_edge)
+    return filtered_edges
 
 
 def _scrub_per_op_equivalence_lists(ops: Iterable["Op"], labels_to_remove: set[str]) -> None:
