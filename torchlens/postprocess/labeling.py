@@ -309,6 +309,11 @@ _LIST_FIELDS_TO_RENAME = [
     "recurrent_ops",
 ]
 
+# SCALAR fields in Op that hold ONE raw label needing rename.
+_SCALAR_LABEL_FIELDS_TO_RENAME = [
+    "buffer_source",
+]
+
 
 def _rename_elif_children(
     conditional_elif_children: dict[int, list[str]],
@@ -458,6 +463,18 @@ def _replace_layer_names_for_layer_entry(
             set_entry_field(field, [field_mapping[raw] for raw in orig])
         else:  # set
             set_entry_field(field, type(orig)(field_mapping[raw] for raw in orig))
+
+    # Scalar label-bearing fields. ``buffer_source`` names the producer of a buffer's
+    # current value and is a portable ``FieldPolicy.KEEP`` field read by the public
+    # ``Buffer.buffer_source`` accessor -- but it was absent from every rename list, so
+    # it survived into FINISHED traces as a DANGLING RAW label (``add_1_4_raw`` while
+    # the producer's final label is ``add_1_2``), handed users an unresolvable lookup
+    # key, and persisted that dead label into ``.tlspec`` artifacts. The buffer-merge
+    # path only ever repointed it to ANOTHER raw label.
+    for scalar_field in _SCALAR_LABEL_FIELDS_TO_RENAME:
+        raw_value = getattr(layer_entry, scalar_field, None)
+        if isinstance(raw_value, str) and raw_value in mapping:
+            set_entry_field(scalar_field, mapping[raw_value])
 
     # Fix the arg locations field:
     arg_locs = getattr(layer_entry, "parent_arg_positions", None)

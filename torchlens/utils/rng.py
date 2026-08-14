@@ -799,13 +799,31 @@ class AutocastRestore:
         self._contexts: list[Any] = []
 
     def __enter__(self) -> "AutocastRestore":
-        """Enter captured autocast contexts.
+        """Enter captured autocast contexts, unwinding fully if any entry fails.
+
+        Python never calls ``__exit__`` when ``__enter__`` raises, so a multi-device
+        replay whose second device fails (an artifact-controlled ``dtype``, an
+        unsupported device) used to leave the FIRST device's autocast entered
+        thread-globally for the rest of the process -- every later user op silently
+        running under an autocast nobody asked for. The unwind arm is
+        ``BaseException``-wide because a Ctrl-C between two entries leaves exactly the
+        same unbalanced nesting.
 
         Returns
         -------
         AutocastRestore
             This context manager instance.
         """
+
+        try:
+            self._enter_contexts()
+        except BaseException:
+            self._exit_contexts(None, None, None)
+            raise
+        return self
+
+    def _enter_contexts(self) -> None:
+        """Open one autocast context per captured device entry."""
 
         for device, state in self._autocast_state.items():
             if device.startswith("__"):
@@ -824,7 +842,6 @@ class AutocastRestore:
             ctx = autocast(device, dtype=state["dtype"], enabled=bool(state["enabled"]))
             ctx.__enter__()
             self._contexts.append(ctx)
-        return self
 
     def __exit__(
         self,
@@ -844,9 +861,34 @@ class AutocastRestore:
             Traceback propagated by the managed block, if any.
         """
 
-        # Exit in reverse order to mirror the nesting order of __enter__.
-        for ctx in reversed(self._contexts):
-            ctx.__exit__(exc_type, exc_value, traceback)
+        self._exit_contexts(exc_type, exc_value, traceback)
+
+    def _exit_contexts(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Exit every opened context in reverse nesting order, guarding each one.
+
+        A raise from the innermost ``__exit__`` used to skip every OUTER context,
+        leaving ``autocast_increment_nesting`` permanently unbalanced for the thread.
+        Each exit is fenced independently (the same per-item pattern the monitor's
+        restore queue uses) and the list is cleared so a repeat exit is a no-op; the
+        FIRST failure is re-raised once every context has been given its chance.
+        """
+
+        contexts = self._contexts
+        self._contexts = []
+        first_error: BaseException | None = None
+        for ctx in reversed(contexts):
+            try:
+                ctx.__exit__(exc_type, exc_value, traceback)
+            except BaseException as error:  # noqa: PERF203 - per-item fence is the point
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 # ======================================================================================
@@ -1837,9 +1879,38 @@ def _call_site_argcount(frame: Any) -> int | None:
 _ACTIVE_MONITOR: "host_nondeterminism_monitor | None" = None
 """The capture-scoped monitor currently installed, or ``None`` (r41 hon2_1).
 
-Published as the LAST statement of ``__enter__`` and cleared FIRST in ``__exit__`` so
-readers never observe a partially-installed window. Captures do not nest
+Published as the LAST statement of ``__enter__`` and restored to the PREVIOUS occupant
+FIRST in the teardown, so readers never observe a partially-installed window and a
+nested window's exit cannot null the slot mid-outer-window. Captures do not nest
 (``active_logging`` rejects nested captures), so a single slot is sufficient.
+"""
+
+
+class _PatchStackEntry:
+    """One live monitor patch on ``(holder, name)``, spliceable out of order.
+
+    ``holder`` is retained STRONGLY so its ``id()`` cannot be reused by another object
+    while the entry is stacked (the stack is keyed by ``(id(holder), name)``).
+    """
+
+    __slots__ = ("holder", "name", "original", "wrapper")
+
+    def __init__(self, holder: Any, name: str, original: Any, wrapper: Any) -> None:
+        self.holder = holder
+        self.name = name
+        self.original = original
+        self.wrapper = wrapper
+
+
+_PATCH_STACKS: dict[tuple[int, str], list[_PatchStackEntry]] = {}
+"""Live monitor patches per ``(id(holder), name)``, innermost last.
+
+Restoration is SPLICE-aware. A monitor unwinding out of order (a non-LIFO overlap) used
+to hand the true original back and then have the outer window's restore write ITS
+snapshot -- which was the inner wrapper -- leaving ``time.time`` / ``os.urandom`` /
+``np.random.default_rng`` wrapped for the life of the process. Splicing instead rewrites
+the successor entry's recorded original, so whoever restores last always writes the
+genuine pre-monitor value.
 """
 
 
@@ -1973,6 +2044,17 @@ class host_nondeterminism_monitor:
         self._threading_hook: Any = None
         self._sys_profile_installed = False
         self._threading_profile_installed = False
+        # Window lifecycle. ``_entered`` refuses a second arm on the same instance and
+        # ``_torn_down`` makes the unwind idempotent (an ``ExitStack`` double-close used
+        # to clobber a later window's profile hook); the profile hooks also read
+        # ``_torn_down`` to SELF-uninstall on threads ``__exit__`` cannot reach.
+        self._entered = False
+        self._torn_down = False
+        # Set only AFTER the profile slots have been handed back, so the owner thread's
+        # own teardown frames do not trip the self-uninstall and then read as
+        # "someone replaced our hook".
+        self._hooks_retired = False
+        self._previous_active_monitor: host_nondeterminism_monitor | None = None
         self._generator_states: list[tuple[Any, str]] = []
         # B4: whole-window digests of numpy RNG receivers DEEPLY reachable from
         # profiled-frame roots (named globals incl. module namespaces, fast locals,
@@ -2032,13 +2114,26 @@ class host_nondeterminism_monitor:
         # the digest for a user frame.
         self._numpy_frame_digest_scope_cache: dict[int, tuple[CodeType, bool]] = {}
         # r49 hon1_1: re-entrancy depth for monitor-INTERNAL probes. While > 0 the monitor is
-        # reading through its OWN inventory probe (owner-thread, ``__enter__``-scoped, BEFORE the
-        # user forward runs), so any channel a probe transitively touches must NOT be marked as a
-        # model host read. Guarded at the single ``_mark`` choke point -> surface-complete over
-        # every clock/entropy channel.
-        self._suppress_self_marks: int = 0
+        # reading through its OWN inventory probe, so any channel a probe transitively touches
+        # must NOT be marked as a model host read. Guarded at the single ``_mark`` choke point
+        # -> surface-complete over every clock/entropy channel.
+        #
+        # THREAD-LOCAL, not a shared int. The bracket is NOT owner-thread-only in practice:
+        # ``log_current_rng_states`` raises it once per logged op from the wrapper hot path
+        # while the forward runs, so a concurrent thread's ``+=``/``-=`` could interleave and
+        # store a NEGATIVE resting value -- truthy forever, silently dropping EVERY later
+        # ``_mark``/``_mark_replayable`` on every thread while ``uncertain`` stayed False. That
+        # is a direct false-VERIFIED path. Per-thread depth makes a lost update impossible and
+        # is also semantically right: a probe on thread A never exempts thread B's host reads.
+        self._suppress_state = _threading_module.local()
 
     # -- helpers -----------------------------------------------------------------
+
+    @property
+    def _suppress_self_marks(self) -> int:
+        """This THREAD's monitor-internal probe depth (0 outside any probe)."""
+
+        return int(getattr(self._suppress_state, "depth", 0))
 
     def _mark(self, channel: str) -> None:
         """Record a host nondeterminism channel touch, unless a monitor probe is active.
@@ -2087,11 +2182,13 @@ class host_nondeterminism_monitor:
         forward runs), so no user/model/worker host read is ever inside it.
         """
 
-        self._suppress_self_marks += 1
+        self._suppress_state.depth = self._suppress_self_marks + 1
         try:
             yield
         finally:
-            self._suppress_self_marks -= 1
+            # Never let the resting depth go negative (a negative depth is truthy and
+            # would suppress every later mark on this thread with no uncertainty stamp).
+            self._suppress_state.depth = max(0, self._suppress_self_marks - 1)
 
     def _flag_uncertain(self, reason: str) -> None:
         """Downgrade monitor completeness, optionally recording one reason.
@@ -2108,22 +2205,60 @@ class host_nondeterminism_monitor:
     def _patch_attr(self, holder: Any, name: str, wrapper: Any) -> None:
         """Patch one module or class attribute and queue its exact restoration.
 
-        The queued restore flags uncertainty when the attribute no longer holds
-        this wrapper at teardown -- someone replaced the patch mid-window, so exact
+        The queued restore flags uncertainty when the attribute no longer holds this
+        wrapper at teardown -- someone replaced the patch mid-window, so exact
         restoration cannot be proven -- and restores the original regardless.
+
+        Restoration is SPLICE-aware through :data:`_PATCH_STACKS`: unwinding out of
+        order hands our recorded original to the entry stacked ABOVE us instead of
+        writing it under a live patch, so the genuine pre-monitor value always reaches
+        the attribute and no wrapper survives the last unwind.
         """
 
         original = getattr(holder, name)
+        entry = _PatchStackEntry(holder, name, original, wrapper)
+        _PATCH_STACKS.setdefault((id(holder), name), []).append(entry)
         setattr(holder, name, wrapper)
 
-        def _restore(holder: Any = holder, name: str = name, original: Any = original) -> None:
-            """Restore the captured original, flagging uncertainty if the patch was replaced."""
+        def _restore(entry: _PatchStackEntry = entry) -> None:
+            """Restore this entry's original, or splice it out from under a live patch."""
 
-            if getattr(holder, name, None) is not wrapper:
-                # Someone replaced our patch mid-window: restoration cannot be
-                # proven exact -> uncertainty (fail closed), restore anyway.
-                self._flag_uncertain(f"patch_replaced:{getattr(holder, '__name__', holder)}.{name}")
-            setattr(holder, name, original)
+            key = (id(entry.holder), entry.name)
+            stack = _PATCH_STACKS.get(key) or []
+            try:
+                index = stack.index(entry)
+            except ValueError:
+                index = -1
+            if index >= 0 and index != len(stack) - 1:
+                # A LATER monitor patched over us and is still live. Writing our
+                # original now would strip its wrapper, and its own restore would then
+                # write OUR wrapper back -- the historical permanent leak. Hand our
+                # original to the successor and leave the attribute alone.
+                stack[index + 1].original = entry.original
+                stack.pop(index)
+                self._flag_uncertain(
+                    f"patch_spliced:{getattr(entry.holder, '__name__', entry.holder)}.{entry.name}"
+                )
+                return
+            if index >= 0:
+                stack.pop(index)
+            if not stack:
+                _PATCH_STACKS.pop(key, None)
+            try:
+                if getattr(entry.holder, entry.name, None) is not entry.wrapper:
+                    # Someone outside the monitor replaced our patch mid-window:
+                    # restoration cannot be proven exact -> uncertainty (fail closed),
+                    # restore anyway.
+                    self._flag_uncertain(
+                        f"patch_replaced:"
+                        f"{getattr(entry.holder, '__name__', entry.holder)}.{entry.name}"
+                    )
+            finally:
+                # The tamper check reads through the holder's own attribute machinery
+                # (a PEP-562 module ``__getattr__`` can raise). Restoring in a
+                # ``finally`` keeps a raising probe from stranding the wrapper on a
+                # stdlib module for the life of the process.
+                setattr(entry.holder, entry.name, entry.original)
 
         self._restores.append(_restore)
 
@@ -2781,6 +2916,28 @@ class host_nondeterminism_monitor:
         def hook(frame: Any, event: str, arg: Any) -> Any:
             """Classify one profile event, then chain to the predecessor hook."""
 
+            if self._hooks_retired:
+                # The window that installed this hook is over. ``threading.setprofile``
+                # only seeds NEW threads, so a worker started in-window keeps this hook
+                # as its thread-local profile function forever -- a permanent per-call
+                # tax, a permanent strong reference to the model graph, and (worse) a
+                # later capture's draws on that thread classifying into this dead
+                # window's discarded result. A non-LIFO overlap can likewise hand this
+                # hook back to the process. Self-uninstall on the first event after
+                # teardown -- but ONLY when this hook is the one currently installed on
+                # this thread: while it is merely a LINK in a live successor's chain,
+                # uninstalling would tear down that successor's window too.
+                try:
+                    if _sys_module.getprofile() is hook:
+                        _sys_module.setprofile(predecessor)
+                except Exception:
+                    pass
+                if predecessor is not None:
+                    try:
+                        predecessor(frame, event, arg)
+                    except Exception:
+                        pass
+                return None
             if records_thread_ident:
                 # r41 hon2_1: the threading hook registers every hooked thread's ident
                 # (idempotent set.add, GIL-atomic) during thread bootstrap -- BEFORE the
@@ -4058,188 +4215,96 @@ class host_nondeterminism_monitor:
 
     # -- context protocol ---------------------------------------------------------
 
+    def _install_steps(self) -> tuple[tuple[str, Callable[[], None]], ...]:
+        """Return the ordered install steps, each guarded INDEPENDENTLY by ``__enter__``.
+
+        One raising surface used to abort every later surface (a single hostile model
+        attribute cost the whole profile belt), which is a silent under-witness rather
+        than a fail-closed degradation: the failed step flags uncertainty and the rest
+        still install. Profile hooks stay LAST so the classifier never observes a
+        half-patched surface set.
+        """
+
+        return (
+            ("prologue", self._install_prologue),
+            ("rng_primitive", self._install_python_rng_primitives),
+            ("entropy", self._install_entropy_surfaces),
+            ("construction", self._install_construction_surfaces),
+            ("clock", self._install_clock_surfaces),
+            ("torch_rng", self._install_torch_rng_surfaces),
+            ("generator_belt", self._install_generator_belt),
+            ("profile_hooks", self._install_profile_hooks),
+        )
+
     def __enter__(self) -> HostRngMonitorResult:
-        try:
-            self._tl_globals_ids = _torchlens_module_globals_ids()
-            self._exempt_ids = frozenset(id(item) for item in _rng_exempt_instances())
-            # rng_primitive: Python RNG class primitives (instances + subclasses +
-            # the bare C base for ``_random.Random()``).
-            for holder in (random.Random, random.SystemRandom, _c_random_module.Random):
-                for method_name in ("random", "getrandbits", "randbytes"):
-                    if method_name in vars(holder):
-                        self._patch_attr(
-                            holder,
-                            method_name,
-                            self._instance_method_wrapper(
-                                getattr(holder, method_name),
-                                f"{holder.__module__}.{holder.__qualname__}.{method_name}",
-                            ),
-                        )
-            # entropy: OS entropy + the secrets funnel alias + uuid4's feed. Each
-            # original is identity-registered BEFORE patching (r41 held-ref layer).
-            self._register_held_ref(_os_module.urandom, "os.urandom")
-            self._patch_attr(
-                _os_module, "urandom", self._entropy_wrapper(_os_module.urandom, "os.urandom")
-            )
-            if hasattr(_os_module, "getrandom"):
-                self._register_held_ref(_os_module.getrandom, "os.getrandom")
-                self._patch_attr(
-                    _os_module,
-                    "getrandom",
-                    self._entropy_wrapper(_os_module.getrandom, "os.getrandom"),
-                )
-            if hasattr(random, "_urandom"):
-                self._register_held_ref(random._urandom, "random._urandom")
-                self._patch_attr(
-                    random,
-                    "_urandom",
-                    self._entropy_wrapper(random._urandom, "random._urandom"),
-                )
-            # construction: the modern NumPy generator factory + the writable
-            # construction-entropy alias for unseeded BitGenerator construction (E5).
-            self._register_held_ref(np.random.default_rng, "np.random.default_rng")
-            self._patch_attr(
-                np.random,
-                "default_rng",
-                self._entropy_wrapper(np.random.default_rng, "np.random.default_rng"),
-            )
-            bit_generator_module = getattr(np.random, "bit_generator", None)
-            if bit_generator_module is not None and hasattr(bit_generator_module, "randbits"):
-                self._register_held_ref(bit_generator_module.randbits, "np_bit_generator_randbits")
-                self._patch_attr(
-                    bit_generator_module,
-                    "randbits",
-                    self._entropy_wrapper(
-                        bit_generator_module.randbits, "np_bit_generator_randbits"
-                    ),
-                )
-            # clock: the frozen ``time.*`` readers (thread-independent module patches).
-            for clock_name in _CLOCK_COUNTER_NAMES:
-                if hasattr(_time_module, clock_name):
-                    self._register_held_ref(getattr(_time_module, clock_name), f"time.{clock_name}")
-                    self._patch_attr(
-                        _time_module,
-                        clock_name,
-                        self._clock_wrapper(
-                            getattr(_time_module, clock_name), f"time.{clock_name}", None
-                        ),
-                    )
-            for clock_name, time_arg_index in _CLOCK_IMPLICIT_NOW:
-                if hasattr(_time_module, clock_name):
-                    self._register_held_ref(
-                        getattr(_time_module, clock_name), f"time.{clock_name}", time_arg_index
-                    )
-                    self._patch_attr(
-                        _time_module,
-                        clock_name,
-                        self._clock_wrapper(
-                            getattr(_time_module, clock_name), f"time.{clock_name}", time_arg_index
-                        ),
-                    )
-            if hasattr(_os_module, "times"):
-                self._register_held_ref(_os_module.times, "os.times")
-                self._patch_attr(
-                    _os_module, "times", self._clock_wrapper(_os_module.times, "os.times", None)
-                )
-            if _resource_module is not None and hasattr(_resource_module, "getrusage"):
-                self._register_held_ref(_resource_module.getrusage, "resource.getrusage")
-                self._patch_attr(
-                    _resource_module,
-                    "getrusage",
-                    self._clock_wrapper(_resource_module.getrusage, "resource.getrusage", None),
-                )
-            # clock: immutable ``datetime`` current readers via c_call identity.
-            for receiver, method in _DATETIME_CLOCK_READERS:
-                if hasattr(receiver, method):
-                    self._clock_ccall_keys[(id(receiver), method)] = (
-                        f"datetime.{receiver.__name__}.{method}"
-                    )
-            # r65 CLUSTER Z: torch RNG API module patches, derived from the ONE frozen
-            # disposition table (entropy/mutation ceiling permanently; replayable_read
-            # sets the consumed flag only). Each ORIGINAL is held-code registered
-            # BEFORE its attribute is replaced, mirroring the r41 held-ref layer, so a
-            # pre-window ``from torch import manual_seed`` alias cannot bypass.
-            for surface_row in TORCH_RNG_SURFACE:
-                if surface_row.disposition not in ("entropy", "mutation", "replayable_read"):
-                    continue
-                module_path, _, attr_name = surface_row.target.rpartition(".")
-                rng_holder_module = _torch_rng_holder_module(module_path)
-                if rng_holder_module is None or not hasattr(rng_holder_module, attr_name):
-                    continue
-                original = getattr(rng_holder_module, attr_name)
-                self._register_held_code(original, surface_row.target, surface_row.disposition)
-                self._patch_attr(
-                    rng_holder_module,
-                    attr_name,
-                    self._torch_rng_wrapper(original, surface_row.target, surface_row.disposition),
-                )
-            # r67 C1: seed the default-generator ROUTING CACHE for the all-receiver
-            # c_call classifier (process default + every populated cuda/xpu/mtia
-            # device default). Never forces device init, and never an honesty
-            # boundary: the classifier re-resolves on any miss.
-            self._default_generator_ids = _resolve_default_generator_ids()
-            # BELT (thread-independent, CHEAP -- model attributes + builtin-container
-            # nesting): digest generators the model HOLDS, so a draw on ANY thread
-            # (incl. a pre-existing worker) is caught by the before/after state
-            # comparison at __exit__. Deliberately NOT a process-wide
-            # ``gc.get_objects()`` scan -- the r39-draft GC-wide inventory cost
-            # ~900 ms/capture, perturbed the tracemalloc peak, and could over-trigger
-            # on unrelated generators (removed for cause). Realistic CROSS-THREAD
-            # external draws (hon1_1/corr2_2) are caught by ``threading.setprofile``
-            # below; an EXTERNALLY-held generator drawn on a PRE-EXISTING (non-hooked)
-            # thread is the documented residual (contract s11), same class as the
-            # adversarial draw+state-restore.
-            self._generator_states = self._sweep_model_generators()
-            # BELT: dual chained profile hooks (owner thread + threads started in-window). These
-            # are the r37/base mechanism (base runs them and is fast); the owner hook catches
-            # owner-thread numpy Generator instance draws and the immutable ``datetime`` readers,
-            # the threading hook catches an in-window helper-thread draw (hon1_1/corr2_2) and
-            # records each hooked thread's ident for the escape belt's 3-class gate (r41).
-            self._previous_sys_profile = _sys_module.getprofile()
-            self._sys_hook = self._make_profile_hook(self._previous_sys_profile)
-            _sys_module.setprofile(self._sys_hook)
-            self._sys_profile_installed = True
-            self._previous_threading_profile = (
-                _threading_module.getprofile() if hasattr(_threading_module, "getprofile") else None
-            )
-            self._threading_hook = self._make_profile_hook(
-                self._previous_threading_profile, records_thread_ident=True
-            )
-            _threading_module.setprofile(self._threading_hook)
-            self._threading_profile_installed = True
-        except Exception:
-            self._flag_uncertain("monitor_install_failed")
-        # r41 hon2_1: publish the in-window registry LAST so the escape belt never
-        # observes a partially-installed window (cleared FIRST in __exit__).
         global _ACTIVE_MONITOR
+        if self._entered:
+            # Re-arming the SAME instance would snapshot its own patches as the
+            # "prior" state and hand a torn-down window's hook back to the process at
+            # exit. The window is already live: degrade completeness, install nothing.
+            self._flag_uncertain("monitor_reentered")
+            return self.result
+        self._entered = True
+        if _ACTIVE_MONITOR is not None:
+            # Overlapping windows are outside the single-threaded capture model: this
+            # window's ``_patch_attr`` snapshots the OUTER window's wrappers as its
+            # "originals", so a non-LIFO unwind cannot prove exact restoration. Degrade
+            # completeness (the capture ceilings) rather than claim a clean window.
+            self._flag_uncertain("monitor_overlap")
+        try:
+            for step_name, step in self._install_steps():
+                try:
+                    step()
+                except Exception:
+                    self._flag_uncertain(f"monitor_install_failed:{step_name}")
+        except BaseException:
+            # Python never calls ``__exit__`` when ``__enter__`` raises, so a
+            # BaseException (a Ctrl-C landing in the O(model-size) generator sweep,
+            # a thread kill) would leave ~40 process-wide patches and both profile
+            # hooks installed FOREVER with no owner -- and the next window would
+            # snapshot the leaked wrapper as its own "original", stacking the leak
+            # monotonically. Unwind before re-raising.
+            self._flag_uncertain("monitor_install_interrupted")
+            self._teardown()
+            raise
+        # r41 hon2_1: publish the in-window registry LAST so the escape belt never
+        # observes a partially-installed window (restored FIRST in the teardown).
+        self._previous_active_monitor = _ACTIVE_MONITOR
         _ACTIVE_MONITOR = self
         return self.result
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self._teardown()
+
+    def _teardown(self) -> None:
+        """Unwind everything :meth:`__enter__` installed, exactly once.
+
+        Idempotent by contract: a second call (an ``ExitStack`` double-close, a manual
+        ``__exit__`` after a ``with``) used to clobber a LATER monitor's -- or a
+        debugger's -- profile hook and uninstall a live window's wrappers mid-forward,
+        so every repeat is a no-op. Also called from ``__enter__``'s BaseException arm.
+        """
+
         global _ACTIVE_MONITOR
-        _ACTIVE_MONITOR = None
-        if self._threading_profile_installed:
-            try:
-                if (
-                    hasattr(_threading_module, "getprofile")
-                    and _threading_module.getprofile() is not self._threading_hook
-                ):
-                    self._flag_uncertain("threading_profile_replaced")
-                _threading_module.setprofile(self._previous_threading_profile)
-            except Exception:
-                self._flag_uncertain("threading_profile_restore_failed")
-        if self._sys_profile_installed:
-            try:
-                if _sys_module.getprofile() is not self._sys_hook:
-                    self._flag_uncertain("sys_profile_replaced")
-                _sys_module.setprofile(self._previous_sys_profile)
-            except Exception:
-                self._flag_uncertain("sys_profile_restore_failed")
+        if self._torn_down:
+            return
+        self._torn_down = True
+        # Restore the PREVIOUS registry entry instead of clearing unconditionally: a
+        # nested monitor's exit used to null the slot mid-outer-window, after which
+        # TorchLens's own per-op RNG restores marked a false ``mutation`` channel and
+        # every in-window thread reclassified as foreign.
+        if _ACTIVE_MONITOR is self or _ACTIVE_MONITOR is None:
+            _ACTIVE_MONITOR = self._previous_active_monitor
+        else:
+            self._flag_uncertain("active_monitor_replaced")
+        self._restore_profile_hooks()
+        self._hooks_retired = True
         for restore in reversed(self._restores):
             try:
                 restore()
             except Exception:
                 self._flag_uncertain("patch_restore_failed")
+        self._restores.clear()
         for holder, before in self._generator_states:
             try:
                 if self._digest_rng_instance(holder) != before:
@@ -4252,3 +4317,214 @@ class host_nondeterminism_monitor:
                     self._mark("frame_reachable_generator")
             except Exception:
                 self._flag_uncertain("inventory_compare_failed")
+
+    def _restore_profile_hooks(self) -> None:
+        """Hand the profile slots back, never overwriting a hook that is not ours.
+
+        A non-LIFO overlap (monitor A exiting inside monitor B's window) used to
+        install A's saved predecessor OVER B's live hook, permanently destroying it.
+        When the slot no longer holds our hook we flag uncertainty and LEAVE it --
+        our hook is already gone, and whoever replaced it owns the slot. Threads that
+        still carry a torn-down hook self-uninstall on their next profile event (see
+        :meth:`_make_profile_hook`), which is also what un-strands the in-window
+        worker threads ``threading.setprofile`` cannot reach.
+        """
+
+        if self._threading_profile_installed:
+            try:
+                if (
+                    hasattr(_threading_module, "getprofile")
+                    and _threading_module.getprofile() is not self._threading_hook
+                ):
+                    self._flag_uncertain("threading_profile_replaced")
+                else:
+                    _threading_module.setprofile(self._previous_threading_profile)
+            except Exception:
+                self._flag_uncertain("threading_profile_restore_failed")
+        if self._sys_profile_installed:
+            try:
+                if _sys_module.getprofile() is not self._sys_hook:
+                    self._flag_uncertain("sys_profile_replaced")
+                else:
+                    _sys_module.setprofile(self._previous_sys_profile)
+            except Exception:
+                self._flag_uncertain("sys_profile_restore_failed")
+
+    def _install_prologue(self) -> None:
+        """Resolve the identity exemption sets consulted by every classifier."""
+
+        self._tl_globals_ids = _torchlens_module_globals_ids()
+        self._exempt_ids = frozenset(id(item) for item in _rng_exempt_instances())
+
+    def _install_python_rng_primitives(self) -> None:
+        """Patch the Python RNG class primitives (instances, subclasses, the bare C base)."""
+
+        # rng_primitive: Python RNG class primitives (instances + subclasses +
+        # the bare C base for ``_random.Random()``).
+        for holder in (random.Random, random.SystemRandom, _c_random_module.Random):
+            for method_name in ("random", "getrandbits", "randbytes"):
+                if method_name in vars(holder):
+                    self._patch_attr(
+                        holder,
+                        method_name,
+                        self._instance_method_wrapper(
+                            getattr(holder, method_name),
+                            f"{holder.__module__}.{holder.__qualname__}.{method_name}",
+                        ),
+                    )
+
+    def _install_entropy_surfaces(self) -> None:
+        """Patch the OS-entropy funnels (``os``/``random._urandom``) with held-ref registration."""
+
+        # entropy: OS entropy + the secrets funnel alias + uuid4's feed. Each
+        # original is identity-registered BEFORE patching (r41 held-ref layer).
+        self._register_held_ref(_os_module.urandom, "os.urandom")
+        self._patch_attr(
+            _os_module, "urandom", self._entropy_wrapper(_os_module.urandom, "os.urandom")
+        )
+        if hasattr(_os_module, "getrandom"):
+            self._register_held_ref(_os_module.getrandom, "os.getrandom")
+            self._patch_attr(
+                _os_module,
+                "getrandom",
+                self._entropy_wrapper(_os_module.getrandom, "os.getrandom"),
+            )
+        if hasattr(random, "_urandom"):
+            self._register_held_ref(random._urandom, "random._urandom")
+            self._patch_attr(
+                random,
+                "_urandom",
+                self._entropy_wrapper(random._urandom, "random._urandom"),
+            )
+
+    def _install_construction_surfaces(self) -> None:
+        """Patch the NumPy generator factory and the unseeded-construction entropy alias."""
+
+        # construction: the modern NumPy generator factory + the writable
+        # construction-entropy alias for unseeded BitGenerator construction (E5).
+        self._register_held_ref(np.random.default_rng, "np.random.default_rng")
+        self._patch_attr(
+            np.random,
+            "default_rng",
+            self._entropy_wrapper(np.random.default_rng, "np.random.default_rng"),
+        )
+        bit_generator_module = getattr(np.random, "bit_generator", None)
+        if bit_generator_module is not None and hasattr(bit_generator_module, "randbits"):
+            self._register_held_ref(bit_generator_module.randbits, "np_bit_generator_randbits")
+            self._patch_attr(
+                bit_generator_module,
+                "randbits",
+                self._entropy_wrapper(
+                    bit_generator_module.randbits, "np_bit_generator_randbits"
+                ),
+            )
+
+    def _install_clock_surfaces(self) -> None:
+        """Patch the clock family and register the immutable ``datetime`` readers."""
+
+        # clock: the frozen ``time.*`` readers (thread-independent module patches).
+        for clock_name in _CLOCK_COUNTER_NAMES:
+            if hasattr(_time_module, clock_name):
+                self._register_held_ref(getattr(_time_module, clock_name), f"time.{clock_name}")
+                self._patch_attr(
+                    _time_module,
+                    clock_name,
+                    self._clock_wrapper(
+                        getattr(_time_module, clock_name), f"time.{clock_name}", None
+                    ),
+                )
+        for clock_name, time_arg_index in _CLOCK_IMPLICIT_NOW:
+            if hasattr(_time_module, clock_name):
+                self._register_held_ref(
+                    getattr(_time_module, clock_name), f"time.{clock_name}", time_arg_index
+                )
+                self._patch_attr(
+                    _time_module,
+                    clock_name,
+                    self._clock_wrapper(
+                        getattr(_time_module, clock_name), f"time.{clock_name}", time_arg_index
+                    ),
+                )
+        if hasattr(_os_module, "times"):
+            self._register_held_ref(_os_module.times, "os.times")
+            self._patch_attr(
+                _os_module, "times", self._clock_wrapper(_os_module.times, "os.times", None)
+            )
+        if _resource_module is not None and hasattr(_resource_module, "getrusage"):
+            self._register_held_ref(_resource_module.getrusage, "resource.getrusage")
+            self._patch_attr(
+                _resource_module,
+                "getrusage",
+                self._clock_wrapper(_resource_module.getrusage, "resource.getrusage", None),
+            )
+        # clock: immutable ``datetime`` current readers via c_call identity.
+        for receiver, method in _DATETIME_CLOCK_READERS:
+            if hasattr(receiver, method):
+                self._clock_ccall_keys[(id(receiver), method)] = (
+                    f"datetime.{receiver.__name__}.{method}"
+                )
+
+    def _install_torch_rng_surfaces(self) -> None:
+        """Patch the frozen torch RNG surface table and seed the default-generator routing cache."""
+
+        # r65 CLUSTER Z: torch RNG API module patches, derived from the ONE frozen
+        # disposition table (entropy/mutation ceiling permanently; replayable_read
+        # sets the consumed flag only). Each ORIGINAL is held-code registered
+        # BEFORE its attribute is replaced, mirroring the r41 held-ref layer, so a
+        # pre-window ``from torch import manual_seed`` alias cannot bypass.
+        for surface_row in TORCH_RNG_SURFACE:
+            if surface_row.disposition not in ("entropy", "mutation", "replayable_read"):
+                continue
+            module_path, _, attr_name = surface_row.target.rpartition(".")
+            rng_holder_module = _torch_rng_holder_module(module_path)
+            if rng_holder_module is None or not hasattr(rng_holder_module, attr_name):
+                continue
+            original = getattr(rng_holder_module, attr_name)
+            self._register_held_code(original, surface_row.target, surface_row.disposition)
+            self._patch_attr(
+                rng_holder_module,
+                attr_name,
+                self._torch_rng_wrapper(original, surface_row.target, surface_row.disposition),
+            )
+        # r67 C1: seed the default-generator ROUTING CACHE for the all-receiver
+        # c_call classifier (process default + every populated cuda/xpu/mtia
+        # device default). Never forces device init, and never an honesty
+        # boundary: the classifier re-resolves on any miss.
+        self._default_generator_ids = _resolve_default_generator_ids()
+
+    def _install_generator_belt(self) -> None:
+        """Digest the generators the MODEL holds (the cheap thread-independent belt)."""
+
+        # BELT (thread-independent, CHEAP -- model attributes + builtin-container
+        # nesting): digest generators the model HOLDS, so a draw on ANY thread
+        # (incl. a pre-existing worker) is caught by the before/after state
+        # comparison at __exit__. Deliberately NOT a process-wide
+        # ``gc.get_objects()`` scan -- the r39-draft GC-wide inventory cost
+        # ~900 ms/capture, perturbed the tracemalloc peak, and could over-trigger
+        # on unrelated generators (removed for cause). Realistic CROSS-THREAD
+        # external draws (hon1_1/corr2_2) are caught by ``threading.setprofile``
+        # below; an EXTERNALLY-held generator drawn on a PRE-EXISTING (non-hooked)
+        # thread is the documented residual (contract s11), same class as the
+        # adversarial draw+state-restore.
+        self._generator_states = self._sweep_model_generators()
+
+    def _install_profile_hooks(self) -> None:
+        """Install the dual chained profile hooks -- ALWAYS the last step."""
+
+        # BELT: dual chained profile hooks (owner thread + threads started in-window). These
+        # are the r37/base mechanism (base runs them and is fast); the owner hook catches
+        # owner-thread numpy Generator instance draws and the immutable ``datetime`` readers,
+        # the threading hook catches an in-window helper-thread draw (hon1_1/corr2_2) and
+        # records each hooked thread's ident for the escape belt's 3-class gate (r41).
+        self._previous_sys_profile = _sys_module.getprofile()
+        self._sys_hook = self._make_profile_hook(self._previous_sys_profile)
+        _sys_module.setprofile(self._sys_hook)
+        self._sys_profile_installed = True
+        self._previous_threading_profile = (
+            _threading_module.getprofile() if hasattr(_threading_module, "getprofile") else None
+        )
+        self._threading_hook = self._make_profile_hook(
+            self._previous_threading_profile, records_thread_ident=True
+        )
+        _threading_module.setprofile(self._threading_hook)
+        self._threading_profile_installed = True

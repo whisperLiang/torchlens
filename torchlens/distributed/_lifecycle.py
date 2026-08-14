@@ -394,10 +394,24 @@ def _arm(source: str) -> ArmingRecord:
             source=source,
         )
         state = _ArmedState(arming=arming, recognizer=recognizer)
-        _install_lifecycle_wraps(state)
-        from ..backends.torch.collectives import install_collective_wraps
+        try:
+            _install_lifecycle_wraps(state)
+            from ..backends.torch.collectives import install_collective_wraps
 
-        install_collective_wraps(state.originals)
+            install_collective_wraps(state.originals)
+        except BaseException:
+            # Arming installs TWO independent wrap families before publishing ``_STATE``.
+            # A failure (or a Ctrl-C) between them left unguarded wraps installed with
+            # ``_STATE is None``, so nothing owned them: a later ``disarm()`` had no
+            # record to restore from, and a re-arm wrapped the STALE WRAPS -- each failed
+            # arm adding another passthrough layer that could never be peeled back to the
+            # pristine functions. Restore whatever was recorded, then re-raise.
+            for (module, name), original in state.originals.items():
+                try:
+                    setattr(module, name, original)
+                except Exception:
+                    pass
+            raise
         _STATE = state
         return arming
 

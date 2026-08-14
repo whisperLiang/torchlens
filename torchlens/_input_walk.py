@@ -89,17 +89,136 @@ r67 C2 adds ``registered`` (a ``tl.register_container`` type, descended through 
 """
 
 
+MAX_INPUT_CONTAINER_DEPTH: int = 200
+"""Declared nesting bound for the input-boundary walk, mirroring the DECODE direction.
+
+``_runnable_execution._MAX_DECODE_NESTING_DEPTH`` bounds the symmetric decode direction
+precisely so a hostile artifact cannot produce an "uncaught ``RecursionError``"; the walk
+direction had no equivalent, so a self-referential input container (``d["self"] = d`` --
+trivially produced by any graph/tree structure or back-reference) or a legitimately deep
+nest ended the capture with a raw ``RecursionError`` from library internals, at a depth
+that also depended on how much stack the caller had already consumed. ``RecursionError``
+is neither ``_UnsupportedLiteralError`` nor a ``RunnableDiagnostic``, so no honest
+degradation was possible.
+"""
+
+_UNSET_FIELD = object()
+"""Sentinel for a DECLARED dataclass field that the instance never set.
+
+``dataclasses.fields`` enumerates a ``field(init=False)`` entry with no default even
+though ``getattr`` raises for it, so both walkers' raw ``getattr`` killed every
+intervention-ready capture of a legal dataclass input (a lazily-populated cache/scratch
+field) with an untyped ``AttributeError`` from library internals.
+"""
+
+
+def _declared_field_value(value: Any, name: str) -> Any:
+    """Read one declared dataclass field, returning :data:`_UNSET_FIELD` if unset."""
+
+    try:
+        return getattr(value, name)
+    except AttributeError:
+        return _UNSET_FIELD
+
+
+def unset_declared_fields(value: Any) -> tuple[str, ...]:
+    """Return the DECLARED dataclass field names the instance does not carry."""
+
+    if not (dataclasses.is_dataclass(value) and not isinstance(value, type)):
+        return ()
+    return tuple(
+        field.name
+        for field in dataclasses.fields(value)
+        if _declared_field_value(value, field.name) is _UNSET_FIELD
+    )
+
+
+def declares_namedtuple_fields(value: Any) -> bool:
+    """Return whether ``value`` is a ``tuple`` subclass DECLARING a ``_fields`` schema.
+
+    Resolved through the raw MRO (:func:`_raw_mro_attr`), never through the instance.
+    The historical ``hasattr(value, "_fields")`` spelling ran the instance's
+    ``__getattribute__``/``__getattr__`` -- the exact untrusted hook the r71 C contract
+    promises never executes during ``snapshot_input_boundary`` -- and let the hook STEER
+    classification: a genuine namedtuple subclass whose ``__getattribute__`` raised
+    ``AttributeError`` for ``"_fields"`` classified as a plain ``sequence``, so neither
+    ``_declared_schema_uninspectable`` nor :func:`undeclared_instance_state` was ever
+    consulted and its hidden instance state escaped judgment entirely.
+
+    Presence is judged separately from VALIDITY: a declared-but-malformed ``_fields``
+    (a list, a property) still classifies as ``namedtuple`` so the schema-totality
+    refusal fires, instead of silently degrading to a zero-field container.
+    """
+
+    return isinstance(value, tuple) and _raw_mro_attr(value, "_fields") is not None
+
+
+def empty_input_container_kind(value: Any) -> str | None:
+    """Return the KIND of an EMPTY non-tensor container, else ``None`` (inert; r29-C2).
+
+    The canonical implementation, resolving a namedtuple's declared schema through
+    :func:`declares_namedtuple_fields`/:func:`_instance_fields` rather than a live
+    ``value._fields`` read. Two behavioural fixes over the historical spelling:
+
+    * the namedtuple arm also requires ``len(value) == 0``. A zero-field namedtuple
+      physically carrying ``(tensor, "steer")`` used to classify ``empty``, which
+      dropped its children -- INCLUDING TENSORS -- from every walker with no refusal
+      and no witness gap, i.e. a false VERIFIED shape;
+    * a declared-but-malformed ``_fields`` is not treated as "zero fields".
+    """
+
+    if declares_namedtuple_fields(value):
+        return "namedtuple" if len(_instance_fields(value)) == 0 and len(value) == 0 else None
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return "dataclass" if len(dataclasses.fields(value)) == 0 else None
+    if isinstance(value, Mapping):
+        return "mapping" if len(value) == 0 else None
+    if isinstance(value, (list, tuple)):
+        return "sequence" if len(value) == 0 else None
+    return None
+
+
+def namedtuple_arity_mismatch(value: Any) -> bool:
+    """Return whether a namedtuple-kind container's declared schema is not TOTAL.
+
+    ``True`` when the declared ``_fields`` schema does not account for the physical
+    tuple, i.e. a malformed ``_fields`` (non-tuple, non-str members) or
+    ``len(value) != len(_fields)``.
+
+    Physical arity was never witnessed: ``tuple.__new__(P, (t, extra))`` on a one-field
+    namedtuple walked only ``('x',)``, so snapshots of instances with DIFFERENT hidden
+    payloads compared EQUAL, the extra tensor appeared in no ``input_tensor_sites`` and
+    in no leaf-path set, and hidden positional state read via ``box[1]`` steered forward
+    control flow with no witness -- the recorded path then replayed VERIFIED on a
+    changed payload.
+    """
+
+    if not declares_namedtuple_fields(value):
+        return False
+    fields = _instance_fields(value)
+    if not fields:
+        # Declared but unusable (``_fields`` is a list / a property / holds non-str
+        # members). ``_instance_fields``' documented fail-closed did not fire here: for
+        # a tuple subclass the instance ``__dict__`` is empty, so
+        # ``undeclared_instance_state`` returned False and the node was recorded as a
+        # zero-field namedtuple with every child dropped.
+        return True
+    return len(fields) != len(value)
+
+
 def classify_input_container(value: Any) -> str:
     """Classify one boundary value into the closed container-kind vocabulary.
 
     This is THE single container dispatch (order is load-bearing; see the module
     docstring). :func:`walk_input_boundary` consumes it, so adding a container kind
     here extends every input-boundary walker in lockstep.
+
+    Every branch is INERT: no instance attribute read, so a hostile container's
+    ``__getattribute__``/``__getattr__`` cannot run here and cannot steer the kind.
     """
 
     import torch
 
-    from torchlens._io.runnable import empty_container_kind
     from torchlens.ir.container import get_registered_container
 
     if isinstance(value, torch.Tensor):
@@ -110,9 +229,9 @@ def classify_input_container(value: Any) -> str:
     # traversal at bind (advertise-then-fail).
     if not isinstance(value, type) and get_registered_container(type(value)) is not None:
         return "registered"
-    if empty_container_kind(value) is not None:
+    if empty_input_container_kind(value) is not None:
         return "empty"
-    if isinstance(value, tuple) and hasattr(value, "_fields"):
+    if declares_namedtuple_fields(value):
         return "namedtuple"
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return "dataclass"
@@ -188,25 +307,49 @@ def walk_input_boundary(
         ``None`` ignores such leaves.
     on_empty_container:
         Called ``(kind, path)`` for every EMPTY container, where ``kind`` is the
-        ``empty_container_kind`` string. ``None`` ignores empty containers.
+        ``empty_input_container_kind`` string. ``None`` ignores empty containers.
     on_opaque_key_subtree:
         Called ``(child, parent_path)`` once per mapping key rejected by
         ``key_component`` (the child subtree is NOT descended). ``None`` skips.
     """
 
-    from torchlens._io.runnable import _UnsupportedLiteralError, empty_container_kind
+    from torchlens._io.runnable import _UnsupportedLiteralError
+
+    # Identity of every CONTAINER on the current descent chain, plus a declared depth
+    # bound: a cycle or an over-deep nest ceilings its subtree through the existing
+    # opaque channel (witness coverage downgrades, the runnable save refuses through the
+    # symmetric snapshot refusal) instead of raising ``RecursionError`` from internals.
+    # Ancestors only, NOT a global seen-set: the same leaf legitimately appears at many
+    # paths (a shared tensor in two slots) and every occurrence must still be witnessed.
+    active_ids: set[int] = set()
 
     def _descend(value: Any, path: tuple[Any, ...]) -> None:
         """Dispatch one node through the closed container-kind vocabulary."""
 
         kind = classify_input_container(value)
+        if kind not in {"tensor", "leaf"}:
+            if id(value) in active_ids or len(path) > MAX_INPUT_CONTAINER_DEPTH:
+                if on_opaque_key_subtree is not None:
+                    on_opaque_key_subtree(value, path)
+                return
+            active_ids.add(id(value))
+            try:
+                _descend_container(value, kind, path)
+            finally:
+                active_ids.discard(id(value))
+            return
+        _descend_container(value, kind, path)
+
+    def _descend_container(value: Any, kind: str, path: tuple[Any, ...]) -> None:
+        """Dispatch one already-classified, already-cycle-checked node."""
+
         if kind == "tensor":
             if on_tensor is not None:
                 on_tensor(value, path)
             return
         if kind == "empty":
             if on_empty_container is not None:
-                empty_kind = empty_container_kind(value)
+                empty_kind = empty_input_container_kind(value)
                 assert empty_kind is not None  # classify_input_container said "empty"
                 on_empty_container(empty_kind, path)
             return
@@ -235,7 +378,14 @@ def walk_input_boundary(
             return
         if kind == "dataclass":
             for field in dataclasses.fields(value):
-                _descend(getattr(value, field.name), (*path, field.name))
+                child = _declared_field_value(value, field.name)
+                if child is _UNSET_FIELD:
+                    # A declared-but-unset ``init=False`` field carries no value to
+                    # witness. Skipping it symmetrically on the capture and runtime
+                    # walkers keeps their leaf-path sets comparable; the snapshot's
+                    # ``unset_declared_field`` refusal is what fails the runnable save.
+                    continue
+                _descend(child, (*path, field.name))
             return
         if kind == "mapping":
             for key, child in value.items():
@@ -685,13 +835,23 @@ def _declared_schema_uninspectable(value: Any) -> bool:
 
     getattribute = _raw_mro_attr(value, "__getattribute__")
     # A USER override is a Python callable (``FunctionType``); a builtin standard
-    # ``__getattribute__`` (``object`` / ``tuple`` for namedtuples) is a C-level
-    # ``wrapper_descriptor`` that cannot run arbitrary user code. Only a non-builtin
-    # override blinds the proof.
-    if getattribute is not object.__getattribute__ and not isinstance(
-        getattribute, _types.WrapperDescriptorType
-    ):
-        return True
+    # ``__getattribute__`` (``object``'s, or the ``dict``/``tuple`` slot wrappers a
+    # namedtuple or dict-backed container inherits) is a C-level ``wrapper_descriptor``
+    # that cannot run arbitrary user code. Only a non-builtin override blinds the proof.
+    if getattribute is not object.__getattribute__:
+        if not isinstance(getattribute, _types.WrapperDescriptorType):
+            return True
+        # ...but a wrapper descriptor GRAFTED from a FOREIGN class is not inert for THIS
+        # value: ``Sneak.__getattribute__ = type.__getattribute__`` is a wrapper
+        # descriptor too, so the blanket allowlist passed the inertness gate and the
+        # subsequent declared-field read raised an untyped ``TypeError`` from internals.
+        # Require the descriptor to belong to a class on this value's OWN MRO. Tested
+        # through ``type(value)`` rather than ``isinstance(value, objclass)``, because
+        # the latter reads ``value.__class__`` -- straight back through the grafted
+        # descriptor, which raises before the gate can decide.
+        objclass = getattr(getattribute, "__objclass__", None)
+        if not isinstance(objclass, type) or objclass not in type(value).__mro__:
+            return True
     # ``object`` / ``tuple`` declare NO ``__getattr__``, so any MRO ``__getattr__`` is
     # a user-added hook that can compute or hide declared-field values.
     return any("__getattr__" in cls.__dict__ for cls in type(value).__mro__)
@@ -732,7 +892,7 @@ def undeclared_instance_state(value: Any, kind: str) -> bool:
 
     is_dataclass_kind = kind == "dataclass" or (kind == "empty" and _dc.is_dataclass(value))
     is_namedtuple_kind = kind == "namedtuple" or (
-        kind == "empty" and isinstance(value, tuple) and hasattr(value, "_fields")
+        kind == "empty" and declares_namedtuple_fields(value)
     )
     if not (is_dataclass_kind or is_namedtuple_kind):
         return False
@@ -771,20 +931,26 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
     ``path`` (canonical components), ``kind`` (closed vocabulary + ``registered``),
     ``type`` (exact ``[module, qualname]``), and the declared child schema (``fields``
     for namedtuple/dataclass, ordered codec-encoded ``keys`` for mappings, ``size`` for
-    sequences/registered, ``empty_kind`` for empty nodes, ``aux`` for registered
-    containers). Refusals name the path and reason -- opaque keys, undeclared instance
-    state, throwing/nonconforming or state-incomplete registrations -- and the runnable
-    producer refuses the save on any of them (the existing
+    sequences/registered AND namedtuples, ``empty_kind`` for empty nodes, ``aux`` for
+    registered containers). Refusals name the path and reason -- opaque keys, undeclared
+    instance state, non-total namedtuple schemas, unset declared fields, container cycles
+    or over-deep nests, throwing/nonconforming or state-incomplete registrations -- and
+    the runnable producer refuses the save on any of them (the existing
     ``missing_input_container_contract``); analysis captures are unaffected.
+
+    ``size`` on a namedtuple node is the PHYSICAL tuple arity. Without it, two instances
+    of a one-field namedtuple built as ``tuple.__new__(P, (t, extra))`` with different
+    hidden payloads produced byte-identical snapshots, so hidden positional state read
+    via ``box[1]`` steered the forward with no witness at all.
     """
 
     import dataclasses as _dc
 
-    from torchlens._io.runnable import empty_container_kind
     from torchlens.ir.container import get_registered_container
 
     nodes: list[dict[str, Any]] = []
     refusals: list[dict[str, Any]] = []
+    active_ids: set[int] = set()
 
     def _type_ref(item: Any) -> list[str]:
         """Exact ``(module, qualname)`` witness for one container's class."""
@@ -793,7 +959,28 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         return [str(cls.__module__), str(cls.__qualname__)]
 
     def _descend(item: Any, path: tuple[Any, ...]) -> None:
-        """Walk one input node, appending its structural node and any type refusals.
+        """Cycle/depth-fence one node, then record it (see :func:`_record`)."""
+
+        kind = classify_input_container(item)
+        if kind in {"tensor", "leaf"}:
+            _record(item, kind, path)
+            return
+        if id(item) in active_ids:
+            refusals.append({"path": list(path), "reason": "input_container_cycle"})
+            nodes.append({"path": list(path), "kind": kind, "type": _type_ref(item)})
+            return
+        if len(path) > MAX_INPUT_CONTAINER_DEPTH:
+            refusals.append({"path": list(path), "reason": "input_container_too_deep"})
+            nodes.append({"path": list(path), "kind": kind, "type": _type_ref(item)})
+            return
+        active_ids.add(id(item))
+        try:
+            _record(item, kind, path)
+        finally:
+            active_ids.discard(id(item))
+
+    def _record(item: Any, kind: str, path: tuple[Any, ...]) -> None:
+        """Append one input node's structural record and any type refusals.
 
         Only CONTAINER nodes carry the exact-class witness: a tensor leaf belongs to
         the admission gate and a scalar leaf to the literal-witness VALUE contract,
@@ -803,7 +990,6 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         symmetric runtime snapshot.
         """
 
-        kind = classify_input_container(item)
         # r67 heavy-gate fix: only CONTAINER nodes carry the exact-class witness. A
         # tensor leaf's identity is the admission gate's domain, and a scalar LEAF
         # literal's semantics are the literal-witness VALUE contract (numeric equality
@@ -870,27 +1056,50 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         if undeclared_instance_state(item, kind):
             refusals.append({"path": list(path), "reason": "undeclared_instance_state"})
         if kind == "empty":
-            empty_kind = empty_container_kind(item)
+            empty_kind = empty_input_container_kind(item)
             node["empty_kind"] = str(empty_kind)
             nodes.append(node)
             return
         if kind == "namedtuple":
             fields = _instance_fields(item)
             node["fields"] = [str(name) for name in fields]
+            # PHYSICAL arity, so a hidden positional payload cannot make two snapshots
+            # compare equal, and a declared schema that does not account for the whole
+            # tuple refuses instead of silently dropping the extras (tensors included).
+            node["size"] = len(item)
+            if namedtuple_arity_mismatch(item):
+                refusals.append({"path": list(path), "reason": "namedtuple_schema_not_total"})
             nodes.append(node)
             for name in fields:
                 _descend(getattr(item, name), (*path, str(name)))
             return
         if kind == "dataclass":
             node["fields"] = [field.name for field in _dc.fields(item)]
+            unset = unset_declared_fields(item)
+            if unset:
+                # A declared ``init=False`` field the instance never set is enumerated by
+                # ``dataclasses.fields`` but raises on ``getattr``. The walkers used to
+                # let that raw ``AttributeError`` escape and kill the whole capture; it
+                # is now an explicit structural fact plus a typed save refusal.
+                node["unset_fields"] = list(unset)
+                refusals.append({"path": list(path), "reason": "unset_declared_field"})
             nodes.append(node)
             for field in _dc.fields(item):
-                _descend(getattr(item, field.name), (*path, field.name))
+                child = _declared_field_value(item, field.name)
+                if child is _UNSET_FIELD:
+                    continue
+                _descend(child, (*path, field.name))
             return
         if kind == "mapping":
             keys: list[Any] = []
             encodable = True
-            for key in item.keys():
+            # Derive the ordered-key fact from the SAME ``items()`` traversal that
+            # descends the children. Reading ``keys()`` here while the children came
+            # from ``items()`` meant a Mapping whose ``keys()`` is defined independently
+            # of ``__iter__`` persisted an "ordered keys" witness in a different order
+            # from the one the model actually iterates -- and the order-insensitive
+            # child-path set could not detect it.
+            for key in (entry[0] for entry in item.items()):
                 try:
                     keys.append(encode_mapping_key(key))
                 except ValueError:
@@ -938,20 +1147,37 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         nodes.append(node)
 
     def _safe_aux(aux: Any) -> Any:
-        """Return JSON-safe registered-container aux data, refusing anything else.
+        """Return the CANONICAL type-strict registered-container aux witness.
+
+        Aux IS the declared instance-state schema of a registered container, so its
+        atoms must carry the same type identity every other input-boundary edge does.
+        The historical ``isinstance(aux, (bool, int, float, str))`` admission was
+        type-BLIND in both directions: it admitted an ``IntEnum`` (semantic type
+        identity no persisted value can carry, only refused far downstream with the
+        misattributed ``context_field_invalid``), and the snapshot comparison is
+        builtin ``==``, where ``True == 1 == 1.0`` and ``-0.0 == 0.0`` -- so a
+        ``mode=True`` capture re-run with the ``mode=1`` twin reported VERIFIED
+        end-to-end, and a NaN aux false-DIVERGED byte-identical inputs
+        (``[nan] != [nan]``).
+
+        Atoms therefore route through :func:`encode_mapping_key` -- the same canonical
+        token authority the ``COMPOSITE_LITERAL_COMPONENT_POLICY`` table names for
+        mapping keys and tuple-key components: it is classifier-first (semantic and
+        NumPy-wrapper atoms raise), keeps ``True``/``1``/``1.0`` and ``-0.0``/``+0.0``
+        distinct, and encodes a NaN's binary64 BIT PATTERN so an identical NaN aux
+        compares equal to itself. Sequence nodes carry their exact kind so a
+        ``tuple`` aux cannot launder into a ``list`` one.
 
         Raises
         ------
         ValueError
-            If the aux tree holds a value outside ``None``/bool/int/float/str and
-            nested lists or tuples of those.
+            If the aux tree holds a value outside the canonical atom grammar or
+            nested lists/tuples of those.
         """
 
-        if aux is None or isinstance(aux, (bool, int, float, str)):
-            return aux
         if isinstance(aux, (list, tuple)):
-            return [_safe_aux(item) for item in aux]
-        raise ValueError(f"Registered container aux data {type(aux).__name__} is unsafe.")
+            return ["tuple" if isinstance(aux, tuple) else "list", [_safe_aux(i) for i in aux]]
+        return ["atom", encode_mapping_key(aux)]
 
     _descend(value, ())
     return {"nodes": nodes, "refusals": refusals}

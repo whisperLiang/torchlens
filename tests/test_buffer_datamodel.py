@@ -336,7 +336,12 @@ def test_internal_source_parents_survive_journal_projection() -> None:
     add_op = trace["add_1_1"]
     output_op = trace["output_1"]
     assert add_op.internal_source_parents == ("buffer_1",)
-    assert output_op.internal_source_parents == ("buffer_1",)
+    # internal_source_parents is a DIRECT-PARENT relation, so the synthetic output node
+    # names ITS parent (``add_1_1``), which carries the buffer ancestry -- not the
+    # ``buffer_1`` label it used to inherit verbatim from the clone source. The old
+    # expectation pinned that bug in: ``buffer_1`` is not a parent of ``output_1``.
+    assert output_op.parents == ("add_1_1",)
+    assert output_op.internal_source_parents == ("add_1_1",)
 
 
 class DataSetter(nn.Module):

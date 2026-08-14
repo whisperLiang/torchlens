@@ -748,6 +748,20 @@ print_funcs = ["__repr__", "__str__", "_str"]
 # wrappers bypass that dispatch, so we must inject it ourselves.
 _DEVICE_CONSTRUCTOR_NAMES: set[str] = set()
 
+_FULL_DECORATION_COMPLETED = False
+"""True once ``decorate_all_once()`` has run to COMPLETION at least once.
+
+Distinct from ``_state._is_decorated`` (which tracks whether wrappers are currently
+INSTALLED, and flips back to False on ``unwrap_torch()``). ``_wrap_torch_locked`` keyed
+its "full decoration vs re-install from the existing maps" choice on
+``_state._orig_to_decorated`` being non-empty -- but a decoration that failed partway
+through pass 2 leaves that map PARTIALLY populated, so the retry took the re-install
+branch, reinstalled only the partial map, and stamped ``_is_decorated = True``. That
+permanently disarmed the #138 retry guard ``decorate_all_once`` is built around and left
+never-decorated functions silently unlogged in every future capture. Completion, not
+map non-emptiness, is the correct predicate.
+"""
+
 # Argument leaf types that never require the recursive object crawler. Keeping
 # these tuples module-local avoids rebuilding the isinstance chains for every op.
 _SIMPLE_ARG_TYPES = (int, float, bool, str, type(None))
@@ -2358,6 +2372,8 @@ def decorate_all_once() -> None:
     _state._decorated_identity = torch_func_decorator(identity, "identity")
     _decorate_transform_builders()
     _decorate_direct_transforms()
+    global _FULL_DECORATION_COMPLETED
+    _FULL_DECORATION_COMPLETED = True
     _state._is_decorated = True
 
     # Wrapping __getitem__ on torch.Tensor pollutes the C-level sq_item slot,
@@ -2810,8 +2826,10 @@ def _wrap_torch_locked(
 
     _state._wrap_epoch += 1
 
-    if not _state._orig_to_decorated:
-        # First time: full decoration
+    if not _FULL_DECORATION_COMPLETED:
+        # No decoration pass has ever COMPLETED (first wrap, or a retry after one
+        # failed partway). Run the full pass: it is per-pair idempotent, so it
+        # finishes exactly the targets a partial failure left undecorated.
         decorate_all_once()
         install_autograd_wrappers()
         sweep_stale_belt_references()

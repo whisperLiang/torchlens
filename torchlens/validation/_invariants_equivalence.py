@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .invariants import (
         _EQUIVALENT_OPS_UNAVAILABLE,
+        _RAW_LABEL_BEARING_LIST_FIELDS,
+        _RAW_LABEL_BEARING_SCALAR_FIELDS,
         _RAW_LABEL_PATTERN,
         MetadataInvariantError,
         _retained_orphan_op_labels,
@@ -264,10 +266,29 @@ def _check_graph_ordering(ml: Trace) -> None:
                     f">= child '{lpl.layer_label}' (rt={lpl.raw_index})",
                 )
 
-    # No raw labels survive postprocessing
+    # No raw labels survive postprocessing -- on ANY label-bearing surface, not just
+    # ``layer_labels``. A raw label surviving in a relation set or in the scalar
+    # ``buffer_source`` field is an unresolvable lookup key handed to users and
+    # persisted into portable artifacts, which is exactly what this check exists to stop.
     for label in ml.layer_labels:
-        if _RAW_LABEL_PATTERN.match(label):
+        if _RAW_LABEL_PATTERN.search(label):
             raise MetadataInvariantError(name, f"Raw label '{label}' survived postprocessing")
+    for lpl in ml.layer_list:
+        for field in _RAW_LABEL_BEARING_LIST_FIELDS:
+            for item in getattr(lpl, field, ()) or ():
+                if isinstance(item, str) and _RAW_LABEL_PATTERN.search(item):
+                    raise MetadataInvariantError(
+                        name,
+                        f"Raw label {item!r} survived postprocessing in "
+                        f"{lpl.layer_label}.{field}",
+                    )
+        for field in _RAW_LABEL_BEARING_SCALAR_FIELDS:
+            item = getattr(lpl, field, None)
+            if isinstance(item, str) and _RAW_LABEL_PATTERN.search(item):
+                raise MetadataInvariantError(
+                    name,
+                    f"Raw label {item!r} survived postprocessing in {lpl.layer_label}.{field}",
+                )
 
 
 def _check_loop_detection_invariants(ml: Trace) -> None:

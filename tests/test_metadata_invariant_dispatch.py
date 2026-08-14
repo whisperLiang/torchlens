@@ -45,6 +45,10 @@ PRE_REFACTOR_TORCH_SEQUENCE = (
     "pass_count_consistency",
     "distance_invariants",
     "graph_connectivity",
+    # ancestry_closure recomputes the four reachability closures from parents/children;
+    # it runs AFTER graph_connectivity so a dropped op is reported by the dangling-node
+    # contract that owns it, not by the closure check that also notices.
+    "ancestry_closure",
     "module_containment_logic",
     "lookup_key_consistency",
     "func_call_id_consistency",

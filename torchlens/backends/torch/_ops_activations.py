@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from ..._robustness import UnsupportedTensorVariantError
 from ...capture.flops import compute_backward_flops, compute_forward_flops
 from ...data_classes.op import (
     _dedup_saved_activation_out,
@@ -56,6 +57,40 @@ __all__ = (
     "_stream_activation_fields",
     "_retention_device",
 )
+
+
+def _metadata_shape(t: torch.Tensor) -> tuple[int, ...]:
+    """Return a captured tensor's shape, refusing TYPED for a shapeless variant.
+
+    ``tuple(t.shape)`` is the very first metadata read of every recorded output, and on a
+    NESTED tensor it dies with torch's own internal error -- "Internal error:
+    NestedTensorImpl doesn't support sizes. Please file an issue." -- so a model doing
+    ``torch.nested.as_nested_tensor([...])`` (including the mainstream jagged-SDPA
+    layout) aborted mid-forward and told the user to file a TORCH bug about a TorchLens
+    limitation. The entry gate covers meta/sparse/fake/functional INPUTS; nested is a
+    whole variant class created INSIDE ``forward``, where the gate cannot see it.
+
+    Feature-detected per the ``_torch_compat`` doctrine: the capability probed is "does
+    this tensor support ``sizes``", never a version string. Any shapeless variant that
+    appears later refuses the same way instead of leaking a raw internal error.
+    """
+
+    if getattr(t, "is_nested", False):
+        raise UnsupportedTensorVariantError(
+            "torchlens cannot log a NESTED tensor created inside forward(): the variant "
+            "has no dense shape, so TorchLens can record no shape, memory, or FLOPs "
+            "metadata for it. Restructure the forward to build the nested tensor "
+            "outside the traced region, or pad to a dense tensor before the ops you "
+            "want captured."
+        )
+    try:
+        return tuple(t.shape)
+    except RuntimeError as error:
+        raise UnsupportedTensorVariantError(
+            "torchlens cannot log a tensor variant that does not support `sizes` "
+            f"({type(t).__name__}); TorchLens can record no shape metadata for it. "
+            f"Underlying torch error: {error}"
+        ) from error
 
 
 def _log_output_tensor_info(
@@ -302,7 +337,7 @@ def _log_output_tensor_info(
     fields_dict["has_saved_args"] = False
     fields_dict["saved_args"] = None
     fields_dict["saved_kwargs"] = None
-    fields_dict["shape"] = tuple(t.shape)
+    fields_dict["shape"] = _metadata_shape(t)
     fields_dict["transformed_out_shape"] = None
     fields_dict["dtype"] = t.dtype
     fields_dict["transformed_out_dtype"] = None

@@ -340,6 +340,16 @@ def _add_output_layers(
             "args": {0: output_node._label_raw},
             "kwargs": {},
         }
+        # internal_source_parents is a DIRECT-PARENT relation ("the subset of MY parents
+        # whose producers carry internal-source ancestry"), so it must be re-derived like
+        # parents/parent_arg_positions above. It used to survive the wholesale clone
+        # verbatim, which was wrong in BOTH directions on every model with a buffer or
+        # factory-tensor ancestry (i.e. any BatchNorm net): it named labels that are not
+        # parents of the output node at all, and omitted the output node's ONE real
+        # parent, which does carry that ancestry.
+        new_output_node.internal_source_parents = (
+            [output_node._label_raw] if output_node.has_internal_source_ancestor else []
+        )
         new_output_node._edge_uses = []
 
         # Clear func_config on synthetic output nodes:

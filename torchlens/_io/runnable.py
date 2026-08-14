@@ -4575,24 +4575,17 @@ def input_path_key_component(key: Any) -> Any:
 def empty_container_kind(value: Any) -> str | None:
     """Return the KIND string of an EMPTY non-tensor container, else ``None`` (r29-C2).
 
-    ``None`` for non-containers and for NON-empty containers (whose leaves are witnessed
-    ordinarily). Namedtuples are treated as sequences by field arity; an empty namedtuple has
-    no fields. r67 C2 (free-F2/hon1-F2c): a ZERO-FIELD dataclass is an EMPTY container by
-    KIND -- without the row it emitted nothing at all, so the argument vanished from the
-    input contract and a run against a different-arity model falsely VERIFIED.
+    Compatibility alias for ``_input_walk.empty_input_container_kind``, which owns the
+    inert implementation. Two authorities for the same decision is the drift class the
+    walker-parity meta-test exists to prevent, and this copy's live
+    ``hasattr(value, "_fields")`` / ``value._fields`` reads executed an untrusted
+    instance hook during ``snapshot_input_boundary`` and treated a zero-field namedtuple
+    physically carrying tensors as an EMPTY container.
     """
 
-    import dataclasses as _dataclasses
+    from torchlens._input_walk import empty_input_container_kind
 
-    if isinstance(value, tuple) and hasattr(value, "_fields"):
-        return "namedtuple" if len(value._fields) == 0 else None
-    if _dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return "dataclass" if len(_dataclasses.fields(value)) == 0 else None
-    if isinstance(value, Mapping):
-        return "mapping" if len(value) == 0 else None
-    if isinstance(value, (list, tuple)):
-        return "sequence" if len(value) == 0 else None
-    return None
+    return empty_input_container_kind(value)
 
 
 def _encode_literal_key(value: Any) -> LiteralAtom | LiteralTupleKey:

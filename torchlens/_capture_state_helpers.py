@@ -443,16 +443,36 @@ def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
                     )
                 )
     except BaseException:
-        for swap in reversed(swaps):
-            setattr(swap.module, swap.name, swap.compiled_callable)
+        _restore_callable_swaps(swaps, only_if_bypassed=False)
         raise
 
     try:
         yield
     finally:
-        for swap in reversed(swaps):
-            if vars(swap.module).get(swap.name) is swap.bypass_callable:
-                setattr(swap.module, swap.name, swap.compiled_callable)
+        _restore_callable_swaps(swaps, only_if_bypassed=True)
+
+
+
+def _restore_callable_swaps(swaps: Any, *, only_if_bypassed: bool) -> None:
+    """Put every swapped-out compiled callable back, fencing each swap independently.
+
+    A raising user ``__setattr__`` in the reversed restore loop used to skip every
+    REMAINING swap, leaving the module tree permanently half-bypassed. Each restore is
+    fenced so one exotic module cannot strand the others; the first failure is re-raised
+    once the whole unwind is complete.
+    """
+
+    first_error: BaseException | None = None
+    for swap in reversed(swaps):
+        if only_if_bypassed and vars(swap.module).get(swap.name) is not swap.bypass_callable:
+            continue
+        try:
+            setattr(swap.module, swap.name, swap.compiled_callable)
+        except BaseException as error:  # noqa: PERF203 - per-item fence is the point
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 @contextmanager
@@ -1780,32 +1800,141 @@ def _reject_opaque_wrappers(model: nn.Module) -> None:
 
 
 def _move_tensors_to_device(obj: Any, device: torch.device | str) -> Any:
-    """Recursively move tensors in a nested structure (lists, tuples, dicts) to *device*.
+    """Recursively move tensors in a nested structure to *device*, preserving TYPE.
 
-    Handles common dict-like types (OrderedDict, HuggingFace BatchEncoding, etc.)
-    by attempting to reconstruct the original container type after moving values.
-    NamedTuple subclasses (e.g. a GNN model's batch container, which is also an
+    Handles common dict-like types (OrderedDict, HuggingFace BatchEncoding, etc.) by
+    reconstructing the original container type after moving values. NamedTuple
+    subclasses (e.g. a GNN model's batch container, which is also an
     ``isinstance(obj, tuple)`` match) are reconstructed through their own type so
-    downstream named-field access keeps working instead of silently degrading to
-    a plain ``tuple``.
+    downstream named-field access keeps working.
+
+    Three defects this function used to have, all of which changed the program the
+    capture claims to be capturing:
+
+    * every OTHER ``tuple`` subclass was rebuilt as a plain ``tuple``, so
+      ``torch.Size``, a ``torch.return_types.*`` structseq, and any user subclass
+      reached ``forward()`` as a DIFFERENT TYPE than the caller passed. The
+      input-structure snapshot then honestly witnessed the mutated tree, so nothing
+      refused -- a forward doing ``isinstance(x, torch.Size)`` or ``out.values`` took a
+      different branch (or raised) under ``tl.trace`` than outside it, and a capture of
+      ``torch.Size`` was indistinguishable from a capture of ``tuple``;
+    * ``_fields`` presence was taken as proof of a namedtuple ``__new__(cls, *fields)``,
+      so a tuple subclass merely exposing ``_fields`` (a list, a property) aborted the
+      capture with an untyped ``TypeError`` blamed on the user's container;
+    * it descended only ``list``/``tuple``/``MutableMapping`` while
+      ``classify_input_container`` treats dataclasses, registered containers and ANY
+      ``Mapping`` as descendable, so tensors inside a dataclass or a read-only Mapping
+      were never moved -- a CUDA device mismatch, or a partially-moved tree with sibling
+      leaves on different devices.
+
+    Reconstruction is now NOTHING-MOVED-AWARE: when no leaf actually changed device the
+    ORIGINAL object is returned untouched, which is both faster and exactly type-faithful.
+    When something did move but the container cannot be rebuilt faithfully, the original
+    is returned as well -- leaving a tensor on its own device is a loud, ordinary device
+    error, while silently substituting a different container class is not.
     """
+
+    moved = _move_tensors_to_device_inner(obj, device)
+    return obj if moved is _UNMOVED else moved
+
+
+_UNMOVED = object()
+"""Sentinel: this subtree holds no tensor that changed device, so keep the original."""
+
+
+def _move_tensors_to_device_inner(obj: Any, device: torch.device | str) -> Any:
+    """Return the device-moved copy of ``obj``, or :data:`_UNMOVED` if nothing moved."""
+
+    import dataclasses as _dataclasses
+
     if isinstance(obj, torch.Tensor):
+        target = torch.device(device) if not isinstance(device, torch.device) else device
+        if obj.device == target:
+            return _UNMOVED
         return obj.to(device)
-    elif isinstance(obj, (list, tuple)):
-        moved_sequence = [_move_tensors_to_device(item, device) for item in obj]
-        if not isinstance(obj, tuple):
-            return type(obj)(moved_sequence)
+
+    def _children(items: Any) -> tuple[list[Any], bool]:
+        """Move each child, reporting whether any of them actually changed."""
+
+        results: list[Any] = []
+        changed = False
+        for item in items:
+            moved = _move_tensors_to_device_inner(item, device)
+            if moved is _UNMOVED:
+                results.append(item)
+            else:
+                results.append(moved)
+                changed = True
+        return results, changed
+
+    if isinstance(obj, (list, tuple)):
+        moved_sequence, changed = _children(obj)
+        if not changed:
+            return _UNMOVED
         obj_type = type(obj)
-        if hasattr(obj_type, "_fields"):
-            return obj_type(*moved_sequence)
-        return tuple(moved_sequence)
-    elif isinstance(obj, collections.abc.MutableMapping):
-        # Handles dict, UserDict, BatchEncoding, OrderedDict, etc.
-        moved_mapping = {k: _move_tensors_to_device(v, device) for k, v in obj.items()}
+        if not isinstance(obj, tuple):
+            try:
+                return obj_type(moved_sequence)
+            except Exception:
+                return list(moved_sequence) if obj_type is list else _UNMOVED
+        if obj_type is tuple:
+            return tuple(moved_sequence)
+        # A tuple SUBCLASS. Try the namedtuple positional constructor, then the
+        # single-iterable ``__new__`` shape structseq and torch.Size use, and only then
+        # give up -- keeping the original rather than substituting a plain ``tuple``.
+        for build in (
+            lambda: obj_type(*moved_sequence),
+            lambda: obj_type(moved_sequence),
+        ):
+            try:
+                rebuilt = build()
+            except Exception:
+                continue
+            if type(rebuilt) is obj_type:
+                return rebuilt
+        return _UNMOVED
+
+    if isinstance(obj, collections.abc.Mapping):
+        # Handles dict, UserDict, BatchEncoding, OrderedDict, MappingProxyType, and any
+        # read-only custom Mapping (the last three used to be skipped entirely).
+        keys = list(obj.keys())
+        moved_values, changed = _children(obj[key] for key in keys)
+        if not changed:
+            return _UNMOVED
+        moved_mapping = dict(zip(keys, moved_values))
         if type(obj) is dict:
             return moved_mapping
         try:
-            return cast(Any, type(obj))(moved_mapping)
+            rebuilt = cast(Any, type(obj))(moved_mapping)
         except Exception:
-            return moved_mapping
-    return obj
+            return _UNMOVED
+        return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
+
+    if _dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        fields = [
+            field for field in _dataclasses.fields(obj) if hasattr(obj, field.name)
+        ]
+        moved_values, changed = _children(getattr(obj, field.name) for field in fields)
+        if not changed:
+            return _UNMOVED
+        try:
+            rebuilt = cast(Any, type(obj))(
+                **{
+                    field.name: value
+                    for field, value in zip(fields, moved_values)
+                    if field.init
+                }
+            )
+        except Exception:
+            return _UNMOVED
+        if type(rebuilt) is not type(obj):
+            return _UNMOVED
+        for field, value in zip(fields, moved_values):
+            if not field.init:
+                try:
+                    setattr(rebuilt, field.name, value)
+                except Exception:
+                    return _UNMOVED
+        return rebuilt
+
+    return _UNMOVED

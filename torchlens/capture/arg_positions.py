@@ -1070,6 +1070,23 @@ _UNARY_FUNCS = [
     "hammingwindow",
     "hannwindow",
     "kaiserwindow",
+    # The MODERN torch.signal.windows namespace (B3 R02 inventory fix). Same shape as
+    # the legacy top-level ``*_window`` twins above: the first positional argument is a
+    # length, never a tensor, so nothing beyond position 0 can be a tensor arg.
+    "bartlett",
+    "blackman",
+    "cosine",
+    "exponential",
+    "gaussian",
+    "generalcosine",
+    "generalhamming",
+    "hamming",
+    "hann",
+    "kaiser",
+    "nuttall",
+    # torch.from_dlpack builds a tensor from a FOREIGN capsule/producer object, so it
+    # has no tensor argument at all -- the same source-factory shape as from_numpy.
+    "fromdlpack",
     # CUDNN / MKLDNN
     "cudnnisacceptable",
     "mkldnnadaptiveavgpool2d",
@@ -2421,6 +2438,20 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "sparsecsrsum": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "sparsecsrtensor": ArgSpec(
         positions=(0, 1, 2), tensor_kwargs=("crow_indices", "col_indices", "values")
+    ),
+    # The rest of the PUBLIC sparse-compressed family (B3 R02 inventory fix): each takes
+    # the two index tensors plus the value tensor in positions 0-2, spelled per layout.
+    "sparsecsctensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("ccol_indices", "row_indices", "values")
+    ),
+    "sparsebsrtensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("crow_indices", "col_indices", "values")
+    ),
+    "sparsebsctensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("ccol_indices", "row_indices", "values")
+    ),
+    "sparsecompressedtensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("compressed_indices", "plain_indices", "values")
     ),
     "sparsemaskprojection": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "mask")),
     "sparseresize": ArgSpec(positions=(0,), tensor_kwargs=("self",)),

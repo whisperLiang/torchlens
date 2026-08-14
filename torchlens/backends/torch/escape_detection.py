@@ -7,6 +7,7 @@ completeness without the separate dispatcher witness.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import sys
 import threading
@@ -691,19 +692,32 @@ def _install_monitoring(guard: _GuardState) -> None:
 
 
 def _uninstall_monitoring(guard: _GuardState) -> None:
-    """Restore sys.monitoring state by releasing TorchLens's private tool id."""
+    """Restore sys.monitoring state by releasing TorchLens's private tool id.
+
+    Every step is fenced INDEPENDENTLY and the tool id is freed in a ``finally``. A raise
+    partway through this sequence used to leak the tool id with its callbacks still
+    firing into a dead guard -- and ``sys.monitoring`` has only a handful of tool ids, so
+    six such leaks exhaust the space and no later capture (or any other tool in the
+    process) can register one at all.
+    """
 
     monitoring = cast(Any, getattr(sys, "monitoring"))
     tool_id = guard.monitoring_tool_id
     if tool_id is None:
         return
-    monitoring.set_events(tool_id, 0)
-    for code in guard.monitoring_codes:
-        monitoring.set_local_events(tool_id, code, 0)
-    monitoring.register_callback(tool_id, monitoring.events.PY_START, None)
-    monitoring.register_callback(tool_id, monitoring.events.CALL, None)
-    monitoring.free_tool_id(tool_id)
-    guard.monitoring_tool_id = None
+    try:
+        with contextlib.suppress(Exception):
+            monitoring.set_events(tool_id, 0)
+        for code in guard.monitoring_codes:
+            with contextlib.suppress(Exception):
+                monitoring.set_local_events(tool_id, code, 0)
+        for event in (monitoring.events.PY_START, monitoring.events.CALL):
+            with contextlib.suppress(Exception):
+                monitoring.register_callback(tool_id, event, None)
+    finally:
+        guard.monitoring_tool_id = None
+        with contextlib.suppress(Exception):
+            monitoring.free_tool_id(tool_id)
 
 
 def _install_detector(guard: _GuardState) -> None:
@@ -816,10 +830,15 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
             _install_detector(guard)
         yield
     finally:
-        if mode == "shadow":
-            _uninstall_detector(guard)
+        # Clear the thread-local guard BEFORE the uninstall and fence the uninstall
+        # itself: a raise inside ``_uninstall_detector`` used to skip
+        # ``_THREAD_STATE.guard = None`` and every diagnostic write below it, stranding a
+        # torn-down guard as this thread's live guard for the rest of the process.
         _THREAD_STATE.guard = None
         _THREAD_STATE.tokens = []
+        if mode == "shadow":
+            with contextlib.suppress(Exception):
+                _uninstall_detector(guard)
         thread_count_end = threading.active_count()
         trace.capture_thread_count_end = thread_count_end
         trace.capture_thread_activity_detected = thread_count_end != thread_count_start

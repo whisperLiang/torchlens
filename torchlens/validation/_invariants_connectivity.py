@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from ..data_classes.module import Module
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = (
+    "_check_ancestry_closure",
     "_check_distance_invariants",
     "_op_follows_recorded_backward_trigger",
     "_consumed_unattributed_data_operand",
@@ -189,6 +190,304 @@ def _consumed_unattributed_data_operand(layer: Op) -> bool:
     """
 
     return bool(tuple(getattr(layer, "unattributed_tensor_args", ()) or ()))
+
+
+def _check_ancestry_closure(ml: Trace) -> None:
+    """Check: ancestry/reachability sets are the CLOSURE of the recorded edges.
+
+    The whole derived ancestry class used to have no tripwire at all. Validation only
+    checked CARDINALITY (``has_input_ancestor`` <-> non-empty), MEMBERSHIP DOMAIN
+    (``input_ancestors`` subset of ``input_layers``) and ``min <= max`` on distances --
+    and even those ran only when the non-default ``mark_layer_depths`` was on, while all
+    four sets are populated on EVERY capture. Eleven planted corruptions across
+    ``input_ancestors``, ``output_descendants``, ``root_ancestors``,
+    ``internal_source_ancestors``, ``internal_source_parents`` and
+    ``distance_from_input`` produced ZERO tripwire hits, while every neighbouring
+    relation class fired and named itself. The gap shipped a real defect: synthetic
+    output nodes inherited ``internal_source_parents`` from their clone source, naming
+    labels that were not parents at all, on every model with a buffer or factory-tensor
+    ancestry (i.e. any BatchNorm net).
+
+    These sets are produced by traversals (``postprocess/graph_traversal.py`` floods,
+    plus the in-place rebinds on the step-6 buffer path) that are INDEPENDENT of the
+    edge tables, so recomputing them from ``parents``/``children`` is a genuine
+    two-independent-structures test -- the same shape as the ``parent_arg_positions``
+    cross-check -- not a property-vs-property tautology.
+
+    Recomputed rules (verified against 12 fixtures incl. resnet18, densenet121,
+    vit_b_16, LSTM/GRU, BatchNorm train/eval, buffer-write-reread, 3-pass recurrence,
+    conditional and in-place graphs -- zero false positives):
+
+    * ``input_ancestors(n)``     = ``{n}`` if ``n`` is an input, else the union over parents.
+    * ``output_descendants(n)``  = ``{n}`` if ``n`` is an output, else the union over children.
+    * ``internal_source_ancestors(n)`` = ``{n}`` if ``n`` is an internal source (the
+      closure RESETS at a source -- a written buffer names itself, not the ancestry of
+      the value written into it), else the union over parents.
+    * ``root_ancestors(n)`` = ``input_ancestors(n) | internal_source_ancestors(n)``.
+      Skipped for internal sources: the source-minting producers disagree about
+      self-inclusion there (a parentless factory records the empty set while a buffer
+      source records ``{self}``), which is a naming/spec question for the field, NOT
+      something this check may bless either way.
+    * ``internal_source_parents(n)`` is a DIRECT-PARENT relation: a subset of
+      ``parents``, every member carrying internal-source ancestry, and -- for a
+      non-source node -- exactly the parents that carry it.
+    * ``has_input_ancestor`` / ``has_output_descendant`` /
+      ``has_internal_source_ancestor`` mirror their sets' emptiness.
+    * Distances, when populated: ``0`` at the boundary, else
+      ``min/max(neighbour) + 1`` over the recorded edges.
+
+    Retained orphan islands are outside the active projection by design and are skipped
+    by label, exactly as the neighbouring checks do.
+    """
+
+    name = "ancestry_closure"
+    input_set = set(ml.input_layers)
+    orphan_labels = _retained_orphan_layer_labels(ml) | _retained_orphan_op_labels(ml)
+
+    entries = [lpl for lpl in ml.layer_list if lpl.layer_label not in orphan_labels]
+    by_label: dict[str, Any] = {}
+    for lpl in entries:
+        by_label.setdefault(lpl.layer_label, lpl)
+    for lpl in entries:
+        exact = _pass_qualified_label(lpl)
+        if exact is not None:
+            by_label[exact] = lpl
+
+    def resolve(label: str) -> Any | None:
+        """Resolve one stored edge label to its record, or ``None`` if foreign.
+
+        An unresolvable label is ``graph_topology``'s finding ("parent not in
+        layer_labels"); this check owns only the resolvable-edge closures.
+        """
+
+        return by_label.get(label)
+
+    def key(lpl: Any) -> str:
+        """Identity of one record for the memo tables (pass-qualified when available)."""
+
+        return _pass_qualified_label(lpl) or lpl.layer_label
+
+    def normalize(labels: Any) -> set[str]:
+        """Fold a stored label collection into ONE comparison spelling.
+
+        The ancestry producers are not uniform: some rows record a set member by its
+        bare layer label and some by its pass-qualified label (a buffer source records
+        itself as ``buffer_1:1`` while its consumers name it ``buffer_1``). That is a
+        producer wart, not a corruption, and this check is about set MEMBERSHIP, so both
+        spellings fold to the record's ``layer_label`` before comparison. An
+        unresolvable label folds to itself and is therefore still caught.
+        """
+
+        folded: set[str] = set()
+        for label in labels:
+            record = by_label.get(label)
+            folded.add(record.layer_label if record is not None else label)
+        return folded
+
+    # Forward closures, in recorded (topological) order.
+    input_ancestors: dict[str, set[str]] = {}
+    internal_source_ancestors: dict[str, set[str]] = {}
+    for lpl in entries:
+        parents = [record for record in map(resolve, lpl.parents) if record is not None]
+        own = {lpl.layer_label}
+        input_ancestors[key(lpl)] = (own if lpl.is_input else set()).union(
+            *(input_ancestors.get(key(parent), set()) for parent in parents), set()
+        )
+        internal_source_ancestors[key(lpl)] = (
+            own
+            if lpl.is_internal_source
+            else set().union(
+                *(internal_source_ancestors.get(key(parent), set()) for parent in parents), set()
+            )
+        )
+
+    # Backward closure, in reverse recorded order.
+    output_descendants: dict[str, set[str]] = {}
+    for lpl in reversed(entries):
+        children = [record for record in map(resolve, lpl.children) if record is not None]
+        output_descendants[key(lpl)] = ({lpl.layer_label} if lpl.is_output else set()).union(
+            *(output_descendants.get(key(child), set()) for child in children), set()
+        )
+
+    for lpl in entries:
+        label = key(lpl)
+        _check_one_ancestry_record(
+            ml,
+            name,
+            lpl,
+            label,
+            input_ancestors[label],
+            output_descendants[label],
+            internal_source_ancestors[label],
+            resolve,
+            normalize,
+            input_set,
+        )
+    _check_distance_closure(name, entries, resolve, key)
+
+
+def _pass_qualified_label(lpl: Any) -> str | None:
+    """Return ``layer_label:pass_index`` when both stored fields are present."""
+
+    layer_label = getattr(lpl, "layer_label", None)
+    pass_index = getattr(lpl, "pass_index", None)
+    if isinstance(layer_label, str) and isinstance(pass_index, int):
+        return f"{layer_label}:{pass_index}"
+    return None
+
+
+def _check_one_ancestry_record(
+    ml: Trace,
+    name: str,
+    lpl: Any,
+    label: str,
+    expected_input: set[str],
+    expected_output: set[str],
+    expected_internal: set[str],
+    resolve: Any,
+    normalize: Any,
+    input_set: set[str],
+) -> None:
+    """Compare one record's stored ancestry sets against the recomputed closures."""
+
+    if normalize(lpl.input_ancestors) != expected_input:
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': input_ancestors={sorted(normalize(lpl.input_ancestors))} != the "
+            f"closure of the recorded parent edges {sorted(expected_input)}",
+        )
+    if normalize(lpl.output_descendants) != expected_output:
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': output_descendants={sorted(lpl.output_descendants)} != the "
+            f"closure of the recorded child edges {sorted(expected_output)}",
+        )
+    if normalize(lpl.internal_source_ancestors) != expected_internal:
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': internal_source_ancestors="
+            f"{sorted(lpl.internal_source_ancestors)} != the closure of the recorded "
+            f"parent edges {sorted(expected_internal)}",
+        )
+    if not lpl.is_internal_source:
+        expected_root = expected_input | expected_internal
+        if normalize(lpl.root_ancestors) != expected_root:
+            raise MetadataInvariantError(
+                name,
+                f"Layer '{label}': root_ancestors={sorted(lpl.root_ancestors)} != "
+                f"input_ancestors | internal_source_ancestors {sorted(expected_root)}",
+            )
+
+    # internal_source_parents is a DIRECT-PARENT relation, so it is a subset of parents
+    # whose members all carry internal-source ancestry. For a non-source node it is
+    # EXACTLY those parents; a source resets the relation (see the check docstring).
+    parent_names = {record.layer_label for record in map(resolve, lpl.parents) if record is not None}
+    parent_names |= set(lpl.parents)
+    stored_internal_parents = tuple(lpl.internal_source_parents)
+    not_a_parent = [item for item in stored_internal_parents if item not in parent_names]
+    if not_a_parent:
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': internal_source_parents names {not_a_parent}, which are "
+            f"not recorded parents (parents={tuple(lpl.parents)})",
+        )
+    for item in stored_internal_parents:
+        record = resolve(item)
+        if record is not None and not record.has_internal_source_ancestor:
+            raise MetadataInvariantError(
+                name,
+                f"Layer '{label}': internal_source_parents names {item!r}, which carries "
+                f"no internal-source ancestry",
+            )
+    if not lpl.is_internal_source:
+        expected_names = {
+            record.layer_label
+            for record in map(resolve, lpl.parents)
+            if record is not None and record.has_internal_source_ancestor
+        }
+        stored_names = {
+            record.layer_label
+            for record in map(resolve, stored_internal_parents)
+            if record is not None
+        }
+        if stored_names != expected_names:
+            raise MetadataInvariantError(
+                name,
+                f"Layer '{label}': internal_source_parents={sorted(stored_names)} != the "
+                f"parents carrying internal-source ancestry {sorted(expected_names)}",
+            )
+
+    # Flag coherence, UNGATED (the historical pair lived behind mark_layer_depths).
+    for flag_name, stored_set in (
+        ("has_input_ancestor", lpl.input_ancestors),
+        ("has_output_descendant", lpl.output_descendants),
+        ("has_internal_source_ancestor", lpl.internal_source_ancestors),
+    ):
+        if bool(getattr(lpl, flag_name)) != bool(stored_set):
+            raise MetadataInvariantError(
+                name,
+                f"Layer '{label}': {flag_name}={getattr(lpl, flag_name)} but its set has "
+                f"{len(stored_set)} members",
+            )
+    extra_ancestors = normalize(lpl.input_ancestors) - normalize(input_set)
+    if extra_ancestors:
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': input_ancestors contains labels not in input_layers: "
+            f"{sorted(extra_ancestors)}",
+        )
+    if normalize(lpl.output_descendants) - normalize(set(ml.output_layers)):
+        raise MetadataInvariantError(
+            name,
+            f"Layer '{label}': output_descendants contains labels not in output_layers: "
+            f"{sorted(normalize(lpl.output_descendants) - normalize(set(ml.output_layers)))}",
+        )
+
+
+def _check_distance_closure(name: str, entries: list[Any], resolve: Any, key: Any) -> None:
+    """Recompute populated min/max hop distances from the recorded edges.
+
+    Runs UNGATED on whatever is populated: the historical distance checks returned
+    early unless ``mark_layer_depths`` was on, so a wrong distance on a default trace
+    was never examined at all. Records whose distances are ``None`` (unreached by the
+    flood) are skipped, never guessed.
+    """
+
+    for direction, edge_field, boundary_flag, min_field, max_field in (
+        ("input", "parents", "is_input", "min_distance_from_input", "max_distance_from_input"),
+        ("output", "children", "is_output", "min_distance_to_output", "max_distance_to_output"),
+    ):
+        for lpl in entries:
+            stored_min = getattr(lpl, min_field)
+            stored_max = getattr(lpl, max_field)
+            if stored_min is None or stored_max is None:
+                continue
+            if getattr(lpl, boundary_flag):
+                if stored_min != 0 or stored_max != 0:
+                    raise MetadataInvariantError(
+                        name,
+                        f"Layer '{key(lpl)}': {direction} boundary node has "
+                        f"{min_field}={stored_min}, {max_field}={stored_max}, expected 0",
+                    )
+                continue
+            neighbours = [
+                record
+                for record in map(resolve, getattr(lpl, edge_field))
+                if record is not None
+                and getattr(record, min_field) is not None
+                and getattr(record, max_field) is not None
+            ]
+            if not neighbours:
+                continue
+            expected_min = min(getattr(record, min_field) for record in neighbours) + 1
+            expected_max = max(getattr(record, max_field) for record in neighbours) + 1
+            if stored_min != expected_min or stored_max != expected_max:
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer '{key(lpl)}': {min_field}/{max_field}=({stored_min}, "
+                    f"{stored_max}) but the recorded {edge_field} give "
+                    f"({expected_min}, {expected_max})",
+                )
 
 
 def _check_graph_connectivity(ml: Trace) -> None:

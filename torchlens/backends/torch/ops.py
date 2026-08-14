@@ -23,6 +23,7 @@ from torch.utils.weak import WeakIdKeyDictionary
 from ... import _state as _st
 from ..._errors import TorchLensPostfuncError
 from ..._io import BlobRef
+from ..._robustness import UnsupportedTensorVariantError
 from ..._state import pause_logging
 from ..._training_validation import TrainingModeConfigError
 from ...capture.arg_positions import (
@@ -776,6 +777,8 @@ _container_leaf_occurrences_from_entries = _rebind_function(
 _get_autograd_saved_stats_for_tensor = _rebind_function(
     _ops_autograd._get_autograd_saved_stats_for_tensor, globals()
 )
+# Rebound helper the shape-metadata reader needs in the caller's namespace.
+_metadata_shape = _rebind_function(_ops_activations._metadata_shape, globals())
 _log_output_tensor_info = _rebind_function(_ops_activations._log_output_tensor_info, globals())
 _save_activation_fields = _rebind_function(_ops_activations._save_activation_fields, globals())
 _stream_activation_fields = _rebind_function(_ops_activations._stream_activation_fields, globals())

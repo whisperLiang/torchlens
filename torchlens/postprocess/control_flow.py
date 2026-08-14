@@ -814,10 +814,14 @@ def _fix_buffer_layers(self: Trace) -> None:
     """
     buffer_counter: dict[str, int] = defaultdict(lambda: 1)
     buffer_hash_groups: dict[str, list[str]] = defaultdict(list)
+    # Buffer rows whose edges this step changes; their descendant cones need ancestry
+    # re-derived (see _repropagate_ancestry_after_buffer_wiring).
+    rewired_buffers: list[str] = []
 
     for layer_label in self.buffer_layers:
         layer = self[layer_label]
         if layer.buffer_source is not None:
+            rewired_buffers.append(layer._label_raw)
             if layer.buffer_source not in layer.parents:
                 layer.parents.append(layer.buffer_source)
             if layer_label not in self[layer.buffer_source].children:
@@ -866,9 +870,12 @@ def _fix_buffer_layers(self: Trace) -> None:
                     and (torch.equal(buffer.out, unique_buffer.out))
                 ):
                     _merge_buffer_entries(self, unique_buffer, buffer)
+                    rewired_buffers.append(unique_buffer._label_raw)
                     break
             else:
                 unique_buffers.append(buffer_label)
+
+    _repropagate_ancestry_after_buffer_wiring(self, rewired_buffers)
 
     # And relabel the buffer ops.
 
@@ -878,6 +885,72 @@ def _fix_buffer_layers(self: Trace) -> None:
         layer.buffer_pass = buffer_counter[address]
         self.buffer_num_calls[address] = buffer_counter[address]
         buffer_counter[address] += 1
+
+
+def _repropagate_ancestry_after_buffer_wiring(self: Trace, rewired: list[str]) -> None:
+    """Re-derive ancestry over the DESCENDANT CONE of every buffer rewired at step 6.
+
+    Step 6 inserts ``buffer -> buffer_source`` edges AFTER capture-time ancestry
+    propagation and after steps 2/4, and it only ever updated the buffer row's OWN
+    ``input_ancestors``/``root_ancestors``. Nothing revisited the descendants, so on a
+    write-then-reread buffer every op downstream of the buffer kept its pre-edge sets:
+    ``self.b[:2].copy_(x); return self.b.sum()`` produced a ``sum`` op whose parent
+    carries ``input_ancestors={'input_1'}`` while the op itself carried ``set()`` -- an
+    op that demonstrably depends on the model input reporting no input ancestry at all,
+    on the default (depths-off) path where step 4's flood does not run to paper over it.
+    Public ``op.input_ancestors`` / ``root_ancestors`` reads, reachability queries, and
+    ``receptive_field`` all consume these sets, and they are portable state that survives
+    save/load.
+
+    The re-derivation is exactly the closure the ``ancestry_closure`` invariant checks,
+    applied to the affected cone only (raw-label space, topological order):
+
+    * ``input_ancestors``            = own-if-input, else the union over parents;
+    * ``internal_source_ancestors``  = ``{self}`` if an internal source, else the union;
+    * ``internal_source_parents``    = the parents carrying internal-source ancestry;
+    * ``root_ancestors``             = ``input_ancestors | internal_source_ancestors``.
+
+    Internal-source rows keep the ``root_ancestors`` value step 6 assigned them: the
+    source-minting producers disagree about self-inclusion there (a parentless factory
+    records the empty set, a buffer source records ``{self}``), which is a field-naming
+    question, not something to silently change here.
+    """
+
+    if not rewired:
+        return
+    raw_dict = self._raw_graph_ws.raw_layer_dict
+    cone: set[str] = set()
+    frontier = [label for label in rewired if label in raw_dict]
+    while frontier:
+        current = frontier.pop()
+        if current in cone:
+            continue
+        cone.add(current)
+        frontier.extend(child for child in raw_dict[current].children if child in raw_dict)
+
+    for raw_label in self._raw_graph_ws.raw_layer_labels_list:
+        if raw_label not in cone:
+            continue
+        layer = raw_dict[raw_label]
+        parents = [raw_dict[parent] for parent in layer.parents if parent in raw_dict]
+        input_ancestors: set[str] = {raw_label} if layer.is_input else set()
+        for parent in parents:
+            input_ancestors.update(parent.input_ancestors)
+        if layer.is_internal_source:
+            internal_source_ancestors = {raw_label}
+        else:
+            internal_source_ancestors = set()
+            for parent in parents:
+                internal_source_ancestors.update(parent.internal_source_ancestors)
+        layer.input_ancestors = input_ancestors
+        layer.has_input_ancestor = bool(input_ancestors)
+        layer.internal_source_ancestors = internal_source_ancestors
+        layer.has_internal_source_ancestor = bool(internal_source_ancestors)
+        if not layer.is_internal_source:
+            layer.internal_source_parents = [
+                parent._label_raw for parent in parents if parent.has_internal_source_ancestor
+            ]
+            layer.root_ancestors = input_ancestors | internal_source_ancestors
 
 
 def _buffer_source_value_matches(source: Op, buffer_layer: Op) -> bool:
@@ -907,8 +980,19 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
     for child_layer in buffer_to_remove.children:
         if child_layer not in source_buffer.children:
             source_buffer.children.append(child_layer)
-        self[child_layer].parents.remove(buffer_to_remove._label_raw)
-        self[child_layer].parents.append(source_buffer._label_raw)
+        # Preserve edge MULTIPLICITY: ``parents`` is an edge-OCCURRENCE list (one entry
+        # per argument slot), so a child consuming the removed buffer at two slots must
+        # end with two entries naming the survivor. ``list.remove`` strips only the FIRST
+        # occurrence, so repointing one-for-one is the multiplicity-faithful move; the
+        # closing ``_remove_log_entry(..., remove_references=True)`` scrub would otherwise
+        # strip the leftovers and drop the count to 1 (DISPUTED D1 -- safe hardening,
+        # not an adjudication of reachability).
+        child_parents = self[child_layer].parents
+        repointed = 0
+        while buffer_to_remove._label_raw in child_parents:
+            child_parents.remove(buffer_to_remove._label_raw)
+            repointed += 1
+        child_parents.extend([source_buffer._label_raw] * max(1, repointed))
         if buffer_to_remove._label_raw in self[child_layer].internal_source_parents:
             self[child_layer].internal_source_parents.remove(buffer_to_remove._label_raw)
             self[child_layer].internal_source_parents.append(source_buffer._label_raw)
@@ -923,8 +1007,19 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
     for parent_layer in buffer_to_remove.parents:
         if parent_layer not in source_buffer.parents:
             source_buffer.parents.append(parent_layer)
-        self[parent_layer].children.remove(buffer_to_remove._label_raw)
-        self[parent_layer].children.append(source_buffer._label_raw)
+        parent_children = self[parent_layer].children
+        if buffer_to_remove._label_raw in parent_children:
+            parent_children.remove(buffer_to_remove._label_raw)
+        # Membership-guard the NEIGHBOUR side too (DISPUTED D1 -- safe hardening either
+        # way, NOT an adjudication of reachability). The survivor's own appends above are
+        # guarded, but this one was unconditional: both merged duplicates share their
+        # parent BY CONSTRUCTION (the dedup hash at the call site includes
+        # ``buffer_source``), so on any non-None-source merge the shared parent's
+        # ``children`` got the survivor appended a SECOND time -- a duplicated child edge,
+        # a shape no honest capture produces (parents may legitimately duplicate for
+        # multi-slot reuse; children never do).
+        if source_buffer._label_raw not in parent_children:
+            parent_children.append(source_buffer._label_raw)
 
     for parent_layer in buffer_to_remove.internal_source_parents:
         if parent_layer not in source_buffer.internal_source_parents:

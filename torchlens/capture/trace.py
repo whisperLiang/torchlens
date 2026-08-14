@@ -238,10 +238,20 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
             if tracemalloc_started_here:
                 with contextlib.suppress(Exception):
                     tracemalloc_module.stop()
-        if backend_label == "mps" and torch_module is not None:
-            after = int(torch_module.mps.current_allocated_memory())
-        else:
-            after = _process_rss_bytes()
+        # Both readers can raise on a hostile host (`mps.current_allocated_memory()`
+        # on a degraded MPS build, `psutil.Process().memory_info()` with AccessDenied /
+        # NoSuchProcess inside a restricted container -- `_process_rss_bytes` only
+        # catches ImportError). They were the only two statements in this finally
+        # outside a suppress, so a failure there replaced the user's in-flight forward
+        # exception with a psutil/MPS error AND skipped both field writes, contrary to
+        # the docstring's "measurement never raises into the capture path". Default to
+        # a zero delta: an unmeasurable host reports no measured growth, never a lie.
+        after = before
+        with contextlib.suppress(Exception):
+            if backend_label == "mps" and torch_module is not None:
+                after = int(torch_module.mps.current_allocated_memory())
+            else:
+                after = _process_rss_bytes()
         rss_delta = max(0, after - before)
         trace.forward_memory_backend = backend_label
         trace.forward_peak_memory = Bytes(max(rss_delta, int(traced_peak)))
@@ -1535,6 +1545,20 @@ def run_and_log_inputs_through_model(
                             # existing RNG_MONITOR_UNCERTAIN witness gap
                             # (unverifiable, never a silent false VERIFIED) -- channel
                             # coverage on the disarmed lane is unknowable, not absent.
+                            # Stamp the FAIL-CLOSED verdict before the forward runs.
+                            # The real verdict is stamped after the monitor tears down,
+                            # several statements away from its only consumer
+                            # (``_io/runnable.py`` treats a falsy/``None`` flag as
+                            # CERTAIN), so anything raising in between -- the swallowed-
+                            # stop checkpoint, the global-engine diff, a Ctrl-C during
+                            # teardown -- used to leave the field ``None`` and read as a
+                            # proven-clean window. Pre-stamping means an unreached stamp
+                            # ceilings through the existing RNG_MONITOR_UNCERTAIN
+                            # witness gap instead.
+                            self._runnable.rng_monitor_uncertain = True
+                            self._runnable.rng_monitor_uncertain_detail = (
+                                "monitor_verdict_not_stamped",
+                            )
                             _host_rng_before = snapshot_host_rng()
                             if bool(getattr(self, "intervention_ready", False)):
                                 from ..utils.rng import host_nondeterminism_monitor
