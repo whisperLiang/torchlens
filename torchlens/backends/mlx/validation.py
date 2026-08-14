@@ -200,12 +200,18 @@ def _payloads_close(a: Any, b: Any) -> bool:
         # scale, sized for bf16 (eps 7.8e-3). fp16 now gets its own ~1-ULP
         # band; other 2-byte floats (the bf16 class) keep 1e-2.
         if a_np.dtype == np.float16:
-            tolerance = 1e-3
+            rtol = 1e-3
         elif a_np.dtype.itemsize <= 2:
-            tolerance = 1e-2
+            rtol = 1e-2
         else:
-            tolerance = 1e-5
-        return bool(np.allclose(a_np, b_np, rtol=tolerance, atol=tolerance, equal_nan=True))
+            rtol = 1e-5
+        # The absolute term exists ONLY to absorb jitter at the very bottom of
+        # the representable range: it is the relative band applied to the
+        # smallest normal value.  The former ``atol == rtol`` spelling blessed
+        # TOTAL corruption (all-zero or sign-flipped replays) of every element
+        # whose magnitude sat below the band's decimal tolerance.
+        atol = rtol * float(np.finfo(a_np.dtype).tiny)
+        return bool(np.allclose(a_np, b_np, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(a_np, b_np))
 
 
