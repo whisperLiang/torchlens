@@ -2731,6 +2731,22 @@ ships the model source.
 - Function signatures and source line numbers are structural interface metadata (like a type stub)
   and are retained even when source text is stripped.
 
+### Harvested module attributes and `include_custom_attributes` (privacy disclosure)
+
+Model preparation harvests every public, non-callable module instance attribute verbatim into
+`Module.custom_attributes`, and portable saves persist the whole channel by default -- arbitrary
+user values (config scalars, but equally tokens, host paths, usernames, or large containers a
+module happens to hold as public attributes) ship in the shareable artifact.
+`include_custom_attributes: bool = True` on `tl.save`/`Trace.save` is the opt-out: `False` drops
+the entire channel from the artifact (the live `Trace` is untouched). Values are NEVER rewritten
+or partially scrubbed -- the channel ships verbatim or not at all, because a save that silently
+mutates documented metadata values is worse than the disclosure problem it would paper over.
+Every save writes a `custom_attributes_disclosure` entry in `manifest.json` naming the channel:
+the effective `included` flag, the count of modules carrying attributes, and the bounded sorted
+union of top-level key names (names only, never values). Sparse runnable cores always drop the
+field regardless of the flag (it is in the sparse DROP set), and their disclosure records
+`included: false`.
+
 The complete implementation includes `load_state_dict`, transient state sources, initializer
 reporting, `run`, `RunResult`, transactional run forks, sparse input/call/output reconstruction,
 three-state `path_faithfulness`, strict divergence rollback, monotonically poisoned opt-in results,

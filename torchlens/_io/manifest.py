@@ -222,14 +222,10 @@ def _json_ready_codec_metadata_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {
-            str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()
-        }
+        return {str(key): _json_ready_codec_metadata_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return {
-            _CODEC_METADATA_TUPLE_TAG: [
-                _json_ready_codec_metadata_value(item) for item in value
-            ]
+            _CODEC_METADATA_TUPLE_TAG: [_json_ready_codec_metadata_value(item) for item in value]
         }
     if isinstance(value, list):
         return [_json_ready_codec_metadata_value(item) for item in value]
@@ -418,6 +414,10 @@ class Manifest:
         Best-effort records for tensors skipped under ``strict=False``.
     provenance:
         Optional versioned capture provenance certificate. Older manifests omit it.
+    custom_attributes_disclosure:
+        Optional save-time disclosure of the harvested module-attribute channel
+        (``included`` flag, ``module_count``, bounded ``top_level_keys``). Older
+        manifests omit it.
     """
 
     tlspec_version: int
@@ -434,6 +434,7 @@ class Manifest:
     tensors: list[TensorEntry]
     unsupported_tensors: list[dict[str, str]]
     provenance: Provenance | None = None
+    custom_attributes_disclosure: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Manifest:
@@ -514,6 +515,28 @@ class Manifest:
         if raw_provenance is not None and not isinstance(raw_provenance, dict):
             raise TorchLensIOError("Manifest field 'provenance' must be an object when present.")
         provenance = None if raw_provenance is None else Provenance.from_dict(raw_provenance)
+        raw_disclosure = data.get("custom_attributes_disclosure")
+        if raw_disclosure is not None:
+            if not isinstance(raw_disclosure, dict):
+                raise TorchLensIOError(
+                    "Manifest field 'custom_attributes_disclosure' must be an object when present."
+                )
+            if not isinstance(raw_disclosure.get("included"), bool):
+                raise TorchLensIOError(
+                    "Manifest custom_attributes_disclosure.included must be a boolean."
+                )
+            raw_count = raw_disclosure.get("module_count")
+            if not isinstance(raw_count, int) or raw_count < 0:
+                raise TorchLensIOError(
+                    "Manifest custom_attributes_disclosure.module_count must be a "
+                    "non-negative integer."
+                )
+            raw_keys = raw_disclosure.get("top_level_keys")
+            if not isinstance(raw_keys, list) or not all(isinstance(key, str) for key in raw_keys):
+                raise TorchLensIOError(
+                    "Manifest custom_attributes_disclosure.top_level_keys must be a "
+                    "list of strings."
+                )
         manifest = cls(
             tlspec_version=data["tlspec_version"],
             torchlens_version=data["torchlens_version"],
@@ -529,6 +552,7 @@ class Manifest:
             tensors=tensors,
             unsupported_tensors=unsupported_tensors,
             provenance=provenance,
+            custom_attributes_disclosure=raw_disclosure,
         )
         manifest._validate_counts()
         return manifest
@@ -602,6 +626,8 @@ class Manifest:
         data["tensors"] = [entry.to_dict() for entry in self.tensors]
         if self.provenance is None:
             data.pop("provenance")
+        if self.custom_attributes_disclosure is None:
+            data.pop("custom_attributes_disclosure")
         return data
 
     def _validate_counts(self) -> None:
