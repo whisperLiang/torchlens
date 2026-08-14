@@ -130,6 +130,10 @@ class GradOptions:
     loss_fn: Callable[[Any], Any] | None = None
     input_grad_argnums: tuple[int, ...] = ()
     intermediate_grads: bool = False
+    # DELIBERATELY lower than the 64 default of the other four previews: the
+    # JAX intermediate producer runs a zero-tap AD replay whose cost scales
+    # with the boundary cap, and control-flow unrolling multiplies JAX
+    # boundary counts. Raise explicitly per call when more are needed.
     max_intermediate_grads: int = 8
 
     def __init__(

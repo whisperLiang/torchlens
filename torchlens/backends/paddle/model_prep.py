@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...ir.events import ModuleFrame
+from .._finalize import nearest_metadata_parent
 
 
 @dataclass
@@ -359,36 +360,9 @@ def _direct_children(address: str, metadata: dict[str, dict[str, Any]]) -> list[
     children = [
         candidate
         for candidate in metadata
-        if candidate != address and _nearest_metadata_parent(candidate, metadata) == address
+        if candidate != address and nearest_metadata_parent(candidate, metadata) == address
     ]
     return sorted(children, key=_address_sort_key)
-
-
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``.
-
-    Parameters
-    ----------
-    address
-        Child address.
-    metadata
-        Module metadata keyed by address.
-
-    Returns
-    -------
-    str | None
-        Parent address, or ``None`` for root.
-    """
-
-    if address == "self":
-        return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
 
 
 def _join_module_address(parent: str, child_name: str) -> str:

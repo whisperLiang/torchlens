@@ -11,6 +11,7 @@ from ..data_classes._compaction import compact_op_metadata
 from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
+from ..ir.op_record import amend_preview_output_parent_mark
 from ..postprocess.finalization import _build_module_logs, _build_root_module_log
 from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
 from ..quantities import Bytes
@@ -898,3 +899,107 @@ def normalize_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
             continue
         calls.append((text, 1))
     return tuple(calls)
+
+
+def nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
+    """Return the closest existing parent address for ``address``.
+
+    Parameters
+    ----------
+    address:
+        Child module address.
+    metadata:
+        Module metadata keyed by address.
+
+    Returns
+    -------
+    str | None
+        Parent address, or ``None`` for root.
+    """
+
+    if address == "self":
+        return None
+    parts = address.split(".")
+    while len(parts) > 1:
+        parts.pop()
+        candidate = ".".join(parts)
+        if candidate in metadata:
+            return candidate
+    return "self" if "self" in metadata else None
+
+
+def mark_output_label(trace: Trace, label: str) -> None:
+    """Mark one resolved output label on a preview trace.
+
+    The shared tail of every preview backend's output marking: append the
+    label to ``output_layers`` and amend the producing op event's
+    ``is_output_parent`` flag. Backends keep only their native output-tensor
+    iteration and label resolution.
+
+    Parameters
+    ----------
+    trace:
+        Trace with live capture events.
+    label:
+        Resolved raw producer label for one output tensor.
+
+    Returns
+    -------
+    None
+        Mutates ``trace.output_layers`` and the event stream.
+    """
+
+    trace.output_layers.append(label)
+    event = trace.capture_events.op_event_by_label_raw.get(label)
+    if event is None:
+        return
+    trace.capture_events.append_amendment(
+        amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+    )
+
+
+def attach_module_owned_op_params(
+    op_log: Any,
+    trace: Trace,
+    seen_param_barcodes: set[str],
+) -> None:
+    """Attach module-owned parameters to one finalized op log.
+
+    The ONE implementation of the mlx/tf/paddle triplet: the op's owning
+    module is its innermost normalized module call, and each parameter
+    barcode attaches to the FIRST op of its owner.
+
+    Parameters
+    ----------
+    op_log:
+        Operation log being finalized.
+    trace:
+        Trace whose parameter accessor owns the backend param logs.
+    seen_param_barcodes:
+        Mutable set of parameter barcodes already attached to earlier ops.
+
+    Returns
+    -------
+    None
+        Mutates ``op_log`` in place when new params are attached.
+    """
+
+    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
+    if not module_calls:
+        return
+    owner = module_calls[-1][0]
+    params = [
+        param
+        for param in trace.param_logs
+        if param.module_address == owner and param.barcode not in seen_param_barcodes
+    ]
+    if not params:
+        return
+    op_log._param_logs = params
+    op_log._param_barcodes = [param.barcode for param in params]
+    op_log.param_shapes = [param.shape for param in params]
+    op_log.num_params = sum(param.num_params for param in params)
+    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
+    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
+    op_log.param_memory = sum(int(param.param_memory) for param in params)
+    seen_param_barcodes.update(param.barcode for param in params)

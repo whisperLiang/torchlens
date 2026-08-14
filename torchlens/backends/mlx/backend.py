@@ -42,7 +42,6 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
-from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.predicate import _DEFERRED_VALUE, RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -52,9 +51,12 @@ from ...quantities import Duration
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus  # noqa: TC001
 from .._finalize import (
     attach_function_root_module,
+    attach_module_owned_op_params,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mark_output_label,
     mirror_param_derived_grads,
+    nearest_metadata_parent,
     normalize_op_module_calls,
     numel_from_shape as _numel,
     session_callable_identity as _callable_identity,
@@ -2191,13 +2193,7 @@ class MLXBackend:
             label = self.tensor_store.get_label(value)
             if label is None:
                 continue
-            trace.output_layers.append(label)
-            event = trace.capture_events.op_event_by_label_raw.get(label)
-            if event is None:
-                continue
-            trace.capture_events.append_amendment(
-                amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-            )
+            mark_output_label(trace, label)
 
     def _finish_trace(self, trace: Trace, module_tree: MLXModuleTree | None = None) -> None:
         """Finalize a manually captured MLX Trace.
@@ -2226,7 +2222,7 @@ class MLXBackend:
             module_tree=module_tree,
             attach_function_root_module=attach_function_root_module,
             attach_object_module_logs=self._attach_object_module_logs,
-            attach_op_params=_attach_mlx_op_params_for_finalize,
+            attach_op_params=attach_module_owned_op_params,
             count_layers_with_attached_params=True,
             recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
@@ -2363,74 +2359,6 @@ def mlx_param_logs(tree: MLXModuleTree, trace: Trace) -> dict[str, Param]:
         )
         param_logs[existing_address] = param
     return param_logs
-
-
-def _attach_mlx_op_params(
-    op_log: Any,
-    param_logs: ParamAccessor,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach MLX module-owned parameters to a finalized op log.
-
-    Parameters
-    ----------
-    op_log
-        Op log being finalized.
-    param_logs
-        Trace parameter accessor.
-    seen_param_barcodes
-        Mutable set of parameter barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Parameter fields are updated in place.
-    """
-
-    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
-    if not module_calls:
-        return
-    owner = module_calls[-1][0]
-    params = [
-        param
-        for param in param_logs
-        if param.module_address == owner and param.barcode not in seen_param_barcodes
-    ]
-    if not params:
-        return
-    op_log._param_logs = params
-    op_log._param_barcodes = [param.barcode for param in params]
-    op_log.param_shapes = [param.shape for param in params]
-    op_log.num_params = sum(param.num_params for param in params)
-    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
-    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
-    seen_param_barcodes.update(param.barcode for param in params)
-
-
-def _attach_mlx_op_params_for_finalize(
-    op_log: Any,
-    trace: Trace,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach MLX params through the shared finalization hook.
-
-    Parameters
-    ----------
-    op_log:
-        Operation log being finalized.
-    trace:
-        Trace whose parameter accessor owns MLX param logs.
-    seen_param_barcodes:
-        Param barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates ``op_log`` in place when new params are attached.
-    """
-
-    _attach_mlx_op_params(op_log, trace.param_logs, seen_param_barcodes)
 
 
 def _iter_mlx_parameter_candidates(tree: MLXModuleTree) -> list[MLXParameterCandidate]:
@@ -2598,7 +2526,7 @@ def _mlx_metadata_top_level(
     """
 
     del metadata
-    return address != "self" and _nearest_metadata_parent(address, metadata_by_address) == "self"
+    return address != "self" and nearest_metadata_parent(address, metadata_by_address) == "self"
 
 
 def _mlx_op_top_level(address: str) -> bool:
@@ -2666,33 +2594,6 @@ def _resolve_mlx_module_identity_mode(
     if value == "function_root":
         return False
     return module_tree is not None
-
-
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``.
-
-    Parameters
-    ----------
-    address
-        Child address.
-    metadata
-        Module metadata keyed by address.
-
-    Returns
-    -------
-    str | None
-        Parent address, or ``None`` for root.
-    """
-
-    if address == "self":
-        return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
 
 
 def _join_module_address(parent: str, child_name: str) -> str:
