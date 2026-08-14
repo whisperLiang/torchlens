@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import traceback
 import warnings
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -182,12 +183,21 @@ class StopRequest:
         Event kind at the stop boundary, when known.
     boundary_label:
         Op label at the stop boundary, when known.
+    error_ref:
+        Weak reference to the exact exception raised at the latch site.
+        Settlement matches the terminal exception against it by IDENTITY, so
+        an unrelated later ``CaptureError`` (after the latched abort was
+        swallowed) settles FAILED with its own diagnostics instead of being
+        misattributed as the clean ABORTED_NONFINITE (R06). Weak so the
+        latch never extends the exception's (traceback-carrying) lifetime;
+        within the raise-to-settle window the terminal exception is alive.
     """
 
     kind: str
     reason: str | None = None
     boundary_kind: str | None = None
     boundary_label: str | None = None
+    error_ref: weakref.ref[BaseException] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +547,23 @@ def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
 
     if outcome.status is not CaptureStatus.FAILED and any(
         getattr(outcome, field_name) is not None for field_name in _FAILED_ONLY_OUTCOME_FIELDS
+    ):
+        return False
+    # ``derived`` is provenance only the derivation lattices write, and they
+    # emit HALTED / UNATTESTED / UNKNOWN exclusively; every settle stamp
+    # writes ``derived=False``. A derived COMPLETE / ABORTED_NONFINITE /
+    # FAILED payload is therefore internally contradictory (R06).
+    if outcome.derived and outcome.status in (
+        CaptureStatus.COMPLETE,
+        CaptureStatus.ABORTED_NONFINITE,
+        CaptureStatus.FAILED,
+    ):
+        return False
+    # ``settle_completed`` writes neither a reason nor the fastlog
+    # disk-recovery marker; a COMPLETE payload carrying either forges
+    # provenance no writer can produce (R06).
+    if outcome.status is CaptureStatus.COMPLETE and (
+        outcome.reason is not None or outcome.recovered
     ):
         return False
     carries_boundary_evidence = any(
@@ -926,6 +953,12 @@ def settle_failed(
         isinstance(stop_request, StopRequest)
         and stop_request.kind == "nonfinite"
         and isinstance(exc, CaptureError)
+        # The latch records the raised exception's IDENTITY: only the exact
+        # nonfinite CaptureError classifies ABORTED_NONFINITE. An unrelated
+        # CaptureError arriving after a swallowed abort settles FAILED below
+        # with its own reason/error_type instead of being misattributed (R06).
+        and stop_request.error_ref is not None
+        and stop_request.error_ref() is exc
         # A SWALLOWED nonfinite abort is a FAILED capture, never a clean
         # ABORTED_NONFINITE: the abort did not actually stop the forward.
         and not isinstance(exc, StopSignalSwallowedError)

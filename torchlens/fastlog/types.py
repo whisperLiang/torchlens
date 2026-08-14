@@ -27,7 +27,6 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from ..capture.projections import RecordingState
     from ..capture.session import CapturedRunCore
     from ..data_classes.trace import Trace
 
@@ -379,11 +378,14 @@ class Recording(CapturedRun):
 
         Stamped recordings return the settlement authority's record. Legacy
         pickles (whose ``_outcome`` slot may be unset) and recovered/unstamped
-        recordings derive from the construction status: finalized ``complete``
-        / ``halted`` are construction-time proofs, ``partial_error`` is
-        FAILED, and ``recovered`` is UNKNOWN (or reconstructed HALTED where
-        the halt markers survived) with ``recovered=True`` -- all
-        ``derived=True``, never a settle-stamp upgrade.
+        recordings derive from the construction status: ``halted`` halt
+        markers are construction-time proofs, ``partial_error`` is FAILED,
+        ``recovered`` is UNKNOWN (or reconstructed HALTED where the halt
+        markers survived) with ``recovered=True``, and ``complete`` derives
+        UNATTESTED -- the status string on a deserialized object is a plain
+        spoofable field, and a derivation never blesses COMPLETE (R06; same
+        doctrine as the trace-side structural lattice). All ``derived=True``,
+        never a settle-stamp upgrade.
         """
 
         from ..capture.outcome import CaptureOutcome, CaptureStatus, FailureOrigin
@@ -415,7 +417,7 @@ class Recording(CapturedRun):
                 derived=True,
             )
         if status == "complete":
-            return CaptureOutcome(status=CaptureStatus.COMPLETE, derived=True)
+            return CaptureOutcome(status=CaptureStatus.UNATTESTED, derived=True)
         return CaptureOutcome(status=CaptureStatus.UNKNOWN, derived=True)
 
     @property
@@ -956,55 +958,3 @@ def _mark_recording_halted(recording: Recording, pass_index: int, reason: str) -
     object.__setattr__(recording, "halted", True)
     object.__setattr__(recording, "status", "halted")
     object.__setattr__(recording, "halt_reason", reason)
-
-
-def build_grad_record_context(
-    recording_state: RecordingState,
-    grad_fn_handle: Any,
-    grad: torch.Tensor | None,
-    *,
-    label: str,
-    grad_kind: Literal["grad_input", "grad_output"],
-    backward_call_index: int,
-    grad_input_index: int | None = None,
-    grad_output_index: int | None = None,
-) -> GradRecordContext:
-    """Build a fastlog gradient context from a backward node and optional join."""
-
-    forward_ctx = recording_state.grad_fn_to_context.get(grad_fn_handle)
-    shape = tuple(grad.shape) if grad is not None else None
-    dtype = grad.dtype if grad is not None else None
-    tensor_device = grad.device if grad is not None else None
-    grad_fn_type = type(grad_fn_handle).__name__.removesuffix("Backward0").lower()
-    if forward_ctx is None:
-        return GradRecordContext(
-            label=label,
-            grad_fn_class_name=type(grad_fn_handle).__name__,
-            type=grad_fn_type,
-            backward_call_index=backward_call_index,
-            grad_kind=grad_kind,
-            grad_input_index=grad_input_index,
-            grad_output_index=grad_output_index,
-            shape=shape,
-            dtype=dtype,
-            tensor_device=tensor_device,
-        )
-    return GradRecordContext(
-        label=label,
-        grad_fn_class_name=type(grad_fn_handle).__name__,
-        type=grad_fn_type,
-        backward_call_index=backward_call_index,
-        grad_kind=grad_kind,
-        grad_input_index=grad_input_index,
-        grad_output_index=grad_output_index,
-        layer_label=_public_fastlog_layer_label(forward_ctx),
-        op_label=_public_fastlog_layer_label(forward_ctx),
-        module_stack=forward_ctx.module_stack,
-        has_forward_op=True,
-        has_op=True,
-        pass_index=forward_ctx.pass_index,
-        event_index=forward_ctx.event_index,
-        shape=shape,
-        dtype=dtype,
-        tensor_device=tensor_device,
-    )

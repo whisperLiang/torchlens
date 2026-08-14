@@ -272,3 +272,47 @@ def test_contradictory_complete_grants_no_extra_capability() -> None:
     # phase/origin/error_type -- so both records resolve identically.
     for capability, by_status in CAPTURE_OUTCOME_CAPABILITIES.items():
         assert by_status[contradictory.status] == by_status[plain.status], capability
+
+
+# ---------------------------------------------------------------------------
+# (c) forged provenance flags on settle-only statuses (R06)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["complete", "aborted_nonfinite", "failed"])
+def test_forged_derived_flag_refuses_on_settle_only_statuses(status: str) -> None:
+    """No writer derives COMPLETE / ABORTED_NONFINITE / FAILED.
+
+    Every settle stamp writes ``derived=False`` and the derivation lattices
+    emit only HALTED / UNATTESTED / UNKNOWN, so a derived payload claiming a
+    settle-only status forges provenance and must not be adopted.
+    """
+
+    outcome = parse_outcome_payload({"status": status, "derived": True})
+    halted = False
+    finished = status == "complete"
+    assert attestation_coherent(outcome, halted=halted, finished=finished) is False
+
+
+@pytest.mark.parametrize("status", ["halted", "unattested", "unknown"])
+def test_legitimate_derived_statuses_stay_coherent(status: str) -> None:
+    """The lattice's own derived statuses still parse and adopt."""
+
+    outcome = parse_outcome_payload({"status": status, "derived": True})
+    halted = status == "halted"
+    finished = status in ("halted", "unattested")
+    assert attestation_coherent(outcome, halted=halted, finished=finished) is True
+
+
+def test_forged_reason_refuses_on_complete() -> None:
+    """``settle_completed`` never writes a reason; COMPLETE + reason is forged."""
+
+    outcome = parse_outcome_payload({"status": "complete", "reason": "looks legit"})
+    assert attestation_coherent(outcome, halted=False, finished=True) is False
+
+
+def test_forged_recovered_flag_refuses_on_complete() -> None:
+    """The fastlog disk-recovery marker never accompanies a settled COMPLETE."""
+
+    outcome = parse_outcome_payload({"status": "complete", "recovered": True})
+    assert attestation_coherent(outcome, halted=False, finished=True) is False

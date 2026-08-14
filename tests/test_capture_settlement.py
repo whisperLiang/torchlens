@@ -401,3 +401,41 @@ def test_preview_backends_stamp_at_return_boundary() -> None:
             if "stamp_backend_finalized(trace)" in line:
                 break
         assert "from ...capture.outcome import stamp_backend_finalized" in source, backend
+
+
+def test_unrelated_capture_error_after_swallowed_nonfinite_settles_failed() -> None:
+    """The nonfinite latch matches the terminal exception by IDENTITY (R06).
+
+    A swallowed nonfinite abort followed by an UNRELATED ``CaptureError``
+    used to settle a clean ABORTED_NONFINITE carrying the stale nan reason
+    and discarding the real terminal error's diagnostics.
+    """
+
+    import weakref
+    from types import SimpleNamespace
+
+    from torchlens.capture.outcome import StopRequest, settle_failed
+    from torchlens.errors import CaptureError
+
+    latched = CaptureError("nan in relu_1_1")
+    unrelated = CaptureError("event stream desync")
+    trace = SimpleNamespace()
+    trace.__dict__["_stop_requested"] = StopRequest(
+        kind="nonfinite",
+        reason="nan in relu_1_1",
+        boundary_kind="op",
+        boundary_label="relu_1_1",
+        error_ref=weakref.ref(latched),
+    )
+
+    outcome = settle_failed(trace, None, unrelated, n_ops_committed=0)
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.error_type == "CaptureError"
+    assert outcome.reason == "event stream desync"
+
+    # The exact latched exception still classifies the clean abort.
+    trace2 = SimpleNamespace()
+    trace2.__dict__["_stop_requested"] = trace.__dict__["_stop_requested"]
+    aborted = settle_failed(trace2, None, latched, n_ops_committed=0)
+    assert aborted.status is CaptureStatus.ABORTED_NONFINITE
+    assert aborted.reason == "nan in relu_1_1"
