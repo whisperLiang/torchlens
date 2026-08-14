@@ -178,7 +178,10 @@ def test_output_at_composed_with_grad_input_resolves_nonzero_sites() -> None:
     """MAJOR-3: ``output_at(0) & grad_input()`` intersects meaningfully (not 0)."""
 
     model = _TupleOut()
-    log = tl.trace(model, torch.randn(2, 4), intervention_ready=True)
+    # Gradient retention is opt-in: log_backward no longer silently widens the
+    # trace's save_grads selection (per-pass retention scoping), so grad-input
+    # payload sites only exist when the capture arms save_grads itself.
+    log = tl.trace(model, torch.randn(2, 4), intervention_ready=True, save_grads="all")
     branch0 = log.find_sites(tl.output_at(0))
     assert branch0, "expected output_at(0) to match the first tuple branch"
     log.log_backward(branch0[0].out.sum())

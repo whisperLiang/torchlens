@@ -22,7 +22,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-import torch
 
 from torchlens.intervention.helpers import helper_from_serialized
 from torchlens.intervention.save import _resolve_import_ref
@@ -55,6 +54,5 @@ def test_omitting_value_decoder_raises_typeerror_not_silent_corruption() -> None
     with pytest.raises(TypeError, match="value_decoder"):
         helper_from_serialized(  # type: ignore[call-arg]
             payload,
-            tensor_loader=lambda tid: torch.zeros(1),
             import_resolver=_resolve_import_ref,
         )
