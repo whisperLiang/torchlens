@@ -258,6 +258,41 @@ def test_grad_fn_hook_records_backward_fire() -> None:
     assert record.replaced is True
 
 
+def test_grad_fn_hook_inplace_mutation_records_replaced() -> None:
+    """A backward hook mutating a grad slot in place must not record replaced=False.
+
+    ``replaced`` derived from tuple-slot identity alone, so a hook editing
+    ``grad_input[0]`` in place and returning ``None`` was a genuine gradient
+    change recorded with zero replacement evidence.
+    """
+
+    trace_stub, grad_fn_handle = _hook_trace()
+
+    def mutate_in_place(
+        grad_input: tuple[torch.Tensor, ...],
+        *,
+        grad_output: tuple[torch.Tensor, ...],
+        grad_fn_handle: object,
+        call_index: int,
+        run_ctx: object,
+    ) -> None:
+        """Zero the first grad slot in place, returning nothing."""
+
+        del grad_output, grad_fn_handle, call_index, run_ctx
+        grad_input[0].mul_(0)
+        return None
+
+    mutate_in_place.direction = "backward"
+    _state._active_hook_plan = normalize_hook_plan(tl.grad_fn(type="relu"), mutate_in_place)
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    hook((torch.ones(1),), (torch.ones(1),))
+
+    record = grad_fn_handle.calls[0].intervention_fire_ref
+    assert isinstance(record, FireRecord)
+    assert record.replaced is True
+
+
 def test_composite_backward_target_specs_match_live_hooks() -> None:
     """Composite selector target specs reconstruct recursively for live hooks."""
 
@@ -507,7 +542,11 @@ def test_backward_in_place_none_return_helper_records_gradient_effect() -> None:
     ]
     assert records
     assert isinstance(records[0], FireRecord)
-    assert records[0].replaced is False
+    # Round-3 semantics: an in-place mutation IS a genuine gradient change and
+    # must carry replacement evidence (version-counter witnessed). The old
+    # identity-only derivation recorded replaced=False here -- a real value
+    # change with zero replacement evidence.
+    assert records[0].replaced is True
 
 
 def test_grad_fn_hook_call_index_targeting() -> None:

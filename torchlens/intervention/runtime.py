@@ -366,6 +366,7 @@ def _apply_live_hooks(
         previous_notes = tuple(hook_context.run_ctx.get("ledger_notes", ()))
         pre_hook_shape = tuple(current_out.shape)
         pre_hook_dtype = str(current_out.dtype)
+        version_before = _tensor_version(current_out)
         result = _execute_hook(
             normalized_entry.normalized_callable,
             current_out,
@@ -379,6 +380,18 @@ def _apply_live_hooks(
             call_args=call_args,
             call_kwargs=call_kwargs,
         )
+        if (
+            not replaced
+            and result is current_out
+            and version_before is not None
+            and _tensor_version(current_out) != version_before
+        ):
+            # An in-place-mutating HOOK (``out.mul_(0); return out``) is a
+            # genuine value change: recording replaced=False minted ZERO
+            # replacement evidence, so validation later failed forward replay
+            # in a capture-bug shape on a genuine intervention, and an
+            # unvalidated trace carried the false no-replacement claim.
+            replaced = True
         record = _build_live_fire_record(
             normalized_entry,
             site=site,
@@ -416,6 +429,28 @@ def _apply_live_hooks(
                 )
         current_out = result
     return current_out, tuple(fire_results)
+
+
+def _tensor_version(value: Any) -> int | None:
+    """Return a tensor's in-place mutation counter, or ``None`` when unreadable.
+
+    ``Tensor._version`` is the cheap autograd version counter; inference-mode
+    tensors (no counter) and exotic subclasses read as ``None``, which callers
+    treat as "no in-place evidence" rather than a refusal.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        return int(value._version)
+    except Exception:
+        return None
+
+
+def _tuple_versions(values: tuple[torch.Tensor | None, ...]) -> tuple[int | None, ...]:
+    """Version counters for one grad tuple, ``None`` per non-tensor slot."""
+
+    return tuple(_tensor_version(value) for value in values)
 
 
 def _apply_inplace_replacement_to_mutated_storage(
@@ -1296,6 +1331,7 @@ def _apply_live_backward_hooks(
         ):
             continue
         previous = current
+        versions_before = _tuple_versions(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1313,6 +1349,7 @@ def _apply_live_backward_hooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before,
                 timing="post",
                 previous=previous,
                 current=current,
@@ -1366,6 +1403,7 @@ def _apply_live_backward_prehooks(
         ):
             continue
         previous = current
+        versions_before = _tuple_versions(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1383,6 +1421,7 @@ def _apply_live_backward_prehooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before,
                 timing="pre",
                 previous=previous,
                 current=current,
@@ -1602,6 +1641,7 @@ def _build_live_backward_fire_record(
     timing: str,
     previous: tuple[torch.Tensor | None, ...],
     current: tuple[torch.Tensor | None, ...],
+    inplace_mutated: bool = False,
 ) -> FireRecord:
     """Build an audit record for one live backward hook fire.
 
@@ -1621,6 +1661,10 @@ def _build_live_backward_fire_record(
         Tuple before this helper ran.
     current:
         Tuple after this helper ran.
+    inplace_mutated:
+        Whether the hook mutated a grad slot IN PLACE (version-counter
+        evidence): a hook editing a tensor and returning ``None`` is a
+        genuine value change and must not record ``replaced=False``.
 
     Returns
     -------
@@ -1649,7 +1693,7 @@ def _build_live_backward_fire_record(
         call_index=call_index,
         grad_kind=grad_kind,  # type: ignore[arg-type]
         tuple_index=tuple_index,
-        replaced=tuple_index is not None or current is not previous,
+        replaced=tuple_index is not None or current is not previous or inplace_mutated,
     )
 
 
