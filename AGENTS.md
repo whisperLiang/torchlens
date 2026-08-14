@@ -50,10 +50,12 @@ Key entry points:
   `postprocess/_contracts.py::POSTPROCESS_STEP_CONTRACTS`)
 - Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`
 - Intervention: `torchlens/intervention/` plus top-level selector/helper aliases. Live
-  `trace(intervene=...)`/`trace(halt=...)` run on torch and on the eager Paddle preview
+  `trace(intervene=...)` runs on torch, on the eager Paddle preview
   (`torchlens/backends/paddle/interventions.py`; forward-only, builtin helper adapters
-  `zero_ablate`/`scale`/`add`/`replace_with`, corroborated validation carve-out); the other
-  previews refuse typed.
+  `zero_ablate`/`scale`/`add`/`replace_with`, corroborated validation carve-out), and on the
+  eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
+  see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
+  refuse typed.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
