@@ -302,15 +302,15 @@ def test_ast_file_cache_respects_lru_cap(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_perf_gate_compare_passes_within_tolerance() -> None:
-    """Regression gate accepts rows inside the P6 tolerance."""
+    """Regression gate accepts rows inside the baseline-derived tolerance."""
 
     baseline = _payload([_row("resnet18", "cpu", "tl_trace", 100.0, iqr_ms=3.0)])
-    current = _payload([_row("resnet18", "cpu", "tl_trace", 111.0, iqr_ms=6.0)])
+    current = _payload([_row("resnet18", "cpu", "tl_trace", 109.0, iqr_ms=6.0)])
 
     comparison = compare_gate_payloads(baseline, current)
 
     assert comparison["passed"] is True
-    assert comparison["checks"][0]["tolerance_ms"] == 12.0
+    assert comparison["checks"][0]["tolerance_ms"] == 10.0
 
 
 def test_perf_gate_compare_fails_regression_beyond_tolerance() -> None:

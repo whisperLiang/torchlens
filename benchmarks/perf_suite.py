@@ -308,6 +308,7 @@ def _run_cell(
     samples: int,
     timeout: int,
     tag: str,
+    threads: int = 4,
 ) -> dict[str, Any]:
     """Run one benchmark subprocess.
 
@@ -327,6 +328,8 @@ def _run_cell(
         Subprocess timeout in seconds.
     tag:
         Output filename tag.
+    threads:
+        Torch intra-op thread pin forwarded to the runner (0 = unpinned).
 
     Returns
     -------
@@ -351,6 +354,8 @@ def _run_cell(
         str(out),
         "--samples",
         str(samples),
+        "--threads",
+        str(threads),
     ]
     start = time.perf_counter()
     try:
@@ -886,11 +891,18 @@ def _write_report(payload: dict[str, Any], path: Path = RESULT_MD) -> None:
         "",
         "## Methodology",
         "",
-        "Each operation/model/device/pass cell runs in a fresh subprocess. Timing cells use 5 "
-        "untimed warmups and 50 measured wall-clock samples unless the row is a one-time "
-        "startup cost. Memory cells are separate subprocesses that record USS after setup, "
-        "run the operation 10 untimed times, and report `uss_delta_mb_memory_pass`. CUDA "
-        "memory columns are true allocator peaks after `torch.cuda.reset_peak_memory_stats()`.",
+        "Each operation/model/device/pass cell runs in a fresh subprocess with torch "
+        "intra-op threads pinned (recorded as `torch_num_threads` in each cell's env "
+        "block; wall times are not comparable across differing thread pins). Timing "
+        "cells use 5 untimed warmups and 50 measured samples unless the row is a "
+        "one-time startup cost; each sample records both wall clock (`perf_counter`) "
+        "and process CPU time (`process_time`, `cpu_*` stats). Memory cells are "
+        "separate subprocesses that record USS after setup, run the operation 10 "
+        "untimed times, and report the end delta `uss_delta_mb_memory_pass` plus the "
+        "phase-local peaks `uss_peak_delta_mb_memory_pass` (per-run sampled) and "
+        "`phase_rss_high_water_delta_mb` (0 means the phase never exceeded the setup "
+        "peak). CUDA memory columns are true allocator peaks after "
+        "`torch.cuda.reset_peak_memory_stats()`.",
         "",
         "Gradient mode is enabled for headline rows, models are in eval mode, dtype is "
         "float32, autocast is not used, TF32 is disabled, and seeds are fixed to 0. "
@@ -984,13 +996,15 @@ def _write_report(payload: dict[str, Any], path: Path = RESULT_MD) -> None:
     path.write_text("\n".join(lines))
 
 
-def _hooked_smoke(timeout: int) -> dict[str, Any]:
+def _hooked_smoke(timeout: int, threads: int) -> dict[str, Any]:
     """Run the HookedTransformer TorchLens capture smoke gate.
 
     Parameters
     ----------
     timeout:
         Timeout in seconds.
+    threads:
+        Torch intra-op thread pin forwarded to the runner.
 
     Returns
     -------
@@ -1007,6 +1021,7 @@ def _hooked_smoke(timeout: int) -> dict[str, Any]:
         samples=1,
         timeout=timeout,
         tag="hooked_smoke",
+        threads=threads,
     ) | {"smoke": "hooked_transformer_tl_capture", "out": str(out)}
 
 
@@ -1028,6 +1043,12 @@ def parse_args() -> argparse.Namespace:
         help="Run only no-save wrapper-overhead rows and merge them into existing results",
     )
     parser.add_argument("--samples", type=int, default=50)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="Torch intra-op thread pin forwarded to every runner cell (0 = unpinned)",
+    )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--out-json", type=Path, default=RESULT_JSON)
     parser.add_argument("--out-md", type=Path, default=RESULT_MD)
@@ -1147,6 +1168,7 @@ def main() -> None:
                 samples=args.samples,
                 timeout=args.timeout,
                 tag="run1",
+                threads=args.threads,
             )
         )
     _assert_torchlens_cells_ok(cells)
@@ -1166,11 +1188,14 @@ def main() -> None:
                     samples=args.samples,
                     timeout=args.timeout,
                     tag="run2",
+                    threads=args.threads,
                 )
             )
         rerun_tolerance = _check_rerun_tolerance(rows, _merge_passes(rerun_cells))
     hooked_smoke = (
-        _hooked_smoke(args.timeout) if not args.smoke and not args.addendum_no_save else None
+        _hooked_smoke(args.timeout, args.threads)
+        if not args.smoke and not args.addendum_no_save
+        else None
     )
     addendum_wall_clock_s = time.perf_counter() - start
     source_sha = _git_sha()
@@ -1187,6 +1212,7 @@ def main() -> None:
                 "hostname": platform.node(),
                 "os": f"{platform.system()} {platform.release()}",
                 "cpu_model": _cpu_model(),
+                "torch_threads_pin": args.threads,
                 "torch": torch.__version__,
                 "cuda_available": torch.cuda.is_available(),
                 "cuda": torch.version.cuda,

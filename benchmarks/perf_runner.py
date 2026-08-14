@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import random
 import resource
@@ -45,6 +46,7 @@ OperationFn = Callable[[], Any]
 DEFAULT_WARMUPS = 5
 DEFAULT_SAMPLES = 50
 DEFAULT_MEMORY_RUNS = 10
+DEFAULT_THREADS = 4
 
 
 def _set_determinism() -> None:
@@ -57,6 +59,20 @@ def _set_determinism() -> None:
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+
+
+def _pin_threads(threads: int) -> None:
+    """Pin torch intra-op parallelism for cross-run comparability.
+
+    Parameters
+    ----------
+    threads:
+        Torch intra-op thread count; ``0`` leaves the runtime default in
+        place (recorded but not comparable across hosts).
+    """
+
+    if threads > 0:
+        torch.set_num_threads(threads)
 
 
 def _package_version(package: str) -> str | None:
@@ -129,12 +145,22 @@ def _env_metadata(device: str) -> dict[str, Any]:
     gpu_name = (
         torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else None
     )
+    try:
+        load_average_1m = os.getloadavg()[0]
+    except OSError:
+        load_average_1m = None
     return {
         "python": sys.version.replace("\n", " "),
         "platform": platform.platform(),
         "hostname": platform.node(),
         "cpu_model": _cpu_model(),
+        "cpu_count": os.cpu_count(),
+        "load_average_1m": load_average_1m,
         "torch": torch.__version__,
+        "torch_num_threads": torch.get_num_threads(),
+        "torch_num_interop_threads": torch.get_num_interop_threads(),
+        "omp_num_threads_env": os.environ.get("OMP_NUM_THREADS"),
+        "mkl_num_threads_env": os.environ.get("MKL_NUM_THREADS"),
         "cuda": torch.version.cuda,
         "gpu_name": gpu_name,
         "torchlens_git_sha": _git_sha(),
@@ -224,13 +250,15 @@ def _percentile(sorted_values: list[float], q: float) -> float:
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
 
 
-def _stats(samples_s: list[float]) -> dict[str, Any]:
+def _stats(samples_s: list[float], prefix: str = "") -> dict[str, Any]:
     """Summarize timing samples.
 
     Parameters
     ----------
     samples_s:
-        Wall-clock samples in seconds.
+        Timing samples in seconds.
+    prefix:
+        Optional key prefix (for example ``"cpu_"`` for process-time stats).
 
     Returns
     -------
@@ -243,14 +271,14 @@ def _stats(samples_s: list[float]) -> dict[str, Any]:
     q1 = _percentile(sorted_ms, 25)
     q3 = _percentile(sorted_ms, 75)
     return {
-        "samples_ms": samples_ms,
-        "sample_count": len(samples_ms),
-        "median_ms": statistics.median(samples_ms) if samples_ms else None,
-        "mean_ms": statistics.mean(samples_ms) if samples_ms else None,
-        "stdev_ms": statistics.stdev(samples_ms) if len(samples_ms) > 1 else 0.0,
-        "p5_ms": _percentile(sorted_ms, 5),
-        "p95_ms": _percentile(sorted_ms, 95),
-        "iqr_ms": q3 - q1,
+        f"{prefix}samples_ms": samples_ms,
+        f"{prefix}sample_count": len(samples_ms),
+        f"{prefix}median_ms": statistics.median(samples_ms) if samples_ms else None,
+        f"{prefix}mean_ms": statistics.mean(samples_ms) if samples_ms else None,
+        f"{prefix}stdev_ms": statistics.stdev(samples_ms) if len(samples_ms) > 1 else 0.0,
+        f"{prefix}p5_ms": _percentile(sorted_ms, 5),
+        f"{prefix}p95_ms": _percentile(sorted_ms, 95),
+        f"{prefix}iqr_ms": q3 - q1,
     }
 
 
@@ -274,7 +302,7 @@ def _select_fastlog_names(model: torch.nn.Module, x: Any, fraction: float) -> se
 
     import torchlens as tl
 
-    trace = tl.fastlog.dry_run(model, x, keep_op=lambda _ctx: True)
+    trace = tl.fastlog.dry_run(model, x, save=lambda _ctx: True)
     names = [
         getattr(ctx, "func_name", "") for ctx in trace.contexts if getattr(ctx, "func_name", "")
     ]
@@ -310,7 +338,7 @@ def _fastlog_op_halt_index(model: torch.nn.Module, x: Any, fraction: float) -> i
 
     import torchlens as tl
 
-    trace = tl.fastlog.dry_run(model, x, keep_op=lambda _ctx: True)
+    trace = tl.fastlog.dry_run(model, x, save=lambda _ctx: True)
     op_count = sum(1 for ctx in trace.contexts if getattr(ctx, "kind", None) == "op")
     return max(1, int(op_count * fraction))
 
@@ -456,12 +484,13 @@ def _operation(
         import torchlens as tl
 
         _prime_target_model(model, x, device)
-        state["fastlog_zero_policy"] = "keep_op=False, keep_module=False"
+        state["fastlog_zero_policy"] = (
+            "save=False predicate, default_op=False, default_module=False"
+        )
         return lambda: tl.fastlog.record(
             model,
             x,
-            keep_op=lambda ctx: False,
-            keep_module=lambda ctx: False,
+            save=lambda _ctx: False,
             default_op=False,
             default_module=False,
         )
@@ -490,7 +519,7 @@ def _operation(
         return lambda: tl.fastlog.record(
             model,
             x,
-            keep_op=lambda ctx: getattr(ctx, "func_name", None) in names,
+            save=lambda ctx: getattr(ctx, "func_name", None) in names,
             default_op=False,
             default_module=False,
         )
@@ -503,7 +532,7 @@ def _operation(
         return lambda: tl.fastlog.record(
             model,
             x,
-            keep_op=lambda ctx: getattr(ctx, "func_name", None) in names,
+            save=lambda ctx: getattr(ctx, "func_name", None) in names,
             default_op=False,
             default_module=False,
         )
@@ -603,13 +632,16 @@ def _run_timing(fn: OperationFn, device: str, warmups: int, samples: int) -> dic
         fn()
     _sync(device)
     samples_s: list[float] = []
+    cpu_samples_s: list[float] = []
     for _ in range(samples):
         _sync(device)
         start = time.perf_counter()
+        cpu_start = time.process_time()
         fn()
         _sync(device)
+        cpu_samples_s.append(time.process_time() - cpu_start)
         samples_s.append(time.perf_counter() - start)
-    return _stats(samples_s)
+    return _stats(samples_s) | _stats(cpu_samples_s, prefix="cpu_")
 
 
 def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any]:
@@ -627,7 +659,11 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     Returns
     -------
     dict[str, Any]
-        Memory metrics.
+        Memory metrics. Peak fields are phase-local: the USS peak is sampled
+        after every run against a pre-loop baseline, and the RSS high-water
+        delta subtracts the pre-loop process high water (so ``0.0`` means the
+        operation phase never exceeded the setup-phase peak, not that the
+        operation allocated nothing).
     """
 
     metrics: dict[str, Any] = {"memory_run_count": memory_runs}
@@ -641,18 +677,27 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
         process = None
         baseline_uss = None
         metrics["uss_delta_mb_memory_pass"] = None
+        metrics["uss_peak_delta_mb_memory_pass"] = None
         metrics["uss_skip_reason"] = "psutil unavailable"
+    rss_high_water_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    metrics["rss_high_water_before_mb"] = rss_high_water_before / 1024
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
+    peak_uss = baseline_uss
     for _ in range(memory_runs):
         fn()
+        if process is not None and peak_uss is not None:
+            peak_uss = max(peak_uss, process.memory_full_info().uss)
     _sync(device)
-    if process is not None and baseline_uss is not None:
+    if process is not None and baseline_uss is not None and peak_uss is not None:
         final_uss = process.memory_full_info().uss
+        peak_uss = max(peak_uss, final_uss)
         metrics["final_uss_mb"] = final_uss / 1024 / 1024
         metrics["uss_delta_mb_memory_pass"] = (final_uss - baseline_uss) / 1024 / 1024
+        metrics["uss_peak_delta_mb_memory_pass"] = (peak_uss - baseline_uss) / 1024 / 1024
     usage = resource.getrusage(resource.RUSAGE_SELF)
     metrics["process_high_water_rss_mb"] = usage.ru_maxrss / 1024
+    metrics["phase_rss_high_water_delta_mb"] = (usage.ru_maxrss - rss_high_water_before) / 1024
     if device == "cuda":
         metrics["max_allocated_mb"] = torch.cuda.max_memory_allocated() / 1024 / 1024
         metrics["max_reserved_mb"] = torch.cuda.max_memory_reserved() / 1024 / 1024
@@ -692,6 +737,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS)
     parser.add_argument("--memory-runs", type=int, default=DEFAULT_MEMORY_RUNS)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=DEFAULT_THREADS,
+        help="Torch intra-op thread pin (0 leaves the runtime default unpinned)",
+    )
     return parser.parse_args()
 
 
@@ -700,6 +751,7 @@ def main() -> None:
 
     args = parse_args()
     _set_determinism()
+    _pin_threads(args.threads)
     payload: dict[str, Any] = {
         "operation": args.operation,
         "model": args.model,
