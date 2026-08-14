@@ -872,6 +872,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         reads=frozenset(
             (
                 "_edge_uses",
+                # Reviewed widening (8ba75e99 superlinear-rename fix): the
+                # recurrent_ops rename memo is indexed by every raw member
+                # label, so the sweep reads each entry's own _label_raw as
+                # the memo lookup key.
+                "_label_raw",
                 "_param_barcodes",
                 "activation_memory",
                 "args_template",
@@ -1829,6 +1834,11 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                 (
                     "internal_source_parents",
                     "_edge_uses",
+                    # Reviewed widening (8ba75e99 superlinear-rename fix):
+                    # step 9's recurrent_ops rename memo reads each entry's
+                    # _label_raw as its lookup key, which step 1 writes when
+                    # minting output rows.
+                    "_label_raw",
                     "_param_barcodes",
                     "activation_memory",
                     "atomic_module_call",

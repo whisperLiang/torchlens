@@ -193,9 +193,15 @@ def test_buffer_duplicate_axis_actually_merges(
     merges: list[tuple[str, str]] = []
     real_merge = cf._merge_buffer_entries
 
-    def spying_merge(trace: Any, survivor: Any, removed: Any) -> None:
+    def spying_merge(
+        trace: Any,
+        survivor: Any,
+        removed: Any,
+        *,
+        deferred_removals: Any = None,
+    ) -> None:
         merges.append((survivor._label_raw, removed._label_raw))
-        real_merge(trace, survivor, removed)
+        real_merge(trace, survivor, removed, deferred_removals=deferred_removals)
 
     monkeypatch.setattr(cf, "_merge_buffer_entries", spying_merge)
     trace = _axis_buffer_duplicate()
