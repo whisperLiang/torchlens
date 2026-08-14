@@ -59,6 +59,17 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     "torchlens/backends/torch/_completeness_finalize.py": frozenset(
         {"getattr(torch, '_C')"}
     ),
+    # Expanded-weights shim comparison basis: torch's own
+    # ``ExpandedWeight.__torch_function__`` special-cases
+    # ``func is torch._cudnn_rnn_flatten_weight`` with a CALL-TIME namespace
+    # read, so the shim must compare against the very same call-time object --
+    # a compat-layer snapshot could drift from what torch compares. Guarded
+    # getattr, fail-neutral: if the symbol disappears, torch's special case
+    # disappears with it and the shim falls through to the alias-table path
+    # (fw2/wrap identity shims).
+    "torchlens/backends/torch/identity_shims.py": frozenset(
+        {"getattr(torch, '_cudnn_rnn_flatten_weight')"}
+    ),
     # TorchDispatchMode base class (public-by-usage, import fails the module
     # loudly at import time) and the same fail-closed torch.ops enumeration.
     "torchlens/backends/torch/completeness_witness.py": frozenset(
