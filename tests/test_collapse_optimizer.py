@@ -650,18 +650,22 @@ def test_collapse_adjacency_index_build_and_visit_bound(
     original_resolver = auto_collapse._resolve_relationship_op
     counts = {"index_builds": 0, "relationship_visits": 0}
 
-    def counted_index(target: tl.Trace) -> Mapping[str, str]:
+    def counted_index(
+        target: tl.Trace, revision: tuple[object, ...] | None = None
+    ) -> Mapping[str, str]:
         """Count cache-miss index constructions."""
 
         if target not in auto_collapse._OP_ADJACENCY_INDEX_CACHE:
             counts["index_builds"] += 1
-        return original_index(target)
+        return original_index(target, revision)
 
-    def counted_resolver(target: tl.Trace, label: str) -> Any:
+    def counted_resolver(
+        target: tl.Trace, label: str, revision: tuple[object, ...] | None = None
+    ) -> Any:
         """Count relationship-resolution visits."""
 
         counts["relationship_visits"] += 1
-        return original_resolver(target, label)
+        return original_resolver(target, label, revision)
 
     def reject_fuzzy_lookup(self: TraceOpAccessor, key: str) -> Any:
         """Fail if an ordinary relationship label requires fuzzy lookup."""
@@ -1541,7 +1545,7 @@ def test_auto_plan_unaffected_by_max_salience_floor(
             "torchlens.visualization.collapse_optimizer.MAX_SALIENCE_FLOOR",
             0.0,
         )
-        _RESULT_CACHE[trace].pop((context, "auto"), None)
+        _RESULT_CACHE.pop(trace, None)
         auto_collapse_result = select_collapse_plan(trace, context, mode="auto")
 
         assert _plan_signature(auto_collapse_result.plan) == _plan_signature(baseline)

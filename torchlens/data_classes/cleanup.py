@@ -29,6 +29,7 @@ from .._trace_core.groups import GroupRef
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..intervention.types import ParentRef, Unsupported
 from ..utils.collections import remove_entry_from_list
+from ..utils.display import cleanup_trace_visualizer_dir
 from ..utils.tensor_utils import _is_cuda_available
 from ._state_adapter import state_items
 from .op import Op
@@ -52,6 +53,7 @@ def cleanup(self: "Trace") -> None:
     close_fast_run_session(self)
     _purge_trace_from_backward_registry(self)
     forget_event_stream(self)
+    cleanup_trace_visualizer_dir(self)
     # GC-1: Release parameter references to allow model GC.
     if hasattr(self, "param_logs"):
         for pl in self.param_logs:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
@@ -12,6 +11,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
+from ..utils.display import ensure_trace_visualizer_dir
 from ..visualization.node_spec import NodeSpec, NodeSpecFn
 from .node_plots import _apply_colormap, _normalize_finite
 
@@ -907,11 +907,7 @@ def _write_feature_map_image(trace: Any, key: str, image: Image.Image) -> Path:
         Local PNG path for ``NodeSpec.image``.
     """
 
-    output_dir = getattr(trace, "_visualizer_dir", None)
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="torchlens_visualizers_")
-        trace._visualizer_dir = str(output_dir)
-    plot_dir = Path(str(output_dir)) / "feature_maps"
+    plot_dir = ensure_trace_visualizer_dir(trace) / "feature_maps"
     plot_dir.mkdir(parents=True, exist_ok=True)
     safe_key = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in key)
     image_path = plot_dir / f"{safe_key}.png"

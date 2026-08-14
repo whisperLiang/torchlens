@@ -24,7 +24,6 @@ import pickle
 import re
 import stat
 import tempfile
-import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
@@ -86,6 +85,7 @@ from ._trace_selector_helpers import (
     _make_layers_to_save_predicate,
     _predicate_cache_key,
     _split_save_options_and_predicate,
+    _stable_cache_fragment,
 )
 from ._trace_state import TraceState
 from ._training_validation import TrainingModeConfigError, validate_training_compatibility
@@ -134,7 +134,7 @@ from .options import (
 )
 from .types import ActivationPostfunc, GradientPostfunc
 from .utils._torch_compat import is_dynamo_compiled_callable
-from .utils.display import _vprint, warn_parallel
+from .utils.display import _vprint, atomic_write_text, ensure_trace_visualizer_dir, warn_parallel
 from .utils.introspection import _get_code_context
 from .utils.tensor_utils import SaveMode
 from .visualization.code_panel import (
@@ -182,6 +182,8 @@ _MLX_STATIC_LABEL_SAVE_SELECTOR_KINDS = frozenset(
 _CAPTURE_CACHE_SECRET_FILE = ".capture_cache_secret"
 _CAPTURE_CACHE_TAG_SUFFIX = ".hmac"
 _CAPTURE_CACHE_SECRET_BYTES = 32
+_CAPTURE_CACHE_MAX_ENTRIES = 64
+_CAPTURE_CACHE_MAX_BYTES = 2 * 1024**3
 
 
 def _capture_cache_io_error(message: str) -> Exception:
@@ -424,12 +426,17 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     elif not tag_path.is_file():
         reason = "no authentication tag accompanies it"
     else:
-        recorded = tag_path.read_text(encoding="ascii").strip()
-        if not hmac.compare_digest(recorded, _capture_cache_tag_of_file(secret, cache_path)):
-            reason = "its authentication tag does not match its bytes"
+        try:
+            recorded = tag_path.read_text(encoding="ascii").strip()
+            observed = _capture_cache_tag_of_file(secret, cache_path)
+        except (OSError, UnicodeError) as exc:
+            reason = f"its authentication metadata cannot be read ({exc})"
         else:
-            with cache_path.open("rb") as handle:
-                return pickle.load(handle)
+            if not hmac.compare_digest(recorded, observed):
+                reason = "its authentication tag does not match its bytes"
+            else:
+                with cache_path.open("rb") as handle:
+                    return pickle.load(handle)
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
@@ -462,14 +469,99 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
     import hmac
 
     mac = hmac.new(secret, digestmod=hashlib.sha256)
-    # Streamed, so caching a multi-GiB trace does not additionally materialize the
-    # whole pickle in memory just to tag it.
-    with cache_path.open("wb") as file:
-        pickle.dump(trace, _TaggingWriter(file, mac))
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=cache_path.parent,
+        prefix=f".{cache_path.name}.tmp.",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        # Streamed, so caching a multi-GiB trace does not additionally materialize
+        # the whole pickle in memory just to tag it.
+        with os.fdopen(descriptor, "wb") as file:
+            pickle.dump(trace, _TaggingWriter(file, mac))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, cache_path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
     tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
-    # Payload first, then tag: a crash between the two leaves an unauthenticated
-    # entry, which the loader treats as a miss rather than trusting it.
-    tag_path.write_text(mac.hexdigest(), encoding="ascii")
+    atomic_write_text(tag_path, mac.hexdigest(), encoding="ascii")
+
+
+def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
+    """Enforce capture-cache entry and byte limits using mtime LRU order.
+
+    Parameters
+    ----------
+    cache_root:
+        Directory containing authenticated cache entries.
+    keep:
+        Just-written entry, which is never evicted in the same operation.
+    """
+
+    entries: list[tuple[int, int, Path, Path]] = []
+    for payload in cache_root.glob("*.pkl"):
+        tag = payload.with_name(payload.name + _CAPTURE_CACHE_TAG_SUFFIX)
+        if payload.is_symlink() or tag.is_symlink() or not tag.is_file():
+            continue
+        try:
+            payload_stat = payload.stat()
+            tag_stat = tag.stat()
+        except OSError:
+            continue
+        entries.append(
+            (
+                max(payload_stat.st_mtime_ns, tag_stat.st_mtime_ns),
+                payload_stat.st_size + tag_stat.st_size,
+                payload,
+                tag,
+            )
+        )
+    entries.sort(reverse=True)
+    total_bytes = sum(entry[1] for entry in entries)
+    retained = len(entries)
+    for _mtime_ns, size, payload, tag in reversed(entries):
+        if retained <= _CAPTURE_CACHE_MAX_ENTRIES and total_bytes <= _CAPTURE_CACHE_MAX_BYTES:
+            break
+        if payload == keep:
+            continue
+        payload.unlink(missing_ok=True)
+        tag.unlink(missing_ok=True)
+        total_bytes -= size
+        retained -= 1
+
+
+def clear_capture_cache(cache_dir: str | Path | None = None) -> int:
+    """Delete authenticated capture-cache entries while preserving the secret.
+
+    Parameters
+    ----------
+    cache_dir:
+        Cache root accepted by ``trace(cache_dir=...)``. ``None`` uses the
+        configured default.
+
+    Returns
+    -------
+    int
+        Number of payload entries removed.
+    """
+
+    cache_root = _capture_cache_dir(cache_dir) / "capture"
+    if not cache_root.exists():
+        return 0
+    if cache_root.is_symlink() or not cache_root.is_dir():
+        raise _capture_cache_io_error(f"Refusing non-directory capture cache {cache_root}.")
+    removed = 0
+    for payload in cache_root.glob("*.pkl"):
+        if payload.is_symlink():
+            continue
+        tag = payload.with_name(payload.name + _CAPTURE_CACHE_TAG_SUFFIX)
+        payload.unlink(missing_ok=True)
+        if not tag.is_symlink():
+            tag.unlink(missing_ok=True)
+        removed += 1
+    return removed
 
 
 def list_logs() -> tuple[Trace, ...]:
@@ -1565,57 +1657,28 @@ def _run_model_and_save_specified_outs(
         _state.reset_capture_runtime_context()
         raise
     try:
-        if trace.capture_mode == "predicate":
-            from .capture.projections import (
-                RecordingState,
-                _empty_recording,
-                active_recording_state,
-            )
-
-            options = trace._predicate_save_options
-            recording = _empty_recording(options)
-            recording_state = RecordingState(options=options, recording=recording)
-            recording_state.pass_index = 1
-            recording_state.runtime_trace = trace
-            trace._fastlog_recording = recording
-            recording.start_times.append(time.time())
-            try:
-                with active_recording_state(recording_state):
-                    trace._run_and_log_inputs_through_model(
-                        model,
-                        cast(torch.Tensor | list[Any], input_args),
-                        input_kwargs,
-                        layers_to_save,
-                        grads_to_save,
-                        random_seed,
-                    )
-            except Exception as exc:
-                recording_state.abort_storage(str(exc))
-                raise
-            finally:
-                recording.end_times.append(time.time())
-            recording_state.finalize_storage()
-            recording_state.raise_accumulated_predicate_error()
-        else:
-            trace._run_and_log_inputs_through_model(
-                model,
-                cast(torch.Tensor | list[Any], input_args),
-                input_kwargs,
-                layers_to_save,
-                grads_to_save,
-                random_seed,
-            )
-    except (PredicateError, SaveBudgetExceededError, TorchLensIOError, TorchLensPostfuncError):
-        raise
-    except Exception as exc:
+        trace._run_and_log_inputs_through_model(
+            model,
+            cast(torch.Tensor | list[Any], input_args),
+            input_kwargs,
+            layers_to_save,
+            grads_to_save,
+            random_seed,
+        )
+    except BaseException as exc:
         # F5: postprocess pops ``_out_writer`` at its transient-state seam, so
         # a post-seam failure (teardown, streaming tail) reaches this handler
         # on a trace WITHOUT the attribute; the unguarded read used to mask
         # the real exception with AttributeError.
         out_writer = trace.__dict__.get("_out_writer")
         if out_writer is not None:
-            out_writer.abort(str(exc))
-            raise TorchLensIOError("Streaming out save failed during forward pass.") from exc
+            if not getattr(out_writer, "_closed", False):
+                out_writer.abort(str(exc))
+            if isinstance(exc, Exception) and not isinstance(
+                exc,
+                (PredicateError, SaveBudgetExceededError, TorchLensIOError, TorchLensPostfuncError),
+            ):
+                raise TorchLensIOError("Streaming out save failed during forward pass.") from exc
         raise
     finally:
         _state.reset_capture_runtime_context()
@@ -1651,8 +1714,7 @@ def _render_layer_visualizers(
         Mapping from TorchLens site selectors to visualizer callables.
     """
 
-    output_dir = Path(tempfile.mkdtemp(prefix="torchlens_visualizers_"))
-    trace._visualizer_dir = str(output_dir)
+    output_dir = ensure_trace_visualizer_dir(trace)
     visualizer_dir = output_dir / "visualizers"
     visualizer_dir.mkdir(parents=True, exist_ok=True)
     max_fanout = max(1, len(trace.layer_list))
@@ -2786,7 +2848,7 @@ def _trace_torch_model(
             "chunk_size": normalized_chunk_size,
             "chunk_paths": normalize_chunk_paths(chunk_paths_value),
             "capture_container_structure": capture_container_structure,
-            "output_transform": repr(output_transform_value),
+            "output_transform": _stable_cache_fragment(output_transform_value),
             "output_style": output_style_value,
             "output_head": output_head_value,
             "semantic_output_cache_key": semantic_output_cache_key(
@@ -2810,14 +2872,14 @@ def _trace_torch_model(
             "save_raw_output": repr(save_raw_output_policy),
             "save_raw_activations": save_raw_activations,
             "save_raw_gradients": save_raw_gradients,
-            "activation_transform": repr(activation_transform),
-            "grad_transform": repr(grad_transform),
+            "activation_transform": _stable_cache_fragment(activation_transform),
+            "grad_transform": _stable_cache_fragment(grad_transform),
             "random_seed": random_seed,
-            "module_filter": repr(module_filter_value),
-            "layer_visualizers": repr(layer_visualizers_value),
-            "save_visualizations": repr(save_visualizations_value),
+            "module_filter": _stable_cache_fragment(module_filter_value),
+            "layer_visualizers": _stable_cache_fragment(layer_visualizers_value),
+            "save_visualizations": _stable_cache_fragment(save_visualizations_value),
             "optimizer": repr(optimizer),
-            "hooks": repr(hooks),
+            "hooks": _stable_cache_fragment(hooks),
             "lookback": lookback,
             "lookback_payload_policy": lookback_payload_policy,
             "jax_control_flow": capture_options.jax_control_flow,
@@ -2834,6 +2896,12 @@ def _trace_torch_model(
                 "Trace | None", _load_authenticated_capture_cache(cache_path, cache_secret)
             )
             if cached_log is not None:
+                tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
+                try:
+                    os.utime(cache_path, None)
+                    os.utime(tag_path, None)
+                except OSError:
+                    pass
                 cached_log.capture_cache_hit = True
                 cached_log.capture_cache_key = cache_key
                 cached_log.capture_cache_path = str(cache_path)
@@ -3115,6 +3183,7 @@ def _trace_torch_model(
             trace.capture_cache_path = str(cache_path)
             _prepare_log_for_capture_cache(trace)
             _store_authenticated_capture_cache(trace, cache_path, cache_secret)
+            _evict_capture_cache(cache_path.parent, keep=cache_path)
         return trace
 
     run_capture = functools.partial(
@@ -3237,6 +3306,7 @@ def _trace_torch_model(
         trace.capture_cache_path = str(cache_path)
         _prepare_log_for_capture_cache(trace)
         _store_authenticated_capture_cache(trace, cache_path, cache_secret)
+        _evict_capture_cache(cache_path.parent, keep=cache_path)
 
     return trace
 
@@ -3267,8 +3337,10 @@ def log_model_metadata(
         model,
         input_args,
         input_kwargs,
-        layers_to_save=None,
-        compute_input_output_distances=True,
+        capture=CaptureOptions(
+            layers_to_save=None,
+            compute_input_output_distances=True,
+        ),
     )
 
 

@@ -227,8 +227,12 @@ class CaptureSession:
         self.gradient_reference_peak_count = 0
         self.live_gradient_labels.clear()
         if self._activation_spill_dir is not None:
-            self._activation_spill_dir.cleanup()
-            self._activation_spill_dir = None
+            try:
+                self._activation_spill_dir.cleanup()
+            except Exception:
+                pass
+            finally:
+                self._activation_spill_dir = None
         self._gradient_warning_emitted = False
         self.backend_token = None
         if self.outcome is not None:

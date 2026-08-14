@@ -211,19 +211,70 @@ class CollapseAnalysis:
     elapsed_ms: float
 
 
-_ANALYSIS_CACHE: weakref.WeakKeyDictionary[Any, CollapseAnalysis] = weakref.WeakKeyDictionary()
-_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[Any, Mapping[str, str]] = (
-    weakref.WeakKeyDictionary()
-)
+_ANALYSIS_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[tuple[object, ...], CollapseAnalysis]
+] = weakref.WeakKeyDictionary()
+_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[tuple[object, ...], Mapping[str, str]]
+] = weakref.WeakKeyDictionary()
 
 
-def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
+def _collapse_graph_revision(trace: Trace) -> tuple[object, ...]:
+    """Return a by-value graph fingerprint for visualization cache invalidation.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose mutable graph and module relations are fingerprinted.
+
+    Returns
+    -------
+    tuple[object, ...]
+        Stable snapshot of collapse-relevant operation and module metadata.
+    """
+
+    op_revision = tuple(
+        (
+            op.label,
+            op.label_short,
+            op._label_raw,
+            op.layer_label,
+            op.layer_label_short,
+            tuple(op.parents),
+            tuple(op.children),
+            tuple(str(module) for module in (op.modules or ())),
+            op.func_name,
+            tuple(op.shape),
+            op.io_role,
+        )
+        for op in trace.ops
+    )
+    module_revision = tuple(
+        (
+            module.address,
+            getattr(module, "address_parent", None),
+            tuple(getattr(module, "address_children", ()) or ()),
+            getattr(module, "num_calls", None),
+            getattr(module, "num_params", None),
+        )
+        for module in trace.modules
+    )
+    return (op_revision, module_revision)
+
+
+def _op_adjacency_index(
+    trace: Trace, revision: tuple[object, ...] | None = None
+) -> Mapping[str, str]:
     """Return unambiguous relationship labels mapped to canonical Op labels.
 
     Parameters
     ----------
     trace:
         Trace whose operation relationships are being indexed.
+    revision:
+        Already-computed graph fingerprint for this probe. ``None`` computes
+        it here; entry points that just fingerprinted the trace pass it in so
+        validation stays one O(ops) walk per public call, not one per probe.
 
     Returns
     -------
@@ -231,9 +282,14 @@ def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
         Unambiguous accessor label forms mapped to canonical operation labels.
     """
 
+    if revision is None:
+        revision = _collapse_graph_revision(trace)
     cached = _OP_ADJACENCY_INDEX_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    # Identity first: a walk threads ONE revision object through every
+    # resolve, so repeat probes within that walk are O(1), not a full
+    # tuple-equality pass over the fingerprint.
+    if cached is not None and (cached[0] is revision or cached[0] == revision):
+        return cached[1]
     unique_ops: dict[str, Op] = {}
     ambiguous_forms: set[str] = set()
     for op in trace.ops:
@@ -254,11 +310,13 @@ def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
             elif existing is not op:
                 ambiguous_forms.add(form)
     index = {form: op.label for form, op in unique_ops.items() if form not in ambiguous_forms}
-    _OP_ADJACENCY_INDEX_CACHE[trace] = index
+    _OP_ADJACENCY_INDEX_CACHE[trace] = (revision, index)
     return index
 
 
-def _resolve_relationship_op(trace: Trace, label: str) -> Op:
+def _resolve_relationship_op(
+    trace: Trace, label: str, revision: tuple[object, ...] | None = None
+) -> Op:
     """Resolve a parent/child relationship label without changing accessor semantics.
 
     Parameters
@@ -267,6 +325,12 @@ def _resolve_relationship_op(trace: Trace, label: str) -> Op:
         Trace that owns the operation relationship.
     label:
         Label stored in an operation's ``parents`` or ``children`` collection.
+    revision:
+        Graph fingerprint already computed by the calling walk. ``None``
+        fingerprints here; per-edge callers must thread the walk-level
+        revision or every edge pays a full O(ops) fingerprint just to probe
+        the adjacency cache. The index itself still builds lazily, on the
+        first resolve that actually needs it.
 
     Returns
     -------
@@ -274,7 +338,7 @@ def _resolve_relationship_op(trace: Trace, label: str) -> Op:
         The same operation returned by the public trace accessor.
     """
 
-    canonical_label = _op_adjacency_index(trace).get(label)
+    canonical_label = _op_adjacency_index(trace, revision).get(label)
     if canonical_label is None:
         return cast("Op", trace.ops[label])
     return cast("Op", trace.ops[canonical_label])
@@ -294,14 +358,17 @@ def analyze_collapse(trace: Trace) -> CollapseAnalysis:
         Cached signal, digest, peer, and score data.
     """
 
+    revision = _collapse_graph_revision(trace)
     cached = _ANALYSIS_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == revision:
+        return cached[1]
     start = time.perf_counter()
-    signals_without_peers = _compute_signal_skeleton(trace)
+    signals_without_peers = _compute_signal_skeleton(trace, revision)
     digests = _compute_structural_digests(trace, signals_without_peers)
     peer_groups = _group_structural_peers(trace, digests)
-    child_flow_graphs = _compute_child_condensed_flow_graphs(trace, signals_without_peers)
+    child_flow_graphs = _compute_child_condensed_flow_graphs(
+        trace, signals_without_peers, revision
+    )
     peer_count_by_address: dict[str, int] = {}
     for group in peer_groups.values():
         for address in group:
@@ -335,7 +402,7 @@ def analyze_collapse(trace: Trace) -> CollapseAnalysis:
         child_flow_graphs=child_flow_graphs,
         elapsed_ms=(time.perf_counter() - start) * 1000.0,
     )
-    _ANALYSIS_CACHE[trace] = analysis
+    _ANALYSIS_CACHE[trace] = (revision, analysis)
     return analysis
 
 
@@ -802,10 +869,13 @@ def _synthetic_child_condensed_flow_graph(
         for label in labels:
             owner_by_label[label] = child_address
     edges: set[tuple[str, str]] = set()
+    # Reachable outside analyze_collapse (optimizer synthetic scopes), so this
+    # walk fingerprints once here rather than per edge.
+    revision = _collapse_graph_revision(trace)
     for op in trace.ops:
         source = owner_by_label.get(op.label)
         for child_label in getattr(op, "children", ()) or ():
-            child_op = _resolve_relationship_op(trace, child_label)
+            child_op = _resolve_relationship_op(trace, child_label, revision)
             target_label = child_op.label
             if not _is_forward_dataflow_edge(trace, op.label, target_label):
                 continue
@@ -1703,7 +1773,9 @@ def _module_output_shape(trace: Trace, address: str) -> str | None:
     return str(tuple(shape))
 
 
-def _compute_signal_skeleton(trace: Trace) -> dict[str, ModuleCollapseSignals]:
+def _compute_signal_skeleton(
+    trace: Trace, revision: tuple[object, ...]
+) -> dict[str, ModuleCollapseSignals]:
     """Compute all non-peer module signals in one shared traversal."""
 
     op_labels_by_module: dict[str, list[str]] = defaultdict(list)
@@ -1715,26 +1787,34 @@ def _compute_signal_skeleton(trace: Trace) -> dict[str, ModuleCollapseSignals]:
     ops = list(trace.ops)
     op_by_label = {op.label: op for op in ops}
     stack_by_label = {op.label: _module_address_stack(op) for op in ops}
+    labels_by_stack: dict[tuple[str, ...], list[str]] = defaultdict(list)
 
     for op in ops:
         stack = stack_by_label[op.label]
-        for address in stack:
-            op_labels_by_module[address].append(op.label)
+        labels_by_stack[stack].append(op.label)
         if stack:
             own_func_names_by_module[stack[-1]].append(_op_func_name(op))
 
+    # Most ops share an enclosing module stack. Expand each distinct stack once,
+    # rather than repeating the same ancestry walk for every op in the module.
+    for stack, labels in labels_by_stack.items():
+        for address in stack:
+            op_labels_by_module[address].extend(labels)
+
+    stack_sets = {stack: frozenset(stack) for stack in labels_by_stack}
+
     for parent in ops:
         parent_stack = stack_by_label[parent.label]
-        parent_set = set(parent_stack)
+        parent_set = stack_sets.setdefault(parent_stack, frozenset(parent_stack))
         for child_label in parent.children:
             child = op_by_label.get(child_label)
             if child is None:
-                child = _resolve_relationship_op(trace, child_label)
+                child = _resolve_relationship_op(trace, child_label, revision)
                 op_by_label[child_label] = child
                 op_by_label[child.label] = child
                 stack_by_label[child.label] = _module_address_stack(child)
             child_stack = stack_by_label[child.label]
-            child_set = set(child_stack)
+            child_set = stack_sets.setdefault(child_stack, frozenset(child_stack))
             edge = (parent.label, child.label)
             for address in parent_set & child_set:
                 internal_edges[address].add(edge)
@@ -1760,8 +1840,9 @@ def _compute_signal_skeleton(trace: Trace) -> dict[str, ModuleCollapseSignals]:
                 module,
                 subtree_ops,
                 input_edges.get(address, set()) | output_edges.get(address, set()),
+                revision,
             ),
-            passthrough_edges=_count_passthrough_edges(trace, module, subtree_ops),
+            passthrough_edges=_count_passthrough_edges(trace, module, subtree_ops, revision),
             output_junctions=_output_junctions(
                 trace,
                 module,
@@ -1788,6 +1869,7 @@ def _module_address_stack(op: Op) -> tuple[str, ...]:
 def _compute_child_condensed_flow_graphs(
     trace: Trace,
     signals: Mapping[str, ModuleCollapseSignals],
+    revision: tuple[object, ...],
 ) -> dict[str, ChildCondensedFlowGraph]:
     """Compute child-condensed flow graphs for every parent module.
 
@@ -1797,6 +1879,8 @@ def _compute_child_condensed_flow_graphs(
         Trace owning the module hierarchy.
     signals:
         Precomputed module signal skeletons.
+    revision:
+        Walk-level graph fingerprint threaded through relationship resolution.
 
     Returns
     -------
@@ -1850,6 +1934,7 @@ def _compute_child_condensed_flow_graphs(
             child_sets,
             set(parent_ops),
             owner_by_op,
+            revision,
         )
         endpoint_counts = _child_external_endpoint_counts(edges, flow_children)
         interval_flags = _flow_interval_flags(trace, flow_children, child_sets, edges)
@@ -2028,6 +2113,7 @@ def _condensed_edges(
     child_sets: Mapping[str, set[str]],
     parent_ops: set[str],
     owner_by_op: Mapping[str, str],
+    revision: tuple[object, ...],
 ) -> tuple[tuple[str, str], ...]:
     """Return condensed edges within one parent module subtree.
 
@@ -2043,6 +2129,8 @@ def _condensed_edges(
         Parent-owned operation labels.
     owner_by_op:
         First-wins direct-child owner index.
+    revision:
+        Walk-level graph fingerprint threaded through relationship resolution.
 
     Returns
     -------
@@ -2060,7 +2148,7 @@ def _condensed_edges(
         op = cast("Op", trace.ops[label])
         source = _condensed_owner_for_op(label, owner_by_op)
         for parent_label in getattr(op, "parents", ()) or ():
-            parent_op = _resolve_relationship_op(trace, parent_label)
+            parent_op = _resolve_relationship_op(trace, parent_label, revision)
             normalized_parent_label = parent_op.label
             if normalized_parent_label in parent_subtree:
                 continue
@@ -2068,7 +2156,7 @@ def _condensed_edges(
                 continue
             edges.add((f"external_source:{normalized_parent_label}", source))
         for child_label in getattr(op, "children", ()) or ():
-            child = _resolve_relationship_op(trace, child_label)
+            child = _resolve_relationship_op(trace, child_label, revision)
             normalized_child_label = child.label
             if not _is_forward_dataflow_edge(trace, label, normalized_child_label):
                 continue
@@ -2207,6 +2295,7 @@ def _count_landmark_edges(
     module: Module,
     subtree_ops: tuple[str, ...],
     boundary_edges: set[tuple[str, str]],
+    revision: tuple[object, ...],
 ) -> int:
     """Return boundary-crossing junction edges for a module.
 
@@ -2220,6 +2309,8 @@ def _count_landmark_edges(
         Pass-qualified operation labels in the module subtree.
     boundary_edges:
         Distinct edges crossing the module boundary.
+    revision:
+        Walk-level graph fingerprint threaded through relationship resolution.
 
     Returns
     -------
@@ -2253,7 +2344,7 @@ def _count_landmark_edges(
             continue
         if getattr(parent, "is_output", False) or getattr(child, "is_output", False):
             continue
-        if not _boundary_edge_preserves_junction(trace, parent, child, subtree):
+        if not _boundary_edge_preserves_junction(trace, parent, child, subtree, revision):
             continue
         landmarks.add((parent.label, child.label))
     return len(landmarks)
@@ -2264,6 +2355,7 @@ def _boundary_edge_preserves_junction(
     parent: Op,
     child: Op,
     subtree: set[str],
+    revision: tuple[object, ...],
 ) -> bool:
     """Return whether a boundary edge is part of a cross-boundary junction.
 
@@ -2277,6 +2369,8 @@ def _boundary_edge_preserves_junction(
         Child endpoint of the boundary edge.
     subtree:
         Pass-qualified operation labels in the candidate module subtree.
+    revision:
+        Walk-level graph fingerprint threaded through relationship resolution.
 
     Returns
     -------
@@ -2295,10 +2389,11 @@ def _boundary_edge_preserves_junction(
         return True
     if not _is_junction_op(internal):
         return False
-    return _has_external_parent(trace, internal, subtree) and _has_external_child(
+    return _has_external_parent(trace, internal, subtree, revision) and _has_external_child(
         trace,
         internal,
         subtree,
+        revision,
     )
 
 
@@ -2308,21 +2403,25 @@ def _is_junction_op(op: Op) -> bool:
     return _op_func_name(op) in JUNCTION_FUNC_NAMES
 
 
-def _has_external_parent(trace: Trace, op: Op, subtree: set[str]) -> bool:
+def _has_external_parent(
+    trace: Trace, op: Op, subtree: set[str], revision: tuple[object, ...]
+) -> bool:
     """Return whether an operation has a non-buffer parent outside ``subtree``."""
 
     for parent_label in getattr(op, "parents", ()) or ():
-        parent = _resolve_relationship_op(trace, parent_label)
+        parent = _resolve_relationship_op(trace, parent_label, revision)
         if parent.label not in subtree and not getattr(parent, "is_buffer", False):
             return True
     return False
 
 
-def _has_external_child(trace: Trace, op: Op, subtree: set[str]) -> bool:
+def _has_external_child(
+    trace: Trace, op: Op, subtree: set[str], revision: tuple[object, ...]
+) -> bool:
     """Return whether an operation has a non-buffer child outside ``subtree``."""
 
     for child_label in getattr(op, "children", ()) or ():
-        child = _resolve_relationship_op(trace, child_label)
+        child = _resolve_relationship_op(trace, child_label, revision)
         if child.label not in subtree and not getattr(child, "is_buffer", False):
             return True
     return False
@@ -2349,6 +2448,7 @@ def _count_passthrough_edges(
     trace: Trace,
     module: Module,
     subtree_ops: tuple[str, ...],
+    revision: tuple[object, ...],
 ) -> int:
     """Return internal output joins fed directly by module inputs.
 
@@ -2360,6 +2460,8 @@ def _count_passthrough_edges(
         Candidate module being scored.
     subtree_ops:
         Pass-qualified operation labels in the module subtree.
+    revision:
+        Walk-level graph fingerprint threaded through relationship resolution.
 
     Returns
     -------
@@ -2382,7 +2484,7 @@ def _count_passthrough_edges(
         has_internal_parent = False
         has_input_parent = False
         for parent_label in op.parents:
-            parent = _resolve_relationship_op(trace, parent_label)
+            parent = _resolve_relationship_op(trace, parent_label, revision)
             if parent.label in subtree:
                 has_internal_parent = True
             elif _base_label(parent.label) in input_layers:

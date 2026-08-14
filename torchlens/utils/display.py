@@ -6,10 +6,14 @@ plus environment checks (Jupyter detection, parallel-processing guard).
 
 import multiprocessing as mp
 import os
+import shutil
 import sys
+import tempfile
 import time
+import weakref
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
@@ -27,6 +31,75 @@ _T = TypeVar("_T")
 # filenames against it to find the first non-torchlens frame. Matches the
 # already-established approach in utils/introspection.py's stack filter.
 _PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+
+def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace a text file with fully written content.
+
+    Parameters
+    ----------
+    path:
+        Destination path.
+    text:
+        Complete text payload.
+    encoding:
+        Text encoding used for the temporary file.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.tmp.",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def ensure_trace_visualizer_dir(trace: Any) -> Path:
+    """Return a trace-owned visualizer scratch directory.
+
+    Parameters
+    ----------
+    trace:
+        Trace-like owner receiving the scratch path.
+
+    Returns
+    -------
+    pathlib.Path
+        Existing or newly created scratch directory.
+    """
+
+    current = getattr(trace, "_visualizer_dir", None)
+    if current is not None and Path(current).is_dir():
+        return Path(current)
+    output_dir = Path(tempfile.mkdtemp(prefix="torchlens_visualizers_"))
+    trace._visualizer_dir = str(output_dir)
+    weakref.finalize(trace, shutil.rmtree, output_dir, ignore_errors=True)
+    return output_dir
+
+
+def cleanup_trace_visualizer_dir(trace: Any) -> None:
+    """Remove a trace-owned visualizer scratch directory if one exists.
+
+    Parameters
+    ----------
+    trace:
+        Trace-like owner whose scratch directory should be removed.
+    """
+
+    output_dir = getattr(trace, "_visualizer_dir", None)
+    if output_dir is not None:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        trace._visualizer_dir = None
 
 
 def _record_phase_timing(trace: "Trace", bucket: str, elapsed_s: float) -> None:

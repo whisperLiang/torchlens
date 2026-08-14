@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import inspect
 import types
+import weakref
 from collections.abc import Mapping
 from typing import Any
 
@@ -74,11 +75,11 @@ _ABSENT = object()
 # from, any class in either MRO invalidates that class's entry. What memoization can
 # never weaken is the property these lookups exist for: the answer is still derived
 # from the CLASS, never from an attacker-controllable instance ``__dict__``.
-_STATIC_ATTR_MEMO: dict[type, list[Any]] = {}
+_STATIC_ATTR_MEMO: weakref.WeakKeyDictionary[type, list[Any]] = weakref.WeakKeyDictionary()
 
 # Same discipline one level up: the shadow VERDICT per (class, key), so each key of
 # an incoming state dict costs a plain dict lookup.
-_SHADOW_VERDICT_MEMO: dict[type, list[Any]] = {}
+_SHADOW_VERDICT_MEMO: weakref.WeakKeyDictionary[type, list[Any]] = weakref.WeakKeyDictionary()
 
 # Bumped at every load boundary; a memo entry re-validates its fingerprint the first
 # time it is used in a new generation, so the per-lookup cost is one int comparison
@@ -98,7 +99,7 @@ def invalidate_static_class_attr_cache() -> None:
     _CACHE_GENERATION += 1
 
 
-def _class_definition_fingerprint(cls: type) -> tuple[int, ...] | None:
+def _class_definition_fingerprint(cls: type) -> tuple[tuple[tuple[str, int, type], ...], ...] | None:
     """Return a fingerprint of every ``__dict__`` a static lookup consults.
 
     Returns ``None`` for an exotic class whose MRO cannot be read, which disables
@@ -106,14 +107,23 @@ def _class_definition_fingerprint(cls: type) -> tuple[int, ...] | None:
     """
 
     try:
-        return tuple(len(klass.__dict__) for klass in inspect.getmro(cls)) + tuple(
-            len(klass.__dict__) for klass in inspect.getmro(type(cls))
+        return tuple(
+            tuple(
+                sorted(
+                    (name, id(value), type(value))
+                    for name, value in klass.__dict__.items()
+                )
+            )
+            for klass in (*inspect.getmro(cls), *inspect.getmro(type(cls)))
         )
     except (AttributeError, TypeError):  # pragma: no cover - exotic metaclass
         return None
 
 
-def _validated_memo_entry(cls: type, memo: dict[type, list[Any]]) -> dict[str, Any] | None:
+def _validated_memo_entry(
+    cls: type,
+    memo: weakref.WeakKeyDictionary[type, list[Any]],
+) -> dict[str, Any] | None:
     """Return ``cls``'s memo dict, resetting it when the class definition changed.
 
     Entries are ``[generation, fingerprint, answers]``. The fingerprint is rebuilt

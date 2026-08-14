@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
+from ..utils.display import atomic_write_text
 from ._render_common import *
 from ._render_edges import *
 from ._render_flow import *
@@ -1110,8 +1111,7 @@ def _inline_svg_file_local_images(svg_path: str) -> None:
         svg_text = svg_file.read()
     inlined_svg = _inline_svg_local_images(svg_text)
     if inlined_svg != svg_text:
-        with open(svg_path, "w", encoding="utf-8") as svg_file:
-            svg_file.write(inlined_svg)
+        atomic_write_text(svg_path, inlined_svg)
 
 
 def _normalize_svg_root_viewbox(svg_text: str) -> str:
@@ -1222,8 +1222,7 @@ def _write_composed_code_panel(
         compose_graph_with_code_panel(graph_svg, source_text)
     )
     if file_format == "svg":
-        with open(rendered_path, "w", encoding="utf-8") as svg_file:
-            svg_file.write(combined_svg)
+        atomic_write_text(rendered_path, combined_svg)
         return
     import cairosvg
 

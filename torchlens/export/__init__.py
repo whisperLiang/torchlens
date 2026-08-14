@@ -7,6 +7,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from ..utils.display import atomic_write_text
+
 
 def svg(log: Any, path: str | Path, *, editable: bool = True) -> Path:
     """Export a Trace graph as a lightweight SVG file.
@@ -29,7 +31,7 @@ def svg(log: Any, path: str | Path, *, editable: bool = True) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
-    destination.write_text(_render_svg(data, editable=editable), encoding="utf-8")
+    atomic_write_text(destination, _render_svg(data, editable=editable))
     return destination
 
 
@@ -56,7 +58,7 @@ def html(log: Any, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
     payload = _json.dumps(data, separators=(",", ":"))
-    destination.write_text(_render_html(payload), encoding="utf-8")
+    atomic_write_text(destination, _render_html(payload))
     return destination
 
 
@@ -83,7 +85,7 @@ def chrome_trace(log: Any, path: str | Path) -> Path:
         "displayTimeUnit": "ms",
         "metadata": {"schema": "torchlens.chrome_trace.v1"},
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -113,7 +115,7 @@ def chrome_trace_diff(bundle: Any, path: str | Path) -> Path:
             "members": list(bundle.names),
         },
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -159,7 +161,7 @@ def speedscope(log: Any, path: str | Path) -> Path:
         ],
         "activeProfileIndex": 0,
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -189,7 +191,7 @@ def flamegraph(log: Any, path: str | Path) -> Path:
         stack.append(_layer_display_name(layer))
         folded_stack = ";".join(_sanitize_flamegraph_frame(frame) for frame in stack)
         lines.append(f"{folded_stack} {_duration_us(layer)}")
-    destination.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    atomic_write_text(destination, "\n".join(lines) + ("\n" if lines else ""))
     return destination
 
 
@@ -234,7 +236,7 @@ def memory_timeline(log: Any, path: str | Path) -> Path:
         "disclaimer": "Tensor scope only; not an allocator trace.",
         "events": events,
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -601,7 +603,7 @@ def model_explorer(log: Any, path: str | Path) -> Path:
             }
         ],
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -657,7 +659,7 @@ def netron(log: Any, path: str | Path) -> Path:
             ],
         },
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 

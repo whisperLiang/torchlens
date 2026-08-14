@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .._io import _json
+from ..utils.display import atomic_write_text
 
 
 def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
@@ -44,7 +45,7 @@ def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
     payload = {"schema": "torchlens.execution_trace.v1", "nodes": nodes}
     path = Path(trace_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2))
     return payload
 
 

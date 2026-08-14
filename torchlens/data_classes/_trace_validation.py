@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
-from .._errors import KeywordConflictError, InvalidArgumentError, RecordBindingError
+from .._errors import InvalidArgumentError, KeywordConflictError, RecordBindingError
 from ..options import ReplayOptions, merge_replay_options
 from ..runnable import DivergencePolicy, RunProvider, RunResult
 from .cleanup import (
@@ -964,7 +964,8 @@ class TraceValidationMixin(_TraceMixinBase):
             Whether to scrub all graph references to the removed entries.
         """
         entries_to_remove = list(entries_to_remove)
-        surviving_entries = [entry for entry in self if entry not in entries_to_remove]
+        removal_ids = {id(entry) for entry in entries_to_remove}
+        surviving_entries = [entry for entry in self if id(entry) not in removal_ids]
         _materialize_layer_mirrors_for_removed(self, entries_to_remove)
 
         labels_to_remove = set()
