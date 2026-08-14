@@ -1,0 +1,91 @@
+"""Entry self-test for the shared replay comparator (R75-4).
+
+``tensor_nanequal`` is the single judge behind every per-op replay verdict
+AND capture-side alias/mutation bookkeeping, with no oracle above it: a
+degradation making it vacuously true would blind the whole forward-replay
+tripwire while the suite stays green (the b9-fable independence table's
+"dominant hub" finding; kill margin measured at ONE test in R74-1).
+``validate_saved_outs`` now proves the judge on known sentinel pairs before
+trusting any verdict it produces.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens.validation import core as validation_core
+
+pytestmark = pytest.mark.smoke
+
+
+def _traced_linear() -> tuple[tl.Trace, list[torch.Tensor]]:
+    """Capture a tiny linear model with full saves for replay validation.
+
+    Returns
+    -------
+    tuple[tl.Trace, list[torch.Tensor]]
+        The trace and its ground-truth output tensors.
+    """
+
+    model = nn.Sequential(nn.Linear(4, 3)).eval()
+    x = torch.randn(2, 4)
+    with torch.no_grad():
+        ground_truth = model(x)
+    trace = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
+    return trace, [ground_truth]
+
+
+def test_degraded_comparator_refuses_to_validate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A vacuously-true comparator must abort validation, never bless it.
+
+    Red-capable: before the entry self-test, this exact degradation made
+    ``validate_saved_outs`` return a PASSING status (the comparator blesses
+    every replay), which is the judge-corruption class the finding names.
+    """
+
+    trace, ground_truth = _traced_linear()
+    monkeypatch.setattr(validation_core, "tensor_nanequal", lambda *args, **kwargs: True)
+    with pytest.raises(RuntimeError, match="comparator self-test failed"):
+        validation_core.validate_saved_outs(trace, ground_truth)
+
+
+def test_always_false_comparator_also_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An always-False judge is equally untrustworthy and must abort."""
+
+    trace, ground_truth = _traced_linear()
+    monkeypatch.setattr(validation_core, "tensor_nanequal", lambda *args, **kwargs: False)
+    with pytest.raises(RuntimeError, match="comparator self-test failed"):
+        validation_core.validate_saved_outs(trace, ground_truth)
+
+
+def test_healthy_comparator_validates_normally() -> None:
+    """The self-test is invisible on a healthy comparator."""
+
+    trace, ground_truth = _traced_linear()
+    status = validation_core.validate_saved_outs(trace, ground_truth)
+    assert bool(status)
+
+
+def test_nan_doctrine_is_part_of_the_self_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A judge that loses the NaN-pattern doctrine must also abort.
+
+    ``equal_nan`` semantics are load-bearing (identical NaN patterns are
+    agreement; NaN-vs-number is a mismatch); a comparator that starts
+    treating NaN-vs-number as equal is exactly the vacuous-under-NaN
+    degradation the backward degeneracy guard exists to catch.
+    """
+
+    real = validation_core.tensor_nanequal
+
+    def _nan_blind(a: torch.Tensor, b: torch.Tensor, **kwargs: object) -> bool:
+        if bool(torch.isnan(a).any()) or bool(torch.isnan(b).any()):
+            return True
+        return bool(real(a, b, **kwargs))
+
+    trace, ground_truth = _traced_linear()
+    monkeypatch.setattr(validation_core, "tensor_nanequal", _nan_blind)
+    with pytest.raises(RuntimeError, match="comparator self-test failed"):
+        validation_core.validate_saved_outs(trace, ground_truth)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from ..utils.tensor_utils import LAYER_GRAD_VALIDATION_ATOL, LAYER_GRAD_VALIDATION_RTOL
+from ..utils.tensor_utils import layer_grad_tolerances_for_dtype
 from ._errors import (
     AmbiguousCallError,
     AmbiguousInputError,
@@ -139,8 +139,8 @@ def _empirical_adjoint_checks(
     trace: Trace,
     containment: tuple[ReceptiveFieldValidation, ...],
     *,
-    atol: float,
-    rtol: float,
+    atol: float | None,
+    rtol: float | None,
 ) -> tuple[EmpiricalAdjointCheck, ...]:
     """Compare sampled saved-graph VJP rows and double-VJP columns.
 
@@ -153,6 +153,9 @@ def _empirical_adjoint_checks(
         the sampled Jacobian entries.
     atol, rtol:
         Floating-point comparison tolerances for this diagnostic only.
+        ``None`` derives per compared-gradient dtype via
+        ``layer_grad_tolerances_for_dtype`` (R13 consumer wiring); an
+        explicit float applies to every dtype unchanged.
 
     Returns
     -------
@@ -284,8 +287,16 @@ def _empirical_adjoint_checks(
                         torch.allclose(
                             receptive_value,
                             projective_value,
-                            atol=atol,
-                            rtol=rtol,
+                            atol=(
+                                atol
+                                if atol is not None
+                                else layer_grad_tolerances_for_dtype(receptive_value.dtype)[1]
+                            ),
+                            rtol=(
+                                rtol
+                                if rtol is not None
+                                else layer_grad_tolerances_for_dtype(receptive_value.dtype)[0]
+                            ),
                             equal_nan=True,
                         )
                     ),
@@ -299,8 +310,8 @@ def _empirical_adjoint_checks(
 def verify(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = LAYER_GRAD_VALIDATION_ATOL,
-    empirical_adjoint_rtol: float = LAYER_GRAD_VALIDATION_RTOL,
+    empirical_adjoint_atol: float | None = None,
+    empirical_adjoint_rtol: float | None = None,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Run containment and sampled empirical-adjoint RF diagnostics.
@@ -321,7 +332,10 @@ def verify(
         Backward-ready trace to inspect.
     empirical_adjoint_atol, empirical_adjoint_rtol:
         Non-negative floating-point comparison tolerances used only for the
-        reported equality of two empirical derivative probes.
+        reported equality of two empirical derivative probes. ``None``
+        (default) derives the pair per compared-gradient dtype via
+        ``layer_grad_tolerances_for_dtype`` (fp32 resolves to the legacy
+        layer-grad constants).
     **kwargs:
         Keyword arguments accepted by :func:`cross_validate`.
 
@@ -332,7 +346,9 @@ def verify(
         sampled receptive gradient.
     """
 
-    if empirical_adjoint_atol < 0 or empirical_adjoint_rtol < 0:
+    if (empirical_adjoint_atol is not None and empirical_adjoint_atol < 0) or (
+        empirical_adjoint_rtol is not None and empirical_adjoint_rtol < 0
+    ):
         raise ReceptiveFieldConfigurationError(
             "empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative."
         )
@@ -358,8 +374,8 @@ def verify(
 def self_check(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = LAYER_GRAD_VALIDATION_ATOL,
-    empirical_adjoint_rtol: float = LAYER_GRAD_VALIDATION_RTOL,
+    empirical_adjoint_atol: float | None = None,
+    empirical_adjoint_rtol: float | None = None,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Alias :func:`verify` for interactive RF self-consistency diagnostics."""

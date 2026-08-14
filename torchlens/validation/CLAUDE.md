@@ -30,7 +30,13 @@ Legacy top-level shims for `validate_forward_pass`, `validate_backward_pass`, an
 `validate_saved_outs` forward to this package.
 
 ## Forward Replay Flow
-1. Run the model for ground truth output.
+1. Run the model for ground truth output on PRISTINE torch: installed
+   torchlens wrappers are removed for this forward (restored from the
+   pre-decoration originals ledger) and reinstalled afterwards, so the
+   ground-truth oracle is independent of the wrapper layer it checks
+   (R75-1; backward validation's stock-autograd pass does the same). If
+   the wrappers cannot be removed because a capture is active, validation
+   refuses rather than blessing a wrap-state-dependent ground truth.
 2. Run `trace(..., layers_to_save="all", save_arg_values=True)`.
 3. Check logged output matches ground truth.
 4. Walk backward from outputs, replaying each saved operation from saved parents.

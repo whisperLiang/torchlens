@@ -478,3 +478,336 @@ def test_index_domain_rotation_is_valid_and_distinct() -> None:
     # A NON-index parent (the weight) gets no rotation -- it stays on the
     # strict generic perturbation path.
     assert index_domain_rotation_values(emb_layer, "weight_parent", weight) is None
+
+
+# ---------------------------------------------------------------------------
+# R08-1 (b1-sol round-2): Tensor.new is OVERLOADED. Only the argless /
+# integer-sizes / torch.Size forms return uninitialized memory; new(tensor)
+# and new(data) are initialized value-bearing calls whose replay must run.
+# The blanket registry membership blessed a wrong new(tensor) replay
+# 'exempted' without execution.
+# ---------------------------------------------------------------------------
+
+
+class _NewFromTensorModel(nn.Module):
+    """Model exercising the value-bearing ``Tensor.new(tensor)`` overload."""
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Return ``x.new(y)`` plus a value anchor on both inputs.
+
+        Parameters
+        ----------
+        x:
+            Prototype tensor supplying dtype/device.
+        y:
+            VALUE-BEARING source tensor copied into the result.
+
+        Returns
+        -------
+        torch.Tensor
+            The initialized copy of ``y``.
+        """
+
+        return x.new(y)
+
+
+class _NewSizesModel(nn.Module):
+    """Model exercising the genuinely uninitialized size-only overload."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Allocate with ``x.new(2, 3)`` and erase the garbage values.
+
+        Parameters
+        ----------
+        x:
+            Prototype tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Deterministic output built on the uninitialized allocation.
+        """
+
+        return x.new(2, 3).zero_() + x.sum()
+
+
+def test_value_bearing_tensor_new_corruption_fails_not_exempted() -> None:
+    """A corrupted ``new(tensor)`` replay must FAIL, never bless 'exempted'.
+
+    Red-capable: pre-narrowing, the registry-1 early exit returned
+    ``exempted('uninitialized_by_design')`` before reading the saved output,
+    so this planted corruption validated clean (the b1-sol reproduction).
+    """
+
+    trace = _capture(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+    op = _op_with_func_name(trace, "new")
+    # Corrupt the op's own retained output payload: replay recomputes
+    # new(y) honestly from the saved parents and must now disagree.
+    # Pre-narrowing the registry early-exit blessed this exempted without
+    # ever executing the comparison.
+    payload = op._slot("out")
+    assert payload is not None
+    payload.add_(999.0)
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "failed", (result.decision, result.reason)
+    assert result.reason == "replay_mismatch"
+
+
+def test_value_bearing_tensor_new_replays_honestly() -> None:
+    """An honest ``new(tensor)`` capture must replay-VALIDATE, not exempt."""
+
+    trace = _capture(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+    op = _op_with_func_name(trace, "new")
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "validated", (result.decision, result.reason)
+
+
+def test_size_only_tensor_new_stays_exempt() -> None:
+    """The genuinely uninitialized size-only overload keeps its exemption."""
+
+    trace = _capture(_NewSizesModel(), torch.tensor([4.0]))
+    op = _op_with_func_name(trace, "new")
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "exempted", (result.decision, result.reason)
+    assert result.reason == "uninitialized_by_design"
+
+
+def test_uninitialized_by_design_proof_is_fail_closed() -> None:
+    """The per-call proof rejects every non-size-only shape."""
+
+    from torchlens.validation.exemptions import uninitialized_by_design_applies
+
+    healthy = SimpleNamespace(
+        func_name="new", parents=("input_1",), non_tensor_kwargs={}, non_tensor_pos_args=[2, 3]
+    )
+    assert uninitialized_by_design_applies(healthy)
+    assert uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[torch.Size([2, 3])],
+        )
+    )
+    # Second tensor parent = value-bearing new(tensor).
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1", "input_2"),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[],
+        )
+    )
+    # Sequence positional arg = legacy DATA constructor.
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[[1.0, 2.0]],
+        )
+    )
+    # Unknown kwargs and bools are not provably sizes.
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={"weird": 1},
+            non_tensor_pos_args=[],
+        )
+    )
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new", parents=("input_1",), non_tensor_kwargs={}, non_tensor_pos_args=[True]
+        )
+    )
+    # Non-overloaded registry members stay membership-exempt.
+    assert uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="empty_like",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[],
+        )
+    )
+
+
+def test_new_from_tensor_full_validation_still_passes() -> None:
+    """Public-path regression: an honest new(tensor) model validates green."""
+
+    assert _quiet_validate(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+
+
+# ---------------------------------------------------------------------------
+# R08-2 (b1-sol round-2, KNOWN b1:D2 re-filed): meshgrid/broadcast_tensors
+# outputs DO carry input values, but the whole-op perturbation skip (and the
+# posthoc structural_output_template blanket) exempted EVERY parent -- so a
+# dropped or misattributed value edge on these zipped multi-output ops was
+# never perturbation-proved. Per-output parent projection: output j must be
+# sensitive to input j; only cross-member siblings are structural.
+# ---------------------------------------------------------------------------
+
+
+class _MeshgridModel(nn.Module):
+    """Two-input meshgrid whose outputs feed a value-mixing sum."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return the summed meshgrid expansion of both inputs.
+
+        Parameters
+        ----------
+        a:
+            First 1-D input.
+        b:
+            Second 1-D input.
+
+        Returns
+        -------
+        torch.Tensor
+            Sum of both expanded grids.
+        """
+
+        grid_a, grid_b = torch.meshgrid(a, b, indexing="ij")
+        return grid_a.sum() + grid_b.sum()
+
+
+class _BroadcastModel(nn.Module):
+    """Two-input broadcast_tensors whose outputs feed a value-mixing sum."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return the summed broadcast expansion of both inputs.
+
+        Parameters
+        ----------
+        a:
+            First input.
+        b:
+            Second input (unsqueezed to force a real broadcast).
+
+        Returns
+        -------
+        torch.Tensor
+            Sum of both broadcast tensors.
+        """
+
+        expanded_a, expanded_b = torch.broadcast_tensors(a, b.unsqueeze(1))
+        return expanded_a.sum() + expanded_b.sum()
+
+
+def _zipped_op_for_index(trace: Any, func_names: tuple[str, ...], index: int) -> Any:
+    """Return the zipped multi-output op with ``multi_output_index == index``."""
+
+    return next(
+        op
+        for op in trace.layer_list
+        if op.func_name in func_names and op.multi_output_index == index
+    )
+
+
+def test_meshgrid_own_value_edge_is_perturbation_tested() -> None:
+    """Output j must be perturbation-SENSITIVE to its own input j.
+
+    Red-capable: pre-narrowing the whole-op skip / posthoc blanket recorded
+    this edge 'exempted' without ever proving the value dependency.
+    """
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    for index in (0, 1):
+        op = _zipped_op_for_index(trace, ("meshgrid",), index)
+        own_parent = op.parent_arg_positions["args"][(0, index)]
+        result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[own_parent]
+        )
+        assert result.decision == "validated", (index, result.decision, result.reason)
+
+
+def test_meshgrid_dead_own_edge_now_fails_perturbation() -> None:
+    """A provably dead own-value edge must FAIL, never launder structural.
+
+    Red-capable: freezing the op's replay (the dropped-dependency simulation
+    used across this file) was blessed 'structural_output_template' by the
+    posthoc blanket pre-narrowing.
+    """
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    op = _zipped_op_for_index(trace, ("meshgrid",), 0)
+    own_parent = op.parent_arg_positions["args"][(0, 0)]
+    _freeze_op_replay(op)
+    _assert_edge_now_fails(trace, op, own_parent)
+
+
+def test_meshgrid_cross_member_perturbation_stays_exempt() -> None:
+    """Cross-member zipped siblings remain provably structural (no false-fail)."""
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    op = _zipped_op_for_index(trace, ("meshgrid",), 0)
+    sibling_parent = op.parent_arg_positions["args"][(0, 1)]
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, op.label, perturb=True, layers_to_perturb=[sibling_parent]
+    )
+    assert result.decision == "exempted", (result.decision, result.reason)
+
+
+def test_broadcast_tensors_own_value_edge_is_perturbation_tested() -> None:
+    """The canonical 'broadcasttensors' spelling gets the same projection.
+
+    Doubly red-capable: besides the whole-op-skip class, the old registry
+    row was keyed 'broadcast_tensors' while capture canonicalizes to
+    'broadcasttensors' -- a silently dead row.
+    """
+
+    trace = _capture(_BroadcastModel(), [torch.randn(3), torch.randn(4)])
+    for index in (0, 1):
+        op = _zipped_op_for_index(trace, ("broadcasttensors", "broadcast_tensors"), index)
+        own_parent = op.parent_arg_positions["args"][(0, index)]
+        result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[own_parent]
+        )
+        assert result.decision == "validated", (index, result.decision, result.reason)
+        sibling_parent = op.parent_arg_positions["args"][(0, 1 - index)]
+        sibling_result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[sibling_parent]
+        )
+        assert sibling_result.decision == "exempted", (
+            index,
+            sibling_result.decision,
+            sibling_result.reason,
+        )
+
+
+def test_zipped_models_full_validation_still_passes() -> None:
+    """Public-path regression: honest zipped-op models validate green."""
+
+    assert _quiet_validate(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    assert _quiet_validate(_BroadcastModel(), [torch.randn(3), torch.randn(4)])
+
+
+def test_meshgrid_perturbation_decisions_are_real_not_whole_op_skipped() -> None:
+    """The BFS records REAL perturbation decisions for zipped ops.
+
+    Red-capable: pre-narrowing the whole-op registry skip recorded every
+    meshgrid parent edge as 'skip_perturbation_entirely:meshgrid' without
+    running the check.
+    """
+
+    from torchlens.validation import core as validation_core
+
+    model = _MeshgridModel()
+    inputs = [torch.randn(3), torch.randn(4)]
+    with torch.no_grad():
+        ground_truth = model(*inputs)
+    trace = _capture(model, inputs)
+    status = validation_core.validate_saved_outs(trace, [ground_truth])
+    assert bool(status)
+    meshgrid_perturbations = [
+        decision
+        for decision in status.decisions
+        if decision["func_name"] == "meshgrid" and decision["phase"] == "perturbation"
+    ]
+    assert meshgrid_perturbations, "no perturbation decisions recorded for meshgrid"
+    assert not any(
+        str(decision["reason"]).startswith("skip_perturbation_entirely")
+        for decision in meshgrid_perturbations
+    )
+    # At least one own-value edge is genuinely perturbation-VALIDATED.
+    assert any(decision["decision"] == "validated" for decision in meshgrid_perturbations)

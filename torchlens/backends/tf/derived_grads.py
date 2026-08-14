@@ -31,6 +31,7 @@ from .._finalize import mirror_param_derived_grads, stable_callable_name as _cal
 from ..registry import BackendUnsupportedError
 from .modules import TFModuleTree
 from .op_callback_capture import TFEagerCaptureSession, TFOpCapture
+from .validation import _float_replay_tolerances
 
 
 @dataclass(frozen=True)
@@ -866,7 +867,20 @@ def _tf_values_close(left: Any, right: Any) -> bool:
     left_array = np.asarray(left)
     right_array = np.asarray(right)
     if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
-        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
+        # Per-dtype ULP-derived bands (ported paddle/mlx validation-oracle
+        # derivation): the former dtype-blind fp32 pair (rtol 1e-5 /
+        # atol 1e-6) blessed fp64 corruption ~4.5e9 of its own ULPs and TOTAL
+        # corruption of every element below 1e-6, while false-failing
+        # legitimate one-ULP fp16 storage rounding.
+        try:
+            finfo = np.finfo(left_array.dtype)
+        except (TypeError, ValueError):
+            # Extended floats NumPy has no finfo row for (e.g. tf.bfloat16
+            # payloads whose ml_dtypes registration is unavailable) compare
+            # exactly: never derive a band from the wrong dtype's finfo.
+            return bool(np.array_equal(left_array, right_array))
+        rtol, atol = _float_replay_tolerances(finfo)
+        return bool(np.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
 
 

@@ -20,12 +20,7 @@ from ..options import CaptureOptions
 from ..utils.arg_handling import normalize_input_args
 from ..utils.display import warn_parallel
 from ..utils.rng import set_random_seed
-from ..utils.tensor_utils import (
-    LAYER_GRAD_VALIDATION_ATOL,
-    LAYER_GRAD_VALIDATION_RTOL,
-    PARAM_GRAD_VALIDATION_ATOL,
-    PARAM_GRAD_VALIDATION_RTOL,
-)
+from ..utils.tensor_utils import param_grad_tolerances_for_dtype
 
 _SUM_IN_PROGRESS = object()
 """Memo sentinel: this container is on the current descent chain (a cycle)."""
@@ -189,32 +184,43 @@ def _stock_param_grad_degeneracy(
         ``"all-nonfinite"`` when EVERY element of EVERY gradient is NaN/Inf
         (vacuous under ``equal_nan=True``), ``"all-zero"`` when every element
         is exactly zero (zero-filled buffers are indistinguishable from a
-        correct capture), ``"element-free"`` when no gradient carries any
-        element, and ``None`` for a census with real comparison power. The
-        classification is deliberately TOTAL-degeneracy only: any finite
-        nonzero element anywhere restores detection power and returns ``None``.
+        correct capture), ``"mixed-nonfinite-zero"`` when every element is
+        NaN/Inf or exactly zero but neither class alone covers the census,
+        ``"element-free"`` when no gradient carries any element, and ``None``
+        for a census with real comparison power. The rule is exactly the one
+        the ``equal_nan=True`` comparison implies: a FINITE NONZERO element
+        anywhere restores detection power and returns ``None``; every element
+        that is NaN/Inf (vacuous) or zero (indistinguishable from a
+        zero-filled buffer) contributes none.
     """
 
     saw_element = False
-    all_nonfinite = True
-    all_zero = True
+    saw_finite = False
+    saw_nonzero = False
     for grad in expected_param_grads.values():
         if grad.numel() == 0:
             continue
         saw_element = True
-        if all_nonfinite and bool(torch.isfinite(grad).any()):
-            all_nonfinite = False
-        # NaN/Inf elements are not zero, so an all-zero verdict already implies
-        # an all-finite census; the two arms are mutually exclusive.
-        if all_zero and bool(grad.ne(0).any()):
-            all_zero = False
-        if not all_nonfinite and not all_zero:
+        finite = torch.isfinite(grad)
+        # The decisive per-element predicate: only an element that is BOTH
+        # finite AND nonzero gives the comparison detection power. Tracking
+        # the two properties as independent whole-census totals (the previous
+        # shape) was defeated by a MIXED census -- one all-NaN grad killed the
+        # all-zero arm, one all-zero grad killed the all-nonfinite arm, and a
+        # census with zero finite-nonzero elements passed as "real power".
+        if bool((finite & grad.ne(0)).any()):
             return None
+        if bool(finite.any()):
+            saw_finite = True
+        if bool(grad.ne(0).any()):
+            saw_nonzero = True
     if not saw_element:
         return "element-free"
-    if all_nonfinite:
+    if not saw_finite:
         return "all-nonfinite"
-    return "all-zero"
+    if not saw_nonzero:
+        return "all-zero"
+    return "mixed-nonfinite-zero"
 
 
 def _param_grads(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -405,8 +411,8 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = PARAM_GRAD_VALIDATION_ATOL,
-    rtol: float = PARAM_GRAD_VALIDATION_RTOL,
+    atol: float | None = None,
+    rtol: float | None = None,
     validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
@@ -434,25 +440,31 @@ def validate_backward_pass(
         Fixed RNG seed for stock and candidate passes. Auto-generated if None.
     atol:
         Absolute tolerance for the parameter-gradient ``torch.allclose``.
-        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_ATOL`
-        (parameter grads are batch/position REDUCTIONS, so they carry
-        accumulation-order round-off; see the error model on the constants).
+        ``None`` (default) derives the tolerance PER GRADIENT DTYPE via
+        :func:`~torchlens.utils.tensor_utils.param_grad_tolerances_for_dtype`
+        (fp32 resolves to the legacy
+        :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_ATOL`;
+        fp64 tightens by the eps ratio, fp16/bf16 get a few-storage-ULP
+        budget). An explicit float applies to every dtype unchanged.
     rtol:
         Relative tolerance for the parameter-gradient ``torch.allclose``.
-        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_RTOL`.
+        ``None`` (default) derives per gradient dtype (fp32 row ==
+        :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_RTOL`).
     validate_layer_grads:
         If True (default), validate captured per-module-output gradients in
         addition to parameter gradients. False preserves the legacy
         parameter-only validation path as an explicit opt-out.
     layer_grad_atol:
         Optional absolute tolerance for per-module-output gradients. ``None``
-        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_ATOL`
-        (module-output grads are compared ELEMENTWISE with no cross-element
-        reduction, so they earn a 10x tighter pair than parameter grads;
-        they previously inherited the looser parameter pair).
+        derives per gradient dtype via
+        :func:`~torchlens.utils.tensor_utils.layer_grad_tolerances_for_dtype`
+        (fp32 row == :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_ATOL`;
+        module-output grads are compared ELEMENTWISE with no cross-element
+        reduction, so they earn a 10x tighter pair than parameter grads).
     layer_grad_rtol:
         Optional relative tolerance for per-module-output gradients. ``None``
-        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_RTOL`.
+        derives per gradient dtype (fp32 row ==
+        :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_RTOL`).
 
     Returns
     -------
@@ -504,20 +516,43 @@ def validate_backward_pass(
             input_args, input_kwargs, model_device
         )
         model.zero_grad(set_to_none=True)
-        if validate_layer_grads:
-            from ._stock_layer_grads import _stock_layer_grads
+        # R75-1 sibling site: the "stock autograd" reference pass must run on
+        # PRISTINE torch. In a wrapped process it used to run through the
+        # installed pass-through wrapper shells -- the same closures the
+        # candidate capture observes through -- so a wrapper-layer numeric
+        # distortion corrupted stock and captured gradients IDENTICALLY and
+        # the comparison passed vacuously. Refuse (fail-closed) if the
+        # wrappers cannot be removed because a capture is active.
+        from .._errors import CaptureContextError
+        from ._pristine import pristine_torch_oracle
 
-            stock_module_grads, stock_identity_addresses = _stock_layer_grads(
-                model,
-                stock_inputs,
-                stock_kwargs,
-                loss_fn=loss_fn,
-                random_seed=random_seed,
-                state_dict_snapshot=state_dict,
+        try:
+            with pristine_torch_oracle():
+                if validate_layer_grads:
+                    from ._stock_layer_grads import _stock_layer_grads
+
+                    stock_module_grads, stock_identity_addresses = _stock_layer_grads(
+                        model,
+                        stock_inputs,
+                        stock_kwargs,
+                        loss_fn=loss_fn,
+                        random_seed=random_seed,
+                        state_dict_snapshot=state_dict,
+                    )
+                else:
+                    stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
+                    stock_loss.backward()  # type: ignore[no-untyped-call]
+        except CaptureContextError:
+            warnings.warn(
+                "validate_backward_pass could not compute pristine-torch stock "
+                "gradients because a capture is active in this process; the "
+                "verdict would depend on the wrapper installation it is meant "
+                "to check. Returning False rather than reporting unverified "
+                "success.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        else:
-            stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
-            stock_loss.backward()  # type: ignore[no-untyped-call]
+            return False
         expected_param_grads = _param_grads(model)
 
         model.load_state_dict(state_dict)
@@ -578,8 +613,11 @@ def validate_backward_pass(
                 trace,
                 stock_module_grads,
                 stock_identity_addresses,
-                atol=layer_grad_atol if layer_grad_atol is not None else LAYER_GRAD_VALIDATION_ATOL,
-                rtol=layer_grad_rtol if layer_grad_rtol is not None else LAYER_GRAD_VALIDATION_RTOL,
+                # None flows through: the comparator derives the tolerance per
+                # gradient dtype (R13: the fp32 constants applied to fp64
+                # masked corruption ~4.5e11 fp64 ULPs above round-off).
+                atol=layer_grad_atol,
+                rtol=layer_grad_rtol,
             )
             if not bool(layer_report):
                 return False
@@ -607,9 +645,11 @@ def validate_backward_pass(
         # pipelines identically), and an all-zero census cannot distinguish a
         # correct capture from zero-filled gradient buffers. Either way the
         # comparison below has ZERO detection power, so the verdict is
-        # unverifiable -- never PASS (the ABORTED_NONFINITE doctrine). This is
-        # TOTAL degeneracy only: a partially NaN or partially zero census keeps
-        # its finite-nonzero comparison power and must keep passing.
+        # unverifiable -- never PASS (the ABORTED_NONFINITE doctrine). The
+        # decisive predicate is per-element: a census with at least one FINITE
+        # NONZERO element keeps its comparison power and must keep passing; a
+        # census made entirely of NaN/Inf and exact-zero elements (including
+        # the MIXED all-NaN-grad + all-zero-grad shape) has none.
         degeneracy = _stock_param_grad_degeneracy(expected_param_grads)
         if degeneracy is not None:
             warnings.warn(
@@ -626,17 +666,24 @@ def validate_backward_pass(
             return False
         # equal_nan follows tensor_nanequal's doctrine: an identical NaN
         # pattern in candidate and stock grads is agreement, not a mismatch
-        # (NaN-vs-number still fails elementwise).
-        params_passed = all(
-            torch.allclose(
+        # (NaN-vs-number still fails elementwise). Tolerances resolve PER
+        # GRADIENT DTYPE when not explicitly overridden: the fp32 constants
+        # applied to every dtype checked fp64 grads ~4.5e11 of their own ULPs
+        # loose and false-failed fp16 grads (R13; the derivation shipped in
+        # c9734a7e but had zero verdict-site consumers).
+        params_passed = True
+        for name in expected_param_grads:
+            expected_grad = expected_param_grads[name]
+            derived_rtol, derived_atol = param_grad_tolerances_for_dtype(expected_grad.dtype)
+            if not torch.allclose(
                 observed_param_grads[name],
-                expected_param_grads[name],
-                atol=atol,
-                rtol=rtol,
+                expected_grad,
+                atol=atol if atol is not None else derived_atol,
+                rtol=rtol if rtol is not None else derived_rtol,
                 equal_nan=True,
-            )
-            for name in expected_param_grads
-        )
+            ):
+                params_passed = False
+                break
         return params_passed
     finally:
         model.load_state_dict(state_dict)

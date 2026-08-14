@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 
-from ..utils.tensor_utils import LAYER_GRAD_VALIDATION_ATOL, LAYER_GRAD_VALIDATION_RTOL
+from ..utils.tensor_utils import layer_grad_tolerances_for_dtype
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -63,8 +63,11 @@ class LayerGradReport:
     mismatched_count: int
     unexpected_count: int
     candidate_grad_count: int
-    atol: float
-    rtol: float
+    # None records the default dtype-aware mode: each comparison derived its
+    # (rtol, atol) from the stock gradient's dtype via
+    # layer_grad_tolerances_for_dtype. A float records an explicit override.
+    atol: float | None
+    rtol: float | None
     mismatched_labels: tuple[str, ...] = ()
     max_abs_diffs: dict[str, float] = field(default_factory=dict)
     max_rel_diffs: dict[str, float] = field(default_factory=dict)
@@ -86,8 +89,8 @@ def _compare_module_output_grads(
     stock_module_grads: Mapping[ModuleOutputGradKey, torch.Tensor],
     stock_identity_addresses: set[ModuleOutputGradKey],
     *,
-    atol: float = LAYER_GRAD_VALIDATION_ATOL,
-    rtol: float = LAYER_GRAD_VALIDATION_RTOL,
+    atol: float | None = None,
+    rtol: float | None = None,
 ) -> LayerGradReport:
     """Compare candidate module-call output grads to stock module-output grads.
 
@@ -100,11 +103,14 @@ def _compare_module_output_grads(
     stock_identity_addresses:
         Module-output keys whose stock output is identical to input.
     atol:
-        Absolute allclose tolerance. The default is the shared elementwise
-        layer-grad pair (see the error model on the constants in
-        ``torchlens.utils.tensor_utils``).
+        Absolute allclose tolerance. ``None`` (default) derives per stock
+        gradient dtype via
+        :func:`~torchlens.utils.tensor_utils.layer_grad_tolerances_for_dtype`
+        (the fp32 row is the shared elementwise layer-grad pair; see the
+        error model on the constants in ``torchlens.utils.tensor_utils``).
+        An explicit float applies to every dtype unchanged.
     rtol:
-        Relative allclose tolerance.
+        Relative allclose tolerance. ``None`` derives per dtype likewise.
 
     Returns
     -------
@@ -202,8 +208,16 @@ def _compare_module_output_grads(
             # equal_nan: an identical NaN pattern in candidate and stock grads
             # is agreement (tensor_nanequal doctrine); NaN-vs-number still
             # fails elementwise. Without it a CORRECT NaN-bearing gradient
-            # false-FAILED this check.
-            if torch.allclose(cand_grad, stock_grad, atol=atol, rtol=rtol, equal_nan=True):
+            # false-FAILED this check. Tolerances resolve per stock-grad
+            # dtype unless explicitly overridden (R13 consumer wiring).
+            derived_rtol, derived_atol = layer_grad_tolerances_for_dtype(stock_grad.dtype)
+            if torch.allclose(
+                cand_grad,
+                stock_grad,
+                atol=atol if atol is not None else derived_atol,
+                rtol=rtol if rtol is not None else derived_rtol,
+                equal_nan=True,
+            ):
                 coverage[coverage_label] = "covered"
             else:
                 coverage[coverage_label] = "mismatched"

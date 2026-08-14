@@ -46,6 +46,7 @@ from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.tensor_utils import (
     derive_float_tolerances,
     fp8_safe_comparison_pair,
+    get_fp8_dtypes,
     tensor_all_nan,
     tensor_nanequal,
 )
@@ -57,6 +58,7 @@ from .exemptions import (
     index_domain_rotation_values,
     perturbed_layer_at_structural_position,
     posthoc_perturb_check,
+    uninitialized_by_design_applies,
 )
 from .status import ValidationReplayStatus
 
@@ -197,6 +199,35 @@ class ValidationDecisionRecorder:
 
         return len({item.op_label for item in self.decisions if item.decision == decision})
 
+    def replay_validated_node_count(self) -> int:
+        """Return the number of distinct op labels validated by REPLAY.
+
+        ``node_count("validated")`` is phase-blind: it also counts the
+        ground-truth output decisions and the trace-level dispatch-census
+        decision (the ``op_label=None`` bucket), so the
+        ``no_nodes_replay_validated`` guard could be satisfied with ZERO
+        interior op replays -- a trace whose every interior op was
+        individually exempted but whose outputs matched ground truth
+        reported ``passed`` with an inflated count (b1-fable round-2 F1).
+        Only labeled ``phase="replay"`` validations are replayed nodes.
+
+        Returns
+        -------
+        int
+            Number of distinct operation labels with a replay-phase
+            ``validated`` decision.
+        """
+
+        return len(
+            {
+                item.op_label
+                for item in self.decisions
+                if item.decision == "validated"
+                and item.phase == "replay"
+                and item.op_label is not None
+            }
+        )
+
     def reason_counts(self, decision: ValidationDecisionKind) -> dict[str, int]:
         """Return reason-code counts for a given decision kind.
 
@@ -234,7 +265,7 @@ class ValidationDecisionRecorder:
         return ValidationReplayStatus.from_replay_counts(
             backend=backend,
             source="live",
-            replayed_node_count=self.node_count("validated"),
+            replayed_node_count=self.replay_validated_node_count(),
             unverified_node_count=self.node_count("unverified"),
             failed_node_count=self.node_count("failed"),
             unverified_reason_counts=self.reason_counts("unverified"),
@@ -438,9 +469,13 @@ DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM = 4.0
 def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float, float]:
     """Return derived ``(base_rel, outlier_rel, mean_rel)`` band-C bounds.
 
-    ``payload_dtype`` is the dtype actually compared (post-fp8-widening).
-    fp16/bf16 accumulate in fp32, fp64/complex128 in fp64; everything else in
-    fp32. Each bound is capped by its historical ceiling literal.
+    ``payload_dtype`` is the dtype actually compared (post-fp8-widening), so
+    an fp8 payload's ``storage_term`` is DELIBERATELY fp32's, not fp8's --
+    the same strict-direction fp8 doctrine as ``fp8_safe_comparison_pair``
+    (an fp8-eps storage term of 4 x 2^-3 would dominate every bound and
+    bless multi-ULP fp8 corruption). fp16/bf16 accumulate in fp32,
+    fp64/complex128 in fp64; everything else in fp32. Each bound is capped
+    by its historical ceiling literal.
     """
 
     if payload_dtype in (torch.float64, torch.complex128):
@@ -487,7 +522,15 @@ _GROUND_TRUTH_DEFAULT_ULP_HEADROOM = 8.0
 
 
 def _ground_truth_tolerances(dtype: torch.dtype) -> tuple[float, float]:
-    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``."""
+    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``.
+
+    One DELIBERATE exception to the same-strictness-in-own-ULPs model: fp8
+    payloads are widened exactly to float32 first and measured at the fp32
+    row with a zeroed absolute term (see the fp8 doctrine on
+    ``fp8_safe_comparison_pair`` and the caller) -- an own-ULP fp8 row
+    (4 x 2^-3 eps) would read a genuine one-ULP fp8 corruption as equal.
+    Strictly tighter, never looser.
+    """
 
     headroom = _GROUND_TRUTH_ULP_HEADROOM.get(dtype, _GROUND_TRUTH_DEFAULT_ULP_HEADROOM)
     try:
@@ -813,9 +856,16 @@ def _ground_truth_output_matches_saved(
 
     from .._state import pause_logging
 
+    original_dtype = saved_output.dtype
+
     with pause_logging():
-        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, so the
-        # tolerance below stays the float32-grade one (see fp8_safe_comparison_pair).
+        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, and
+        # the tolerance below DELIBERATELY stays the float32-grade row rather
+        # than fp8's own coarse 2^-3/2^-2 epsilon (the documented fp8
+        # doctrine on fp8_safe_comparison_pair: an own-ULP row would read a
+        # genuine one-ULP fp8 corruption as equal). This is the one dtype
+        # family measured in the WIDENED dtype's ULPs by design -- strictly
+        # tighter, never looser (b4-opus F13-2a adjudication).
         saved_output, ground_truth_output = fp8_safe_comparison_pair(
             saved_output, ground_truth_output
         )
@@ -826,6 +876,11 @@ def _ground_truth_output_matches_saved(
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
         ground_truth_nonan = torch.nan_to_num(ground_truth_output, 0.7234691827346)
         rtol, atol = _ground_truth_tolerances(saved_nonan.dtype)
+        if original_dtype in get_fp8_dtypes():
+            # Mirror tensor_nanequal's rtol-only fp8 rule: even a
+            # denormal-scale float32 absolute term is measured against the
+            # wrong dtype's bottom-of-range once the payload started as fp8.
+            atol = 0.0
         return bool(
             torch.allclose(
                 saved_nonan,
@@ -833,6 +888,41 @@ def _ground_truth_output_matches_saved(
                 rtol=rtol,
                 atol=atol,
             )
+        )
+
+
+def _comparator_self_test() -> None:
+    """Prove the shared replay comparator on known sentinel pairs.
+
+    ``tensor_nanequal`` is the judge for every per-op replay comparison; a
+    corrupted or monkeypatched-vacuous comparator would bless arbitrary
+    replay corruption with no other oracle in the loop. Each call is a few
+    microseconds on four-element CPU tensors.
+
+    Raises
+    ------
+    RuntimeError
+        If the comparator returns the wrong verdict on any sentinel pair.
+    """
+
+    from .._state import pause_logging
+
+    with pause_logging():
+        base = torch.tensor([1.0, -2.0, 0.0, 0.5])
+        unequal = torch.tensor([1.0, -2.0, 0.0, 0.75])
+        nan_pair = torch.tensor([float("nan"), 1.0])
+        nan_vs_number = torch.tensor([0.25, 1.0])
+        healthy = (
+            bool(tensor_nanequal(base, base.clone(), allow_tolerance=True))
+            and not bool(tensor_nanequal(base, unequal, allow_tolerance=True))
+            and bool(tensor_nanequal(nan_pair, nan_pair.clone(), allow_tolerance=True))
+            and not bool(tensor_nanequal(nan_pair, nan_vs_number, allow_tolerance=True))
+        )
+    if not healthy:
+        raise RuntimeError(
+            "TorchLens validation comparator self-test failed: tensor_nanequal "
+            "returned the wrong verdict on a known sentinel pair, so no replay "
+            "verdict from this process can be trusted. Refusing to validate."
         )
 
 
@@ -880,6 +970,13 @@ def validate_saved_outs(
     # validation refuses typed. Metadata invariants run in full elsewhere.
     refuse_collective_boundary_trace(self, "forward-replay validation")
     _raise_if_portable_bundle_log(self)
+    # Judge self-test (R75-4): tensor_nanequal is the single comparator
+    # behind BOTH the per-op replay verdict here and capture-side
+    # alias/mutation bookkeeping, with no oracle above it. A degradation
+    # making it vacuously true would blind the whole tripwire while every
+    # test stays green, so the entry point proves the judge on known
+    # sentinel pairs before trusting any verdict it produces.
+    _comparator_self_test()
 
     # Diagnostics side-channel: clear any stale failure from a prior run so a
     # report reflects THIS validation only. ADD-ONLY -- never affects the result.
@@ -3144,11 +3241,16 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         return ValidationCheckResult.failed_result("functionless_computational_op")
 
     # Registry 1: skip ALL validation for nondeterministic ops (e.g., empty_like).
+    # Membership is proved PER CALL: Tensor.new's value-bearing overloads
+    # (new(tensor)/new(data)) are deterministic initialized calls and fall
+    # through to real replay -- exempting them blessed a wrong replay
+    # without execution (b1-sol R08-1).
     if layer.func_name in SKIP_VALIDATION_ENTIRELY:
-        return ValidationCheckResult.exempted(
-            "uninitialized_by_design",
-            justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
-        )
+        if uninitialized_by_design_applies(layer):
+            return ValidationCheckResult.exempted(
+                "uninitialized_by_design",
+                justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
+            )
 
     saved_output = _saved_out_payload(layer)
     if saved_output is None:

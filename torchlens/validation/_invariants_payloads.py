@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -97,6 +98,26 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     exists, its referenced parent label must resolve. This invariant never
     asserts that every parent edge has a corresponding edge-use record.
 
+    Edge-occurrence MULTIPLICITY witness (b9-opus R75-1): on live frozen
+    torch traces the canonical CSR dataflow edge-occurrence table
+    (``_trace_core/relations.py``) is additionally cross-checked per
+    (child, parent) against the independently stored roots -- the row's
+    ``parents`` entries plus its per-position ``parent_arg_positions`` map.
+    The correspondence is EXACT EQUALITY by construction of the freeze
+    (``relation_views.py`` pass 2 emits, for every parents-list entry that
+    resolves, one occurrence per attributed arg position naming that parent,
+    or exactly one when no position names it), and it was verified
+    empirically on plain MLPs, genuine double consumption (``h + h``, which
+    legitimately records parallel occurrences), same-tensor multi-position
+    ops, recurrent loops (pass-qualified parent labels are unresolved on
+    BOTH sides, so they cancel), and buffer-carrying models. Genuine
+    parallel edges therefore stay green, while DUPLICATING one occurrence
+    in the edge table -- invisible to every deduped label view and to the
+    per-position arg map -- breaks the count equality and fails here.
+    Loaded, preview, and detached traces carry no CSR edge table
+    (``dataflow_edges is None``), so the multiplicity witness is vacuous
+    there by precondition, exactly like the freeze it mirrors.
+
     Parameters
     ----------
     ml:
@@ -105,8 +126,10 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     Raises
     ------
     MetadataInvariantError
-        If populated edge-use or parent-arg-position metadata is malformed or
-        references labels that do not resolve.
+        If populated edge-use or parent-arg-position metadata is malformed,
+        references labels that do not resolve, or (live frozen traces) the
+        canonical edge table's per-(child, parent) occurrence counts disagree
+        with the parents/parent-arg-position roots.
     """
 
     name = "edge_use_parent_arg_consistency"
@@ -168,6 +191,67 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
                         f"Layer '{layer_label}' parent_arg_positions[{arg_domain!r}]"
                         f"[{position!r}] references missing parent {parent_label!r}",
                     )
+
+    # Edge-occurrence MULTIPLICITY witness (see docstring). The label views
+    # dedup and the arg map is per-position, so a duplicated occurrence in
+    # the CSR table changes NEITHER recorded root -- only a per-(child,
+    # parent) COUNT comparison against those roots can see it.
+    core = getattr(ml, "_trace_core", None)
+    store = getattr(core, "ops", None) if core is not None else None
+    edges = getattr(store, "dataflow_edges", None) if store is not None else None
+    ref_labels = getattr(store, "ref_labels", None) if store is not None else None
+    label_rows = getattr(core, "label_rows", None) if core is not None else None
+    if edges is None or ref_labels is None or not label_rows:
+        return
+    # Iterate PER-PASS op records, never the layer aggregate: on a
+    # multi-pass layer the bare label resolves to ONE pass's row while the
+    # layer facade mirrors a different pass's parents, so pairing
+    # ``label_rows`` keys with ``layer_dict_all_keys`` entries compared
+    # pass-1 edges against pass-3 roots and false-failed honest recurrent
+    # traces (caught by the validation-decision golden's TinyRecurrent).
+    # Each op record carries its own row and its own pass-exact
+    # parents/parent_arg_positions staging.
+    for layer in getattr(ml, "layer_list", ()) or ():
+        for op in getattr(layer, "ops", ()) or ():
+            row = getattr(op, "_row", None)
+            if row is None:
+                continue
+            parent_arg_positions = getattr(op, "parent_arg_positions", None) or {}
+            position_counts: Counter = Counter()
+            if isinstance(parent_arg_positions, Mapping):
+                for arg_domain in ("args", "kwargs"):
+                    domain_map = parent_arg_positions.get(arg_domain) or {}
+                    if isinstance(domain_map, Mapping):
+                        for parent_label in domain_map.values():
+                            if isinstance(parent_label, str):
+                                position_counts[parent_label] += 1
+            # One expected occurrence per parents-list entry per attributed
+            # arg position (or exactly one when unattributed), aggregated by
+            # resolved source row -- verbatim the freeze's pass-2 emission
+            # rule, including its skip of labels ``label_rows`` cannot
+            # resolve (cross-pass recurrent parents such as
+            # ``grucell_1_3:1`` and boundary spellings never emit edges).
+            expected: Counter = Counter()
+            for parent_label in getattr(op, "parents", ()) or ():
+                source_row = label_rows.get(parent_label)
+                if source_row is None:
+                    continue
+                positions = position_counts.get(parent_label, 0)
+                expected[source_row] += positions if positions else 1
+            actual = Counter(edge.source for edge in edges.in_edges(row))
+            if actual != expected:
+                offender = next(
+                    source for source in {*actual, *expected} if actual[source] != expected[source]
+                )
+                offender_label = ref_labels.get(offender, f"<row {offender}>")
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer '{getattr(op, 'label', '<unknown>')}' edge-occurrence "
+                    f"multiplicity mismatch for parent '{offender_label}': the "
+                    f"canonical edge table records {actual[offender]} occurrence(s) "
+                    f"but the parents/parent_arg_positions roots imply "
+                    f"{expected[offender]}",
+                )
 
 
 def _check_op_log_fields(ml: Trace) -> None:

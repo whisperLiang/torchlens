@@ -38,6 +38,21 @@ TORCHLENS_UPDATE_CAPTURE_ORACLE=1 PYTHONPATH="$PWD/tests:$PWD" \
   -k capture_characterization_matches_golden -q
 ```
 
+## Shared adapter root and its guards
+
+The golden is a **regression snapshot, not an independent oracle**: its per-op event
+expectations are derived from the captured journal through the SHARED inverse oracle adapter
+(`producer_parity._oracle_adapter.op_event_from_record`), the same root the production ingest
+relies on, so a common-mode adapter defect would corrupt regenerated records and any golden
+re-pinned from them alike. Two guards keep that honest:
+
+- `test_adapter_corruption_plant.py` monkeypatches the adapter to drop a parent edge during a
+  real characterization run and asserts the output diverges from the committed golden AND
+  breaks a first-principles fact — proving the committed golden catches live adapter drift.
+- `test_independent_fact_pins.py` pins hand-derived model facts (op sequence, topology, shapes,
+  parameter counts) against the committed golden FILE, so a re-pinned golden that drifted from
+  the model's own source goes red without running any torchlens generator.
+
 Timing and Python memory are retained for regression tracking as broad ratios to the committed
 baseline, not as machine-specific absolute gates. CUDA peak memory is normalized to `None` so
 device visibility cannot change the oracle result. RNG, model, and input construction are seeded

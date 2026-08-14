@@ -244,7 +244,12 @@ def test_validation_decision_recorder_counts_distinct_nodes() -> None:
 
     status = recorder.as_status()
 
-    assert status.replayed_node_count == 2
+    # Only the labeled replay-phase validation is a replayed node: the
+    # perturbation decision dedups onto the same label and the ground-truth
+    # output decision is a different phase entirely (counting it let
+    # "exemptions alone" traces pass the no_nodes_replay_validated guard --
+    # b1-fable round-2 F1).
+    assert status.replayed_node_count == 1
     assert status.state == "passed"
 
 
@@ -2941,11 +2946,12 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     # b1p2 D2 adjudication: the six torchvision PyCapsule ops left this
     # whole-op registry for coordinate-arg-only rows in
     # STRUCTURAL_ARG_POSITIONS (a NARROWING; their feature/score value edges
-    # are perturbation-tested again).
+    # are perturbation-tested again). R08-2 narrowing: meshgrid /
+    # broadcast_tensors left it for CUSTOM_EXEMPTION_CHECKS per-output
+    # parent projection (only cross-member zipped siblings stay exempt;
+    # each output's own value edge is perturbation-tested again).
     assert sorted(SKIP_PERTURBATION_ENTIRELY) == [
-        "broadcast_tensors",
         "exponential_",
-        "meshgrid",
         "new_ones",
         "new_zeros",
         "ones_like",
@@ -2954,6 +2960,8 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
         "zero_",
         "zeros_like",
     ]
+    for zipped_name in ("meshgrid", "broadcast_tensors", "broadcasttensors"):
+        assert zipped_name in CUSTOM_EXEMPTION_CHECKS
     assert "full" not in SKIP_VALIDATION_ENTIRELY
     assert "full" not in SKIP_PERTURBATION_ENTIRELY
     assert "full" not in CUSTOM_EXEMPTION_CHECKS
@@ -4341,6 +4349,18 @@ def test_tensor_nanequal_tolerances_are_dtype_derived_boundary() -> None:
     c_rtol, _c_atol = _tolerances_for_dtype(torch.complex128)
     assert c_rtol < 1e-12
 
+    # A LOW-PRECISION out-of-table dtype must derive at the few-ULP
+    # storage-rounding headroom, not the accumulating 512-ULP one: complex32
+    # (component eps ~9.8e-4) derived rtol=0.5 -- a row that would bless 40%
+    # corruption the day torch lands the missing chalf comparison kernels.
+    # The row must sit at the same ULP budget fp16/bf16 get.
+    c32_rtol, c32_atol = _tolerances_for_dtype(torch.complex32)
+    eps_c32 = float(torch.finfo(torch.complex32).eps)
+    fp16_rtol, _ = _tolerances_for_dtype(torch.float16)
+    assert c32_rtol == pytest.approx((fp16_rtol / torch.finfo(torch.float16).eps) * eps_c32)
+    assert c32_rtol < 0.005
+    assert c32_atol <= 4.0 * float(torch.finfo(torch.complex32).tiny)
+
 
 def test_ground_truth_output_check_is_dtype_aware() -> None:
     """The GT direct-forward bar is a few ULPs of the OUTPUT dtype, both ways.
@@ -4371,6 +4391,41 @@ def test_ground_truth_output_check_is_dtype_aware() -> None:
     f32 = torch.tensor([2.0, -3.0], dtype=torch.float32)
     assert _ground_truth_output_matches_saved(f32, f32 * (1.0 + 3e-7))
     assert not _ground_truth_output_matches_saved(f32, f32 * (1.0 + 1e-5))
+
+
+def test_ground_truth_fp8_doctrine_stays_strict() -> None:
+    """PIN the deliberate fp8 exception to the own-ULP tolerance model.
+
+    fp8 payloads widen exactly to float32 and are measured at the fp32-grade
+    row with a zeroed absolute term (the fp8_safe_comparison_pair doctrine):
+    an own-ULP fp8 row (4 x 2^-3 eps = rtol 0.5) would read a genuine
+    one-ULP fp8 corruption as EQUAL. This pin makes that deviation
+    load-bearing -- a future "consistency" refactor that hands fp8 its own
+    derived row goes red here (b4-opus F13-2a adjudication: strict by
+    design, never loosen).
+    """
+
+    from torchlens.utils.tensor_utils import get_fp8_dtypes
+    from torchlens.validation.core import _ground_truth_output_matches_saved
+
+    fp8_dtypes = get_fp8_dtypes()
+    if not fp8_dtypes:
+        pytest.skip("this torch build ships no fp8 dtypes")
+    e4m3 = torch.float8_e4m3fn
+    assert e4m3 in fp8_dtypes
+
+    exact = torch.tensor([1.0, 0.5, 0.25], dtype=e4m3)
+    assert _ground_truth_output_matches_saved(exact, exact.clone())
+
+    # One fp8 ULP at 1.0 (1.0 -> 1.125) must FAIL: 12.5% relative is real
+    # corruption even though it is a single fp8 quantum.
+    one_ulp = torch.tensor([1.125, 0.5, 0.25], dtype=e4m3)
+    assert not _ground_truth_output_matches_saved(exact, one_ulp)
+
+    # No absolute floor may bless small-magnitude fp8 corruption: subnormal
+    # fp8 values vs an all-zero output must FAIL (atol is zeroed for fp8).
+    sub = torch.tensor([0.001953125, 0.00390625], dtype=e4m3)
+    assert not _ground_truth_output_matches_saved(sub, torch.zeros_like(sub))
 
 
 def test_deep_numeric_replay_outlier_bound_scales_with_depth() -> None:
@@ -6887,6 +6942,33 @@ def _corrupt_first_computational_layer_parentless(log) -> "object":
             for arg_domain in ("args", "kwargs"):
                 lpl.parent_arg_positions.get(arg_domain, {}).clear()
             # has_parents is a read-only property derived from parents
+            #
+            # Since the edge-occurrence multiplicity witness (b9-opus R75-1)
+            # the canonical CSR edge table is a checked surface too: the
+            # post-witness silent edge-drop class must scrub the op's
+            # in-edge occurrences there as well, or the cheap
+            # edge_use_parent_arg_consistency count cross-check catches the
+            # asymmetric edit before the layering these tests pin is reached.
+            core = log.__dict__.get("_trace_core")
+            store = getattr(core, "ops", None) if core is not None else None
+            edges = getattr(store, "dataflow_edges", None) if store is not None else None
+            label_rows = getattr(core, "label_rows", {}) if core is not None else {}
+            target_row = label_rows.get(lpl.layer_label)
+            if edges is not None and target_row is not None:
+                kept = [
+                    edges.edge(edge_id)
+                    for edge_id in range(len(edges))
+                    if edges.edge(edge_id).target != target_row
+                ]
+                edges._frozen = False
+                edges._sources = [edge.source for edge in kept]
+                edges._targets = [edge.target for edge in kept]
+                edges._use_kinds = [edge.use_kind for edge in kept]
+                edges._arg_positions = [edge.arg_position for edge in kept]
+                edges._seqs = [edge.seq for edge in kept]
+                edges._by_source = None
+                edges._by_target = None
+                edges.freeze(len(store), len(store))
             return lpl
     raise AssertionError("fixture produced no eligible computational layer")
 

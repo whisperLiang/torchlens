@@ -50,7 +50,16 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 SKIP_VALIDATION_ENTIRELY: dict[str, str] = {
     "empty_like": "returns uninitialized memory by construction; saved bytes are not replayable",
-    "new": "torch.Tensor.new() returns uninitialized memory by construction",
+    # Membership for "new" is NECESSARY but not SUFFICIENT: Tensor.new is
+    # overloaded, and only the argless / integer-sizes / torch.Size forms
+    # return uninitialized memory. uninitialized_by_design_applies() proves
+    # the size-only form per call; the value-bearing new(tensor)/new(data)
+    # overloads fall through to real replay (b1-sol R08-1).
+    "new": (
+        "torch.Tensor.new() returns uninitialized memory by construction for the "
+        "argless/size-only overloads ONLY, proved per call by "
+        "uninitialized_by_design_applies"
+    ),
     "new_empty": "torch.Tensor.new_empty() returns uninitialized memory by construction",
     "new_empty_strided": (
         "torch.Tensor.new_empty_strided() returns uninitialized memory by construction"
@@ -83,18 +92,10 @@ SKIP_PERTURBATION_ENTIRELY: dict[str, str] = {
     "ones_like": "shape/dtype/device template only; the output value is constant one",
     "rand_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
     "randn_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
-    # meshgrid/broadcast_tensors outputs DO carry input values, but their
-    # per-call parent fields are shared across zipped outputs; they stay
-    # whole-op-skipped until per-output parent projection covers them.
-    "meshgrid": (
-        "per-call parent fields are shared across the zipped outputs, so cross-member "
-        "value perturbation is legitimately insensitive; value edges stay guarded by "
-        "replay and the orphan/identity sweeps until per-output parent projection lands"
-    ),
-    "broadcast_tensors": (
-        "same shared-zipped-parent limitation as meshgrid; retained with the same "
-        "replay-side guard and the same pending narrowing"
-    ),
+    # meshgrid/broadcast_tensors moved to CUSTOM_EXEMPTION_CHECKS
+    # (_check_zipped_sibling_exempt): per-output parent projection landed
+    # (R08-2), so only genuine CROSS-member perturbations are exempt and each
+    # output's OWN value edge is perturbation-tested again.
     # The six torchvision PyCapsule ops moved to ``STRUCTURAL_ARG_POSITIONS``
     # keyed on their coordinate/offset arg only (b1p2 D2 adjudication, all
     # three labs converged): the whole-op skip was wider than its segfault
@@ -108,6 +109,12 @@ SKIP_PERTURBATION_ENTIRELY: dict[str, str] = {
 # When the perturbed layer's tensor matches saved_args[pos], skip perturbation.
 # ---------------------------------------------------------------------------
 STRUCTURAL_ARG_POSITIONS: dict[str, set[int]] = {
+    # Value-bearing Tensor.new(tensor)/new(data): the SELF tensor (arg 0)
+    # supplies dtype/device only -- its values never reach the output -- while
+    # the data source (arg 1) stays strictly perturbation-tested. The
+    # size-only overloads never get here (uninitialized_by_design_applies
+    # exempts them before replay). R08-1 narrowing companion.
+    "new": {0},
     "copy_": {0},  # destination values are overwritten; source values determine output
     # Zipped foreach spelling of ``copy_`` (r29 F5): each destination member is
     # TOTALLY overwritten by its zipped source member, so the destination list
@@ -464,6 +471,52 @@ INPLACE_DESTINATION_WRITE_FUNCS: set[str] = {
 }
 
 
+def uninitialized_by_design_applies(op: Any) -> bool:
+    """Return whether the registry-1 uninitialized-memory exemption holds.
+
+    Registry membership alone is not proof for ``Tensor.new``: the func is
+    OVERLOADED, and only the argless / integer-sizes / ``torch.Size`` forms
+    return uninitialized memory. ``new(tensor)`` and ``new(sequence_data)``
+    are initialized, value-bearing, deterministic calls -- classifying them
+    uninitialized skipped replay entirely and blessed an actually WRONG
+    replay ``exempted`` without execution (b1-sol R08-1, reproduced). The
+    proof is fail-closed: a call not provably size-only is NOT exempt and
+    falls through to real replay, where a wrong value fails loud.
+
+    Parameters
+    ----------
+    op:
+        Candidate operation record.
+
+    Returns
+    -------
+    bool
+        True when the op is registry-listed AND (for ``new``) the saved call
+        is provably the uninitialized size-only/argless overload: at most the
+        self tensor as parent, no keyword arguments, and every non-tensor
+        positional argument a plain ``int`` or a ``torch.Size``.
+    """
+
+    if op is None or getattr(op, "func_name", None) not in SKIP_VALIDATION_ENTIRELY:
+        return False
+    if getattr(op, "func_name", None) != "new":
+        return True
+    parents = getattr(op, "parents", ()) or ()
+    if len(parents) > 1:
+        # A second tensor parent is the value-bearing new(tensor) overload.
+        return False
+    if getattr(op, "non_tensor_kwargs", None):
+        return False
+    for arg in getattr(op, "non_tensor_pos_args", None) or ():
+        if isinstance(arg, bool):
+            return False
+        if isinstance(arg, (int, torch.Size)):
+            continue
+        # Sequences are DATA (legacy constructor semantics), not sizes.
+        return False
+    return True
+
+
 def _uninitialized_value_origin(op: Any, source_trace: Any, depth: int = 0) -> bool:
     """Return whether an op's VALUE is itself uninitialized memory.
 
@@ -489,7 +542,10 @@ def _uninitialized_value_origin(op: Any, source_trace: Any, depth: int = 0) -> b
 
     if op is None:
         return False
-    return getattr(op, "func_name", None) in SKIP_VALIDATION_ENTIRELY
+    # Same per-call proof as the replay-skip consumer: a value-bearing
+    # new(tensor)/new(data) result is REAL data, never uninitialized
+    # allocation memory (R08-1 sibling site).
+    return uninitialized_by_design_applies(op)
 
 
 def _perturbed_parent_is_uninitialized_setitem_dest(
@@ -1414,7 +1470,85 @@ def _check_scatter_or_index_domain_exempt(
 # ---------------------------------------------------------------------------
 # Registry 4: Custom exemption checks keyed by func name.
 # ---------------------------------------------------------------------------
+def _perturbed_parents_are_zipped_siblings(layer: Op, layers_to_perturb: list[str]) -> bool:
+    """Return whether every perturbed parent is a CROSS-member zipped input.
+
+    ``meshgrid``/``broadcast_tensors`` zip N inputs to N outputs: output ``j``
+    carries EXACTLY input ``j``'s values, so perturbing input ``k != j`` is
+    legitimately insensitive for output ``j``, while perturbing input ``j``
+    must change it. The former whole-op skip (R08-2, b1-sol) exempted BOTH
+    directions, so a dropped or misattributed value edge on these
+    multi-output ops was never perturbation-proved.
+
+    The projection is fail-closed: a missing ``multi_output_index``, an
+    unrecognized arg-position shape, or a perturbed parent not found in the
+    positional map keeps the perturbation STRICT (returns False).
+
+    Parameters
+    ----------
+    layer:
+        Zipped multi-output operation record (one output's op).
+    layers_to_perturb:
+        Parent labels selected for perturbation.
+
+    Returns
+    -------
+    bool
+        True when every perturbed parent sits at a zipped index other than
+        this output's own ``multi_output_index``.
+    """
+
+    own_index = getattr(layer, "multi_output_index", None)
+    if not isinstance(own_index, int):
+        return False
+    parent_arg_positions = getattr(layer, "parent_arg_positions", None) or {}
+    args_map = parent_arg_positions.get("args") if isinstance(parent_arg_positions, dict) else None
+    if not isinstance(args_map, dict) or not args_map:
+        return False
+    for perturbed_label in layers_to_perturb:
+        positions = [position for position, label in args_map.items() if label == perturbed_label]
+        if not positions:
+            return False
+        for position in positions:
+            zipped_index = position[-1] if isinstance(position, tuple) and position else position
+            if not isinstance(zipped_index, int) or zipped_index == own_index:
+                return False
+    return True
+
+
+def _check_zipped_sibling_exempt(
+    source_trace: "Trace", layer: Op, layers_to_perturb: list[str]
+) -> bool:
+    """Custom check: exempt only cross-member zipped-sibling perturbations.
+
+    Parameters
+    ----------
+    source_trace:
+        Trace being validated (unused; custom-check signature).
+    layer:
+        Zipped multi-output operation record.
+    layers_to_perturb:
+        Parent labels selected for perturbation.
+
+    Returns
+    -------
+    bool
+        True when the perturbation targets only zipped siblings of this
+        output (provably value-irrelevant); False keeps it strict.
+    """
+
+    return _perturbed_parents_are_zipped_siblings(layer, layers_to_perturb)
+
+
 CUSTOM_EXEMPTION_CHECKS: dict[str, Callable[["Trace", Op, list[str]], bool]] = {
+    # R08-2 per-output parent projection: only CROSS-member zipped-sibling
+    # perturbations are exempt; each output's own value edge stays tested.
+    # Both spellings of broadcast_tensors are registered -- capture
+    # canonicalizes to "broadcasttensors", which the old whole-op skip never
+    # matched (a silently dead registry row).
+    "meshgrid": _check_zipped_sibling_exempt,
+    "broadcast_tensors": _check_zipped_sibling_exempt,
+    "broadcasttensors": _check_zipped_sibling_exempt,
     "__getitem__": _check_getitem_exempt,
     "__setitem__": _check_setitem_exempt,
     "index_put": _check_index_put_exempt,
@@ -1711,7 +1845,15 @@ def _posthoc_structural_output_decision(
             "integer boundary; a same-bucket perturbation is quantization, not a "
             "dropped dependency (arg-identity logging still guards the mapping)",
         )
-    if layer.func_name in ["meshgrid", "broadcast_tensors"]:
+    if layer.func_name in [
+        "meshgrid",
+        "broadcast_tensors",
+        "broadcasttensors",
+    ] and _perturbed_parents_are_zipped_siblings(layer, layers_to_perturb):
+        # R08-2 narrowing: only a CROSS-member zipped-sibling perturbation is
+        # structural here. An output's OWN input staying insensitive is a
+        # dropped/misattributed value edge and must fall through to the
+        # failure path.
         return PosthocPerturbDecision(True, "structural_output_template")
     if layer.func_name in [
         "full_like",
