@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any, TypeAlias, cast
 
@@ -370,7 +371,9 @@ def render_image_scatter(
     canvas_size:
         Width and height of the square output image.
     min_distance:
-        Optional minimum center-to-center distance in pixels.
+        Optional minimum center-to-center distance in pixels. Pass ``0`` to
+        disable overlap-avoidance and draw every item at its exact
+        projected coordinate.
     show_axes:
         Whether to draw faint central guide axes.
     background:
@@ -379,7 +382,11 @@ def render_image_scatter(
     Returns
     -------
     Image.Image
-        RGB scatter image of exactly ``(canvas_size, canvas_size)``.
+        RGB scatter image of exactly ``(canvas_size, canvas_size)``. Close
+        centers are deterministically spread apart for legibility; whenever
+        any item is moved off its true projected coordinate, the image
+        carries a quantified ``spread <=Npx`` marker in the lower-left
+        corner.
 
     Raises
     ------
@@ -405,12 +412,23 @@ def render_image_scatter(
 
     shown_count = min(max_items, array.shape[0])
     margin = thumbnail_size / 2.0 + _SCATTER_CAPTION_RESERVE
-    centers = _coords_to_pixel_centers(array[:shown_count], canvas_size=canvas_size, margin=margin)
+    true_centers = _coords_to_pixel_centers(
+        array[:shown_count], canvas_size=canvas_size, margin=margin
+    )
     spacing = (
         min_distance if min_distance is not None else (float(thumbnail_size) if images else 14.0)
     )
     centers = _spread_close_centers(
-        centers, canvas_size=canvas_size, margin=margin, min_distance=spacing
+        true_centers, canvas_size=canvas_size, margin=margin, min_distance=spacing
+    )
+    # Position is the datum in a scatter: when overlap-avoidance moves any
+    # item off its true projected coordinate, the image itself must say so.
+    max_displacement = max(
+        (
+            math.hypot(moved[0] - original[0], moved[1] - original[1])
+            for original, moved in zip(true_centers, centers)
+        ),
+        default=0.0,
     )
     canvas = Image.new("RGB", (canvas_size, canvas_size), background)
     draw = ImageDraw.Draw(canvas)
@@ -428,6 +446,12 @@ def render_image_scatter(
     more_count = array.shape[0] - shown_count
     if more_count > 0:
         _draw_more_indicator(draw, canvas_size=canvas_size, text=f"+{more_count} more")
+    if max_displacement > 0.5:
+        _draw_spread_indicator(
+            draw,
+            canvas_size=canvas_size,
+            text=f"spread <={max(1, int(math.ceil(max_displacement)))}px",
+        )
     return canvas
 
 
@@ -1900,6 +1924,33 @@ def _draw_more_indicator(draw: ImageDraw.ImageDraw, *, canvas_size: int, text: s
     x0 = canvas_size - text_width - 2 * pad - 8
     y0 = canvas_size - text_height - 2 * pad - 8
     x1 = canvas_size - 8
+    y1 = canvas_size - 8
+    draw.rectangle(
+        [(x0, y0), (x1, y1)],
+        fill=_MORE_FILL,
+        outline=_MORE_OUTLINE,
+    )
+    _draw_text(draw, (x0 + pad, y0 + pad), text, fill=_TEXT_COLOR)
+
+
+def _draw_spread_indicator(draw: ImageDraw.ImageDraw, *, canvas_size: int, text: str) -> None:
+    """Draw the displacement disclosure in the scatter's lower-left corner.
+
+    Parameters
+    ----------
+    draw:
+        PIL drawing context.
+    canvas_size:
+        Output image side length.
+    text:
+        Quantified displacement text (e.g. ``"spread <=24px"``).
+    """
+
+    text_width, text_height = _measure_text(draw, text)
+    pad = 6
+    x0 = 8
+    y0 = canvas_size - text_height - 2 * pad - 8
+    x1 = 8 + text_width + 2 * pad
     y1 = canvas_size - 8
     draw.rectangle(
         [(x0, y0), (x1, y1)],
