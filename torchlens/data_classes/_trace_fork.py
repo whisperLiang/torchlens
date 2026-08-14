@@ -19,6 +19,18 @@ failed partials) take the detached fallback: every record shell binds a
 fresh single-row ``DetachedOpStore`` holding isolated copies of its public
 state — the same storage class those records already use after pickle
 restore.
+
+Cost disclosure (measured 2026-08-14, small linear/BN/relu stack, 83 ops,
+gc-tracked-object census with no-op and known-allocation calibration
+guards; a prior uncalibrated probe over-counted 20x, and gc UNTRACKS
+atomic-only dicts/tuples, so calibrate before trusting any count): the COW
+fork is cheap in PAYLOAD BYTES (tensors and sealed columns are shared, and
+those dominate real models) but NOT near-free in objects — it retained ~61
+gc-tracked objects and ~13.5 KB of new small allocations per op (~68% of a
+steady-state capture's tracked-object retention). The bulk is the eager
+fork-time isolation of mutable container cells, the per-record shells, and
+the Layer shadow dicts — all load-bearing for the bidirectional isolation
+contract, so the object count scales O(graph), not O(1).
 """
 
 from __future__ import annotations
