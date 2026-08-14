@@ -213,15 +213,11 @@ def _build_ir_instances() -> dict[str, object]:
         bytes_delta_at_call=None,
         bytes_peak_at_call=None,
     )
+    # R47-2 (eca53c86): CapturePolicy keeps only its three consumed facts.
     capture_policy = CapturePolicy(
-        must_keep_topology=True,
         save_payload=True,
-        requires_isolation=False,
-        save_args=False,
-        save_code=False,
-        save_rng=False,
         save_grad=False,
-        stream=False,
+        save_mode="copy",
     )
     fire_result = FireResult(
         plan_id="plan-0",
