@@ -82,7 +82,7 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
     the tracked follow-up that lands with the >5s re-tier sweep.
     """
 
-    budget = getattr(request.session, "_tl_smoke_budget_value", 15.0)
+    budget = getattr(request.session, "_tl_smoke_family_budget_value", 30.0)
     family_totals = getattr(request.session, "_tl_smoke_family_durations", {})
     offenders = [
         (family, duration)

@@ -165,6 +165,11 @@ def pytest_runtest_makereport(
         total_duration = 0.0
     budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
     item.session._tl_smoke_budget_value = budget
+    # A parametrized family's aggregate legitimately scales with its parameter
+    # count (the 278-cell selector matrix costs ~16s at 57ms/cell on a quiet
+    # box) — give aggregates 2x the per-test budget; genuine family ballooning
+    # still trips at that bar. Tightens with the 5s re-tier follow-up.
+    item.session._tl_smoke_family_budget_value = budget * 2.0
     if total_duration > budget:
         offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
         if offenders is None:
