@@ -976,16 +976,19 @@ def _build_box(
                 # example a scalar-selected getitem axis narrowed to its
                 # recorded singleton). Serve the walk's tight bounds instead
                 # of the descriptor's conservative whole extent.
+                narrowed_minimum = narrowed.minimum
+                narrowed_maximum = narrowed.maximum
+                assert narrowed_minimum is not None and narrowed_maximum is not None
                 box_axes.append(
                     ReceptiveFieldBoxAxis(
                         axis,
                         "full",
                         None,
                         None,
-                        narrowed.minimum,
-                        narrowed.maximum + 1,
-                        max(narrowed.minimum, 0),
-                        min(narrowed.maximum + 1, extent),
+                        narrowed_minimum,
+                        narrowed_maximum + 1,
+                        max(narrowed_minimum, 0),
+                        min(narrowed_maximum + 1, extent),
                     )
                 )
             else:
