@@ -60,6 +60,7 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
     _check_journal_seq_invariants(trace, name)
     _check_backward_event_flow_invariants(trace, name)
     if not trace.grad_fn_logs:
+        _refuse_backward_evidence_without_registry(trace, name)
         return
 
     valid_pass_indices = _check_backward_grad_fn_registry(trace, name)
@@ -70,6 +71,66 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
     _check_grad_fn_topology_invariants(trace, name)
     _check_backward_pass_domain_invariants(trace, name, valid_pass_indices)
     _check_backward_pass_record_consistency(trace, name, valid_pass_indices)
+
+
+def _refuse_backward_evidence_without_registry(trace: Trace, name: str) -> None:
+    """Refuse an empty grad-fn registry that sits beside backward evidence.
+
+    The rest of the backward invariant family is gated on ``grad_fn_logs``
+    being non-empty, and the capture-event journal is a run-scoped live fact
+    that never survives pickle restore, fork, or bundle load -- so on a
+    detached trace a WIPED registry used to silently skip every registry,
+    backpointer, saved-grad, density, topology, and domain check. Backward
+    projection can never legitimately leave ``backward_pass_logs``,
+    ``num_backward_passes``, ``grad_fn_order``, or
+    ``backward_root_grad_fn_object_ids`` populated while the registry is
+    empty, so that state is corruption and the gate REFUSES instead of
+    skipping. Forward-time ``grad_fn_object_id`` stamps are deliberately NOT
+    treated as evidence: they exist on every grad-enabled forward-only
+    capture. A pass record whose ``status`` is not ``"ok"`` is a DISCLOSED
+    failed walk (the walk died before discovering any grad fn), so it is
+    legitimately registry-free and does not count as evidence either.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose ``grad_fn_logs`` is empty.
+    name:
+        Invariant check name for raised errors.
+
+    Raises
+    ------
+    MetadataInvariantError
+        If backward-projection evidence exists without a grad-fn registry.
+    """
+
+    evidence: list[str] = []
+    backward_pass_logs = getattr(trace, "backward_pass_logs", None) or {}
+    ok_pass_count = sum(
+        1 for record in backward_pass_logs.values() if getattr(record, "status", "ok") == "ok"
+    )
+    if ok_pass_count:
+        evidence.append(f"backward_pass_logs holds {ok_pass_count} ok-status pass record(s)")
+    num_backward_passes = getattr(trace, "num_backward_passes", 0) or 0
+    if isinstance(num_backward_passes, int) and num_backward_passes > len(backward_pass_logs):
+        evidence.append(
+            f"num_backward_passes={num_backward_passes} exceeds the "
+            f"{len(backward_pass_logs)} recorded pass record(s)"
+        )
+    grad_fn_order = getattr(trace, "grad_fn_order", None) or ()
+    if grad_fn_order:
+        evidence.append(f"grad_fn_order holds {len(grad_fn_order)} id(s)")
+    root_ids = getattr(trace, "backward_root_grad_fn_object_ids", None) or ()
+    if root_ids:
+        evidence.append(f"backward_root_grad_fn_object_ids holds {len(root_ids)} id(s)")
+    if evidence:
+        raise MetadataInvariantError(
+            name,
+            "grad_fn_logs is empty while backward evidence is present "
+            f"({'; '.join(evidence)}): the grad-fn registry was wiped or never "
+            "recorded, so the backward invariant family cannot verify this "
+            "trace and refuses rather than silently skipping.",
+        )
 
 
 def _check_backward_grad_fn_registry(trace: Trace, name: str) -> set[int]:

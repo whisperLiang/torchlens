@@ -1085,6 +1085,62 @@ def test_equivalence_symmetry_catches_suffixed_in_module_group_corruption() -> N
         check_metadata_invariants(trace)
 
 
+def test_wiped_grad_fn_registry_on_detached_trace_fails_invariants() -> None:
+    """An empty grad-fn registry beside backward evidence must FAIL, not skip.
+
+    The whole backward invariant family was gated on ``grad_fn_logs`` being
+    non-empty, and the capture-event journal is never serialized: on a
+    detached trace (pickle restore, fork, bundle load) the event-flow
+    reconciliation early-returns, so wiping ``grad_fn_logs`` (with
+    ``backward_pass_logs``, ``num_backward_passes``, ``grad_fn_order``, and
+    dangling per-layer backpointers all left in place) silently skipped
+    registry, backpointer, saved-grad, density, topology, and domain checks
+    (deephunt finding H5). The gate now refuses when backward-projection
+    evidence exists without a registry.
+    """
+
+    from torchlens.options import CaptureOptions
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(
+        model,
+        torch.randn(2, 4),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all"),
+    )
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    check_metadata_invariants(trace)
+    assert trace.backward_pass_logs, "backward evidence precondition"
+    assert trace.num_backward_passes >= 1
+    assert trace.grad_fn_logs, "registry precondition"
+
+    # The journal is a run-scoped live-capture fact: pickle restore, fork, and
+    # bundle load all produce journal-less traces, which is where the
+    # event-flow reconciliation cannot catch the wipe.
+    trace._capture_events = None
+    check_metadata_invariants(trace)
+
+    trace.grad_fn_logs = {}
+    with pytest.raises(MetadataInvariantError, match="grad_fn"):
+        check_metadata_invariants(trace)
+
+
+def test_forward_only_trace_keeps_empty_backward_registry_valid() -> None:
+    """A trace that never ran backward legitimately has an empty registry.
+
+    Guards the H5 refusal against over-firing: forward-time
+    ``grad_fn_object_id`` stamps are NOT backward evidence, and a plain
+    forward-only capture (with or without its journal) must keep passing with
+    every backward field empty.
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4))
+    assert not trace.grad_fn_logs
+    check_metadata_invariants(trace)
+    trace._capture_events = None
+    check_metadata_invariants(trace)
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 

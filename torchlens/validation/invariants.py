@@ -337,6 +337,9 @@ check_func_call_id_invariant = _rebind_function(
 _check_backward_graph_invariants = _rebind_function(
     _invariants_backward_graph._check_backward_graph_invariants, globals()
 )
+_refuse_backward_evidence_without_registry = _rebind_function(
+    _invariants_backward_graph._refuse_backward_evidence_without_registry, globals()
+)
 _check_backward_grad_fn_registry = _rebind_function(
     _invariants_backward_graph._check_backward_grad_fn_registry, globals()
 )
@@ -595,9 +598,7 @@ _check_distance_invariants = _rebind_function(
 _check_ancestry_closure = _rebind_function(
     _invariants_connectivity._check_ancestry_closure, globals()
 )
-_pass_qualified_label = _rebind_function(
-    _invariants_connectivity._pass_qualified_label, globals()
-)
+_pass_qualified_label = _rebind_function(_invariants_connectivity._pass_qualified_label, globals())
 _check_one_ancestry_record = _rebind_function(
     _invariants_connectivity._check_one_ancestry_record, globals()
 )
