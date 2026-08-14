@@ -10,6 +10,7 @@ bundle.
 
 from __future__ import annotations
 
+import os
 import pickle
 import platform
 import sys
@@ -24,6 +25,7 @@ from safetensors.torch import save_file
 from .. import __version__ as TORCHLENS_VERSION
 from .._state import pause_logging
 from . import TLSPEC_VERSION, TorchLensIOError
+from ._durability import fsync_dir, fsync_tree
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .scrub import BlobSpec
 from .tensor_policy import FailReason, Ok, SkipReason, is_supported_for_save
@@ -32,6 +34,31 @@ from .tlspec import _TlSpecWriter
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"
 _BLOB_TENSOR_KEY = "data"
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a streamed bundle path's permissions (POSIX only).
+
+    Twin of ``_io/bundle.py::_restrict_mode``: ``mkdir``/``open`` honor the
+    ambient umask, so under umask 002 the streaming bundle dir and its metadata
+    sidecars were left group-writable while the core bundle writer tightens
+    them. Best-effort: a filesystem that ignores mode bits is not a save
+    failure.
+
+    Parameters
+    ----------
+    path:
+        Bundle directory or file to tighten.
+    mode:
+        Target permission bits (``0o700`` for directories, ``0o600`` for files).
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def next_blob_id(blob_index: int) -> str:
@@ -99,6 +126,14 @@ class BundleStreamWriter:
             self.tmp_path.parent.mkdir(parents=True, exist_ok=True)
             self.tmp_path.mkdir()
             self.blobs_path.mkdir()
+            # Permission parity with tl.save (B8-10): mkdir honors the ambient
+            # umask, so under umask 002 the streaming bundle dir and its blobs/
+            # dir were left group-writable/readable while the core bundle
+            # writer tightens them to 0700. The rename at finalize preserves
+            # tmp_path's mode, so tightening here also tightens the published
+            # bundle directory.
+            _restrict_mode(self.tmp_path, 0o700)
+            _restrict_mode(self.blobs_path, 0o700)
         except OSError as exc:
             raise TorchLensIOError(
                 f"Failed to create streaming temp bundle at {self.tmp_path}."
@@ -247,7 +282,7 @@ class BundleStreamWriter:
                 self.write_blob(blob_id, tensor, kind=kind, label=label)
 
             legacy_manifest = self._build_manifest(
-                scrubbed_state=scrubbed_state, unsupported=unsupported
+                scrubbed_state=scrubbed_state, unsupported=unsupported, trace=trace
             )
             _TlSpecWriter.write_trace_manifest(
                 path=self.tmp_path / "manifest.json",
@@ -255,8 +290,10 @@ class BundleStreamWriter:
                 legacy_manifest=legacy_manifest,
                 save_level="portable",
             )
+            _restrict_mode(self.tmp_path / "manifest.json", 0o600)
             with (self.tmp_path / "metadata.pkl").open("wb") as handle:
                 pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            _restrict_mode(self.tmp_path / "metadata.pkl", 0o600)
         except TorchLensIOError:
             raise
         except (OSError, TypeError, ValueError, pickle.PickleError) as exc:
@@ -284,12 +321,26 @@ class BundleStreamWriter:
                 raise TorchLensIOError(reason) from exc
             raise
 
+        # Crash-durability before publish: fsync every written blob/sidecar and
+        # the staged directories so a power/OS crash after the rename below
+        # cannot publish a final-named bundle holding zero-length/partial files
+        # with no PARTIAL sentinel (cleanup_tmp would never sweep it). Mirrors
+        # the tl.save writer (_io/bundle.py:568-586).
+        try:
+            fsync_tree(self.tmp_path)
+        except OSError as exc:
+            reason = f"Failed to flush streaming bundle at {self.tmp_path}: {exc}"
+            self.abort(reason)
+            raise TorchLensIOError(reason) from exc
+
         try:
             self.tmp_path.rename(self.final_path)
         except OSError as exc:
             reason = f"Failed to atomically rename {self.tmp_path} to {self.final_path}."
             self.abort(reason)
             raise TorchLensIOError(reason) from exc
+        # Make the rename itself durable before declaring the save complete.
+        fsync_dir(self.final_path.parent)
 
         self._closed = True
         self._finalized = True
@@ -408,6 +459,7 @@ class BundleStreamWriter:
         *,
         scrubbed_state: dict[str, Any],
         unsupported: list[dict[str, str]],
+        trace: Any,
     ) -> Manifest:
         """Build the final manifest for the streamed bundle."""
 
@@ -417,6 +469,13 @@ class BundleStreamWriter:
         n_auxiliary_blobs = len(tensor_entries) - n_out_blobs - n_grad_blobs
         layer_list = scrubbed_state.get("layer_list", [])
         n_layers = len(layer_list) if isinstance(layer_list, list) else 0
+        # Disclose the harvested module-attribute channel (R62): the documented
+        # invariant is that EVERY save writes a custom_attributes_disclosure
+        # entry, but the streaming writer shipped the channel with none. The
+        # streaming path persists custom_attributes with the same default as
+        # tl.save (include_custom_attributes=True), so it is reported included.
+        from .bundle import _custom_attributes_disclosure
+
         return Manifest(
             tlspec_version=TLSPEC_VERSION,
             torchlens_version=TORCHLENS_VERSION,
@@ -436,6 +495,7 @@ class BundleStreamWriter:
             n_auxiliary_blobs=n_auxiliary_blobs,
             tensors=tensor_entries,
             unsupported_tensors=unsupported,
+            custom_attributes_disclosure=_custom_attributes_disclosure(trace, included=True),
         )
 
     def _ensure_writable(self) -> None:
