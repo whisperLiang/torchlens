@@ -71,6 +71,7 @@ from ._torch_compat import (
     HAS_GENERATOR_GRAPHSAFE_SET_STATE,
     autocast_get_dtype,
     autocast_is_enabled,
+    warm_lazy_torch_imports,
 )
 from .hashing import seed_barcode_rng
 from .tensor_utils import _is_cuda_available, _is_cuda_initialized
@@ -4272,6 +4273,17 @@ class host_nondeterminism_monitor:
             # "originals", so a non-LIFO unwind cannot prove exact restoration. Degrade
             # completeness (the capture ceilings) rather than claim a clean window.
             self._flag_uncertain("monitor_overlap")
+        # BEFORE any patch installs: force torch's lazy torch._compile /
+        # torch._dynamo import cascade (first wrapped op of a selective
+        # runnable-capable capture) to draw its module-exec entropy
+        # (uuid.uuid4/getrandbits) OUTSIDE the window. In-window it marked
+        # os.urandom channels and permanently ceilinged a pure deterministic
+        # model's first runnable artifact to UNVERIFIABLE. A failed warm is
+        # benign: the in-window retry's draws are then honestly marked.
+        try:
+            warm_lazy_torch_imports()
+        except Exception:
+            pass
         try:
             for step_name, step in self._install_steps():
                 try:

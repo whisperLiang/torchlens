@@ -2253,6 +2253,47 @@ def dynamo_is_compiling() -> bool:
         return True
 
 
+_LAZY_TORCH_IMPORTS_WARMED: bool = False
+
+
+def warm_lazy_torch_imports() -> None:
+    """Force torch's lazy ``torch._compile``/``torch._dynamo`` cascade to run NOW.
+
+    The first wrapped op of a capture can trigger torch's own lazy
+    ``import torch._dynamo`` (``torch/_compile.py``), whose import cascade
+    draws host entropy at module-exec time (``uuid.uuid4()`` in
+    ``torch.distributed._composable.contract``, plus getrandbits/instance
+    draws). Fired INSIDE the RNG channel-monitor window, those draws marked
+    ``os.urandom``/getrandbits channels and permanently ceilinged the first
+    selective runnable-capable capture of the process to UNVERIFIABLE -- a
+    silent, order-dependent breach of the contract's "a plain deterministic
+    capture records nothing" pin. The monitor calls this BEFORE arming any
+    patch so the cascade runs outside every window.
+
+    Failure is benign and intentionally unlatched: a partially-executed failed
+    import is evicted from ``sys.modules``, so a later in-window retry re-runs
+    the cascade and its draws are then honestly MARKED (the pre-warm's absence
+    restores the old fail-closed ceiling, never a false-VERIFIED).
+
+    Returns
+    -------
+    None
+        ``sys.modules`` gains the warmed torch modules on success.
+    """
+
+    global _LAZY_TORCH_IMPORTS_WARMED
+
+    if _LAZY_TORCH_IMPORTS_WARMED:
+        return
+    warmed = True
+    for module_name in ("torch._compile", "torch._dynamo"):
+        try:
+            importlib.import_module(module_name)
+        except Exception:
+            warmed = False
+    _LAZY_TORCH_IMPORTS_WARMED = warmed
+
+
 @contextlib.contextmanager
 def force_eager_stance_scope() -> Iterator[bool]:
     """Force compiled callables to run their original eager Python for a scope.
