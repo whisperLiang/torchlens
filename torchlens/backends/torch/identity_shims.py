@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -107,6 +108,19 @@ def install_identity_shims() -> None:
     """
 
     if _installed:
+        # The causal-bias site resolves only through sys.modules (lazy-import
+        # belt), so a user import of torch.nn.attention.bias AFTER the first
+        # wrap is picked up here: wrap_torch() re-enters at every capture
+        # entry, shimming the late-imported site before its dispatch can be
+        # captured. The install is a no-op when the site is absent or already
+        # shimmed.
+        late_records: list[tuple[Any, str, Any]] = []
+        try:
+            _install_causal_bias_shim(late_records)
+        except Exception:
+            _restore(late_records)
+            raise
+        _installed.extend(late_records)
         return
     records: list[tuple[Any, str, Any]] = []
     try:
@@ -269,9 +283,15 @@ def _install_causal_bias_shim(records: list[tuple[Any, str, Any]]) -> None:
 
     if not _torch_compat.HAS_ATTENTION_CAUSAL_BIAS:
         return
-    causal_bias = _torch_compat._import_module_attr_or_none(
-        "torch.nn.attention.bias", "CausalBias"
-    )
+    # Resolve ONLY through sys.modules (r45/r49 lazy-import belt): importing
+    # torch.nn.attention.bias fires torch._dynamo.allow_in_graph at module
+    # top level, dragging the _dynamo/_inductor tree into every wrap. A live
+    # CausalBias can only exist after the USER imported the module, so an
+    # absent module means there is nothing to shim; install_identity_shims
+    # re-checks this site on every wrap so a post-wrap import is picked up
+    # at the next capture entry.
+    module = sys.modules.get("torch.nn.attention.bias")
+    causal_bias = getattr(module, "CausalBias", None) if module is not None else None
     if causal_bias is None:
         return
     orig_classmethod = vars(causal_bias).get("__torch_function__")
