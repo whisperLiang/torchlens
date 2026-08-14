@@ -395,11 +395,22 @@ def _repo_root() -> Path:
 
 
 def test_limitations_doc_exists() -> None:
-    """The limitations page ships with the repo."""
-    path = _repo_root() / "docs" / "LIMITATIONS.md"
-    assert path.is_file(), f"Expected docs/LIMITATIONS.md to exist at {path}"
-    content = path.read_text()
-    assert len(content) > 500, "LIMITATIONS.md looks suspiciously short"
+    """The limitations pages ship with the repo.
+
+    The canonical catalog moved to docs/reference/limitations.md (grind/f1-docs
+    reconcile); docs/LIMITATIONS.md remains as a compatibility redirect stub so
+    existing links do not break. Both must exist, and the canonical page must
+    carry the real content.
+    """
+    stub = _repo_root() / "docs" / "LIMITATIONS.md"
+    assert stub.is_file(), f"Expected docs/LIMITATIONS.md redirect stub at {stub}"
+    assert "reference/limitations.md" in stub.read_text(), (
+        "docs/LIMITATIONS.md must point readers at the canonical page"
+    )
+    canonical = _repo_root() / "docs" / "reference" / "limitations.md"
+    assert canonical.is_file(), f"Expected canonical doc at {canonical}"
+    content = canonical.read_text()
+    assert len(content) > 500, "docs/reference/limitations.md looks suspiciously short"
 
 
 def test_readme_links_to_limitations_doc() -> None:
@@ -418,7 +429,7 @@ def test_limitations_doc_covers_key_contexts() -> None:
     remember to document it. Conversely, if we remove a guard without
     updating this list, the test catches the stale doc.
     """
-    content = (_repo_root() / "docs" / "LIMITATIONS.md").read_text().lower()
+    content = (_repo_root() / "docs" / "reference" / "limitations.md").read_text().lower()
     must_mention = [
         "torch.compile",
         "torch.jit",
@@ -432,6 +443,6 @@ def test_limitations_doc_covers_key_contexts() -> None:
     ]
     for phrase in must_mention:
         assert phrase in content, (
-            f"docs/LIMITATIONS.md should mention '{phrase}'. "
+            f"docs/reference/limitations.md should mention '{phrase}'. "
             f"Missing phrase suggests a stale or incomplete limitations doc."
         )
