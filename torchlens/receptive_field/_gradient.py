@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from .. import _state
 from ..backends import BackendUnsupportedError, get_backend_spec
 from . import _engine, _rules
 from ._errors import (
@@ -259,9 +260,16 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
     previous_flag = trace_dict.get("_tl_rf_probe_active")
     before = _snapshot_probe_state(trace)
     trace._tl_rf_probe_active = True
+    # The per-trace flag alone cannot suppress a probe on a FORK: the
+    # backward grad-fn registry and the capture-time tensor hooks resolve to
+    # the BASE trace (forks preserve tensor identity), whose flag is unset, so
+    # a fork probe minted a phantom managed pass on the parent. The global
+    # depth gates every autograd entry and grad hook while ANY probe runs.
+    _state._rf_probe_depth += 1
     try:
         yield
     finally:
+        _state._rf_probe_depth -= 1
         if flag_was_present:
             trace._tl_rf_probe_active = previous_flag
         else:

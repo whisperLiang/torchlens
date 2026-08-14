@@ -105,6 +105,19 @@ functional-op collection without importing the fast-run implementation. It is no
 only inside ``Trace.run(inputs=..., fast=True)`` and is restored in ``finally``.
 """
 
+_rf_probe_depth: int = 0
+"""Depth of in-flight receptive/projective-field gradient probes.
+
+While positive, no wrapped autograd entry may mint a managed backward pass on
+ANY trace and no capture-time tensor grad hook may record: probes are pure
+measurements. The per-trace ``_tl_rf_probe_active`` flag alone cannot express
+this — the probed trace can be a FORK, while the grad-fn registry and the
+tensor hooks resolve to the BASE trace, whose flag is unset (a fork probe used
+to mint a phantom ``autograd_grad`` pass with retained gradients on the
+parent). Incremented/decremented by ``_probe_suppressed`` in
+``receptive_field/_gradient.py``; single-threaded capture by design.
+"""
+
 _active_hook_plan: Any | None = None
 """Hook plan for the active intervention-ready capture.
 

@@ -149,6 +149,11 @@ def _add_tensor_backward_hook(
         refresh_target_ref = getattr(active_trace, "_refresh_projection_target_ref", None)
         if refresh_target_ref is not None:
             active_trace = refresh_target_ref()
+        if _state._rf_probe_depth > 0:
+            # A fork probe resolves here to the BASE trace whose per-trace
+            # flag is unset; the global depth suppresses grad recording on
+            # every trace while any RF/PF probe runs.
+            return
         if active_trace is not None and getattr(active_trace, "_tl_rf_probe_active", False):
             return
         # A managed backward directed at a FORK RELATIVE (a fork's

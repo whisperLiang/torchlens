@@ -432,6 +432,12 @@ def _traces_for_roots(roots: Any) -> tuple[Any, ...]:
 
     if not _BACKWARD_GRAD_FN_REGISTRY:
         return ()
+    if _state._rf_probe_depth > 0:
+        # An RF/PF gradient probe is in flight: probes are pure measurements
+        # and must never mint a managed pass on ANY trace. The per-trace
+        # ``_tl_rf_probe_active`` check below cannot cover a probe on a FORK,
+        # whose registry entries resolve to the base trace.
+        return ()
     matched: list[Any] = []
     matched_ids: set[int] = set()
     stale_ids: list[int] = []
