@@ -68,6 +68,20 @@ _OP_SESSION_CACHE_FIELDS = (
     "_projective_field_cache",
 )
 
+# Instance-memoized Trace accessor caches (the R37 GC fix moved them onto the
+# instance). Each cached value holds SOURCE-trace record facades — and the
+# op/layer entries are tuple-wrapped, which the conservative default policy
+# would SHARE by reference, so a fork's `.ops`/`.layers` would hand out the
+# PARENT's facades and every COW isolation guarantee would silently vanish.
+# Forks drop them and rebuild lazily over their own shells on first access.
+_TRACE_ACCESSOR_CACHE_FIELDS = frozenset(
+    {
+        "_op_accessor_cache",
+        "_layer_accessor_cache",
+        "_module_call_accessor",
+    }
+)
+
 _OP_FID_BY_NAME = _OP_STORE_LAYOUT.fid_by_name
 _SOURCE_TRACE_REF_FID = _OP_FID_BY_NAME["_source_trace_ref"]
 _OP_SESSION_CACHE_FIDS = tuple(
@@ -290,6 +304,11 @@ def _fork_model_field(parent: Trace, field_name: str, value: Any, memo: dict[Any
         # Derived from the stream that was just replaced; carrying the
         # parent's values would make the fork's guard silently skip its
         # first materialize. ``build_fork`` pops these after restore.
+        return None
+    if field_name in _TRACE_ACCESSOR_CACHE_FIELDS:
+        # Memoized accessors hold parent facades (tuple-wrapped, so the
+        # default policy would share them); the fork rebuilds lazily.
+        # ``build_fork`` pops these after restore.
         return None
     policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name)
     if policy is None:
@@ -604,6 +623,8 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     state_restore(fork, fork_state)
     for stale_guard_field in _STREAM_DERIVED_GUARD_FIELDS:
         fork.__dict__.pop(stale_guard_field, None)
+    for accessor_cache_field in _TRACE_ACCESSOR_CACHE_FIELDS:
+        fork.__dict__.pop(accessor_cache_field, None)
     # The fork gets exactly ONE fresh DETACHED stream — never the parent's
     # (shared lists let a fork backward corrupt the parent's projection),
     # and never none (a fork remains a supported backward-capture target).

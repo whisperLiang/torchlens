@@ -293,6 +293,8 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_tf_validation_result": "session",
     "_tl_save_selector_fire_count": "session",
     "_module_call_accessor": "graph",
+    "_op_accessor_cache": "graph",
+    "_layer_accessor_cache": "graph",
     "_receptive_field_solution": "session",
     "_rf_source_solutions": "session",
     "_rf_target_solutions": "session",
