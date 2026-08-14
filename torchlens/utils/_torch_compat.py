@@ -1252,6 +1252,28 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
 )
 
 
+OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
+    {
+        # PEP 657 / 3.11 code-object surfaces: an interpreter feature, not a
+        # torch-private degradation -- CPython 3.10 installs are healthy.
+        "HAS_CODE_POSITIONS",
+        "HAS_CODE_QUALNAME",
+        # Named-tensor API was REMOVED upstream (torch 2.13): its absence tracks
+        # torch's own public surface, so there is nothing for TorchLens to
+        # degrade on -- named-dim metadata simply cannot exist on such builds.
+        "HAS_NAMED_TENSOR_API",
+    }
+)
+"""Capability flags whose ``False`` is an absent OPTIONAL feature, not a degradation.
+
+r-b4 R26-4: doctor/compat previously presented every ``False`` flag as a
+graceful-degradation WARN, so every healthy torch-only / CPython-3.10 install
+showed a permanent warning row with no actionable remedy -- training users to
+ignore the row. Flags listed here still appear in the snapshot (with their
+true value) but do not drive WARN status; only genuine degradations do.
+"""
+
+
 def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
     """Mark a torch capability absent and emit at most one opt-out warning.
 

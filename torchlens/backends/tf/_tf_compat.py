@@ -81,9 +81,23 @@ def get_tf_capability_snapshot() -> TFCapabilitySnapshot:
     Returns
     -------
     TFCapabilitySnapshot
-        Mapping from ``HAS_*`` flag name to boolean availability.
+        Mapping from ``HAS_*`` flag name to boolean availability. EMPTY when
+        TensorFlow itself is not installed (r-b4 R26-4): this module imports
+        cleanly without TF (the tf import is deferred inside
+        ``_import_op_callbacks_module``), so torch-only installs used to merge
+        a permanent ``HAS_TF_OP_CALLBACKS=False`` into every doctor/compat
+        snapshot -- a false degradation alarm for an optional backend the user
+        never installed.
     """
 
+    import importlib.util
+
+    try:
+        tf_installed = importlib.util.find_spec("tensorflow") is not None
+    except (ImportError, ValueError):
+        tf_installed = False
+    if not tf_installed:
+        return {}
     return {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
 
 

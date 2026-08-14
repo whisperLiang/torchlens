@@ -356,11 +356,22 @@ def _probe_torch_capabilities() -> DoctorCheck:
         Snapshot of probed private integration capabilities.
     """
 
+    from ._torch_compat import OPTIONAL_CAPABILITY_FLAGS
+
     snapshot = _runtime_capability_snapshot()
-    missing = [name for name, available in snapshot.items() if not available]
+    absent = [name for name, available in snapshot.items() if not available]
+    # r-b4 R26-4: only genuine DEGRADATIONS drive WARN. An absent optional
+    # feature (interpreter-version surface, upstream-removed API, an optional
+    # backend that is not installed) is reported with its true value but keeps
+    # a healthy install at PASS -- a permanent false alarm trains users to
+    # ignore the row.
+    missing = [name for name in absent if name not in OPTIONAL_CAPABILITY_FLAGS]
+    optional_absent = [name for name in absent if name in OPTIONAL_CAPABILITY_FLAGS]
     detail = _format_capability_snapshot(snapshot)
     if missing:
         detail += "; missing=" + ",".join(missing)
+    if optional_absent:
+        detail += "; optional_absent=" + ",".join(optional_absent)
     # Report the true state: a missing private-integration capability is a
     # degraded (WARN) row, not a "PASS". These flags are feature-detected and may
     # be legitimately absent across torch versions, so WARN (not FAIL) is honest.
