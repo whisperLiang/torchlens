@@ -476,9 +476,13 @@ def maybe_auto_arm() -> ArmingRecord | None:
     """
 
     global _AUTO_ARM_WARNED
-    if _STATE is not None:
-        _refuse_if_broken(_STATE)
-        return _STATE.arming
+    # Already-armed fast path under the lock: the unlocked triple read of
+    # _STATE raced disarm() (None between the check and the attribute read).
+    with _LOCK:
+        state = _STATE
+        if state is not None:
+            _refuse_if_broken(state)
+            return state.arming
     try:
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return None
@@ -547,13 +551,19 @@ def resolve_group_identity(group: Any) -> GroupIdentity:
         When called while unarmed.
     """
 
-    state = _STATE
-    if state is None:
-        raise RuntimeError("resolve_group_identity() requires torchlens.distributed to be armed")
     dist = torch.distributed
     if group is None:
         group = dist.group.WORLD
+    # Snapshot _STATE only INSIDE the lock: disarm() retires the armed state
+    # under this same lock, so a pre-lock snapshot could seed identities and
+    # ledger events into a RETIRED state after the public API already
+    # reported the process unarmed.
     with _LOCK:
+        state = _STATE
+        if state is None:
+            raise RuntimeError(
+                "resolve_group_identity() requires torchlens.distributed to be armed"
+            )
         identity = state.identities.get(id(group))
         if identity is not None:
             return identity
@@ -648,11 +658,14 @@ def next_seq(identity: GroupIdentity, channel: str) -> int:
     communicator is a new uid and its counters start fresh at 0.
     """
 
-    state = _STATE
-    if state is None:
-        raise RuntimeError("next_seq() requires torchlens.distributed to be armed")
     key = (identity.membership_digest, identity.lifetime_ordinal, channel)
+    # Snapshot _STATE only INSIDE the lock (same atomicity contract as
+    # resolve_group_identity): a pre-lock snapshot raced disarm() and ticked
+    # the seq counters of a RETIRED state while reporting success.
     with _LOCK:
+        state = _STATE
+        if state is None:
+            raise RuntimeError("next_seq() requires torchlens.distributed to be armed")
         value = state.seq_counters.get(key, 0)
         state.seq_counters[key] = value + 1
         return value
