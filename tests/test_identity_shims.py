@@ -281,7 +281,7 @@ class TestSubclassCtorUnderWitness:
 
         torch.manual_seed(0)
         x = torch.randn(2, 3)
-        assert tl.validate_forward_pass(SubclassCtorModel(), x)
+        assert tl.validation.validate_forward_pass(SubclassCtorModel(), x)
 
     @pytest.mark.skipif(
         not _flag("HAS_ATTENTION_CAUSAL_BIAS"),
@@ -299,7 +299,7 @@ class TestSubclassCtorUnderWitness:
         q = torch.randn(1, 2, 6, 8)
         k = torch.randn(1, 2, 6, 8)
         v = torch.randn(1, 2, 6, 8)
-        assert tl.validate_forward_pass(SDPAModel(), (q, k, v))
+        assert tl.validation.validate_forward_pass(SDPAModel(), (q, k, v))
 
     def test_plain_tensor_ctor_keeps_witness_view(self):
         # cls == torch.Tensor exactly must NOT pop the witness: the plain
@@ -312,7 +312,7 @@ class TestSubclassCtorUnderWitness:
 
         torch.manual_seed(0)
         x = torch.randn(2, 3)
-        assert tl.validate_forward_pass(PlainCtorModel(), x)
+        assert tl.validation.validate_forward_pass(PlainCtorModel(), x)
 
 
 class TestShimLifecycle:

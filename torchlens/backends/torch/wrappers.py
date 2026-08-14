@@ -2401,6 +2401,19 @@ def decorate_all_once() -> None:
                 "factory-function device injection inventory could not be evaluated",
             )
 
+    # B8-4: warm BOTH ``functools.cache``'d torch introspection tables BEFORE
+    # the first wrapper setattr. ``get_testing_overrides()`` was already warmed
+    # transitively by the pair crawl, but ``get_overridable_functions()``
+    # previously materialized on the belt's first post-wrap ``_derive()`` call,
+    # permanently keying most entries by torchlens wrappers -- the one measured
+    # side effect that survived ``unwrap_torch()`` -- and making belt
+    # derivation order-dependent. Invariant: no torchlens path may FIRST-call a
+    # cached torch introspection table while wrappers are installed.
+    from torch.overrides import get_overridable_functions, get_testing_overrides
+
+    get_overridable_functions()
+    get_testing_overrides()
+
     _decorate_torch_func_pairs(get_orig_torch_funcs())
 
     # ---- JIT builtin table registration ----
