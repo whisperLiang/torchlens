@@ -23,7 +23,7 @@ from torchlens.fastlog.options import (
 def test_runtime_tuple_derives_from_the_canonical_literal() -> None:
     """The runtime vocabulary is the literal's args, in the literal's order."""
 
-    assert LOOKBACK_PAYLOAD_POLICIES == get_args(LookbackPayloadPolicy)
+    assert get_args(LookbackPayloadPolicy) == LOOKBACK_PAYLOAD_POLICIES
     assert LOOKBACK_PAYLOAD_POLICIES == (
         "metadata_only",
         "detached_raw",

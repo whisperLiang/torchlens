@@ -87,9 +87,9 @@ def _update_content_digest(digest: Any, value: Any) -> None:
         # ``.numpy()`` shares the tensor's memory; hashing through the buffer
         # protocol avoids materializing a whole-payload ``bytes`` copy. The
         # digest bytes are identical to the prior ``.tobytes()`` spelling.
-        raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
-        digest.update(raw.nbytes.to_bytes(8, "big"))
-        digest.update(raw.data)
+        byte_view = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        digest.update(byte_view.nbytes.to_bytes(8, "big"))
+        digest.update(byte_view.data)
         return
     if isinstance(value, Mapping):
         digest.update(b"mapping\0")
