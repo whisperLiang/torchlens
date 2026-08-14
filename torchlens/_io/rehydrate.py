@@ -36,6 +36,7 @@ from .scrub import (
     _RAW_IMAGE_SENTINEL,
     _RAW_INPUT_IMAGE_BYTES_LIMIT,
     _RAW_INPUT_IMAGE_MAX_EDGE,
+    _pin_in_memo,
 )
 from .state_keys import invalidate_static_class_attr_cache, static_class_attr
 
@@ -446,6 +447,7 @@ def _rehydrate_object(
     if cached is not None:
         return cached
     if kind == _REHYDRATE_TUPLE:
+        _pin_in_memo(seen, value)
         seen[obj_id] = _REHYDRATE_IN_PROGRESS
         rebuilt_tuple = _rebuild_tuple_value(
             value,
@@ -507,6 +509,7 @@ def _rehydrate_object(
         return value
     if kind == _REHYDRATE_SET:
         rebuilt_set: set[Any] = set()
+        _pin_in_memo(seen, value)
         seen[obj_id] = rebuilt_set
         rebuilt_set.update(
             _rehydrate_object(
@@ -527,6 +530,7 @@ def _rehydrate_object(
         )
         return rebuilt_set
     if kind == _REHYDRATE_FROZENSET:
+        _pin_in_memo(seen, value)
         seen[obj_id] = _REHYDRATE_IN_PROGRESS
         rebuilt_frozenset = frozenset(
             _rehydrate_object(
@@ -1265,6 +1269,7 @@ def _rehydrate_nested_object(
     if cached is not None:
         return cached
     if isinstance(value, tuple):
+        _pin_in_memo(seen, value)
         seen[obj_id] = _REHYDRATE_IN_PROGRESS
         rebuilt_tuple = _rebuild_tuple_value(
             value,
@@ -1347,6 +1352,7 @@ def _rehydrate_nested_object(
         return value
     if isinstance(value, set):
         rebuilt_set: set[Any] = set()
+        _pin_in_memo(seen, value)
         seen[obj_id] = rebuilt_set
         rebuilt_set.update(
             _rehydrate_nested_object(
@@ -1364,6 +1370,7 @@ def _rehydrate_nested_object(
         )
         return rebuilt_set
     if isinstance(value, frozenset):
+        _pin_in_memo(seen, value)
         seen[obj_id] = _REHYDRATE_IN_PROGRESS
         rebuilt_frozenset = frozenset(
             _rehydrate_nested_object(

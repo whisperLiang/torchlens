@@ -28,6 +28,7 @@ from torchlens._io.state_keys import (
 )
 from torchlens._trace_selector_helpers import _predicate_cache_key
 from torchlens.utils.display import cleanup_trace_visualizer_dir, ensure_trace_visualizer_dir
+from torchlens.visualization import auto_collapse
 from torchlens.visualization.auto_collapse import analyze_collapse
 
 
@@ -248,6 +249,45 @@ def test_visualizer_cleanup_helper_is_idempotent() -> None:
     assert not output_dir.exists()
 
 
+def test_streamed_bundle_lazy_load_keeps_relation_labels_as_strings(tmp_path: Path) -> None:
+    """Rehydrate memos must never serve a stale rebuilt value for a recycled id.
+
+    Regression: the portable-walk memos keyed rebuilt containers by
+    ``id(original)`` without pinning the originals. Replaced originals were
+    freed mid-walk, CPython recycled their addresses, and later nodes hit the
+    stale entries -- a lazy-loaded op's ``parents`` tuple came back holding the
+    previous op's ``EdgeUseRecord`` payload instead of label strings.
+    """
+
+    class _TwoOpModel(nn.Module):
+        """Conv-then-ReLU model exercising multi-op relation rehydration."""
+
+        def __init__(self) -> None:
+            """Initialize the two chained modules."""
+
+            super().__init__()
+            self.conv = nn.Conv2d(1, 2, 3)
+            self.relu = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run conv then relu."""
+
+            return self.relu(self.conv(x))
+
+    bundle_path = tmp_path / "streamed_relation_bundle.tl"
+    tl.trace(
+        _TwoOpModel(),
+        torch.randn(1, 1, 8, 8),
+        layers_to_save="all",
+        save_outs_to=bundle_path,
+        random_seed=0,
+    )
+    lazy_log = tl.load(bundle_path, lazy=True)
+    for op in lazy_log.ops:
+        assert all(isinstance(parent, str) for parent in op.parents), op.label
+        assert all(isinstance(child, str) for child in op.children), op.label
+
+
 def test_collapse_analysis_cache_invalidates_after_equal_size_graph_edit() -> None:
     """Visualization caches fingerprint graph content rather than trace identity alone."""
 
@@ -262,3 +302,42 @@ def test_collapse_analysis_cache_invalidates_after_equal_size_graph_edit() -> No
     assert any(
         "relu_cache_probe" in signal.own_func_names for signal in second.signals.values()
     )
+
+
+def test_collapse_analysis_fingerprints_once_per_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One analysis pass must validate the graph fingerprint O(1) times, not per edge.
+
+    Regression: content-based cache validation recomputed the O(ops) graph
+    fingerprint inside every per-edge relationship resolution, turning one
+    ``analyze_collapse`` miss into O(edges x ops) work — minutes-long
+    "hangs" on real torchvision graphs. The walk must validate once at entry
+    and thread the validated adjacency index through the edge loops.
+    """
+
+    model = nn.Sequential(
+        nn.Conv2d(1, 4, 3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4, 4, 3, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(4 * 8 * 8, 10),
+    )
+    trace = tl.trace(model, torch.randn(1, 1, 8, 8))
+    edge_count = sum(len(op.children) for op in trace.ops)
+    assert edge_count >= 5
+
+    calls = 0
+    real_revision = auto_collapse._collapse_graph_revision
+
+    def counting_revision(target: Any) -> tuple[object, ...]:
+        """Count fingerprint computations while preserving behavior."""
+
+        nonlocal calls
+        calls += 1
+        return real_revision(target)
+
+    monkeypatch.setattr(auto_collapse, "_collapse_graph_revision", counting_revision)
+    analyze_collapse(trace)
+    assert calls <= 2, f"{calls} fingerprint walks for {edge_count} edges"

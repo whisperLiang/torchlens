@@ -49,6 +49,27 @@ _SCRUB_IN_PROGRESS = object()
 _LOGGER = logging.getLogger(__name__)
 
 
+def _pin_in_memo(memo: dict[int, Any], value: Any) -> None:
+    """Keep ``value`` alive for the memo's lifetime so its ``id`` cannot recycle.
+
+    The portable-walk memos key rebuilt results by ``id(original)``. When an
+    original container is a temporary (dropped once its owner's field is
+    replaced), CPython may reuse its address for a later object, which would
+    then falsely hit the memo and receive an unrelated rebuilt value. Pinning
+    every memoized original under a reserved key (``id(memo)``, the same
+    device ``copy.deepcopy`` uses) makes the id-keyed lookup sound.
+
+    Parameters
+    ----------
+    memo:
+        Identity-keyed walk memo whose lifetime bounds the pin.
+    value:
+        Original object being memoized.
+    """
+
+    memo.setdefault(id(memo), []).append(value)  # type: ignore[union-attr]
+
+
 @dataclass(frozen=True)
 class BlobSpec:
     """A payload selected for portable blob persistence.
@@ -556,6 +577,7 @@ def _scrub_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_list: list[Any] = []
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_list
         rebuilt_list.extend(
             _scrub_value(
@@ -577,6 +599,7 @@ def _scrub_value(
             raise TorchLensIOError("Portable metadata contains a cycle through a tuple.")
         if cached is not None:
             return cached
+        _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
             rebuilt_tuple = _rebuild_tuple_value(
@@ -604,6 +627,7 @@ def _scrub_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_set: set[Any] = set()
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_set
         rebuilt_set.update(
             _scrub_value(
@@ -625,6 +649,7 @@ def _scrub_value(
             raise TorchLensIOError("Portable metadata contains a cycle through a frozenset.")
         if cached is not None:
             return cached
+        _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
             rebuilt_frozenset = frozenset(
@@ -652,6 +677,7 @@ def _scrub_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
+        _pin_in_memo(memo, value)
         if isinstance(value, defaultdict):
             rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
             memo[obj_id] = rebuilt
@@ -704,6 +730,7 @@ def _scrub_value(
         return memo[obj_id]
 
     scrubbed_obj = state_new(type(value))
+    _pin_in_memo(memo, value)
     memo[obj_id] = scrubbed_obj
     scrubbed_state: dict[str, Any] = {}
     owner_is_trace = isinstance(value, Trace)
@@ -1490,6 +1517,7 @@ def _blobify_recursive_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_list: list[Any] = []
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_list
         rebuilt_list.extend(recurse(item) for item in value)
         return rebuilt_list
@@ -1500,6 +1528,7 @@ def _blobify_recursive_value(
             raise TorchLensIOError("Portable payload contains a cycle through a tuple.")
         if cached is not None:
             return cached
+        _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
             rebuilt_tuple = _rebuild_tuple_value(value, (recurse(item) for item in value))
@@ -1518,6 +1547,7 @@ def _blobify_recursive_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_ordered: OrderedDict[Any, Any] = OrderedDict()
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_ordered
         for key, item in value.items():
             rebuilt_ordered[key] = recurse(item)
@@ -1527,6 +1557,7 @@ def _blobify_recursive_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt
         for key, item in value.items():
             rebuilt[key] = recurse(item)
@@ -1536,6 +1567,7 @@ def _blobify_recursive_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_mapping: dict[Any, Any] = {}
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_mapping
         for key, item in value.items():
             rebuilt_mapping[key] = recurse(item)
@@ -1545,6 +1577,7 @@ def _blobify_recursive_value(
         if obj_id in memo:
             return memo[obj_id]
         rebuilt_set: set[Any] = set()
+        _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_set
         rebuilt_set.update(recurse(item) for item in value)
         return rebuilt_set
@@ -1555,6 +1588,7 @@ def _blobify_recursive_value(
             raise TorchLensIOError("Portable payload contains a cycle through a frozenset.")
         if cached is not None:
             return cached
+        _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
             rebuilt_frozenset = frozenset(recurse(item) for item in value)
