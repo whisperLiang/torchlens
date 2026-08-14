@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -113,9 +114,25 @@ def apply_static_label_save_policy(
         return
     _reject_non_static_save_predicate(predicate, backend_name=backend_name)
     hidden_payloads = _hidden_payloads_by_label(trace)
+    matched_any = False
     for op in getattr(trace, "layer_list", ()):
-        if not bool(predicate(op)):
+        if bool(predicate(op)):
+            matched_any = True
+        else:
             _drop_public_activation_payload(op)
+    if not matched_any:
+        # A predicate matching ZERO sites used to complete silently -- a
+        # typo'd label or function name produced a trace with no saved
+        # activations and no diagnostic. The trace stays usable (structure
+        # and metadata survive), so this warns rather than refusing; TF's
+        # intervene-side reachability check remains fail-closed separately.
+        warnings.warn(
+            f"{backend_name} trace(save=...) predicate matched zero operations; "
+            "the returned trace retains no saved activation payloads. Check the "
+            "selector against the captured op labels (trace.layer_list) -- a "
+            "mistyped label or function name silently saves nothing.",
+            stacklevel=3,
+        )
     trace._selective_save_hidden_payloads = hidden_payloads
     _refresh_saved_activation_summary(trace)
 
