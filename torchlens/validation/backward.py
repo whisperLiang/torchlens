@@ -189,32 +189,43 @@ def _stock_param_grad_degeneracy(
         ``"all-nonfinite"`` when EVERY element of EVERY gradient is NaN/Inf
         (vacuous under ``equal_nan=True``), ``"all-zero"`` when every element
         is exactly zero (zero-filled buffers are indistinguishable from a
-        correct capture), ``"element-free"`` when no gradient carries any
-        element, and ``None`` for a census with real comparison power. The
-        classification is deliberately TOTAL-degeneracy only: any finite
-        nonzero element anywhere restores detection power and returns ``None``.
+        correct capture), ``"mixed-nonfinite-zero"`` when every element is
+        NaN/Inf or exactly zero but neither class alone covers the census,
+        ``"element-free"`` when no gradient carries any element, and ``None``
+        for a census with real comparison power. The rule is exactly the one
+        the ``equal_nan=True`` comparison implies: a FINITE NONZERO element
+        anywhere restores detection power and returns ``None``; every element
+        that is NaN/Inf (vacuous) or zero (indistinguishable from a
+        zero-filled buffer) contributes none.
     """
 
     saw_element = False
-    all_nonfinite = True
-    all_zero = True
+    saw_finite = False
+    saw_nonzero = False
     for grad in expected_param_grads.values():
         if grad.numel() == 0:
             continue
         saw_element = True
-        if all_nonfinite and bool(torch.isfinite(grad).any()):
-            all_nonfinite = False
-        # NaN/Inf elements are not zero, so an all-zero verdict already implies
-        # an all-finite census; the two arms are mutually exclusive.
-        if all_zero and bool(grad.ne(0).any()):
-            all_zero = False
-        if not all_nonfinite and not all_zero:
+        finite = torch.isfinite(grad)
+        # The decisive per-element predicate: only an element that is BOTH
+        # finite AND nonzero gives the comparison detection power. Tracking
+        # the two properties as independent whole-census totals (the previous
+        # shape) was defeated by a MIXED census -- one all-NaN grad killed the
+        # all-zero arm, one all-zero grad killed the all-nonfinite arm, and a
+        # census with zero finite-nonzero elements passed as "real power".
+        if bool((finite & grad.ne(0)).any()):
             return None
+        if bool(finite.any()):
+            saw_finite = True
+        if bool(grad.ne(0).any()):
+            saw_nonzero = True
     if not saw_element:
         return "element-free"
-    if all_nonfinite:
+    if not saw_finite:
         return "all-nonfinite"
-    return "all-zero"
+    if not saw_nonzero:
+        return "all-zero"
+    return "mixed-nonfinite-zero"
 
 
 def _param_grads(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -607,9 +618,11 @@ def validate_backward_pass(
         # pipelines identically), and an all-zero census cannot distinguish a
         # correct capture from zero-filled gradient buffers. Either way the
         # comparison below has ZERO detection power, so the verdict is
-        # unverifiable -- never PASS (the ABORTED_NONFINITE doctrine). This is
-        # TOTAL degeneracy only: a partially NaN or partially zero census keeps
-        # its finite-nonzero comparison power and must keep passing.
+        # unverifiable -- never PASS (the ABORTED_NONFINITE doctrine). The
+        # decisive predicate is per-element: a census with at least one FINITE
+        # NONZERO element keeps its comparison power and must keep passing; a
+        # census made entirely of NaN/Inf and exact-zero elements (including
+        # the MIXED all-NaN-grad + all-zero-grad shape) has none.
         degeneracy = _stock_param_grad_degeneracy(expected_param_grads)
         if degeneracy is not None:
             warnings.warn(

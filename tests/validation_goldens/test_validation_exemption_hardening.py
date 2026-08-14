@@ -1518,6 +1518,76 @@ def test_backward_validation_all_zero_grads_is_not_pass() -> None:
         )
 
 
+def test_backward_validation_mixed_nan_and_zero_grads_is_not_pass() -> None:
+    """A MIXED all-NaN + all-zero census must be unverifiable, never PASS.
+
+    The two degeneracy arms used to be tracked as independent whole-census
+    totals, so one all-NaN gradient killed the all-zero arm and one all-zero
+    gradient killed the all-nonfinite arm -- a census with ZERO finite-nonzero
+    elements (no detection power at all) returned ``None`` and validation
+    passed vacuously (b4-fable round-2 probe; defect in the a2680381 guard).
+    The decisive predicate is per-element finite-AND-nonzero existence.
+    """
+
+    class MixedDegenerateModel(nn.Module):
+        """Model whose census is one all-NaN grad plus one all-zero grad."""
+
+        def __init__(self) -> None:
+            """Initialize the two degenerate-gradient parameters."""
+
+            super().__init__()
+            self.nan_param = nn.Parameter(torch.tensor(1.0))
+            self.zero_param = nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return ``x`` plus a NaN-grad term and a zero-grad term.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Input with one NaN-gradient and one zero-gradient
+                contribution.
+            """
+
+            nan_term = (self.nan_param * 0.0) * torch.tensor(float("inf"))
+            zero_term = (self.zero_param * x.sum()) * 0.0
+            return x + nan_term + zero_term
+
+    model = MixedDegenerateModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+            # The bare two-parameter module has no submodule outputs, so the
+            # layer-grad report is empty; disable it to reach the parameter
+            # census guard under test.
+            validate_layer_grads=False,
+        )
+
+
+def test_stock_param_grad_degeneracy_mixed_census_is_degenerate() -> None:
+    """Unit pin: the mixed census classifies degenerate, not real-power."""
+
+    census = {
+        "a": torch.full((3,), float("nan")),
+        "b": torch.zeros(3),
+    }
+    verdict = backward_validation._stock_param_grad_degeneracy(census)
+    assert verdict == "mixed-nonfinite-zero"
+
+    # Any finite nonzero element anywhere restores detection power.
+    census["c"] = torch.tensor([0.0, 1e-30, 0.0])
+    assert backward_validation._stock_param_grad_degeneracy(census) is None
+
+
 def test_backward_validation_partial_nan_grads_still_pass() -> None:
     """A PARTIALLY NaN census keeps its detection power and still passes.
 
