@@ -23,6 +23,7 @@ from torchlens.backends.torch.completeness_witness import (
     MAX_AUDITED_COMPLETENESS_BOUNDARIES,
 )
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+from torchlens.utils.introspection import INPUT_SEARCH_DEPTH_LIMIT
 
 # (major, minor) of the running torch, dependency-free (e.g. "2.8.0+cpu" -> (2, 8)).
 _TORCH_XY = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
@@ -181,6 +182,35 @@ class _DeepInputModel(nn.Module):
         value = nested
         for _ in range(self.depth):
             value = value[0]  # type: ignore[index]
+        return value + 1.0  # type: ignore[operator, no-any-return]
+
+
+class _AttrWrap:
+    """Plain attribute wrapper the container-boundary walkers do not descend into."""
+
+    __slots__ = ("inner",)
+
+    def __init__(self, inner: object) -> None:
+        """Store the wrapped value."""
+
+        self.inner = inner
+
+
+class _DeepAttrInputModel(nn.Module):
+    """Consume a tensor nested below an attribute-wrapper chain."""
+
+    def __init__(self, depth: int) -> None:
+        """Store the number of attribute levels to unwrap."""
+
+        super().__init__()
+        self.depth = depth
+
+    def forward(self, nested: object) -> torch.Tensor:
+        """Unwrap ``nested`` and add one to its tensor leaf."""
+
+        value = nested
+        for _ in range(self.depth):
+            value = value.inner  # type: ignore[attr-defined]
         return value + 1.0  # type: ignore[operator, no-any-return]
 
 
@@ -545,15 +575,45 @@ def test_deep_input_tensor_is_captured_and_witnessed() -> None:
 
 
 @pytest.mark.smoke
-def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
-    """The retained safety ceiling names its frontier and forbids verification."""
+def test_mid_band_container_depth_is_captured_and_witnessed() -> None:
+    """Container nesting in the once-dropped 65-200 band is fully captured.
+
+    The witness walker's private ``64`` ceiling used to silently drop tensor
+    leaves for legal inputs in this band (grind-p3 T11.4); after the unified
+    ``INPUT_TREE_MAX_DEPTH`` ceiling, a 70-level list input is a represented,
+    verified graph source.
+    """
 
     wrap_torch(completeness_witness=True)
     nested: object = torch.tensor([5.0])
     for _ in range(70):
         nested = [nested]
+    trace = tl.trace(_DeepInputModel(70), nested)
+
+    assert len(trace.input_layers) == 1
+    assert trace.capture_verified is True
+    assert trace.completeness_witness_verified is True
+    assert trace.capture_verification_reason == "dispatch_witness_verified"
+
+
+@pytest.mark.smoke
+def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
+    """The retained safety ceiling names its frontier and forbids verification.
+
+    Container nesting past ``INPUT_TREE_MAX_DEPTH`` refuses TYPED at capture
+    entry (``input_tree_depth_exceeded``; pinned in
+    ``test_input_boundary_guards.py``), so the retained witness ceiling is
+    exercised through ATTRIBUTE nesting, which the container-boundary entry
+    walkers deliberately do not descend into.
+    """
+
+    wrap_torch(completeness_witness=True)
+    depth = INPUT_SEARCH_DEPTH_LIMIT + 50
+    nested: object = torch.tensor([5.0])
+    for _ in range(depth):
+        nested = _AttrWrap(nested)
     with pytest.warns(TorchLensCaptureGapWarning, match="input_traversal_depth_exceeded"):
-        trace = tl.trace(_DeepInputModel(70), nested)
+        trace = tl.trace(_DeepAttrInputModel(depth), nested)
 
     assert trace.input_layers == []
     assert trace.capture_verified is False
@@ -564,7 +624,7 @@ def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
         for report in trace.completeness_diagnostics
         if report["reason"] == "input_traversal_depth_exceeded"
     )
-    assert input_gap["input_path"].startswith("input.nested.0.0")
+    assert input_gap["input_path"].startswith("input.nested.inner.inner")
 
 
 @pytest.mark.smoke
