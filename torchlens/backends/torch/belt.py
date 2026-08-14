@@ -21,10 +21,13 @@ The belt membership is DERIVED MECHANICALLY per build, never hand-listed:
    call with zero callbacks is a belt member; a call that fires the mode is
    excluded (this resolves build-dependent visibility such as ``from_file``
    automatically per version).
-3. Candidates without a runnable probe are DISCLOSED in the report, never
-   silently classified.
+3. Candidates without a runnable probe are DISCLOSED in the report — by name
+   (``unprobed_candidates``) and count — never silently classified. Probing
+   itself is recipe-gated: only ``PROBE_RECIPES`` entries can be measured, so
+   the mechanical derivation resolves visibility for the RECIPE-COVERED
+   tensor-source family and honestly discloses the rest.
 
-On this torch build the derived set is ``{torch.from_numpy,
+On this torch build the derived set is ``{torch.from_numpy, torch.from_dlpack,
 torch.frombuffer, torch.Tensor.as_subclass}`` (pinned in
 ``tests/test_mechanical_belt.py``).
 """
@@ -138,6 +141,7 @@ class BeltReport:
     probed_visible: tuple[tuple[str, str], ...]
     probe_failures: tuple[tuple[str, str], ...]
     unprobed_candidate_count: int
+    unprobed_candidates: tuple[tuple[str, str], ...] = ()
 
 
 _report: BeltReport | None = None
@@ -193,7 +197,7 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
     probed_visible: list[tuple[str, str]] = []
     probe_failures: list[tuple[str, str]] = []
     member_map: dict[int, Any] = {}
-    unprobed = 0
+    unprobed_candidates: list[tuple[str, str]] = []
     seen_original_ids: set[int] = set()
 
     for namespace_name, func_name in inventory:
@@ -209,7 +213,7 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
             continue
         recipe = PROBE_RECIPES.get((namespace_name, func_name))
         if recipe is None:
-            unprobed += 1
+            unprobed_candidates.append((namespace_name, func_name))
             continue
         mode = _CountingMode()
         cleanup_path: str | None = None
@@ -243,7 +247,8 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
         members=tuple(members),
         probed_visible=tuple(probed_visible),
         probe_failures=tuple(probe_failures),
-        unprobed_candidate_count=unprobed,
+        unprobed_candidate_count=len(unprobed_candidates),
+        unprobed_candidates=tuple(unprobed_candidates),
     )
     return report, member_map
 

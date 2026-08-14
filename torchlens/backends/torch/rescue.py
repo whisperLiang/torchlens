@@ -188,10 +188,13 @@ def _disclosure(
     trigger: str,
     recovered: bool,
     recovered_ops: tuple[str, ...] = (),
+    lost_ops: tuple[str, ...] = (),
     primary_escape_diagnostics: tuple[Any, ...] = (),
     primary_error: str | None = None,
     rescue_error: str | None = None,
     residual_signal: str | None = None,
+    skipped_reason: str | None = None,
+    forward_runs: int = 2,
 ) -> dict[str, Any]:
     """Build the session-time ``rescue_rerun`` disclosure record."""
 
@@ -199,12 +202,35 @@ def _disclosure(
         "trigger": trigger,
         "recovered": recovered,
         "recovered_ops": recovered_ops,
+        "lost_ops": lost_ops,
         "primary_escape_diagnostics": primary_escape_diagnostics,
         "primary_error": primary_error,
         "rescue_error": rescue_error,
         "residual_signal": residual_signal,
-        "forward_runs": 2,
+        "skipped_reason": skipped_reason,
+        "forward_runs": forward_runs,
     }
+
+
+def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
+    """Labels of primary-forward ops that WROTE module buffer state.
+
+    A rescue re-run executes the user's forward a SECOND time. When the
+    primary forward wrote buffers (train-mode BatchNorm running stats and
+    ``num_batches_tracked``, any in-forward buffer counter), the re-run
+    double-applies those writes: RNG is restored between runs, module state is
+    not restorable. Captures whose primary shows buffer writes therefore
+    refuse the re-run. A custom in-forward PYTHON-attribute counter (not a
+    registered buffer) still mutates twice on rescued captures -- the
+    documented residual (see docs/migration/scoped_detached_patching.md).
+    """
+
+    labels: list[str] = []
+    for op in getattr(trace, "ops", ()) or ():
+        if getattr(op, "buffer_write_kind", None) is not None:
+            label = getattr(op, "label_raw", None) or getattr(op, "layer_label", None)
+            labels.append(str(label or getattr(op, "func_name", "?")))
+    return tuple(labels)
 
 
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
@@ -219,7 +245,16 @@ def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """
 
     trace.capture_verified = False
-    if reason == "mode_rescue_rerun" or not getattr(trace, "capture_verification_reason", None):
+    existing_reason = getattr(trace, "capture_verification_reason", None)
+    if getattr(trace, "_raw_dynamo_region_detected", False) or existing_reason == (
+        "dynamo_region_not_logged"
+    ):
+        # R16-3: the dynamo-region verdict has TOP precedence at both finalize
+        # sites (compile threads and unaccounted dispatches are symptoms of
+        # that same region); a recovered rescue must not clobber it. The
+        # rescue attempt stays disclosed through ``rescue_rerun`` below.
+        pass
+    elif reason == "mode_rescue_rerun" or not existing_reason:
         trace.capture_verification_reason = reason
     trace.rescue_rerun = info
 
@@ -271,6 +306,37 @@ def capture_with_rescue(
         if signal is None:
             return primary
         trigger = signal
+        # R16-2: a rescue re-run executes the user's forward a SECOND time.
+        # When the primary forward WROTE buffer state (train-mode BatchNorm
+        # counters and running stats, in-forward buffer counters), the re-run
+        # double-applies those writes (RNG is restored, module state is not),
+        # so the re-run is refused and the escape stands disclosed.
+        buffer_writes = _buffer_write_labels(primary)
+        if buffer_writes:
+            shown = ", ".join(buffer_writes[:3])
+            warnings.warn(
+                "TorchLens detected an escape signal but skipped the rescue "
+                f"re-run: the forward wrote module buffer state ({shown}), and "
+                "re-running it would double-apply those writes. The escape "
+                "stands unrecovered; call model.eval() (or fix the stale torch "
+                "reference) and re-capture.",
+                UserWarning,
+                stacklevel=3,
+            )
+            _mark(
+                primary,
+                "escape_rescue_unrecovered",
+                _disclosure(
+                    trigger=trigger,
+                    recovered=False,
+                    primary_escape_diagnostics=tuple(
+                        getattr(primary, "escape_diagnostics", ()) or ()
+                    ),
+                    skipped_reason="buffer_writes_double_forward",
+                    forward_runs=1,
+                ),
+            )
+            return primary
 
     _thread_local.rescue_active = True
     try:
@@ -311,8 +377,19 @@ def capture_with_rescue(
         return rescued
 
     assert primary is not None
-    recovered_counts = _op_name_counts(rescued) - _op_name_counts(primary)
-    if recovered_counts:
+    # R16-1: the recovery oracle is TWO-SIDED. ``Counter.__sub__`` alone drops
+    # losses, so mode-induced de-fusion (eval MHA: 3 fused ops -> 27 small
+    # ops) read as pure gains and a benign false alarm silently swapped the
+    # user's canonical fused trace for a structurally different
+    # mode-perturbed one marked recovered. A rescue counts as recovery ONLY
+    # when the rescued op multiset is a strict SUPERSET of the primary's;
+    # any loss means mode perturbation, and the mode-free primary stays
+    # authoritative with both deltas disclosed.
+    primary_counts = _op_name_counts(primary)
+    rescued_counts = _op_name_counts(rescued)
+    recovered_counts = rescued_counts - primary_counts
+    lost_counts = primary_counts - rescued_counts
+    if recovered_counts and not lost_counts:
         _mark(
             rescued,
             "mode_rescue_rerun",
@@ -326,16 +403,19 @@ def capture_with_rescue(
         )
         return rescued
 
-    # The net saw nothing new: a residual class beyond any mode (worker
-    # thread, de-moded composite interior). Keep the mode-free primary and
-    # disclose that the escape stands unrecovered.
+    # Nothing new, or a structurally different (mode-perturbed) graph: keep
+    # the mode-free primary and disclose that the escape stands unrecovered,
+    # including both deltas and whether the rescue still carried the signal.
     _mark(
         primary,
         "escape_rescue_unrecovered",
         _disclosure(
             trigger=trigger,
             recovered=False,
+            recovered_ops=tuple(sorted(recovered_counts.elements())),
+            lost_ops=tuple(sorted(lost_counts.elements())),
             primary_escape_diagnostics=tuple(getattr(primary, "escape_diagnostics", ()) or ()),
+            residual_signal=_escape_signal(rescued),
         ),
     )
     return primary

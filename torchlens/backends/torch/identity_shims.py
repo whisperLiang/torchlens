@@ -18,7 +18,13 @@ broken operand pairings are:
 Census (2026-08-14, installed-source grep over the supported eager range,
 identity/equality forms against wrappable callables, runtime paths only)
 found exactly these sites; compiler/export/testing namespaces are out of
-capture scope by contract.
+capture scope by contract. A fourth normalization rides along:
+``torch.overrides.resolve_name`` keys its cached index by the pre-warm
+originals, so a wrapper argument resolved to ``None`` -- the shim retries a
+miss with the ledger original. The standing installed-tree grep gate lives
+in ``tests/test_wrap_state_compat.py``; the ``nested/_internal`` NJT
+identity reads it surfaces are a documented unshimmed residual (nested
+jagged tensors are not supported capture inputs).
 
 Strategy: NEVER re-implement torch's decision logic. Each shim normalizes
 the identity operand to the basis the immediately-following torch comparison
@@ -107,6 +113,7 @@ def install_identity_shims() -> None:
         _install_transformer_ctor_shims(records)
         _install_causal_bias_shim(records)
         _install_expanded_weights_shims(records)
+        _install_resolve_name_shim(records)
     except Exception:
         _restore(records)
         raise
@@ -172,6 +179,15 @@ def _install_transformer_ctor_shims(records: list[tuple[Any, str, Any]]) -> None
             continue
         cls.__init__ = _make_ctor_shim(orig_init, sig)
         records.append((cls, "__init__", orig_init))
+        # ``__setstate__`` injects the CURRENT ``F.relu`` -- the live wrapper
+        # while wrapped -- when unpickling legacy state that lacks
+        # ``activation`` (encoder writes the attribute after delegating,
+        # decoder patches the state dict before). Normalize the stored object
+        # afterwards so legacy unpickles are wrap-invariant too.
+        orig_setstate = vars(cls).get("__setstate__")
+        if orig_setstate is not None and not _is_shimmed(orig_setstate):
+            cls.__setstate__ = _make_setstate_shim(orig_setstate)
+            records.append((cls, "__setstate__", orig_setstate))
 
 
 def _make_ctor_shim(
@@ -217,6 +233,24 @@ def _make_ctor_shim(
 
     setattr(ctor_shim, _SHIM_MARKER, True)
     return ctor_shim
+
+
+def _make_setstate_shim(orig_setstate: Callable[..., None]) -> Callable[..., None]:
+    """Build the ``__setstate__`` shim for one transformer layer class."""
+
+    @functools.wraps(orig_setstate)
+    def setstate_shim(self: Any, state: Any) -> None:
+        orig_setstate(self, state)
+        stored = getattr(self, "activation", None)
+        if callable(stored):
+            resolved_stored = _resolve(stored)
+            if resolved_stored is not stored:
+                # Store what an unwrapped unpickle stores: the original torch
+                # function, never a torchlens wrapper.
+                self.activation = resolved_stored
+
+    setattr(setstate_shim, _SHIM_MARKER, True)
+    return setstate_shim
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +376,44 @@ def _install_expanded_weights_shims(records: list[tuple[Any, str, Any]]) -> None
     setattr(expanded_weight_shim, _SHIM_MARKER, True)
     expanded_weight.__torch_function__ = classmethod(expanded_weight_shim)
     records.append((expanded_weight, "__torch_function__", orig_classmethod))
+
+
+# ---------------------------------------------------------------------------
+# Site 4: torch.overrides.resolve_name
+# ---------------------------------------------------------------------------
+
+
+def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim ``torch.overrides.resolve_name`` to the table's original-key basis.
+
+    ``resolve_name`` looks the callable up in the cached overridable-functions
+    index, which is keyed by the objects the namespaces held when the cache
+    first materialized (the pre-wrap ORIGINALS once ``decorate_all_once``
+    pre-warms both tables). A user or third-party tool passing the CURRENT
+    namespace read -- the torchlens wrapper -- silently got ``None`` instead
+    of the name. The shim retries a ``None`` miss with the ledger-resolved
+    original, so the answer matches unwrapped eager torch under either alias.
+    """
+
+    overrides_module = getattr(torch, "overrides", None)
+    if overrides_module is None:
+        return
+    orig_resolve = vars(overrides_module).get("resolve_name")
+    if orig_resolve is None or _is_shimmed(orig_resolve):
+        return
+
+    @functools.wraps(orig_resolve)
+    def resolve_name_shim(f: Any) -> Any:
+        result = orig_resolve(f)
+        if result is None:
+            original = _resolve(f)
+            if original is not f:
+                result = orig_resolve(original)
+        return result
+
+    setattr(resolve_name_shim, _SHIM_MARKER, True)
+    overrides_module.resolve_name = resolve_name_shim
+    records.append((overrides_module, "resolve_name", orig_resolve))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:

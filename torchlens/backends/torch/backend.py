@@ -382,6 +382,27 @@ class TorchBackend:
             with capture_escape_guard(trace), capture_completeness_witness(trace):
                 with capture_scalar_escape_warning(trace):
                     with _state.active_logging(trace):
+                        # R54 wrapped-epoch check: model prep wrapped torch
+                        # BEFORE admission, so a concurrent unwrap_torch()
+                        # completing in between (it now holds the admission
+                        # lock through teardown) leaves this capture admitted
+                        # into an UNWRAPPED process -- the forward would run
+                        # with zero logging and return a silently empty Trace.
+                        # Refuse loudly instead.
+                        if not _state._is_decorated:
+                            from ..._errors import CaptureContextError
+
+                            raise CaptureContextError(
+                                "torch wrappers were removed between model "
+                                "preparation and capture admission (a "
+                                "concurrent unwrap_torch() call)",
+                                code="wrappers_removed_before_capture",
+                                remedy=(
+                                    "do not call unwrap_torch() concurrently "
+                                    "with capture entry; re-run tl.trace -- "
+                                    "the next capture re-installs the wrappers"
+                                ),
+                            )
                         yield
 
         return guarded_logging()
@@ -1123,6 +1144,14 @@ class TorchBackend:
             else:
                 try:
                     exc.partial_log = partial_log  # type: ignore[attr-defined]
+                    # B8-45: the SUCCESS path must tell the user the recovery
+                    # exists too -- only the two attachment-FAILURE arms did.
+                    with contextlib.suppress(Exception):
+                        exc.add_note(
+                            "TorchLens attached partial capture diagnostics: inspect "
+                            "exc.partial_log, or recover it with "
+                            "torchlens.partial.from_failed_capture(exception)."
+                        )
                 except Exception as attachment_error:
                     _register_failed_capture(exc, partial_log)
                     warnings.warn(
@@ -1155,8 +1184,20 @@ class TorchBackend:
                 entry = raw_layer_dict.get(label)
                 if entry is not None and hasattr(entry, "out") and entry.out is not None:
                     _tl.clear_meta(entry.out)
-        print(
-            "************\nFeature extraction failed; returning model and environment to normal\n*************"
+        # B8-35/B8-44: the historical unconditional stdout banner ("Feature
+        # extraction failed; returning model and environment to normal") was
+        # factually false on rescue-recovered captures and supported
+        # return_partial flows, corrupted machine-readable stdout, and was
+        # unfilterable. One accurate ROUTED warning replaces it, naming what
+        # actually happened and where the diagnostics live; stacklevel targets
+        # the user's tl.trace call through the driver frames.
+        warnings.warn(
+            "TorchLens capture attempt failed "
+            f"({type(exc).__name__}); the model and torch environment were "
+            "restored. Partial diagnostics ride the exception (exc.partial_log "
+            "/ torchlens.partial.from_failed_capture).",
+            RuntimeWarning,
+            stacklevel=4,
         )
 
     def cleanup_forward_memory(self, session: object) -> None:
@@ -1165,16 +1206,22 @@ class TorchBackend:
         Parameters
         ----------
         session:
-            Active trace session, unused by torch CUDA cache cleanup.
+            Active trace session, consulted for the capture-touched-CUDA
+            predicate before clearing the allocator cache.
 
         Returns
         -------
         None
-            CUDA allocator cache is cleared when CUDA is available.
+            CUDA allocator cache is cleared when this capture touched CUDA.
         """
 
-        del session
-        if _is_cuda_available():
+        # R16-4b: an unconditional empty_cache() stalled EVERY capture teardown
+        # on CUDA hosts (synchronizes the device and drops the warm allocator
+        # arena) even for pure-CPU captures. Gate on the capture-touched-CUDA
+        # predicate, matching the postprocess executor site.
+        from ...utils.tensor_utils import capture_touched_cuda
+
+        if _is_cuda_available() and capture_touched_cuda(session):
             torch.cuda.empty_cache()
 
 

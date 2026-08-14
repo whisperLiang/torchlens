@@ -1,0 +1,581 @@
+"""Wrap-history compatibility batteries: torch meta-APIs and identity bases.
+
+Regression batteries for the wrap-state identity class (R55/R56/R78 family):
+
+1. ``R55.defaults`` scan — walk every loaded ``torch.*`` module for function
+   defaults frozen to a wrapped original at torch-import time. The class is
+   closed (the transformer trio, shimmed; ``torch.jit._trace.verify``,
+   irrelevant); a new torch release adding a fourth site fails here.
+2. Installed-tree identity grep gate — every ``is F.<name>`` / ``is
+   torch.*.<name>`` comparison in torch's eager runtime source that resolves
+   to a WRAPPED callable must be a reviewed site (shimmed or a documented
+   residual). A new torch release adding one fails here.
+3. ``R55.eco`` meta-API smoke — torch meta-API entry points that historically
+   broke (or could break) while wrappers are installed, run post-wrap.
+4. Override-table coherence (B8-4) — both ``functools.cache``'d torch
+   introspection tables must be keyed by ORIGINALS: no torchlens path may
+   first-call one while wrapped (the poisoned table survived
+   ``unwrap_torch()`` and made belt derivation order-dependent).
+5. Wrap-history construction corpus — the transformer trio built under wrap
+   must match an unwrapped construction: state bytes, stored activation
+   object, fastpath flag, pickle-ability, and legacy ``__setstate__``.
+"""
+
+from __future__ import annotations
+
+import io
+import pickle
+import re
+import types
+from pathlib import Path
+
+import pytest
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import torchlens as tl
+from torchlens import _state
+
+pytestmark = pytest.mark.smoke
+
+
+def _ensure_wrapped() -> None:
+    """Force the lazy torch wrap through the public capture path."""
+
+    tl.trace(nn.Linear(2, 2), torch.randn(1, 2))
+
+
+def _resolve(fn):
+    """Follow the wrapper ledger to the original callable."""
+
+    seen: set[int] = set()
+    while id(fn) in _state._decorated_to_orig and id(fn) not in seen:
+        seen.add(id(fn))
+        fn = _state._decorated_to_orig[id(fn)]
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# 1. R55.defaults scan
+# ---------------------------------------------------------------------------
+
+# (function __module__, __qualname__) pairs allowed to hold a wrapped original
+# in __defaults__/__kwdefaults__. Transformer.__init__ delegates activation to
+# the SHIMMED layer ctors; torch.jit._trace.verify is outside capture scope.
+_DEFAULTS_ALLOWLIST = {
+    ("torch.nn.modules.transformer", "Transformer.__init__"),
+    ("torch.nn.modules.transformer", "TransformerEncoderLayer.__init__"),
+    ("torch.nn.modules.transformer", "TransformerDecoderLayer.__init__"),
+    ("torch.jit._trace", "verify"),
+}
+
+
+def test_no_unreviewed_wrapped_original_in_import_time_defaults():
+    import sys
+
+    _ensure_wrapped()
+    orig_ids = {id(v) for v in _state._decorated_to_orig.values()}
+    hits: set[tuple[str, str]] = set()
+    for mod_name, mod in list(sys.modules.items()):
+        if not mod_name.startswith("torch") or mod is None:
+            continue
+        candidates: list[types.FunctionType] = []
+        for attr in list(vars(mod).values()):
+            if isinstance(attr, types.FunctionType):
+                candidates.append(attr)
+            elif isinstance(attr, type):
+                for method_name in ("__init__", "__new__", "forward", "__call__"):
+                    method = vars(attr).get(method_name)
+                    if isinstance(method, types.FunctionType):
+                        candidates.append(method)
+        for fn in candidates:
+            defaults = list(fn.__defaults__ or ())
+            defaults.extend((fn.__kwdefaults__ or {}).values())
+            if any(callable(d) and id(d) in orig_ids for d in defaults):
+                hits.add((fn.__module__, fn.__qualname__))
+    unreviewed = hits - _DEFAULTS_ALLOWLIST
+    assert not unreviewed, (
+        f"New import-time default(s) frozen to a wrapped original: {sorted(unreviewed)}. "
+        "Each needs an identity shim (see backends/torch/identity_shims.py) or a "
+        "reviewed allowlist entry."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. Installed-tree identity grep gate
+# ---------------------------------------------------------------------------
+
+# Namespaces outside eager capture scope by the shim census contract
+# (compiler/export/testing stacks, distributed, dispatch-level machinery).
+_GREP_SKIP_PREFIXES = (
+    "test",
+    "testing",
+    "_dynamo",
+    "_inductor",
+    "_export",
+    "export",
+    "_lazy",
+    "_subclasses",
+    "_functorch",
+    "func",
+    "fx",
+    "onnx",
+    "jit",
+    "ao",
+    "quantization",
+    "distributed",
+    "distributions",
+    "masked",
+    "signal",
+    "special",
+    "backends",
+    "cuda",
+    "xpu",
+    "mtia",
+    "compiler",
+    "profiler",
+    "package",
+    "monitor",
+    "overrides",
+    "_refs",
+    "_decomp",
+    "_prims",
+    "_meta_registrations",
+    "utils/_sympy",
+)
+
+# (relative source path, attribute name) pairs reviewed 2026-08-14:
+# transformer/bias/expanded-weights sites are SHIMMED; the nested/_internal
+# NJT identity reads are a documented unshimmed residual (nested jagged
+# tensors are not supported capture inputs).
+_GREP_ALLOWLIST = {
+    ("nn/modules/transformer.py", "relu"),
+    ("nn/modules/transformer.py", "gelu"),
+    ("nn/attention/bias.py", "scaled_dot_product_attention"),
+    ("nn/utils/_expanded_weights/conv_utils.py", "conv1d"),
+    ("nn/utils/_expanded_weights/conv_utils.py", "conv2d"),
+    ("nn/utils/_expanded_weights/conv_utils.py", "conv3d"),
+    ("nn/utils/_expanded_weights/expanded_weights_impl.py", "_cudnn_rnn_flatten_weight"),
+    ("nested/_internal/nested_tensor.py", "size"),
+    ("nested/_internal/nested_tensor.py", "dim"),
+    ("nested/_internal/ops.py", "scaled_dot_product_attention"),
+}
+
+_IDENTITY_PATTERN = re.compile(
+    r"\bis\s+(?:not\s+)?(F|torch(?:\.[a-zA-Z_][\w.]*)?)\.([a-zA-Z_]\w*)\b"
+)
+
+
+def _grep_skipped(rel_path: str) -> bool:
+    return any(
+        rel_path.startswith(prefix) or f"/{prefix}/" in rel_path
+        for prefix in _GREP_SKIP_PREFIXES
+    )
+
+
+def test_installed_torch_tree_identity_checks_are_reviewed():
+    _ensure_wrapped()
+    orig_ids = {id(v) for v in _state._decorated_to_orig.values()}
+    wrapper_ids = set(_state._decorated_to_orig.keys())
+    torch_root = Path(torch.__file__).parent
+    unreviewed: set[tuple[str, str]] = set()
+    for source_path in torch_root.rglob("*.py"):
+        rel_path = source_path.relative_to(torch_root).as_posix()
+        if _grep_skipped(rel_path):
+            continue
+        try:
+            text = source_path.read_text(errors="ignore")
+        except OSError:
+            continue
+        for match in _IDENTITY_PATTERN.finditer(text):
+            base, attr = match.group(1), match.group(2)
+            namespace = torch.nn.functional if base == "F" else torch
+            if base != "F":
+                for part in base.split(".")[1:]:
+                    namespace = getattr(namespace, part, None)
+                    if namespace is None:
+                        break
+            if namespace is None:
+                continue
+            target = getattr(namespace, attr, None)
+            if target is None or not callable(target):
+                continue
+            wrapped_wrapper = getattr(target, "__wrapped__", None)
+            if (
+                id(target) in wrapper_ids
+                or id(target) in orig_ids
+                or (wrapped_wrapper is not None and id(wrapped_wrapper) in orig_ids)
+            ):
+                if (rel_path, attr) not in _GREP_ALLOWLIST:
+                    unreviewed.add((rel_path, attr))
+    assert not unreviewed, (
+        f"New torch-tree identity check(s) against wrapped callables: "
+        f"{sorted(unreviewed)}. Each needs an identity shim or a reviewed "
+        "allowlist entry (see backends/torch/identity_shims.py)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. R55.eco meta-API smoke
+# ---------------------------------------------------------------------------
+
+
+class TestMetaApiSmokePostWrap:
+    def test_resolve_name_matches_unwrapped_answer(self):
+        _ensure_wrapped()
+        assert torch.overrides.resolve_name(F.relu) == "torch.nn.functional.relu"
+        assert torch.overrides.resolve_name(_resolve(F.relu)) == "torch.nn.functional.relu"
+
+    def test_functional_call_and_grad(self):
+        _ensure_wrapped()
+        module = nn.Linear(3, 2)
+        x = torch.randn(1, 3)
+        params = dict(module.named_parameters())
+        out = torch.func.functional_call(module, params, (x,))
+        assert out.shape == (1, 2)
+        grad_fn = torch.func.grad(lambda t: (t * t).sum())
+        assert torch.allclose(grad_fn(torch.tensor(3.0)), torch.tensor(6.0))
+
+    def test_vmap(self):
+        _ensure_wrapped()
+        batched = torch.vmap(torch.dot)(torch.randn(4, 3), torch.randn(4, 3))
+        assert batched.shape == (4,)
+
+    def test_flop_counter_mode(self):
+        from torch.utils.flop_counter import FlopCounterMode
+
+        _ensure_wrapped()
+        module = nn.Linear(8, 8)
+        with FlopCounterMode(display=False) as counter:
+            module(torch.randn(2, 8))
+        assert counter.get_total_flops() > 0
+
+    def test_gradcheck(self):
+        _ensure_wrapped()
+        x = torch.randn(3, dtype=torch.double, requires_grad=True)
+        assert torch.autograd.gradcheck(lambda t: (t * t).sum(), (x,))
+
+    def test_checkpoint(self):
+        from torch.utils.checkpoint import checkpoint
+
+        _ensure_wrapped()
+        module = nn.Linear(4, 4)
+        x = torch.randn(2, 4, requires_grad=True)
+        out = checkpoint(module, x, use_reentrant=False)
+        out.sum().backward()
+        assert x.grad is not None
+
+    def test_parametrize(self):
+        import torch.nn.utils.parametrize as parametrize
+
+        _ensure_wrapped()
+        module = nn.Linear(3, 3)
+
+        class Sym(nn.Module):
+            def forward(self, weight):
+                return weight.triu() + weight.triu(1).transpose(-1, -2)
+
+        parametrize.register_parametrization(module, "weight", Sym())
+        weight = module.weight
+        assert torch.allclose(weight, weight.transpose(-1, -2))
+
+    def test_pickle_fresh_module(self):
+        _ensure_wrapped()
+        payload = pickle.dumps(nn.Linear(2, 2))
+        assert pickle.loads(payload).weight.shape == (2, 2)
+
+    def test_jit_script(self):
+        _ensure_wrapped()
+
+        @torch.jit.script
+        def scripted(x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(x) + 1
+
+        assert torch.equal(scripted(torch.tensor([-1.0, 1.0])), torch.tensor([1.0, 2.0]))
+
+
+class _ActModel(nn.Module):
+    """Module-level so pickle can save it by reference."""
+
+    def __init__(self):
+        super().__init__()
+        self.act = F.relu
+
+    def forward(self, x):
+        return self.act(x)
+
+
+class TestWrapperPickleLadder:
+    # B8-1: @wraps copied the original C descriptor's __qualname__
+    # (_VariableFunctionsClass.cos) onto the wrapper, so pickling a BARE
+    # wrapped callable failed on attribute lookup. Install-site stamping makes
+    # every rung pickle by reference to the public torch name while wrapped.
+
+    def test_bare_wrapped_function_pickles_while_wrapped(self):
+        _ensure_wrapped()
+        for target in (torch.cos, F.relu, torch.mean):
+            loaded = pickle.loads(pickle.dumps(target))
+            assert _resolve(loaded) is _resolve(target)
+        result = pickle.loads(pickle.dumps(torch.cos))(torch.zeros(2))
+        assert torch.equal(result, torch.ones(2))
+
+    def test_model_holding_namespace_read_pickles_while_wrapped(self):
+        _ensure_wrapped()
+        loaded = pickle.loads(pickle.dumps(_ActModel()))
+        assert torch.equal(loaded(torch.tensor([-1.0, 2.0])), torch.tensor([0.0, 2.0]))
+
+    def test_wrapper_introspection_module_fidelity(self):
+        # B8-5 (module namespaces only): wrapped module-namespace functions
+        # report the install site. CLASS-namespace wrappers (tensor methods)
+        # deliberately KEEP the honest torchlens wrappers module: stamping
+        # them "torch" would make a wrapped storage-unsafe method claim torch
+        # purity to string-based safety gates — the r36 smuggling defense
+        # (tests/test_r36_tensor_method_smuggling.py, LOCKED) pins that
+        # surface. Security disclosure wins over introspection fidelity here.
+        _ensure_wrapped()
+        assert torch.cos.__module__ == "torch"
+        assert torch.cos.__qualname__ == "cos"
+        assert torch.Tensor.add.__module__ == "torchlens.backends.torch.wrappers"
+        assert F.relu.__module__ == "torch.nn.functional"
+
+    def test_signature_fabrication_residual_shape(self):
+        # DISCLOSED RESIDUAL (B8-5 half): inspect.signature on a wrapped C
+        # builtin reports the wrapper's (*args, **kwargs) instead of the
+        # honest ValueError -- __wrapped__ must stay deleted for JIT
+        # compatibility and a function attribute cannot raise. Pinned so a
+        # silent change gets noticed.
+        import inspect
+
+        _ensure_wrapped()
+        if id(torch.mean) not in _state._decorated_to_orig:
+            pytest.skip("torch.mean not wrapped on this build")
+        parameters = inspect.signature(torch.mean).parameters
+        assert set(parameters) == {"args", "kwargs"}
+
+
+# ---------------------------------------------------------------------------
+# 4. Override-table coherence (B8-4)
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideTableCoherence:
+    def test_both_cached_tables_keyed_by_originals(self):
+        from torch.overrides import get_overridable_functions, get_testing_overrides
+
+        _ensure_wrapped()
+        # Force the belt derivation (the historical first-caller-while-wrapped).
+        from torchlens.backends.torch import belt
+
+        assert belt.belt_report() is not None
+        wrapper_ids = set(_state._decorated_to_orig.keys())
+        overridable_poisoned = sum(
+            1
+            for functions in get_overridable_functions().values()
+            for fn in functions
+            if id(fn) in wrapper_ids
+        )
+        testing_poisoned = sum(1 for fn in get_testing_overrides() if id(fn) in wrapper_ids)
+        assert overridable_poisoned == 0, (
+            f"{overridable_poisoned} wrapper entries in get_overridable_functions(): "
+            "a torchlens path first-called a cached torch introspection table while wrapped"
+        )
+        assert testing_poisoned == 0
+
+    def test_belt_discloses_unprobed_candidates_by_name(self):
+        from torchlens.backends.torch import belt
+
+        _ensure_wrapped()
+        report = belt.belt_report()
+        assert report is not None
+        assert report.unprobed_candidate_count == len(report.unprobed_candidates)
+        if report.unprobed_candidates:
+            namespace_name, func_name = report.unprobed_candidates[0]
+            assert isinstance(namespace_name, str) and isinstance(func_name, str)
+
+
+# ---------------------------------------------------------------------------
+# 4b. Unwrap safety: R54 admission-lock atomicity + B8-6 burial diagnostic
+# ---------------------------------------------------------------------------
+
+
+class TestUnwrapSafety:
+    def test_unwrap_holds_capture_admission_lock(self):
+        # R54: the mid-capture refusal reads state published under
+        # _capture_admission_lock; without holding it, a capture admitted
+        # between the refusal check and the uninstall was silently truncated
+        # (reproduced with a deterministic barrier). Pin the lock coverage:
+        # unwrap_torch must block while the admission lock is held elsewhere.
+        import threading
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        assert _state._capture_admission_lock.acquire(timeout=5)
+        done = threading.Event()
+
+        def do_unwrap():
+            unwrap_torch()
+            done.set()
+
+        worker = threading.Thread(target=do_unwrap)
+        try:
+            worker.start()
+            assert not done.wait(0.3), (
+                "unwrap_torch() proceeded without the capture admission lock"
+            )
+        finally:
+            _state._capture_admission_lock.release()
+            worker.join(10)
+        assert done.is_set()
+        wrap_torch()
+
+    def test_admission_epoch_check_refuses_unwrapped_process(self):
+        # R54 second half: a capture admitted AFTER a concurrent unwrap
+        # completes must refuse typed rather than run an unlogged forward.
+        from torchlens._errors import CaptureContextError
+        from torchlens.backends.torch.backend import TorchBackend
+
+        _ensure_wrapped()
+        session = tl.trace(nn.Linear(2, 2), torch.randn(1, 2))
+        saved = _state._is_decorated
+        try:
+            _state._is_decorated = False
+            with pytest.raises(CaptureContextError) as exc_info:
+                with TorchBackend().active_logging(session):
+                    pass
+            assert exc_info.value.fields["code"] == "wrappers_removed_before_capture"
+        finally:
+            _state._is_decorated = saved
+        # The refusal must have unwound admission cleanly.
+        assert _state._active_trace is None
+        assert not _state._logging_enabled
+
+    def test_unwrap_warns_on_buried_wrapper(self):
+        # B8-6: a third-party wrapper installed on top of a torchlens wrapper
+        # is (correctly) not clobbered at teardown, but the burial must be
+        # named instead of silent.
+        import functools
+        import warnings as warnings_module
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        tl_wrapper = torch.cos
+        assert id(tl_wrapper) in _state._decorated_to_orig, "torch.cos not wrapped"
+
+        @functools.wraps(tl_wrapper)
+        def foreign(*args, **kwargs):
+            return tl_wrapper(*args, **kwargs)
+
+        torch.cos = foreign
+        try:
+            with warnings_module.catch_warnings(record=True) as records:
+                warnings_module.simplefilter("always")
+                unwrap_torch()
+            buried_messages = [
+                str(record.message) for record in records if "buried" in str(record.message)
+            ]
+            assert len(buried_messages) == 1, buried_messages
+            assert "torch.cos" in buried_messages[0]
+            # Drift tolerance: the foreign wrapper is preserved, never clobbered.
+            assert torch.cos is foreign
+        finally:
+            torch.cos = _resolve(tl_wrapper)
+            wrap_torch()
+
+    def test_clean_unwrap_emits_no_burial_warning(self):
+        import warnings as warnings_module
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            with warnings_module.catch_warnings(record=True) as records:
+                warnings_module.simplefilter("always")
+                unwrap_torch()
+            assert not [r for r in records if "buried" in str(r.message)]
+        finally:
+            wrap_torch()
+
+
+# ---------------------------------------------------------------------------
+# 5. Wrap-history construction corpus (transformer trio + __setstate__)
+# ---------------------------------------------------------------------------
+
+
+def _has_fastpath_flag() -> bool:
+    from torchlens.utils import _torch_compat
+
+    return bool(getattr(_torch_compat, "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG", False))
+
+
+@pytest.mark.skipif(
+    not _has_fastpath_flag(),
+    reason="torch build lacks the transformer activation fastpath flag",
+)
+class TestWrapHistoryConstructionCorpus:
+    def _build_trio(self):
+        torch.manual_seed(99)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        torch.manual_seed(99)
+        decoder_layer = nn.TransformerDecoderLayer(d_model=8, nhead=2)
+        torch.manual_seed(99)
+        transformer = nn.Transformer(d_model=8, nhead=2, num_encoder_layers=1, num_decoder_layers=1)
+        return encoder_layer, decoder_layer, transformer
+
+    def test_trio_construction_matches_unwrapped(self):
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            unwrap_torch()
+            reference = self._build_trio()
+        finally:
+            wrap_torch()
+        wrapped_builds = self._build_trio()
+        for ref_model, wrapped_model in zip(reference, wrapped_builds):
+            for (name_r, p_r), (name_w, p_w) in zip(
+                ref_model.state_dict().items(), wrapped_model.state_dict().items()
+            ):
+                assert name_r == name_w
+                assert torch.equal(p_r, p_w), f"parameter drift in {name_r}"
+            # Stored callables must be wrap-invariant (never a torchlens wrapper).
+            for module_r, module_w in zip(ref_model.modules(), wrapped_model.modules()):
+                act_r = getattr(module_r, "activation", None)
+                act_w = getattr(module_w, "activation", None)
+                if callable(act_r) or callable(act_w):
+                    assert act_w is act_r
+        # The wrapped-build trio must pickle exactly like the reference once
+        # wrappers are removed (pickling a stored-ORIGINAL while the namespace
+        # holds the wrapper is the pinned disclosed residual — see
+        # test_identity_shims.TestDisclosedResiduals).
+        try:
+            unwrap_torch()
+            for wrapped_model in wrapped_builds:
+                pickle.dump(wrapped_model, io.BytesIO())
+        finally:
+            wrap_torch()
+
+    def test_string_activation_construction_pickles_while_wrapped(self):
+        # R78-2 sibling: the STRING spelling reads F.gelu at ctor time -- under
+        # wrap that read returns the live wrapper, which then poisoned
+        # whole-model pickle (and survived unwrap). The ctor shim stores the
+        # original instead.
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2, activation="gelu")
+        assert layer.activation is _resolve(F.gelu)
+        assert layer.activation_relu_or_gelu == 2
+        pickle.dump(layer, io.BytesIO())
+
+    def test_setstate_legacy_unpickle_is_wrap_invariant(self):
+        # R78-2 sibling: __setstate__ injects the CURRENT F.relu (the live
+        # wrapper while wrapped) when legacy state lacks ``activation``.
+        _ensure_wrapped()
+        for cls in (nn.TransformerEncoderLayer, nn.TransformerDecoderLayer):
+            layer = cls(d_model=8, nhead=2)
+            state = layer.__dict__.copy()
+            state.pop("activation", None)
+            revived = cls(d_model=8, nhead=2)
+            revived.__setstate__(state)
+            assert revived.activation is _resolve(F.relu), cls.__name__

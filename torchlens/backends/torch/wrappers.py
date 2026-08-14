@@ -38,6 +38,7 @@ from ...utils._torch_compat import (
     HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE,
     dynamo_is_compiling,
     fix_tensor_sequence_slot,
+    get_current_dispatch_mode_stack,
     get_current_function_mode_stack,
     get_device_constructors,
     get_device_context_type,
@@ -82,6 +83,7 @@ from .buffer_writes import (
 )
 from .completeness_witness import (
     CompletenessWitnessMode,
+    _CompletenessDispatchMode,
     completeness_scope_for_wrapper,
     internal_scalar_read,
     observe_nonowner_operands,
@@ -239,6 +241,19 @@ def _warn_dynamo_region_not_logged() -> None:
         "eagerly via torch.compiler.set_stance and this gap does not arise).",
         UserWarning,
         stacklevel=2,
+    )
+
+
+def _warn_functorch_region_not_logged() -> None:
+    """Emit the once-per-forward functorch transform-boundary warning."""
+
+    warnings.warn(
+        "TorchLens detected a functorch/vmap/grad/jacfwd transform "
+        "during this forward pass. Operations that run inside the "
+        "transform are not logged. The returned Trace will only "
+        "contain operations that ran OUTSIDE the transform.",
+        UserWarning,
+        stacklevel=3,
     )
 
 
@@ -693,9 +708,7 @@ def _decorate_transform_builders() -> None:
             _state._decorated_func_mapper[decorated] = current
             _state._decorated_func_mapper[current] = decorated
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(namespace, attr_name, decorated)
+            _setattr_ignoring_advisories(namespace, attr_name, decorated)
         except (AttributeError, TypeError):
             pass
 
@@ -727,9 +740,7 @@ def _decorate_direct_transforms() -> None:
             _state._decorated_func_mapper[decorated] = current
             _state._decorated_func_mapper[current] = decorated
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(namespace, attr_name, decorated)
+            _setattr_ignoring_advisories(namespace, attr_name, decorated)
         except (AttributeError, TypeError):
             pass
 
@@ -1444,6 +1455,71 @@ def _propagate_mutation_label_to_storage_aliases(
 # is ever emitted and consumers keep stale/absent parents (round-31 M6).
 # ``requires_grad`` / ``grad`` and similar setters change autograd bookkeeping,
 # not forward values, and are deliberately NOT listed.
+def _setattr_ignoring_advisories(namespace: Any, name: str, value: Any) -> None:
+    """Set a torch namespace attribute, suppressing ADVISORY warnings only.
+
+    Wrap/unwrap setattr over deprecated torch aliases legitimately fires
+    deprecation-family advisories, but the historical bare
+    ``simplefilter("ignore")`` also hid every OTHER warning category raised in
+    scope and invalidated the process ``__warningregistry__`` per entry
+    (B8-39). Only the advisory categories are ignored; a genuine torch
+    ``RuntimeWarning`` (or anything else) still reaches the user.
+    """
+
+    with warnings.catch_warnings():
+        for category in (
+            DeprecationWarning,
+            PendingDeprecationWarning,
+            FutureWarning,
+            UserWarning,
+        ):
+            warnings.simplefilter("ignore", category)
+        setattr(namespace, name, value)
+
+
+def _exit_own_witness_modes() -> list[Any] | None:
+    """Pop TorchLens's own completeness-witness dispatch modes off the stack top.
+
+    ``TensorBase.__new__`` with a strict Tensor SUBCLASS ``cls`` crashes whenever
+    ANY python ``TorchDispatchMode`` is active: torch materializes the interior
+    tensor's python object as plain ``Tensor`` on the mode's redispatch, and the
+    subsequent subclass association refuses (reproduced on stock torch with a
+    no-op mode — torch-inherent, not a wrapper effect). The completeness witness
+    is TorchLens's OWN mode (armed for validation and runnable-eligible
+    captures), so the wrapper exits it for exactly the original ctor call and
+    re-enters afterwards. The ctor op itself IS captured by this wrapper, so its
+    paused interior stays owned — the same opacity class as a fused kernel.
+    Foreign user modes are never popped: stock torch crashes under them too, and
+    popping them would change observable torch behavior relative to unwrapped
+    eager execution. Runs on the owner thread around one synchronous call, so
+    the exit/re-enter pair is LIFO-safe.
+
+    Returns
+    -------
+    list[Any] | None
+        The exited witness modes, outermost last, or ``None`` when the stack is
+        unreadable or holds no TorchLens witness mode on top (fail closed to
+        stock behavior).
+    """
+
+    stack = get_current_dispatch_mode_stack()
+    if not stack:
+        return None
+    exited: list[Any] = []
+    while stack and isinstance(stack[-1], _CompletenessDispatchMode):
+        mode = stack.pop()
+        mode.__exit__(None, None, None)
+        exited.append(mode)
+    return exited or None
+
+
+def _reenter_witness_modes(exited: list[Any]) -> None:
+    """Re-enter witness modes previously popped by ``_exit_own_witness_modes``."""
+
+    for mode in reversed(exited):
+        mode.__enter__()
+
+
 _MUTATING_TENSOR_PROPERTY_SETTERS = frozenset({"real", "imag", "data"})
 
 # Setters that rebind the receiver to the RHS's storage instead of writing in
@@ -1516,6 +1592,10 @@ def torch_func_decorator(
         or is_mutating_property_setter
     )
     force_distinct_return = func_name == "identity"
+    # ``TensorBase.__new__`` is the one wrapped callable whose ORIGINAL refuses
+    # to run under any python TorchDispatchMode when handed a strict Tensor
+    # subclass cls (see _exit_own_witness_modes); every other op pays nothing.
+    constructs_tensor_subclass = func_name == "__new__"
     # Decoration-time constant: ``propagate_detached_saved_activation`` is a
     # guaranteed no-op for any name outside the propagation allowlist, but its
     # ARGUMENTS (two tensor collections, each with a BFS fall-back for nested
@@ -1526,6 +1606,8 @@ def torch_func_decorator(
     canonical_capture_callable = None
     if func_name != "data" or property_accessor == "del":
         canonical_capture_callable = (func, func_name)
+    # See the barcode-transparency note inside ``wrapped_func`` (R16-5).
+    is_barcode_transparent = func_name == "as_subclass"
 
     @wraps(func)
     def wrapped_func(*args: Any, **kwargs: Any) -> Any:
@@ -1609,16 +1691,7 @@ def torch_func_decorator(
             if not _state._functorch_warning_emitted:
                 _state._functorch_warning_emitted = True
                 trace._raw_transform_escape_detected = True
-                import warnings
-
-                warnings.warn(
-                    "TorchLens detected a functorch/vmap/grad/jacfwd transform "
-                    "during this forward pass. Operations that run inside the "
-                    "transform are not logged. The returned Trace will only "
-                    "contain operations that ran OUTSIDE the transform.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+                _warn_functorch_region_not_logged()
             # A raw transform interior is outside the witness claim, but the witness-off
             # route retains its original logging state and avoids the context-manager cost.
             if _state._completeness_witness_mode == "shadow":
@@ -1673,6 +1746,17 @@ def torch_func_decorator(
             )
 
         # Reset barcode; skip metadata-only functions that would cause recursion.
+        # R16-5: ``as_subclass`` is barcode-TRANSPARENT. Torch's default
+        # ``__torch_function__`` return conversion calls ``ret.as_subclass(cls)``
+        # INSIDE the enclosing wrapped call (``torch.tanh(subclass_tensor)``),
+        # which used to steal the enclosing call's bottom-level barcode: the
+        # real op (tanh) never logged, and the trace showed a parentless
+        # bookkeeping ``as_subclass`` node flagged only by the provenance
+        # heuristic. The conversion still logs its own value flow, then
+        # restores the enclosing barcode so the outer call keeps its identity.
+        enclosing_barcode = (
+            trace._wrapper_runtime_ws.current_func_barcode if is_barcode_transparent else 0
+        )
         trace._wrapper_runtime_ws.current_func_barcode = 0
         if is_unlogged_func:
             if _diagnostic_edge_armed():
@@ -1824,6 +1908,15 @@ def torch_func_decorator(
             else False
         )
         expected_token = None
+        exited_witness_modes = None
+        if (
+            constructs_tensor_subclass
+            and args
+            and isinstance(args[0], type)
+            and args[0] is not torch.Tensor
+            and issubclass(args[0], torch.Tensor)
+        ):
+            exited_witness_modes = _exit_own_witness_modes()
         # W3 F8: per-op duration must measure the USER op, not TorchLens
         # bookkeeping. The clock starts here -- after RNG/autocast snapshots
         # and container/intervention-site registration -- and stops right
@@ -1843,6 +1936,8 @@ def torch_func_decorator(
             else:
                 out_orig = func(*args, **kwargs)
         finally:
+            if exited_witness_modes is not None:
+                _reenter_witness_modes(exited_witness_modes)
             _nvtx_range_pop(nvtx_pushed)
         func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:
@@ -2125,6 +2220,9 @@ def torch_func_decorator(
                 producer_label,
             )
 
+        if is_barcode_transparent and enclosing_barcode:
+            trace._wrapper_runtime_ws.current_func_barcode = enclosing_barcode
+
         if out_orig is not out_before_hooks:
             return out_orig
         if force_distinct_return:
@@ -2341,6 +2439,19 @@ def decorate_all_once() -> None:
                 "factory-function device injection inventory could not be evaluated",
             )
 
+    # B8-4: warm BOTH ``functools.cache``'d torch introspection tables BEFORE
+    # the first wrapper setattr. ``get_testing_overrides()`` was already warmed
+    # transitively by the pair crawl, but ``get_overridable_functions()``
+    # previously materialized on the belt's first post-wrap ``_derive()`` call,
+    # permanently keying most entries by torchlens wrappers -- the one measured
+    # side effect that survived ``unwrap_torch()`` -- and making belt
+    # derivation order-dependent. Invariant: no torchlens path may FIRST-call a
+    # cached torch introspection table while wrappers are installed.
+    from torch.overrides import get_overridable_functions, get_testing_overrides
+
+    get_overridable_functions()
+    get_testing_overrides()
+
     _decorate_torch_func_pairs(get_orig_torch_funcs())
 
     # ---- JIT builtin table registration ----
@@ -2381,6 +2492,44 @@ def decorate_all_once() -> None:
     # making PySequence_Check(tensor) return True.  Clear it so torch.tensor()
     # doesn't try to iterate 0-d tensor elements as sequences.
     _fix_tensor_sequence_slot()
+
+
+def _stamp_wrapper_provenance(
+    wrapper: Callable[..., Any], namespace_name: str, func_name: str
+) -> None:
+    """Stamp install-site ``__module__``/``__qualname__`` onto a wrapper.
+
+    ``@wraps`` copies the ORIGINAL's metadata, which for torch's C descriptors
+    names classes that are not importable attributes (``pickle.dumps(torch.cos)``
+    died on ``_VariableFunctionsClass.cos`` — B8-1a). The install-site stamp
+    makes a bare wrapper pickle by reference to its public torch name while
+    wrappers are installed (loading as the ORIGINAL in a fresh process), and
+    introspection reports the namespace the user actually reached the callable
+    through. Shared originals keep their FIRST (public-namespace-first) stamp
+    via the dedup branch below. The ``inspect.signature`` fabrication for C
+    builtins stays a documented residual: ``__wrapped__`` must remain deleted
+    for JIT compatibility, and functions cannot raise from attribute access.
+
+    MODULE namespaces only — CLASS-namespace wrappers (tensor methods) are
+    deliberately NOT stamped. C-level tensor methods carry no ``__module__``,
+    so their wrappers keep the honest ``torchlens.backends.torch.wrappers``
+    module. Stamping them ``"torch"`` would make a wrapped storage-unsafe
+    method (``Tensor.resize_``/``set_``/``apply_``/``map_``) CLAIM torch
+    purity to every string-based safety gate — the exact spoof surface the
+    r36 smuggling defense (tests/test_r36_tensor_method_smuggling.py, LOCKED)
+    pins as denied on REAL identity with the wrappers module visible. The
+    security disclosure wins over introspection fidelity there; a bare wrapped
+    tensor method staying unpicklable-by-reference is the accepted residual.
+    """
+
+    namespace_obj = get_optional_torch_namespace(namespace_name)
+    if isinstance(namespace_obj, type):
+        return
+    try:
+        wrapper.__module__ = namespace_name
+        wrapper.__qualname__ = func_name
+    except (AttributeError, TypeError):
+        pass
 
 
 def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
@@ -2445,19 +2594,16 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
             if id(orig_func) in _state._orig_to_decorated:
                 existing = _state._orig_to_decorated[id(orig_func)]
                 try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        setattr(local_func_namespace, func_name, existing)
+                    _setattr_ignoring_advisories(local_func_namespace, func_name, existing)
                 except (AttributeError, TypeError):
                     pass
                 continue
 
             recorded_name = _recorded_func_name(namespace_name, func_name)
             new_func = torch_func_decorator(orig_func, recorded_name)
+            _stamp_wrapper_provenance(new_func, namespace_name, func_name)
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    setattr(local_func_namespace, func_name, new_func)
+                _setattr_ignoring_advisories(local_func_namespace, func_name, new_func)
                 mark_decorated_function(new_func)
                 # Bidirectional id-keyed mappings for fast lookup.
                 _state._orig_to_decorated[id(orig_func)] = new_func
@@ -2486,9 +2632,7 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
             mark_decorated_function(deleter_dec)
             new_property = property(getter_dec, setter_dec, deleter_dec, doc=func_name)
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    setattr(local_func_namespace, func_name, new_property)
+                _setattr_ignoring_advisories(local_func_namespace, func_name, new_property)
                 # #31: Only add mapper entries if setattr succeeded — otherwise
                 # we'd have dangling entries pointing to an uninstalled property.
                 cast(dict[int, Any], _state._orig_to_decorated)[id(orig_func)] = new_property
@@ -2570,11 +2714,21 @@ def unwrap_torch() -> None:
         that runs inside the traced forward.
     """
     with _wrapper_install_lock:
-        _refuse_unwrap_during_active_capture()
-        from .identity_shims import remove_identity_shims
+        # R54: the refusal reads _active_trace/_logging_enabled, which are
+        # PUBLISHED under _capture_admission_lock (a different lock domain), so
+        # a capture admitted between the refusal check and the uninstall was
+        # silently truncated (reproduced with a deterministic barrier). Holding
+        # the admission lock across refusal AND teardown makes the two domains
+        # atomic: a racing capture is either seen by the refusal or blocks
+        # until torch is fully restored (and then fails the wrapped-epoch check
+        # at admission instead of running an unlogged forward). Lock order is
+        # install -> admission only; admission never acquires the install lock.
+        with _state._capture_admission_lock:
+            _refuse_unwrap_during_active_capture()
+            from .identity_shims import remove_identity_shims
 
-        remove_identity_shims()
-        _unwrap_torch_locked()
+            remove_identity_shims()
+            _unwrap_torch_locked()
 
 
 def _refuse_unwrap_during_active_capture() -> None:
@@ -2606,6 +2760,43 @@ def _refuse_unwrap_during_active_capture() -> None:
     )
 
 
+def _buries_live_wrapper(current: Any) -> bool:
+    """Return whether a foreign callable buries a live torchlens wrapper.
+
+    ``_unwrap_torch_locked`` restores a namespace slot only when the CURRENT
+    attribute is a known torchlens wrapper; a third-party wrapper installed on
+    top of ours is (correctly) left untouched, but that leaves the torchlens
+    wrapper LIVE inside its ``__wrapped__``/closure chain with zero diagnostic
+    (B8-6). This walk detects the burial so teardown can name it. Bounded and
+    cheap: it runs only for drifted slots (rare), never on the hot path.
+    """
+
+    seen: set[int] = set()
+    stack: list[Any] = [current]
+    visited = 0
+    while stack and visited < 32:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        visited += 1
+        if obj is not current and id(obj) in _state._decorated_to_orig:
+            return True
+        wrapped = getattr(obj, "__wrapped__", None)
+        if callable(wrapped):
+            stack.append(wrapped)
+        closure = getattr(obj, "__closure__", None)
+        if closure:
+            for cell in closure:
+                try:
+                    content = cell.cell_contents
+                except ValueError:
+                    continue
+                if callable(content):
+                    stack.append(content)
+    return False
+
+
 def _unwrap_torch_locked() -> None:
     """Remove torchlens wrappers; caller holds ``_wrapper_install_lock``."""
 
@@ -2625,6 +2816,7 @@ def _unwrap_torch_locked() -> None:
         _state._is_decorated = False
         return
 
+    buried_sites: list[str] = []
     for namespace_name, func_name in get_orig_torch_funcs():
         # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
         # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,
@@ -2635,11 +2827,18 @@ def _unwrap_torch_locked() -> None:
         current = getattr(local_func_namespace, func_name)
         orig = _state._decorated_to_orig.get(id(current))
         if orig is None:
+            # B8-6: a drifted slot whose foreign wrapper chains to a live
+            # torchlens wrapper stays buried past this teardown -- collect it
+            # so the user learns unwrap did NOT fully restore that callable.
+            if (
+                id(current) not in _state._orig_to_decorated
+                and callable(current)
+                and _buries_live_wrapper(current)
+            ):
+                buried_sites.append(f"{namespace_name}.{func_name}")
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
 
@@ -2652,9 +2851,7 @@ def _unwrap_torch_locked() -> None:
         if orig is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
 
@@ -2667,11 +2864,24 @@ def _unwrap_torch_locked() -> None:
         if orig is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
+
+    if buried_sites:
+        from ..._errors import TorchLensWarning
+
+        shown = ", ".join(buried_sites[:5])
+        more = f" (+{len(buried_sites) - 5} more)" if len(buried_sites) > 5 else ""
+        warnings.warn(
+            f"unwrap_torch() left {len(buried_sites)} torch callable(s) with a "
+            f"torchlens wrapper buried under a third-party wrapper: {shown}{more}. "
+            "TorchLens never clobbers foreign patches, so those slots still run "
+            "the torchlens wrapper underneath. Remove or reinstall the outer "
+            "wrapper around the restored original to fully unwrap.",
+            TorchLensWarning,
+            stacklevel=3,
+        )
 
     _state._is_decorated = False
 
@@ -2862,9 +3072,7 @@ def _wrap_torch_locked(
         if decorated is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, decorated)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, decorated)
         except (AttributeError, TypeError):
             pass
 

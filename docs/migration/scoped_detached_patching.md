@@ -22,7 +22,9 @@ repair stale bindings. Coverage is now:
    Then those bindings capture the wrappers directly and no rescue is needed.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
-   `torch.from_numpy`, `torch.frombuffer`, and `torch.Tensor.as_subclass`. A stale reference to one
+   `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`
+   (the authoritative set is the live derivation in `belt_report().members`, pinned per build in
+   `tests/test_mechanical_belt.py`). A stale reference to one
    of these produces no signal a rescue could trigger on, so module-level attribute references to
    them keep targeted patching, with a conditional reversal ledger restored at
    `torchlens.backends.torch.wrappers.unwrap_torch()`.
@@ -43,6 +45,16 @@ repair stale bindings. Coverage is now:
   (for example an `autograd.grad` boundary is a known no-provenance source); no rescue runs.
 - Streaming saves, `out_sink` captures, and halt-predicate partials are not re-runnable; they
   report the escape and skip the rescue.
+- A rescue re-run executes the user's forward a SECOND time. When the primary forward WROTE
+  module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`, in-forward
+  buffer counters), the re-run is refused — RNG is restored between runs, module state is not —
+  and the escape stands disclosed (`skipped_reason == "buffer_writes_double_forward"`,
+  `forward_runs == 1`). On rescued (eval-mode) captures, a custom in-forward PYTHON-attribute
+  counter (not a registered buffer) still mutates twice: a declared residual of the double
+  forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
+- A rescue that would count as recovery must produce a strict SUPERSET of the primary's op
+  multiset. Mode presence can de-fuse fused fast paths; any op LOSS keeps the mode-free primary
+  authoritative, with both deltas disclosed (`recovered_ops` / `lost_ops`).
 
 ## Deprecated surface
 
@@ -111,12 +123,12 @@ round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `Tr
 | --- | --- |
 | Closure, dict/list, unrelated class/default, ordinary Python partial | Rescued on signal; shadow reports when Python exposes the call |
 | Saved Tensor method descriptor or Tensor-bound builtin | Rescued on signal; shadow reports via descriptor compatibility |
-| Protocol-invisible constructors (`from_numpy`, `frombuffer`, `as_subclass`) | Mechanical belt (module-attr patching; membership derived per build) |
+| Protocol-invisible constructors (`from_numpy`, `from_dlpack`, `frombuffer`, `as_subclass`) | Mechanical belt (module-attr patching; membership derived per build) |
 | C `functools.partial` around a C builtin | Known profile blind spot; shadow mode stays machine-readably unverified |
 | De-moded `handle_torch_function` composite interiors | Beyond any mode; disclosed `escape_rescue_unrecovered` |
 | `DataLoader(num_workers=0)` callback executed inside forward | Owner-thread domain; shadow reports visible escapes |
 | Worker process preprocessing before model invocation | Outside the armed model-forward domain |
-| Model tensor work delegated to another thread/process | Unsupported; owner-thread qualification applies; escapes disclosed, never silent |
+| Model tensor work delegated to another thread/process | Unsupported; owner-thread qualification applies; TENSOR-crossing escapes are disclosed. A PRE-EXISTING thread running a stale op whose result crosses back only as a python scalar (a float, never a tensor) is a declared SILENT residual — no mode, belt, or tripwire observes it |
 | Deferred `trace.log_backward(...)` / `Recording.log_backward(...)` | Explicitly `not_armed` in this rollout |
 | `torch.func` / functorch transform internals | Existing transform boundary warning/marker remains authoritative |
 

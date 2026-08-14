@@ -260,6 +260,100 @@ class TestDisclosedResiduals:
             wrap_torch()
 
 
+class TestSubclassCtorUnderWitness:
+    # ``TensorBase.__new__`` with a strict Tensor SUBCLASS cls crashes whenever
+    # ANY python TorchDispatchMode is active (torch materializes the interior
+    # tensor's python object as plain ``Tensor`` before the subclass
+    # association runs -- reproduced on stock torch with a no-op mode). The
+    # completeness witness is TorchLens's own dispatch mode, armed for
+    # validation and runnable-eligible captures, so without the wrapper-side
+    # carve-out a mainstream SDPA+CausalBias model captured fine but could
+    # never be VALIDATED (the R55-1 capture-time residual, root-caused).
+
+    def test_user_tensor_subclass_ctor_survives_witnessed_capture(self):
+        class PlainSubclass(torch.Tensor):
+            pass
+
+        class SubclassCtorModel(nn.Module):
+            def forward(self, x):
+                scratch = PlainSubclass(2, 3)
+                return x + scratch.sum() * 0
+
+        torch.manual_seed(0)
+        x = torch.randn(2, 3)
+        assert tl.validation.validate_forward_pass(SubclassCtorModel(), x)
+
+    @pytest.mark.skipif(
+        not _flag("HAS_ATTENTION_CAUSAL_BIAS"),
+        reason="torch build lacks torch.nn.attention.bias.CausalBias",
+    )
+    def test_causal_bias_model_validates(self):
+        from torch.nn.attention.bias import causal_lower_right
+
+        class SDPAModel(nn.Module):
+            def forward(self, q, k, v):
+                bias = causal_lower_right(q.shape[-2], k.shape[-2])
+                return F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+
+        torch.manual_seed(0)
+        q = torch.randn(1, 2, 6, 8)
+        k = torch.randn(1, 2, 6, 8)
+        v = torch.randn(1, 2, 6, 8)
+        assert tl.validation.validate_forward_pass(SDPAModel(), (q, k, v))
+
+    def test_plain_tensor_ctor_keeps_witness_view(self):
+        # cls == torch.Tensor exactly must NOT pop the witness: the plain
+        # legacy ctor works under a dispatch mode, so the census keeps its
+        # full view there.
+        class PlainCtorModel(nn.Module):
+            def forward(self, x):
+                scratch = torch.Tensor(2, 3)
+                return x + scratch.sum() * 0
+
+        torch.manual_seed(0)
+        x = torch.randn(2, 3)
+        assert tl.validation.validate_forward_pass(PlainCtorModel(), x)
+
+
+class _PlainTensorSubclass(torch.Tensor):
+    pass
+
+
+class TestAsSubclassOpIdentity:
+    # R16-5: torch's default __torch_function__ return conversion calls
+    # ret.as_subclass(cls) INSIDE the enclosing wrapped call, which used to
+    # steal its bottom-level barcode: the real op (tanh) never logged and the
+    # trace showed a parentless bookkeeping as_subclass node flagged only by
+    # the provenance heuristic. as_subclass is now barcode-transparent.
+
+    def test_ops_on_subclass_tensors_keep_their_identity(self):
+        class Model(nn.Module):
+            def forward(self, x):
+                s = torch.sigmoid(x).as_subclass(_PlainTensorSubclass)
+                return torch.tanh(s)
+
+        torch.manual_seed(0)
+        x = torch.randn(2, 3)
+        log = tl.trace(Model(), x)
+        names = [op.func_name for op in log.ops]
+        assert "tanh" in names, names
+        tanh_op = log["tanh"]
+        assert tanh_op.parents, "tanh must be connected to the graph"
+        assert "assubclass" in tanh_op.parents[0]
+        assert log.rescue_rerun is None, "a clean capture must not need a rescue"
+        expected = torch.tanh(torch.sigmoid(x))
+        assert torch.allclose(log["tanh"].out, expected, atol=1e-6)
+
+    def test_subclass_model_validates(self):
+        class Model(nn.Module):
+            def forward(self, x):
+                s = torch.sigmoid(x).as_subclass(_PlainTensorSubclass)
+                return torch.tanh(s)
+
+        torch.manual_seed(0)
+        assert tl.validation.validate_forward_pass(Model(), torch.randn(2, 3))
+
+
 class TestShimLifecycle:
     def test_shims_removed_on_unwrap_and_reinstalled_on_wrap(self):
         from torchlens.backends.torch import identity_shims
