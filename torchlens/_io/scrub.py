@@ -807,6 +807,16 @@ def _scrub_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
+        if type(value) is not list:
+            # Symmetry with the tuple-subclass downgrade disclosure (R10-9): a
+            # list/set/frozenset subclass rebuilds as a plain builtin, silently
+            # losing its type; disclose it once per type like tuples do.
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable list subclass {name} in portable metadata; "
+                "it rebuilds as a plain list.",
+            )
         rebuilt_list: list[Any] = []
         _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_list
@@ -858,6 +868,13 @@ def _scrub_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
+        if type(value) is not set:
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable set subclass {name} in portable metadata; "
+                "it rebuilds as a plain set.",
+            )
         rebuilt_set: set[Any] = set()
         _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_set
@@ -881,6 +898,13 @@ def _scrub_value(
             raise TorchLensIOError("Portable metadata contains a cycle through a frozenset.")
         if cached is not None:
             return cached
+        if type(value) is not frozenset:
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable frozenset subclass {name} in portable "
+                "metadata; it rebuilds as a plain frozenset.",
+            )
         _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
