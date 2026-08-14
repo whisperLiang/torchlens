@@ -2453,7 +2453,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
         if not candidate.is_dir():
             continue
         if not bundle_path.exists():
-            _restore_backup(candidate, bundle_path)
+            _restore_backup(candidate, bundle_path, warn_on_failure=False)
             if not candidate.exists():
                 removed.append(bundle_path)
             else:
@@ -3815,8 +3815,18 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
+def _restore_backup(
+    backup_path: Path, bundle_path: Path, *, warn_on_failure: bool = True
+) -> bool:
     """Best-effort restore an overwritten bundle after a failed replacement.
+
+    On a DOUBLE fault (the save failed AND this restore also fails -- permissions,
+    disk-full, a cross-device backup), the user's previous artifact is gone from its
+    canonical ``bundle_path`` but still exists under the ``.bak.<uuid>`` backup name.
+    Silently swallowing that left the prior artifact stranded under a hidden name the
+    error never mentioned; disclose the backup path so it is recoverable (matching the
+    save handler's stated intent). No behavior change on the single-fault path, where
+    the restore succeeds.
 
     Parameters
     ----------
@@ -3824,9 +3834,26 @@ def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
         Backup path holding the previous bundle contents.
     bundle_path:
         Final bundle path to restore.
+    warn_on_failure:
+        Emit a warning naming the stranded backup when the restore fails. Callers that
+        do their own disclosure (``cleanup_tmp``) pass ``False``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the backup was restored onto ``bundle_path``.
     """
 
     try:
         backup_path.rename(bundle_path)
-    except OSError:
-        return
+    except OSError as exc:
+        if warn_on_failure:
+            warnings.warn(
+                f"Could not restore the previous bundle from its backup after a failed "
+                f"save ({exc}). Your prior artifact is NOT lost: it remains at "
+                f"{backup_path}. Move it back to {bundle_path} to recover it.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return False
+    return True

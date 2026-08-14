@@ -268,6 +268,56 @@ def test_git_commit_hash_is_dropped_when_source_excluded(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
+# Atomic-save double-fault disclosure                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_double_fault_restore_discloses_stranded_backup(tmp_path: Path) -> None:
+    """When a save fails AND the restore fails, the backup path is disclosed.
+
+    Fail-before: the restore's ``except OSError`` silently passed, so the prior
+    artifact was stranded under a hidden ``.bak.<uuid>`` name the error never named.
+    """
+
+    backup = tmp_path / "b.tlspec.bak.deadbeef"
+    backup.mkdir()
+    (backup / "marker").write_text("prior", encoding="utf-8")
+    target = tmp_path / "b.tlspec"  # does not exist -> restore path is taken
+
+    def _failing_rename(*_a, **_k):
+        raise OSError("cross-device restore failed")
+
+    import torchlens._io.bundle as b
+
+    original = Path.rename
+    try:
+        Path.rename = _failing_rename  # type: ignore[method-assign]
+        with pytest.warns(UserWarning, match=str(backup)):
+            restored = b._restore_backup(backup, target)
+    finally:
+        Path.rename = original  # type: ignore[method-assign]
+    assert restored is False
+    assert backup.exists(), "the backup must remain recoverable"
+
+
+def test_single_fault_restore_is_silent_and_succeeds(tmp_path: Path) -> None:
+    """The normal single-fault path restores the backup with no warning."""
+
+    import warnings as _warnings
+
+    import torchlens._io.bundle as b
+
+    backup = tmp_path / "b.tlspec.bak.cafe"
+    backup.mkdir()
+    target = tmp_path / "b.tlspec"
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        assert b._restore_backup(backup, target) is True
+    assert target.exists()
+    assert not backup.exists()
+
+
+# --------------------------------------------------------------------------- #
 # R27-3: typed recursion refusal during rehydration                            #
 # --------------------------------------------------------------------------- #
 
