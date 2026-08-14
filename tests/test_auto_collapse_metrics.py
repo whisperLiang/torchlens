@@ -2308,22 +2308,31 @@ def test_auto_collapse_run_fold_splits_same_spatial_channel_steps(tmp_path: Path
 
 
 def test_auto_collapse_run_fold_folds_mobilenet_channel_plateaus() -> None:
-    """MobileNetV2-style same-class plateaus fold and channel transitions split."""
+    """MobileNetV2-style same-class plateaus fold and channel transitions split.
+
+    REVIEWED rebaseline (T9, grind-p3): ``features.3`` (the channel
+    transition, 29 layers / 7296 params) previously folded as the visible
+    representative of the ``features.3-6`` run even though every hidden
+    member (30 layers / 9344 params, residual join) differs from it — the
+    "+3 more" ellipsis claimed a sameness the render could not prove. The
+    uniformity check now spans the representative too, so the transition
+    stays visible on its own and the plateau folds from ``features.4``.
+    """
 
     trace = _trace(MobileNetPlateauStack(), torch.randn(1, 3, 16, 16))
     try:
         folds = resolve_repeat_folds(trace, _select_features_child)
 
         assert folds["features.0"].addresses == ("features.0", "features.1", "features.2")
-        assert folds["features.3"].addresses == (
-            "features.3",
+        assert "features.3" not in folds
+        assert folds["features.4"].addresses == (
             "features.4",
             "features.5",
             "features.6",
         )
-        assert folds["features.0"].addresses[-1] != folds["features.3"].addresses[0]
-        assert folds["features.3"].hidden_member_composition == {
-            "hidden_with_residual_join": 3,
+        assert folds["features.4"].representative == "features.4"
+        assert folds["features.4"].hidden_member_composition == {
+            "hidden_with_residual_join": 2,
             "hidden_without_residual_join": 0,
         }
     finally:
@@ -2331,37 +2340,48 @@ def test_auto_collapse_run_fold_folds_mobilenet_channel_plateaus() -> None:
 
 
 def test_auto_collapse_run_fold_folds_residual_mix_without_digest_key() -> None:
-    """Same-class equal-shape blocks fold even when residual topology differs."""
+    """Structurally uniform residual plateaus fold behind a matching representative.
+
+    REVIEWED rebaseline (T9, grind-p3): this pin previously asserted that
+    the residual-topology-DIFFERENT transition ``features.3`` folded as the
+    representative of the ``features.3-6`` run. With the all-member
+    uniformity contract the run splits and the residual plateau folds from
+    its own structurally-matching representative.
+    """
 
     trace = _trace(MobileNetPlateauStack(), torch.randn(1, 3, 16, 16))
     try:
         folds = resolve_repeat_folds(trace, _select_features_child)
 
-        assert folds["features.3"].addresses == (
-            "features.3",
+        assert folds["features.4"].addresses == (
             "features.4",
             "features.5",
             "features.6",
         )
-        assert folds["features.3"].hidden_member_composition["hidden_with_residual_join"] == 3
+        assert folds["features.4"].hidden_member_composition["hidden_with_residual_join"] == 2
     finally:
         trace.cleanup()
 
 
 def test_auto_collapse_fold_repeats_true_splits_run_around_odd_hidden_member() -> None:
-    """``fold_repeats=True`` folds the maximal legal sub-runs around an odd hidden member.
+    """``fold_repeats=True`` folds the maximal legal sub-runs around an odd member.
 
     Regression for the round-3 honesty gate's own adjacent gap: pre-fix,
     ``_iter_collapsible_runs`` (the "shared substrate" v1 grouper reachable
     via ``fold_repeats=True`` or a custom ``collapse_fn``, as opposed to the
     default v2 optimizer's ``_maximal_legal_runs``) yielded exactly one
     whole-run candidate per class/stem group with no backtracking, so
-    ``_run_fold_hidden_members_uniform`` rejecting that single candidate
+    ``_run_fold_members_uniform`` rejecting that single candidate
     (because ``blocks.3`` is structurally odd) meant *zero* folds for the
-    entire 7-block run -- even though ``(blocks.0, blocks.1, blocks.2)`` and
-    ``(blocks.3, blocks.4, blocks.5, blocks.6)`` are each independently
-    legal, hidden-uniform runs, exactly as the default v2 engine already
-    handles for the identical input.
+    entire 7-block run -- even though the uniform sub-runs around the odd
+    member are independently legal folds, exactly as the default v2 engine
+    already handles for the identical input.
+
+    REVIEWED rebaseline (T9, grind-p3): the odd ``blocks.3`` previously
+    folded as the visible representative of ``blocks.3-6`` even though every
+    hidden member differs from it. Under the all-member uniformity contract
+    it stays visible on its own and the uniform tail folds from
+    ``blocks.4``.
     """
 
     trace = _trace(OddHiddenMemberStack(total=7, odd_index=3), torch.randn(2, 8))
@@ -2369,16 +2389,16 @@ def test_auto_collapse_fold_repeats_true_splits_run_around_odd_hidden_member() -
         folds = resolve_repeat_folds(trace, _select_blocks_child, fold_repeats=True)
 
         assert folds["blocks.0"].addresses == ("blocks.0", "blocks.1", "blocks.2")
-        assert folds["blocks.3"].addresses == (
-            "blocks.3",
+        assert "blocks.3" not in folds
+        assert folds["blocks.4"].addresses == (
             "blocks.4",
             "blocks.5",
             "blocks.6",
         )
-        assert folds["blocks.3"].representative == "blocks.3"
-        # The odd block is only ever the visible representative of its own
-        # fold -- it must never appear as a *hidden* member of any fold.
-        assert all("blocks.3" not in fold.addresses[1:] for fold in folds.values())
+        assert folds["blocks.4"].representative == "blocks.4"
+        # The odd block must not appear anywhere inside any fold -- neither
+        # as a hidden member nor as a mismatching representative.
+        assert all("blocks.3" not in fold.addresses for fold in folds.values())
     finally:
         trace.cleanup()
 
@@ -2999,6 +3019,51 @@ def test_v2_max_op_segment_renders_dashed_box_and_contracts_edges(
         )
         assert any(
             op.modules and op.modules[0].startswith("blocks:") for op in first_segment_members
+        )
+    finally:
+        trace.cleanup()
+
+
+class _AtomicGapStack(torch.nn.Module):
+    """Two-op blocks with a bare atomic activation wedged between them."""
+
+    def __init__(self) -> None:
+        """Initialize blocks around one atomic top-level child."""
+
+        super().__init__()
+        self.layers = torch.nn.Sequential(
+            SegmentToyBlock(),
+            torch.nn.ReLU(),
+            SegmentToyBlock(),
+            SegmentToyBlock(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the atomic-gap stack forward pass."""
+
+        return self.layers(x)
+
+
+def test_op_segment_span_disclosure_counts_atomic_module_members(tmp_path: Path) -> None:
+    """R19-5 span disclosure must name hidden ATOMIC module calls too.
+
+    T9 (grind-p3, MED) red pin: the spanned-homes walk used the renderer's
+    effective module stack, which drops an atomic module's own innermost
+    level (a presentation choice — the renderer keeps the op and drops the
+    box). Containment disclosure must not inherit that drop: a segment
+    hiding a bare ``nn.ReLU`` child's op silently omitted its module call
+    from the ``-- spans @...`` list, undercounting the hidden module calls.
+    """
+
+    trace = _trace(_AtomicGapStack(), torch.randn(1, 4, 8, 8))
+    try:
+        source = _draw_source(trace, tmp_path, "atomic_gap_spans", "max")
+
+        assert "-- spans" in source
+        spans_lines = [line for line in source.splitlines() if "-- spans" in line]
+        assert any("layers.1:1" in line for line in spans_lines), (
+            "the atomic nn.ReLU child's module call is missing from the "
+            f"span disclosure: {spans_lines}"
         )
     finally:
         trace.cleanup()

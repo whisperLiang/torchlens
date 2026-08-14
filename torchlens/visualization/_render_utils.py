@@ -147,9 +147,11 @@ def relativize_visualizer_image(path: str) -> str:
     r-b6 R19-6: node ``image=`` attributes used to embed the absolute
     ``tempfile.mkdtemp`` visualizer path, so every run's DOT differed in
     every image node and byte-comparison/golden hashing was impossible for
-    those features. Emitting the path RELATIVE to the scratch root (with the
-    root supplied once through the graph-level ``imagepath`` attribute)
-    confines the per-run bytes to a single graph attribute. Paths outside a
+    those features. Emitting the path RELATIVE to the scratch root keeps
+    per-run bytes out of the source entirely; T9 (grind-p3) supplies the
+    root to Graphviz as the render subprocess working directory (the dot
+    engine) instead of an in-source ``imagepath`` graph attribute, so
+    user-saved DOT stays free of the per-run temp path. Paths outside a
     visualizer scratch dir (user-supplied images) pass through unchanged.
     """
 

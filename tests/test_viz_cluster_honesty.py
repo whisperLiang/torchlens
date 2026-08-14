@@ -132,8 +132,17 @@ def test_boundary_crossing_segment_discloses_spanned_modules() -> None:
     )
 
 
-def test_within_module_segment_label_stays_unchanged() -> None:
-    """A segment fully inside one module keeps its plain range label."""
+def test_within_module_segment_discloses_hidden_atomic_module_calls() -> None:
+    """A within-module segment names the atomic module calls it hides.
+
+    REVIEWED rebaseline (T9, grind-p3): this pin previously asserted the
+    label stayed a plain range ("spans" absent). That silence was the
+    atomic undercount defect itself — the spanned-homes walk inherited the
+    renderer's effective-stack atomic drop, so a segment hiding ops from
+    FOUR distinct atomic module calls (Linear/ReLU children) reported zero
+    homes and disclosed nothing. Hidden atomic module calls are containment
+    facts like any other and must be disclosed.
+    """
 
     from types import SimpleNamespace
 
@@ -144,7 +153,7 @@ def test_within_module_segment_label_stays_unchanged() -> None:
     context = SimpleNamespace(vis_mode="unrolled")
     labels = tuple(label for label in ("linear_1_1", "relu_1_2", "linear_2_3", "relu_2_4"))
     descriptor = _make_op_segment_descriptor(trace, context, labels, labels)
-    assert "spans" not in descriptor.label, descriptor.label
+    assert "spans @0.0:1, @0.1:1, @0.2:1, +1 more" in descriptor.label, descriptor.label
 
 
 def test_condensed_away_clusters_are_not_emitted_empty(tmp_path: Path) -> None:
@@ -196,8 +205,10 @@ def test_image_node_attrs_are_visualizer_relative(tmp_path: Path) -> None:
     """DOT ``image=`` attrs never embed the mkdtemp visualizer path (R19-6).
 
     The absolute scratch path used to appear in every image node, defeating
-    byte-comparison and golden hashing for image-bearing features; it now
-    appears exactly once, as the graph-level ``imagepath`` root.
+    byte-comparison and golden hashing for image-bearing features. REVIEWED
+    rebaseline (T9, grind-p3): the root now stays out of the source
+    entirely (render subprocess cwd supplies it), so saved DOT carries no
+    per-run temp path anywhere.
     """
 
     pytest.importorskip("PIL")
@@ -230,4 +241,5 @@ def test_image_node_attrs_are_visualizer_relative(tmp_path: Path) -> None:
     assert image_attrs, "probe expects at least one image node"
     absolute = [attr for attr in image_attrs if attr.startswith(("/", "\\"))]
     assert not absolute, f"absolute visualizer paths leaked into image attrs: {absolute}"
-    assert "imagepath=" in source, "relative image attrs need the imagepath root"
+    assert "imagepath" not in source, "the per-run temp root must not be baked into saved DOT"
+    assert "torchlens_visualizers_" not in source

@@ -1773,3 +1773,35 @@ def test_segment_descriptor_parity_guard_survives_python_O() -> None:
 
     with pytest.raises(RuntimeError, match="segment descriptor cardinality"):
         _assert_segment_descriptor_parity((), {"phantom": object()})  # type: ignore[arg-type]
+
+
+def test_visible_plan_guards_survive_python_O() -> None:
+    """The empty-plan honesty guards raise, not assert (T9, grind-p3).
+
+    ``python -O`` strips asserts; the v2 select path and the floor fallback
+    both publish plans on the DEFAULT ``draw(collapse=)`` path, so an empty
+    plan must fail loudly with assertions disabled too.
+    """
+
+    from torchlens.visualization.collapse_optimizer import _assert_visible_plan
+
+    _assert_visible_plan(1, "v2 collapse plan")
+    with pytest.raises(RuntimeError, match="v2 collapse plan produced no visible nodes"):
+        _assert_visible_plan(0, "v2 collapse plan")
+    with pytest.raises(RuntimeError, match="collapse floor fallback produced no visible nodes"):
+        _assert_visible_plan(0, "collapse floor fallback")
+
+
+def test_rank_group_parity_guard_survives_python_O() -> None:
+    """The sibling rank-group emission guard raises, not asserts (T9, grind-p3).
+
+    ``python -O`` strips asserts; the queued-vs-emitted parity check runs on
+    the DEFAULT ``draw()`` path, so a dropped sibling rank group must fail
+    loudly with assertions disabled too.
+    """
+
+    from torchlens.visualization._render_dot import _assert_rank_group_parity
+
+    _assert_rank_group_parity(3, 3)
+    with pytest.raises(RuntimeError, match="sibling rank-group emission mismatch"):
+        _assert_rank_group_parity(3, 2)

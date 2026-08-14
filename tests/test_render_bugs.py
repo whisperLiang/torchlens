@@ -880,3 +880,89 @@ def test_rank_layout_model_class_name_html_specials_render_cleanly(
 
     assert "Loss&amp;Aux&lt;Model&gt;" in dot
     assert "Loss&Aux<Model>" not in dot
+
+
+def _attach_probe_image(trace: Trace) -> Path:
+    """Write one PNG into the trace's visualizer scratch root and return it."""
+
+    from PIL import Image
+
+    from torchlens.utils.display import ensure_trace_visualizer_dir
+
+    root = ensure_trace_visualizer_dir(trace)
+    image_path = root / "probe.png"
+    Image.new("RGB", (12, 12), "red").save(image_path)
+    return image_path
+
+
+def test_saved_dot_source_free_of_per_run_temp_imagepath(tmp_path: Path) -> None:
+    """User-saved DOT must not bake the per-run mkdtemp visualizer path.
+
+    T9 (grind-p3, LOW) red pin: node images live in a ``tempfile.mkdtemp``
+    scratch dir that is removed when the trace is garbage collected. Baking
+    that dir into the saved source as a graph-level ``imagepath`` made every
+    user-kept DOT unrenderable after the trace died. The image root now
+    reaches Graphviz as the render subprocess working directory only; the
+    saved source keeps stable relative image refs.
+    """
+
+    trace = tl.trace(_TinyRenderModel(), torch.randn(1, 3))
+    try:
+        image_path = _attach_probe_image(trace)
+
+        def spec_fn(layer_log: Any, default_spec: Any) -> Any:
+            if "relu" in str(layer_log.layer_label):
+                default_spec.image = str(image_path)
+            return default_spec
+
+        outpath = tmp_path / "temp_free"
+        trace.draw(
+            node_spec_fn=spec_fn,
+            vis_fileformat="dot",
+            vis_save_only=True,
+            vis_outpath=str(outpath),
+        )
+        source = (tmp_path / "temp_free.dot").read_text()
+    finally:
+        trace.cleanup()
+
+    assert 'image="probe.png"' in source, "probe image ref missing; test rig broke"
+    assert "torchlens_visualizers_" not in source, (
+        "saved DOT bakes the per-run mkdtemp visualizer path"
+    )
+    assert "imagepath" not in source
+
+
+def test_node_image_renders_without_in_source_imagepath(tmp_path: Path) -> None:
+    """Node images still resolve (inlined into SVG) with no in-source root.
+
+    Counterpart guard for the T9 imagepath removal: dropping the in-source
+    root must not silently break image rendering — the SVG pipeline inlines
+    the probe image as a data URI, which requires Graphviz (running in the
+    scratch root) and the inliner to both find it.
+    """
+
+    trace = tl.trace(_TinyRenderModel(), torch.randn(1, 3))
+    try:
+        image_path = _attach_probe_image(trace)
+
+        def spec_fn(layer_log: Any, default_spec: Any) -> Any:
+            if "relu" in str(layer_log.layer_label):
+                default_spec.image = str(image_path)
+            return default_spec
+
+        outpath = tmp_path / "image_inlined"
+        trace.draw(
+            node_spec_fn=spec_fn,
+            vis_fileformat="svg",
+            vis_save_only=True,
+            vis_outpath=str(outpath),
+        )
+        svg = (tmp_path / "image_inlined.svg").read_text()
+    finally:
+        trace.cleanup()
+
+    assert "data:image/png;base64" in svg, (
+        "probe node image was not inlined; Graphviz could not resolve the "
+        "relative image ref without an in-source imagepath"
+    )

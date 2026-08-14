@@ -44,9 +44,9 @@ from .auto_collapse import (
     _paired_external_connector,
     _readable_band_high,
     _rendered_module_hidden_counts,
-    _run_fold_hidden_members_uniform,
     _run_fold_is_chain_interval,
     _run_fold_is_legal,
+    _run_fold_members_uniform,
     _shape_channel_dim,
     _shape_spatial_dims,
     analyze_collapse,
@@ -198,6 +198,25 @@ class OptimizerResult:
                 f"plan segment nodes {segment_nodes}; publishing this result would "
                 "silently render hidden structure"
             )
+
+
+def _assert_visible_plan(visible_count: int, origin: str) -> None:
+    """Raise when a collapse plan about to be published has no visible nodes.
+
+    T9 (grind-p3): a raise, not an assert — these guards run on the DEFAULT
+    ``draw(collapse=)`` path and ``python -O`` strips asserts, which would
+    let an empty plan render a blank graph with no diagnosis.
+
+    Parameters
+    ----------
+    visible_count:
+        Visible node count of the plan being published.
+    origin:
+        Human-readable name of the publishing path, used in the error.
+    """
+
+    if visible_count <= 0:
+        raise RuntimeError(f"{origin} produced no visible nodes")
 
 
 @dataclass(frozen=True)
@@ -478,7 +497,7 @@ def select_collapse_plan(
             segments = {}
     else:
         segments = {}
-    assert count(plan) > 0, "v2 collapse plan produced no visible nodes"
+    _assert_visible_plan(count(plan), "v2 collapse plan")
     result = OptimizerResult(
         selected=instantiated_point.selected,
         repeat_folds=repeat_folds,
@@ -2074,13 +2093,20 @@ def _op_segment_spanned_modules(
     module containment at all, so the label must name the spanned modules.
     Returns the ordered distinct immediate homes below ``owner`` when the
     placement actually loses containment information, else ``[]``.
+
+    T9 (grind-p3): the walk reads the op's FULL module stack, not the
+    renderer's effective stack. The effective stack drops an atomic
+    module's own innermost level — a presentation choice (the renderer
+    keeps the op and drops the box) — and inheriting that drop here made
+    the disclosure silently omit hidden atomic module calls from the
+    ``spans @...`` list.
     """
 
     homes: list[str] = []
     has_direct_member = False
     for label in labels:
         op = _trace_op_for_concrete_label(trace, label)
-        stack: tuple[str, ...] = _effective_render_module_stack(op)
+        stack: tuple[str, ...] = tuple(str(module) for module in getattr(op, "modules", ()) or ())
         if vis_mode == "rolled":
             stack = tuple(value.rsplit(":", 1)[0] for value in stack)
         if owner is None or owner not in stack:
@@ -2728,7 +2754,7 @@ def _floor_fallback_selection(
         )
         if 0 < count(candidate_plan) < full_count:
             return selected, candidate_plan
-    assert full_count > 0, "collapse floor fallback produced no visible nodes"
+    _assert_visible_plan(full_count, "collapse floor fallback")
     return frozenset(), full_plan
 
 
@@ -3269,7 +3295,7 @@ def _maximal_legal_runs(
             if (
                 len(run) >= RUN_FOLD_MIN_LENGTH
                 and _run_fold_is_legal(run, graph)
-                and _run_fold_hidden_members_uniform(state.trace, run)
+                and _run_fold_members_uniform(state.trace, run)
             ):
                 best = run
         if best:
