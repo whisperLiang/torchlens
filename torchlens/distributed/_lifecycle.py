@@ -109,6 +109,13 @@ class _ArmedState:
     identities: dict[int, GroupIdentity] = field(default_factory=dict)
     seq_counters: dict[tuple[str, int, str], int] = field(default_factory=dict)
     originals: dict[tuple[Any, str], Any] = field(default_factory=dict)
+    broken: bool = False
+    """Poison flag: a failed arm whose restore ALSO failed published this
+    state only so ``disarm()`` can retry restoration. Some collective sites
+    are wrapped and others pristine, so presenting it as armed would let a
+    capture proceed while unwrapped collectives are silently omitted --
+    exactly the fail-open arming exists to prevent. Every arming entry point
+    refuses typed while this is set."""
 
 
 _LOCK = threading.Lock()
@@ -126,6 +133,26 @@ def armed_state() -> _ArmedState | None:
     """Return the live armed state, or ``None`` when unarmed."""
 
     return _STATE
+
+
+def _refuse_if_broken(state: _ArmedState) -> None:
+    """Refuse typed on a poisoned half-armed state (deep-hunt F9).
+
+    A failed arm whose restore also failed leaves SOME collective sites
+    wrapped and others pristine; proceeding "armed" would silently omit the
+    unwrapped collectives from an armed capture. ``disarm()`` retries the
+    restoration and clears the state.
+    """
+
+    if state.broken:
+        raise CompatibilityError(
+            "torchlens.distributed arming previously failed and its rollback "
+            "could not restore every wrapped collective site; this process is "
+            "half-armed and captures would silently omit unwrapped "
+            "collectives. Call torchlens.distributed.disarm() to retry the "
+            "restoration, then arm() again.",
+            kind="distributed_arming_broken",
+        )
 
 
 def _dist() -> Any:
@@ -385,6 +412,7 @@ def _arm(source: str) -> ArmingRecord:
     global _STATE
     with _LOCK:
         if _STATE is not None:
+            _refuse_if_broken(_STATE)
             return _STATE.arming
         _dist()
         recognizer = derive_collective_recognizer()
@@ -417,6 +445,10 @@ def _arm(source: str) -> ArmingRecord:
                     continue
                 state.originals.pop((module, name), None)
             if restore_error is not None:
+                # Published ONLY so disarm() can retry restoration; poisoned
+                # so no arming entry point presents the half-wrapped process
+                # as armed (deep-hunt F9).
+                state.broken = True
                 _STATE = state
                 raise restore_error from arm_error
             raise
@@ -445,6 +477,7 @@ def maybe_auto_arm() -> ArmingRecord | None:
 
     global _AUTO_ARM_WARNED
     if _STATE is not None:
+        _refuse_if_broken(_STATE)
         return _STATE.arming
     try:
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():

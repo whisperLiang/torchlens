@@ -499,3 +499,54 @@ class TestC10dGroupSeqCompatRouting:
                 return 41
 
         assert collectives._c10d_group_seq(Fake()) == 41
+
+
+class TestBrokenArmPoisoning:
+    """Deep-hunt F9: a failed arm with a failed rollback must not present as armed.
+
+    Fail-before: the error path published the half-armed ``_STATE`` (so
+    ``disarm()`` could retry restoration) with no poison marker, so a
+    subsequent ``arm()`` / ``maybe_auto_arm()`` returned the arming record and
+    capture proceeded "armed" while unwrapped collective sites were silently
+    omitted -- precisely the fail-open arming exists to prevent.
+    """
+
+    def test_failed_arm_with_failed_restore_poisons_state(self, unarmed, monkeypatch):
+        from torchlens.errors._base import CompatibilityError
+
+        _ = unarmed
+        original = object()
+
+        class RefusingModule:
+            allow = False
+
+            def __setattr__(self, name: str, value: object) -> None:
+                if name == "f" and value is original and not RefusingModule.allow:
+                    raise RuntimeError("restore refused")
+                object.__setattr__(self, name, value)
+
+        module = RefusingModule()
+
+        def failing_install(state):
+            state.originals[(module, "f")] = original
+            raise RuntimeError("install failed")
+
+        monkeypatch.setattr(lifecycle, "_install_lifecycle_wraps", failing_install)
+        with pytest.raises(RuntimeError, match="restore refused"):
+            lifecycle.arm()
+        state = lifecycle.armed_state()
+        assert state is not None and state.broken is True
+
+        # Every arming entry point refuses typed on the poisoned state.
+        with pytest.raises(CompatibilityError, match="half-armed"):
+            lifecycle.arm()
+        with pytest.raises(CompatibilityError, match="half-armed"):
+            lifecycle.maybe_auto_arm()
+
+        # disarm() keeps retrying restoration; success clears the poison.
+        with pytest.raises(RuntimeError, match="restore refused"):
+            lifecycle.disarm()
+        assert lifecycle.armed_state() is state
+        RefusingModule.allow = True
+        lifecycle.disarm()
+        assert not lifecycle.is_armed()
