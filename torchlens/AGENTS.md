@@ -169,7 +169,7 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
   sparse overlays, `TraceCore` with COW fork). The M5 Op seam is LIVE: `Op` is a
   `(_core, _row)` facade with one generated data descriptor per stored field; captured
   ops share the per-trace `OpRowStore` (`trace._trace_core`, `FieldPolicy.DROP`,
-  sealed after postprocess step 20), while copy/pickle/fork/preview paths use detached
+  sealed after the final postprocess step, key `20`), while copy/pickle/fork/preview paths use detached
   single-row stores. Architecture of record in
   `docs/reference/trace_core_design.md`. The declared
   record schema carries `StorageBinding` axes (`data_classes/_schema_bindings.py`,

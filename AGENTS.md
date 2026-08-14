@@ -45,7 +45,9 @@ Key entry points:
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
   `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`
-- Postprocess: `torchlens/postprocess/__init__.py` current 20-step pipeline
+- Postprocess: `torchlens/postprocess/__init__.py` current 26-step pipeline (declared
+  contract keys `0`..`20` plus fractional inserts `11.5`/`11.75`/`15.5`/`16.5`/`17.5` in
+  `postprocess/_contracts.py::POSTPROCESS_STEP_CONTRACTS`)
 - Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`
 - Intervention: `torchlens/intervention/` plus top-level selector/helper aliases. Live
   `trace(intervene=...)`/`trace(halt=...)` run on torch and on the eager Paddle preview

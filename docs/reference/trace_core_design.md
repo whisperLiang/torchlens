@@ -439,7 +439,7 @@ OUT (documented handoffs, never silent):
 - **No-journal capture writer** (capture writes semantic columns directly): OUT
   permanently, per section 3.3.
 - New physical columnar `.tlspec` (JMT-FORK-3); Arrow core dependency; global interning;
-  `torchlens/projection/` package (the 20 steps' order is load-bearing; the substance —
+  `torchlens/projection/` package (the 26 declared steps' order is load-bearing; the substance —
   declared per-step read/write sets — lands without the relocation); UI regrouping
   implementation (plan-only, JMT-FORK-2); `intervention_ready` rename (separate
   authorization).

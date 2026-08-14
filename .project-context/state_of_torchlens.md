@@ -87,7 +87,7 @@ validation, and core data-class names for the current 2.x surface.
 | `torchlens/io/` | Public I/O/admin helpers | `inspect_tlspec`, `detect_tlspec_format`, moved admin APIs |
 | `torchlens/capture/` | Forward/backward runtime logging | Wrapper handoff and raw `Op` construction |
 | `torchlens/backends/torch/` | Lazy torch wrapping and model preparation | Torch namespace lifecycle, module wrappers |
-| `torchlens/postprocess/` | 20-step graph cleanup/finalization | Labels, loops, conditionals, modules, streaming finalization |
+| `torchlens/postprocess/` | 26-step graph cleanup/finalization | Labels, loops, conditionals, modules, streaming finalization |
 | `torchlens/data_classes/` | `Trace`, `Layer`, `Op`, module/param/buffer/grad records | User-visible capture data structures |
 | `torchlens/validation/` | Forward/backward replay, invariants, `.tlspec` schema | Correctness checks |
 | `torchlens/visualization/` | Graphviz, ELK, NodeSpec, overlays, bundle diff, fastlog preview | Rendering and visual customization |

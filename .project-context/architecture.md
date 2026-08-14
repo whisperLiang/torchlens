@@ -34,7 +34,9 @@ Real-time tensor operation logging during forward pass.
 - `flops.py` — Per-operation FLOPs computation (~290 ops)
 
 ### `torchlens/postprocess/` (6 files, ~3,179 lines)
-19-step pipeline. Order is critical — many steps depend on prior output.
+26-step pipeline (declared contract keys `0`..`20` plus fractional inserts `11.5`, `11.75`,
+`15.5`, `16.5`, `17.5` in `_contracts.py::POSTPROCESS_STEP_CONTRACTS`). Order is critical —
+many steps depend on prior output.
 - `graph_traversal.py` — Steps 1-4: output layers, ancestor marking, orphan removal, distance flood
 - `control_flow.py` — Steps 5-6: six-phase conditional attribution (AST indexing, bool
   classification, event materialization, backward flood, forward arm attribution, derived
@@ -87,7 +89,7 @@ log_forward_pass(model, input)
   →     torch_func_decorator     # barcode nesting → bottom-level ops logged
   →       log_function_output_tensors_exhaustive()  # builds LayerPassLog entry
   →       OR log_function_output_tensors_fast()     # reuses prior graph structure
-  → postprocess(model_log)       # 19-step pipeline
+  → postprocess(model_log)       # 26-step pipeline
   →   Steps 1-4: graph cleanup (outputs, ancestors, orphans, distances)
   →   Steps 5-6: control flow (Step 5a-5f conditional attribution, buffer dedup)
   →   Step 7: loop detection (isomorphic subgraph expansion)

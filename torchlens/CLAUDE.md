@@ -20,7 +20,8 @@ trace(model, input, save=..., intervene=..., lookback=..., storage=...)
   |- backends/torch/model_prep.py - ensure torch is wrapped, prepare modules/buffers/params
   |- capture/trace.py          - run forward pass with active logging
   |- backends/torch/ops.py     - build raw torch op records during wrapper calls
-  |- postprocess/              - current 20-step graph cleanup/finalization pipeline
+  |- postprocess/              - current 26-step graph cleanup/finalization pipeline
+                                 (contract keys 0..20 + 5 fractional inserts)
   +- returns Trace
 
 tl.record(model, input, save=...)
@@ -141,7 +142,7 @@ exclusive with backward-related capture because it discards the autograd graph.
   table, payload arena, overlays, `TraceCore`). The M5 Op seam is LIVE: every captured
   `Op` is a two-word `(_core, _row)` facade over the per-trace `OpRowStore`
   (`op_store.py`) held at `trace._trace_core` (declared `FieldPolicy.DROP`); rows are
-  row-major lists while building and seal after step 20 (columnar transpose with
+  row-major lists while building and seal after the final step, key 20 (columnar transpose with
   numeric packing at >=512 rows). `Op.copy()`, pickle restore, fork shells, and
   preview backends use detached single-row stores. M6 relations are LIVE
   (`relation_views.py`): on FINISHED traces the relation accessors return IMMUTABLE
