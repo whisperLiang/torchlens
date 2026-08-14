@@ -58,6 +58,7 @@ from .exemptions import (
     index_domain_rotation_values,
     perturbed_layer_at_structural_position,
     posthoc_perturb_check,
+    uninitialized_by_design_applies,
 )
 from .status import ValidationReplayStatus
 
@@ -3240,11 +3241,16 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         return ValidationCheckResult.failed_result("functionless_computational_op")
 
     # Registry 1: skip ALL validation for nondeterministic ops (e.g., empty_like).
+    # Membership is proved PER CALL: Tensor.new's value-bearing overloads
+    # (new(tensor)/new(data)) are deterministic initialized calls and fall
+    # through to real replay -- exempting them blessed a wrong replay
+    # without execution (b1-sol R08-1).
     if layer.func_name in SKIP_VALIDATION_ENTIRELY:
-        return ValidationCheckResult.exempted(
-            "uninitialized_by_design",
-            justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
-        )
+        if uninitialized_by_design_applies(layer):
+            return ValidationCheckResult.exempted(
+                "uninitialized_by_design",
+                justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
+            )
 
     saved_output = _saved_out_payload(layer)
     if saved_output is None:

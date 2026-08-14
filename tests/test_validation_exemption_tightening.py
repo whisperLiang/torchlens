@@ -478,3 +478,161 @@ def test_index_domain_rotation_is_valid_and_distinct() -> None:
     # A NON-index parent (the weight) gets no rotation -- it stays on the
     # strict generic perturbation path.
     assert index_domain_rotation_values(emb_layer, "weight_parent", weight) is None
+
+
+# ---------------------------------------------------------------------------
+# R08-1 (b1-sol round-2): Tensor.new is OVERLOADED. Only the argless /
+# integer-sizes / torch.Size forms return uninitialized memory; new(tensor)
+# and new(data) are initialized value-bearing calls whose replay must run.
+# The blanket registry membership blessed a wrong new(tensor) replay
+# 'exempted' without execution.
+# ---------------------------------------------------------------------------
+
+
+class _NewFromTensorModel(nn.Module):
+    """Model exercising the value-bearing ``Tensor.new(tensor)`` overload."""
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Return ``x.new(y)`` plus a value anchor on both inputs.
+
+        Parameters
+        ----------
+        x:
+            Prototype tensor supplying dtype/device.
+        y:
+            VALUE-BEARING source tensor copied into the result.
+
+        Returns
+        -------
+        torch.Tensor
+            The initialized copy of ``y``.
+        """
+
+        return x.new(y)
+
+
+class _NewSizesModel(nn.Module):
+    """Model exercising the genuinely uninitialized size-only overload."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Allocate with ``x.new(2, 3)`` and erase the garbage values.
+
+        Parameters
+        ----------
+        x:
+            Prototype tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Deterministic output built on the uninitialized allocation.
+        """
+
+        return x.new(2, 3).zero_() + x.sum()
+
+
+def test_value_bearing_tensor_new_corruption_fails_not_exempted() -> None:
+    """A corrupted ``new(tensor)`` replay must FAIL, never bless 'exempted'.
+
+    Red-capable: pre-narrowing, the registry-1 early exit returned
+    ``exempted('uninitialized_by_design')`` before reading the saved output,
+    so this planted corruption validated clean (the b1-sol reproduction).
+    """
+
+    trace = _capture(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+    op = _op_with_func_name(trace, "new")
+    # Corrupt the op's own retained output payload: replay recomputes
+    # new(y) honestly from the saved parents and must now disagree.
+    # Pre-narrowing the registry early-exit blessed this exempted without
+    # ever executing the comparison.
+    payload = op._slot("out")
+    assert payload is not None
+    payload.add_(999.0)
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "failed", (result.decision, result.reason)
+    assert result.reason == "replay_mismatch"
+
+
+def test_value_bearing_tensor_new_replays_honestly() -> None:
+    """An honest ``new(tensor)`` capture must replay-VALIDATE, not exempt."""
+
+    trace = _capture(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+    op = _op_with_func_name(trace, "new")
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "validated", (result.decision, result.reason)
+
+
+def test_size_only_tensor_new_stays_exempt() -> None:
+    """The genuinely uninitialized size-only overload keeps its exemption."""
+
+    trace = _capture(_NewSizesModel(), torch.tensor([4.0]))
+    op = _op_with_func_name(trace, "new")
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(trace, op.label)
+    assert result.decision == "exempted", (result.decision, result.reason)
+    assert result.reason == "uninitialized_by_design"
+
+
+def test_uninitialized_by_design_proof_is_fail_closed() -> None:
+    """The per-call proof rejects every non-size-only shape."""
+
+    from torchlens.validation.exemptions import uninitialized_by_design_applies
+
+    healthy = SimpleNamespace(
+        func_name="new", parents=("input_1",), non_tensor_kwargs={}, non_tensor_pos_args=[2, 3]
+    )
+    assert uninitialized_by_design_applies(healthy)
+    assert uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[torch.Size([2, 3])],
+        )
+    )
+    # Second tensor parent = value-bearing new(tensor).
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1", "input_2"),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[],
+        )
+    )
+    # Sequence positional arg = legacy DATA constructor.
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[[1.0, 2.0]],
+        )
+    )
+    # Unknown kwargs and bools are not provably sizes.
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new",
+            parents=("input_1",),
+            non_tensor_kwargs={"weird": 1},
+            non_tensor_pos_args=[],
+        )
+    )
+    assert not uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="new", parents=("input_1",), non_tensor_kwargs={}, non_tensor_pos_args=[True]
+        )
+    )
+    # Non-overloaded registry members stay membership-exempt.
+    assert uninitialized_by_design_applies(
+        SimpleNamespace(
+            func_name="empty_like",
+            parents=("input_1",),
+            non_tensor_kwargs={},
+            non_tensor_pos_args=[],
+        )
+    )
+
+
+def test_new_from_tensor_full_validation_still_passes() -> None:
+    """Public-path regression: an honest new(tensor) model validates green."""
+
+    assert _quiet_validate(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])

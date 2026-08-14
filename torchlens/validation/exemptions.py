@@ -50,7 +50,16 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 SKIP_VALIDATION_ENTIRELY: dict[str, str] = {
     "empty_like": "returns uninitialized memory by construction; saved bytes are not replayable",
-    "new": "torch.Tensor.new() returns uninitialized memory by construction",
+    # Membership for "new" is NECESSARY but not SUFFICIENT: Tensor.new is
+    # overloaded, and only the argless / integer-sizes / torch.Size forms
+    # return uninitialized memory. uninitialized_by_design_applies() proves
+    # the size-only form per call; the value-bearing new(tensor)/new(data)
+    # overloads fall through to real replay (b1-sol R08-1).
+    "new": (
+        "torch.Tensor.new() returns uninitialized memory by construction for the "
+        "argless/size-only overloads ONLY, proved per call by "
+        "uninitialized_by_design_applies"
+    ),
     "new_empty": "torch.Tensor.new_empty() returns uninitialized memory by construction",
     "new_empty_strided": (
         "torch.Tensor.new_empty_strided() returns uninitialized memory by construction"
@@ -108,6 +117,12 @@ SKIP_PERTURBATION_ENTIRELY: dict[str, str] = {
 # When the perturbed layer's tensor matches saved_args[pos], skip perturbation.
 # ---------------------------------------------------------------------------
 STRUCTURAL_ARG_POSITIONS: dict[str, set[int]] = {
+    # Value-bearing Tensor.new(tensor)/new(data): the SELF tensor (arg 0)
+    # supplies dtype/device only -- its values never reach the output -- while
+    # the data source (arg 1) stays strictly perturbation-tested. The
+    # size-only overloads never get here (uninitialized_by_design_applies
+    # exempts them before replay). R08-1 narrowing companion.
+    "new": {0},
     "copy_": {0},  # destination values are overwritten; source values determine output
     # Zipped foreach spelling of ``copy_`` (r29 F5): each destination member is
     # TOTALLY overwritten by its zipped source member, so the destination list
@@ -464,6 +479,52 @@ INPLACE_DESTINATION_WRITE_FUNCS: set[str] = {
 }
 
 
+def uninitialized_by_design_applies(op: Any) -> bool:
+    """Return whether the registry-1 uninitialized-memory exemption holds.
+
+    Registry membership alone is not proof for ``Tensor.new``: the func is
+    OVERLOADED, and only the argless / integer-sizes / ``torch.Size`` forms
+    return uninitialized memory. ``new(tensor)`` and ``new(sequence_data)``
+    are initialized, value-bearing, deterministic calls -- classifying them
+    uninitialized skipped replay entirely and blessed an actually WRONG
+    replay ``exempted`` without execution (b1-sol R08-1, reproduced). The
+    proof is fail-closed: a call not provably size-only is NOT exempt and
+    falls through to real replay, where a wrong value fails loud.
+
+    Parameters
+    ----------
+    op:
+        Candidate operation record.
+
+    Returns
+    -------
+    bool
+        True when the op is registry-listed AND (for ``new``) the saved call
+        is provably the uninitialized size-only/argless overload: at most the
+        self tensor as parent, no keyword arguments, and every non-tensor
+        positional argument a plain ``int`` or a ``torch.Size``.
+    """
+
+    if op is None or getattr(op, "func_name", None) not in SKIP_VALIDATION_ENTIRELY:
+        return False
+    if getattr(op, "func_name", None) != "new":
+        return True
+    parents = getattr(op, "parents", ()) or ()
+    if len(parents) > 1:
+        # A second tensor parent is the value-bearing new(tensor) overload.
+        return False
+    if getattr(op, "non_tensor_kwargs", None):
+        return False
+    for arg in getattr(op, "non_tensor_pos_args", None) or ():
+        if isinstance(arg, bool):
+            return False
+        if isinstance(arg, (int, torch.Size)):
+            continue
+        # Sequences are DATA (legacy constructor semantics), not sizes.
+        return False
+    return True
+
+
 def _uninitialized_value_origin(op: Any, source_trace: Any, depth: int = 0) -> bool:
     """Return whether an op's VALUE is itself uninitialized memory.
 
@@ -489,7 +550,10 @@ def _uninitialized_value_origin(op: Any, source_trace: Any, depth: int = 0) -> b
 
     if op is None:
         return False
-    return getattr(op, "func_name", None) in SKIP_VALIDATION_ENTIRELY
+    # Same per-call proof as the replay-skip consumer: a value-bearing
+    # new(tensor)/new(data) result is REAL data, never uninitialized
+    # allocation memory (R08-1 sibling site).
+    return uninitialized_by_design_applies(op)
 
 
 def _perturbed_parent_is_uninitialized_setitem_dest(

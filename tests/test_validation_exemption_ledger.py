@@ -883,6 +883,20 @@ _FACTORY_TEMPLATE_REFUSES = (
 #: Per-entry audit records for ``STRUCTURAL_ARG_POSITIONS``.
 STRUCTURAL_POSITION_LEDGER: tuple[StructuralPositionExemption, ...] = (
     StructuralPositionExemption(
+        func_name="new",
+        positions=frozenset({0}),
+        contract=_C2,
+        proof_kind="value_irrelevance_proved",
+        justification=(
+            "value-bearing Tensor.new(tensor)/new(data): the arg-0 SELF tensor supplies "
+            "dtype and device only, per torch's legacy constructor contract -- its "
+            "values never reach the output; the size-only overloads are exempted "
+            "earlier by uninitialized_by_design_applies and never reach perturbation "
+            "(R08-1 narrowing companion)"
+        ),
+        refuses=_FACTORY_TEMPLATE_REFUSES,
+    ),
+    StructuralPositionExemption(
         func_name="copy_",
         positions=frozenset({0}),
         contract=_C2,
