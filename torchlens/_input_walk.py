@@ -66,17 +66,79 @@ from typing import Any
 __all__ = [
     "COMPOSITE_LITERAL_COMPONENT_POLICY",
     "INPUT_CONTAINER_KINDS",
+    "INPUT_TREE_MAX_DEPTH",
     "InstanceStateInspection",
     "classify_input_container",
     "classify_scalar",
     "inspect_instance_state",
     "instance_state_names",
+    "raise_input_tree_cycle_refusal",
+    "raise_input_tree_depth_refusal",
     "raw_mapping_key_component",
     "reserved_input_path_components",
     "slice_semantic_component",
     "tagged_mapping_key_component",
     "walk_input_boundary",
 ]
+
+
+INPUT_TREE_MAX_DEPTH: int = 200
+"""The shared model-input boundary nesting ceiling (r-b4 R27-1).
+
+Mirrors the artifact-side literal-decode ceiling
+(``_runnable_execution._MAX_DECODE_NESTING_DEPTH`` / the ``_io`` parse quartet):
+200 sits far above any real input nesting and well below the interpreter's
+default recursion crash depth (the live walkers burn ~2-3 frames per level, so
+an unbounded walk died with a raw ``RecursionError`` at ~350 user levels).
+Every capture-entry input walker (``walk_input_boundary``,
+``snapshot_input_boundary``, ``backends.default_specs._simple_leaves``,
+``utils.arg_handling.copy_arg_tree``) enforces this ONE ceiling with a typed
+refusal instead of an untyped stdlib crash.
+"""
+
+
+def raise_input_tree_depth_refusal(*, depth: int) -> None:
+    """Raise the typed over-depth input-boundary refusal (r-b4 R27-1).
+
+    Parameters
+    ----------
+    depth:
+        Nesting depth at which the ceiling was crossed.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "Model-input tree nesting exceeds the supported input-boundary depth "
+        f"ceiling ({INPUT_TREE_MAX_DEPTH}).",
+        code="input_tree_depth_exceeded",
+        remedy=(
+            "Flatten the nested input containers (or unwrap the deep wrapper "
+            "object) before tracing; the ceiling matches the portable-artifact "
+            "nesting bound."
+        ),
+        depth=depth,
+    )
+
+
+def raise_input_tree_cycle_refusal(*, kind: str) -> None:
+    """Raise the typed cyclic-container input-boundary refusal (r-b4 R27-1).
+
+    Parameters
+    ----------
+    kind:
+        Container kind (closed vocabulary) at which the cycle closed.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        f"Model-input tree contains a self-referential {kind} container "
+        "(a container reachable from itself).",
+        code="input_tree_cycle",
+        remedy="Remove the container reference cycle from the model input.",
+        kind=kind,
+    )
 
 
 INPUT_CONTAINER_KINDS: frozenset[str] = frozenset(
@@ -196,7 +258,12 @@ def walk_input_boundary(
 
     from torchlens._io.runnable import _UnsupportedLiteralError, empty_container_kind
 
-    def _descend(value: Any, path: tuple[Any, ...]) -> None:
+    # r-b4 R27-1: PATH-scoped cycle guard + shared depth ceiling with typed refusals.
+    # The guard is ancestor-scoped (not global) because a DAG-shaped input legitimately
+    # reuses one container under distinct paths and every occurrence must be witnessed.
+    in_progress: set[int] = set()
+
+    def _descend(value: Any, path: tuple[Any, ...], depth: int = 0) -> None:
         """Dispatch one node through the closed container-kind vocabulary."""
 
         kind = classify_input_container(value)
@@ -210,6 +277,24 @@ def walk_input_boundary(
                 assert empty_kind is not None  # classify_input_container said "empty"
                 on_empty_container(empty_kind, path)
             return
+        if kind in {"registered", "namedtuple", "dataclass", "mapping", "sequence"}:
+            if depth >= INPUT_TREE_MAX_DEPTH:
+                raise_input_tree_depth_refusal(depth=depth)
+            value_id = id(value)
+            if value_id in in_progress:
+                raise_input_tree_cycle_refusal(kind=kind)
+            in_progress.add(value_id)
+            try:
+                _descend_container(value, path, kind, depth)
+            finally:
+                in_progress.discard(value_id)
+            return
+        if on_leaf is not None:
+            on_leaf(value, path)
+
+    def _descend_container(value: Any, path: tuple[Any, ...], kind: str, depth: int) -> None:
+        """Descend one guarded container node's children."""
+
         if kind == "registered":
             # r67 C2 (corr1-3): descend the registration's OWN flatten children with
             # indexed components; a throwing/nonconforming hook routes the node to the
@@ -227,15 +312,15 @@ def walk_input_boundary(
                     on_opaque_key_subtree(value, path)
                 return
             for index, child in enumerate(children):
-                _descend(child, (*path, index))
+                _descend(child, (*path, index), depth + 1)
             return
         if kind == "namedtuple":
             for name in _instance_fields(value):
-                _descend(getattr(value, name), (*path, str(name)))
+                _descend(getattr(value, name), (*path, str(name)), depth + 1)
             return
         if kind == "dataclass":
             for field in dataclasses.fields(value):
-                _descend(getattr(value, field.name), (*path, field.name))
+                _descend(getattr(value, field.name), (*path, field.name), depth + 1)
             return
         if kind == "mapping":
             for key, child in value.items():
@@ -245,14 +330,10 @@ def walk_input_boundary(
                     if on_opaque_key_subtree is not None:
                         on_opaque_key_subtree(child, path)
                     continue
-                _descend(child, (*path, component))
+                _descend(child, (*path, component), depth + 1)
             return
-        if kind == "sequence":
-            for index, child in enumerate(value):
-                _descend(child, (*path, index))
-            return
-        if on_leaf is not None:
-            on_leaf(value, path)
+        for index, child in enumerate(value):
+            _descend(child, (*path, index), depth + 1)
 
     _descend(value, path)
 
@@ -785,6 +866,11 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
 
     nodes: list[dict[str, Any]] = []
     refusals: list[dict[str, Any]] = []
+    # r-b4 R27-1: path-scoped cycle guard + shared depth ceiling. The snapshot is a
+    # TOTAL function (bind time re-derives it on runtime input), so a violation joins
+    # the refusals ledger -- the runnable producer refuses the save typed and a
+    # runtime-side violation fails the structure comparison -- instead of raising.
+    in_progress: set[int] = set()
 
     def _type_ref(item: Any) -> list[str]:
         """Exact ``(module, qualname)`` witness for one container's class."""
@@ -792,7 +878,29 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         cls = type(item)
         return [str(cls.__module__), str(cls.__qualname__)]
 
-    def _descend(item: Any, path: tuple[Any, ...]) -> None:
+    def _descend(item: Any, path: tuple[Any, ...], depth: int = 0) -> None:
+        """Guard one node's depth/cycle budget, then dispatch it."""
+
+        kind = classify_input_container(item)
+        if kind in {"tensor", "leaf"}:
+            _descend_node(item, path, kind, depth)
+            return
+        if depth >= INPUT_TREE_MAX_DEPTH:
+            refusals.append({"path": list(path), "reason": "input_tree_depth_exceeded"})
+            nodes.append({"path": list(path), "kind": kind, "type": _type_ref(item)})
+            return
+        item_id = id(item)
+        if item_id in in_progress:
+            refusals.append({"path": list(path), "reason": "input_tree_cycle"})
+            nodes.append({"path": list(path), "kind": kind, "type": _type_ref(item)})
+            return
+        in_progress.add(item_id)
+        try:
+            _descend_node(item, path, kind, depth)
+        finally:
+            in_progress.discard(item_id)
+
+    def _descend_node(item: Any, path: tuple[Any, ...], kind: str, depth: int) -> None:
         """Walk one input node, appending its structural node and any type refusals.
 
         Only CONTAINER nodes carry the exact-class witness: a tensor leaf belongs to
@@ -803,7 +911,6 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         symmetric runtime snapshot.
         """
 
-        kind = classify_input_container(item)
         # r67 heavy-gate fix: only CONTAINER nodes carry the exact-class witness. A
         # tensor leaf's identity is the admission gate's domain, and a scalar LEAF
         # literal's semantics are the literal-witness VALUE contract (numeric equality
@@ -851,7 +958,7 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             node["size"] = len(children)
             nodes.append(node)
             for index, child in enumerate(children):
-                _descend(child, (*path, index))
+                _descend(child, (*path, index), depth + 1)
             return
         # r71 C: a declared-schema container whose attribute hooks / __dict__ cannot
         # be inspected inertly refuses with the DISTINCT ``instance_state_uninspectable``
@@ -879,13 +986,13 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             node["fields"] = [str(name) for name in fields]
             nodes.append(node)
             for name in fields:
-                _descend(getattr(item, name), (*path, str(name)))
+                _descend(getattr(item, name), (*path, str(name)), depth + 1)
             return
         if kind == "dataclass":
             node["fields"] = [field.name for field in _dc.fields(item)]
             nodes.append(node)
             for field in _dc.fields(item):
-                _descend(getattr(item, field.name), (*path, field.name))
+                _descend(getattr(item, field.name), (*path, field.name), depth + 1)
             return
         if kind == "mapping":
             keys: list[Any] = []
@@ -910,13 +1017,13 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             nodes.append(node)
             if encodable:
                 for key, child in item.items():
-                    _descend(child, (*path, encode_mapping_key(key)))
+                    _descend(child, (*path, encode_mapping_key(key)), depth + 1)
             return
         if kind == "sequence":
             node["size"] = len(item)
             nodes.append(node)
             for index, child in enumerate(item):
-                _descend(child, (*path, index))
+                _descend(child, (*path, index), depth + 1)
             return
         # Literal leaf: the VALUE is witnessed by the literal walker, but the scalar
         # TYPE-CLASS disposition is decided here by the ONE classifier (r69 B). A

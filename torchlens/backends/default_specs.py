@@ -514,13 +514,26 @@ def _has_saved_model_signatures(value: object) -> bool:
     return isinstance(signatures, Mapping) and bool(signatures)
 
 
-def _simple_leaves(value: object) -> tuple[object, ...]:
+def _simple_leaves(
+    value: object,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> tuple[object, ...]:
     """Return leaves from simple Python containers.
+
+    Runs at backend RESOLUTION on the raw user input, so it is the first walker a
+    hostile/degenerate input tree reaches. Depth and cycles refuse typed through
+    the shared input-boundary guard (r-b4 R27-1) instead of dying in a raw
+    ``RecursionError`` (probe: ~350 user levels crossed the interpreter limit).
 
     Parameters
     ----------
     value:
         Candidate tree.
+    _depth:
+        Internal recursion depth (callers must not supply this).
+    _in_progress:
+        Internal path-scoped container-id set (callers must not supply this).
 
     Returns
     -------
@@ -528,10 +541,32 @@ def _simple_leaves(value: object) -> tuple[object, ...]:
         Flat leaves.
     """
 
-    if isinstance(value, dict):
-        return tuple(leaf for child in value.values() for leaf in _simple_leaves(child))
-    if isinstance(value, tuple | list):
-        return tuple(leaf for child in value for leaf in _simple_leaves(child))
+    if isinstance(value, dict | tuple | list):
+        from .._input_walk import (
+            INPUT_TREE_MAX_DEPTH,
+            raise_input_tree_cycle_refusal,
+            raise_input_tree_depth_refusal,
+        )
+
+        if _depth >= INPUT_TREE_MAX_DEPTH:
+            raise_input_tree_depth_refusal(depth=_depth)
+        if _in_progress is None:
+            _in_progress = set()
+        value_id = id(value)
+        if value_id in _in_progress:
+            raise_input_tree_cycle_refusal(
+                kind="mapping" if isinstance(value, dict) else "sequence"
+            )
+        _in_progress.add(value_id)
+        try:
+            children = value.values() if isinstance(value, dict) else value
+            return tuple(
+                leaf
+                for child in children
+                for leaf in _simple_leaves(child, _depth + 1, _in_progress)
+            )
+        finally:
+            _in_progress.discard(value_id)
     return (value,)
 
 

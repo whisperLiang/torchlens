@@ -14,6 +14,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .._input_walk import INPUT_TREE_MAX_DEPTH
 from .tensor_utils import (
     _clone_tensor_payload,
     _copy_tensor_payload,
@@ -48,7 +49,7 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
-def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
+def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: int = 0) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
     Why not ``copy.deepcopy``?  Many third-party tensor wrappers hold
@@ -84,6 +85,9 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         Internal recursion state mapping ``id()`` of a mutable container being
         built to its (partially populated) copy, used to terminate reference
         cycles. Callers should not supply this.
+    _depth
+        Internal recursion depth used to enforce the shared input-boundary
+        nesting ceiling (r-b4 R27-1). Callers should not supply this.
 
     Returns
     -------
@@ -103,6 +107,13 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
     if existing is not None:
         # A container on the current recursion path referred back to itself.
         return existing
+    if isinstance(arg, (defaultdict, dict, list, tuple)) and _depth >= INPUT_TREE_MAX_DEPTH:
+        # r-b4 R27-1: the canonical per-capture input copier is depth-bounded with the
+        # SAME shared ceiling as every other input-boundary walker -- a deeper tree
+        # refuses typed at capture entry instead of dying in a raw RecursionError.
+        from .._input_walk import raise_input_tree_depth_refusal
+
+        raise_input_tree_depth_refusal(depth=_depth)
     if isinstance(arg, defaultdict):
         # defaultdict(factory, {k: v, ...}) — preserve the default_factory (#127).
         # A plain dict() constructor would lose default_factory.
@@ -110,7 +121,7 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         _in_progress[arg_id] = copied
         try:
             for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress)
+                copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         finally:
             _in_progress.pop(arg_id, None)
         return copied
@@ -121,7 +132,7 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         _in_progress[arg_id] = copied
         try:
             for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress)
+                copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         finally:
             _in_progress.pop(arg_id, None)
         return copied
@@ -130,7 +141,7 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         _in_progress[arg_id] = copied
         try:
             for item in arg:
-                copied.append(copy_arg_tree(item, _in_progress))
+                copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
         finally:
             _in_progress.pop(arg_id, None)
         return copied
@@ -138,7 +149,7 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         # Tuples are immutable and cannot self-reference directly; any cycle
         # through a tuple passes through a mutable container that is already
         # registered above, so recursing eagerly here is safe.
-        items = [copy_arg_tree(item, _in_progress) for item in arg]
+        items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
         # NamedTuples have _fields and need *args construction; plain tuples
         # take an iterable.
         return type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
