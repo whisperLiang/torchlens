@@ -216,7 +216,11 @@ EXEMPTION_LEDGER: tuple[Exemption, ...] = (
         tier="posthoc",
         contract="C2 perturbation sensitivity",
         proof="torchlens.validation.exemptions:_posthoc_structural_output_decision",
-        refuses="a cast that preserves value information (the values still flow through)",
+        refuses=(
+            "a perturbed parent outside the template slot (args[1]/other=) -- in "
+            "particular the perturbed data SOURCE of the cast, whose values flow "
+            "through to the output"
+        ),
     ),
     Exemption(
         code="integer_cast_quantization",

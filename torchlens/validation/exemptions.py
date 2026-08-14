@@ -1613,22 +1613,30 @@ def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
 def _perturbed_parents_only_occupy_template_slot(
     layer: Op,
     layers_to_perturb: list[str],
+    template_arg_roots: tuple[int, ...] = (0,),
+    template_kwarg_names: tuple[str, ...] = ("input",),
 ) -> bool:
     """Return whether EVERY perturbed parent occupies only the template slot.
 
-    The ``*_like`` structural-template exemption is only sound for the
-    TEMPLATE argument (``args[0]`` / ``input=``): its values never flow into
-    the output, only its shape/dtype/device do. Any other parent slot -- in
-    particular a runtime ``full_like`` fill_value tensor -- is a genuine value
-    dependency, and an unchanged output there must NOT be excused as
-    structural (F2 tightening). Missing position metadata fails closed.
+    A structural-template exemption is only sound for the TEMPLATE argument:
+    its values never flow into the output, only its shape/dtype/device do.
+    For the ``*_like`` family that is ``args[0]`` / ``input=`` (the F2
+    tightening); for ``to(other)`` it is ``args[1]`` / ``other=`` (the H3
+    tightening -- the perturbed data SOURCE of a cast is a genuine value
+    dependency, and an unchanged output there is a dropped substitution, not
+    structure). Any other parent slot must NOT be excused as structural.
+    Missing position metadata fails closed.
 
     Parameters
     ----------
     layer:
-        Captured ``*_like``-family op.
+        Captured op carrying a structural template argument.
     layers_to_perturb:
         Parent labels currently being perturbed.
+    template_arg_roots:
+        Positional root indices of the template slot.
+    template_kwarg_names:
+        Keyword spellings of the template slot.
 
     Returns
     -------
@@ -1649,10 +1657,10 @@ def _perturbed_parents_only_occupy_template_slot(
             return False
         for key in arg_keys:
             root = key[0] if isinstance(key, tuple) and key else key
-            if root != 0:
+            if root not in template_arg_roots:
                 return False
         for name in kwarg_names:
-            if name != "input":
+            if name not in template_kwarg_names:
                 return False
     return True
 
@@ -1679,7 +1687,21 @@ def _posthoc_structural_output_decision(
         Exempt decision for structural cases, otherwise a non-exempt result.
     """
 
-    if layer.func_name == "to" and len(args) > 1 and isinstance(args[1], torch.Tensor):
+    if (
+        layer.func_name == "to"
+        and len(args) > 1
+        and isinstance(args[1], torch.Tensor)
+        and _perturbed_parents_only_occupy_template_slot(
+            layer,
+            layers_to_perturb,
+            template_arg_roots=(1,),
+            template_kwarg_names=("other",),
+        )
+    ):
+        # H3 tightening: only the TEMPLATE tensor (args[1] / other=) is
+        # structural -- solely its dtype/device flow into the output. A
+        # perturbed data SOURCE (args[0]) whose replay output stays unchanged
+        # is a dropped substitution and must fall through to the failure path.
         return PosthocPerturbDecision(True, "type_template_output")
     if _integer_cast_quantization_applies(layer, args):
         return PosthocPerturbDecision(

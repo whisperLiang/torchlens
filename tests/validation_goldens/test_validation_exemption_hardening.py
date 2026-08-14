@@ -1214,6 +1214,58 @@ def test_genuine_intervention_replacement_survives_save_load(tmp_path: Any) -> N
         assert isinstance(stamp, dict) and stamp.get("corroborated") is True
 
 
+def test_to_tensor_template_exemption_refuses_perturbed_data_source() -> None:
+    """``to(other)`` only excuses the TEMPLATE parent, never the data SOURCE.
+
+    The posthoc blanket fired on func name + template-tensor presence without
+    consulting ``layers_to_perturb``: perturbing the SOURCE (``args[0]``) of a
+    ``to(other)`` cast and seeing an unchanged output is exactly a
+    dropped-substitution capture bug, yet it was excused as
+    ``type_template_output`` (deephunt finding H3). The template parent
+    (``args[1]`` / ``other=``) is genuinely structural -- only its
+    dtype/device flow into the output -- and keeps the exemption, mirroring
+    the F2 ``*_like`` template-slot tightening.
+    """
+
+    from torchlens.validation.exemptions import _posthoc_structural_output_decision
+
+    layer = _fake_layer(
+        func_name="to",
+        saved_args=(torch.randn(2, 2), torch.zeros(2, 2, dtype=torch.float64)),
+        saved_kwargs={},
+        parent_arg_positions={
+            "args": {0: "source_parent", 1: "template_parent"},
+            "kwargs": {},
+        },
+        out=torch.randn(2, 2).to(torch.float64),
+        dtype=torch.float64,
+    )
+
+    source_decision = _posthoc_structural_output_decision(
+        layer, layer.saved_args, ["source_parent"]
+    )
+    assert not source_decision.exempt
+
+    template_decision = _posthoc_structural_output_decision(
+        layer, layer.saved_args, ["template_parent"]
+    )
+    assert template_decision.exempt
+    assert template_decision.reason == "type_template_output"
+
+    # Missing position metadata fails closed, like the *_like template proof.
+    unmapped = _fake_layer(
+        func_name="to",
+        saved_args=layer.saved_args,
+        saved_kwargs={},
+        parent_arg_positions={"args": {}, "kwargs": {}},
+        out=layer.out,
+        dtype=torch.float64,
+    )
+    assert not _posthoc_structural_output_decision(
+        unmapped, unmapped.saved_args, ["source_parent"]
+    ).exempt
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 
