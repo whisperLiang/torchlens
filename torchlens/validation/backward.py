@@ -13,6 +13,7 @@ from torch import nn
 
 from .._capture_state_helpers import unwrap_compiled_model
 from .._input_coerce import _coerce_input_args
+from .._input_walk import INPUT_TREE_MAX_DEPTH, raise_input_tree_depth_refusal
 from .._robustness import check_model_and_input_variants
 from ..intervention.errors import AppendStateValidationWarning
 from ..options import CaptureOptions
@@ -26,43 +27,113 @@ from ..utils.tensor_utils import (
     PARAM_GRAD_VALIDATION_RTOL,
 )
 
+_SUM_IN_PROGRESS = object()
+"""Memo sentinel: this container is on the current descent chain (a cycle)."""
 
-def _sum_tensors(value: Any) -> torch.Tensor:
+
+def _sum_tensors(
+    value: Any,
+    _memo: dict[int, Any] | None = None,
+    _depth: int = 0,
+) -> torch.Tensor:
     """Reduce nested tensor outputs to a scalar loss.
+
+    Depth-bounded and memoized (grind-p3 T11): the walk shares the boundary
+    nesting ceiling instead of dying in a raw ``RecursionError``, a cyclic
+    container refuses typed (its occurrence-weighted sum would be infinite),
+    and a DAG-shaped output that reuses one sub-container under several paths
+    computes that subtree's sum ONCE and adds the cached scalar per
+    occurrence -- the exact value the unmemoized walk produced, in O(nodes)
+    instead of O(paths) (shared substructure doubled the walk per level).
 
     Parameters
     ----------
     value:
         Tensor or nested container of tensors.
+    _memo:
+        Internal per-call cache mapping container ``id()`` to its computed
+        subtree sum (or the in-progress cycle sentinel). Callers must not
+        supply this.
+    _depth:
+        Internal recursion depth for the shared nesting ceiling. Callers must
+        not supply this.
 
     Returns
     -------
     torch.Tensor
-        Scalar sum over all tensors in ``value``.
+        Scalar sum over all tensors in ``value``, occurrence-weighted.
     """
     if isinstance(value, torch.Tensor):
         return value.sum()
-    if isinstance(value, dict):
-        tensors = [_sum_tensors(item) for item in value.values()]
-    elif isinstance(value, (list, tuple)):
-        tensors = [_sum_tensors(item) for item in value]
-    else:
-        tensors = []
+    if not isinstance(value, (dict, list, tuple)):
+        raise ValueError("validate_backward_pass requires the model to return at least one tensor.")
+    from .._errors import InvalidArgumentError
+    from ..ir.container_registry import OUTPUT_TREE_MAX_DEPTH
+
+    if _depth >= OUTPUT_TREE_MAX_DEPTH:
+        raise InvalidArgumentError(
+            "Model-output tree nesting exceeds the supported output-boundary "
+            f"depth ceiling ({OUTPUT_TREE_MAX_DEPTH}) in validate_backward_pass.",
+            code="output_tree_depth_exceeded",
+            remedy="Flatten the nested output containers before validating.",
+            depth=_depth,
+        )
+    if _memo is None:
+        _memo = {}
+    value_id = id(value)
+    cached = _memo.get(value_id)
+    if cached is _SUM_IN_PROGRESS:
+        raise InvalidArgumentError(
+            "Model-output tree contains a self-referential container; its "
+            "occurrence-weighted tensor sum is not defined.",
+            code="output_tree_cycle",
+            remedy="Remove the container reference cycle from the model output.",
+        )
+    if cached is not None:
+        return cast(torch.Tensor, cached)
+    _memo[value_id] = _SUM_IN_PROGRESS
+    try:
+        items = value.values() if isinstance(value, dict) else value
+        tensors = [_sum_tensors(item, _memo, _depth + 1) for item in items]
+    finally:
+        if _memo.get(value_id) is _SUM_IN_PROGRESS:
+            del _memo[value_id]
     if not tensors:
         raise ValueError("validate_backward_pass requires the model to return at least one tensor.")
     result = tensors[0]
     for tensor in tensors[1:]:
         result = result + tensor
+    _memo[value_id] = result
     return result
 
 
-def _clone_inputs_with_grad(input_args: Any) -> Any:
+def _clone_inputs_with_grad(
+    input_args: Any,
+    _memo: dict[int, Any] | None = None,
+    _depth: int = 0,
+) -> Any:
     """Clone tensor inputs and enable grads on floating tensors.
+
+    Depth-bounded and memoized (grind-p3 T11), mirroring
+    :func:`torchlens.utils.arg_handling.copy_arg_tree`: an over-deep nest
+    refuses typed through the shared input-boundary ceiling instead of a raw
+    ``RecursionError``; a mutable container is registered in the memo BEFORE
+    its children so a reference cycle resolves to the in-progress copy; and a
+    DAG-shaped input that reuses one sub-container under several paths is
+    cloned ONCE and stays aliased in the copy (the unmemoized walk expanded
+    shared substructure exponentially in depth). Tensors remain leaves cloned
+    per distinct container occurrence and are never memoized.
 
     Parameters
     ----------
     input_args:
         User input arguments.
+    _memo:
+        Internal per-call cache mapping container ``id()`` to its (possibly
+        in-progress) copy. Callers must not supply this.
+    _depth:
+        Internal recursion depth for the shared nesting ceiling. Callers must
+        not supply this.
 
     Returns
     -------
@@ -74,13 +145,32 @@ def _clone_inputs_with_grad(input_args: Any) -> Any:
         if cloned.is_floating_point() or cloned.is_complex():
             cloned.requires_grad_(True)
         return cloned
+    if not isinstance(input_args, (tuple, list, dict)):
+        return input_args
+    if _depth >= INPUT_TREE_MAX_DEPTH:
+        raise_input_tree_depth_refusal(depth=_depth)
+    if _memo is None:
+        _memo = {}
+    existing = _memo.get(id(input_args))
+    if existing is not None:
+        return existing
     if isinstance(input_args, tuple):
-        return tuple(_clone_inputs_with_grad(item) for item in input_args)
+        # Immutable: any cycle passes through a registered mutable container,
+        # so eager recursion is safe; memoized after construction for DAG reuse.
+        copied: Any = tuple(_clone_inputs_with_grad(item, _memo, _depth + 1) for item in input_args)
+        _memo[id(input_args)] = copied
+        return copied
     if isinstance(input_args, list):
-        return [_clone_inputs_with_grad(item) for item in input_args]
-    if isinstance(input_args, dict):
-        return {key: _clone_inputs_with_grad(item) for key, item in input_args.items()}
-    return input_args
+        copied = []
+        _memo[id(input_args)] = copied
+        for item in input_args:
+            copied.append(_clone_inputs_with_grad(item, _memo, _depth + 1))
+        return copied
+    copied = {}
+    _memo[id(input_args)] = copied
+    for key, item in input_args.items():
+        copied[key] = _clone_inputs_with_grad(item, _memo, _depth + 1)
+    return copied
 
 
 def _stock_param_grad_degeneracy(
