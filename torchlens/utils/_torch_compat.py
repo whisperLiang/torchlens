@@ -1136,17 +1136,31 @@ def _probe_transformer_activation_fastpath_flag() -> bool:
 def _probe_attention_causal_bias() -> bool:
     """Return whether ``torch.nn.attention.bias.CausalBias`` is available.
 
+    NEVER executes ``torch.nn.attention.bias`` (r45/r49 lazy-import belt): that
+    module's top level calls ``torch._dynamo.allow_in_graph(...)``, dragging the
+    whole ``_dynamo``/``_inductor`` tree into every ``import torchlens``. When
+    the USER has already imported the module, the class is inspected exactly;
+    otherwise ``find_spec`` proves existence without execution (the parent
+    ``torch.nn.attention`` package body is dynamo-free) and the exact
+    ``__torch_function__`` site check is deferred to causal-bias shim install,
+    which resolves only through ``sys.modules``.
+
     Returns
     -------
     bool
-        ``True`` when the class exists and defines its own
-        ``__torch_function__`` (the identity-dispatch site the causal-bias
-        identity shim normalizes). Absent on torch builds predating the
-        ``torch.nn.attention`` namespace.
+        ``True`` when the class exists (exactly, if the module is already
+        imported; by spec existence otherwise). Absent on torch builds
+        predating the ``torch.nn.attention`` namespace.
     """
 
-    causal_bias = _import_module_attr_or_none("torch.nn.attention.bias", "CausalBias")
-    return causal_bias is not None and "__torch_function__" in vars(causal_bias)
+    module = sys.modules.get("torch.nn.attention.bias")
+    if module is not None:
+        causal_bias = getattr(module, "CausalBias", None)
+        return causal_bias is not None and "__torch_function__" in vars(causal_bias)
+    try:
+        return importlib.util.find_spec("torch.nn.attention.bias") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 
 def _probe_expanded_weights_conv_picker() -> bool:

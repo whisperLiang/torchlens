@@ -28,6 +28,7 @@ import torch
 
 from ..backends.torch._tl import get_tensor_label, set_tensor_label
 from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
+from ._torch_symbols import torch_attr
 
 SaveMode = Literal["copy", "reference", "view", "cpu_async"]
 
@@ -1129,7 +1130,7 @@ def synchronize_pending_cpu_async_copies() -> None:
             key = str(entry)
             if key not in synced_devices:
                 synced_devices.add(key)
-                torch_module = getattr(torch, entry.type, None)
+                torch_module = torch_attr(entry.type)
                 sync = getattr(torch_module, "synchronize", None)
                 if sync is not None:
                     sync(entry)
