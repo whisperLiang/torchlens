@@ -25,7 +25,7 @@ import torch
 
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..data_classes._state_adapter import state_items, state_new, state_restore
-from ..data_classes.trace import Trace
+from ..data_classes.trace import Trace, _scrubbed_transform_repr
 from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError
 from .payload_codec import PayloadCodec, get_payload_codec
 
@@ -784,8 +784,10 @@ def _scrub_value(
         )
 
     if isinstance(value, Trace):
-        scrubbed_state["_activation_transform_repr"] = (
-            repr(value.activation_transform) if value.activation_transform is not None else None
+        # B8-20: a functools.partial repr embeds its bound argument VALUES, so the
+        # scrubbed persistence repr redacts them.
+        scrubbed_state["_activation_transform_repr"] = _scrubbed_transform_repr(
+            value.activation_transform
         )
         scrubbed_state["tlspec_version"] = TLSPEC_VERSION
         _apply_source_metadata_policy(scrubbed_state, options)

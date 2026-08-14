@@ -395,6 +395,40 @@ def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
     raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}")
 
 
+def _scrubbed_transform_repr(fn: Any) -> str | None:
+    """Return a persistence-safe repr of an activation-transform callable.
+
+    The repr is stored (``_activation_transform_repr``) at every save level. A plain
+    function repr is inert, but ``functools.partial`` reprs embed the BOUND ARGUMENT
+    VALUES (B8-20: a probe recovered a planted token from a saved artifact). Redact a
+    partial's positional and keyword arguments to ``<scrubbed>`` while keeping the
+    wrapped function's own (recursively scrubbed) repr, so the string stays useful
+    without leaking captured values.
+
+    Parameters
+    ----------
+    fn:
+        Activation-transform callable, or ``None``.
+
+    Returns
+    -------
+    str | None
+        Scrubbed repr, or ``None`` when ``fn`` is ``None``.
+    """
+
+    import functools
+
+    if fn is None:
+        return None
+    if isinstance(fn, functools.partial):
+        inner = _scrubbed_transform_repr(fn.func)
+        parts = [inner] if inner is not None else []
+        parts.extend("<scrubbed>" for _ in fn.args)
+        parts.extend(f"{key}=<scrubbed>" for key in (fn.keywords or {}))
+        return f"functools.partial({', '.join(parts)})"
+    return repr(fn)
+
+
 @dataclass
 class ResolvedPreprocessing:
     """Structured provenance for automatic input preprocessing.
@@ -1679,9 +1713,7 @@ class Trace(
         self.save_visualizations = save_visualizations
         self._visualizer_dir: str | None = None
         self.activation_transform = activation_transform
-        self._activation_transform_repr = (
-            repr(activation_transform) if activation_transform is not None else None
-        )
+        self._activation_transform_repr = _scrubbed_transform_repr(activation_transform)
         self.save_raw_activations = save_raw_activations
         self.input_annotations: dict[str, Any] = {}
         self.grad_transform = grad_transform
@@ -2719,9 +2751,7 @@ class Trace(
         state.pop("_tl_grad_hook_owner_by_label", None)
         state["_pending_live_fire_records"] = []
         state["_last_hook_handle_ids"] = ()
-        state["_activation_transform_repr"] = (
-            repr(self.activation_transform) if self.activation_transform is not None else None
-        )
+        state["_activation_transform_repr"] = _scrubbed_transform_repr(self.activation_transform)
         # Runnable traces bind state as immutable MappingProxyType views, which
         # cannot be pickled/deepcopied. Preserve tensor identity while replacing
         # only those mapping proxies with ordinary dictionaries.

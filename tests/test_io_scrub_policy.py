@@ -102,6 +102,40 @@ def _build_live_log() -> Trace:
     )
 
 
+def test_partial_activation_transform_repr_does_not_leak_bound_values(tmp_path: Path) -> None:
+    """B8-20: a ``functools.partial`` transform's bound arg values are not persisted.
+
+    Fail-before: ``_activation_transform_repr = repr(fn)`` embedded a partial's bound
+    argument VALUES verbatim into ``metadata.pkl`` at every save level; a probe
+    recovered a planted token.
+    """
+
+    import functools
+
+    secret = "SENSITIVE-ACTIVATION-TOKEN"
+
+    def _identity(t: torch.Tensor, token: str | None = None) -> torch.Tensor:
+        return t
+
+    transform = functools.partial(_identity, token=secret)
+    trace = trace_fn(
+        _TinyIOModel(),
+        torch.randn(2, 4),
+        layers_to_save="all",
+        activation_transform=transform,
+    )
+    spec = tmp_path / "partial.tlspec"
+    tl.save(trace, str(spec))
+    for artifact in spec.rglob("*"):
+        if artifact.is_file():
+            assert secret.encode() not in artifact.read_bytes(), (
+                f"partial bound value leaked into {artifact.name}"
+            )
+    saved_repr = pickle.loads((spec / "metadata.pkl").read_bytes())["_activation_transform_repr"]
+    assert "<scrubbed>" in saved_repr
+    assert secret not in saved_repr
+
+
 def test_portable_state_specs_cover_every_live_attribute() -> None:
     """Each target class must map every live attribute to a scrub policy."""
 
