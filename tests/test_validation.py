@@ -6934,6 +6934,33 @@ def _corrupt_first_computational_layer_parentless(log) -> "object":
             for arg_domain in ("args", "kwargs"):
                 lpl.parent_arg_positions.get(arg_domain, {}).clear()
             # has_parents is a read-only property derived from parents
+            #
+            # Since the edge-occurrence multiplicity witness (b9-opus R75-1)
+            # the canonical CSR edge table is a checked surface too: the
+            # post-witness silent edge-drop class must scrub the op's
+            # in-edge occurrences there as well, or the cheap
+            # edge_use_parent_arg_consistency count cross-check catches the
+            # asymmetric edit before the layering these tests pin is reached.
+            core = log.__dict__.get("_trace_core")
+            store = getattr(core, "ops", None) if core is not None else None
+            edges = getattr(store, "dataflow_edges", None) if store is not None else None
+            label_rows = getattr(core, "label_rows", {}) if core is not None else {}
+            target_row = label_rows.get(lpl.layer_label)
+            if edges is not None and target_row is not None:
+                kept = [
+                    edges.edge(edge_id)
+                    for edge_id in range(len(edges))
+                    if edges.edge(edge_id).target != target_row
+                ]
+                edges._frozen = False
+                edges._sources = [edge.source for edge in kept]
+                edges._targets = [edge.target for edge in kept]
+                edges._use_kinds = [edge.use_kind for edge in kept]
+                edges._arg_positions = [edge.arg_position for edge in kept]
+                edges._seqs = [edge.seq for edge in kept]
+                edges._by_source = None
+                edges._by_target = None
+                edges.freeze(len(store), len(store))
             return lpl
     raise AssertionError("fixture produced no eligible computational layer")
 
