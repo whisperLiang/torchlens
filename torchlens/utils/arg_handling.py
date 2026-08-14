@@ -16,8 +16,10 @@ from torch import nn
 
 from .._input_walk import INPUT_TREE_MAX_DEPTH
 from .tensor_utils import (
+    TensorByteFootprint,
     _clone_tensor_payload,
     _copy_tensor_payload,
+    tensor_byte_footprint,
     touched_bytes_relation,
 )
 
@@ -324,35 +326,146 @@ def _record_unpreserved_tensor_aliases(
     None
         Appends one diagnostic for every potentially overlapping pair whose
         topology cannot be preserved without severing autograd linkage.
+
+    Notes
+    -----
+    r-b4 R29-2: the historical implementation ran ``touched_bytes_relation`` on
+    every pair -- O(T^2) in tensor-leaf count (measured 0.72 s at 4k leaves even
+    with every storage disjoint). Candidate pairs are now pre-filtered by a
+    device-scoped byte-interval sweep (:func:`_alias_candidate_pairs`) that drops
+    ONLY pairs the relation ladder provably answers ``disjoint`` from bounding
+    intervals alone; every surviving pair still runs the exact same per-pair
+    ladder, so verdicts and diagnostic text are byte-identical.
     """
 
-    for left_index, (left_path, left, left_transparent) in enumerate(tensor_records):
-        for right_path, right, right_transparent in tensor_records[left_index + 1 :]:
-            if left is right:
-                if require_distinct_tensor_sites:
-                    semantic_gaps.append(
-                        f"{left_path} <-> {right_path}: runnable input sites share "
-                        "one tensor identity, which the sparse descriptor cannot encode"
-                    )
-                continue
-            if left_transparent and right_transparent and not require_distinct_tensor_sites:
-                continue
-            try:
-                relation = touched_bytes_relation(left, right)
-            except (RuntimeError, TypeError, NotImplementedError):
-                relation = "unknown"
-            if relation == "disjoint":
-                continue
+    if len(tensor_records) < 2:
+        return
+    footprints: list[TensorByteFootprint | None] = []
+    for _left_path, tensor, _transparent in tensor_records:
+        try:
+            footprints.append(tensor_byte_footprint(tensor))
+        except (RuntimeError, TypeError, NotImplementedError):
+            footprints.append(None)
+    for left_index, right_index in sorted(_alias_candidate_pairs(tensor_records, footprints)):
+        left_path, left, left_transparent = tensor_records[left_index]
+        right_path, right, right_transparent = tensor_records[right_index]
+        if left is right:
             if require_distinct_tensor_sites:
                 semantic_gaps.append(
-                    f"{left_path} <-> {right_path}: runnable input sites have "
-                    f"{relation} storage, which the sparse descriptor cannot encode"
+                    f"{left_path} <-> {right_path}: runnable input sites share "
+                    "one tensor identity, which the sparse descriptor cannot encode"
                 )
-            else:
-                semantic_gaps.append(
-                    f"{left_path} <-> {right_path}: grad-preserving clones cannot prove "
-                    f"the original tensor alias topology ({relation})"
-                )
+            continue
+        if left_transparent and right_transparent and not require_distinct_tensor_sites:
+            continue
+        try:
+            relation = touched_bytes_relation(left, right)
+        except (RuntimeError, TypeError, NotImplementedError):
+            relation = "unknown"
+        if relation == "disjoint":
+            continue
+        if require_distinct_tensor_sites:
+            semantic_gaps.append(
+                f"{left_path} <-> {right_path}: runnable input sites have "
+                f"{relation} storage, which the sparse descriptor cannot encode"
+            )
+        else:
+            semantic_gaps.append(
+                f"{left_path} <-> {right_path}: grad-preserving clones cannot prove "
+                f"the original tensor alias topology ({relation})"
+            )
+
+
+def _alias_candidate_pairs(
+    tensor_records: list[tuple[str, torch.Tensor, bool]],
+    footprints: list["TensorByteFootprint | None"],
+) -> set[tuple[int, int]]:
+    """Return the record-index pairs the alias scan cannot silently skip (r-b4 R29-2).
+
+    A pair is EXCLUDED only when ``touched_bytes_relation`` provably answers
+    ``disjoint`` without a per-pair proof: both footprints known, distinct
+    objects, and either (a) an empty view on one side, (b) distinct device
+    types, (c) same device type with two CONCRETE, different indexes, or
+    (d) the same device key with non-overlapping absolute byte intervals.
+    Everything else -- identity pairs, unprovable footprints, same-type
+    None-vs-concrete device indexes, interval overlaps -- stays a candidate and
+    runs the unchanged exact ladder.
+
+    Parameters
+    ----------
+    tensor_records:
+        Tensor input paths, original tensors, and storage-deepcopy eligibility.
+    footprints:
+        Pre-computed ``tensor_byte_footprint`` per record (``None`` = unprovable).
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Candidate ``(left_index, right_index)`` pairs with ``left < right``.
+    """
+
+    total = len(tensor_records)
+    candidates: set[tuple[int, int]] = set()
+
+    # Identity pairs (one object at several sites) always reach the loop body:
+    # the caller's identity branch decides them before any footprint logic.
+    by_identity: dict[int, list[int]] = {}
+    for index, (_path, tensor, _transparent) in enumerate(tensor_records):
+        by_identity.setdefault(id(tensor), []).append(index)
+    for indices in by_identity.values():
+        for position, left_index in enumerate(indices):
+            for right_index in indices[position + 1 :]:
+                candidates.add((left_index, right_index))
+
+    # An unprovable footprint relates ``unknown`` to every partner (checked
+    # before the empty-view rule in the ladder, so zero-numel partners count).
+    for index, footprint in enumerate(footprints):
+        if footprint is not None:
+            continue
+        for other in range(total):
+            if other != index:
+                candidates.add((min(index, other), max(index, other)))
+
+    # Provable footprints with a nonzero span, grouped by exact device key as
+    # (start_byte, end_byte, record_index) interval entries.
+    by_device_key: dict[tuple[str, int | None], list[tuple[int, int, int]]] = {}
+    for index, footprint in enumerate(footprints):
+        if footprint is None or footprint.numel == 0:
+            continue
+        by_device_key.setdefault(footprint.device_key, []).append(
+            (footprint.start_byte, footprint.end_byte, index)
+        )
+
+    # Same device TYPE under two different keys is provably disjoint only when
+    # both indexes are concrete; a None-vs-concrete index answers ``unknown``.
+    keys_by_type: dict[str, list[tuple[str, int | None]]] = {}
+    for device_key in by_device_key:
+        keys_by_type.setdefault(device_key[0], []).append(device_key)
+    for device_keys in keys_by_type.values():
+        for key_position, left_key in enumerate(device_keys):
+            for right_key in device_keys[key_position + 1 :]:
+                if left_key[1] is not None and right_key[1] is not None:
+                    continue
+                for _, _, left_index in by_device_key[left_key]:
+                    for _, _, right_index in by_device_key[right_key]:
+                        candidates.add(
+                            (min(left_index, right_index), max(left_index, right_index))
+                        )
+
+    # Interval sweep inside one exact device key: only pairs whose absolute
+    # byte spans overlap survive (disjoint spans are the ladder's own verdict).
+    for entries in by_device_key.values():
+        if len(entries) < 2:
+            continue
+        entries.sort()
+        active: list[tuple[int, int]] = []  # (end_byte, record_index)
+        for start_byte, end_byte, index in entries:
+            active = [entry for entry in active if entry[0] > start_byte]
+            for _, other in active:
+                candidates.add((min(index, other), max(index, other)))
+            active.append((end_byte, index))
+
+    return candidates
 
 
 def safe_copy_input_tree(
