@@ -2654,15 +2654,19 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
 
     import numpy as np
 
+    from .validation import _arrays_close
+
     if tuple(getattr(left, "shape", ())) != tuple(getattr(right, "shape", ())):
         return False
     if str(getattr(left, "dtype", "")) != str(getattr(right, "dtype", "")):
         return False
-    left_array = left.numpy()
-    right_array = right.numpy()
-    if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
-        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
-    return bool(np.array_equal(left_array, right_array))
+    # Delegate to this backend's replay-validation oracle core: per-dtype
+    # ULP-derived bands with ``atol = rtol * finfo.tiny`` and the equal_nan
+    # doctrine, plus exact comparison for the bf16-as-uint16 NumPy transport.
+    # The former dtype-blind fp32 pair (rtol 1e-5 / atol 1e-6) blessed fp64
+    # corruption ~4.5e9 of its own ULPs and TOTAL corruption of every element
+    # below 1e-6, while false-failing one-ULP fp16 storage rounding.
+    return _arrays_close(np.asarray(left.numpy()), np.asarray(right.numpy()))
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]

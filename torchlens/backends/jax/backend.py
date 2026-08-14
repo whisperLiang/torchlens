@@ -4214,11 +4214,57 @@ def _values_close(left: Any, right: Any) -> bool:
         return False
     if left_array.dtype == jnp.bool_ or jnp.issubdtype(left_array.dtype, jnp.integer):
         return bool(jnp.array_equal(left_array, right_array, equal_nan=True))
-    if jnp.issubdtype(left_array.dtype, jnp.floating):
-        return bool(jnp.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
-    if jnp.issubdtype(left_array.dtype, jnp.complexfloating):
-        return bool(jnp.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
+    if jnp.issubdtype(left_array.dtype, jnp.floating) or jnp.issubdtype(
+        left_array.dtype, jnp.complexfloating
+    ):
+        # Per-dtype ULP-derived bands (ported paddle/mlx validation-oracle
+        # derivation); ``jnp.finfo`` reports component precision for complex
+        # and covers the extended ml_dtypes floats (bfloat16, fp8).
+        rtol, atol = _float_replay_tolerances(jnp.finfo(left_array.dtype))
+        return bool(jnp.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(jnp.array_equal(left_array, right_array))
+
+
+def _float_replay_tolerances(finfo: Any) -> tuple[float, float]:
+    """Derive the dtype-honest ``(rtol, atol)`` replay band from a float finfo.
+
+    Ports the paddle/mlx validation-oracle derivation (b7a07864), replacing
+    the former dtype-blind fp32 decimal pair (rtol 1e-5 / atol 1e-6) that was
+    wrong in both directions: fp64 corruption ~4.5e9 of its own ULPs read as
+    agreement, while a legitimate one-ULP fp16 storage-rounding difference
+    false-failed.
+
+    * Accumulating dtypes (eps <= fp32's): the legacy fp32 relative band
+      rescaled by the eps ratio, so every dtype gets the SAME strictness
+      measured in its own ULPs (fp32 keeps exactly the historical 1e-5).
+    * Storage-rounding dtypes (eps > fp32's): values compute in a wider dtype
+      and round ONCE to storage, so the legitimate replay difference is a few
+      storage ULPs (4-ULP headroom).
+    * The absolute term only absorbs jitter at the bottom of the representable
+      range (the relative band applied to the smallest normal value); the
+      former 1e-6 floor blessed TOTAL corruption of every element below it.
+
+    Parameters
+    ----------
+    finfo
+        ``finfo`` of the payload dtype (``jnp.finfo`` or ``np.finfo``;
+        component finfo for complex dtypes).
+
+    Returns
+    -------
+    tuple[float, float]
+        Derived ``(rtol, atol)`` pair.
+    """
+
+    import numpy as np
+
+    eps32 = float(np.finfo(np.float32).eps)
+    eps = float(finfo.eps)
+    if eps > eps32:
+        rtol = 4.0 * eps
+    else:
+        rtol = 1e-5 * eps / eps32
+    return rtol, rtol * float(finfo.tiny)
 
 
 def _path_to_string(path: Sequence[Any]) -> str:
