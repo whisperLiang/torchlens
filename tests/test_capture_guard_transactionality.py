@@ -68,7 +68,14 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
 
     # Establish the pristine baseline count of never-decorated targets (classes, type
     # aliases, property getters) so the post-retry comparison is against reality.
+    # The baseline must come from a FRESH full wrap generation, not whatever
+    # generation the session happened to carry in: the retry below runs a
+    # fresh full pass, and comparing it against an older generation's count
+    # was order-dependent (p2 R76 reverse-order red, 57 == 61 -- e.g. the
+    # torchvision-ops ensure ran between the two under some orderings).
     tl.trace(nn.Linear(4, 4), torch.randn(1, 4))
+    wrappers_module.unwrap_torch()
+    wrappers_module.wrap_torch()
     baseline_undecorated = len(_undecorated_targets())
 
     wrappers_module.unwrap_torch()

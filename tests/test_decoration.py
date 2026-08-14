@@ -908,8 +908,25 @@ class TestDecorationConsistency:
         assert len(_state._orig_to_decorated) > 1000
 
     def test_decorated_to_orig_populated(self):
-        """_decorated_to_orig should mirror _orig_to_decorated."""
-        assert len(_state._decorated_to_orig) == len(_state._orig_to_decorated)
+        """The append-only unwrap ledger mirrors every CURRENT wrapper.
+
+        Strict length equality only holds in a single-wrap-generation
+        session: ``_decorated_to_orig`` is the session's append-only unwrap
+        LEDGER (it must never shrink -- see
+        lesson-decorated-to-orig-append-only), so after any legitimate
+        re-wrap generation it is a strict superset of the current map and
+        the old ``len == len`` assertion was order-dependent (p2 R76
+        reverse-order red, 3886 == 1944).
+        """
+
+        current_wrapper_ids = {
+            id(dec)
+            for dec in _state._orig_to_decorated.values()
+            if not isinstance(dec, property)
+        }
+        missing = current_wrapper_ids - set(_state._decorated_to_orig)
+        assert not missing, "current-generation wrappers absent from the unwrap ledger"
+        assert len(_state._decorated_to_orig) >= len(current_wrapper_ids)
 
     def test_bidirectional_mapper(self):
         """_decorated_func_mapper should have dec->orig for every wrapper."""
