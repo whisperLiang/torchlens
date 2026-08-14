@@ -1364,6 +1364,33 @@ def _validate_forward_pass_torch(
                 return_addresses=True,
                 allow_repeats=True,
             )
+        # b9 R74/75-1: ground-truth enumeration SHARED ITS ROOT with capture
+        # (both resolve through the one backends walker), so a walker defect
+        # dropped the same output leaf from both sides and validation blessed
+        # a missing output. Cross-check the adapter's enumeration against the
+        # validation-owned independent traversal; a disagreement is a capture
+        # (or adapter) bug and must FAIL validation, never pass silently.
+        from .validation._output_walk import independent_output_tensor_ids
+
+        adapter_leaf_ids = {id(entry[0]) for entry in ground_truth_output_all}
+        independent_leaf_ids = set(independent_output_tensor_ids(ground_truth_output))
+        missed_by_adapter = independent_leaf_ids - adapter_leaf_ids
+        # Direction matters: the adapter legitimately sees MORE than the
+        # generic walk (registered custom containers, opaque structseq
+        # internals), and more-than can never hide a dropped output. Leaves
+        # the independent walk found that the adapter MISSED are exactly the
+        # dropped-output defect class.
+        if missed_by_adapter:
+            warnings.warn(
+                "TorchLens validation found a ground-truth output-enumeration "
+                f"defect: {len(missed_by_adapter)} tensor leaf(ves) reachable in "
+                "the model output are missing from the capture-side walker's "
+                "enumeration. Validation fails rather than validating against "
+                "the same defective enumeration.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         # Deduplicate by structural address to match how capture/trace.py extracts
         # outputs (same tensor returned in multiple positions is counted once).
         addresses_used = []
@@ -1620,6 +1647,7 @@ def validate_batch_of_models_and_inputs(
     models_and_inputs_dict: dict[str, dict[str, Any]],
     out_path: str,
     redo_model_if_already_run: bool = True,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """Batch-validate multiple models, writing incremental results to a CSV.
 
@@ -1636,6 +1664,9 @@ def validate_batch_of_models_and_inputs(
             - ``model_sample_inputs`` (dict[str, input]): named sample inputs.
         out_path: File path for the results CSV (created if absent, appended otherwise).
         redo_model_if_already_run: Re-validate models already present in the CSV.
+        show_progress: Show the tqdm bar and per-model status lines. Pass False
+            for quiet batch runs (b8 B8-38: the bar was ungated and a bare print
+            inside the loop corrupted the live bar).
 
     Returns
 
@@ -1661,10 +1692,12 @@ def validate_batch_of_models_and_inputs(
             }
         )
     models_already_run = current_csv["model_class_name"].unique()
-    for model_class_name, model_info in tqdm(
-        models_and_inputs_dict.items(), desc="Validating models"
-    ):
-        print(f"Validating model {model_class_name}")
+    progress = tqdm(
+        models_and_inputs_dict.items(), desc="Validating models", disable=not show_progress
+    )
+    for model_class_name, model_info in progress:
+        # Route the status line through the bar so it never corrupts it.
+        progress.set_postfix_str(model_class_name)
         if model_class_name in models_already_run and not redo_model_if_already_run:
             continue
         model_category = model_info["model_category"]
