@@ -99,7 +99,6 @@ __all__ = [
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_FSDP_WRAPPER",
-    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
@@ -1133,7 +1132,12 @@ HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_se
 HAS_SAFE_WEIGHTS_ONLY_LOAD: bool = _probe_safe_weights_only_load()
 HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
-HAS_ROLL_TENSOR_SHIFTS: bool = _probe_roll_tensor_shifts()
+# r-b4 R26-5a: ROLL_TENSOR_SHIFTS_SUPPORTED is a TEST HELPER, not a published
+# capability. It tracks a user-side torch spelling limitation (torch.roll with a
+# bare 0-dim tensor `shifts`: 2.8 rejects, 2.13 accepts) on which TorchLens does
+# NOT degrade -- zero library consumers exist, so publishing it made doctor WARN
+# across most of the declared support range for nothing TorchLens does.
+ROLL_TENSOR_SHIFTS_SUPPORTED: bool = _probe_roll_tensor_shifts()
 HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspection()
 HAS_SAVED_TENSORS_HOOKS_PATCHABLE: bool = _probe_saved_tensors_hooks_patchable()
 HAS_CODE_POSITIONS: bool = _probe_code_positions()
@@ -1238,7 +1242,6 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
-    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
     "HAS_CODE_POSITIONS",

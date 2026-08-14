@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.utils._torch_compat import HAS_ROLL_TENSOR_SHIFTS
+from torchlens.utils._torch_compat import ROLL_TENSOR_SHIFTS_SUPPORTED
 
 
 def _ops_by_func(trace: object, func_name: str) -> list:
@@ -107,7 +107,7 @@ class _ArangeTensorEnd(nn.Module):
 
 
 @pytest.mark.skipif(
-    not HAS_ROLL_TENSOR_SHIFTS,
+    not ROLL_TENSOR_SHIFTS_SUPPORTED,
     reason="torch.roll rejects a bare 0-dim tensor shifts on this torch (capability probe)",
 )
 def test_h2_roll_tensor_shift_is_parent() -> None:
