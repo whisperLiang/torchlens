@@ -276,6 +276,7 @@ class RunnableErrorCode(str, Enum):
     POISONED_RUN_REFUSED = "poisoned_run_refused"
     COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
     HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
+    USER_INTERVENTION_NOT_REPLAYABLE = "user_intervention_not_replayable"
 
 
 class LiteralAtomKind(str, Enum):

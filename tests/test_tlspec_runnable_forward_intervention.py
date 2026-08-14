@@ -1,11 +1,12 @@
 """Round-11 F5 regression: forward-modifying interventions must not lie.
 
 A forward-modifying (value-override) intervention makes the captured forward diverge
-from the recorded sparse DAG (which stores only the original op recipe). The runnable
-replay recomputes the un-intervened value, so the run must report UNVERIFIABLE +
-NOT_APPLICABLE (never a false VERIFIED, never a contradicting NumericAttestationError)
-so both honesty layers AGREE. Observe-only/backward interventions and plain captures
-are unchanged and still VERIFY.
+from the recorded sparse DAG (which stores only the original op recipe). A runnable
+replay could only recompute the un-intervened value, so since deephunt F1 the producer
+refuses ``level="runnable"`` at SAVE time with the named
+``user_intervention_not_replayable`` diagnostic (historically the save succeeded and
+the run ceilinged UNVERIFIABLE + NOT_APPLICABLE with no findable cause).
+Observe-only/backward interventions and plain captures are unchanged and still VERIFY.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.errors import RunnablePreflightError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
@@ -54,8 +56,17 @@ def _capture(model: nn.Module, value: torch.Tensor, **kwargs: object) -> tl.Trac
 
 
 @pytest.mark.smoke
-def test_forward_override_intervention_is_unverifiable_not_verified(tmp_path: Path) -> None:
-    """A zero-ablated capture never reports a false VERIFIED sparse-only."""
+def test_forward_override_intervention_refuses_runnable_save(tmp_path: Path) -> None:
+    """A zero-ablated capture refuses runnable save with a named diagnostic.
+
+    REVIEWED REBASELINE (deephunt F1): this test previously pinned the honest
+    run-time ceiling (save succeeds, replay of the UN-ablated DAG reports
+    UNVERIFIABLE + NOT_APPLICABLE). The disclosure gap -- a replay output from a
+    different computation than the artifact's provenance, with no diagnostic
+    naming the dropped intervention -- is now closed EARLIER, at save time, so
+    the artifact is never produced. The never-false-VERIFIED contract is
+    unchanged; the honesty moved from an unfindable ceiling to a typed refusal.
+    """
 
     torch.manual_seed(0)
     value = torch.randn(2, 4)
@@ -65,18 +76,19 @@ def test_forward_override_intervention_is_unverifiable_not_verified(tmp_path: Pa
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
     )
     path = tmp_path / "ablated.tlspec"
-    tl.save(trace, path, level="runnable", include_weights=True)
-
-    result = tl.load(path).run(inputs=value, seed=0)
-
-    # The DAG replay recomputes the UN-ablated value, so the honest ceiling is
-    # UNVERIFIABLE + NOT_APPLICABLE -- the two layers must agree, never VERIFIED.
-    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    with pytest.raises(RunnablePreflightError) as excinfo:
+        tl.save(trace, path, level="runnable", include_weights=True)
+    assert "user_intervention_not_replayable" in str(excinfo.value.fields.get("diagnostics"))
 
 
-def test_forward_override_with_activations_does_not_contradict(tmp_path: Path) -> None:
-    """Archived activations must not raise a contradicting attestation error."""
+def test_forward_override_with_activations_also_refuses(tmp_path: Path) -> None:
+    """The refusal is independent of the activation-archive payload flags.
+
+    REVIEWED REBASELINE (deephunt F1): previously asserted the saved artifact's
+    run reported UNVERIFIABLE + NOT_APPLICABLE without a contradicting
+    attestation error; the save itself now refuses first (same rationale as
+    above).
+    """
 
     torch.manual_seed(0)
     value = torch.randn(2, 4)
@@ -86,19 +98,16 @@ def test_forward_override_with_activations_does_not_contradict(tmp_path: Path) -
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
     )
     path = tmp_path / "ablated-with-acts.tlspec"
-    tl.save(
-        trace,
-        path,
-        level="runnable",
-        include_weights=True,
-        include_activations=True,
-    )
-
-    # Previously this raised NumericAttestationError while faithfulness said VERIFIED.
-    result = tl.load(path).run(inputs=value, seed=0)
-
-    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    with pytest.raises(RunnablePreflightError) as excinfo:
+        tl.save(
+            trace,
+            path,
+            level="runnable",
+            include_weights=True,
+            include_activations=True,
+        )
+    assert "user_intervention_not_replayable" in str(excinfo.value.fields.get("diagnostics"))
+    assert not path.exists()
 
 
 @pytest.mark.smoke
