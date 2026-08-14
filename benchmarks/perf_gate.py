@@ -20,6 +20,13 @@ candidate targets are drafted for the JMT fork on the default ``rel_tolerance``:
 
 The default stays 10% until the fork is decided; both are reachable via
 ``--rel-tolerance``.
+
+Metric policy (b6-sol R28, T14-6). Rows are judged on PROCESS-CPU time
+(``cpu_median_ms`` / ``cpu_iqr_ms``) whenever both sides carry it: wall clock
+on a loaded box charges run-queue pressure to the code under test, which the
+process-time samples do not. Rows where either side predates the CPU metrics
+fall back to wall clock, disclosed per row via ``"metric"``; the committed
+wall-only baselines keep comparing until the next REVIEWED rebaseline.
 """
 
 from __future__ import annotations
@@ -325,10 +332,24 @@ def _compare_row(
         Row comparison, or ``None`` when timing metrics are unavailable.
     """
 
-    baseline_median = _timing(base_row, "median_ms")
-    current_median = _timing(current_row, "median_ms")
-    baseline_iqr = _timing(base_row, "iqr_ms")
-    current_iqr = _timing(current_row, "iqr_ms")
+    # Prefer process-CPU statistics whenever BOTH sides record them; wall
+    # clock is only the legacy fallback for pre-CPU-metric payloads.
+    metric = "process_cpu"
+    baseline_median = _timing(base_row, "cpu_median_ms")
+    current_median = _timing(current_row, "cpu_median_ms")
+    baseline_iqr = _timing(base_row, "cpu_iqr_ms")
+    current_iqr = _timing(current_row, "cpu_iqr_ms")
+    if (
+        baseline_median is None
+        or current_median is None
+        or baseline_iqr is None
+        or current_iqr is None
+    ):
+        metric = "wall_clock"
+        baseline_median = _timing(base_row, "median_ms")
+        current_median = _timing(current_row, "median_ms")
+        baseline_iqr = _timing(base_row, "iqr_ms")
+        current_iqr = _timing(current_row, "iqr_ms")
     if (
         baseline_median is None
         or current_median is None
@@ -341,6 +362,7 @@ def _compare_row(
     key = _row_key(current_row)
     return {
         **_key_dict(key),
+        "metric": metric,
         "baseline_median_ms": baseline_median,
         "current_median_ms": current_median,
         "baseline_iqr_ms": baseline_iqr,
