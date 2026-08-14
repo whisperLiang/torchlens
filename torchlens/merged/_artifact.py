@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import uuid
 from dataclasses import replace
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .._io import _json
+from .._io._durability import fsync_dir, fsync_tree
 from ._engine import derive_merge
 from ._enums import (
     MERGED_BUNDLE_FORMAT,
@@ -152,6 +154,33 @@ def _schema_refusal(detail: str, **payload: Any) -> MergedArtifactError:
     )
 
 
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a merged-artifact path's permissions (POSIX only).
+
+    ``mkdir``/``write_bytes`` honor the ambient umask, so under the common
+    umask 002 the merged root, its ``merge/`` subdir, and the descriptor /
+    manifest sidecars were left group-writable/readable even though the copied
+    rank cores inside stay 0600/0700 (B8-10 parity, missed for the merged
+    writer). Best-effort: a filesystem that ignores mode bits is not a save
+    failure.
+
+    Parameters
+    ----------
+    path:
+        Merged-artifact directory or file to tighten.
+    mode:
+        Target permission bits (``0o700`` for directories, ``0o600`` for
+        files).
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
 def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = False) -> None:
     """Write a ``merged-directory`` artifact.
 
@@ -212,7 +241,10 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
     try:
         members_dir = staging_root / "members"
         members_dir.mkdir(parents=True)
+        _restrict_mode(staging_root, 0o700)
+        _restrict_mode(members_dir, 0o700)
         (staging_root / "merge").mkdir()
+        _restrict_mode(staging_root / "merge", 0o700)
 
         members_payload: list[dict[str, Any]] = []
         for rank in merged.rank_ids:
@@ -250,6 +282,7 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
         }
         descriptor_bytes = canonical_json_bytes(descriptor)
         (staging_root / "merge" / "descriptor.json").write_bytes(descriptor_bytes)
+        _restrict_mode(staging_root / "merge" / "descriptor.json", 0o600)
 
         import platform as platform_module
         from datetime import datetime, timezone
@@ -276,11 +309,35 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
         (staging_root / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        _restrict_mode(staging_root / "manifest.json", 0o600)
 
+        # Crash-durability before publish: fsync every written blob/sidecar and
+        # the staged directories so a power/OS crash after the rename below
+        # cannot leave a "successfully saved" artifact holding zero-length or
+        # partial files. load_merged requires EXACT descriptor-sha + per-member
+        # tree-hash equality, so a torn publish reads back as a PERMANENT false
+        # merged_descriptor_tamper accusation on an honest save (deep-hunt F12);
+        # the previous version is already renamed aside. Mirrors the .tlspec
+        # writers (_io/bundle.py, _io/tlspec.py).
+        fsync_tree(staging_root)
+
+        # Re-check the target existence/overwrite policy at publish time, not
+        # only at entry: the staging copytree/save_bundle above can run for
+        # minutes, and a path created at ``root`` in that window would otherwise
+        # be silently renamed aside and destroyed even under overwrite=False
+        # (TOCTOU). Mirrors _io/bundle.py's publish-time FileExistsError.
         if root.exists():
+            if not overwrite:
+                raise MergedArtifactError(
+                    f"{root} was created by another writer during the save; "
+                    "pass overwrite=True to replace it.",
+                    code=MergedErrorCode.MERGE_INPUT_INVALID,
+                )
             backup_root = root.parent / f"{root.name}.bak.{uuid.uuid4().hex}"
             root.rename(backup_root)
         staging_root.rename(root)
+        # Make the rename itself durable before declaring the save complete.
+        fsync_dir(root.parent)
         if backup_root is not None:
             shutil.rmtree(backup_root, ignore_errors=True)
     except BaseException:
@@ -601,6 +658,12 @@ def load_merged(path: str | Path) -> MergedTrace:
 
     root = Path(path)
     manifest_path = root / "manifest.json"
+    # Reject a symlinked manifest/descriptor before reading it: the tree-hash
+    # and member guards already refuse symlinks, but the two root sidecars were
+    # read through symlinks (arbitrary-path read / DoS), unlike the sibling
+    # .tlspec loaders. A symlink here is never a legitimate merged artifact.
+    if manifest_path.is_symlink():
+        raise _schema_refusal(f"{root} manifest.json is a symlink")
     if not manifest_path.is_file():
         raise _schema_refusal(f"{root} has no manifest.json")
     try:
@@ -622,6 +685,8 @@ def load_merged(path: str | Path) -> MergedTrace:
         )
 
     descriptor_path = root / "merge" / "descriptor.json"
+    if descriptor_path.is_symlink():
+        raise _schema_refusal("merge/descriptor.json is a symlink")
     if not descriptor_path.is_file():
         raise _tamper("merge/descriptor.json is missing")
     # The descriptor's EXACT on-disk bytes are the checksum subject, so they must be
