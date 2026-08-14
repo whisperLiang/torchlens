@@ -1,4 +1,4 @@
-"""r-b4 R27-6a: programmatic selector chains stay flat and stack-safe.
+"""r-b4 R27-6a: chained selector composition stays flat and stack-safe.
 
 ``&``/``|`` built one binary composite per application, so
 ``functools.reduce(operator.or_, [tl.func(n) for n in five_hundred])`` made a
