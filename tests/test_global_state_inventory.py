@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import threading
 from pathlib import Path
@@ -376,6 +377,16 @@ _PROCESS_CACHES = frozenset(
         # outside _REPLAY_ULP_HEADROOM; clearing only re-derives (pure finfo
         # arithmetic), so it is a memo, not capability state.
         ("torchlens/utils/tensor_utils.py", "_DTYPE_FLOAT_TOLERANCES"),
+        # Fork-inheritance discriminator for warn_parallel (r-b6 R40-3b): the
+        # PID that first observed an initialized process group. Clearing it
+        # only re-stamps on the next capture entry; it never steers anything
+        # but the child-process refusal.
+        ("torchlens/utils/display.py", "_DIST_GROUP_OBSERVED_PID"),
+        # Live viewer child handles (r-b6 R40-1): retained solely so each
+        # launch can reap already-exited viewers. Clearing it costs at most
+        # one unreaped zombie per cleared entry until process exit — hygiene,
+        # never correctness.
+        ("torchlens/visualization/_render_utils.py", "_VIEWER_PROCS"),
     }
 )
 """Process-lifetime memos holding strong references.
@@ -1189,6 +1200,10 @@ def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch)
         daemon = False
 
     monkeypatch.setattr(mp, "current_process", lambda: _FakeChild())
+    # r-b6 R40-3b: the guard no longer trusts the user-assignable process
+    # name — child detection keys on ``parent_process()`` (plus the raw-fork
+    # PID stamp), so the fake must present a parent to read as a child.
+    monkeypatch.setattr(mp, "parent_process", lambda: _FakeChild())
 
     with pytest.raises(tl.errors.CaptureContextError) as refusal:
         warn_parallel()
@@ -1196,6 +1211,85 @@ def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch)
     assert refusal.value.fields["code"] == "child_process_capture_unsupported"
     assert refusal.value.fields["process_name"] == "Process-1"
     assert not str(refusal.value).startswith("WARNING:")
+
+
+def test_child_process_guard_ignores_spoofed_main_process_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child named "MainProcess" is still refused (r-b6 R40-3b).
+
+    ``process.name`` is a user-assignable constructor kwarg
+    (``mp.Process(name="MainProcess")``); the historical name-keyed check let
+    such a child capture and corrupt the per-interpreter toggle state.
+    """
+
+    import multiprocessing as mp
+
+    from torchlens.utils.display import warn_parallel
+
+    class _SpoofedChild:
+        """A child process wearing the main process's name."""
+
+        name = "MainProcess"
+        daemon = False
+
+    monkeypatch.setattr(mp, "current_process", lambda: _SpoofedChild())
+    monkeypatch.setattr(mp, "parent_process", lambda: _SpoofedChild())
+
+    with pytest.raises(tl.errors.CaptureContextError) as refusal:
+        warn_parallel()
+    assert refusal.value.fields["code"] == "child_process_capture_unsupported"
+
+
+def test_child_process_guard_refuses_fork_inherited_group_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inherited initialized-group stamp does not read as a rank (r-b6 R40-3b).
+
+    A forked child of a rank inherits ``dist.is_initialized() == True``; the
+    rank carve-out must not readmit it. The PID stamp of the process that
+    first observed the group is the discriminator.
+    """
+
+    import multiprocessing as mp
+
+    import torchlens.utils.display as display_mod
+    from torchlens.utils.display import warn_parallel
+
+    class _FakeChild:
+        """A non-daemonic child claiming rank via an inherited group flag."""
+
+        name = "Process-2"
+        daemon = False
+
+    class _FakeDist:
+        """Distributed module stub reporting an initialized group."""
+
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+    monkeypatch.setattr(mp, "current_process", lambda: _FakeChild())
+    monkeypatch.setattr(mp, "parent_process", lambda: _FakeChild())
+    fake_dist = _FakeDist()
+    monkeypatch.setattr(torch, "distributed", fake_dist)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)  # type: ignore[arg-type]
+
+    # Positive control: a process that stamps its OWN pid reads as a rank, so
+    # the refusal below can only come from the inheritance discriminator.
+    monkeypatch.setitem(display_mod._DIST_GROUP_OBSERVED_PID, "pid", os.getpid())
+    warn_parallel()
+
+    # The "parent rank" observed the group under a different PID; the fork
+    # child inherits that stamp and must be refused.
+    monkeypatch.setitem(display_mod._DIST_GROUP_OBSERVED_PID, "pid", os.getpid() + 1)
+    with pytest.raises(tl.errors.CaptureContextError) as refusal:
+        warn_parallel()
+    assert refusal.value.fields["code"] == "child_process_capture_unsupported"
 
 
 def test_main_process_capture_is_never_refused() -> None:

@@ -164,7 +164,7 @@ def _record_host_escape_source(trace: Any, func: Any, args: tuple[Any, ...], res
     if not _output_is_host_value(result):
         return
     for source in _iter_tensor_operands(args):
-        _record_escape_source_tensor(trace, source, invisible=False)
+        _record_escape_source_tensor(trace, source)
 
 
 def _escape_storage_ptr(source: torch.Tensor) -> int | None:
@@ -428,17 +428,10 @@ def _operator_total_writer_destination(
 def _live_deterministic_fill_governs() -> bool:
     """Return whether the LIVE capture context proves deterministic uninit fill."""
 
-    from ...utils._torch_compat import (
-        HAS_DETERMINISTIC_ALGORITHMS_QUERY,
-        read_fill_uninitialized_memory,
-    )
+    from ...utils._torch_compat import read_fill_uninitialized_memory
     from ...utils.rng import deterministic_fill_governs
 
-    deterministic = (
-        bool(torch.are_deterministic_algorithms_enabled())
-        if HAS_DETERMINISTIC_ALGORITHMS_QUERY
-        else None
-    )
+    deterministic = bool(torch.are_deterministic_algorithms_enabled())
     return deterministic_fill_governs(deterministic, read_fill_uninitialized_memory())
 
 

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
-from ..utils.display import atomic_write_text
+from ..utils.display import atomic_write_text, user_stacklevel
 from ._render_common import *
 from ._render_edges import *
 from ._render_flow import *
@@ -408,6 +408,13 @@ def _build_graphviz_shell(
     }
     if request.collapse_fn is not None:
         graph_args["newrank"] = "true"
+    visualizer_dir = getattr(trace, "_visualizer_dir", None)
+    if visualizer_dir:
+        # r-b6 R19-6: node image attributes are emitted RELATIVE to the trace
+        # visualizer scratch root; this one graph attribute supplies the root,
+        # so the per-run mkdtemp path appears exactly once in the DOT instead
+        # of in every image node.
+        graph_args["imagepath"] = str(visualizer_dir)
     graph_args.update(theme_graph_attrs(theme, font_size=request.font_size, dpi=request.dpi))
     overrides = cast(VisualizationOverrides, request.overrides)
     for arg_name, arg_val in overrides.graph.items():  # type: ignore[union-attr]
@@ -485,7 +492,8 @@ def _resolve_forward_context(
             RANK_LAYOUT_NOTICE.format(
                 cost=layout_cost,
                 threshold=RANK_LAYOUT_COST_THRESHOLD,
-            )
+            ),
+            stacklevel=user_stacklevel(),
         )
     _vprint(
         trace,
@@ -685,7 +693,8 @@ def _finalize_forward_ir(
                     cost=context.layout_cost,
                     budget=SIBLING_ORDER_VERIFY_LAYOUT_BUDGET,
                     threshold=RANK_LAYOUT_COST_THRESHOLD,
-                )
+                ),
+                stacklevel=user_stacklevel(),
             )
             sibling_order_chains = ()
         if sibling_order_chains:
@@ -755,6 +764,10 @@ def _emit_and_finish_forward(
             key: str(val(trace)) if callable(val) else str(val)
             for key, val in overrides.graph.items()  # type: ignore[union-attr]
         }
+        rank_visualizer_dir = getattr(trace, "_visualizer_dir", None)
+        if rank_visualizer_dir and "imagepath" not in resolved_graph_overrides:
+            # r-b6 R19-6: same one-attribute image root as the dot path.
+            resolved_graph_overrides["imagepath"] = str(rank_visualizer_dir)
         with _timed_phase(trace, "render:graphviz:forward"):
             result = render_rank_layout(
                 forward_render_ir,
@@ -791,6 +804,7 @@ def _emit_and_finish_forward(
     if context.source_text is not None and not compose_code_panel:
         render_code_panel_subgraph(dot, context.source_text)
 
+    render_timeout = 120
     if in_notebook() and not target.save_only:
         try:
             from IPython.display import SVG, display  # #72: lazy import
@@ -801,17 +815,42 @@ def _emit_and_finish_forward(
             ) from error
 
         display_fn = cast(Any, display)
+        # r-b6 R40-2: render through the BOUNDED subprocess runner instead of
+        # ``dot.pipe()`` / ``display(dot)`` — graphviz 0.21 exposes no pipe
+        # timeout, so a wedged ``dot`` hung the kernel indefinitely while
+        # every CLI path was already bounded at ``render_timeout`` with a
+        # typed error. Timeout/failure map to the same typed raises.
+        with tempfile.NamedTemporaryFile("w", suffix=".dot", delete=False) as notebook_source_file:
+            notebook_source_file.write(dot.source)
+            notebook_source_path = notebook_source_file.name
+        try:
+            notebook_image_root = getattr(trace, "_visualizer_dir", None)
+            graph_svg = _render_graph_only_svg(
+                dot.engine,
+                notebook_source_path,
+                render_timeout,
+                Path(notebook_image_root) if notebook_image_root else None,
+            )
+        except subprocess.TimeoutExpired as error:
+            # The typed raise names the saved source path, so keep the file.
+            _raise_graphviz_timeout(
+                "forward graph (notebook display)",
+                f"{trace.num_tensors} nodes",
+                notebook_source_path,
+                render_timeout,
+                error,
+            )
+        except subprocess.CalledProcessError as error:
+            _raise_graphviz_failure("forward graph (notebook display)", notebook_source_path, error)
+        if os.path.exists(notebook_source_path):
+            os.remove(notebook_source_path)
         if compose_code_panel:
-            graph_svg = _inline_svg_local_images(dot.pipe(format="svg").decode("utf-8"))
-            combined_svg = compose_graph_with_code_panel(
+            graph_svg = compose_graph_with_code_panel(
                 graph_svg,
                 cast(str, context.source_text),
             )
-            display_fn(SVG(combined_svg))
-        else:
-            display_fn(dot)
+        display_fn(SVG(graph_svg))
 
-    render_timeout = 120
     source_override = None
     trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
     if forward_render_ir.ordering_constraints:
@@ -828,6 +867,13 @@ def _emit_and_finish_forward(
                 raise
             _warn_sibling_order_fallback_once(exc)
 
+    late_visualizer_dir = getattr(trace, "_visualizer_dir", None)
+    if late_visualizer_dir and "imagepath=" not in dot.source:
+        # r-b6 R19-6: the visualizer scratch dir is created LAZILY while
+        # nodes render (raw-input montages, feature maps), i.e. after the
+        # graph attributes were set — so the relative image root is injected
+        # here, once, before the source is written.
+        dot.attr(imagepath=str(late_visualizer_dir))
     final_source = source_override if source_override is not None else dot.source
     source_path = dot.save(target.outpath)
     with open(source_path, "w", encoding="utf-8") as source_file:
@@ -835,6 +881,7 @@ def _emit_and_finish_forward(
     with _timed_phase(trace, "render:graphviz:forward"):
         try:
             rendered_path = f"{target.outpath}.{target.fileformat}"
+            render_image_root = Path(late_visualizer_dir) if late_visualizer_dir else None
             if compose_code_panel:
                 _write_composed_code_panel(
                     dot.engine,
@@ -843,12 +890,19 @@ def _emit_and_finish_forward(
                     rendered_path,
                     target.fileformat,
                     render_timeout,
+                    render_image_root,
                 )
             else:
                 cmd = [dot.engine, f"-T{target.fileformat}", "-o", rendered_path, source_path]
-                subprocess.run(cmd, timeout=render_timeout, check=True, capture_output=True)
+                subprocess.run(
+                    cmd,
+                    timeout=render_timeout,
+                    check=True,
+                    capture_output=True,
+                    start_new_session=True,
+                )
                 if target.fileformat == "svg":
-                    _inline_svg_file_local_images(rendered_path)
+                    _inline_svg_file_local_images(rendered_path, render_image_root)
             _validate_rendered_output(rendered_path, source_path, "forward graph")
             if not target.save_only:
                 _view_rendered_file(rendered_path)
@@ -1086,7 +1140,9 @@ def _add_orphan_island_nodes(
             )
 
 
-def _render_graph_only_svg(engine: str, source_path: str, timeout: int) -> str:
+def _render_graph_only_svg(
+    engine: str, source_path: str, timeout: int, image_root: Path | None = None
+) -> str:
     """Render a saved DOT source to an SVG string (no code panel)."""
 
     completed = subprocess.run(
@@ -1094,22 +1150,26 @@ def _render_graph_only_svg(engine: str, source_path: str, timeout: int) -> str:
         timeout=timeout,
         check=True,
         capture_output=True,
+        start_new_session=True,
     )
-    return _inline_svg_local_images(completed.stdout.decode("utf-8"))
+    return _inline_svg_local_images(completed.stdout.decode("utf-8"), image_root)
 
 
-def _inline_svg_file_local_images(svg_path: str) -> None:
+def _inline_svg_file_local_images(svg_path: str, image_root: Path | None = None) -> None:
     """Inline local image hrefs in a saved SVG file.
 
     Parameters
     ----------
     svg_path:
         Path to the rendered SVG file to update in place.
+    image_root:
+        Directory relative image hrefs are resolved against (the DOT
+        ``imagepath`` root).
     """
 
     with open(svg_path, encoding="utf-8") as svg_file:
         svg_text = svg_file.read()
-    inlined_svg = _inline_svg_local_images(svg_text)
+    inlined_svg = _inline_svg_local_images(svg_text, image_root)
     if inlined_svg != svg_text:
         atomic_write_text(svg_path, inlined_svg)
 
@@ -1164,13 +1224,17 @@ def _normalize_svg_root_viewbox(svg_text: str) -> str:
     )
 
 
-def _inline_svg_local_images(svg_text: str) -> str:
+def _inline_svg_local_images(svg_text: str, image_root: Path | None = None) -> str:
     """Replace local SVG image references with embedded data URIs.
 
     Parameters
     ----------
     svg_text:
         SVG text produced by Graphviz.
+    image_root:
+        Directory relative hrefs are resolved against — the graph-level
+        ``imagepath`` root the DOT source carried (r-b6 R19-6 relativizes
+        node image attrs, and Graphviz copies them into the SVG verbatim).
 
     Returns
     -------
@@ -1189,7 +1253,7 @@ def _inline_svg_local_images(svg_text: str) -> str:
         href = attrs.get(href_attr)
         if href is None or _is_non_file_svg_href(href):
             return tag
-        image_path = _resolve_svg_image_path(href)
+        image_path = _resolve_svg_image_path(href, image_root)
         try:
             payload = image_path.read_bytes()
         except OSError:
@@ -1208,6 +1272,7 @@ def _write_composed_code_panel(
     rendered_path: str,
     file_format: str,
     timeout: int,
+    image_root: Path | None = None,
 ) -> None:
     """Render the graph and code panel separately and write the joined output.
 
@@ -1217,7 +1282,9 @@ def _write_composed_code_panel(
     so vectors are preserved.
     """
 
-    graph_svg = _normalize_svg_root_viewbox(_render_graph_only_svg(engine, source_path, timeout))
+    graph_svg = _normalize_svg_root_viewbox(
+        _render_graph_only_svg(engine, source_path, timeout, image_root)
+    )
     combined_svg = _normalize_svg_root_viewbox(
         compose_graph_with_code_panel(graph_svg, source_text)
     )
@@ -1582,16 +1649,8 @@ def _verify_and_apply_sibling_ordering(
     return current_source, _sibling_order_decision(chains, survivors, ratios)
 
 
-def _strict_sibling_order_checks_enabled() -> bool:
-    """Return whether sibling-order verification failures should raise.
-
-    Returns
-    -------
-    bool
-        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
-    """
-
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+# r-b7 R42-9: one shared TORCHLENS_COLLAPSE_STRICT parser (_render_common).
+_strict_sibling_order_checks_enabled = strict_collapse_checks_enabled
 
 
 def _warn_sibling_order_fallback_once(exc: BaseException) -> None:
@@ -1654,6 +1713,7 @@ def _layout_dot_plain(
             capture_output=True,
             text=True,
             timeout=120,
+            start_new_session=True,
         )
     finally:
         os.remove(source_path)
@@ -1797,6 +1857,34 @@ def _setup_subgraphs(
     assert queued_rank_groups == emitted_rank_groups
 
 
+def _module_subtree_payload_empty(
+    module_edge_dict: dict,
+    module_submodule_dict: dict,
+    subgraph_name_w_pass: str,
+    vis_mode: str,
+) -> bool:
+    """Return whether a module cluster AND all its descendants would be empty.
+
+    r-b6 R19-3: when collapse="max" condenses a module's ops into a segment
+    OUTSIDE it, the module's whole subtree accumulates no nodes, edges, or
+    rank groups — emitting its cluster produces a labeled dashed husk that
+    both misplaces the ops and fabricates a "no input ancestor" claim about
+    nothing. The descent branch opens clusters before reaching the leaf
+    guard, so emptiness has to be decided for the SUBTREE up front.
+    """
+
+    payload_key = (
+        subgraph_name_w_pass if vis_mode == "unrolled" else subgraph_name_w_pass.split(":")[0]
+    )
+    payload = module_edge_dict[payload_key]
+    if payload.get("nodes") or payload.get("edges") or payload.get("rank_groups"):
+        return False
+    return all(
+        _module_subtree_payload_empty(module_edge_dict, module_submodule_dict, child, vis_mode)
+        for child in module_submodule_dict.get(subgraph_name_w_pass, ())
+    )
+
+
 def _setup_subgraphs_recurse(
     self: "Trace",
     starting_subgraph: graphviz.Digraph,
@@ -1854,6 +1942,12 @@ def _setup_subgraphs_recurse(
         subgraph_title = subgraph_module
 
     if call_depth < len(parent_graph_list) - 1:  # we haven't gotten to the bottom yet, keep going.
+        if _module_subtree_payload_empty(
+            module_edge_dict, module_submodule_dict, subgraph_name_w_pass, vis_mode
+        ):
+            # r-b6 R19-3: the whole subtree is empty — opening the cluster
+            # here would emit a labeled dashed husk (see helper docstring).
+            return 0
         with starting_subgraph.subgraph(name=cluster_name) as s:
             return _setup_subgraphs_recurse(
                 self,
@@ -1872,12 +1966,15 @@ def _setup_subgraphs_recurse(
     else:  # Leaf of this branch: create the subgraph and add all edges.
         emitted_rank_groups = 0
         cluster_payload = module_edge_dict[subgraph_name]
-        if (
-            sg_ml.num_layers <= 1  # type: ignore[union-attr]
-            and not module_submodule_dict[subgraph_name_w_pass]
-            and not cluster_payload.get("nodes")
-            and not cluster_payload.get("edges")
-            and not cluster_payload.get("rank_groups")
+        # r-b6 R19-3: an empty cluster is never emitted, whatever the module's
+        # layer count. When collapse="max" condenses a module's ops into a
+        # segment OUTSIDE it, the historical num_layers>1 carve-out still
+        # emitted the husk — a labeled, dashed ("no input ancestor") box with
+        # ZERO contents, both misplacing the ops and fabricating a
+        # disconnection claim about nothing. Module containment for such ops
+        # is disclosed on the segment label instead (R19-5).
+        if _module_subtree_payload_empty(
+            module_edge_dict, module_submodule_dict, subgraph_name_w_pass, vis_mode
         ):
             return emitted_rank_groups
         with starting_subgraph.subgraph(name=cluster_name) as s:

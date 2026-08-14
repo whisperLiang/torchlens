@@ -81,7 +81,6 @@ class ModuleCaptureWorkspace:
     module_build_data: dict[str, Any] = field(default_factory=dict)
     module_metadata: dict[Any, Any] = field(default_factory=dict)
     module_forward_args: dict[Any, Any] = field(default_factory=dict)
-    module_containment_engine: str = "hook_stack"
 
 
 @dataclass(slots=True)

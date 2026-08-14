@@ -12,91 +12,91 @@
 <text text-anchor="start" x="8" y="-8783.13" font-family="Times,serif" font-weight="bold" font-size="14.00">ResNet</text>
 <text text-anchor="start" x="8" y="-8769.13" font-family="Times,serif" font-size="14.00">151 tensors total (2.7 MB)</text>
 <text text-anchor="start" x="8" y="-8755.13" font-family="Times,serif" font-size="14.00">11689512 params (all trainable, 44.6 MB)</text>
-<g id="clust3" class="cluster">
+<g id="clust2" class="cluster">
 <title>cluster_layer1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="89.5,-606.92 89.5,-2521.03 689.5,-2521.03 689.5,-606.92 89.5,-606.92"/>
 <text text-anchor="start" x="97.5" y="-2506.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer1</text>
 <text text-anchor="start" x="97.5" y="-2492.83" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust7" class="cluster">
+<g id="clust6" class="cluster">
 <title>cluster_layer1.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="109.5,-626.92 109.5,-1541.98 669.5,-1541.98 669.5,-626.92 109.5,-626.92"/>
 <text text-anchor="start" x="117.5" y="-1527.78" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer1.0</text>
 <text text-anchor="start" x="117.5" y="-1513.78" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust8" class="cluster">
+<g id="clust7" class="cluster">
 <title>cluster_layer1.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="109.5,-1549.98 109.5,-2465.03 669.5,-2465.03 669.5,-1549.98 109.5,-1549.98"/>
 <text text-anchor="start" x="117.5" y="-2450.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer1.1</text>
 <text text-anchor="start" x="117.5" y="-2436.83" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust4" class="cluster">
+<g id="clust3" class="cluster">
 <title>cluster_layer2_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="85.5,-2640.03 85.5,-4443.14 777.5,-4443.14 777.5,-2640.03 85.5,-2640.03"/>
 <text text-anchor="start" x="93.5" y="-4428.94" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer2</text>
 <text text-anchor="start" x="93.5" y="-4414.94" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust9" class="cluster">
+<g id="clust8" class="cluster">
 <title>cluster_layer2.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="105.5,-2660.03 105.5,-3464.09 757.5,-3464.09 757.5,-2660.03 105.5,-2660.03"/>
 <text text-anchor="start" x="113.5" y="-3449.89" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer2.0</text>
 <text text-anchor="start" x="113.5" y="-3435.89" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust26" class="cluster">
+<g id="clust14" class="cluster">
 <title>cluster_layer2.0.downsample_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="3" points="421.5,-3047.03 421.5,-3234.03 737.5,-3234.03 737.5,-3047.03 421.5,-3047.03"/>
 <text text-anchor="start" x="429.5" y="-3219.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer2.0.downsample</text>
 <text text-anchor="start" x="429.5" y="-3205.83" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust10" class="cluster">
+<g id="clust9" class="cluster">
 <title>cluster_layer2.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="105.5,-3472.09 105.5,-4387.14 683.5,-4387.14 683.5,-3472.09 105.5,-3472.09"/>
 <text text-anchor="start" x="113.5" y="-4372.94" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer2.1</text>
 <text text-anchor="start" x="113.5" y="-4358.94" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust5" class="cluster">
+<g id="clust4" class="cluster">
 <title>cluster_layer3_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="85.5,-4562.14 85.5,-6365.25 777.5,-6365.25 777.5,-4562.14 85.5,-4562.14"/>
 <text text-anchor="start" x="93.5" y="-6351.05" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3</text>
 <text text-anchor="start" x="93.5" y="-6337.05" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust11" class="cluster">
+<g id="clust10" class="cluster">
 <title>cluster_layer3.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="105.5,-4582.14 105.5,-5386.19 757.5,-5386.19 757.5,-4582.14 105.5,-4582.14"/>
 <text text-anchor="start" x="113.5" y="-5371.99" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.0</text>
 <text text-anchor="start" x="113.5" y="-5357.99" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust35" class="cluster">
+<g id="clust15" class="cluster">
 <title>cluster_layer3.0.downsample_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="3" points="421.5,-4969.14 421.5,-5156.14 737.5,-5156.14 737.5,-4969.14 421.5,-4969.14"/>
 <text text-anchor="start" x="429.5" y="-5141.94" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.0.downsample</text>
 <text text-anchor="start" x="429.5" y="-5127.94" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust12" class="cluster">
+<g id="clust11" class="cluster">
 <title>cluster_layer3.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="105.5,-5394.19 105.5,-6309.25 683.5,-6309.25 683.5,-5394.19 105.5,-5394.19"/>
 <text text-anchor="start" x="113.5" y="-6295.05" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.1</text>
 <text text-anchor="start" x="113.5" y="-6281.05" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust6" class="cluster">
+<g id="clust5" class="cluster">
 <title>cluster_layer4_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="85.5,-6484.25 85.5,-8287.35 777.5,-8287.35 777.5,-6484.25 85.5,-6484.25"/>
 <text text-anchor="start" x="93.5" y="-8273.15" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4</text>
 <text text-anchor="start" x="93.5" y="-8259.15" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust13" class="cluster">
+<g id="clust12" class="cluster">
 <title>cluster_layer4.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="105.5,-6504.25 105.5,-7308.3 757.5,-7308.3 757.5,-6504.25 105.5,-6504.25"/>
 <text text-anchor="start" x="113.5" y="-7294.1" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.0</text>
 <text text-anchor="start" x="113.5" y="-7280.1" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust44" class="cluster">
+<g id="clust16" class="cluster">
 <title>cluster_layer4.0.downsample_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="3" points="421.5,-6891.25 421.5,-7078.25 737.5,-7078.25 737.5,-6891.25 421.5,-6891.25"/>
 <text text-anchor="start" x="429.5" y="-7064.05" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.0.downsample</text>
 <text text-anchor="start" x="429.5" y="-7050.05" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust14" class="cluster">
+<g id="clust13" class="cluster">
 <title>cluster_layer4.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="142.5,-7316.3 142.5,-8231.35 720.5,-8231.35 720.5,-7316.3 142.5,-7316.3"/>
 <text text-anchor="start" x="150.5" y="-8217.15" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.1</text>

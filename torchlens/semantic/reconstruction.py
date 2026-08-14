@@ -129,30 +129,6 @@ def find_sdpa_op(module: Any) -> Any | None:
     return None
 
 
-def reconstructed_sdpa_value(
-    module: Any, facet: ReconstructionFacet
-) -> torch.Tensor | MissingFacet:
-    """Reconstruct and validate one SDPA-derived value.
-
-    Parameters
-    ----------
-    module:
-        TorchLens attention module record.
-    facet:
-        Facet name to reconstruct.
-
-    Returns
-    -------
-    torch.Tensor | MissingFacet
-        Reconstructed value or a missing sentinel naming the failed prerequisite.
-    """
-
-    sdpa_op = find_sdpa_op(module)
-    if sdpa_op is None:
-        return MissingFacet(f"{facet} reconstruction missing prerequisite: SDPA op.")
-    return _reconstruct_checked(module, sdpa_op, facet)
-
-
 def _as_reconstructed_spec(spec: FacetSpec) -> FacetSpec:
     """Return a computed spec marked as reconstructed.
 

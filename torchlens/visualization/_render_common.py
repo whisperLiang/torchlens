@@ -77,6 +77,7 @@ from ._render_utils import (
     compute_module_penwidth,
     direction_to_rankdir,
     make_module_cluster_attrs,
+    relativize_visualizer_image,
 )
 from .code_panel import (
     CodePanelOption,
@@ -115,6 +116,22 @@ from .themes import (
     theme_graph_attrs,
     theme_node_attrs,
 )
+
+
+def strict_collapse_checks_enabled() -> bool:
+    """Return whether collapse/sibling-order verification failures should raise.
+
+    THE one parser of ``TORCHLENS_COLLAPSE_STRICT`` (r-b7 R42-9: it used to be
+    duplicated byte-for-byte in ``auto_collapse`` and ``_render_dot``, a
+    divergence hazard for a verification-arming knob).
+
+    Returns
+    -------
+    bool
+        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
+    """
+
+    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
 
 
 def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) -> str:
@@ -792,6 +809,7 @@ __all__ = [
     "_SVG_ROOT_RE",
     "_SVG_VIEWBOX_RE",
     "_open_file_quietly",
+    "relativize_visualizer_image",
     "_timed_phase",
     "_vprint",
     "apply_theme_to_spec",
@@ -809,6 +827,7 @@ __all__ = [
     "field",
     "format_memory",
     "format_collapsed_module_contents",
+    "strict_collapse_checks_enabled",
     "format_module_kwargs",
     "format_module_path",
     "format_param_list",

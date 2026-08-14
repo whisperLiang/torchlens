@@ -341,7 +341,7 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
     ``aten.equal`` -- EXCEPT inside torch's own ``_disable_current_modes()`` regions (tensor
     string formatting; explicit predicate guards), which pop the census TorchDispatchMode
     (measured E6). This method patch fires regardless of dispatch-mode state, feeding the SAME
-    ``_record_escape_source_tensor(..., invisible=True)`` attribution ladder as the census, so
+    ``_record_escape_source_tensor(...)`` attribution ladder as the census, so
     the escape is witnessed by its SOURCE tensor's capture-time digest either way.
 
     Records ``self`` plus any tensor argument (``equal`` / ``allclose`` take a second tensor
@@ -378,10 +378,10 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
                     if name == "__bool__":
                         _record_bool_consumer_location(state.trace, self)
                     if not _completeness_census_active():
-                        _record_escape_source_tensor(state.trace, self, invisible=True)
+                        _record_escape_source_tensor(state.trace, self)
                         for value in (*args, *kwargs.values()):
                             if isinstance(value, torch.Tensor):
-                                _record_escape_source_tensor(state.trace, value, invisible=True)
+                                _record_escape_source_tensor(state.trace, value)
             elif state.belt_armed:
                 # r43: a NON-owner value escape ceilings iff its receiver OR any tensor operand
                 # is a captured tensor (the census is thread-local, so the belt is PRIMARY here).
@@ -649,7 +649,7 @@ def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessStat
                 ):
                     for value in (*args, *kwargs.values()):
                         if isinstance(value, torch.Tensor):
-                            _record_escape_source_tensor(state.trace, value, invisible=True)
+                            _record_escape_source_tensor(state.trace, value)
             elif state.belt_armed:
                 for value in (*args, *kwargs.values()):
                     if isinstance(value, torch.Tensor):
@@ -689,7 +689,7 @@ def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
                 if _state._logging_enabled:
                     for value in (*args, *kwargs.values()):
                         if isinstance(value, torch.Tensor):
-                            _record_escape_source_tensor(state.trace, value, invisible=True)
+                            _record_escape_source_tensor(state.trace, value)
                             # r65 (F2): ``to_dlpack`` exports a zero-copy capsule pinning
                             # the operand's full layout (strides + byte offset), so a
                             # state-derived operand records the exact-layout read kinds,
@@ -737,7 +737,7 @@ def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> pr
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled:
-                    _record_escape_source_tensor(state.trace, self, invisible=True)
+                    _record_escape_source_tensor(state.trace, self)
                     # r65 (F2): the CUDA array interface dict carries an explicit
                     # ``strides`` key + data pointer -- a zero-copy layout export exactly
                     # like ``numpy()``/``__dlpack__`` -- so a state-derived receiver

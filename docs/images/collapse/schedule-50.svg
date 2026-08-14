@@ -12,49 +12,49 @@
 <text text-anchor="start" x="8" y="-5396.92" font-family="Times,serif" font-weight="bold" font-size="14.00">ResNet</text>
 <text text-anchor="start" x="8" y="-5382.92" font-family="Times,serif" font-size="14.00">151 tensors total (2.7 MB)</text>
 <text text-anchor="start" x="8" y="-5368.92" font-family="Times,serif" font-size="14.00">11689512 params (all trainable, 44.6 MB)</text>
-<g id="clust5" class="cluster">
+<g id="clust2" class="cluster">
 <title>cluster_layer3_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="23,-876.92 23,-2885.03 1325,-2885.03 1325,-876.92 23,-876.92"/>
 <text text-anchor="start" x="31" y="-2870.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3</text>
 <text text-anchor="start" x="31" y="-2856.83" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust11" class="cluster">
+<g id="clust4" class="cluster">
 <title>cluster_layer3.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="43,-896.92 43,-1905.98 1305,-1905.98 1305,-896.92 43,-896.92"/>
 <text text-anchor="start" x="51" y="-1891.78" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.0</text>
 <text text-anchor="start" x="51" y="-1877.78" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust35" class="cluster">
+<g id="clust8" class="cluster">
 <title>cluster_layer3.0.downsample_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="3" points="723,-916.92 723,-1389.92 1285,-1389.92 1285,-916.92 723,-916.92"/>
 <text text-anchor="start" x="731" y="-1375.72" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.0.downsample</text>
 <text text-anchor="start" x="731" y="-1361.72" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust12" class="cluster">
+<g id="clust5" class="cluster">
 <title>cluster_layer3.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="282,-1913.98 282,-2829.03 860,-2829.03 860,-1913.98 282,-1913.98"/>
 <text text-anchor="start" x="290" y="-2814.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3.1</text>
 <text text-anchor="start" x="290" y="-2800.83" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust6" class="cluster">
+<g id="clust3" class="cluster">
 <title>cluster_layer4_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="5" points="8,-2893.03 8,-4901.14 1310,-4901.14 1310,-2893.03 8,-2893.03"/>
 <text text-anchor="start" x="16" y="-4886.94" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4</text>
 <text text-anchor="start" x="16" y="-4872.94" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust13" class="cluster">
+<g id="clust6" class="cluster">
 <title>cluster_layer4.0_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="28,-2913.03 28,-3922.09 1290,-3922.09 1290,-2913.03 28,-2913.03"/>
 <text text-anchor="start" x="36" y="-3907.89" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.0</text>
 <text text-anchor="start" x="36" y="-3893.89" font-family="Times,serif" font-size="14.00">(BasicBlock)</text>
 </g>
-<g id="clust44" class="cluster">
+<g id="clust9" class="cluster">
 <title>cluster_layer4.0.downsample_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="3" points="708,-2933.03 708,-3406.03 1270,-3406.03 1270,-2933.03 708,-2933.03"/>
 <text text-anchor="start" x="716" y="-3391.83" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.0.downsample</text>
 <text text-anchor="start" x="716" y="-3377.83" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust14" class="cluster">
+<g id="clust7" class="cluster">
 <title>cluster_layer4.1_pass1</title>
 <polygon fill="white" stroke="black" stroke-width="4" points="439,-3930.09 439,-4845.14 1017,-4845.14 1017,-3930.09 439,-3930.09"/>
 <text text-anchor="start" x="447" y="-4830.94" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4.1</text>

@@ -24,6 +24,19 @@ from typing import TYPE_CHECKING, Any, cast
 import graphviz
 
 from .._errors import InvalidArgumentError
+from ..utils.display import user_stacklevel
+
+#: Live viewer child handles (r-b6 R40-1). Retained so every launch can reap
+#: previously-exited viewers; without this the discarded ``Popen`` handle left
+#: one persistent zombie per process (each new spawn reaped the previous
+#: corpse, so the census never returned to baseline).
+_VIEWER_PROCS: list[subprocess.Popen[bytes]] = []
+
+
+def _reap_finished_viewers() -> None:
+    """Drop (and thereby reap) every viewer child that has already exited."""
+
+    _VIEWER_PROCS[:] = [proc for proc in _VIEWER_PROCS if proc.poll() is None]
 
 
 def _is_interactive_display_context() -> bool:
@@ -83,17 +96,20 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
     try:
         if sys.platform == "win32":
             os.startfile(filepath)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(
-                ["open", filepath],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
         else:
-            subprocess.Popen(
-                ["xdg-open", filepath],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            # r-b6 R40-1/3a: retain the handle and reap prior viewer children
+            # (the discarded Popen left one persistent zombie per process),
+            # and detach the viewer into its own session so a later render
+            # timeout kill cannot orphan its grandchildren onto us.
+            _reap_finished_viewers()
+            _VIEWER_PROCS.append(
+                subprocess.Popen(
+                    [opener, filepath],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
             )
         return True
     except (FileNotFoundError, OSError):
@@ -120,6 +136,30 @@ RENDER_TIMEOUT_SECONDS = 120
 MAX_MODULE_PENWIDTH = 5
 MIN_MODULE_PENWIDTH = 2
 PENWIDTH_RANGE = MAX_MODULE_PENWIDTH - MIN_MODULE_PENWIDTH
+
+
+_VISUALIZER_DIR_MARKER = "torchlens_visualizers_"
+
+
+def relativize_visualizer_image(path: str) -> str:
+    """Return an image path relative to the trace visualizer scratch root.
+
+    r-b6 R19-6: node ``image=`` attributes used to embed the absolute
+    ``tempfile.mkdtemp`` visualizer path, so every run's DOT differed in
+    every image node and byte-comparison/golden hashing was impossible for
+    those features. Emitting the path RELATIVE to the scratch root (with the
+    root supplied once through the graph-level ``imagepath`` attribute)
+    confines the per-run bytes to a single graph attribute. Paths outside a
+    visualizer scratch dir (user-supplied images) pass through unchanged.
+    """
+
+    marker_index = path.find(_VISUALIZER_DIR_MARKER)
+    if marker_index == -1:
+        return path
+    separator_index = path.find(os.sep, marker_index)
+    if separator_index == -1:
+        return path
+    return path[separator_index + 1 :]
 
 
 def strip_known_extension(outpath: str) -> str:
@@ -374,6 +414,7 @@ def render_dot_to_file(
             timeout=timeout_seconds,
             check=True,
             capture_output=True,
+            start_new_session=True,
         )
         render_succeeded = True
         if not save_only:
@@ -384,10 +425,14 @@ def render_dot_to_file(
             or (
                 f"Graphviz render timed out ({timeout_seconds}s). "
                 f"DOT source saved to '{source_path}'."
-            )
+            ),
+            stacklevel=user_stacklevel(),
         )
     except subprocess.CalledProcessError as exc:
-        warnings.warn(f"Graphviz render failed: {exc.stderr.decode()}")
+        warnings.warn(
+            f"Graphviz render failed: {exc.stderr.decode()}",
+            stacklevel=user_stacklevel(),
+        )
     finally:
         if render_succeeded and os.path.exists(source_path):
             os.remove(source_path)

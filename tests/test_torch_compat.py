@@ -176,13 +176,19 @@ def test_untyped_storage_wrapper_cache_probe_matches_runtime() -> None:
 def test_variable_functions_absence_falls_back_to_torch_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing ``torch._C._VariableFunctions`` falls back to public exports."""
+    """Missing ``torch._C._VariableFunctions`` degrades to an EMPTY roster.
+
+    r-b7 R42-2: the historical fallback returned ``torch.__all__`` — the wrong
+    namespace for a variable-function roster; had it ever been taken it would
+    have silently mis-seeded the wrapper inventory. An empty list skips
+    VF-based discovery honestly, with the flipped flag keeping it visible.
+    """
 
     _reset_capability(monkeypatch, "HAS_VARIABLE_FUNCTIONS")
     monkeypatch.setattr(tc, "_nested_getattr_or_none", lambda _root, _path: None)
     with pytest.warns(UserWarning, match="HAS_VARIABLE_FUNCTIONS"):
         names = tc.get_variable_function_names()
-    assert names == list(getattr(torch, "__all__", ()))
+    assert names == []
     assert tc.HAS_VARIABLE_FUNCTIONS is False
 
 
@@ -346,7 +352,6 @@ def test_torch_capability_snapshot_contract() -> None:
     """Capability snapshot keys and values provide a named torch-private API signal."""
     snapshot = tc.get_torch_capability_snapshot()
     expected = {
-        "HAS_AUTOCAST_DEVICE_TYPE_ARG": tc.AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED,
         "HAS_VARIABLE_FUNCTIONS": True,
         "HAS_TORCH_VF": True,
         "HAS_TORCH_FUNC": True,
@@ -443,16 +448,11 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_ATTENTION_CAUSAL_BIAS": tc.HAS_ATTENTION_CAUSAL_BIAS,
         "HAS_EXPANDED_WEIGHTS_CONV_PICKER": True,
         "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
-        # r35 decision E: ambient execution-context knobs are feature-detected and
-        # surfaced in the capability snapshot (values are runtime-dependent).
-        "HAS_FLOAT32_MATMUL_PRECISION": tc.HAS_FLOAT32_MATMUL_PRECISION,
-        "HAS_DETERMINISTIC_ALGORITHMS_QUERY": tc.HAS_DETERMINISTIC_ALGORITHMS_QUERY,
-        "HAS_CUDA_MATMUL_TF32": tc.HAS_CUDA_MATMUL_TF32,
-        "HAS_CUDNN_FLAGS": tc.HAS_CUDNN_FLAGS,
-        "HAS_SDP_TOGGLES": tc.HAS_SDP_TOGGLES,
-        # r53 hon_1: the global uninitialized-memory fill knob is an ambient
-        # execution-context knob, feature-detected and surfaced like the others.
-        "HAS_FILL_UNINITIALIZED_MEMORY": tc.HAS_FILL_UNINITIALIZED_MEMORY,
+        # r-b7 R42-1/6: the six ambient execution-context HAS_* flags and the
+        # HAS_AUTOCAST_DEVICE_TYPE_ARG alias are RETIRED — every control they
+        # guarded is a public torch surface older than the 2.1 floor, so the
+        # snapshot reads them directly and only the canonical autocast
+        # spelling remains published.
         "AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED": tc.AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED,
     }
 

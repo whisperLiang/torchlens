@@ -280,6 +280,31 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
         note="CLAUDE.md already records these as deprecated no-ops.",
     ),
     DeprecationFamily(
+        name="inert_option_fields",
+        kind="noop_kwarg",
+        replacement="nothing: the fields never had any effect",
+        remove_in="pending_maintainer_signoff",
+        deprecated_in="unrecorded",
+        sites=("torchlens/options.py::_warn_inert_option_field",),
+        members=(
+            "InterventionOptions(helper_validation=)",
+            "InterventionOptions(auto_promote=)",
+            "InterventionOptions(cohort_migration=)",
+            "InterventionOptions(error_severity_threshold=)",
+            "SaveOptions(output_dir=)",
+            "SaveOptions(save_level=)",
+            "SaveOptions(bundle_format=)",
+            "ReplayOptions(is_appended=)",
+            "ReplayOptions(device_override=)",
+        ),
+        note=(
+            "The grind b7 R47-1 write-only option fields: declared as reserved "
+            "'future' fields, accepted and validated, read by NOTHING. The "
+            "fields are deleted (setting them configured behavior that does "
+            "not exist); the keywords survive one window as loud no-ops."
+        ),
+    ),
+    DeprecationFamily(
         name="domain_node_styles",
         kind="kwarg_value",
         replacement="examples/recipes/<style>.py, or the future torchlens.<style> plugin",
@@ -811,6 +836,10 @@ def test_census_matches_the_recorded_baseline() -> None:
     are pre-existing shims that were being honored in SILENCE and now warn.
     ``flat_option_kwargs`` 80 -> 81 (``vis_opt``), plus the two new families for
     the alias property reads (3) and the legacy buffer-visibility bools (2).
+
+    Rebased in fixwave-2 (R47-1) for +9 spellings, again not new shims: the
+    nine write-only "future" option fields were DELETED (they were silent
+    no-ops), and their keywords now warn through ``inert_option_fields``.
     """
 
     assert deprecated_spelling_census() == {
@@ -822,6 +851,7 @@ def test_census_matches_the_recorded_baseline() -> None:
         "legacy_buffer_visibility_bools": 2,
         "crawler_era_noop_functions": 2,
         "crawler_era_noop_kwargs": 2,
+        "inert_option_fields": 9,
         "domain_node_styles": 2,
         "inert_backward_perturbation_flag": 1,
     }

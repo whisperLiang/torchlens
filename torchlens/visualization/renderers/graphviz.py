@@ -67,6 +67,7 @@ class GraphvizRenderer:
             check=True,
             capture_output=True,
             timeout=target.timeout,
+            start_new_session=True,
         )
         return RenderReport(dot.source, source_path, output_path)
 

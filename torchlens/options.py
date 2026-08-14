@@ -45,6 +45,29 @@ T = TypeVar("T")
 ActivationPostfunc = Callable[[torch.Tensor], torch.Tensor]
 GradientPostfunc = Callable[[torch.Tensor], torch.Tensor]
 
+
+def _warn_inert_option_field(class_name: str, field_name: str) -> None:
+    """Warn that a removed never-implemented option kwarg was supplied.
+
+    These spellings were declared as reserved "future" fields, accepted,
+    validated, and then read by nothing (grind b7 R47-1). Keeping them as
+    stored fields let callers configure behavior that does not exist, so the
+    fields are gone; the keyword survives one deprecation window as an
+    explicit no-op so setting it is at least VISIBLE instead of silent.
+    Registered in ``tests/test_deprecation_inventory.py`` under the
+    ``inert_option_fields`` family.
+    """
+
+    from ._deprecations import REMOVED_IN
+    from .utils.display import user_stacklevel
+
+    warnings.warn(
+        f"{class_name}.{field_name} never had any effect and no longer exists "
+        f"as a field; the keyword is ignored and will be removed in {REMOVED_IN}.",
+        TorchLensDeprecationWarning,
+        stacklevel=user_stacklevel(),
+    )
+
 _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "layers_to_save",
     "transform",
@@ -91,16 +114,12 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "save_budget",
     "distributed_witness",
     "raise_on_nan",
-    "_module_containment_engine",
 )
 _SAVE_FIELDS: Final[tuple[str, ...]] = (
-    "output_dir",
     "activation_transform",
     "grad_transform",
     "save_raw_activations",
     "save_raw_gradients",
-    "save_level",
-    "bundle_format",
 )
 _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "view",
@@ -141,17 +160,11 @@ _REPLAY_FIELDS: Final[tuple[str, ...]] = (
     "differentiable",
     "append",
     "chunk_size",
-    "is_appended",
-    "device_override",
 )
 _INTERVENTION_FIELDS: Final[tuple[str, ...]] = (
     "engine",
     "confirm_mutation",
     "strict",
-    "helper_validation",
-    "auto_promote",
-    "cohort_migration",
-    "error_severity_threshold",
 )
 _STREAMING_FIELDS: Final[tuple[str, ...]] = (
     "bundle_path",
@@ -612,19 +625,12 @@ def _validate_capture_values(values: Mapping[str, Any]) -> None:
     Raises
     ------
     ValueError
-        If ``_module_containment_engine``, ``jax_control_flow``, or
-        ``jax_max_control_flow_unroll`` holds an unsupported value.
+        If ``jax_control_flow`` or ``jax_max_control_flow_unroll`` holds an
+        unsupported value.
     TypeError
         If ``jax_max_control_flow_unroll`` is not an integer.
     """
 
-    if values["_module_containment_engine"] not in {"thread_replay", "hook_stack", "both"}:
-        raise InvalidArgumentError(
-            "Capture option _module_containment_engine has an unsupported value",
-            code="module_containment_engine_invalid",
-            remedy="set _module_containment_engine to 'thread_replay', 'hook_stack', or 'both'",
-            argument="_module_containment_engine",
-        )
     if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
         raise InvalidArgumentError(
             f"Capture option jax_control_flow={values['jax_control_flow']!r} is unsupported",
@@ -1007,7 +1013,6 @@ class CaptureOptions:
     save_budget: SaveBudgetOption = "auto"
     distributed_witness: str = "none"
     raise_on_nan: bool = False
-    _module_containment_engine: Literal["thread_replay", "hook_stack", "both"] = "hook_stack"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1057,9 +1062,6 @@ class CaptureOptions:
         save_budget: SaveBudgetOption | MissingType = MISSING,
         distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
-        _module_containment_engine: (
-            Literal["thread_replay", "hook_stack", "both"] | MissingType
-        ) = MISSING,
         *,
         mark_layer_depths: bool | MissingType = MISSING,
         num_context_lines: int | MissingType = MISSING,
@@ -1232,12 +1234,6 @@ class CaptureOptions:
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
             ),
-            "_module_containment_engine": _resolve_option_value(
-                "_module_containment_engine",
-                _module_containment_engine,
-                "hook_stack",
-                specified_fields,
-            ),
         }
         _validate_capture_values(values)
         _set_frozen_fields(self, _CAPTURE_FIELDS, values)
@@ -1278,8 +1274,6 @@ class SaveOptions:
 
     Parameters
     ----------
-    output_dir:
-        Future save target directory; currently inert during capture.
     activation_transform:
         Optional transform applied to each out before storage.
     grad_transform:
@@ -1288,10 +1282,12 @@ class SaveOptions:
         Whether raw outs remain available when transformed.
     save_raw_gradients:
         Whether raw grads remain available when transformed.
+    output_dir:
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     save_level:
-        Future portable-save level; currently inert during capture.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     bundle_format:
-        Future save bundle format selector; currently inert during capture.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1300,13 +1296,10 @@ class SaveOptions:
     True
     """
 
-    output_dir: str | Path | None = None
     activation_transform: ActivationPostfunc | None = None
     grad_transform: GradientPostfunc | None = None
     save_raw_activations: bool = True
     save_raw_gradients: bool = True
-    save_level: str | None = None
-    bundle_format: str | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1321,9 +1314,15 @@ class SaveOptions:
     ) -> None:
         """Initialize a frozen save option bundle."""
 
+        for inert_name, inert_value in (
+            ("output_dir", output_dir),
+            ("save_level", save_level),
+            ("bundle_format", bundle_format),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("SaveOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
-            "output_dir": _resolve_option_value("output_dir", output_dir, None, specified_fields),
             "activation_transform": _resolve_option_value(
                 "activation_transform", activation_transform, None, specified_fields
             ),
@@ -1335,10 +1334,6 @@ class SaveOptions:
             ),
             "save_raw_gradients": _resolve_option_value(
                 "save_raw_gradients", save_raw_gradients, True, specified_fields
-            ),
-            "save_level": _resolve_option_value("save_level", save_level, None, specified_fields),
-            "bundle_format": _resolve_option_value(
-                "bundle_format", bundle_format, None, specified_fields
             ),
         }
         _set_frozen_fields(self, _SAVE_FIELDS, values)
@@ -1715,9 +1710,9 @@ class ReplayOptions:
         Forward chunk size for rerun chunking sugar. Splits positional input
         along dimension 0 and appends compatible chunks.
     is_appended:
-        Future append-state override; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     device_override:
-        Future replay device override; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1731,8 +1726,6 @@ class ReplayOptions:
     differentiable: bool = False
     append: bool = False
     chunk_size: int | None = None
-    is_appended: bool | None = None
-    device_override: str | torch.device | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1747,6 +1740,12 @@ class ReplayOptions:
     ) -> None:
         """Initialize a frozen replay option bundle."""
 
+        for inert_name, inert_value in (
+            ("is_appended", is_appended),
+            ("device_override", device_override),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("ReplayOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "strict": _resolve_option_value("strict", strict, False, specified_fields),
@@ -1756,12 +1755,6 @@ class ReplayOptions:
             ),
             "append": _resolve_option_value("append", append, False, specified_fields),
             "chunk_size": _resolve_option_value("chunk_size", chunk_size, None, specified_fields),
-            "is_appended": _resolve_option_value(
-                "is_appended", is_appended, None, specified_fields
-            ),
-            "device_override": _resolve_option_value(
-                "device_override", device_override, None, specified_fields
-            ),
         }
         _set_frozen_fields(self, _REPLAY_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
@@ -1801,13 +1794,13 @@ class InterventionOptions:
     strict:
         Whether selector and propagation checks raise instead of warning.
     helper_validation:
-        Future helper-validation mode; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     auto_promote:
-        Future capture auto-promotion toggle; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     cohort_migration:
-        Future cohort migration toggle; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     error_severity_threshold:
-        Future severity threshold for intervention errors; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1819,10 +1812,6 @@ class InterventionOptions:
     engine: str = "auto"
     confirm_mutation: bool = False
     strict: bool = False
-    helper_validation: str = "default"
-    auto_promote: bool = False
-    cohort_migration: bool = True
-    error_severity_threshold: str = "recoverable"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1837,6 +1826,14 @@ class InterventionOptions:
     ) -> None:
         """Initialize a frozen intervention option bundle."""
 
+        for inert_name, inert_value in (
+            ("helper_validation", helper_validation),
+            ("auto_promote", auto_promote),
+            ("cohort_migration", cohort_migration),
+            ("error_severity_threshold", error_severity_threshold),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("InterventionOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "engine": _resolve_option_value("engine", engine, "auto", specified_fields),
@@ -1844,21 +1841,6 @@ class InterventionOptions:
                 "confirm_mutation", confirm_mutation, False, specified_fields
             ),
             "strict": _resolve_option_value("strict", strict, False, specified_fields),
-            "helper_validation": _resolve_option_value(
-                "helper_validation", helper_validation, "default", specified_fields
-            ),
-            "auto_promote": _resolve_option_value(
-                "auto_promote", auto_promote, False, specified_fields
-            ),
-            "cohort_migration": _resolve_option_value(
-                "cohort_migration", cohort_migration, True, specified_fields
-            ),
-            "error_severity_threshold": _resolve_option_value(
-                "error_severity_threshold",
-                error_severity_threshold,
-                "recoverable",
-                specified_fields,
-            ),
         }
         _set_frozen_fields(self, _INTERVENTION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))

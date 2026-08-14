@@ -15,7 +15,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from ..._errors import InvalidArgumentError
-from ...utils.display import atomic_write_text
+from ...utils.display import atomic_write_text, user_stacklevel
 from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
@@ -218,23 +218,26 @@ def _compute_topological_layout(
     compound_bboxes = {}
     padding = 60  # points around contained nodes
 
+    # r-b6 R19-2: bboxes are keyed by the FULL pass-qualified region key.
+    # Collapsing "addr:2" to "addr" made every pass cluster share ONE
+    # last-write-wins bbox, and since the write order was set-iteration
+    # order, the surviving geometry was PYTHONHASHSEED-dependent. Sorted
+    # iteration keeps any remaining tie-breaks deterministic.
     all_mod_keys = set(module_direct_nodes.keys()) | set(module_child_map.keys())
-    for mod_key in all_mod_keys:
+    for mod_key in sorted(all_mod_keys):
         module_node_labels = _collect_module_node_labels(mod_key)
         if not module_node_labels:
             continue
         xs = []
         ys = []
-        for eid in module_node_labels:
+        for eid in sorted(module_node_labels):
             cx, cy = positions[eid]
             w, h = node_label_sizes.get(eid, (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT))
             xs.extend([cx - w / 2, cx + w / 2])
             ys.extend([cy - h / 2, cy + h / 2])
         min_x, max_x_val = min(xs) - padding, max(xs) + padding
         min_y, max_y_val = min(ys) - padding, max(ys) + padding
-        mod_addr = mod_key.split(":")[0] if ":" in mod_key else mod_key
-        group_id = f"group_{mod_addr}"
-        compound_bboxes[group_id] = (
+        compound_bboxes[f"group_{mod_key}"] = (
             min_x,
             min_y,
             max_x_val - min_x,
@@ -553,11 +556,14 @@ def render_rank_layout(
             name = str(attrs.pop("name", statement.args[0] if statement.args else node.name))
         else:
             continue
-        rank_name = (
-            (node.source_label or name).replace(":", "pass") if node.kind != "module_box" else name
-        )
+        # r-b6 R19-2: identity comes from the RENDERER-UNIQUE node name, never
+        # the pass-free ``source_label`` — preferring the source label made
+        # every recurrent pass collapse into ONE node_data entry, so all
+        # passes shared a single positioned node and their clusters inherited
+        # one (last-write-wins) geometry.
+        rank_name = name.replace(":", "pass") if node.kind != "module_box" else name
         rank_names[node.name] = rank_name
-        node_data[rank_name] = {"attrs": attrs, "node_label": node.source_label or rank_name}
+        node_data[rank_name] = {"attrs": attrs, "node_label": rank_name}
         if "solid" in str(attrs.get("style", "")):
             for region_key in node.region_path:
                 module_has_ancestor[region_key] = True
@@ -670,14 +676,15 @@ def render_rank_layout(
         # whether or not the name is quoted.
         lines.append(f"{prefix}subgraph {_dot_id(f'cluster_{safe}')} {{")
 
-        mod_addr = mod_key.split(":")[0] if ":" in mod_key else mod_key
         mod_attrs = dict(region_by_key[mod_key].style)
         mod_attrs["label"] = str(mod_attrs["label"]).replace("align='left'", 'align="left"')
         mod_attrs["style"] = "filled,solid" if module_has_ancestor.get(mod_key) else "filled,dashed"
         mod_attrs["penwidth"] = f"{compute_module_penwidth(depth, max_nest):.1f}"
         mod_attrs.pop("margin", None)
 
-        group_id = f"group_{mod_addr}"
+        # r-b6 R19-2: pass-qualified lookup — each pass cluster gets ITS OWN
+        # bbox instead of whichever pass's geometry happened to write last.
+        group_id = f"group_{mod_key}"
         if group_id in compound_bboxes:
             ex, ey, ew, eh = compound_bboxes[group_id]
             # Convert rank-layout coords (y-down) to graphviz bb (y-up).
@@ -749,7 +756,8 @@ def render_rank_layout(
         warnings.warn(
             f"Graph has {num_rank_nodes} nodes. PDF/PNG rendering may produce "
             f"empty output at this scale. Consider using vis_fileformat='svg' "
-            f"for large graphs; SVG files are zoomable in any browser."
+            f"for large graphs; SVG files are zoomable in any browser.",
+            stacklevel=user_stacklevel(),
         )
 
     source_path = f"{vis_outpath}.dot"
@@ -862,7 +870,9 @@ def _run_neato(
         rendered_path,
         source_path,
     ]
-    return subprocess.run(cmd, timeout=render_timeout, capture_output=True, text=True)
+    return subprocess.run(
+        cmd, timeout=render_timeout, capture_output=True, text=True, start_new_session=True
+    )
 
 
 def _run_neato_with_fallbacks(
@@ -903,7 +913,8 @@ def _run_neato_with_fallbacks(
             raise
         warnings.warn(
             "neato spline routing timed out; retrying with straight-line edges "
-            "(-Gsplines=line). The graph is rendered with straight edges."
+            "(-Gsplines=line). The graph is rendered with straight edges.",
+            stacklevel=user_stacklevel(),
         )
         result = _run_neato(
             rendered_path=rendered_path,
@@ -924,7 +935,8 @@ def _run_neato_with_fallbacks(
             warnings.warn(
                 "neato layout exceeded the rtree coordinate limit; retrying with "
                 "straight-line edges and down-scaled pinned coordinates so the "
-                "canvas fits. Geometry is preserved (uniform scale)."
+                "canvas fits. Geometry is preserved (uniform scale).",
+                stacklevel=user_stacklevel(),
             )
             atomic_write_text(source_path, rescaled)
             result = _run_neato(

@@ -12,27 +12,27 @@
 <text text-anchor="start" x="8" y="-2406.7" font-family="Times,serif" font-weight="bold" font-size="14.00">ResNet</text>
 <text text-anchor="start" x="8" y="-2392.7" font-family="Times,serif" font-size="14.00">151 tensors total (2.7 MB)</text>
 <text text-anchor="start" x="8" y="-2378.7" font-family="Times,serif" font-size="14.00">11689512 params (all trainable, 44.6 MB)</text>
-<g id="clust3" class="cluster">
+<g id="clust2" class="cluster">
 <title>cluster_layer1_pass1</title>
-<polygon fill="white" stroke="black" stroke-width="5" stroke-dasharray="5,2" points="173,-614.92 173,-932.92 439,-932.92 439,-614.92 173,-614.92"/>
+<polygon fill="white" stroke="black" stroke-width="5" points="173,-614.92 173,-932.92 439,-932.92 439,-614.92 173,-614.92"/>
 <text text-anchor="start" x="181" y="-918.72" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer1</text>
 <text text-anchor="start" x="181" y="-904.72" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust4" class="cluster">
+<g id="clust3" class="cluster">
 <title>cluster_layer2_pass1</title>
-<polygon fill="white" stroke="black" stroke-width="5" stroke-dasharray="5,2" points="169,-940.92 169,-1258.92 443,-1258.92 443,-940.92 169,-940.92"/>
+<polygon fill="white" stroke="black" stroke-width="5" points="169,-940.92 169,-1258.92 443,-1258.92 443,-940.92 169,-940.92"/>
 <text text-anchor="start" x="177" y="-1244.72" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer2</text>
 <text text-anchor="start" x="177" y="-1230.72" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust5" class="cluster">
+<g id="clust4" class="cluster">
 <title>cluster_layer3_pass1</title>
-<polygon fill="white" stroke="black" stroke-width="5" stroke-dasharray="5,2" points="164,-1266.92 164,-1584.92 448,-1584.92 448,-1266.92 164,-1266.92"/>
+<polygon fill="white" stroke="black" stroke-width="5" points="164,-1266.92 164,-1584.92 448,-1584.92 448,-1266.92 164,-1266.92"/>
 <text text-anchor="start" x="172" y="-1570.72" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer3</text>
 <text text-anchor="start" x="172" y="-1556.72" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>
-<g id="clust6" class="cluster">
+<g id="clust5" class="cluster">
 <title>cluster_layer4_pass1</title>
-<polygon fill="white" stroke="black" stroke-width="5" stroke-dasharray="5,2" points="164,-1592.92 164,-1910.92 448,-1910.92 448,-1592.92 164,-1592.92"/>
+<polygon fill="white" stroke="black" stroke-width="5" points="164,-1592.92 164,-1910.92 448,-1910.92 448,-1592.92 164,-1592.92"/>
 <text text-anchor="start" x="172" y="-1896.72" font-family="Times,serif" font-weight="bold" font-size="14.00">@layer4</text>
 <text text-anchor="start" x="172" y="-1882.72" font-family="Times,serif" font-size="14.00">(Sequential)</text>
 </g>

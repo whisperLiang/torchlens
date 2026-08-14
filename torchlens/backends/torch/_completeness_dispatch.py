@@ -697,7 +697,7 @@ def _make_invisible_escape_wrapper(original: Any, state: _WitnessState, name: st
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled:
                     if record_source:
-                        _record_escape_source_tensor(state.trace, self, invisible=True)
+                        _record_escape_source_tensor(state.trace, self)
                     if records_state_view_geometry:
                         _observe_state_metadata_read(
                             state.trace, self, STATE_METADATA_MIRROR["stride"][1]

@@ -241,7 +241,12 @@ def test_feature_map_node_spec_renders_one_image_and_overlay_differs_from_fallba
 
     image_paths = list((Path(trace._visualizer_dir) / "feature_maps").glob("*.png"))
     assert len(image_paths) == 1
-    assert str(image_paths[0]) in dot
+    # R19-6: node image attrs are visualizer-relative; the mkdtemp root appears
+    # exactly once as the graph-level imagepath attribute, never per node.
+    relative_image = image_paths[0].relative_to(trace._visualizer_dir)
+    assert f'image="{relative_image}"' in dot
+    assert f'imagepath="{trace._visualizer_dir}"' in dot
+    assert f'image="{image_paths[0]}"' not in dot
     image = Image.open(image_paths[0])
     assert image.size == (72, 148)
 

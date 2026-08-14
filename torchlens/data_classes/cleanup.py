@@ -201,28 +201,6 @@ def _filter_conditional_arm_children(
     return filtered_children_by_cond
 
 
-def _filter_conditional_elif_children(
-    conditional_elif_children: dict[int, list[str]],
-    labels_to_remove: set[str],
-) -> dict[int, list[str]]:
-    """Drop removed labels from ``conditional_elif_children``.
-
-    Args:
-        conditional_elif_children: ``elif_index -> child labels``.
-        labels_to_remove: Labels that should be removed.
-
-    Returns:
-        A new dict with removed labels and empty lists pruned.
-    """
-    return {
-        elif_ix: [
-            child_label for child_label in child_labels if child_label not in labels_to_remove
-        ]
-        for elif_ix, child_labels in conditional_elif_children.items()
-        if any(child_label not in labels_to_remove for child_label in child_labels)
-    }
-
-
 def _filter_conditional_arm_entry_edges(
     conditional_arm_entry_edges: dict[tuple[int, str], list[tuple[str, str]]],
     labels_to_remove: set[str],

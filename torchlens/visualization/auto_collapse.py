@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import re
 import time
 import warnings
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._errors import InvalidArgumentError
 from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
+from ._render_common import strict_collapse_checks_enabled
 from .collapse_plan import RenderContext, collapse_plan_for_trace, count
 
 if TYPE_CHECKING:
@@ -931,7 +931,9 @@ def module_collapse_score(module: Module) -> float:
     return dict(collapse_order(trace)).get(module.address, 0.0)
 
 
-def _module_structural_signature(module: Module) -> tuple[int, int, int, int]:
+def _module_structural_signature(
+    module: Module,
+) -> tuple[int, int, int, int, tuple[tuple[str, str], ...]]:
     """Return a per-module structural fingerprint for fold-honesty checks.
 
     Two modules are only considered structurally interchangeable for the
@@ -942,6 +944,12 @@ def _module_structural_signature(module: Module) -> tuple[int, int, int, int]:
     layers/params) can never be silently hidden inside a ``+N more`` box that
     claims uniformity.
 
+    r-b6 R19-1: counts alone were not enough — a kwargs-different conv
+    (dilation 2) and a tanh-for-relu block both matched the historical 4-int
+    fingerprint, so two DIFFERENT models rendered byte-identical DOT under
+    the homogeneity claim. The fingerprint therefore also carries the ordered
+    per-layer op-type sequence and a canonical ``func_config`` digest.
+
     Parameters
     ----------
     module:
@@ -949,16 +957,43 @@ def _module_structural_signature(module: Module) -> tuple[int, int, int, int]:
 
     Returns
     -------
-    tuple[int, int, int, int]
-        ``(num_layers, num_params, num_params_trainable, num_params_frozen)``.
+    tuple
+        ``(num_layers, num_params, num_params_trainable, num_params_frozen,
+        ops_signature)`` where ``ops_signature`` is a tuple of
+        ``(op_type, func_config_digest)`` rows in layer order.
     """
 
+    ops_signature = tuple(
+        (
+            str(getattr(layer, "func_name", None) or getattr(layer, "layer_type", "")),
+            _func_config_digest(getattr(layer, "func_config", None)),
+        )
+        for layer in module.layers
+    )
     return (
         int(module.num_layers),
         int(module.num_params),
         int(module.num_params_trainable),
         int(module.num_params_frozen),
+        ops_signature,
     )
+
+
+def _func_config_digest(func_config: Any) -> str:
+    """Return a canonical, order-independent digest of one ``func_config``.
+
+    ``func_config`` values are capture-recorded primitives (ints, tuples,
+    strings), so ``repr`` over key-sorted items is deterministic. An exotic
+    unsortable/unreprable config degrades to its type name — coarser matching,
+    never a crash.
+    """
+
+    if not func_config:
+        return ""
+    try:
+        return repr(sorted(func_config.items(), key=lambda item: str(item[0])))
+    except Exception:
+        return type(func_config).__name__
 
 
 def _module_trainability_signature(module: Module) -> tuple[bool, bool]:
@@ -2750,16 +2785,8 @@ def _assert_plan_count(
     _warn_count_mismatch_once(message)
 
 
-def _strict_count_checks_enabled() -> bool:
-    """Return whether collapse count mismatches should fail loudly.
-
-    Returns
-    -------
-    bool
-        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
-    """
-
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+# r-b7 R42-9: one shared TORCHLENS_COLLAPSE_STRICT parser (_render_common).
+_strict_count_checks_enabled = strict_collapse_checks_enabled
 
 
 def _warn_count_mismatch_once(message: str) -> None:

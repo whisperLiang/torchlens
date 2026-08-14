@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from .._errors import InvalidArgumentError
 from .node_spec import NodeSpec
@@ -246,37 +245,3 @@ def theme_edge_attrs(theme: VisualizationTheme, *, font_size: int | None = None)
         attrs["fontsize"] = str(font_size)
     return attrs
 
-
-def legend_lines(theme: VisualizationTheme) -> list[str]:
-    """Return human-readable legend lines for ``theme``.
-
-    Parameters
-    ----------
-    theme:
-        Resolved theme preset.
-
-    Returns
-    -------
-    list[str]
-        Legend rows.
-    """
-
-    return [f"{label}: {color}" for label, color in theme.legend_items]
-
-
-def semantic_class_attrs(node_kind: str) -> dict[str, Any]:
-    """Return semantic SVG/CSS attributes for a TorchLens node kind.
-
-    Parameters
-    ----------
-    node_kind:
-        Semantic node kind.
-
-    Returns
-    -------
-    dict[str, Any]
-        Attribute mapping for exporters.
-    """
-
-    safe_kind = node_kind.replace("_", "-")
-    return {"class": f"tl-node tl-node-{safe_kind}"}
