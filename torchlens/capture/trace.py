@@ -1411,11 +1411,15 @@ def run_and_log_inputs_through_model(
         else contextlib.nullcontext()
     )
     compiled_capture_prep = compiled_capture_context.__enter__()
-    if not isinstance(compiled_capture_prep, CompiledCapturePrep):
-        compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
-    compiled_callable_sites = compiled_capture_prep.sites
 
     try:
+        # B8-25b: everything after ``__enter__`` runs INSIDE the try whose
+        # ``finally`` exits the context -- a KeyboardInterrupt between enter
+        # and try used to strand the compiled-submodule swaps on the user
+        # model with no unwind.
+        if not isinstance(compiled_capture_prep, CompiledCapturePrep):
+            compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
+        compiled_callable_sites = compiled_capture_prep.sites
         global _ACTIVE_CAPTURE_BACKEND
         previous_capture_backend = _ACTIVE_CAPTURE_BACKEND
         _ACTIVE_CAPTURE_BACKEND = backend
@@ -1881,7 +1885,25 @@ def run_and_log_inputs_through_model(
         compiled_unwrap_exception = sys.exc_info()
         committed_ops = count_committed_ops(self)
         try:
-            backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
+            try:
+                backend.cleanup_model_session(
+                    self, (model, input_tensors, (input_args, input_kwargs))
+                )
+            except Exception as cleanup_exc:
+                # B8-23: the PRIMARY control-flow exception (KeyboardInterrupt /
+                # SystemExit) must propagate. Letting an ordinary cleanup
+                # Exception escape here demoted the KI to ``__context__``, and
+                # a caller's ``except Exception`` retry loop swallowed Ctrl-C
+                # outright. Attach the cleanup failure instead of raising it.
+                note = (
+                    "TorchLens model-session cleanup also failed while handling "
+                    f"this interrupt: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
+                add_note = getattr(interrupt_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
             self.__dict__.pop("_capture_producer_policy", None)
         finally:
             settle_failed(
