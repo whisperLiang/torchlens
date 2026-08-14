@@ -116,3 +116,55 @@ def test_jit_script_wrapped_functional_python_op() -> None:
     scripted = torch.jit.script(_calls_softsign)
     x = torch.randn(8)
     assert torch.allclose(scripted(x), torch.nn.functional.softsign(x))
+
+
+class _MaxPoolModule(nn.Module):
+    """Module calling a boolean-dispatched functional (the F.max_pool* family)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply a 2x2 max pool."""
+
+        return torch.nn.functional.max_pool2d(x, kernel_size=2)
+
+
+class _InterpolateModule(nn.Module):
+    """Module calling a pure-Python functional whose source needs extra globals."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Upsample by 2x with nearest-neighbor interpolation."""
+
+        return torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+
+
+def test_jit_script_boolean_dispatched_functional_while_wrapped() -> None:
+    """TorchScript must compile the boolean-dispatched ``F.max_pool*`` family
+    while wrappers are installed.
+
+    Regression: ``torch._jit_internal.boolean_dispatched`` is keyed by the
+    ORIGINAL function objects, so the namespace wrapper missed the table and
+    jit tried to compile the wrapper's varargs source (``NotSupportedError``).
+    """
+
+    _require_torch_jit()
+
+    scripted = torch.jit.script(_MaxPoolModule())
+    x = torch.randn(1, 1, 4, 4)
+    assert torch.allclose(scripted(x), torch.nn.functional.max_pool2d(x, kernel_size=2))
+
+
+def test_jit_script_functional_needing_original_globals_while_wrapped() -> None:
+    """TorchScript must compile a wrapped pure-Python functional whose source
+    resolves names beyond the imported torch.overrides boilerplate.
+
+    Regression: jit pulled ``F.interpolate``'s original source but resolved
+    globals against the WRAPPER module (``undefined value math``); the
+    ``__prepare_scriptable__`` hook now hands jit the original function with
+    its own self-consistent globals.
+    """
+
+    _require_torch_jit()
+
+    scripted = torch.jit.script(_InterpolateModule())
+    x = torch.randn(1, 1, 4, 4)
+    expected = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+    assert torch.allclose(scripted(x), expected)

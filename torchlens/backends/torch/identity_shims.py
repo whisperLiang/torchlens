@@ -21,7 +21,11 @@ found exactly these sites; compiler/export/testing namespaces are out of
 capture scope by contract. A fourth normalization rides along:
 ``torch.overrides.resolve_name`` keys its cached index by the pre-warm
 originals, so a wrapper argument resolved to ``None`` -- the shim retries a
-miss with the ledger original. The standing installed-tree grep gate lives
+miss with the ledger original. A fifth normalizes TorchScript's overload
+resolver (``torch.jit._script._get_overloads``): it is the one recursive
+compilation entry that skips ``__prepare_scriptable__``, so a wrapped
+overloaded functional compiled its original source against the wrapper's
+globals. The standing installed-tree grep gate lives
 in ``tests/test_wrap_state_compat.py``; the ``nested/_internal`` NJT
 identity reads it surfaces are a documented unshimmed residual (nested
 jagged tensors are not supported capture inputs).
@@ -258,6 +262,7 @@ def install_identity_shims() -> None:
         _install_causal_bias_shim(records)
         _install_expanded_weights_shims(records)
         _install_resolve_name_shim(records)
+        _install_jit_overload_shim(records)
     except Exception:
         _restore(records)
         raise
@@ -571,6 +576,47 @@ def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
     setattr(resolve_name_shim, _SHIM_MARKER, True)
     overrides_module.resolve_name = resolve_name_shim
     records.append((overrides_module, "resolve_name", orig_resolve))
+
+
+# ---------------------------------------------------------------------------
+# Site 5: torch.jit._script._get_overloads
+# ---------------------------------------------------------------------------
+
+
+def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim TorchScript's overload resolver to the wrapper's original basis.
+
+    The C++ sugared-value layer resolves a called functional to the CURRENT
+    namespace object (the torchlens wrapper) and hands it to
+    ``torch.jit._script._get_overloads`` — the one recursive-compilation entry
+    that does NOT honor ``__prepare_scriptable__``. It then compiled the
+    ORIGINAL source (``inspect.unwrap`` follows ``__wrapped__``) against the
+    WRAPPER's globals, so every overloaded pure-Python functional
+    (``F.interpolate``, ``F.adaptive_avg_pool2d/3d``) failed to script with
+    ``undefined value math`` while wrappers were installed. Normalizing a
+    torchlens wrapper to its original before delegating hands torch a
+    self-consistent (source, globals) pair; every other caller is untouched.
+    """
+
+    module = _torch_compat.get_jit_overload_resolver_module()
+    if module is None:
+        return
+    orig_get_overloads = vars(module).get("_get_overloads")
+    if orig_get_overloads is None or _is_shimmed(orig_get_overloads):
+        return
+
+    @functools.wraps(orig_get_overloads)
+    def get_overloads_shim(obj: Any) -> Any:
+        """Resolve a torchlens wrapper to its original before overload lookup."""
+        if getattr(obj, "__tl_wrapper_name__", None) is not None:
+            prepare = getattr(obj, "__prepare_scriptable__", None)
+            if prepare is not None:
+                obj = prepare()
+        return orig_get_overloads(obj)
+
+    setattr(get_overloads_shim, _SHIM_MARKER, True)
+    module._get_overloads = get_overloads_shim
+    records.append((module, "_get_overloads", orig_get_overloads))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:
