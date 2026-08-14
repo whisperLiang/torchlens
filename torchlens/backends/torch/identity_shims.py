@@ -17,8 +17,15 @@ broken operand pairings are:
 
 Census (2026-08-14, installed-source grep over the supported eager range,
 identity/equality forms against wrappable callables, runtime paths only)
-found exactly these sites; compiler/export/testing namespaces are out of
-capture scope by contract. A fourth normalization rides along:
+found exactly these sites for the ``is``-comparison FORM; compiler/export/
+testing namespaces are out of capture scope by contract. The grep cannot see
+the third wrap-state shape -- a container built at import time and consulted
+by MEMBERSHIP at call time (the shimmed expanded-weights tables are exactly
+that shape). The runtime membership-container census and its reviewed
+allowlist (``torch._library.utils._RANDOM_FUNCTIONS``, the MaskedTensor
+reduce maps, the lazy-module ``_allowed_methods`` allowlist -- each safe on
+an eager-import or protocol-supplied-original basis) live in
+``tests/test_wrap_state_compat.py``; an unreviewed new table fails that gate. A fourth normalization rides along:
 ``torch.overrides.resolve_name`` keys its cached index by the pre-warm
 originals, so a wrapper argument resolved to ``None`` -- the shim retries a
 miss with the ledger original. A fifth normalizes TorchScript's overload

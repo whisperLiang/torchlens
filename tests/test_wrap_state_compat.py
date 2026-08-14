@@ -652,3 +652,132 @@ def test_import_callback_unwrap_race_cannot_corrupt_shim_state(
     finally:
         unwrap_torch()
         wrap_torch()
+
+
+# ---------------------------------------------------------------------------
+# 7. R55 membership-form census — import-time CONTAINER tables (b7 blind spot)
+# ---------------------------------------------------------------------------
+
+# (module name, attribute name) -> reviewed rationale. The defaults scan (1)
+# and the `is`-form grep gate (2) cannot see the THIRD wrap-state shape: a
+# container built at IMPORT time and consulted by MEMBERSHIP at call time
+# (exactly the shape of the shimmed expanded-weights handler tables). Every
+# import-time container holding a WRAPPED-ORIGINAL torch callable must be a
+# reviewed entry here; a new torch release adding one fails this gate.
+_MEMBERSHIP_TABLE_REVIEWED: dict[tuple[str, str], str] = {
+    ("torch._library.utils", "_RANDOM_FUNCTIONS"): (
+        "is_impure()/fx DCE authority; eagerly imported with torch so keys are "
+        "pre-wrap originals, and fx records the protocol-supplied ORIGINAL as "
+        "the node target (verified), so membership answers stay correct."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TORCH_REDUCE_MAP"): (
+        "MaskedTensor reduction dispatch; eagerly imported with torch, and the "
+        "C-level __torch_function__ protocol supplies the ORIGINAL func operand."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TENSOR_REDUCE_MAP"): (
+        "MaskedTensor reduction dispatch; same basis as TORCH_REDUCE_MAP."
+    ),
+    ("torch._jit_internal", "boolean_dispatched"): (
+        "TorchScript boolean-dispatch table; deliberately DUAL-KEYED by "
+        "torchlens (each wrapper registered alongside its original sharing one "
+        "dispatch record), so membership holds under either alias."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TORCH_REDUCE_FNS"): (
+        "Source list the reduce MAPs are built from; same eager-import basis."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TENSOR_REDUCE_FNS"): (
+        "Source list the reduce MAPs are built from; same eager-import basis."
+    ),
+    ("torch.nn.parameter", "UninitializedTensorMixin._allowed_methods"): (
+        "Lazy-module materialization allowlist consulted from "
+        "UninitializedTensorMixin.__torch_function__, where the C-level "
+        "protocol supplies the ORIGINAL func operand; eagerly imported."
+    ),
+}
+
+# Compiler/export/quantization namespaces are out of capture scope by contract
+# (the identity-shim census covers eager runtime paths only).
+_MEMBERSHIP_SCAN_SKIP_PREFIXES = (
+    "torch._dynamo",
+    "torch._inductor",
+    "torch._prims",
+    "torch._refs",
+    "torch._decomp",
+    "torch.ao",
+    "torch.quantization",
+    "torch.fx",
+    "torch.jit",
+    "torch.onnx",
+    "torch.testing",
+    "torch.distributed",
+)
+
+
+def _iter_membership_hits() -> list[tuple[str, str]]:
+    """Scan loaded torch modules for containers holding wrapped originals."""
+
+    import sys as sys_module
+
+    wrapped_original_ids = set(_state._orig_to_decorated.keys())
+    hits: set[tuple[str, str]] = set()
+
+    def _container_members(value) -> list:
+        try:
+            if isinstance(value, dict):
+                return list(value.keys())
+            if isinstance(value, (set, frozenset, tuple, list)):
+                return list(value)
+            if type(value).__name__ == "WeakKeyDictionary":
+                return list(value.keys())
+        except Exception:
+            return []
+        return []
+
+    def _scan_namespace(mod_name: str, holder_name: str, namespace: dict) -> None:
+        for attr_name, value in list(namespace.items()):
+            members = _container_members(value)
+            if not members:
+                continue
+            if any(id(member) in wrapped_original_ids for member in members):
+                hits.add((mod_name, f"{holder_name}{attr_name}"))
+
+    for mod_name, module in list(sys_module.modules.items()):
+        if module is None or not mod_name.startswith("torch"):
+            continue
+        if mod_name.startswith(_MEMBERSHIP_SCAN_SKIP_PREFIXES):
+            continue
+        module_vars = getattr(module, "__dict__", None)
+        if not isinstance(module_vars, dict):
+            continue
+        _scan_namespace(mod_name, "", module_vars)
+        for cls_name, value in list(module_vars.items()):
+            if isinstance(value, type) and getattr(value, "__module__", None) == mod_name:
+                _scan_namespace(mod_name, f"{cls_name}.", dict(vars(value)))
+    return sorted(hits)
+
+
+def test_import_time_membership_tables_holding_wrapped_originals_are_reviewed() -> None:
+    """Every import-time membership table keyed by wrapped originals is reviewed.
+
+    The wrap-state gates covered function DEFAULTS and ``is``-form source
+    comparisons but were structurally blind to import-time membership
+    CONTAINERS (b7-opus + b7-fable, independently corroborated) — the exact
+    shape of the already-shimmed expanded-weights tables. Their safety today
+    rests on eager import (keys are pre-wrap originals) and protocol-supplied
+    original operands; a torch release that adds a NEW such table, or an
+    unreviewed family, must fail here for review rather than flip silently.
+    """
+
+    _ensure_wrapped()
+    unreviewed = [
+        (mod_name, attr_name)
+        for mod_name, attr_name in _iter_membership_hits()
+        if (mod_name, attr_name) not in _MEMBERSHIP_TABLE_REVIEWED
+        and not mod_name.startswith("torch.nn.utils._expanded_weights")
+        and not mod_name.startswith("torchlens")
+    ]
+    assert unreviewed == [], (
+        "Unreviewed import-time membership tables hold wrapped-original torch "
+        f"callables: {unreviewed}. Review each (shim it like the expanded-weights "
+        "tables, or add a reasoned entry to _MEMBERSHIP_TABLE_REVIEWED)."
+    )
