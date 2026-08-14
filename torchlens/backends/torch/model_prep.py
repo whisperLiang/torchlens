@@ -1878,14 +1878,22 @@ def _make_user_forward_hook_wrapper(
                             intervention_replaced=True,
                         )
                     )
-                # This frame directly observed the genuine replacement (the raw
-                # user hook returned a traced tensor other than the module's
-                # original output), so it is the authority that mints
-                # trace-level replacement-event evidence for validation. The
-                # stamped op keeps its own replayable function, so validation
-                # still replays it (no exemption: a func-bearing op without its
-                # own live fire is never treated as an intentional boundary).
-                _note_replacement_event(trace, replacement_label)
+                # The hook returned an ALREADY-TRACED tensor: that REWIRES the
+                # module boundary to reuse an existing op's value, it does not
+                # replace that op's own computation. The durable
+                # ``intervention_replaced`` stamp above stays as the
+                # intervened-capture disclosure (runnable save keys its
+                # user_intervention_not_replayable refusal on it), but NO
+                # trace-level replacement-event ledger entry is minted here:
+                # that ledger corroboration is what exempts FUNCTIONLESS
+                # ``intervention_replacement`` ops from validation, and a
+                # traced tensor's producing op is an input/buffer/real op with
+                # its own honest exemption or replayable function. Minting it
+                # blessed ANY functionless op a hook happened to return --
+                # masking exactly the lost-func plain-capture gap the
+                # 2026-06-02 tripwire rule requires to STILL fail. Genuine
+                # opaque replacements (fresh untraced tensors) mint their
+                # ledger evidence on the synthesized boundary op below.
             else:
                 boundary_label = _ensure_module_output_tensor_logged(
                     trace, replacement, module, parent_labels
