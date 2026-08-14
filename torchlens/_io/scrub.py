@@ -590,19 +590,54 @@ def _scrub_value_kind(value_type: type) -> int:
     return kind
 
 
-# Type roots whose classes the default-deny safe unpickler can resolve at load
-# time. Anything OUTSIDE these roots pickles by module reference at save but is
-# REFUSED (or booby-trapped) by ``SafeBundleUnpickler`` at load -- a
-# save-succeeds/load-refuses trap the scrub must close on the save side.
-_PORTABLE_TYPE_ROOTS = ("torch", "torchlens")
-
-
 def _type_is_load_reconstructible(value_type: type) -> bool:
-    """Return whether the safe unpickler can rebuild instances of this type."""
+    """Return whether the safe unpickler can rebuild instances of this type.
+
+    Consults the loader's ACTUAL type authority rather than a namespace prefix
+    test (R10-4): the safe unpickler admits a ``torchlens`` type ONLY if its
+    exact ``(module, qualname)`` is on the vetted-inert ``_SAFE_TORCHLENS_TYPES``
+    allowlist and it is not an extras-gated appliance module. The prefix test
+    preserved off-allowlist / appliance torchlens types by TYPE into
+    ``metadata.pkl`` that the loader then REFUSED -- a save-succeeds /
+    load-refuses trap that made the whole bundle unloadable.
+    """
 
     module = getattr(value_type, "__module__", "") or ""
     root = module.split(".", 1)[0]
-    return root in _PORTABLE_TYPE_ROOTS
+    if root == "torchlens":
+        from ._safe_unpickle import _SAFE_TORCHLENS_TYPES, _is_torchlens_appliance_module
+
+        name = getattr(value_type, "__qualname__", None) or getattr(value_type, "__name__", "")
+        return (module, name) in _SAFE_TORCHLENS_TYPES and not _is_torchlens_appliance_module(
+            module
+        )
+    return root == "torch"
+
+
+def _factory_is_load_reconstructible(factory: Any) -> bool:
+    """Return whether the safe unpickler admits ``factory`` as a bare global.
+
+    The loader admits a ``builtins`` / ``collections`` default_factory ONLY if
+    its exact ``(module, name)`` is on ``_SAFE_EXPLICIT_GLOBALS`` (the pure-data
+    constructors: ``list``/``dict``/``int``/``OrderedDict``/...), never every
+    ``builtins`` global -- so a ``builtins.eval`` factory the prefix test
+    preserved was a load-refuses trap. A ``torchlens`` factory must additionally
+    pass ``is_inert_first_party_callable``.
+    """
+
+    module = getattr(factory, "__module__", "") or ""
+    root = module.split(".", 1)[0]
+    if root == "torch":
+        return True
+    if root == "torchlens":
+        from ..utils._callable_safety import is_inert_first_party_callable
+        from ._safe_unpickle import _is_torchlens_owned
+
+        return _is_torchlens_owned(factory) and is_inert_first_party_callable(factory)
+    from ._safe_unpickle import _SAFE_EXPLICIT_GLOBALS
+
+    name = getattr(factory, "__qualname__", None) or getattr(factory, "__name__", "")
+    return (module, name) in _SAFE_EXPLICIT_GLOBALS
 
 
 def _disclose_container_downgrade(
@@ -713,9 +748,7 @@ def _portable_default_factory(
     factory = value.default_factory
     if factory is None:
         return None
-    module = getattr(factory, "__module__", "") or ""
-    root = module.split(".", 1)[0]
-    if root in _PORTABLE_TYPE_ROOTS or root == "builtins":
+    if _factory_is_load_reconstructible(factory):
         return factory
     _disclose_container_downgrade(
         options,

@@ -171,6 +171,21 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     )
     calls = tuple(_parse_call(item) for item in _mapping_sequence(value, "calls"))
     slots = tuple(_parse_slot(item) for item in _mapping_sequence(value, "tensor_slots"))
+    # slot_id uniqueness was enforced NOWHERE (R10-15) while every sibling
+    # namespace dup-checks (call ids, witness families, registry ids, boundary
+    # positions). All slot indexes are last-wins dicts (e.g. slot_by_id at the
+    # SparseRunDescriptor build), but consumers iterate the slot LIST -- so a
+    # duplicated slot_id silently parsed, then the checker validated one binding
+    # and the binder dropped the other value at collapse. Refuse at parse, the
+    # same fail-closed contract as the other namespaces.
+    seen_slot_ids: set[str] = set()
+    for slot in slots:
+        if slot.slot_id in seen_slot_ids:
+            raise ContextFieldInvalidError(
+                "tensor_slots.slot_id",
+                f"duplicate tensor-slot id {slot.slot_id!r}; every slot id must be unique",
+            )
+        seen_slot_ids.add(slot.slot_id)
     _verify_runtime_fingerprints(registry, calls, slots)
     witnesses = tuple(
         _parse_witness(item) for item in _mapping_sequence(value, "control_witnesses")
