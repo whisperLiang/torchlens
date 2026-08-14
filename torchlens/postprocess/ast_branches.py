@@ -921,10 +921,16 @@ def _resolve_frame_var_names(frame: FuncCallLocation, func_name: str | None) -> 
     candidates = _find_candidate_calls(
         file_index, scope, frame.line_number, frame.col_offset, func_name
     )
-    resolved = [entry.assignment_targets for entry in candidates if entry.assignment_targets]
-    if len(resolved) == 1:
-        return list(resolved[0])
-    return []
+    if len(candidates) != 1:
+        # Require a UNIQUE candidate call, mirroring
+        # ``_resolve_frame_arg_expressions``. The old filter kept only
+        # candidates WITH assignment targets, which discarded the candidate's
+        # POSITION: an inner nested call (no targets -- its parent is the
+        # outer call) skipped through to the enclosing assignment, so both
+        # relu ops in ``y = relu(relu(x))`` reported ``['y']`` (deep-hunt
+        # C2). Ambiguous same-name candidates fail closed to no name.
+        return []
+    return list(candidates[0].assignment_targets)
 
 
 def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: str | None) -> list[str]:
