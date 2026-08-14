@@ -991,6 +991,18 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
     _state._tagged_buffer_ids.clear()
     trace._session_buffer_inventory = []
     trace._session_buffer_identity = {}
+    unstampable: list[str] = []
+
+    def _stamp(tensor: torch.Tensor, address: str) -> None:
+        # A failed stamp is EVIDENCE LOSS -- the buffer's reads may log as
+        # internal sources instead of buffer versions -- so it is collected
+        # and disclosed once below instead of silently swallowed (B1-13a).
+        try:
+            register_session_buffer_stamp(trace, tensor, address)
+            _state._tagged_buffer_ids.add(id(tensor))
+        except Exception as exc:
+            unstampable.append(f"{address} ({type(exc).__name__}: {exc})")
+
     for submodule in model.modules():
         module_addr = _module_address(submodule)
         # Scan registered buffers
@@ -1001,11 +1013,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
                 and get_buffer_address(buf_tensor) is None
             ):
                 address = f"{module_addr}.{buf_name}" if module_addr else buf_name
-                try:
-                    register_session_buffer_stamp(trace, buf_tensor, address)
-                    _state._tagged_buffer_ids.add(id(buf_tensor))
-                except Exception:
-                    pass
+                _stamp(buf_tensor, address)
         # Scan __dict__ for plain tensor attributes (not registered as buffers/params)
         for attr_name, attr_val in submodule.__dict__.items():
             if attr_name.startswith("_") or attr_name.startswith("tl_"):
@@ -1016,11 +1024,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
                 and get_buffer_address(attr_val) is None
             ):
                 address = f"{module_addr}.{attr_name}" if module_addr else attr_name
-                try:
-                    register_session_buffer_stamp(trace, attr_val, address)
-                    _state._tagged_buffer_ids.add(id(attr_val))
-                except Exception:
-                    pass
+                _stamp(attr_val, address)
             elif isinstance(attr_val, (list, tuple)):
                 for i, item in enumerate(attr_val):
                     if (
@@ -1031,11 +1035,18 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
                         item_addr = (
                             f"{module_addr}.{attr_name}.{i}" if module_addr else f"{attr_name}.{i}"
                         )
-                        try:
-                            register_session_buffer_stamp(trace, item, item_addr)
-                            _state._tagged_buffer_ids.add(id(item))
-                        except Exception:
-                            pass
+                        _stamp(item, item_addr)
+    if unstampable:
+        import warnings
+
+        shown = "; ".join(unstampable[:5])
+        suffix = "" if len(unstampable) <= 5 else f" (+{len(unstampable) - 5} more)"
+        warnings.warn(
+            f"TorchLens could not stamp buffer provenance on "
+            f"{len(unstampable)} model tensor(s): {shown}{suffix}. Reads of "
+            "these tensors may log as internal sources instead of buffers.",
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1106,7 +1117,15 @@ def _record_module_entry_metadata(
         module.training
     )
     module_call_index = trace._module_capture_ws.mod_call_index[mod_id]
-    assert module_call_index > 0, "_module_stack.push_frame must increment before entry"
+    if module_call_index <= 0:
+        # A hard raise, not an assert: ``python -O`` strips asserts, and this
+        # guard catches a broken push_frame/entry ordering that would silently
+        # mislabel every module call in the capture (R24-5).
+        raise RuntimeError(
+            "TorchLens internal error: _module_stack.push_frame must increment "
+            f"before module entry (module {module_address!r} has call index "
+            f"{module_call_index})"
+        )
     module_call_label = (module_address, module_call_index)
     # Push onto stack — popped by _record_module_exit_metadata (or exception handler).
     trace._module_capture_ws.mod_call_labels[mod_id].append(module_call_label)
@@ -1941,8 +1960,19 @@ def _record_module_exit_metadata(
                         "_tl_module_intervention_parent_labels",
                         tuple(intervention_parent_labels),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Losing the fire metadata means the replacement op minted
+                    # downstream carries no intervention provenance -- disclose
+                    # instead of silently swallowing (B1-13a).
+                    import warnings
+
+                    warnings.warn(
+                        "TorchLens could not attach intervention fire metadata "
+                        f"to a module output tensor ({type(exc).__name__}: "
+                        f"{exc}); the replacement op will carry no "
+                        "intervention provenance.",
+                        stacklevel=2,
+                    )
             tensor_label = get_live_tensor_label(t, trace.capture_events.live_index.by_raw_label)
         if tensor_label is None:
             # A live module-boundary intervention deliberately clears copied op
@@ -2598,6 +2628,26 @@ def _cleanup_model_session(
     end_label_session()
 
 
+def _is_isinstance_hostile_deprecation_shim(value: Any) -> bool:
+    """Return whether ``value`` is torch's ``reduce_op`` deprecation singleton.
+
+    ``torch.distributed.reduce_op`` is a ``_reduce_op`` instance whose
+    ``__getattribute__`` emits a ``FutureWarning`` on ANY attribute access --
+    including the ``__class__`` read every ``isinstance()`` performs -- so an
+    initialized distributed process running under ``-W error`` had its capture
+    CLEANUP aborted by the namespace walks below (SF-45). ``type()`` bypasses
+    the instance's ``__getattribute__``, so this exact-name check is silent;
+    structural matching (not an import of the private class) follows the
+    ``_distributed.py`` fallback convention.
+    """
+
+    value_type = type(value)
+    return (
+        value_type.__name__ == "_reduce_op"
+        and value_type.__module__ == "torch.distributed.distributed_c10d"
+    )
+
+
 def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -> None:
     """Clear TorchLens tensor metadata from a model-owned object graph.
 
@@ -2617,7 +2667,9 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
         Mutates reachable tensors in place by removing TorchLens metadata.
     """
 
-    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+    if value is None or _is_isinstance_hostile_deprecation_shim(value):
+        return
+    if isinstance(value, (str, bytes, int, float, bool)):
         return
     if isinstance(value, ModuleType):
         # r81 (r80 F1 root B): a stamped tensor stashed as a DIRECT attribute of
@@ -2644,7 +2696,8 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
                 slot_names = tuple(
                     name
                     for name, item in namespace.items()
-                    if isinstance(
+                    if not _is_isinstance_hostile_deprecation_shim(item)
+                    and isinstance(
                         item,
                         (torch.Tensor, dict, list, tuple, set, frozenset, deque),
                     )
@@ -2709,6 +2762,8 @@ def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int
         Mutates reachable tensors in place by removing TorchLens metadata.
     """
 
+    if _is_isinstance_hostile_deprecation_shim(value):
+        return
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
             clear_meta(value)
