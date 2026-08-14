@@ -285,6 +285,15 @@ class TestMetaApiSmokePostWrap:
         payload = pickle.dumps(nn.Linear(2, 2))
         assert pickle.loads(payload).weight.shape == (2, 2)
 
+    def test_jit_script(self):
+        _ensure_wrapped()
+
+        @torch.jit.script
+        def scripted(x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(x) + 1
+
+        assert torch.equal(scripted(torch.tensor([-1.0, 1.0])), torch.tensor([1.0, 2.0]))
+
 
 class _ActModel(nn.Module):
     """Module-level so pickle can save it by reference."""
