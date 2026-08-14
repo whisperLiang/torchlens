@@ -1124,6 +1124,7 @@ def _assign_unique_plan_ids(hook_plan: list[NormalizedHookEntry]) -> list[Normal
         if counts[base] > 1:
             metadata = dict(entry.metadata)
             metadata["plan_id"] = f"{base}#occ{seen[base]}"
+            metadata["plan_id_base"] = base
             entry = _dataclasses.replace(entry, metadata=metadata)
         seen[base] += 1
         unique_plan.append(entry)
@@ -1173,22 +1174,38 @@ def _reconcile_rerun_hook_fires(
         corresponding fire, retaining multiplicity for duplicate plans.
     """
 
-    planned = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    plan_ids = [_hook_plan_identifier(entry) for entry in hook_plan]
+    base_by_id = {
+        plan_id: str(entry.metadata.get("plan_id_base", plan_id))
+        for entry, plan_id in zip(hook_plan, plan_ids)
+    }
+    planned = Counter(plan_ids)
     fired: Counter[str] = Counter()
+    # FireRecord-only ops (no FireResult) carry no plan id, only the helper
+    # NAME: those fires go into a separate base-name pool consumed AFTER the
+    # exact per-entry accounting, capped at the shortfall, so the legacy
+    # channel keeps its multiplicity semantics without letting one entry's
+    # FireResult-channel fires hide another entry's miss.
+    fallback_fired: Counter[str] = Counter()
     for op in getattr(new_log, "layer_list", ()):
         fire_results = tuple(getattr(op, "fire_results", None) or ())
         if fire_results:
             fired.update(str(result.plan_id) for result in fire_results)
             continue
-        fired.update(
+        fallback_fired.update(
             str(record.helper_name)
             for record in (getattr(op, "interventions", None) or ())
             if getattr(record, "direction", None) == "forward"
             and getattr(record, "helper_name", None) is not None
         )
+    total_fired = sum(fired.values()) + sum(fallback_fired.values())
     unfired: list[str] = []
     for plan_id, planned_count in planned.items():
-        unfired.extend([plan_id] * max(0, planned_count - fired[plan_id]))
+        shortfall = max(0, planned_count - fired[plan_id])
+        base = base_by_id[plan_id]
+        consumed = min(shortfall, fallback_fired[base])
+        fallback_fired[base] -= consumed
+        unfired.extend([plan_id] * (shortfall - consumed))
     if unfired:
         warnings.warn(
             "Rerun hook plan entries fired at zero sites on the new inputs: "
@@ -1196,7 +1213,7 @@ def _reconcile_rerun_hook_fires(
             UserWarning,
             stacklevel=3,
         )
-    return sum(fired.values()), tuple(unfired)
+    return total_fired, tuple(unfired)
 
 
 def rerun(
