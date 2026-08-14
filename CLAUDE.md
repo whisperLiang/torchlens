@@ -152,8 +152,10 @@ print(tl.compat.report(model, x).to_markdown())
   `op.module_call_stack`, conditional child lists, `Layer.parents`/`Layer.children`, ...)
   are `tuple`; label sets (`input_ancestors`, `output_descendants`, `root_ancestors`,
   `internal_source_ancestors`) are `frozenset`. Reads are identity-stable, in-place
-  mutation (`op.children.append(...)`) raises, direct assignment still works (a raw
-  `list`/`set` normalizes to the view type), and equal views may be shared across
+  mutation (`op.children.append(...)`) raises, direct assignment still works on `Op`
+  records (a raw `list`/`set` normalizes to the view type) — but NOT on `Layer`:
+  `Layer.parents`/`Layer.children` are read-only properties and assignment raises
+  `AttributeError` (and `log[label]` returns a `Layer`). Equal views may be shared across
   records. Dict-shaped relation metadata (`parent_arg_positions`,
   `conditional_elif_children`, `module_entry_arg_keys`, ...) keeps its mutable dict
   type. Legacy saves load with the same immutable surface. `equivalent_ops`/
