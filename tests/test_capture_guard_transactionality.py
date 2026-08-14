@@ -183,7 +183,26 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     if monitoring is None:
         pytest.skip("sys.monitoring requires Python 3.12+")
 
-    guard = escape_detection._GuardState()
+    import threading
+
+    # Minimal faithful state: _uninstall_monitoring reads only the two
+    # monitoring fields, but _GuardState's identity fields are required
+    # (this construction rotted unnoticed while no CI leg ran 3.12).
+    guard = escape_detection._GuardState(
+        trace=None,
+        tables=escape_detection.DetectorTables(
+            epoch=0,
+            raw_by_id={},
+            python_code_to_raw_ids={},
+            c_raw_ids=frozenset(),
+            tensor_method_name_to_raw_ids={},
+            export_sites={},
+            excluded_raw_ids=frozenset(),
+        ),
+        owner_thread_id=threading.get_ident(),
+        mode="shadow",
+        guard_pass_index=0,
+    )
     tool_id = None
     for candidate in range(6):
         try:

@@ -71,6 +71,16 @@ jobs:
             torchvision: "0.28.0+cpu"
             numpy: numpy
             scope: smoke
+          - track: newest-admitted
+            python: "3.12"
+            torch: "2.13.0+cpu"
+            torchvision: "0.28.0+cpu"
+            numpy: numpy
+            scope: smoke
+            # Python >= 3.12 is advertised support AND selects the
+            # sys.monitoring escape-detection path, which no 3.10/3.11 row can
+            # execute. Before this row existed the path had NO CI coverage and
+            # its only >=3.12-gated unit test had rotted unnoticed (T13.4).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
