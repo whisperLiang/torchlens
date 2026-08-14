@@ -1141,6 +1141,79 @@ def test_forward_only_trace_keeps_empty_backward_registry_valid() -> None:
     check_metadata_invariants(trace)
 
 
+def test_forged_placeholder_still_fails_func_call_id_after_save_load(
+    tmp_path: Any,
+) -> None:
+    """A plain-capture placeholder must STILL fail after save/load (locked rule).
+
+    ``op_has_genuine_replacement_evidence`` returned True unconditionally for
+    ``_loaded_from_bundle`` traces (journal edit records are live-capture
+    facts and never serialize), so a placeholder that FAILED the
+    ``func_call_id_consistency`` invariant live PASSED it after a save/load
+    round trip -- a laundering channel that contradicted the locked
+    2026-06-02 rule (deephunt finding M3). The save path now stamps the live
+    corroboration verdict into persisted op annotations and the loaded arm
+    requires it.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4), layers_to_save="all", save_arg_values=True)
+    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+    object.__setattr__(relu_op, "func", None)
+    object.__setattr__(relu_op, "func_name", "intervention_replacement")
+    object.__setattr__(relu_op, "intervention_replaced", True)
+    object.__setattr__(relu_op, "func_call_id", None)
+
+    with pytest.raises(MetadataInvariantError, match="func_call_id"):
+        check_func_call_id_invariant(trace)
+
+    path = str(tmp_path / "forged.tlspec")
+    tl.save(trace, path)
+    loaded = tl.load(path)
+    assert getattr(loaded, "_loaded_from_bundle", False) is True
+    with pytest.raises(MetadataInvariantError, match="func_call_id"):
+        check_func_call_id_invariant(loaded)
+
+
+def test_genuine_intervention_replacement_survives_save_load(tmp_path: Any) -> None:
+    """A genuinely corroborated replacement keeps its exemption after load.
+
+    Guards the M3 fail-closed change against over-firing: the save-time stamp
+    carries the live verdict, so a live-fire intervention capture (hook-minted
+    ``replaced=True`` FireRecord plus armed spec) still passes the
+    ``func_call_id_consistency`` invariant after a save/load round trip.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    trace = tl.trace(
+        model,
+        torch.randn(3, 4),
+        layers_to_save="all",
+        save_arg_values=True,
+        intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+    )
+    replaced_ops = [op for op in trace.layer_list if getattr(op, "intervention_replaced", False)]
+    assert replaced_ops, "zero_ablate must stamp its site"
+    check_func_call_id_invariant(trace)
+
+    path = str(tmp_path / "genuine.tlspec")
+    tl.save(trace, path)
+    loaded = tl.load(path)
+    assert getattr(loaded, "_loaded_from_bundle", False) is True
+    check_func_call_id_invariant(loaded)
+    loaded_replaced = [
+        op for op in loaded.layer_list if getattr(op, "intervention_replaced", False)
+    ]
+    assert loaded_replaced
+    for op in loaded_replaced:
+        stamp = (getattr(op, "annotations", None) or {}).get("replacement_evidence_v1")
+        assert isinstance(stamp, dict) and stamp.get("corroborated") is True
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 

@@ -391,6 +391,9 @@ _check_backward_event_flow_invariants = _rebind_function(
 _intervention_spec_is_armed = _rebind_function(
     _invariants_backward_flow._intervention_spec_is_armed, globals()
 )
+_persisted_replacement_stamp = _rebind_function(
+    _invariants_backward_flow._persisted_replacement_stamp, globals()
+)
 op_has_genuine_replacement_evidence = _rebind_function(
     _invariants_backward_flow.op_has_genuine_replacement_evidence, globals()
 )
