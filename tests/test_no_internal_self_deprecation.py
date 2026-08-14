@@ -161,6 +161,70 @@ def test_record_to_trace_no_internal_self_deprecation() -> None:
         log.cleanup()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "grind b4 R48-3, CONFIRMED STANDING and awaiting its fix lane: the "
+        "metadata route passes the deprecated flat kwargs `layers_to_save` and "
+        "`compute_input_output_distances` to its own internals, so one canonical "
+        "tl.io.log_model_metadata call self-deprecates twice. The fix is in "
+        "torchlens/user_funcs.py, which the b4 fix-lane split assigns to the "
+        "perf/caches/IO lane, not to the deprecations lane. Recorded as a strict "
+        "xfail rather than omitted: xfail_strict=true means this test FAILS as "
+        "soon as the kwargs are made canonical, forcing this marker to be "
+        "deleted instead of quietly outliving the bug."
+    ),
+)
+def test_log_model_metadata_no_internal_self_deprecation() -> None:
+    """The canonical metadata entry point fires zero internal deprecations.
+
+    Added in grind b4 (R48-3). Measured before the fix: ONE
+    ``tl.get_model_metadata`` call emitted FOUR DeprecationWarnings, two of them
+    originating in torchlens frames that passed deprecated FLAT kwargs to their
+    own internals -- warnings a user cannot silence by fixing their own code,
+    because none of their code is involved. The guard previously covered five
+    representative ops and not the metadata route.
+
+    Called through the fully canonical spelling (``tl.io.log_model_metadata``;
+    both ``tl.get_model_metadata`` and the top-level ``tl.log_model_metadata``
+    are themselves deprecated), so any warning inside the monitored block can
+    only have come from torchlens' own internals.
+    """
+
+    model = _SelfDepProbeModel()
+    x = torch.randn(1, 5)
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        metadata = tl.io.log_model_metadata(model, x)
+    assert metadata is not None
+    _assert_no_internal_self_deprecation(records, "tl.io.log_model_metadata")
+
+
+def test_draw_options_no_internal_self_deprecation() -> None:
+    """Canonical visualization options fire zero internal deprecations.
+
+    Guards the R48-1 work from having introduced the R48-3 defect: three of the
+    four ``VisualizationOptions`` "Deprecated alias" properties now warn when
+    READ, so any torchlens internal still reading ``max_module_depth`` /
+    ``layout_engine`` / ``node_mode`` off an options object would deprecate the
+    package to itself here.
+    """
+
+    from torchlens import options as tl_options
+    from torchlens.options import VisualizationOptions
+
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        built = VisualizationOptions(view="rolled", depth=3, save_only=True)
+        merged = tl_options.merge_visualization_options(
+            visualization=built, function_default_mode="rolled"
+        )
+        as_dict = merged.as_dict()
+    assert as_dict["view"] == "rolled"
+    assert as_dict["depth"] == 3
+    _assert_no_internal_self_deprecation(records, "canonical VisualizationOptions")
+
+
 class _SelfDepProbeHeadResult(nn.Module):
     """Return two explicit per-head result tensors stacked on a new axis."""
 

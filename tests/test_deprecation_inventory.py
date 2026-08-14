@@ -24,6 +24,8 @@ surface adds no package code.
 from __future__ import annotations
 
 import ast
+import sys
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -823,6 +825,121 @@ def test_census_matches_the_recorded_baseline() -> None:
         "domain_node_styles": 2,
         "inert_backward_perturbation_flag": 1,
     }
+
+
+#: Source of a throwaway module used to prove caller attribution. Each function
+#: is on its own line so the reported line number identifies the route.
+_ATTRIBUTION_CALLER_SOURCE = '''\
+"""Throwaway caller used to check deprecation-warning attribution."""
+
+import torchlens as tl
+
+
+def use_flat_kwarg_alias():
+    """Trigger the flat-kwarg alias route."""
+    return tl.options.merge_capture_options(capture=None, verbose=True)
+
+
+def use_moved_name():
+    """Trigger the moved-top-level-name route."""
+    return tl.resolve_sites
+
+
+def use_legacy_api_shim():
+    """Trigger the paper-era shim route."""
+    return tl.ModelHistory
+'''
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["use_flat_kwarg_alias", "use_moved_name", "use_legacy_api_shim"],
+)
+def test_deprecations_are_attributed_to_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Every deprecation route blames the CALLER's file, not a torchlens frame.
+
+    The gate for grind b4's R48-2. All three routes used a hardcoded
+    ``stacklevel`` and none of the constants was right for its call depth:
+    measured before the fix, ``tl.peek(...)`` reported ``sys:1`` -- which
+    Python's default ``__main__``-keyed filter hides outright, so the warning was
+    invisible to the users it was written for -- while ``tl.ModelHistory``
+    reported ``torchlens/__init__.py`` and the flat-kwarg route reported
+    ``torchlens/user_funcs.py``.
+
+    Driven from a generated module rather than from this file so "the caller" is
+    unambiguous: any torchlens frame, and this test file itself, are both wrong
+    answers.
+    """
+
+    # Module name varies per route: a shared name would be cached in sys.modules
+    # from the first parametrization and the later cases would import that copy.
+    module_name = f"deprecation_attribution_caller_{route}"
+    caller = tmp_path / f"{module_name}.py"
+    caller.write_text(_ATTRIBUTION_CALLER_SOURCE, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    module = __import__(module_name)
+
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        getattr(module, route)()
+
+    deprecations = [record for record in records if issubclass(record.category, DeprecationWarning)]
+    assert deprecations, f"{route} emitted no deprecation warning"
+    for record in deprecations:
+        assert Path(record.filename).resolve() == caller.resolve(), (
+            f"{route}: warning blamed {record.filename}, not the caller. A "
+            "deprecation attributed to a torchlens frame (or to sys:1) is "
+            "unactionable and may be hidden by the default warning filter."
+        )
+
+
+def test_every_route_advertises_the_same_removal_window() -> None:
+    """All deprecation routes quote ONE advertised window.
+
+    Before grind b4 the alias route promised "a future release" while the
+    moved-name route beside it promised "a future 2.x release" -- two windows for
+    one body of debt. Both now interpolate ``_deprecations.REMOVED_IN``.
+    """
+
+    from torchlens._deprecations import REMOVED_IN, warn_deprecated_alias
+
+    assert REMOVED_IN == tl._REMOVED_IN, (
+        "torchlens.__init__ must quote the shared window constant, not its own copy"
+    )
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        warn_deprecated_alias("probe_old", "probe_new")
+        _ = tl.resolve_sites
+    messages = [str(record.message) for record in records]
+    assert len(messages) >= 2
+    assert all(REMOVED_IN in message for message in messages), messages
+
+
+def test_no_family_is_past_its_advertised_removal_window() -> None:
+    """A family scheduled for a version we have already shipped is overdue.
+
+    The expiry gate the census lacked (grind b4, R48-5, mechanical half): before
+    this, ``remove_in`` could name a concrete version and nothing would ever
+    notice the window closing. Vacuous today by design -- every family is on a
+    prose window or awaiting sign-off -- and load-bearing the moment a real
+    version is chosen. It removes nothing; it reports.
+    """
+
+    current = tuple(int(part) for part in tl.__version__.split(".")[:3])
+    overdue = []
+    for family in DEPRECATION_FAMILIES:
+        parts = family.remove_in.split(".")
+        if not all(part.isdigit() for part in parts):
+            continue  # a prose state from the closed vocabulary, not a version
+        if tuple(int(part) for part in parts) <= current:
+            overdue.append((family.name, family.remove_in))
+    assert not overdue, (
+        f"deprecation families past their advertised removal window (torchlens "
+        f"{tl.__version__}) -- remove the shim or move the window: {overdue}"
+    )
 
 
 def test_no_family_claims_a_concrete_removal_version_yet() -> None:
