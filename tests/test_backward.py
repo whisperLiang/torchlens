@@ -637,6 +637,56 @@ def test_backward_walk_failure_removes_partial_hooks_and_disarms(
     assert _state._active_trace is None
 
 
+def test_rewalk_failure_removes_hooks_and_clears_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A higher-order rewalk failure still unwinds hooks and grad-fn refs.
+
+    The rewalk error used to re-raise from the pass finalizer BEFORE handle
+    removal, pending-record clearing, and forward grad-fn ref clearing, so a
+    failure in that phase stranded live TorchLens hooks on the user's
+    autograd graph.
+    """
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+
+    class _Handle:
+        """Minimal removable hook-handle probe."""
+
+        removed = False
+
+        def remove(self) -> None:
+            """Record that cleanup reached this handle."""
+            self.removed = True
+
+    handle = _Handle()
+    real_walk = backward._walk_and_hook_backward_graph
+
+    def spy_walk(
+        trace_arg: tl.Trace,
+        loss_arg: torch.Tensor,
+        handles: list[object] | None = None,
+    ) -> list[object]:
+        """Run the real walk, then append one spy handle."""
+        result = real_walk(trace_arg, loss_arg, handles)
+        target = handles if handles is not None else result
+        target.append(handle)
+        return result
+
+    def fail_rewalk(_trace: tl.Trace) -> None:
+        """Inject a rewalk-phase failure."""
+        raise RuntimeError("injected rewalk failure")
+
+    monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", spy_walk)
+    monkeypatch.setattr(backward, "_rewalk_higher_order_grad_fns", fail_rewalk)
+    with pytest.raises(RuntimeError, match="injected rewalk failure"):
+        trace.log_backward(_output_loss(trace))
+
+    assert handle.removed is True
+    assert all(layer.grad_fn_handle is None for layer in trace.layer_list)
+
+
 @pytest.mark.parametrize("entrypoint", ["log_backward", "recording_backward"])
 def test_backward_entrypoints_finalize_streaming_on_exception(
     monkeypatch: pytest.MonkeyPatch,
