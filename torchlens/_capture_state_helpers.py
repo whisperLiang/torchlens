@@ -1482,7 +1482,11 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     Returns
     -------
     str
-        SHA-256 digest over tensor metadata and CPU bytes.
+        SHA-256 digest over tensor metadata and CPU bytes. Metadata includes
+        the ORIGINAL tensor's device and ``requires_grad`` flag: a CPU->CUDA
+        move or a freeze between ``cache=True`` runs changes ``device_ref``,
+        timing/memory, and grad_fn metadata on the capture, so it must be a
+        cache miss even though the bytes match.
     """
 
     with _state.pause_logging():
@@ -1491,7 +1495,16 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
             cpu = cpu.to(torch.float32)
         payload = cpu.numpy().tobytes()
     hasher = hashlib.sha256()
-    hasher.update(repr((tuple(cpu.shape), str(cpu.dtype))).encode("utf-8"))
+    hasher.update(
+        repr(
+            (
+                tuple(cpu.shape),
+                str(cpu.dtype),
+                str(tensor.device),
+                bool(tensor.requires_grad),
+            )
+        ).encode("utf-8")
+    )
     hasher.update(payload)
     return hasher.hexdigest()
 
@@ -1533,6 +1546,11 @@ def _fingerprint_model_content(model: nn.Module) -> str:
     for name, tensor in model.state_dict().items():
         hasher.update(name.encode("utf-8"))
         hasher.update(_hash_tensor_content(tensor).encode("utf-8"))
+    # ``state_dict()`` detaches, so a live parameter's requires_grad flag never
+    # reaches the tensor hash: fold the flags explicitly (freezing params
+    # changes captured grad metadata and must be a cache miss).
+    for name, parameter in model.named_parameters():
+        hasher.update(repr((name, bool(parameter.requires_grad))).encode("utf-8"))
     for module_name, module in model.named_modules():
         hasher.update(repr((module_name, bool(module.training))).encode("utf-8"))
         for buffer_name in sorted(module._non_persistent_buffers_set):
@@ -1596,18 +1614,187 @@ def _callable_code_digest(func: Any) -> str:
     return hasher.hexdigest()
 
 
+_ATTRIBUTE_FRAGMENT_DEPTH_CEILING = 4
+_ATTRIBUTE_FRAGMENT_ITEM_CEILING = 256
+
+
+def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
+    """Return a bounded, address-free key fragment for one instance attribute.
+
+    Plain instance attributes routinely determine the traced program
+    (``self.num_layers``, ``self.scale``, ``self.use_checkpoint``), so they
+    must participate in the capture-cache key. Values are reduced to stable
+    primitives: scalars by value, tensors/arrays by content hash, callables by
+    code digest, containers element-wise under depth/size ceilings, and any
+    other object by TYPE identity only -- an opaque object's internal state is
+    a documented boundary of the signature (changing it without changing type
+    keeps the key; conservative for false hits on the covered kinds, never
+    address-churning).
+    """
+
+    if depth > _ATTRIBUTE_FRAGMENT_DEPTH_CEILING:
+        return "<attr-depth-ceiling>"
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        return value
+    if isinstance(value, torch.Tensor):
+        try:
+            return ("tensor", _hash_tensor_content(value))
+        except Exception:
+            return (
+                "tensor-meta",
+                tuple(value.shape),
+                str(value.dtype),
+                str(value.device),
+            )
+    if isinstance(value, (torch.dtype, torch.device, torch.Size)):
+        return ("torch-value", str(value))
+    if isinstance(value, nn.Module):
+        cls = type(value)
+        return ("module", f"{cls.__module__}.{cls.__qualname__}")
+    if isinstance(value, dict):
+        items = list(value.items())[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return (
+            "dict",
+            len(value),
+            tuple(
+                sorted(
+                    (
+                        repr(_attribute_state_fragment(key, depth + 1)),
+                        repr(_attribute_state_fragment(item, depth + 1)),
+                    )
+                    for key, item in items
+                )
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        items = list(value)[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return (
+            "sequence",
+            len(value),
+            tuple(_attribute_state_fragment(item, depth + 1) for item in items),
+        )
+    if isinstance(value, (set, frozenset)):
+        member_reprs = sorted(
+            (repr(_attribute_state_fragment(item, depth + 1)) for item in value),
+        )[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        return ("set", len(value), tuple(member_reprs))
+    if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
+        try:
+            digest = hashlib.sha256(value.tobytes()).hexdigest()
+            return ("ndarray", tuple(getattr(value, "shape", ())), str(value.dtype), digest)
+        except Exception:
+            pass
+    if callable(value):
+        return ("callable", _callable_code_digest(value))
+    cls = type(value)
+    return ("object", f"{cls.__module__}.{cls.__qualname__}")
+
+
+# Hook dicts that fire during (or around) the captured forward/backward and
+# therefore change what a capture observes. State-dict/load hooks are excluded:
+# they cannot affect the traced program. The ``*_with_kwargs`` /
+# ``*_always_called`` companions are flag dicts keyed by handle id; ids come
+# from a process-global counter and are NOT stable across processes, so only
+# their VALUES are folded, aligned by registration order.
+_HOOK_DICT_NAMES = (
+    "_forward_pre_hooks",
+    "_forward_hooks",
+    "_backward_pre_hooks",
+    "_backward_hooks",
+)
+_HOOK_FLAG_DICT_NAMES = (
+    "_forward_pre_hooks_with_kwargs",
+    "_forward_hooks_with_kwargs",
+    "_forward_hooks_always_called",
+)
+
+
+def _module_hook_signature(module: nn.Module) -> tuple[object, ...]:
+    """Return an order-preserving, address-free signature of a module's hooks.
+
+    User-registered ``nn.Module`` hooks are real model behavior that fires
+    inside the captured forward, so they must participate in the capture-cache
+    key. TorchLens' own instrumentation hooks are filtered out (they come and
+    go with capture bookkeeping and must not churn the key).
+    """
+
+    signature: list[object] = []
+    for dict_name in _HOOK_DICT_NAMES:
+        hooks = getattr(module, dict_name, None)
+        if not hooks:
+            continue
+        fragments = tuple(
+            _stable_cache_fragment(hook)
+            for hook in hooks.values()
+            if not _is_torchlens_instrumentation(hook)
+        )
+        if fragments:
+            signature.append((dict_name, fragments))
+    for dict_name in _HOOK_FLAG_DICT_NAMES:
+        flags = getattr(module, dict_name, None)
+        if flags:
+            signature.append((dict_name, tuple(bool(flag) for flag in flags.values())))
+    return tuple(signature)
+
+
+def _global_hook_signature() -> tuple[object, ...]:
+    """Signature of torch's process-global module hooks (same key rules)."""
+
+    torch_module = torch.nn.modules.module
+    signature: list[object] = []
+    for dict_name in (
+        "_global_forward_pre_hooks",
+        "_global_forward_hooks",
+        "_global_backward_pre_hooks",
+        "_global_backward_hooks",
+    ):
+        hooks = getattr(torch_module, dict_name, None)
+        if not hooks:
+            continue
+        fragments = tuple(
+            _stable_cache_fragment(hook)
+            for hook in hooks.values()
+            if not _is_torchlens_instrumentation(hook)
+        )
+        if fragments:
+            signature.append((dict_name, fragments))
+    return tuple(signature)
+
+
+def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, Any]]:
+    """Yield the user-visible plain instance attributes of one module.
+
+    Skips torch-internal underscore state (parameters, buffers, hook dicts --
+    hooks are fingerprinted separately), TorchLens instrumentation (``tl_*``
+    attributes survive across captures by design and must not churn the key),
+    ``training`` (already folded by the content fingerprint), and instance
+    ``forward`` overrides (folded with instrumentation filtering above).
+    """
+
+    for attr_name in sorted(module.__dict__):
+        if attr_name.startswith(("_", "tl_")) or attr_name in ("training", "forward"):
+            continue
+        yield attr_name, module.__dict__[attr_name]
+
+
 def _fingerprint_model_implementation(model: nn.Module) -> str:
     """Fingerprint model IMPLEMENTATION for the capture cache.
 
     ``_fingerprint_model_content`` covers tensor content (``state_dict``
     values, training flags, non-persistent buffers) but says nothing about
-    CODE, so editing ``forward`` between runs used to silently hit the stale
-    cached trace of the old implementation. This signature folds in the module
-    tree structure (registered names in order), each module's class identity
-    (module + qualname), each distinct class's ``forward`` code digest, and
-    any instance-level ``forward`` override, so an implementation change is a
-    cache miss. Closure cell contents and mutated global state referenced by
-    ``forward`` remain outside the signature (documented heuristic boundary).
+    CODE or configuration, so editing ``forward`` between runs used to
+    silently hit the stale cached trace of the old implementation. This
+    signature folds in the module tree structure (registered names in order),
+    each module's class identity (module + qualname), each distinct class's
+    ``forward`` code digest, any instance-level ``forward`` override, a
+    bounded digest of each module's plain instance attributes (the
+    ``self.num_layers`` / ``self.scale`` axis: same class, same weights,
+    different traced program), and the user-registered module hook
+    inventories (per-module and torch-global: hooks fire inside the captured
+    forward, so a registration change must miss). Closure cell contents, mutated global state
+    referenced by ``forward``, and the interior state of opaque attribute
+    objects (keyed by type only; see ``_attribute_state_fragment``) remain
+    outside the signature (documented heuristic boundary).
     """
 
     hasher = hashlib.sha256()
@@ -1627,6 +1814,16 @@ def _fingerprint_model_implementation(model: nn.Module) -> str:
         if instance_forward is not None and not _is_torchlens_instrumentation(instance_forward):
             hasher.update(b"<instance-forward>")
             hasher.update(_callable_code_digest(instance_forward).encode("utf-8"))
+        for attr_name, attr_value in _iter_plain_instance_attributes(module):
+            hasher.update(
+                repr((name, attr_name, _attribute_state_fragment(attr_value))).encode("utf-8")
+            )
+        hook_signature = _module_hook_signature(module)
+        if hook_signature:
+            hasher.update(repr((name, "hooks", hook_signature)).encode("utf-8"))
+    global_hooks = _global_hook_signature()
+    if global_hooks:
+        hasher.update(repr(("<global>", "hooks", global_hooks)).encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -1648,7 +1845,11 @@ def _is_torchlens_instrumentation(func: Any) -> bool:
     code = getattr(target, "__code__", None)
     if not isinstance(code, types.CodeType):
         return False
-    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR)
+    # The separator matters: a bare prefix match also claimed sibling installs
+    # such as ``site-packages/torchlens_contrib/model.py``, silently EXCLUDING
+    # a user-owned forward override from the implementation signature (edits
+    # then hit the stale cache).
+    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR + os.sep)
 
 
 def _capture_cache_dir(cache_dir: str | Path | None) -> Path:
@@ -1696,9 +1897,10 @@ def _capture_cache_key(
     """
 
     payload = {
-        # Schema 3: single-record authenticated entries plus the
-        # model-implementation signature (a changed ``forward`` must miss).
-        "schema": 3,
+        # Schema 4: schema 3 (single-record authenticated entries plus the
+        # model-implementation signature) widened so plain instance
+        # attributes participate in the key (a changed ``self.k`` must miss).
+        "schema": 4,
         "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
         "model": _fingerprint_model_content(model),

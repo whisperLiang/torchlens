@@ -320,8 +320,21 @@ def _predicate_cache_key(predicate: object) -> object:
         )
     module = getattr(predicate, "__module__", None)
     qualname = getattr(predicate, "__qualname__", None)
-    if callable(predicate) and module is not None and qualname is not None:
+    code_digest = _callable_code_digest(predicate)
+    # The callable lane engages whenever a code digest exists, not only when
+    # __module__/__qualname__ are set: two module-less (exec-built) predicates
+    # used to fall through to the object lane and COLLIDE on
+    # ("object", "builtins", "function"). Callables without a code object
+    # (builtins, callable instances) keep the type-identity object lane.
+    if callable(predicate) and (
+        code_digest is not None or (module is not None and qualname is not None)
+    ):
         defaults = getattr(predicate, "__defaults__", None)
+        # Keyword-only defaults are a separate attribute: ``def p(ctx, *,
+        # thr=0.5)`` redefined with ``thr=0.9`` has identical co_code, an
+        # empty closure, and ``__defaults__ is None`` -- omitting
+        # ``__kwdefaults__`` collided the two on one key (stale hit).
+        kwdefaults = getattr(predicate, "__kwdefaults__", None)
         closure = getattr(predicate, "__closure__", None)
         closure_values: tuple[object, ...] = ()
         if closure:
@@ -330,8 +343,9 @@ def _predicate_cache_key(predicate: object) -> object:
             "callable",
             str(module),
             str(qualname),
-            _callable_code_digest(predicate),
+            code_digest,
             _stable_cache_fragment(defaults),
+            _stable_cache_fragment(kwdefaults),
             closure_values,
         )
     return ("object", type(predicate).__module__, type(predicate).__qualname__)
@@ -379,12 +393,17 @@ def _stable_cache_fragment(value: object) -> object:
     if callable(value):
         module = getattr(value, "__module__", None)
         qualname = getattr(value, "__qualname__", None)
-        if module is not None and qualname is not None:
+        code_digest = _callable_code_digest(value)
+        if code_digest is not None or (module is not None and qualname is not None):
+            # Both default families participate: the code digest alone cannot
+            # distinguish two definitions differing only in default values.
             return (
                 "callable",
                 str(module),
                 str(qualname),
-                _callable_code_digest(value),
+                code_digest,
+                _stable_cache_fragment(getattr(value, "__defaults__", None)),
+                _stable_cache_fragment(getattr(value, "__kwdefaults__", None)),
             )
     return ("object", type(value).__module__, type(value).__qualname__)
 

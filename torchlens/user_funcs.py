@@ -365,16 +365,33 @@ def _capture_cache_secret(cache_root: Path) -> bytes:
     return secret
 
 
-class _TaggingWriter:
-    """File wrapper that HMACs every byte ``pickle.dump`` streams through it."""
+class _CaptureCacheEntryOverCeilingError(Exception):
+    """Raised mid-stream when a cache entry would exceed the byte ceiling."""
 
-    def __init__(self, handle: Any, mac: Any) -> None:
+
+class _TaggingWriter:
+    """File wrapper that HMACs every byte ``pickle.dump`` streams through it.
+
+    Also enforces the write-side byte ceiling: an entry the load path would
+    refuse at ``_CAPTURE_CACHE_MAX_BYTES`` must never be committed (it can
+    never hit, it is rewritten on every capture, and its exempt-from-eviction
+    bytes used to force the eviction pass to delete every OTHER valid entry).
+    Raising mid-stream aborts the pickle at the ceiling instead of paying the
+    full multi-GiB write first.
+    """
+
+    def __init__(self, handle: Any, mac: Any, byte_ceiling: int | None = None) -> None:
         self._handle = handle
         self._mac = mac
+        self._byte_ceiling = byte_ceiling
+        self._bytes_written = 0
 
     def write(self, data: Any) -> int:
         """Tag and forward one write, returning the bytes written."""
 
+        self._bytes_written += len(data)
+        if self._byte_ceiling is not None and self._bytes_written > self._byte_ceiling:
+            raise _CaptureCacheEntryOverCeilingError
         self._mac.update(data)
         return cast(int, self._handle.write(data))
 
@@ -448,14 +465,15 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
-        "capture runs normally and the entry is rewritten.",
+        "capture runs normally and the entry is rewritten. "
+        "torchlens.clear_capture_cache() empties the cache.",
         UserWarning,
         stacklevel=2,
     )
     return None
 
 
-def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: bytes) -> None:
+def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: bytes) -> bool:
     """Commit a self-authenticating cache entry in ONE atomic step.
 
     The record is ``magic + hex HMAC tag + newline + pickled payload``. The
@@ -474,6 +492,14 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
         Destination entry path.
     secret
         Secret keying the entry's embedded tag.
+
+    Returns
+    -------
+    bool
+        ``True`` when the entry was committed; ``False`` when the store was
+        refused because the payload exceeds ``_CAPTURE_CACHE_MAX_BYTES`` (the
+        load ceiling -- committing such an entry poisons the cache: it can
+        never be loaded, and its bytes force eviction of every valid entry).
     """
 
     import hashlib
@@ -491,16 +517,29 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
         # overwritten in place once the streaming MAC settles.
         with os.fdopen(descriptor, "wb+") as file:
             file.write(_CAPTURE_CACHE_MAGIC + b"0" * _CAPTURE_CACHE_TAG_HEX_CHARS + b"\n")
-            pickle.dump(trace, _TaggingWriter(file, mac))
+            pickle.dump(trace, _TaggingWriter(file, mac, byte_ceiling=_CAPTURE_CACHE_MAX_BYTES))
             file.flush()
             file.seek(len(_CAPTURE_CACHE_MAGIC))
             file.write(mac.hexdigest().encode("ascii"))
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary_path, cache_path)
+    except _CaptureCacheEntryOverCeilingError:
+        temporary_path.unlink(missing_ok=True)
+        warnings.warn(
+            f"Not caching this capture: its serialized size is above the "
+            f"{_CAPTURE_CACHE_MAX_BYTES}-byte cache-entry ceiling, so the entry could "
+            "never be loaded back. The capture itself is unaffected; it simply will "
+            "not hit the cache. Existing valid entries are left in place "
+            "(torchlens.clear_capture_cache() empties the cache).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
+    return True
 
 
 def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
@@ -3288,8 +3327,8 @@ def _trace_torch_model(
             trace.capture_cache_key = cache_key
             trace.capture_cache_path = str(cache_path)
             _prepare_log_for_capture_cache(trace)
-            _store_authenticated_capture_cache(trace, cache_path, cache_secret)
-            _evict_capture_cache(cache_path.parent, keep=cache_path)
+            if _store_authenticated_capture_cache(trace, cache_path, cache_secret):
+                _evict_capture_cache(cache_path.parent, keep=cache_path)
         return trace
 
     run_capture = functools.partial(
@@ -3410,8 +3449,8 @@ def _trace_torch_model(
         trace.capture_cache_key = cache_key
         trace.capture_cache_path = str(cache_path)
         _prepare_log_for_capture_cache(trace)
-        _store_authenticated_capture_cache(trace, cache_path, cache_secret)
-        _evict_capture_cache(cache_path.parent, keep=cache_path)
+        if _store_authenticated_capture_cache(trace, cache_path, cache_secret):
+            _evict_capture_cache(cache_path.parent, keep=cache_path)
 
     return trace
 

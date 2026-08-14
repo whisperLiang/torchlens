@@ -421,6 +421,10 @@ _PROCESS_CACHES = frozenset(
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_REGISTRY"),
         ("torchlens/postprocess/ast_branches.py", "_file_cache"),
         ("torchlens/receptive_field/_engine.py", "_SCHEMA_OPERAND_SLOTS_CACHE"),
+        # Bounded FIFO negative companion of the slots cache (grind-r3
+        # T-CACHES): known-miss func names that must not re-enter the C++
+        # operator registry per (edge, arg) on every RF solve.
+        ("torchlens/receptive_field/_engine.py", "_SCHEMA_OPERAND_MISS_NAMES"),
         ("torchlens/utils/introspection.py", "_COL_OFFSET_CACHE"),
         # Import-time derived ULP tolerance table, lazily extended for dtypes
         # outside _REPLAY_ULP_HEADROOM; clearing only re-derives (pure finfo

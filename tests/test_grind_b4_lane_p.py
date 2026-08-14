@@ -341,3 +341,116 @@ def test_collapse_analysis_fingerprints_once_per_entry(
     monkeypatch.setattr(auto_collapse, "_collapse_graph_revision", counting_revision)
     analyze_collapse(trace)
     assert calls <= 2, f"{calls} fingerprint walks for {edge_count} edges"
+
+
+def test_over_ceiling_entry_is_refused_at_store_not_wiped_at_evict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry above the byte ceiling must never poison the cache (r2 F39-2).
+
+    The store path had no size gate: an over-ceiling trace was fully pickled
+    to disk on EVERY capture, the eviction pass then deleted every OTHER
+    valid entry to satisfy the byte cap (the just-written ``keep`` is exempt
+    but its bytes still count), and the read ceiling refused the entry on
+    every later load -- one huge capture wiped the cache each run and could
+    itself never hit. The store now refuses (with a warning) instead.
+    """
+
+    x = torch.ones(1, 1)
+    for value in (1.0, 2.0):
+        model = nn.Linear(1, 1, bias=False)
+        model.weight.data.fill_(value)
+        tl.trace(model, x, cache=True, cache_dir=tmp_path)
+    cache_root = tmp_path / "capture"
+    small_entries = sorted(path.name for path in cache_root.glob("*.pkl"))
+    assert len(small_entries) == 2
+    total_small = sum(path.stat().st_size for path in cache_root.glob("*.pkl"))
+
+    # Ceiling above the two valid entries combined, below the big capture.
+    monkeypatch.setattr(user_funcs, "_CAPTURE_CACHE_MAX_BYTES", max(total_small + 4096, 200_000))
+
+    big = nn.Linear(1, 1, bias=False)
+    big.register_buffer("big_buffer", torch.arange(120_000, dtype=torch.float32))
+    with pytest.warns(UserWarning, match="above the .*byte cache-entry ceiling"):
+        first = tl.trace(big, x, cache=True, cache_dir=tmp_path)
+    assert first.capture_cache_hit is False
+
+    surviving = sorted(path.name for path in cache_root.glob("*.pkl"))
+    assert surviving == small_entries, (
+        "refusing the oversized store must leave every valid entry in place"
+    )
+
+
+def test_clear_capture_cache_is_public(tmp_path: Path) -> None:
+    """The round-1-agreed remedy tl.clear_capture_cache() is reachable (r2 F39-3).
+
+    user_funcs.clear_capture_cache shipped unexported: not in ``__all__`` and
+    absent from the top-level namespace, so a user hitting the entry/byte cap
+    or an oversized-entry refusal had no supported way to clear the cache.
+    """
+
+    assert "clear_capture_cache" in tl.__all__
+    x = torch.ones(1, 1)
+    model = nn.Linear(1, 1, bias=False)
+    tl.trace(model, x, cache=True, cache_dir=tmp_path)
+    assert len(list((tmp_path / "capture").glob("*.pkl"))) == 1
+    assert tl.clear_capture_cache(tmp_path) == 1
+    assert list((tmp_path / "capture").glob("*.pkl")) == []
+
+
+def test_predicate_keys_cover_keyword_only_defaults() -> None:
+    """kwonly-default redefinition must change the key (r2 b4-fable R39-4).
+
+    ``def p(ctx, *, thr=0.5)`` redefined with ``thr=0.9`` has identical
+    co_code, an empty closure, and ``__defaults__ is None``: both selector
+    key lanes collided the two definitions onto one key, serving the stale
+    cached trace.
+    """
+
+    from torchlens._trace_selector_helpers import _stable_cache_fragment
+
+    namespace_low: dict = {}
+    namespace_high: dict = {}
+    exec("def predicate(ctx, *, thr=0.5):\n    return ctx > thr\n", namespace_low)  # noqa: S102
+    exec("def predicate(ctx, *, thr=0.9):\n    return ctx > thr\n", namespace_high)  # noqa: S102
+    low, high = namespace_low["predicate"], namespace_high["predicate"]
+    assert low.__code__.co_code == high.__code__.co_code
+    assert low.__defaults__ is None and high.__defaults__ is None
+
+    assert _predicate_cache_key(low) != _predicate_cache_key(high)
+    assert _stable_cache_fragment(low) != _stable_cache_fragment(high)
+    # Identical definitions still agree (no false misses).
+    namespace_same: dict = {}
+    exec("def predicate(ctx, *, thr=0.5):\n    return ctx > thr\n", namespace_same)  # noqa: S102
+    assert _predicate_cache_key(low) == _predicate_cache_key(namespace_same["predicate"])
+    assert _stable_cache_fragment(low) == _stable_cache_fragment(namespace_same["predicate"])
+
+
+def test_accessor_caches_version_by_value_not_len(tmp_path: Path) -> None:
+    """Equal-length graph edits must invalidate the accessor memos (r1 row 13).
+
+    ``trace.ops`` / ``trace.layers`` memoized on ``len(...)`` alone, so a
+    user's equal-length direct reassignment (or element swap) served a stale
+    accessor built over the OLD records.
+    """
+
+    model = nn.Sequential(nn.Linear(2, 2), nn.ReLU())
+    trace = tl.trace(model, torch.ones(1, 2))
+    ops_before = trace.ops
+    first_two = list(trace.layer_list[:2])
+
+    # Equal-length in-place swap of the backing list.
+    trace.layer_list[0], trace.layer_list[1] = trace.layer_list[1], trace.layer_list[0]
+    swapped = trace.ops
+    assert swapped is not ops_before
+    assert list(swapped)[:2] == [first_two[1], first_two[0]]
+
+    layers_before = trace.layers
+    # Equal-length reassignment with a different insertion order.
+    items = list(trace.layer_logs.items())
+    trace.layer_logs = dict(reversed(items))
+    layers_after = trace.layers
+    assert layers_after is not layers_before
+    # Unchanged content still re-serves the memo (no per-access rebuilds).
+    assert trace.layers is layers_after
+    assert trace.ops is swapped

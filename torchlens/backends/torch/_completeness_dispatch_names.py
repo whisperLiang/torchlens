@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         _BUFFER_STATE_VIEW_OPERATORS,
         _DISPATCH_TENSOR_ORIGINS,
         _FRAMEWORK_FILENAME_VERDICTS,
+        _FRAMEWORK_FILENAME_VERDICTS_MAX_ENTRIES,
         _HOST_ESCAPE_BOOL_SOURCE_LABELS,
         _HOST_ESCAPE_SOURCE_LABELS,
         _HOST_ESCAPE_STATE_SOURCE_LABELS,
@@ -447,6 +448,11 @@ def _dispatch_callsite() -> _DispatchCallsite:
                 )
             except (OSError, RuntimeError, ValueError):
                 framework_frame = False
+            # Bounded: generated-code / notebook / plugin workloads mint fresh
+            # co_filename values without limit; FIFO-drop the oldest verdict at
+            # the cap rather than growing process-global forever.
+            while len(_FRAMEWORK_FILENAME_VERDICTS) >= _FRAMEWORK_FILENAME_VERDICTS_MAX_ENTRIES:
+                _FRAMEWORK_FILENAME_VERDICTS.pop(next(iter(_FRAMEWORK_FILENAME_VERDICTS)))
             _FRAMEWORK_FILENAME_VERDICTS[filename] = framework_frame
         if not framework_frame:
             return _DispatchCallsite(filename, frame.f_lineno, frame.f_code.co_name)

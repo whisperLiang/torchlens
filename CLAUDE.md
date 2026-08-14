@@ -145,7 +145,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 96 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 97 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
   break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,

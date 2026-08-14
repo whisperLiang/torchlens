@@ -117,6 +117,13 @@ MAX_AUDITED_COMPLETENESS_BOUNDARIES = 9
 _TORCH_ROOT = Path(torch.__file__).resolve().parent
 _TORCHLENS_ROOT = Path(__file__).resolve().parents[2]
 _FRAMEWORK_FILENAME_VERDICTS: dict[str, bool] = {}
+# Filename verdicts are keyed by ``co_filename``, which is attacker-of-bounds
+# free but NOT bounded for generated-code / notebook / plugin workloads
+# (``<ipython-input-N>``, exec'd templates): every unseen filename adds an
+# entry for the process lifetime. FIFO-evict at the cap -- old filename
+# verdicts carry no active-session value and recomputing one is a cheap
+# ``Path.resolve`` pair.
+_FRAMEWORK_FILENAME_VERDICTS_MAX_ENTRIES = 4096
 
 
 AUDITED_COMPLETENESS_BOUNDARIES: tuple[AuditedCompletenessBoundary, ...] = (

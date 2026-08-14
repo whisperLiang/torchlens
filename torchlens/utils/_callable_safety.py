@@ -1119,6 +1119,16 @@ def _torch_overridable_callable_ids() -> frozenset[int]:
     both makes the membership test correct regardless of when this ``lru_cache`` is first
     populated relative to wrapping, since ``is_pure_forward_callable`` always tests the
     UNWRAPPED identity. Built once and frozen: the overridable set is torch-version-fixed.
+
+    ID-PINNING DEPENDENCY (why a frozen ``id()`` set stays valid for the
+    process lifetime): every recorded id is kept alive by a strong reference
+    elsewhere -- the raw callables by their owning torch modules (imported for
+    the process lifetime), and the capture-unwrapped originals by
+    ``_state._decorated_to_orig``, which is a LOCKED append-only ledger
+    (lesson b1842a1f: entries are never removed, even on unwrap). If either
+    pinning source ever weakens, a freed callable's id can recycle onto an
+    arbitrary object and this membership test silently mis-admits it -- do
+    not clear the ledger and do not make this cache outlive its pins.
     """
 
     ids: set[int] = set()
@@ -1180,6 +1190,11 @@ def _is_recognized_operator(real: Callable[..., Any], terminal_name: str) -> boo
     never re-admits a belt-denied or non-forward-dunder op.
     """
 
+    # Sound only while the id-set's members stay pinned: torch modules hold
+    # the raw callables and the append-only ``_state._decorated_to_orig``
+    # ledger holds the unwrapped originals (see the pinning note on
+    # ``_torch_overridable_callable_ids``). ``real`` itself is live here, so a
+    # recycled id cannot alias a still-pinned member.
     if id(real) in _torch_overridable_callable_ids():
         return True
     if _has_aten_operator_schema(terminal_name):

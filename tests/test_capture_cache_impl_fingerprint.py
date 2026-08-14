@@ -135,3 +135,231 @@ def test_submodule_structure_change_is_a_cache_miss(tmp_path) -> None:
     second = tl.trace(second_model, x, capture=_cache_capture(tmp_path))
     assert second.capture_cache_hit is False
     assert any("sigmoid" in label for label in _op_labels(second))
+
+
+class _AttrLoop(nn.Module):
+    """Model whose traced program depends on a PLAIN instance attribute."""
+
+    def __init__(self, k: int) -> None:
+        super().__init__()
+        self.k = k
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.lin(x)
+        for _ in range(self.k):
+            y = torch.relu(y)
+        return y
+
+
+def test_changed_plain_instance_attribute_is_a_cache_miss(tmp_path) -> None:
+    """Loop(5) must never be served Loop(1)'s cached trace (grind-r2 F39-1).
+
+    The content fingerprint covers ``state_dict`` + training flags +
+    non-persistent buffers and the implementation fingerprint covers module
+    tree + class identity + ``forward`` code; before the fix nothing covered
+    instance ``__dict__`` config, so ``Loop(5)`` hit ``Loop(1)``'s entry
+    (hit=True, 3 ops instead of 7, no warning).
+    """
+
+    x = torch.randn(1, 4)
+    torch.manual_seed(0)
+    first = tl.trace(_AttrLoop(1), x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    torch.manual_seed(0)
+    second = tl.trace(_AttrLoop(5), x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "a changed plain instance attribute must not hit the stale cached trace"
+    )
+    assert len(second.layer_labels) > len(first.layer_labels)
+    torch.manual_seed(0)
+    third = tl.trace(_AttrLoop(5), x, capture=_cache_capture(tmp_path))
+    assert third.capture_cache_hit is True, (
+        "an unchanged attribute inventory must still re-hit (no false misses)"
+    )
+
+
+def test_mutated_numeric_instance_attribute_is_a_cache_miss(tmp_path) -> None:
+    """The malignant variant: same op count, numerically wrong served values."""
+
+    class _Scaled(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = 1.0
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.lin(x) * self.scale
+
+    model = _Scaled()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    model.scale = 2.0
+    second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False
+    assert torch.allclose(second.layer_list[-1].out, first.layer_list[-1].out * 2.0)
+
+
+def test_attribute_fragments_are_bounded_and_address_free() -> None:
+    """Fragment rules: primitives by value, opaque objects by type, bounded."""
+
+    from torchlens._capture_state_helpers import _attribute_state_fragment
+
+    assert _attribute_state_fragment(5) == 5
+    assert _attribute_state_fragment("mode") == "mode"
+    assert _attribute_state_fragment(torch.float32) == ("torch-value", "torch.float32")
+    # Tensor attributes key by CONTENT, not identity.
+    tensor_a = torch.ones(3)
+    tensor_b = torch.ones(3)
+    assert _attribute_state_fragment(tensor_a) == _attribute_state_fragment(tensor_b)
+
+    # Opaque objects key by TYPE identity only -- never an address repr.
+    class _Opaque:
+        pass
+
+    fragment = _attribute_state_fragment(_Opaque())
+    assert fragment == _attribute_state_fragment(_Opaque())
+    assert "0x" not in repr(fragment)
+    # Depth ceiling terminates pathological nesting.
+    nested: list = [1]
+    for _ in range(10):
+        nested = [nested]
+    assert "<attr-depth-ceiling>" in repr(_attribute_state_fragment(nested))
+
+
+def test_registered_forward_hook_is_a_cache_miss(tmp_path) -> None:
+    """A user nn.Module hook is real model behavior: register/edit must miss.
+
+    grind-r2 b4-fable R39 finding 1: the config key's ``hooks`` entry covers
+    only the TorchLens ``hooks=`` kwarg; an ``m.register_forward_hook(...)``
+    between ``cache=True`` runs hit the pre-hook cached trace and served
+    wrong activations with no warning.
+    """
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 2)
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False, (
+            "a newly registered forward hook must not hit the hook-free cached trace"
+        )
+    finally:
+        handle.remove()
+
+    # Removing the hook restores the original inventory: the first entry re-hits.
+    third = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert third.capture_cache_hit is True
+
+
+def test_registered_forward_pre_hook_is_a_cache_miss(tmp_path) -> None:
+    """Pre-hooks mutate module inputs and must also invalidate the key."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+
+    handle = model.lin.register_forward_pre_hook(lambda mod, args: (args[0] + 1,))
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False
+    finally:
+        handle.remove()
+
+
+def test_edited_hook_implementation_is_a_cache_miss(tmp_path) -> None:
+    """Same registration slot, different hook CODE -> different key."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 2)
+    try:
+        first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert first.capture_cache_hit is False
+    finally:
+        handle.remove()
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 3)
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False, (
+            "an edited hook implementation must not hit the old hook's cached trace"
+        )
+    finally:
+        handle.remove()
+
+
+def test_input_requires_grad_flip_is_a_cache_miss(tmp_path) -> None:
+    """requires_grad changes grad_fn/backward metadata: the key must see it.
+
+    grind-r2 b4-fable R39-2: shape + dtype + CPU bytes were the whole tensor
+    hash, so freezing params or flipping input requires_grad between
+    cache=True runs hit the stale entry with wrong tensor_requires_grad /
+    grad_fn metadata.
+    """
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    second = tl.trace(model, x.clone().requires_grad_(True), capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "an input requires_grad flip must not hit the no-grad cached trace"
+    )
+
+
+def test_frozen_parameters_are_a_cache_miss(tmp_path) -> None:
+    """Freezing params (requires_grad_(False)) changes captured grad metadata."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False
+
+
+def test_tensor_content_hash_covers_device_and_requires_grad() -> None:
+    """Unit coverage for the hash axes (CUDA device flip untestable on CPU CI)."""
+
+    from torchlens._capture_state_helpers import _hash_tensor_content
+
+    base = torch.ones(3)
+    flagged = torch.ones(3).requires_grad_(True)
+    assert _hash_tensor_content(base) != _hash_tensor_content(flagged)
+    assert _hash_tensor_content(base) == _hash_tensor_content(torch.ones(3))
+
+
+def test_sibling_package_forward_is_not_torchlens_instrumentation() -> None:
+    """A ``torchlens_contrib`` install must not be classified as TorchLens'.
+
+    grind-r2 b4-fable R39-3: the bare prefix match claimed any sibling path
+    that string-extends the package dir, so a user forward override defined
+    in ``.../site-packages/torchlens_contrib/model.py`` was EXCLUDED from the
+    implementation signature and its edits silently hit the stale cache.
+    """
+
+    from torchlens._capture_state_helpers import (
+        _TORCHLENS_PACKAGE_DIR,
+        _is_torchlens_instrumentation,
+    )
+
+    def _function_with_filename(filename: str):
+        code = compile("def shim(x):\n    return x\n", filename, "exec")
+        namespace: dict = {}
+        exec(code, namespace)  # noqa: S102 - test-owned source
+        return namespace["shim"]
+
+    sibling = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "_contrib/model.py")
+    assert _is_torchlens_instrumentation(sibling) is False
+
+    interior = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "/wrapped.py")
+    assert _is_torchlens_instrumentation(interior) is True
