@@ -38,6 +38,16 @@ pytestmark = pytest.mark.smoke
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
 
+#: Warning categories that make a ``warnings.warn`` call a DEPRECATION emission.
+#: ``TorchLensDeprecationWarning`` (grind b4, R48-2/R48-4) is a
+#: ``DeprecationWarning`` subclass introduced so the pytest gate can select
+#: TorchLens's own deprecations by CATEGORY -- correct ``stacklevel`` now blames
+#: the caller, so the old module-keyed filter no longer sees them. The scanner
+#: must recognize both spellings or converting a site to the subclass would make
+#: it vanish from the census, which is exactly the invisibility this file exists
+#: to prevent.
+_DEPRECATION_CATEGORY_NAMES = frozenset({"DeprecationWarning", "TorchLensDeprecationWarning"})
+
 #: How the deprecated spelling reaches the user.
 _KINDS = frozenset(
     {
@@ -333,7 +343,7 @@ def _visit(
         if isinstance(func, ast.Attribute) and func.attr == "warn":
             categories = [*node.args, *(keyword.value for keyword in node.keywords)]
             if any(
-                isinstance(value, ast.Name) and value.id == "DeprecationWarning"
+                isinstance(value, ast.Name) and value.id in _DEPRECATION_CATEGORY_NAMES
                 for value in categories
             ):
                 sites.add(f"{relative}::{enclosing}")
