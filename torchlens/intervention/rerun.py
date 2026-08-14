@@ -996,7 +996,10 @@ def _rerun_save_scope(log: Trace) -> tuple[str | list[int | str] | None, Any | N
                 "all",
                 keep_op,
                 int(getattr(options, "lookback", 0)),
-                str(getattr(options, "lookback_payload_policy", "metadata_only")),
+                # R47-11: direct attribute access, not getattr-with-default -- a
+                # RecordingOptions field rename must raise here, never silently
+                # fall back to "metadata_only".
+                str(options.lookback_payload_policy),
             )
     if getattr(log, "num_saved_ops", 0) == 0:
         return None, None, 0, "metadata_only"

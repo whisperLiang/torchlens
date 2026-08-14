@@ -41,7 +41,7 @@ import torch
 from torch import nn
 
 from ._distributed import check_distributed_capture
-from .errors._base import CompatibilityError
+from .errors._base import CompatibilityError, TorchLensWarning
 from .utils._torch_compat import get_tracing_tensor_types
 
 # ---------------------------------------------------------------------------
@@ -162,25 +162,38 @@ def _model_has_quantized_modules(model: nn.Module) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class VariantScanTruncationWarning(TorchLensWarning):
+    """Emitted when the bounded entry-time tensor scan is truncated.
+
+    The input-tree walk in :func:`_iter_tensors` is bounded (depth and total
+    node count) so a pathological or adversarial container cannot stall
+    capture entry. When either bound truncates the scan, tensors beyond the
+    bound were NOT inspected: an unsupported variant hiding there will not
+    receive the typed entry refusal and will instead fail later, mid-capture,
+    with a raw error. This category discloses that honestly instead of
+    silently narrowing the guarantee.
+    """
+
+
+_ITER_TENSORS_MAX_DEPTH = 128
+"""Maximum container-nesting depth inspected by :func:`_iter_tensors`."""
+
+_ITER_TENSORS_MAX_NODES = 4096
+"""Maximum total objects inspected by one :func:`_iter_tensors` traversal."""
+
+
 def _iter_tensors(
     obj: Any,
     _seen: set[int] | None = None,
-    *,
-    _depth: int = 0,
-    _nodes: list[int] | None = None,
 ) -> Iterator[torch.Tensor]:
     """Yield tensors through builtin and inspectable user containers.
 
     Parameters
     ----------
     obj:
-        Current object to inspect.
+        Root object to inspect.
     _seen:
         Shared object-identity set for cycle prevention.
-    _depth:
-        Internal recursion depth.
-    _nodes:
-        Internal bounded-work counter.
 
     Yields
     ------
@@ -191,40 +204,64 @@ def _iter_tensors(
     -----
     ``nn.Module`` instances are not descended into because registered state is
     handled separately. Instance ``__dict__`` is read directly, so properties and
-    descriptors never execute. Traversal is capped at 12 levels / 4096 objects;
-    opaque slots-only objects and tensors created later inside ``forward`` remain
+    descriptors never execute. Traversal is iterative (an explicit worklist, so
+    the depth bound is decoupled from Python's recursion limit) and capped at
+    128 levels / 4096 objects; when either bound truncates the scan, a one-shot
+    :class:`VariantScanTruncationWarning` disclosure is emitted because
+    unsupported variants beyond the bound would fail undetected later. Opaque
+    slots-only objects and tensors created later inside ``forward`` remain
     outside entry-time detection and are disclosed in the compatibility report.
     """
     if _seen is None:
         _seen = set()
-    if _nodes is None:
-        _nodes = [0]
-    if _depth > 12 or _nodes[0] >= 4096:
-        return
-    obj_id = id(obj)
-    if obj_id in _seen:
-        return
-    _seen.add(obj_id)
-    _nodes[0] += 1
-    if isinstance(obj, torch.Tensor):
-        yield obj
-        return
-    if isinstance(obj, nn.Module):
-        return
-    if isinstance(obj, (list, tuple, set, frozenset)):
-        for item in obj:
-            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
-        return
-    if isinstance(obj, dict):
-        for item in obj.values():
-            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
-        return
-    try:
-        attributes = vars(obj)
-    except (TypeError, AttributeError):
-        return
-    for item in attributes.values():
-        yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
+    nodes = 0
+    truncated_by: str | None = None
+    stack: list[tuple[Any, int]] = [(obj, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > _ITER_TENSORS_MAX_DEPTH:
+            if truncated_by is None:
+                truncated_by = f"depth bound ({_ITER_TENSORS_MAX_DEPTH} nesting levels)"
+            continue
+        if nodes >= _ITER_TENSORS_MAX_NODES:
+            if truncated_by is None:
+                truncated_by = f"node bound ({_ITER_TENSORS_MAX_NODES} objects)"
+            # The counter never decreases, so every remaining item would be
+            # skipped identically — stop instead of draining the worklist.
+            break
+        obj_id = id(current)
+        if obj_id in _seen:
+            continue
+        _seen.add(obj_id)
+        nodes += 1
+        if isinstance(current, torch.Tensor):
+            yield current
+            continue
+        if isinstance(current, nn.Module):
+            continue
+        if isinstance(current, (list, tuple, set, frozenset)):
+            children = list(current)
+        elif isinstance(current, dict):
+            children = list(current.values())
+        else:
+            try:
+                attributes = vars(current)
+            except (TypeError, AttributeError):
+                continue
+            children = list(attributes.values())
+        # Reverse so the stack pops children in original order (DFS preorder,
+        # matching the recursive traversal this replaced).
+        for child in reversed(children):
+            stack.append((child, depth + 1))
+    if truncated_by is not None:
+        warnings.warn(
+            "TorchLens entry-time tensor-variant scan was truncated at its "
+            f"{truncated_by}: tensors beyond the bound were not inspected, so "
+            "unsupported tensor variants hiding there will not be refused up "
+            "front and may fail later during capture with a raw error.",
+            VariantScanTruncationWarning,
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +272,35 @@ def _iter_tensors(
 class UnsupportedTensorVariantError(CompatibilityError, RuntimeError):
     """Raised when ``trace`` is called on a model/input combination
     that TorchLens cannot reliably log (see module docstring for the matrix).
+
+    The capture entry gate attaches structured context on ``fields`` so
+    callers branch without parsing message text: ``code`` is always
+    ``"unsupported_tensor_variant"``, ``remedy`` names the fix, and
+    ``offenses`` is a tuple of ``{"name": ..., "reason": ...}`` dicts, one per
+    detected variant. Mid-forward shapeless-variant refusals raised outside
+    the entry gate (``backends/torch/_ops_activations.py``) do not yet carry
+    these fields.
     """
 
 
-def _docs_pointer() -> str:
-    """Human-readable pointer to the limitations documentation."""
+def _docs_pointer(section: str | None = None) -> str:
+    """Human-readable pointer to the limitations documentation.
+
+    Parameters
+    ----------
+    section:
+        Optional exact section heading of ``docs/reference/limitations.md``
+        to cite; ``None`` points at the catalog as a whole.
+
+    Returns
+    -------
+    str
+        Pointer sentence naming a real documentation location.
+    """
+    if section is None:
+        return "See docs/reference/limitations.md for supported alternatives."
     return (
-        "See the 'Tensor variants and unsupported contexts' section of "
-        "README.md / docs/LIMITATIONS.md for supported alternatives."
+        f"See the {section!r} section of docs/reference/limitations.md for supported alternatives."
     )
 
 
@@ -381,7 +439,13 @@ def check_model_and_input_variants(
             "torchlens.trace cannot run on this model/input "
             "combination. Detected unsupported tensor variant(s):\n"
             f"{bullet_list}\n"
-            f"\n{_docs_pointer()}"
+            f"\n{_docs_pointer('Capture entry and execution contexts')}",
+            code="unsupported_tensor_variant",
+            remedy=(
+                "materialize dense, strided tensors with concrete integer "
+                "shapes on a real device before capture"
+            ),
+            offenses=tuple({"name": name, "reason": why} for name, why in unique),
         )
 
     # Warnings (non-fatal).

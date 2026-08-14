@@ -261,6 +261,117 @@ def test_load_rejects_incomplete_blob_metadata_in_finalized_bundle(tmp_path: Pat
     assert list(recovered.records)
 
 
+def test_recover_depth_bomb_index_line_degrades_to_malformed_warning(tmp_path: Path) -> None:
+    """A JSON depth bomb in the index degrades gracefully, never RecursionError.
+
+    Regression (B8-13): the raw stdlib decoder recursed on a deeply nested
+    payload and the resulting ``RecursionError`` escaped BOTH per-line
+    exception handlers, crashing ``recover()`` on corruption it exists to
+    salvage.
+    """
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "depthbomb"
+    )
+    (bundle_path / "manifest.json").unlink()
+    index_path = bundle_path / "fastlog_index.jsonl"
+    lines = index_path.read_text(encoding="utf-8").splitlines()
+    lines.insert(1, "[" * 100_000)
+    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    assert any("malformed line" in warning for warning in recovered.recovery_warnings)
+    assert len(recovered.records) == len(lines) - 1
+
+
+def test_recover_depth_bomb_tail_line_degrades_to_truncated_tail(tmp_path: Path) -> None:
+    """A depth-bomb final index line reports the graceful truncated-tail outcome."""
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "tailbomb"
+    )
+    (bundle_path / "manifest.json").unlink()
+    index_path = bundle_path / "fastlog_index.jsonl"
+    text = index_path.read_text(encoding="utf-8")
+    index_path.write_text(text + "[" * 100_000, encoding="utf-8")
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    assert any("truncated tail" in warning for warning in recovered.recovery_warnings)
+    assert len(recovered.records) > 0
+
+
+def test_recover_oversized_index_refuses_with_recovery_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An index over the size ceiling refuses typed instead of allocating it."""
+
+    import functools
+    import importlib
+
+    from torchlens._io._json import read_bytes_bounded
+
+    # ``torchlens.fastlog.recover`` the ATTRIBUTE is the re-exported recover()
+    # function; import_module reaches the shadowed submodule itself.
+    recover_module = importlib.import_module("torchlens.fastlog.recover")
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "oversized"
+    )
+    (bundle_path / "manifest.json").unlink()
+    monkeypatch.setattr(
+        recover_module, "read_bytes_bounded", functools.partial(read_bytes_bounded, max_bytes=8)
+    )
+
+    with pytest.raises(RecoveryError, match="maximum recoverable size"):
+        tl.fastlog.recover(bundle_path)
+
+
+def test_recover_depth_bomb_metadata_degrades_to_empty_metadata(tmp_path: Path) -> None:
+    """A depth-bomb ``metadata.json`` degrades to empty metadata, not RecursionError."""
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "metabomb"
+    )
+    (bundle_path / "manifest.json").unlink()
+    (bundle_path / "metadata.json").write_text("[" * 100_000, encoding="utf-8")
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    assert recovered.recovered is True
+    assert len(recovered.records) > 0
+
+
+def test_recovery_warnings_capped_with_accurate_suppression_count(tmp_path: Path) -> None:
+    """Thousands of bad index lines retain a bounded warning list (B8-41).
+
+    A corrupt index with 200k malformed lines used to retain one string per
+    line (15+ MB of ``recovery_warnings``). The list is now capped per warning
+    kind with one final ``(+N more suppressed)`` entry keeping the total count
+    accurate.
+    """
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "flood"
+    )
+    (bundle_path / "manifest.json").unlink()
+    index_path = bundle_path / "fastlog_index.jsonl"
+    lines = index_path.read_text(encoding="utf-8").splitlines()
+    n_records = len(lines)
+    lines[1:1] = ["not-json"] * 3000
+    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    warning_list = recovered.recovery_warnings
+    malformed = [w for w in warning_list if w.startswith("malformed line")]
+    assert len(malformed) == 20
+    assert len(warning_list) <= 25
+    assert warning_list[-1] == "(+2980 more suppressed)"
+    assert len(recovered.records) == n_records
+
+
 def test_disk_roundtrip_label_index_deduplicates_same_raw_label(tmp_path: Path) -> None:
     """Disk label indexes persist one entry when ``label == raw_label``."""
 

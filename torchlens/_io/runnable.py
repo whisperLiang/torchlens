@@ -20,6 +20,7 @@ from .._runnable_state import runnable_tensor_byte_digest
 from ..backends.registry import BackendRegistryError, get_backend_spec
 from ..data_classes._state_adapter import state_items
 from ..errors import RunnablePreflightError
+from ..errors.runnable import SparseCorePayloadError
 from ..intervention.types import (
     CapturedArgTemplate,
     FunctionRegistryKey,
@@ -928,11 +929,44 @@ def require_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
     descriptor = build_sparse_run_descriptor(trace)
     if not descriptor.preflight.passed:
         raise RunnablePreflightError(
-            "Sparse runnable producer preflight failed.",
+            _preflight_failure_message(descriptor.preflight.diagnostics),
             code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
             diagnostics=descriptor.preflight.diagnostics,
         )
     return descriptor
+
+
+_PREFLIGHT_SUMMARY_MESSAGE_LIMIT = 300
+"""Length bound for the first-diagnostic summary inlined into the preflight message."""
+
+
+def _preflight_failure_message(diagnostics: tuple[RunnableDiagnostic, ...]) -> str:
+    """Summarize the first producer diagnostic into the preflight refusal message.
+
+    The full structured diagnostics stay on ``exc.fields["diagnostics"]``; the
+    message carries the first diagnostic's code, bounded text, detection stage,
+    and affected ops so the most common runnable refusal is actionable without
+    unpacking the exception fields.
+    """
+
+    if not diagnostics:
+        return "Sparse runnable producer preflight failed."
+    first = diagnostics[0]
+    detail = " ".join(first.message.split())
+    if len(detail) > _PREFLIGHT_SUMMARY_MESSAGE_LIMIT:
+        detail = detail[: _PREFLIGHT_SUMMARY_MESSAGE_LIMIT - 3] + "..."
+    labels = ", ".join(first.affected_op_labels[:3])
+    if len(first.affected_op_labels) > 3:
+        labels += ", ..."
+    site = f" (stage {first.detection_stage}" + (f"; ops {labels})" if labels else ")")
+    remainder = len(diagnostics) - 1
+    tail = (
+        f" (+{remainder} more diagnostic{'s' if remainder != 1 else ''} on "
+        "exc.fields['diagnostics'].)"
+        if remainder
+        else " (Full diagnostics on exc.fields['diagnostics'].)"
+    )
+    return f"Sparse runnable producer preflight failed: [{first.code.value}] {detail}{site}.{tail}"
 
 
 def with_weight_payload(descriptor: SparseRunDescriptor) -> SparseRunDescriptor:
@@ -1124,8 +1158,12 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
 
     Raises
     ------
-    AssertionError
+    SparseCorePayloadError
         If a tensor, parameter, or portable tensor blob reference is present.
+        The error carries ``fields["code"] == "sparse_core_tensor_payload"``
+        (:attr:`RunnableErrorCode.SPARSE_CORE_TENSOR_PAYLOAD`) plus the dotted
+        payload path; ``AssertionError`` remains in its MRO for historical
+        callers of this ``assert_``-named tripwire.
     """
 
     # Detach runtime-only nested-Trace back-references (conditional arm ``_trace``)
@@ -1152,7 +1190,20 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
         if kind is None:
             kind = classify(type(node))
         if kind == _NODE_PAYLOAD:
-            raise AssertionError(f"Sparse core tensor payload at {_dotted_node_path(path)}.")
+            dotted_path = _dotted_node_path(path)
+            raise SparseCorePayloadError(
+                f"Sparse core tensor payload at {dotted_path}. Remedy: route the "
+                "tensor through a declared payload blob family (state_dict_v1 / "
+                "runnable_nonpersistent_buffer_v1 / selected_activation_v2) or drop "
+                "the field from the portable state; the sparse core must stay "
+                "value-free.",
+                code=RunnableErrorCode.SPARSE_CORE_TENSOR_PAYLOAD.value,
+                remedy=(
+                    "route the tensor through a declared payload blob family or "
+                    "drop the field from the portable state"
+                ),
+                payload_path=dotted_path,
+            )
         if kind == _NODE_SKIP:
             return
         node_id = id(node)

@@ -132,6 +132,11 @@ def _write_output_path(root: Any, path: tuple[str | int, ...], value: Any) -> No
         raise RunPreconditionError(
             "Multiple output leaves cannot share an empty container path.",
             code=RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH.value,
+            remedy=(
+                "re-capture and re-save the runnable artifact with the current "
+                "torchlens producer so every output leaf records a distinct "
+                "container path"
+            ),
         )
     current = root
     for index, component in enumerate(path):
@@ -397,6 +402,10 @@ def _input_structure_positions(descriptor: SparseRunDescriptor) -> set[Any]:
             f"required inventory (facts {sorted(witness_positions, key=repr)!r}, "
             f"required {sorted(inventory_positions, key=repr)!r}).",
             code=RunnableErrorCode.CONTEXT_FIELD_INVALID.value,
+            remedy=(
+                "re-save the artifact with the current torchlens producer instead of "
+                "stripping or editing its input-structure witness facts"
+            ),
         )
     return inventory_positions
 

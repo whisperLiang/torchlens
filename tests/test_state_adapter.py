@@ -11,6 +11,7 @@ from torchlens._io import FieldPolicy, TorchLensIOError
 from torchlens._io.runnable import assert_sparse_core_has_no_tensor_payload
 from torchlens._io.scrub import _scrub_value, _ScrubOptions
 from torchlens.data_classes._state_adapter import state_items, state_new, state_restore
+from torchlens.errors.runnable import SparseCorePayloadError
 
 
 class _DictBackedState:
@@ -105,8 +106,11 @@ def test_sparse_core_backstop_inspects_mixed_dict_and_slot_fields(
 ) -> None:
     """Sparse-core traversal catches tensor payloads in either mixed field store."""
 
-    with pytest.raises(AssertionError, match=expected_field):
+    with pytest.raises(SparseCorePayloadError, match=expected_field) as caught:
         assert_sparse_core_has_no_tensor_payload(_MixedState(slot_value, dict_value))
+    assert caught.value.fields["code"] == "sparse_core_tensor_payload"
+    # The typed tripwire stays catchable as AssertionError for historical callers.
+    assert isinstance(caught.value, AssertionError)
 
 
 def test_state_new_restore_round_trips_dict_backed_state() -> None:

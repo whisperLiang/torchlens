@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
 import importlib
 import pickle
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -359,9 +362,12 @@ _LINEAGE_PROBE_BUILTINS: tuple[type[BaseException], ...] = (
     TypeError,
     RuntimeError,
     Warning,
+    AssertionError,
+    AttributeError,
 )
 
 BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
+    "AmbiguousGroupLifetimeError": ("RuntimeError",),
     "AmbiguousOpLookupError": ("ValueError",),
     "AppendBatchDependenceError": ("ValueError",),
     "AppendMismatchError": ("ValueError",),
@@ -434,11 +440,12 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "PredicateError": ("RuntimeError",),
     "ReattachError": ("RuntimeError",),
     "RecordBindingError": ("RuntimeError",),
-    "RecordContextFieldError": (),
+    "RecordContextFieldError": ("AttributeError",),
     "RecorderStateError": ("RuntimeError",),
     "RecordingConfigError": ("ValueError",),
     "RecoveryError": ("RuntimeError",),
     "RecursiveTracingError": ("RuntimeError",),
+    "ReentrantTraceError": ("RuntimeError",),
     "ReplayPreconditionError": ("RuntimeError",),
     "RunCapabilityUnavailableError": ("RuntimeError",),
     "RunPreconditionError": ("ValueError",),
@@ -452,14 +459,18 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "ShapeInferenceError": ("RuntimeError",),
     "SiteAmbiguityError": ("ValueError",),
     "SiteResolutionError": ("ValueError",),
+    "SparseCorePayloadError": ("AssertionError",),
     "SpecMutationError": ("ValueError",),
     "SpecPortabilityError": ("ValueError",),
     "SpliceModuleDeviceError": ("RuntimeError",),
     "SpliceModuleDtypeError": ("RuntimeError",),
     "StateBindingError": ("ValueError",),
     "StopSignalSwallowedError": (),
+    "StructuralHashMismatchError": ("AssertionError",),
+    "TorchCapabilityWarning": ("Warning",),
     "TorchLensCaptureGapError": ("RuntimeError",),
     "TorchLensCaptureGapWarning": ("Warning",),
+    "TorchLensDeprecationWarning": ("Warning",),
     "TorchLensError": (),
     "TorchLensIOError": ("RuntimeError",),
     "TorchLensInterventionError": ("RuntimeError",),
@@ -468,6 +479,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "TorchLensWarning": ("Warning",),
     "TraceNotReproducibleWarning": ("Warning",),
     "TrainingModeConfigError": ("ValueError",),
+    "UncapturedCollectiveOpError": ("RuntimeError",),
     "UnclassifiedSelectorError": ("ValueError",),
     "UnknownBackendError": ("ValueError",),
     "UnserializableDictKeyError": ("TypeError",),
@@ -475,6 +487,8 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "UnsupportedTensorVariantError": ("RuntimeError",),
     "UntrustedCallableError": ("RuntimeError",),
     "ValidationError": (),
+    "VariantScanTruncationWarning": ("Warning",),
+    "WildcardRecvUnsupportedError": ("RuntimeError",),
 }
 
 
@@ -1011,3 +1025,281 @@ def test_selector_direction_refusal_is_not_swallowed(monkeypatch: pytest.MonkeyP
         user_funcs._backward_intervention_spec_from_predicate(predicate)
 
     assert exc_info.value.fields["code"] == "selector_taxonomy_refusal"
+
+
+# ---------------------------------------------------------------------------
+# Package-wide taxonomy closure (p2#14 golden-closure gate)
+# ---------------------------------------------------------------------------
+#
+# The lineage golden above pins only ``dir(torchlens.errors)`` — historically
+# ~24 exception classes defined elsewhere in the package sat OUTSIDE that
+# universe entirely (ReentrantTraceError, WildcardRecvUnsupportedError,
+# TorchCapabilityWarning, HaltSignal, ...), so a new stranded class could ship
+# with no conscious registration decision. The closure scan below statically
+# walks EVERY module in ``torchlens/`` for exception-lineage class definitions
+# and demands each one is EITHER resolvable through ``torchlens.errors`` OR on
+# the exact-name allowlist here, with a one-line reason per entry. No
+# wildcards: a new stranded class fails this gate until someone classifies it.
+
+_CLOSURE_PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "torchlens"
+
+_BUILTIN_EXCEPTION_ROOTS = frozenset(
+    name
+    for name, obj in vars(builtins).items()
+    if isinstance(obj, type) and issubclass(obj, BaseException)
+)
+
+# Exception classes deliberately NOT registered in ``torchlens.errors``, keyed
+# by "module.ClassName" with the honest reason. Entries must stay exact and
+# current: a stale entry (class deleted or later registered) fails the gate
+# just like a missing one.
+_TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
+    # -- Internal control-flow signals / private helpers (never user-caught) --
+    "torchlens.fastlog._halt.HaltSignal": (
+        "internal control-flow stop signal (BaseException); converted to recording status"
+    ),
+    "torchlens._runnable_execution._ProjectionCountExceeded": (
+        "private internal bound signal; caught inside the projection walk"
+    ),
+    "torchlens.utils.rng._NotADigestableRng": (
+        "private RNG-classifier signal; caught inside the witness classifier"
+    ),
+    "torchlens._io.runnable._UnsupportedLiteralError": (
+        "private save-time literal-classifier signal; converted to typed refusals"
+    ),
+    "torchlens.utils._torch_compat._DynamoExplainOutputError": (
+        "private dynamo-explain probe failure; caught inside the capability probe"
+    ),
+    "torchlens.capture.projections.LiveOpViewFieldNotYetWritten": (
+        "internal AttributeError shim for not-yet-written live OpRecord view fields"
+    ),
+    "torchlens.ir.op_record.OpRecordAttributeError": (
+        "internal strict-protocol AttributeError for OpRecord facet access"
+    ),
+    "torchlens.ir.op_record.AmendmentValidationError": (
+        "internal journal amendment-lane invariant; a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.AmendmentTargetError": (
+        "internal journal invariant (amendment target); a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.LaneMergePolicyError": (
+        "internal journal invariant (lane merge policy); a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.SealedJournalWriteError": (
+        "internal sealed-journal write invariant; a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.SealedJournalAppendError": (
+        "internal sealed-journal append invariant; a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.SealedJournalAmendmentError": (
+        "internal sealed-journal amendment invariant; a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.capture_events.SourceSequencingError": (
+        "internal journal source-sequencing invariant; a raise indicates a TorchLens bug"
+    ),
+    "torchlens.ir.container.ContainerReconstructionError": (
+        "internal replay container-codec error; surfaces wrapped in typed runnable refusals"
+    ),
+    "torchlens.ir.live_index.LiveIndexWindowError": (
+        "internal lookback-window KeyError; caught by the windowed-save machinery"
+    ),
+    # -- Errors governed by other contract docs / documented submodule homes --
+    "torchlens._io.runnable_load.ContextFieldInvalidError": (
+        "runnable contract-doc vocabulary (context_field_invalid); surfaced through "
+        "typed runnable readiness refusals"
+    ),
+    "torchlens._io.runnable_load.DescriptorStructuralBoundError": (
+        "runnable descriptor parse bound; surfaced through typed runnable readiness refusals"
+    ),
+    "torchlens._io.state_keys.PortableStateKeyError": (
+        "taxonomy member (TorchLensError); internal state-key codec error surfaced "
+        "through the strict state binder"
+    ),
+    "torchlens.merged._errors.MergedTraceError": (
+        "public home is torchlens.merged (frozen vocabulary per merged_trace_contract.md); "
+        "taxonomy member via TorchLensError"
+    ),
+    "torchlens.merged._errors.MergeConflictError": (
+        "public home is torchlens.merged (frozen vocabulary per merged_trace_contract.md)"
+    ),
+    "torchlens.merged._errors.MergeInputError": (
+        "public home is torchlens.merged (frozen vocabulary per merged_trace_contract.md)"
+    ),
+    "torchlens.merged._errors.MergedArtifactError": (
+        "public home is torchlens.merged (frozen vocabulary per merged_trace_contract.md)"
+    ),
+    "torchlens.merged._errors.MergedSurfaceUnsupportedError": (
+        "public home is torchlens.merged (frozen vocabulary per merged_trace_contract.md)"
+    ),
+    "torchlens.receptive_field._errors.ReceptiveFieldError": (
+        "public home is the lazy tl.receptive_field submodule; taxonomy member via TorchLensError"
+    ),
+    "torchlens.receptive_field._errors.AmbiguousCallError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.AmbiguousInputError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.AmbiguousPassError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.AmbiguousTargetError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.NoInfluencePathError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.ReceptiveFieldConfigurationError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.ReceptiveFieldUnavailableError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.receptive_field._errors.ReceptiveFieldValidationError": (
+        "public home is the lazy tl.receptive_field submodule"
+    ),
+    "torchlens.debug._compile_counter.CompileCountsUnavailableError": (
+        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
+    ),
+    "torchlens.debug._graph_breaks.GraphBreaksUnavailableError": (
+        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
+    ),
+    "torchlens.debug._graph_breaks.GraphBreaksNormalizationError": (
+        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
+    ),
+    "torchlens.attribution._core.AttributionError": (
+        "public home is torchlens.attribution.__all__; plain ValueError outside the "
+        "taxonomy — rebase/registration is that surface's own review decision"
+    ),
+    "torchlens.bundle.AmbiguousLabelError": (
+        "public home is torchlens.bundle/torchlens.intervention.bundle __all__; plain "
+        "KeyError outside the taxonomy — rebase/registration is that surface's decision"
+    ),
+    "torchlens.semantic.facets.MissingFacetError": (
+        "public home is torchlens.semantic.__all__ (provisional surface); plain KeyError "
+        "outside the taxonomy"
+    ),
+    "torchlens.utils._multipass_access.MultiPassAmbiguityError": (
+        "multi-pass access refusal raised via record accessors; plain ValueError outside "
+        "the taxonomy — flagged for future taxonomy adoption"
+    ),
+    "torchlens.backends.torch._tl.TorchLensTLCollisionError": (
+        "capture-entry _tl attribute-collision guard; plain AttributeError outside the "
+        "taxonomy — flagged for future taxonomy adoption"
+    ),
+    "torchlens.backends.tf.interventions.TFInterventionSiteUnreachableError": (
+        "TF preview refusal catchable via its registered parent BackendUnsupportedError"
+    ),
+    "torchlens.ir.predicate.MLXValueUnavailableError": (
+        "MLX preview value-access refusal; preview-backend surface, not yet in the stable registry"
+    ),
+}
+
+
+def _exception_class_definitions() -> dict[str, tuple[str, ...]]:
+    """Statically scan ``torchlens/`` for exception-lineage class definitions.
+
+    Returns
+    -------
+    dict[str, tuple[str, ...]]
+        Mapping from ``module.ClassName`` to the class's declared base names,
+        for every class whose declared base chain (resolved transitively by
+        bare name across the package) reaches a builtin exception root.
+    """
+
+    definitions: dict[str, tuple[str, ...]] = {}
+    name_to_bases: dict[str, set[str]] = {}
+    per_module: list[tuple[str, str, tuple[str, ...]]] = []
+    for path in sorted(_CLOSURE_PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(_CLOSURE_PACKAGE_ROOT.parent)
+        parts = list(relative.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        module_name = ".".join(parts)
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = tuple(
+                base.id if isinstance(base, ast.Name) else base.attr
+                for base in node.bases
+                if isinstance(base, (ast.Name, ast.Attribute))
+            )
+            per_module.append((module_name, node.name, bases))
+            name_to_bases.setdefault(node.name, set()).update(bases)
+
+    def _is_exception_name(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        """Return whether ``name`` transitively reaches a builtin exception root."""
+
+        if name in _BUILTIN_EXCEPTION_ROOTS:
+            return True
+        if name in seen:
+            return False
+        return any(_is_exception_name(base, seen | {name}) for base in name_to_bases.get(name, ()))
+
+    for module_name, class_name, bases in per_module:
+        if any(_is_exception_name(base) for base in bases):
+            definitions[f"{module_name}.{class_name}"] = bases
+    return definitions
+
+
+def _registered_exception_homes() -> set[str]:
+    """Resolve every ``torchlens.errors`` name to its defining ``module.ClassName``.
+
+    Returns
+    -------
+    set[str]
+        Qualified defining locations of the registered public error surface.
+    """
+
+    homes: set[str] = set()
+    for name in dir(errors):
+        obj = getattr(errors, name)
+        if isinstance(obj, type) and issubclass(obj, BaseException):
+            homes.add(f"{obj.__module__}.{obj.__qualname__}")
+    return homes
+
+
+def test_package_exception_classes_are_registered_or_allowlisted() -> None:
+    """Every exception class in the package has a conscious classification.
+
+    Each statically-discovered exception-lineage class must be resolvable
+    through ``torchlens.errors`` (registered public surface) or carry an
+    exact-name allowlist entry above with its reason. A NEW stranded class
+    fails here until it is classified.
+    """
+
+    discovered = set(_exception_class_definitions())
+    registered = _registered_exception_homes()
+    allowlisted = set(_TAXONOMY_INTERNAL_ALLOWLIST)
+
+    stranded = discovered - registered - allowlisted
+    assert stranded == set(), (
+        "exception classes outside torchlens.errors with no allowlist decision "
+        f"(register them or add an exact-name allowlist entry with a reason): "
+        f"{sorted(stranded)}"
+    )
+
+
+def test_taxonomy_allowlist_has_no_stale_or_shadowing_entries() -> None:
+    """The allowlist stays exact: no dead entries, no double-classification.
+
+    An entry for a deleted class is stale noise; an entry for a class that IS
+    registered would let a later un-registration pass silently.
+    """
+
+    discovered = set(_exception_class_definitions())
+    registered = _registered_exception_homes()
+    allowlisted = set(_TAXONOMY_INTERNAL_ALLOWLIST)
+
+    assert allowlisted - discovered == set(), (
+        f"stale allowlist entries (class no longer defined): {sorted(allowlisted - discovered)}"
+    )
+    assert allowlisted & registered == set(), (
+        "allowlist entries that are ALSO registered in torchlens.errors "
+        f"(remove the allowlist row): {sorted(allowlisted & registered)}"
+    )
+    for entry, reason in _TAXONOMY_INTERNAL_ALLOWLIST.items():
+        assert isinstance(reason, str) and reason.strip(), (
+            f"allowlist entry {entry!r} must carry a non-empty reason"
+        )

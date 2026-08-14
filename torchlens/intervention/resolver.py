@@ -254,6 +254,9 @@ def resolve_function_registry_key(
 
     Raises
     ------
+    InvalidArgumentError
+        If a custom key is missing its ``import_path``
+        (``code="custom_callable_import_path_missing"``).
     ReplayPreconditionError
         If the namespace or qualified name cannot be resolved.
     UntrustedCallableError
@@ -308,7 +311,22 @@ def resolve_function_registry_key(
             return resolved
         if key.namespace == "custom":
             if not key.import_path:
-                raise AttributeError("custom key is missing import_path")
+                # SF-07: a malformed spec refusal is a typed configuration door
+                # (sibling of resolve_import_ref's ``import_path_invalid``), not a
+                # raw AttributeError laundered through the resolution wrapper.
+                # InvalidArgumentError is not in the wrap-except tuple below, so
+                # it propagates with its code intact.
+                raise InvalidArgumentError(
+                    "custom function registry key is missing import_path",
+                    code="custom_callable_import_path_missing",
+                    remedy=(
+                        "supply the custom callable's import reference as "
+                        "import_path='module:qualname' on the saved function "
+                        "registry key entry"
+                    ),
+                    namespace=key.namespace,
+                    qualname=key.qualname,
+                )
             module_name, _, qualname = key.import_path.partition(":")
             # SECURITY BOUNDARY (tripwire). A bundle-supplied custom key is FOREIGN
             # arbitrary code and default-denies. The only auto-trusted custom

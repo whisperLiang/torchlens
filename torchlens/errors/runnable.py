@@ -13,6 +13,17 @@ class RunnablePreflightError(RunnableTLSPECError, ConfigurationError, ValueError
     """Whole-graph producer preflight rejected a runnable claim."""
 
 
+class SparseCorePayloadError(RunnableTLSPECError, ValidationError, AssertionError):
+    """A value-free sparse core carried a tensor or tensor-blob payload.
+
+    Raised by the sparse-core tripwire
+    (:func:`torchlens._io.runnable.assert_sparse_core_has_no_tensor_payload`)
+    with ``fields["code"] == "sparse_core_tensor_payload"``. ``AssertionError``
+    stays in the MRO deliberately: the tripwire's historical raise class was a
+    bare ``AssertionError``, so existing ``except AssertionError`` callers keep
+    working while new callers branch on the stable code."""
+
+
 class RunCapabilityUnavailableError(RunnableTLSPECError, CompatibilityError, RuntimeError):
     """A Trace has no runnable provider or supported backend adapter."""
 
@@ -60,5 +71,6 @@ __all__ = [
     "RunnablePreflightError",
     "RunnableTLSPECError",
     "RuntimeSignatureDriftError",
+    "SparseCorePayloadError",
     "StateBindingError",
 ]

@@ -208,14 +208,27 @@ class RefreshProjector:
                 "refresh target contains buffer sink ops whose live routing can change across reruns",
             )
         refreshed_by_raw = {layer._layer_label_raw: layer for layer in refreshed.layer_list}
+        # B8-36: one aggregated warning per refresh. A per-layer warning with the
+        # label interpolated into the message defeats Python's warning dedup
+        # (hundreds of warnings on a real CNN, and ``-W error`` aborts the
+        # refresh at layer one), so labels are collected during the sweep and
+        # reported once.
+        shape_changed: list[str] = []
         for layer in self.target.layer_list:
             new_shape = refreshed_by_raw[layer._layer_label_raw].shape
             if layer.shape is not None and new_shape != layer.shape:
-                warnings.warn(
-                    f"Tensor shape changed for '{layer.layer_label}': "
-                    f"expected {layer.shape}, got {new_shape}. "
-                    "The computational graph may have changed between ops."
+                shape_changed.append(
+                    f"'{layer.layer_label}' (expected {layer.shape}, got {new_shape})"
                 )
+        if shape_changed:
+            preview = "; ".join(shape_changed[:3])
+            remainder = len(shape_changed) - 3
+            suffix = f"; and {remainder} more layer(s)" if remainder > 0 else ""
+            warnings.warn(
+                f"Tensor shape changed for {len(shape_changed)} layer(s): "
+                f"{preview}{suffix}. "
+                "The computational graph may have changed between ops."
+            )
         from ..data_classes._state_adapter import state_items
 
         preserved_states = [dict(state_items(layer)) for layer in self.target.layer_list]
