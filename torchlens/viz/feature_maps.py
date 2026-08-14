@@ -269,10 +269,13 @@ def feature_map_node_spec(
             cmap=cmap,
             cell_size=cell_size,
             cap_text=cap_text,
+            reduce_label=_reduce_name(int(counts[5].item())),
         )
         image_path = _write_feature_map_image(trace, key, grid)
         caption = str(getattr(layer, "layer_label", None) or getattr(layer, "label", key))
         mode_name = _mode_name(mode_id)
+        if mode_id == _MODE_AGGREGATE:
+            mode_name = f"{mode_name} ({_reduce_name(int(counts[5].item()))})"
         stimulus_clause = f"showing {shown_rows} of {total_stimuli} stimuli"
         channel_clause = (
             "" if mode_id == _MODE_AGGREGATE else f" x {shown_cols} of {total_channels} channels"
@@ -611,6 +614,23 @@ def _reduce_id(reduce: FeatureMapReduce) -> int:
     return _REDUCE_MEAN if reduce == "mean" else _REDUCE_MAX
 
 
+def _reduce_name(reduce_id: int) -> str:
+    """Return the display name for a stored aggregate reduction id.
+
+    Parameters
+    ----------
+    reduce_id:
+        Stored reduction id (``counts[5]``).
+
+    Returns
+    -------
+    str
+        ``"avg"`` for mean, ``"max"`` for max.
+    """
+
+    return "max" if reduce_id == _REDUCE_MAX else "avg"
+
+
 def _feature_map_payload_for_node(
     trace: Any,
     node: Any,
@@ -681,6 +701,7 @@ def _render_feature_map_grid(
     cmap: str,
     cell_size: int,
     cap_text: str | None,
+    reduce_label: str = "avg",
 ) -> Image.Image:
     """Render stored maps as one bounded small-multiples image.
 
@@ -705,6 +726,8 @@ def _render_feature_map_grid(
     cap_text:
         Optional shown-of-total disclosure marker (e.g. ``"4/32 stim"``),
         or ``None`` when the grid shows everything.
+    reduce_label:
+        Channel-aggregation name shown on aggregate cells (``"avg"``/``"max"``).
 
     Returns
     -------
@@ -739,6 +762,7 @@ def _render_feature_map_grid(
                 cell_size=cell_size,
                 stimulus_index=int(stimulus_indices[row_index].item()),
                 channel_id=int(channel_ids[row_index, col_index].item()),
+                reduce_label=reduce_label,
             )
             _draw_constant_cell_label(
                 draw,
@@ -842,6 +866,7 @@ def _draw_cell_label(
     cell_size: int,
     stimulus_index: int,
     channel_id: int,
+    reduce_label: str = "avg",
 ) -> None:
     """Draw a compact stimulus/channel label when it fits.
 
@@ -859,9 +884,16 @@ def _draw_cell_label(
         Source stimulus index.
     channel_id:
         Channel id, or ``-1`` for aggregate.
+    reduce_label:
+        Aggregation name for aggregate cells (``channel_id < 0``); a
+        max-projection must never be captioned ``avg``.
     """
 
-    label = f"s{stimulus_index}/avg" if channel_id < 0 else f"s{stimulus_index}/c{channel_id}"
+    label = (
+        f"s{stimulus_index}/{reduce_label}"
+        if channel_id < 0
+        else f"s{stimulus_index}/c{channel_id}"
+    )
     bbox = draw.textbbox((0, 0), label)
     text_width = int(bbox[2] - bbox[0])
     text_height = int(bbox[3] - bbox[1])

@@ -487,3 +487,33 @@ def test_tooltip_reports_true_totals_not_capped_counts(tmp_path: Path) -> None:
     assert "4 of 8 channels" in dot
     # The capped count must never masquerade as the total.
     assert "4 stimuli" not in dot
+
+
+def test_aggregate_labels_report_actual_reduction(tmp_path: Path) -> None:
+    """A max-projection is captioned max, never avg (reduce_id is honored)."""
+
+    trace = _conv_trace(n_stimuli=2)
+    feature_map_evolution(trace, reduce="max")
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "reduce_label"),
+    )
+
+    assert "aggregate (max)" in dot
+
+    maps = trace._annotation_blobs["featmap:layer:conv2d_1_1:maps"]
+    stimuli = trace._annotation_blobs["featmap:layer:conv2d_1_1:stimuli"]
+    channels = trace._annotation_blobs["featmap:layer:conv2d_1_1:channels"]
+    kwargs: dict[str, Any] = {
+        "raw_images": None,
+        "overlay": False,
+        "alpha": 0.55,
+        "cmap": "magma",
+        "cell_size": 72,
+        "cap_text": None,
+    }
+    as_max = _render_feature_map_grid(maps, stimuli, channels, reduce_label="max", **kwargs)
+    as_avg = _render_feature_map_grid(maps, stimuli, channels, reduce_label="avg", **kwargs)
+    assert ImageChops.difference(as_max, as_avg).getbbox() is not None
