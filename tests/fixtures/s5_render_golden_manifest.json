@@ -8,8 +8,8 @@
         "plan_sha256": "681ece3cd8c502eb57b8e1c24fbd9105c70fa51c612f1f993ec885ae28bccf4f"
       },
       "max": {
-        "dot_len": 10508,
-        "dot_sha256": "40127e385df2123c808ac8f2749340cddbc68688d5b1af0c549ff492c667ada5",
+        "dot_len": 10517,
+        "dot_sha256": "01abfbc6aae2af83f893eb49436aaa0101438cb0cc1c9e13f7ac015d75b87626",
         "plan_repr_len": 61,
         "plan_sha256": "308ee077abe95d24e0484b64b8f087c8db045db0be66a3ff70c520702069883b"
       },
@@ -86,8 +86,8 @@
         "plan_sha256": "c5e1459291685012dcb96ef614acfe4fd866272941191aa2f06091a83ffbc526"
       },
       "max": {
-        "dot_len": 2173,
-        "dot_sha256": "08446ca0ee4e895ea0ce85e076e6ac262497bcb2408a4c41a1ed183e9dba7b1b",
+        "dot_len": 2181,
+        "dot_sha256": "f84c560e295c1baefc1f544aae179e851b9145ef8182a0b5c584923554dc30c2",
         "plan_repr_len": 45,
         "plan_sha256": "98cbcef8b6f4a4de483df28fbdb2729926010cf9cb80a949a96272f094197515"
       },

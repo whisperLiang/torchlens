@@ -2074,13 +2074,20 @@ def _op_segment_spanned_modules(
     module containment at all, so the label must name the spanned modules.
     Returns the ordered distinct immediate homes below ``owner`` when the
     placement actually loses containment information, else ``[]``.
+
+    T9 (grind-p3): the walk reads the op's FULL module stack, not the
+    renderer's effective stack. The effective stack drops an atomic
+    module's own innermost level — a presentation choice (the renderer
+    keeps the op and drops the box) — and inheriting that drop here made
+    the disclosure silently omit hidden atomic module calls from the
+    ``spans @...`` list.
     """
 
     homes: list[str] = []
     has_direct_member = False
     for label in labels:
         op = _trace_op_for_concrete_label(trace, label)
-        stack: tuple[str, ...] = _effective_render_module_stack(op)
+        stack: tuple[str, ...] = tuple(str(module) for module in getattr(op, "modules", ()) or ())
         if vis_mode == "rolled":
             stack = tuple(value.rsplit(":", 1)[0] for value in stack)
         if owner is None or owner not in stack:
