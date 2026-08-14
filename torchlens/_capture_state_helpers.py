@@ -1674,10 +1674,10 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
             tuple(_attribute_state_fragment(item, depth + 1) for item in items),
         )
     if isinstance(value, (set, frozenset)):
-        items = sorted(
+        member_reprs = sorted(
             (repr(_attribute_state_fragment(item, depth + 1)) for item in value),
         )[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
-        return ("set", len(value), tuple(items))
+        return ("set", len(value), tuple(member_reprs))
     if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
         try:
             digest = hashlib.sha256(value.tobytes()).hexdigest()
