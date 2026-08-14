@@ -103,7 +103,8 @@ def test_backward_projection_structural_invariants_trip_on_corruption() -> None:
     trace = _captured_two_pass_trace()
     try:
         victim = next(grad_fn for grad_fn in trace.grad_fns if len(grad_fn.calls) == 2)
-        trace._capture_events.backward_events.clear()
+        # Corrupt only the projected calls dict: deleting journal events instead
+        # would trip the deletion-visible seq invariant before this pin fires.
         call = victim.calls._dict.pop(2)
         victim.calls._dict[3] = call
 

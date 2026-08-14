@@ -69,7 +69,10 @@ def test_backward_event_flow_invariants_trip_on_missing_bracket_end() -> None:
         end_index = next(
             index for index, event in enumerate(events) if isinstance(event, BackwardPassEnd)
         )
-        events.pop(end_index)
+        # Retarget the end bracket to a phantom pass instead of popping it:
+        # deleting the event would trip the deletion-visible seq invariant
+        # before the bracket-pairing pin fires.
+        events[end_index] = replace(events[end_index], pass_index=2)
 
         with pytest.raises(MetadataInvariantError, match="exactly one start and end"):
             check_metadata_invariants(trace)
