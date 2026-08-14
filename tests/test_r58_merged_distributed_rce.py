@@ -324,3 +324,69 @@ def test_missing_merged_members_refuse_typed(tmp_path: Path) -> None:
     with pytest.raises(MergedArtifactError) as caught:
         load_merged(root)
     assert caught.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({}, id="empty-object"),
+        pytest.param("rank0", id="not-a-mapping"),
+        pytest.param({"rank": 0, "path": "rank0"}, id="missing-tree-sha256"),
+        pytest.param(
+            {"rank": 0, "path": "rank0", "tree_sha256": "a" * 64, "smuggled": 1},
+            id="unknown-key",
+        ),
+        pytest.param(
+            {"rank": True, "path": "rank0", "tree_sha256": "a" * 64},
+            id="rank-is-a-bool",
+        ),
+        pytest.param(
+            {"rank": "0", "path": "rank0", "tree_sha256": "a" * 64},
+            id="rank-not-an-int",
+        ),
+        pytest.param(
+            {"rank": -1, "path": "rank0", "tree_sha256": "a" * 64},
+            id="rank-negative",
+        ),
+        pytest.param({"rank": 0, "path": 5, "tree_sha256": "a" * 64}, id="path-not-a-string"),
+        pytest.param({"rank": 0, "path": "rank0", "tree_sha256": 7}, id="digest-not-a-string"),
+        pytest.param(
+            {"rank": 0, "path": "rank0", "tree_sha256": "Z" * 64},
+            id="digest-not-lowercase-hex",
+        ),
+        pytest.param(
+            {"rank": 0, "path": "rank0", "tree_sha256": "a" * 63},
+            id="digest-wrong-length",
+        ),
+    ],
+)
+def test_malformed_member_entry_refuses_typed(tmp_path: Path, entry: Any) -> None:
+    """Every member entry is validated against closed keys/types before use.
+
+    Fail-before (p2 R58 sol-R58-1): a validly hashed descriptor with
+    ``"members": [{}]`` escaped the documented ``MergedArtifactError`` as a raw
+    ``KeyError('rank')``; non-mapping entries escaped via ``TypeError`` and
+    booleans were accepted by ``int()``.
+    """
+
+    root = _merged_artifact(tmp_path / "malformed.merged", _descriptor(members=[entry]))
+    with pytest.raises(MergedArtifactError) as caught:
+        load_merged(root)
+    assert caught.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+
+def test_duplicate_member_rank_refuses_typed(tmp_path: Path) -> None:
+    """Two member entries claiming the same rank refuse at the schema pass."""
+
+    root = _merged_artifact(
+        tmp_path / "dup.merged",
+        _descriptor(
+            members=[
+                {"rank": 0, "path": "rank0", "tree_sha256": "a" * 64},
+                {"rank": 0, "path": "rank0b", "tree_sha256": "b" * 64},
+            ]
+        ),
+    )
+    with pytest.raises(MergedArtifactError) as caught:
+        load_merged(root)
+    assert caught.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value

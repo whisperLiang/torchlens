@@ -128,6 +128,10 @@ def _member_dirname(rank: int) -> str:
     return f"rank_{rank:04d}.tlspec"
 
 
+_MEMBER_ENTRY_KEYS = frozenset({"rank", "path", "tree_sha256"})
+"""Closed key set for one descriptor ``members`` entry (unknown keys refuse)."""
+
+
 def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
     """Build the typed tamper refusal (integrity failure, never a presence gap)."""
 
@@ -237,7 +241,11 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
             "torchlens_version": str(torchlens_version),
             "torch_version": str(torch.__version__),
             "python_version": platform_module.python_version(),
-            "platform": platform_module.platform(),
+            # Coarse system-machine form, matching the core bundle writer's
+            # deliberate choice: the full platform.platform() string leaks the
+            # kernel build, libc, and cloud image tag into a shareable
+            # artifact (B8-22).
+            "platform": f"{platform_module.system().lower()}-{platform_module.machine().lower()}",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         (staging_root / "manifest.json").write_text(
@@ -257,8 +265,40 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
             try:
                 backup_root.rename(root)
             except OSError:
-                pass
+                # Double fault: the save failed AND the restore failed. The
+                # prior artifact is gone from its canonical path but still
+                # exists under the backup name -- disclose it instead of
+                # stranding it under a hidden name the error never mentions
+                # (twin of the _io/bundle.py _restore_backup disclosure).
+                import warnings
+
+                warnings.warn(
+                    f"Failed to restore the previous merged artifact after a "
+                    f"failed overwrite; it remains recoverable at {backup_root}",
+                    stacklevel=2,
+                )
         raise
+
+
+def _cached_verdict(cached: dict[str, Any], key: str, enum_type: Any) -> Any:
+    """Convert one cached verdict field typed; missing/foreign values refuse.
+
+    The degraded-load branch is the ONE consumer of cache fields that exact
+    rederivation equality has not already proven well-formed, so a missing key
+    or a value outside the closed vocabulary previously escaped as a raw
+    KeyError/ValueError instead of the documented typed refusal (R18-5).
+    """
+
+    if key not in cached:
+        raise _schema_refusal(f"descriptor derivation cache is missing {key!r}")
+    value = cached[key]
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        raise _schema_refusal(
+            f"descriptor derivation cache {key}={value!r} is outside the "
+            "closed vocabulary"
+        ) from exc
 
 
 def _resolve_member_path(root: Path, relative: str) -> Path:
@@ -359,14 +399,47 @@ def load_merged(path: str | Path) -> MergedTrace:
     if not isinstance(manifest_members, dict):
         raise _schema_refusal("root manifest members table is absent")
 
-    # 1. Integrity: every member's canonical tree hash must match BOTH records.
-    member_paths: dict[int, Path] = {}
+    # 1a. Schema: every member entry is validated against closed keys and exact
+    # types BEFORE any value is used: a validly hashed descriptor with
+    # `"members": [{}]` (or a non-mapping entry, a boolean rank, ...)
+    # previously escaped the documented typed refusal as a raw
+    # KeyError/TypeError (p2 R58 sol-R58-1).
+    validated_members: dict[int, tuple[str, str]] = {}
     for entry in members:
-        rank = int(entry["rank"])
-        member_path = _resolve_member_path(root, str(entry["path"]))
+        if not isinstance(entry, dict):
+            raise _schema_refusal("descriptor member entry is not a JSON object")
+        if set(entry) != _MEMBER_ENTRY_KEYS:
+            raise _schema_refusal(
+                "descriptor member entry keys "
+                f"{sorted(str(key) for key in entry)} are not the closed set "
+                f"{sorted(_MEMBER_ENTRY_KEYS)}"
+            )
+        rank = entry["rank"]
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise _schema_refusal(
+                f"descriptor member rank {rank!r} is not a non-negative integer"
+            )
+        if rank in validated_members:
+            raise _schema_refusal(f"descriptor member rank {rank} is duplicated")
+        if not isinstance(entry["path"], str):
+            raise _schema_refusal(f"rank {rank} member path is not a string")
+        recorded = entry["tree_sha256"]
+        if (
+            not isinstance(recorded, str)
+            or len(recorded) != 64
+            or any(char not in "0123456789abcdef" for char in recorded)
+        ):
+            raise _schema_refusal(
+                f"rank {rank} tree_sha256 is not a lowercase hex SHA-256 digest"
+            )
+        validated_members[rank] = (entry["path"], recorded)
+
+    # 1b. Integrity: every member's canonical tree hash must match BOTH records.
+    member_paths: dict[int, Path] = {}
+    for rank, (relative, recorded) in validated_members.items():
+        member_path = _resolve_member_path(root, relative)
         if not member_path.is_dir():
-            raise _tamper(f"rank {rank} core {entry['path']!r} is missing")
-        recorded = str(entry["tree_sha256"])
+            raise _tamper(f"rank {rank} core {relative!r} is missing")
         manifest_recorded = manifest_members.get(str(rank))
         if manifest_recorded != recorded:
             raise _tamper(f"rank {rank} tree hash disagrees between descriptor and manifest")
@@ -417,10 +490,33 @@ def load_merged(path: str | Path) -> MergedTrace:
         # at partial by the degradation ledger (3.2).
         from ._enums import MergeAlignment, MergeValueStatus
 
+        stored_alignment = _cached_verdict(cached, "stored_alignment", MergeAlignment)
+        stored_value_status = _cached_verdict(cached, "stored_value_status", MergeValueStatus)
+        # Monotone coherence (R18-5): evidence is demote-only, so the cached
+        # full-set verdicts can never be BETTER than what the surviving cores
+        # prove. A byte-exact digest mismatch among survivors cannot have been
+        # attested with more ranks present, and survivors that structurally
+        # contradict each other could never have merged at all. Without this
+        # cross-check, corrupting ONE member unparseable let an edited cache
+        # present ATTESTED_COMPLETE over cores that rederive DIVERGENT.
+        if rederived.structural_findings:
+            raise _tamper(
+                "the surviving rank cores structurally conflict with each "
+                "other; no honest merge could have produced this artifact"
+            )
+        if (
+            rederived.stored_value_status is MergeValueStatus.DIVERGENT
+            and stored_value_status is not MergeValueStatus.DIVERGENT
+        ):
+            raise _tamper(
+                "the surviving rank cores rederive a DIVERGENT value status "
+                f"but the descriptor cache claims {stored_value_status.value!r}; "
+                "witness evidence is demote-only, so the cache was edited"
+            )
         derivation = replace(
             rederived,
-            stored_alignment=MergeAlignment(cached["stored_alignment"]),
-            stored_value_status=MergeValueStatus(cached["stored_value_status"]),
+            stored_alignment=stored_alignment,
+            stored_value_status=stored_value_status,
         )
 
     merged = MergedTrace(derivation, handles, tuple(load_degradations))

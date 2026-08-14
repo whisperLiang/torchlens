@@ -296,6 +296,202 @@ class TestTamperMatrix:
             tl.load(art)
 
 
+def _append_unparseable_member(art: Path) -> Path:
+    """Add a hash-valid but bundle-unparseable rank-1 member to a saved artifact.
+
+    The member's tree hashes are CORRECT in both records, so it passes
+    integrity and enters ``load_degradations`` at bundle-load time -- the
+    degraded-environment branch, where exact cache equality is skipped.
+    """
+
+    from torchlens.merged._artifact import tree_hash
+
+    fake = art / "members" / "rank_0001.tlspec"
+    fake.mkdir()
+    (fake / "manifest.json").write_text("this is not a bundle manifest")
+    fake_hash = tree_hash(fake)
+    descriptor_path = art / "merge" / "descriptor.json"
+    data = json.loads(descriptor_path.read_text())
+    data["members"].append(
+        {"rank": 1, "path": "members/rank_0001.tlspec", "tree_sha256": fake_hash}
+    )
+    payload = canonical_json_bytes(data)
+    descriptor_path.write_bytes(payload)
+    manifest_path = art / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["members"]["1"] = fake_hash
+    manifest["descriptor_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    return art
+
+
+class TestDegradedLoadCoherence:
+    """R18-5: the degraded branch is typed and demote-only, never cache-trusting."""
+
+    def _degraded(self, tmp_path: Path) -> Path:
+        merged = tl.merge_ranks([_capture()])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+        return _append_unparseable_member(art)
+
+    def _rewrite_cache(self, art: Path, mutate: Any) -> None:
+        descriptor_path = art / "merge" / "descriptor.json"
+        data = json.loads(descriptor_path.read_text())
+        mutate(data["derivation"])
+        payload = canonical_json_bytes(data)
+        descriptor_path.write_bytes(payload)
+        manifest_path = art / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["descriptor_sha256"] = hashlib.sha256(payload).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+
+    def test_unparseable_member_caps_value_status(self, gloo_world, tmp_path):
+        """Fail-before: value_status presented ATTESTED_COMPLETE under degradation."""
+
+        loaded = tl.load(self._degraded(tmp_path))
+        assert loaded.load_degradations
+        assert loaded.stored_value_status.value == "attested_complete"
+        assert loaded.value_status.value == "attested_partial"
+        assert loaded.alignment.value == "partial"
+        assert loaded.report.value_status.value == "attested_partial"
+
+    def test_missing_cached_verdict_refuses_typed(self, gloo_world, tmp_path):
+        """Fail-before: a missing cached field escaped as a raw KeyError."""
+
+        art = self._degraded(tmp_path)
+        self._rewrite_cache(art, lambda d: d.pop("stored_alignment"))
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_schema_invalid"
+
+    def test_bogus_cached_verdict_refuses_typed(self, gloo_world, tmp_path):
+        """Fail-before: a foreign cached value escaped as a raw ValueError."""
+
+        art = self._degraded(tmp_path)
+        self._rewrite_cache(
+            art, lambda d: d.__setitem__("stored_value_status", "immaculate")
+        )
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_schema_invalid"
+
+    def test_divergent_survivors_cannot_present_attested(
+        self, gloo_world, tmp_path, monkeypatch
+    ):
+        """Monotone coherence: a cache claiming better than the survivors refuses.
+
+        Fail-before: with one member unparseable, an edited cache presented
+        ATTESTED_COMPLETE while the surviving cores rederived DIVERGENT.
+        """
+
+        from dataclasses import replace
+
+        import torchlens.merged._artifact as artifact_mod
+        from torchlens.merged._enums import MergeValueStatus
+
+        art = self._degraded(tmp_path)
+        real_derive = artifact_mod.derive_merge
+
+        def diverging(evidence, expected_ranks=None):
+            return replace(
+                real_derive(evidence, expected_ranks),
+                stored_value_status=MergeValueStatus.DIVERGENT,
+            )
+
+        monkeypatch.setattr(artifact_mod, "derive_merge", diverging)
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+    def test_conflicting_survivors_refuse(self, gloo_world, tmp_path, monkeypatch):
+        """Survivors that structurally conflict could never have merged honestly."""
+
+        from dataclasses import replace
+
+        import torchlens.merged._artifact as artifact_mod
+        from torchlens.merged._errors import MergedFinding
+
+        art = self._degraded(tmp_path)
+        real_derive = artifact_mod.derive_merge
+
+        def conflicted(evidence, expected_ranks=None):
+            derivation = real_derive(evidence, expected_ranks)
+            return replace(
+                derivation,
+                findings=derivation.findings
+                + (MergedFinding(kind="relation_violation", detail="planted"),),
+            )
+
+        monkeypatch.setattr(artifact_mod, "derive_merge", conflicted)
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+
+class TestArtifactHardening:
+    """b4-P slice items: platform coarsening and double-fault disclosure."""
+
+    def test_manifest_platform_is_coarse(self, gloo_world, tmp_path):
+        """Fail-before (B8-22): full platform.platform() leaked the kernel
+        build, libc, and cloud image tag into a shareable artifact."""
+
+        import platform as platform_module
+
+        merged = tl.merge_ranks([_capture()])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+        manifest = json.loads((art / "manifest.json").read_text())
+        assert manifest["platform"] == (
+            f"{platform_module.system().lower()}-{platform_module.machine().lower()}"
+        )
+
+    def test_double_fault_restore_discloses_stranded_backup(
+        self, gloo_world, tmp_path, monkeypatch
+    ):
+        """Fail-before: the restore's ``except OSError`` silently passed, so
+        the prior artifact was stranded under a hidden ``.bak.<uuid>`` name
+        the error never named (twin of the _io/bundle.py disclosure)."""
+
+        merged = tl.merge_ranks([_capture()])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+
+        original_rename = Path.rename
+
+        def failing_rename(self: Path, target: Any) -> Any:
+            # Fail every rename INTO the canonical path: the staging install
+            # (first fault) and the backup restore (second fault). Renames to
+            # the backup name and bundle-internal tmp renames stay real.
+            if Path(target) == art:
+                raise OSError("simulated rename failure")
+            return original_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", failing_rename)
+        with pytest.warns(UserWarning, match="recoverable at"):
+            with pytest.raises(OSError, match="simulated rename failure"):
+                merged.save(art, overwrite=True)
+        assert not art.exists()
+        backups = list(tmp_path.glob("merged.tlspec.bak.*"))
+        assert backups, "the backup must remain recoverable"
+
+
+class TestRefusedSurfacesTyped:
+    """R18-9 presenter half: contract-promised refusals are typed, never bare."""
+
+    @pytest.mark.parametrize(
+        "surface",
+        ["fork", "intervene", "log_backward", "receptive_fields", "projective_fields"],
+    )
+    def test_surface_refuses_typed(self, gloo_world, surface):
+        """Fail-before: these raised bare AttributeError despite the contract
+        declaring them refused typed."""
+
+        merged = tl.merge_ranks([_capture()])
+        with pytest.raises(MergedSurfaceUnsupportedError) as excinfo:
+            getattr(merged, surface)()
+        assert excinfo.value.fields["code"] == "merged_surface_unsupported"
+
+
 # ---------------------------------------------------------------------------
 # Multi-rank spawn sims
 # ---------------------------------------------------------------------------

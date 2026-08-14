@@ -243,12 +243,17 @@ def _report_from(
     effective = derivation.stored_alignment
     if load_degradations and effective is MergeAlignment.ALIGNED:
         effective = MergeAlignment.PARTIAL
+    effective_value_status = derivation.stored_value_status
+    if load_degradations and effective_value_status is MergeValueStatus.ATTESTED_COMPLETE:
+        # An unparseable member can never support a COMPLETE attestation claim
+        # (R18-5 presenter half; same demote-only cap as the alignment above).
+        effective_value_status = MergeValueStatus.ATTESTED_PARTIAL
     return MergeReport(
         ranks=derivation.ranks,
         expected_ranks=derivation.expected_ranks,
         stored_alignment=derivation.stored_alignment,
         alignment=effective,
-        value_status=derivation.stored_value_status,
+        value_status=effective_value_status,
         n_joins=len(derivation.joins),
         findings=findings,
         load_degradations=load_degradations,
@@ -292,10 +297,26 @@ class MergedTrace:
         return self.stored_alignment
 
     @property
-    def value_status(self) -> MergeValueStatus:
-        """Merge-level value verdict from the join ledger (3.3)."""
+    def stored_value_status(self) -> MergeValueStatus:
+        """The value verdict derived at merge time (frozen in the descriptor)."""
 
         return self._derivation.stored_value_status
+
+    @property
+    def value_status(self) -> MergeValueStatus:
+        """Merge-level value verdict from the join ledger (3.3).
+
+        EFFECTIVE like ``alignment``: a rank core that no longer parses on
+        this runtime cannot support a COMPLETE attestation claim, so load
+        degradations cap ``attested_complete`` at ``attested_partial``
+        (R18-5 presenter half; demote-only, the stored value stays visible
+        through ``stored_value_status``).
+        """
+
+        stored = self._derivation.stored_value_status
+        if self._load_degradations and stored is MergeValueStatus.ATTESTED_COMPLETE:
+            return MergeValueStatus.ATTESTED_PARTIAL
+        return stored
 
     @property
     def load_degradations(self) -> tuple[str, ...]:
@@ -610,6 +631,45 @@ class MergedTrace:
             "typed while metadata invariants run in full).",
             code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
         )
+
+    def _refuse_surface(self, surface: str) -> Any:
+        """Raise the typed refusal for a contract-promised unsupported surface.
+
+        The contract declares merged runnable export, receptive/projective
+        fields, and intervention chaining "refused typed", but these surfaces
+        previously raised bare AttributeError (R18-9 presenter half).
+        """
+
+        raise MergedSurfaceUnsupportedError(
+            f"MergedTrace does not support {surface}; use a single rank core "
+            "(merged.ranks[r]) instead.",
+            code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
+        )
+
+    def fork(self, *args: Any, **kwargs: Any) -> Any:
+        """Refused: merged forking/intervention chaining does not exist (typed)."""
+
+        self._refuse_surface("fork()")
+
+    def intervene(self, *args: Any, **kwargs: Any) -> Any:
+        """Refused: merged intervention chaining does not exist (typed)."""
+
+        self._refuse_surface("intervene()")
+
+    def log_backward(self, *args: Any, **kwargs: Any) -> Any:
+        """Refused: backward/gradient merging is deferred (fork F1, typed)."""
+
+        self._refuse_surface("log_backward()")
+
+    def receptive_fields(self, *args: Any, **kwargs: Any) -> Any:
+        """Refused: merged influence geometry does not exist (typed)."""
+
+        self._refuse_surface("receptive_fields()")
+
+    def projective_fields(self, *args: Any, **kwargs: Any) -> Any:
+        """Refused: merged influence geometry does not exist (typed)."""
+
+        self._refuse_surface("projective_fields()")
 
     # Artifact save lives in _artifact.py; bound late to avoid an import cycle.
     def save(self, path: str | Path, *, overwrite: bool = False) -> None:
