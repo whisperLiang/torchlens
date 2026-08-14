@@ -141,6 +141,38 @@ def test_n1_failed_capture_refuses_save(tmp_path) -> None:
     assert exc_info.value.fields["code"] == "N1"
 
 
+def test_n1_raw_partial_trace_object_refuses_save_not_attributeerror(tmp_path) -> None:
+    """A raw PartialTrace (no _runnable) must refuse via N1, not crash the poison gate."""
+
+    try:
+        with torch.no_grad():
+            tl.trace(ExplodingModel(), torch.ones(1, 3))
+    except RuntimeError as exc:
+        partial = tl.partial.from_failed_capture(exc)
+    else:
+        raise AssertionError("capture unexpectedly succeeded")
+    assert not hasattr(partial, "_runnable")
+    with pytest.raises(CaptureOutcomeError) as exc_info:
+        tl.save(partial, tmp_path / "raw_partial.tlspec", overwrite=True)
+    assert exc_info.value.fields["code"] == "N1"
+
+
+def test_n1_failed_recording_refuses_save_not_attributeerror(tmp_path) -> None:
+    """A failed Recording (no _runnable) must refuse via N1, not crash the poison gate."""
+
+    recording = tl.record(
+        ExplodingModel(),
+        torch.ones(1, 3),
+        save=tl.func("linear"),
+        on_forward_error="return_partial",
+    )
+    assert recording.failed is True
+    assert not hasattr(recording, "_runnable")
+    with pytest.raises(CaptureOutcomeError) as exc_info:
+        tl.save(recording, tmp_path / "failed_recording.tlspec", overwrite=True)
+    assert exc_info.value.fields["code"] == "N1"
+
+
 def test_n1_unknown_loaded_partial_refuses_save(tmp_path) -> None:
     """The round-1 hole: loaded unfinished partials no longer pass through."""
 

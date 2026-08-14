@@ -23,6 +23,7 @@ from .._input_walk import INPUT_CONTAINER_KINDS
 from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
 from ..backends import TORCH_BACKEND_NAME
 from ..constants import get_orig_torch_funcs
+from ..errors._base import TorchLensError
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
     LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS,
@@ -171,6 +172,21 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     )
     calls = tuple(_parse_call(item) for item in _mapping_sequence(value, "calls"))
     slots = tuple(_parse_slot(item) for item in _mapping_sequence(value, "tensor_slots"))
+    # slot_id uniqueness was enforced NOWHERE (R10-15) while every sibling
+    # namespace dup-checks (call ids, witness families, registry ids, boundary
+    # positions). All slot indexes are last-wins dicts (e.g. slot_by_id at the
+    # SparseRunDescriptor build), but consumers iterate the slot LIST -- so a
+    # duplicated slot_id silently parsed, then the checker validated one binding
+    # and the binder dropped the other value at collapse. Refuse at parse, the
+    # same fail-closed contract as the other namespaces.
+    seen_slot_ids: set[str] = set()
+    for slot in slots:
+        if slot.slot_id in seen_slot_ids:
+            raise ContextFieldInvalidError(
+                "tensor_slots.slot_id",
+                f"duplicate tensor-slot id {slot.slot_id!r}; every slot id must be unique",
+            )
+        seen_slot_ids.add(slot.slot_id)
     _verify_runtime_fingerprints(registry, calls, slots)
     witnesses = tuple(
         _parse_witness(item) for item in _mapping_sequence(value, "control_witnesses")
@@ -245,16 +261,26 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     return descriptor
 
 
-class ContextFieldInvalidError(ValueError):
+class ContextFieldInvalidError(TorchLensError, ValueError):
     """A persisted execution-context field failed closed-vocabulary validation (INV-4).
 
     Raised at PARSE time -- before readiness, staging, or any torch setter/callable
     can observe the attacker-controllable bytes -- and surfaced as the frozen
     ``context_field_invalid`` readiness diagnostic.
+
+    Subclasses ``TorchLensError`` (in addition to ``ValueError``) so that generic
+    ``except TorchLensError`` handling sees it and ``fields["code"]`` is
+    branchable (R65: it was a plain ``ValueError`` with no code, invisible to the
+    house error contract).
     """
 
     def __init__(self, field: str, detail: str) -> None:
-        super().__init__(f"Persisted execution-context field {field!r} is invalid: {detail}")
+        super().__init__(
+            f"Persisted execution-context field {field!r} is invalid: {detail}",
+            code="context_field_invalid",
+            field=field,
+            detail=detail,
+        )
         self.field = field
         self.detail = detail
 
@@ -1514,7 +1540,7 @@ def _callable_registry_contradiction(
     return None
 
 
-class DescriptorStructuralBoundError(ValueError):
+class DescriptorStructuralBoundError(TorchLensError, ValueError):
     """A persisted runnable-descriptor integer failed structural cross-validation (r53 free_1).
 
     Raised at PARSE time -- before readiness resolution, signature binding, state
@@ -1525,10 +1551,20 @@ class DescriptorStructuralBoundError(ValueError):
     diagnostic (frozen ``call_arity_mismatch`` / ``state_shape_mismatch`` codes)
     at detection stage ``descriptor_parse``; the load still succeeds for
     analysis and ``.run()`` refuses typed.
+
+    Subclasses ``TorchLensError`` (in addition to ``ValueError``) so that generic
+    ``except TorchLensError`` handling sees it; the ``RunnableErrorCode`` it
+    already carried on ``.code`` is now also mirrored onto ``fields["code"]``
+    (R65: it was a plain ``ValueError`` whose code never reached ``.fields``).
     """
 
     def __init__(self, code: RunnableErrorCode, field: str, detail: str) -> None:
-        super().__init__(f"Persisted runnable descriptor field {field!r} is invalid: {detail}")
+        super().__init__(
+            f"Persisted runnable descriptor field {field!r} is invalid: {detail}",
+            code=code.value,
+            field=field,
+            detail=detail,
+        )
         self.code = code
         self.field = field
         self.detail = detail
@@ -3310,8 +3346,18 @@ def _parse_input_binding(value: Mapping[str, Any]) -> InputSlotBinding:
         parsed_position = position
     else:
         raise TypeError("model_site_position must be a string, integer, or path array.")
+    # ``io_role`` is a Literal["model_input"] field; it was the one Literal-typed
+    # descriptor field parsed with a bare cast and never validated (R10-17).
+    # Refuse an out-of-vocabulary value at parse, like every other closed-vocab
+    # descriptor field.
+    io_role = _string(value, "io_role")
+    if io_role != "model_input":
+        raise ContextFieldInvalidError(
+            "tensor_slots.input_binding.io_role",
+            f"io_role {io_role!r} is outside the closed vocabulary {{'model_input'}}",
+        )
     return InputSlotBinding(
-        io_role=cast(Any, _string(value, "io_role")),
+        io_role=cast(Any, io_role),
         model_ref=_string(value, "model_ref"),
         model_site_position=parsed_position,
         container_record_id=_integer(value, "container_record_id"),
@@ -3442,6 +3488,21 @@ def _parse_activation_payload_layer(
 def _parse_diagnostic(value: Mapping[str, Any]) -> RunnableDiagnostic:
     """Parse one persisted producer diagnostic."""
 
+    # Refuse a malformed ``details`` entry rather than silently filtering it
+    # (R10-18): this was the one parse site that continued with partial state
+    # instead of failing closed like every sibling parser.
+    details: list[tuple[str, str]] = []
+    for item in _sequence(value, "details"):
+        if not (
+            isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) == 2
+        ):
+            raise ContextFieldInvalidError(
+                "preflight.diagnostics.details",
+                f"malformed diagnostic details entry {item!r}; expected a [key, value] pair",
+            )
+        details.append(
+            (_string_item(item[0], "details key"), _string_item(item[1], "details value"))
+        )
     return RunnableDiagnostic(
         code=RunnableErrorCode(_string(value, "code")),
         message=_string(value, "message"),
@@ -3454,11 +3515,7 @@ def _parse_diagnostic(value: Mapping[str, Any]) -> RunnableDiagnostic:
             value.get("resolver_provenance"), "resolver_provenance"
         ),
         analysis_load_available=_boolean(value, "analysis_load_available"),
-        details=tuple(
-            (_string_item(item[0], "details key"), _string_item(item[1], "details value"))
-            for item in _sequence(value, "details")
-            if isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) == 2
-        ),
+        details=tuple(details),
     )
 
 

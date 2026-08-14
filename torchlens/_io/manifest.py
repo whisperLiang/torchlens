@@ -28,9 +28,9 @@ from . import (
     MIN_TORCHLENS_VERSION_TEXT,
     TLSPEC_VERSION,
     ArtifactSchemaAgeWarning,
-    ArtifactVersionBelowFloorError,
     TorchLensIOError,
     _json,
+    below_floor_error,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -493,13 +493,18 @@ class Manifest:
         """
 
         raw_version = data.get("tlspec_version")
+        if raw_version is None:
+            # An absent tlspec_version predates portable I/O versioning; map it to
+            # the below-floor refusal for consistency with the pickle-path
+            # counterpart (R10-10) instead of a generic missing-field error. A
+            # present-but-non-int value stays a required-field type error below.
+            raise below_floor_error(
+                observed="no tlspec_version (predates portable I/O versioning)",
+                subject="Bundle manifest",
+            )
         if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
-            raise ArtifactVersionBelowFloorError(
-                f"Bundle manifest has tlspec_version={raw_version}, below the "
-                f"supported rehydration floor tlspec_version={MIN_TLSPEC_VERSION} "
-                f"(torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the "
-                f"artifact with a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} "
-                "that still reads it."
+            raise below_floor_error(
+                observed=f"tlspec_version={raw_version}", subject="Bundle manifest"
             )
 
         required_int_fields = (
@@ -809,13 +814,8 @@ def enforce_version_policy(manifest: Manifest) -> None:
             f"{TLSPEC_VERSION}."
         )
     if manifest.tlspec_version < MIN_TLSPEC_VERSION:
-        raise ArtifactVersionBelowFloorError(
-            "Bundle uses tlspec_version="
-            f"{manifest.tlspec_version}, below the supported rehydration floor "
-            f"tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
-            f"{MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the artifact with "
-            f"a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still "
-            "reads it."
+        raise below_floor_error(
+            observed=f"tlspec_version={manifest.tlspec_version}", subject="Bundle"
         )
     if manifest.tlspec_version < TLSPEC_VERSION:
         # Honest between-floor-and-current advisory (r6 L7): the artifact loads
@@ -873,13 +873,9 @@ def enforce_version_policy(manifest: Manifest) -> None:
     # manifest claims a current tlspec_version: a real 2.33+ save can never
     # carry a pre-2.33 torchlens_version, so the pair is inconsistent.
     if manifest_torchlens is not None and manifest_torchlens < Version(MIN_TORCHLENS_VERSION_TEXT):
-        raise ArtifactVersionBelowFloorError(
-            "Bundle torchlens_version="
-            f"{manifest.torchlens_version} is below the supported rehydration "
-            f"floor torchlens {MIN_TORCHLENS_VERSION_TEXT} (tlspec_version="
-            f"{MIN_TLSPEC_VERSION}). Load and re-save the artifact with a "
-            f"torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still "
-            "reads it."
+        raise below_floor_error(
+            observed=f"torchlens_version={manifest.torchlens_version}",
+            subject="Bundle",
         )
     if runtime_torchlens is not None and manifest_torchlens is not None:
         if manifest_torchlens > runtime_torchlens:

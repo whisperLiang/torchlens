@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import platform
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -928,10 +929,14 @@ def require_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
 
     descriptor = build_sparse_run_descriptor(trace)
     if not descriptor.preflight.passed:
+        diagnostics = descriptor.preflight.diagnostics
+        # Fold the first diagnostic and the total count into the refusal message (R65):
+        # the bare "preflight failed." string hid the remediation, code, and affected
+        # labels in fields["diagnostics"] with nothing pointing there.
         raise RunnablePreflightError(
             _preflight_failure_message(descriptor.preflight.diagnostics),
             code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
-            diagnostics=descriptor.preflight.diagnostics,
+            diagnostics=diagnostics,
         )
     return descriptor
 
@@ -1102,8 +1107,14 @@ _NODE_PORTABLE = 4
 # per save. The dispatch is a pure function of the type, so it is resolved once per
 # type instead of re-running an ABC ``isinstance`` chain (and ``dataclasses.fields``)
 # per node. Branch order below mirrors the original per-node chain exactly.
-_SPARSE_CORE_NODE_KINDS: dict[type, int] = {}
-_DATACLASS_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+# WEAK type keys: a notebook-cell / factory-made class used once as a node type
+# would otherwise be pinned (with its ``__globals__``) for the whole process
+# lifetime, since these memos never evict (R60-12). The equivalent scrub/rehydrate
+# caches in this package are already weak; match them.
+_SPARSE_CORE_NODE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+_DATACLASS_FIELD_NAMES: weakref.WeakKeyDictionary[type, tuple[str, ...]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _sparse_core_node_kind(node_type: type) -> int:

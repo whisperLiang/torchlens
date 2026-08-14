@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import uuid
 from dataclasses import replace
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .._io import _json
+from .._io._durability import fsync_dir, fsync_tree
 from ._engine import derive_merge
 from ._enums import (
     MERGED_BUNDLE_FORMAT,
@@ -36,7 +38,7 @@ from ._enums import (
     MERGED_TLSPEC_VERSION,
     MergedErrorCode,
 )
-from ._errors import MergedArtifactError
+from ._errors import MergedArtifactError, MergeInputError
 from ._evidence import extract_rank_evidence
 from ._presenter import MergedTrace, _RankHandle
 
@@ -132,24 +134,72 @@ _MEMBER_ENTRY_KEYS = frozenset({"rank", "path", "tree_sha256"})
 """Closed key set for one descriptor ``members`` entry (unknown keys refuse)."""
 
 
-def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
-    """Build the typed tamper refusal (integrity failure, never a presence gap)."""
+_TAMPER_REMEDY = (
+    "The artifact's integrity records do not match its contents; it was edited "
+    "or corrupted in transit. Re-generate it from the original rank cores with "
+    "tl.merge_ranks([...]).save(path)."
+)
+_SCHEMA_REMEDY = (
+    "The artifact does not match the merged-directory schema this runtime "
+    "supports. Re-generate it with tl.merge_ranks([...]).save(path) using a "
+    "matching torchlens release."
+)
+
+
+def _tamper(detail: str, *, remedy: str = _TAMPER_REMEDY, **payload: Any) -> MergedArtifactError:
+    """Build the typed tamper refusal (integrity failure, never a presence gap).
+
+    Every merged refusal now carries a ``fields["remedy"]`` (R65: the tamper
+    refusals shipped with none, even where the correct sentence existed verbatim
+    elsewhere in this module).
+    """
 
     return MergedArtifactError(
         f"Merged artifact integrity failure: {detail}",
         code=MergedErrorCode.MERGED_DESCRIPTOR_TAMPER,
+        remedy=remedy,
         **payload,
     )
 
 
-def _schema_refusal(detail: str, **payload: Any) -> MergedArtifactError:
-    """Build the typed merged-artifact schema refusal."""
+def _schema_refusal(
+    detail: str, *, remedy: str = _SCHEMA_REMEDY, **payload: Any
+) -> MergedArtifactError:
+    """Build the typed merged-artifact schema refusal (carries a remedy, R65)."""
 
     return MergedArtifactError(
         f"Merged artifact schema refusal: {detail}",
         code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+        remedy=remedy,
         **payload,
     )
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a merged-artifact path's permissions (POSIX only).
+
+    ``mkdir``/``write_bytes`` honor the ambient umask, so under the common
+    umask 002 the merged root, its ``merge/`` subdir, and the descriptor /
+    manifest sidecars were left group-writable/readable even though the copied
+    rank cores inside stay 0600/0700 (B8-10 parity, missed for the merged
+    writer). Best-effort: a filesystem that ignores mode bits is not a save
+    failure.
+
+    Parameters
+    ----------
+    path:
+        Merged-artifact directory or file to tighten.
+    mode:
+        Target permission bits (``0o700`` for directories, ``0o600`` for
+        files).
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = False) -> None:
@@ -212,7 +262,10 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
     try:
         members_dir = staging_root / "members"
         members_dir.mkdir(parents=True)
+        _restrict_mode(staging_root, 0o700)
+        _restrict_mode(members_dir, 0o700)
         (staging_root / "merge").mkdir()
+        _restrict_mode(staging_root / "merge", 0o700)
 
         members_payload: list[dict[str, Any]] = []
         for rank in merged.rank_ids:
@@ -250,6 +303,7 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
         }
         descriptor_bytes = canonical_json_bytes(descriptor)
         (staging_root / "merge" / "descriptor.json").write_bytes(descriptor_bytes)
+        _restrict_mode(staging_root / "merge" / "descriptor.json", 0o600)
 
         import platform as platform_module
         from datetime import datetime, timezone
@@ -276,11 +330,35 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
         (staging_root / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        _restrict_mode(staging_root / "manifest.json", 0o600)
 
+        # Crash-durability before publish: fsync every written blob/sidecar and
+        # the staged directories so a power/OS crash after the rename below
+        # cannot leave a "successfully saved" artifact holding zero-length or
+        # partial files. load_merged requires EXACT descriptor-sha + per-member
+        # tree-hash equality, so a torn publish reads back as a PERMANENT false
+        # merged_descriptor_tamper accusation on an honest save (deep-hunt F12);
+        # the previous version is already renamed aside. Mirrors the .tlspec
+        # writers (_io/bundle.py, _io/tlspec.py).
+        fsync_tree(staging_root)
+
+        # Re-check the target existence/overwrite policy at publish time, not
+        # only at entry: the staging copytree/save_bundle above can run for
+        # minutes, and a path created at ``root`` in that window would otherwise
+        # be silently renamed aside and destroyed even under overwrite=False
+        # (TOCTOU). Mirrors _io/bundle.py's publish-time FileExistsError.
         if root.exists():
+            if not overwrite:
+                raise MergedArtifactError(
+                    f"{root} was created by another writer during the save; "
+                    "pass overwrite=True to replace it.",
+                    code=MergedErrorCode.MERGE_INPUT_INVALID,
+                )
             backup_root = root.parent / f"{root.name}.bak.{uuid.uuid4().hex}"
             root.rename(backup_root)
         staging_root.rename(root)
+        # Make the rename itself durable before declaring the save complete.
+        fsync_dir(root.parent)
         if backup_root is not None:
             shutil.rmtree(backup_root, ignore_errors=True)
     except BaseException:
@@ -297,9 +375,15 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
                 # (twin of the _io/bundle.py _restore_backup disclosure).
                 import warnings
 
+                from ..errors._base import TorchLensWarning
+
+                # Categorized so operators can filter it with
+                # filterwarnings(category=TorchLensWarning); a bare UserWarning
+                # cannot be targeted (R66 F7).
                 warnings.warn(
                     f"Failed to restore the previous merged artifact after a "
                     f"failed overwrite; it remains recoverable at {backup_root}",
+                    TorchLensWarning,
                     stacklevel=2,
                 )
         raise
@@ -601,6 +685,12 @@ def load_merged(path: str | Path) -> MergedTrace:
 
     root = Path(path)
     manifest_path = root / "manifest.json"
+    # Reject a symlinked manifest/descriptor before reading it: the tree-hash
+    # and member guards already refuse symlinks, but the two root sidecars were
+    # read through symlinks (arbitrary-path read / DoS), unlike the sibling
+    # .tlspec loaders. A symlink here is never a legitimate merged artifact.
+    if manifest_path.is_symlink():
+        raise _schema_refusal(f"{root} manifest.json is a symlink")
     if not manifest_path.is_file():
         raise _schema_refusal(f"{root} has no manifest.json")
     try:
@@ -622,6 +712,8 @@ def load_merged(path: str | Path) -> MergedTrace:
         )
 
     descriptor_path = root / "merge" / "descriptor.json"
+    if descriptor_path.is_symlink():
+        raise _schema_refusal("merge/descriptor.json is a symlink")
     if not descriptor_path.is_file():
         raise _tamper("merge/descriptor.json is missing")
     # The descriptor's EXACT on-disk bytes are the checksum subject, so they must be
@@ -663,6 +755,7 @@ def load_merged(path: str | Path) -> MergedTrace:
     # previously escaped the documented typed refusal as a raw
     # KeyError/TypeError (p2 R58 sol-R58-1).
     validated_members: dict[int, tuple[str, str]] = {}
+    seen_paths: set[str] = set()
     for entry in members:
         if not isinstance(entry, dict):
             raise _schema_refusal("descriptor member entry is not a JSON object")
@@ -679,6 +772,16 @@ def load_merged(path: str | Path) -> MergedTrace:
             raise _schema_refusal(f"descriptor member rank {rank} is duplicated")
         if not isinstance(entry["path"], str):
             raise _schema_refusal(f"rank {rank} member path is not a string")
+        # Defense in depth for the rank-identity binding below: two ranks that
+        # name the SAME member directory would each hash the one honest core.
+        # The load-time evidence.rank check catches the swap, but a duplicated
+        # path is itself incoherent -- every rank core is its own directory.
+        if entry["path"] in seen_paths:
+            raise _schema_refusal(
+                f"descriptor member path {entry['path']!r} is shared by more than "
+                "one rank; every rank core is a distinct member directory"
+            )
+        seen_paths.add(entry["path"])
         recorded = entry["tree_sha256"]
         if (
             not isinstance(recorded, str)
@@ -708,14 +811,48 @@ def load_merged(path: str | Path) -> MergedTrace:
     evidence = {}
     handles: dict[int, _RankHandle] = {}
     load_degradations: list[str] = []
-    for rank, member_path in sorted(member_paths.items()):
+    for declared_rank, member_path in sorted(member_paths.items()):
         try:
             trace = load_bundle(member_path)
-            evidence[rank] = extract_rank_evidence(trace, str(member_path))
         except Exception as exc:
-            load_degradations.append(f"rank {rank} core no longer parses on this runtime: {exc}")
+            # A member bundle that no longer LOADS on this runtime is a genuine
+            # environmental degradation (torch/codec drift). It caps the
+            # effective alignment at partial but is never a tamper.
+            load_degradations.append(
+                f"rank {declared_rank} core no longer parses on this runtime: {exc}"
+            )
             continue
-        handles[rank] = _RankHandle(rank, trace=trace, path=str(member_path))
+        # A member that loads as a bundle but is NOT a valid rank core (no
+        # distributed evidence, malformed boundary journal) is a tampered
+        # artifact -- a non-rank-core bundle dropped into a member slot -- not
+        # an environmental degradation. Laundering it into the runtime-parse
+        # channel silently caps the merge at partial instead of refusing
+        # (b3-opus). Refuse typed.
+        try:
+            rank_evidence = extract_rank_evidence(trace, str(member_path))
+        except MergeInputError as exc:
+            raise _tamper(
+                f"rank {declared_rank} member core loaded but carries no coherent "
+                f"rank-core evidence ({exc}); a member that parses yet is not a "
+                "valid rank capture is a tampered artifact, never a runtime "
+                "degradation"
+            ) from exc
+        # Rank-IDENTITY binding (b3-opus HIGH): the descriptor's member table
+        # merely LABELS which rank each slot holds, but each core proves its OWN
+        # global rank from its boundary records. Nothing tied the two, so one
+        # honest core byte-duplicated across N member slots read back as N
+        # distinct attesting ranks -- making ATTESTED_COMPLETE structurally
+        # guaranteed and bypassing the R18-1 digest fix. The core's self-proven
+        # rank is the authority; a slot/label disagreement is tamper.
+        if rank_evidence.rank != declared_rank:
+            raise _tamper(
+                f"descriptor labels a member slot as rank {declared_rank} but the "
+                f"core's own boundary records prove it is rank {rank_evidence.rank}; "
+                "a core placed at the wrong slot (or one core duplicated across "
+                "slots) cannot attest as multiple ranks"
+            )
+        evidence[declared_rank] = rank_evidence
+        handles[declared_rank] = _RankHandle(declared_rank, trace=trace, path=str(member_path))
 
     if not evidence:
         raise _schema_refusal(
@@ -726,7 +863,19 @@ def load_merged(path: str | Path) -> MergedTrace:
     cached = descriptor.get("derivation")
     if not isinstance(cached, dict):
         raise _schema_refusal("descriptor derivation cache is absent")
+    # ``expected_ranks`` feeds straight into ``derive_merge`` (``int(r)`` over
+    # every element); a forged non-iterable or non-integer element escaped as a
+    # raw TypeError/ValueError instead of the documented typed refusal. Validate
+    # against the closed shape (null or a list of non-negative ints) first.
     expected = cached.get("expected_ranks")
+    if expected is not None and (
+        not isinstance(expected, list)
+        or any(isinstance(r, bool) or not isinstance(r, int) or r < 0 for r in expected)
+    ):
+        raise _schema_refusal(
+            "descriptor derivation cache expected_ranks is not null or a list of "
+            "non-negative integers"
+        )
     rederived = derive_merge(evidence, expected)
 
     if not load_degradations:

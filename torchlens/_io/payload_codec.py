@@ -1206,6 +1206,12 @@ def _logical_shape_from_metadata(codec_metadata: Any) -> tuple[int, ...] | None:
         return None
     if not all(isinstance(dim, int) and not isinstance(dim, bool) for dim in logical_shape):
         return None
+    # Reject negative dims (R10-8): a forged ``-1`` silently drives a
+    # ``reshape``-inferred never-declared shape (and two ``-1``s escape as a raw
+    # numpy ValueError). Real logical shapes are non-negative, matching the
+    # manifest-level dim ceilings in manifest.py.
+    if any(dim < 0 for dim in logical_shape):
+        return None
     return tuple(logical_shape)
 
 

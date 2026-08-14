@@ -518,3 +518,69 @@ def test_streaming_bundle_manifest_is_unified_and_schema_valid(tmp_path: Path) -
     loaded = tl.load(bundle_path)
     assert isinstance(loaded, Trace)
     assert loaded.num_ops == trace.num_ops
+
+
+class _AttrStreamingModel(nn.Module):
+    """Streaming model whose submodule carries a planted public attribute."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 3)
+        self.api_token = "CANARY_STREAM_TOKEN"  # noqa: S105 (test canary, not a secret)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+def _stream(model: nn.Module, inputs: torch.Tensor, bundle_path: Path) -> None:
+    """Run a streaming to-disk capture saving all outs."""
+
+    trace_fn(
+        model,
+        inputs,
+        storage=tl.to_disk(bundle_path),
+        capture=tl.options.CaptureOptions(layers_to_save="all"),
+    )
+
+
+def test_streaming_bundle_permissions_are_tight(tmp_path: Path) -> None:
+    """Streaming bundles must match tl.save's 0700/0600 permission parity (B8-10)."""
+
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX permission bits only")
+
+    bundle_path = tmp_path / "perm_bundle.tl"
+    model, inputs = _make_streaming_model()
+    old = os.umask(0o002)
+    try:
+        _stream(model, inputs, bundle_path)
+    finally:
+        os.umask(old)
+
+    for rel in [Path("."), Path("blobs"), Path("manifest.json"), Path("metadata.pkl")]:
+        target = bundle_path / rel
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert not (mode & stat.S_IWGRP), f"{rel} group-writable: {oct(mode)}"
+        assert not (mode & stat.S_IWOTH), f"{rel} world-accessible: {oct(mode)}"
+
+
+def test_streaming_bundle_discloses_custom_attributes_channel(tmp_path: Path) -> None:
+    """Streaming save must write the custom_attributes_disclosure manifest row (R62)."""
+
+    import json
+
+    bundle_path = tmp_path / "disclosure_bundle.tl"
+    torch.manual_seed(0)
+    _stream(_AttrStreamingModel(), torch.randn(2, 4), bundle_path)
+
+    manifest = json.loads((bundle_path / "manifest.json").read_text())
+    assert "custom_attributes_disclosure" in manifest, (
+        "every save must disclose the custom_attributes channel in the manifest"
+    )
+    disclosure = manifest["custom_attributes_disclosure"]
+    assert disclosure["included"] is True
+    assert disclosure["module_count"] >= 1
+    assert "api_token" in disclosure["top_level_keys"]

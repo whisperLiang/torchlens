@@ -590,19 +590,54 @@ def _scrub_value_kind(value_type: type) -> int:
     return kind
 
 
-# Type roots whose classes the default-deny safe unpickler can resolve at load
-# time. Anything OUTSIDE these roots pickles by module reference at save but is
-# REFUSED (or booby-trapped) by ``SafeBundleUnpickler`` at load -- a
-# save-succeeds/load-refuses trap the scrub must close on the save side.
-_PORTABLE_TYPE_ROOTS = ("torch", "torchlens")
-
-
 def _type_is_load_reconstructible(value_type: type) -> bool:
-    """Return whether the safe unpickler can rebuild instances of this type."""
+    """Return whether the safe unpickler can rebuild instances of this type.
+
+    Consults the loader's ACTUAL type authority rather than a namespace prefix
+    test (R10-4): the safe unpickler admits a ``torchlens`` type ONLY if its
+    exact ``(module, qualname)`` is on the vetted-inert ``_SAFE_TORCHLENS_TYPES``
+    allowlist and it is not an extras-gated appliance module. The prefix test
+    preserved off-allowlist / appliance torchlens types by TYPE into
+    ``metadata.pkl`` that the loader then REFUSED -- a save-succeeds /
+    load-refuses trap that made the whole bundle unloadable.
+    """
 
     module = getattr(value_type, "__module__", "") or ""
     root = module.split(".", 1)[0]
-    return root in _PORTABLE_TYPE_ROOTS
+    if root == "torchlens":
+        from ._safe_unpickle import _SAFE_TORCHLENS_TYPES, _is_torchlens_appliance_module
+
+        name = getattr(value_type, "__qualname__", None) or getattr(value_type, "__name__", "")
+        return (module, name) in _SAFE_TORCHLENS_TYPES and not _is_torchlens_appliance_module(
+            module
+        )
+    return root == "torch"
+
+
+def _factory_is_load_reconstructible(factory: Any) -> bool:
+    """Return whether the safe unpickler admits ``factory`` as a bare global.
+
+    The loader admits a ``builtins`` / ``collections`` default_factory ONLY if
+    its exact ``(module, name)`` is on ``_SAFE_EXPLICIT_GLOBALS`` (the pure-data
+    constructors: ``list``/``dict``/``int``/``OrderedDict``/...), never every
+    ``builtins`` global -- so a ``builtins.eval`` factory the prefix test
+    preserved was a load-refuses trap. A ``torchlens`` factory must additionally
+    pass ``is_inert_first_party_callable``.
+    """
+
+    module = getattr(factory, "__module__", "") or ""
+    root = module.split(".", 1)[0]
+    if root == "torch":
+        return True
+    if root == "torchlens":
+        from ..utils._callable_safety import is_inert_first_party_callable
+        from ._safe_unpickle import _is_torchlens_owned
+
+        return _is_torchlens_owned(factory) and is_inert_first_party_callable(factory)
+    from ._safe_unpickle import _SAFE_EXPLICIT_GLOBALS
+
+    name = getattr(factory, "__qualname__", None) or getattr(factory, "__name__", "")
+    return (module, name) in _SAFE_EXPLICIT_GLOBALS
 
 
 def _disclose_container_downgrade(
@@ -713,9 +748,7 @@ def _portable_default_factory(
     factory = value.default_factory
     if factory is None:
         return None
-    module = getattr(factory, "__module__", "") or ""
-    root = module.split(".", 1)[0]
-    if root in _PORTABLE_TYPE_ROOTS or root == "builtins":
+    if _factory_is_load_reconstructible(factory):
         return factory
     _disclose_container_downgrade(
         options,
@@ -774,6 +807,16 @@ def _scrub_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
+        if type(value) is not list:
+            # Symmetry with the tuple-subclass downgrade disclosure (R10-9): a
+            # list/set/frozenset subclass rebuilds as a plain builtin, silently
+            # losing its type; disclose it once per type like tuples do.
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable list subclass {name} in portable metadata; "
+                "it rebuilds as a plain list.",
+            )
         rebuilt_list: list[Any] = []
         _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_list
@@ -825,6 +868,13 @@ def _scrub_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
+        if type(value) is not set:
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable set subclass {name} in portable metadata; "
+                "it rebuilds as a plain set.",
+            )
         rebuilt_set: set[Any] = set()
         _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt_set
@@ -848,6 +898,13 @@ def _scrub_value(
             raise TorchLensIOError("Portable metadata contains a cycle through a frozenset.")
         if cached is not None:
             return cached
+        if type(value) is not frozenset:
+            _disclose_container_downgrade(
+                options,
+                value,
+                "Dropping non-portable frozenset subclass {name} in portable "
+                "metadata; it rebuilds as a plain frozenset.",
+            )
         _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
@@ -1092,6 +1149,202 @@ _DOCSTRING_FIELDS = (
     "forward_docstring",
     "backward_docstring",
 )
+# Signature strings are ``str(inspect.signature(...))`` snapshots. They are kept
+# as structural interface metadata, but ``inspect.Signature.__str__`` renders
+# every parameter default via ``repr(default)`` -- so a default like
+# ``cfg='/home/user/x.yaml'`` embeds an absolute host path verbatim, and a
+# ``token='SECRET'`` default ships source-derived VALUES, both surviving
+# ``include_source=False`` (B8 R62). ``_func_signature`` is the FuncCallLocation
+# owner; the rest ride Trace / Module / GradFn logs (guarded by presence).
+_SIGNATURE_FIELDS = (
+    "init_signature",
+    "forward_signature",
+    "backward_signature",
+)
+_FRAME_SIGNATURE_FIELD = "_func_signature"
+
+_ABS_PATH_LITERAL = re.compile(r"^(?:/|~|[A-Za-z]:[\\/])")
+
+
+def _relativize_path_literals(text: str) -> str:
+    """Reduce absolute-path string literals inside a signature string to basenames.
+
+    Scans ``text`` for quoted string literals and, for any whose content looks
+    like an absolute host path (POSIX ``/...``, ``~...``, or a Windows drive
+    ``X:\\...``), replaces it with its basename -- the same host-PII removal
+    :func:`_relativize_source_path` applies to source-file fields, but applied to
+    default-value reprs embedded in a signature. Non-path literals (plain
+    strings, URLs) are left untouched.
+
+    Parameters
+    ----------
+    text:
+        Signature string (or one parameter of one).
+
+    Returns
+    -------
+    str
+        ``text`` with absolute-path literals relativized.
+    """
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char in "'\"":
+            j = i + 1
+            content: list[str] = []
+            closed = False
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    content.append(text[j : j + 2])
+                    j += 2
+                    continue
+                if text[j] == char:
+                    closed = True
+                    break
+                content.append(text[j])
+                j += 1
+            literal = "".join(content)
+            if closed:
+                if _ABS_PATH_LITERAL.match(literal.replace("\\", "/")):
+                    literal = _relativize_source_path(literal)
+                out.append(char + literal + char)
+                i = j + 1
+                continue
+            out.append(text[i:])
+            break
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _split_top_level_params(inner: str) -> list[str]:
+    """Split a signature's inner text on top-level commas (bracket/quote aware)."""
+
+    params: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    i = 0
+    n = len(inner)
+    while i < n:
+        char = inner[i]
+        if quote is not None:
+            if char == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            params.append(inner[start:i])
+            start = i + 1
+        i += 1
+    params.append(inner[start:])
+    return [param.strip() for param in params if param.strip() != "" or inner == ""]
+
+
+def _stub_param_default(param: str) -> str:
+    """Replace a parameter's default value with ``...`` (structural stub)."""
+
+    depth = 0
+    quote: str | None = None
+    i = 0
+    n = len(param)
+    while i < n:
+        char = param[i]
+        if quote is not None:
+            if char == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "=" and depth == 0:
+            head = param[:i].rstrip()
+            return f"{head} = ..." if ":" in head else f"{head}=..."
+        i += 1
+    return param
+
+
+def _scrub_signature_string(signature: Any, *, include_source: bool) -> Any:
+    """Scrub host paths (and, without source, default values) from a signature.
+
+    Absolute-path literals are relativized in both modes (the ``no $HOME/username
+    ever reaches the bundle`` guarantee). With ``include_source=False`` every
+    parameter default is additionally stubbed to ``...`` because defaults are
+    source-derived values the caller opted out of, keeping only the structural
+    shape (names + annotations).
+
+    Parameters
+    ----------
+    signature:
+        Signature field value (``str`` or ``None``).
+    include_source:
+        Whether source-derived values may be embedded.
+
+    Returns
+    -------
+    Any
+        The scrubbed signature string, or the input unchanged when not a
+        non-empty parenthesized signature.
+    """
+
+    if not isinstance(signature, str) or not signature.startswith("("):
+        return signature
+    # ``str(inspect.signature(...))`` is ``(params) -> return_annotation``; the
+    # optional return-annotation suffix means the string does not end with ")".
+    # Find the close paren balancing the leading "(" (bracket/quote aware), then
+    # process the parameter group and preserve any suffix.
+    depth = 0
+    quote: str | None = None
+    close: int | None = None
+    i = 0
+    n = len(signature)
+    while i < n:
+        char = signature[i]
+        if quote is not None:
+            if char == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+        i += 1
+    if close is None:
+        return signature
+    inner = signature[1:close]
+    suffix = signature[close + 1 :]
+    params = _split_top_level_params(inner)
+    scrubbed: list[str] = []
+    for param in params:
+        cleaned = _relativize_path_literals(param)
+        if not include_source:
+            cleaned = _stub_param_default(cleaned)
+        scrubbed.append(cleaned)
+    # The return annotation is not a default value, so it is never stubbed; its
+    # (unlikely) path literals are still relativized.
+    return "(" + ", ".join(scrubbed) + ")" + _relativize_path_literals(suffix)
 
 
 def _apply_source_metadata_policy(scrubbed_state: dict[str, Any], options: _ScrubOptions) -> None:
@@ -1102,8 +1355,11 @@ def _apply_source_metadata_policy(scrubbed_state: dict[str, Any], options: _Scru
     relativization is unconditional (a pure privacy win: no host paths,
     ``$HOME``, or username ever reach the bundle). Docstrings are verbatim source
     text and are dropped when ``include_source=False``, along with the now-dangling
-    source-file references. Function signatures and source line numbers are
-    structural interface metadata (like a stub) and are retained.
+    source-file references. Function signatures are kept as structural interface
+    metadata, but their default-value reprs are scrubbed: absolute-path literals
+    are always relativized and, with ``include_source=False``, every default is
+    stubbed to ``...`` (defaults are source-derived values). Source line numbers
+    are structural and retained.
 
     Parameters
     ----------
@@ -1112,6 +1368,12 @@ def _apply_source_metadata_policy(scrubbed_state: dict[str, Any], options: _Scru
     options:
         Active scrub options carrying ``include_source``.
     """
+
+    for field_name in _SIGNATURE_FIELDS:
+        if field_name in scrubbed_state:
+            scrubbed_state[field_name] = _scrub_signature_string(
+                scrubbed_state[field_name], include_source=options.include_source
+            )
 
     if options.include_source:
         for field_name in _SOURCE_FILE_FIELDS:
@@ -1168,6 +1430,11 @@ def _apply_frame_source_policy(scrubbed_state: dict[str, Any], options: _ScrubOp
     options:
         Active scrub options carrying ``include_source``.
     """
+
+    if _FRAME_SIGNATURE_FIELD in scrubbed_state:
+        scrubbed_state[_FRAME_SIGNATURE_FIELD] = _scrub_signature_string(
+            scrubbed_state[_FRAME_SIGNATURE_FIELD], include_source=options.include_source
+        )
 
     if options.include_source:
         if "file" in scrubbed_state:

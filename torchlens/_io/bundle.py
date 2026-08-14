@@ -19,6 +19,7 @@ import subprocess
 import sys
 import uuid
 import warnings
+import weakref
 from collections.abc import Collection, Iterable, Mapping, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,14 +37,13 @@ from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
 from . import (
     MIN_TLSPEC_VERSION,
-    MIN_TORCHLENS_VERSION_TEXT,
     TLSPEC_VERSION,
-    ArtifactVersionBelowFloorError,
     BlobRef,
     FieldPolicy,
     PayloadLoadHints,
     TorchLensIOError,
     _json,
+    below_floor_error,
 )
 from ._durability import fsync_dir, fsync_tree
 from ._safe_unpickle import SafeBundleUnpickler
@@ -317,16 +317,23 @@ def save(
             "tl.save(merged.ranks[r], path).",
             code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
         )
-    from ..runnable import refuse_poisoned_trace
-
-    refuse_poisoned_trace(trace, "export")
     # N1: the settled capture outcome gates every export. FAILED, aborted, and
     # UNKNOWN captures never produce a portable artifact (the historical
     # ungated pass-through of failed partials was the hole this closes);
-    # HALTED and legacy UNATTESTED re-export stay open.
+    # HALTED and legacy UNATTESTED re-export stay open. This runs BEFORE the
+    # poison gate because a failed PartialTrace / failed Recording has no
+    # ``_runnable`` sparse-run state, so refuse_poisoned_trace crashed with a
+    # bare AttributeError before this typed N1 refusal could fire -- the exact
+    # shape the MergedTrace typed-refusal-first check above already closed.
     from ..capture.outcome import CaptureOutcomeError, require_capture_capability
 
     require_capture_capability(trace, "save_analysis")
+    from ..runnable import refuse_poisoned_trace
+
+    # The poison gate only applies to products that carry sparse-run state; a
+    # PartialTrace / Recording has none, so there is nothing to refuse.
+    if getattr(trace, "_runnable", None) is not None:
+        refuse_poisoned_trace(trace, "export")
     save_level = coerce_tlspec_save_level(level)
     if save_level == "runnable":
         # N4: a halted capture records a PREFIX of the forward, and the sparse
@@ -1831,12 +1838,10 @@ def _preflight_unified_trace_manifest(
 
     raw_version = manifest.get("tlspec_version")
     if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
-        raise ArtifactVersionBelowFloorError(
-            f"Bundle manifest has tlspec_version={raw_version}, below the "
-            f"supported rehydration floor tlspec_version={MIN_TLSPEC_VERSION} "
-            f"(torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the "
-            f"artifact with a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} "
-            "that still reads it."
+        raise below_floor_error(
+            observed=f"tlspec_version={raw_version}",
+            subject="Bundle manifest",
+            path=str(bundle_path),
         )
 
     try:
@@ -2689,7 +2694,6 @@ def _apply_visualization_save_policy(
         return
 
     visualizer_dir = tmp_path / "visualizers"
-    final_visualizer_dir = bundle_path / "visualizers"
     # scrubbed_layers is a 1:1 scrub of trace.layer_list; pairing a truncated
     # prefix would silently skip visualizer copies for the tail layers.
     for index, (live_layer, scrubbed_layer) in enumerate(
@@ -2706,7 +2710,11 @@ def _apply_visualization_save_policy(
         destination_name = f"{index:05d}_{source_path.name}"
         destination_path = visualizer_dir / destination_name
         shutil.copy2(source_path, destination_path)
-        scrubbed_layer.visualizer_path = str(final_visualizer_dir / destination_name)
+        # Persist a bundle-RELATIVE path (R59-6): the absolute final path embeds
+        # $HOME/username, contradicting the scrub's basename-only PII policy, and
+        # load re-anchors from the basename anyway (_reanchor_visualizer_paths),
+        # so the absolute directory was never used -- only leaked.
+        scrubbed_layer.visualizer_path = f"visualizers/{destination_name}"
 
 
 def _write_tensor_blob(
@@ -3512,7 +3520,10 @@ _NESTED_BLOB_DICT = 2
 _NESTED_BLOB_SEQUENCE = 3
 _NESTED_BLOB_OBJECT = 4
 
-_NESTED_BLOB_KINDS: dict[type, int] = {}
+# WEAK type keys so a notebook-cell / factory-made class used once as a nested
+# blob value is not pinned (with its __globals__) for the process lifetime
+# (R60-12); matches the weak caches elsewhere in _io.
+_NESTED_BLOB_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
 
 
 def _nested_blob_node_kind(value_type: type) -> int:

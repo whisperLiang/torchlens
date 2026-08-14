@@ -116,6 +116,33 @@ def test_pre_floor_bundle_manifest_refuses_typed(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
+def test_below_floor_refusal_carries_structured_fields(tmp_path: Path) -> None:
+    """The below-floor refusal must carry a branchable code, path, and remedy (R65).
+
+    Every raise site used to hand-copy the message with an empty ``fields`` and
+    four of six dropped the artifact path they held in scope.
+    """
+
+    trace = _build_trace()
+    path = tmp_path / "forged.tlspec"
+    tl.save(trace, path)
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tlspec_version"] = MIN_TLSPEC_VERSION - 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactVersionBelowFloorError) as excinfo:
+        tl.load(path)
+    fields = excinfo.value.fields
+    assert fields["code"] == "artifact_version_below_floor"
+    assert fields["observed"] == f"tlspec_version={MIN_TLSPEC_VERSION - 1}"
+    assert fields["floor_tlspec_version"] == MIN_TLSPEC_VERSION
+    assert fields["remedy"]
+    # The one site with the artifact path in scope now reports it.
+    assert fields["path"] == str(path)
+
+
+@pytest.mark.smoke
 def test_between_floor_advisory_is_a_visible_user_warning(tmp_path: Path) -> None:
     """The between-floor artifact-age advisory is visible, not a ``DeprecationWarning``.
 
