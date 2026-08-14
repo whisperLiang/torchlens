@@ -801,6 +801,16 @@ def _scrub_value(
     # covered without an ``_io`` -> ``data_classes`` import cycle.
     elif "class_docstring" in scrubbed_state:
         _apply_source_metadata_policy(scrubbed_state, options)
+    # ``ConditionalEvent`` records (in ``conditional_records``) carry the absolute
+    # path of the user's forward-defining module in ``source_file``. Dispatch on the
+    # field signature (the ``ConditionalEvent`` name is shared with a capture-time
+    # event class) so only the persisted, spec-bearing record is relativized/dropped.
+    elif "source_file" in scrubbed_state and "branch_ranges" in scrubbed_state:
+        _apply_conditional_source_policy(scrubbed_state, options, drop_value="")
+    # ``Conditional`` records (in the public ``conditionals`` accessor) carry the
+    # same absolute path in an OPTIONAL ``source_file``; dropped to ``None``.
+    elif "source_file" in scrubbed_state and "arms" in scrubbed_state:
+        _apply_conditional_source_policy(scrubbed_state, options, drop_value=None)
 
     return state_restore(scrubbed_obj, scrubbed_state)
 
@@ -958,6 +968,40 @@ def _apply_frame_source_policy(scrubbed_state: dict[str, Any], options: _ScrubOp
     scrubbed_state["_num_context_lines_requested"] = 0
     scrubbed_state["_func_docstring"] = None
     scrubbed_state["_frame_func_obj"] = None
+
+
+def _apply_conditional_source_policy(
+    scrubbed_state: dict[str, Any], options: _ScrubOptions, *, drop_value: Any
+) -> None:
+    """Apply the source-embedding privacy policy to a scrubbed conditional record.
+
+    Both ``ConditionalEvent.source_file`` (in ``Trace.conditional_records``) and
+    ``Conditional.source_file`` (in the public ``Trace.conditionals`` accessor) hold
+    the ABSOLUTE path of the user's forward-defining module. Like every other
+    source-file reference in a bundle each is relativized to a bare basename
+    (unconditional privacy win); with ``include_source=False`` it is cleared to
+    ``drop_value``, matching the "no embedded source" contract honored for
+    ``Trace``/``Module``/``FuncCallLocation``. The structural span/kind metadata is
+    retained either way.
+
+    Parameters
+    ----------
+    scrubbed_state:
+        Scrubbed conditional-record field state, mutated in place.
+    options:
+        Active scrub options carrying ``include_source``.
+    drop_value:
+        Value assigned to ``source_file`` when source is excluded (``""`` for the
+        non-optional ``ConditionalEvent.source_file``; ``None`` for the optional
+        ``Conditional.source_file``).
+    """
+
+    if "source_file" not in scrubbed_state:
+        return
+    if options.include_source:
+        scrubbed_state["source_file"] = _relativize_source_path(scrubbed_state["source_file"])
+    else:
+        scrubbed_state["source_file"] = drop_value
 
 
 def _state_items_for_scrub(

@@ -501,6 +501,35 @@ def _init_module_hierarchy_data() -> dict[str, Any]:
 class ConditionalEvent:
     """Structured metadata for one conditional event in user source code."""
 
+    # Declared so the scrubber walks this record field-by-field instead of
+    # persisting it verbatim: ``source_file`` is the ABSOLUTE path of the user's
+    # forward-defining module, and without a spec the source-path relativizer never
+    # ran, leaking host paths at every save level including ``include_source=False``
+    # (B8-18). The scrubber applies the source-privacy policy to ``source_file`` via
+    # ``_apply_conditional_source_policy``; every other field is portable structural
+    # metadata. Declared ``ClassVar`` so ``@dataclass`` does not treat it as a field.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "id": FieldPolicy.KEEP,
+        "kind": FieldPolicy.KEEP,
+        "source_file": FieldPolicy.KEEP,
+        "function_qualname": FieldPolicy.KEEP,
+        "function_span": FieldPolicy.KEEP,
+        "if_stmt_span": FieldPolicy.KEEP,
+        "test_span": FieldPolicy.KEEP,
+        "branch_ranges": FieldPolicy.KEEP,
+        "branch_test_spans": FieldPolicy.KEEP,
+        "call_depth": FieldPolicy.KEEP,
+        "parent_conditional_id": FieldPolicy.KEEP,
+        "parent_branch_kind": FieldPolicy.KEEP,
+        "bool_layers": FieldPolicy.KEEP,
+        # Runtime attributes stamped by phase-5c conditional attribution (not
+        # declared dataclass fields). Retained verbatim, as they were before this
+        # record gained a spec; only ``source_file`` is privacy-adjusted.
+        "_bool_layers_raw": FieldPolicy.KEEP,
+        "_arm_bool_indices": FieldPolicy.KEEP,
+        "_arm_test_structures": FieldPolicy.KEEP,
+    }
+
     id: int
     kind: Literal["if_chain", "ifexp"]
     source_file: str
@@ -626,6 +655,18 @@ class ConditionalArm:
 class Conditional:
     """One if-chain at one source location."""
 
+    # Declared so the scrubber walks this record and applies the source-privacy
+    # policy to ``source_file`` (the absolute forward-module path) instead of
+    # persisting it verbatim (B8-18). ``ClassVar`` so ``@dataclass`` ignores it.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "id": FieldPolicy.KEEP,
+        "arms": FieldPolicy.KEEP,
+        "fired_arm_index": FieldPolicy.KEEP,
+        "fired_arm_kind": FieldPolicy.KEEP,
+        "source_file": FieldPolicy.KEEP,
+        "source_line": FieldPolicy.KEEP,
+    }
+
     id: str
     arms: list[ConditionalArm]
     fired_arm_index: int | None
@@ -678,6 +719,15 @@ class Conditional:
 
 class ConditionalAccessor:
     """Dict-like accessor for Conditional records."""
+
+    # Declared so the scrubber descends into ``_list``/``_dict`` and reaches each
+    # ``Conditional`` (whose ``source_file`` must be privacy-scrubbed) rather than
+    # persisting the whole accessor subtree verbatim (B8-18). ``_list`` and ``_dict``
+    # share the same ``Conditional`` objects, so the scrub memo keeps them identical.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "_list": FieldPolicy.KEEP,
+        "_dict": FieldPolicy.KEEP,
+    }
 
     def __init__(self, conditionals: list[Conditional] | None = None) -> None:
         """Initialize from conditionals in trace order.
