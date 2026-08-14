@@ -22,6 +22,7 @@ from torch import nn
 
 from . import _state
 from ._trace_selector_helpers import _stable_cache_fragment
+from ._transport import to_cpu_contiguous
 from .data_classes.trace import Trace
 from .utils._torch_compat import (
     force_eager_stance_scope,
@@ -452,7 +453,6 @@ def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
         yield
     finally:
         _restore_callable_swaps(swaps, only_if_bypassed=True)
-
 
 
 def _restore_callable_swaps(swaps: Any, *, only_if_bypassed: bool) -> None:
@@ -1470,7 +1470,7 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     """
 
     with _state.pause_logging():
-        cpu = tensor.detach().cpu().contiguous()
+        cpu = to_cpu_contiguous(tensor)
         if cpu.dtype is torch.bfloat16:
             cpu = cpu.to(torch.float32)
         payload = cpu.numpy().tobytes()
@@ -1983,19 +1983,13 @@ def _move_tensors_to_device_inner(obj: Any, device: torch.device | str) -> Any:
         return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
 
     if _dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        fields = [
-            field for field in _dataclasses.fields(obj) if hasattr(obj, field.name)
-        ]
+        fields = [field for field in _dataclasses.fields(obj) if hasattr(obj, field.name)]
         moved_values, changed = _children(getattr(obj, field.name) for field in fields)
         if not changed:
             return _UNMOVED
         try:
             rebuilt = cast(Any, type(obj))(
-                **{
-                    field.name: value
-                    for field, value in zip(fields, moved_values)
-                    if field.init
-                }
+                **{field.name: value for field, value in zip(fields, moved_values) if field.init}
             )
         except Exception:
             return _UNMOVED

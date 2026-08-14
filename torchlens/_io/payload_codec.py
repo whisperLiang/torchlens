@@ -1151,7 +1151,9 @@ def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> An
 def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
     """Convert a torch transport tensor to host NumPy storage for a codec."""
 
-    transport = tensor.detach().cpu().contiguous()
+    from .._transport import to_cpu_contiguous
+
+    transport = to_cpu_contiguous(tensor)
     logical_dtype = str(_entry_field(entry, "logical_dtype") or "")
     if logical_dtype in {"bfloat16", "jax.numpy.bfloat16"}:
         array = transport.to(torch.float32).numpy()

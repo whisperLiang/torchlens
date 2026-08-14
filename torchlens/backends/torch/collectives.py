@@ -42,6 +42,7 @@ from typing import Any
 
 import torch
 
+from ..._transport import to_cpu_contiguous
 from ...errors._base import CompatibilityError
 
 __all__ = [
@@ -266,7 +267,7 @@ def _digest_tensor(tensor: torch.Tensor) -> str:
     """Byte-exact SHA-256 of a tensor's values (dtype-agnostic)."""
 
     # detach-ok: read-only digest snapshot; no retained gradient payload crosses this boundary.
-    flat = tensor.detach().cpu().contiguous().reshape(-1)
+    flat = to_cpu_contiguous(tensor).reshape(-1)
     if flat.numel() == 0:
         return hashlib.sha256(b"").hexdigest()
     return hashlib.sha256(flat.view(torch.uint8).numpy().tobytes()).hexdigest()
