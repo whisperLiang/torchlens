@@ -6736,6 +6736,58 @@ def test_raw_label_survival_roster_is_closed():
     )
 
 
+# -- N3. Equivalence-group symmetry plant (b9 R74/75-6) --
+
+
+class _TwiceLinearEquivalence(nn.Module):
+    """Apply one linear layer twice to mint a real equivalence group."""
+
+    def __init__(self) -> None:
+        """Build the shared linear layer."""
+
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the layer twice.
+
+        Parameters
+        ----------
+        x:
+            Input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Twice-transformed batch.
+        """
+
+        return self.fc(self.fc(x))
+
+
+def test_corruption_equivalence_symmetry_one_sided_group():
+    """A one-sided equivalent_ops rebind trips _check_equivalence_symmetry.
+
+    b9 R74/75-6: the symmetry check had exactly one arming test, and it lived
+    outside every invariant-focused file, so an invariant-suite lane reported
+    a false survivor. The plant corrupts through CELL ASSIGNMENT (dropping a
+    sibling from one member only): in-place mutation of the shared GroupRef
+    view is impossible by design, and a symmetric group-table edit would not
+    be a corruption at all.
+    """
+
+    log = trace_fn(_TwiceLinearEquivalence(), torch.randn(2, 4), random_seed=42)
+    groups = [op for op in log.compute_ops if op.equivalent_ops]
+    assert groups, "expected an equivalence group from the repeated layer"
+    victim = groups[0]
+    members = set(victim.equivalent_ops)
+    assert len(members) >= 2, "equivalence group too small to break one-sidedly"
+    victim.equivalent_ops = members - {sorted(members)[-1]}
+    with pytest.raises(MetadataInvariantError, match="equivalence_symmetry"):
+        check_metadata_invariants(log)
+    log.cleanup()
+
+
 # -- O2. Commit-tier canary: the tripwire fires on nothing legitimate --
 
 
