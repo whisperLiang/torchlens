@@ -42,6 +42,13 @@ jobs:
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Minimal scope (zizmor github-app, T13.3): without an explicit
+          # permission input the minted token inherits the App installation's
+          # FULL permission set, and checkout persists it to disk for the
+          # whole job — including the pip install and semantic-release steps.
+          # Everything this job does (push the release commit + tag, create
+          # the GitHub Release) needs exactly repository contents: write.
+          permission-contents: write
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

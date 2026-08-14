@@ -172,3 +172,51 @@ def test_capture_oracle_version_gate_strips_the_build_tag() -> None:
     assert _recording_torch_matches("2.13.0", "2.13.0+cpu")
     assert not _recording_torch_matches("2.12.0+cpu", "2.13.0+cpu")
     assert not _recording_torch_matches(None, "2.13.0+cpu")
+
+
+def test_release_app_token_is_permission_scoped() -> None:
+    """The minted GitHub App token carries an explicit minimal permission set.
+
+    Without a ``permission-*`` input the token inherits the App
+    installation's FULL permissions and checkout persists it to disk for the
+    whole release job, including third-party pip installs (zizmor
+    ``github-app`` HIGH, T13.3). Contents write is everything the job needs.
+    """
+
+    release = _load_yaml(_WORKFLOWS / "release.yml")["jobs"]["release"]
+    token_step = next(
+        step for step in release["steps"] if "create-github-app-token" in step.get("uses", "")
+    )
+    scoped = [key for key in token_step["with"] if key.startswith("permission-")]
+    assert scoped == ["permission-contents"], (
+        "the release App token must be minted with exactly the minimal permission-contents scope"
+    )
+    assert token_step["with"]["permission-contents"] == "write"
+
+
+def test_non_release_checkouts_do_not_persist_credentials() -> None:
+    """Every checkout that never pushes sets ``persist-credentials: false``.
+
+    checkout persists its token into ``.git/config`` for ALL later steps by
+    default (zizmor ``artipacked``). Only the release job's checkout may
+    persist — semantic-release pushes the version commit and tag through it.
+    """
+
+    offenders = []
+    for workflow in sorted(_WORKFLOWS.glob("*.yml")):
+        for job_name, job in _load_yaml(workflow)["jobs"].items():
+            for step in job.get("steps", ()):
+                if "actions/checkout@" not in step.get("uses", ""):
+                    continue
+                with_block = step.get("with", {})
+                if workflow.name == "release.yml" and job_name == "release":
+                    assert "token" in with_block, (
+                        "the release checkout must authenticate as the App "
+                        "(its push path relies on the persisted scoped token)"
+                    )
+                    continue
+                if with_block.get("persist-credentials") is not False:
+                    offenders.append(f"{workflow.name}:{job_name}")
+    assert not offenders, (
+        f"checkout steps persisting credentials without needing to push: {offenders}"
+    )
