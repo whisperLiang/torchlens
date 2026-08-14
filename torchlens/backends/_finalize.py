@@ -1003,3 +1003,103 @@ def attach_module_owned_op_params(
     op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
     op_log.param_memory = sum(int(param.param_memory) for param in params)
     seen_param_barcodes.update(param.barcode for param in params)
+
+
+def new_preview_function_trace(
+    *,
+    backend_name: str,
+    model: Callable[..., Any],
+    keep_orphans: bool,
+    num_context_lines: int,
+    recurrence_detection: bool,
+    verbose: bool,
+    name: str | None,
+    raw_input: object | None,
+    save_raw_input: str | bool,
+    batch_render: str,
+    output_transform: object | None,
+    save_raw_output: str | bool,
+    param_source: str,
+    compute_input_output_distances: bool = True,
+) -> Trace:
+    """Construct an empty function-root preview trace shell.
+
+    The shared jax/tinygrad constructor (their copies differed only in
+    ``param_source``); tf keeps its own richer shell because it honors more
+    public options.
+
+    Parameters
+    ----------
+    backend_name:
+        Canonical backend name.
+    model:
+        Captured callable.
+    keep_orphans:
+        Whether orphan ops are retained.
+    num_context_lines:
+        Source context line count.
+    recurrence_detection:
+        Recurrence-detection setting.
+    verbose:
+        Verbose flag.
+    name:
+        Optional trace label.
+    raw_input:
+        Original user input.
+    save_raw_input:
+        Raw-input save policy.
+    batch_render:
+        Raw-input render policy.
+    output_transform:
+        Optional output transform.
+    save_raw_output:
+        Raw-output save policy.
+    param_source:
+        Backend parameter provenance (``"pytree-derived"``, ``"none"``, ...).
+    compute_input_output_distances:
+        Whether the layer-depth flood is requested.
+
+    Returns
+    -------
+    Trace
+        Empty trace initialized for the preview backend.
+    """
+
+    trace = Trace(
+        model_class_name=getattr(model, "__name__", type(model).__name__),
+        output_device="same",
+        activation_transform=None,
+        grad_transform=None,
+        save_raw_activations=True,
+        save_raw_gradients=True,
+        keep_orphans=keep_orphans,
+        save_arg_values=False,
+        save_grads=None,
+        detach_saved_activations=False,
+        mark_layer_depths=compute_input_output_distances,
+        num_context_lines=num_context_lines,
+        optimizer=None,
+        save_code_context=False,
+        save_rng_states=False,
+        recurrence_detection=recurrence_detection,
+        verbose=verbose,
+        backward_ready=False,
+        module_filter=None,
+        emit_nvtx=False,
+        transform=None,
+        raw_input=raw_input,
+        save_raw_input=save_raw_input,
+        batch_render=batch_render,
+        output_transform=cast("Callable[[Any], Any] | None", output_transform),
+        save_raw_output=save_raw_output,
+        layer_visualizers=None,
+        save_visualizations=False,
+    )
+    trace.trace_label = name
+    trace.backend = cast(BackendName, backend_name)
+    trace.module_identity_mode = "function_root"
+    trace.param_source = param_source
+    trace.model_label = trace.model_class_name
+    trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
+    trace._pre_forward_rng_states = None
+    return trace

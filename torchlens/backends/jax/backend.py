@@ -18,6 +18,7 @@ from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...backends._finalize import (
     attach_function_root_module,
     mirror_param_derived_grads,
+    new_preview_function_trace,
     normalize_op_module_calls,
     numel_from_shape as _numel,
     session_callable_identity as _callable_identity,
@@ -813,77 +814,24 @@ class JAXBackend:
         save_raw_output: str | bool,
         compute_input_output_distances: bool = True,
     ) -> Trace:
-        """Construct an empty JAX trace.
+        """Construct an empty trace shell via the shared preview constructor."""
 
-        Parameters
-        ----------
-        model
-            Captured callable.
-        keep_orphans
-            Whether orphan ops are retained.
-        num_context_lines
-            Source context line count.
-        recurrence_detection
-            Recurrence-detection setting.
-        verbose
-            Verbose flag.
-        name
-            Optional trace label.
-        raw_input
-            Original user input.
-        save_raw_input
-            Raw-input save policy.
-        batch_render
-            Raw-input render policy.
-        output_transform
-            Optional output transform.
-        save_raw_output
-            Raw-output save policy.
-
-        Returns
-        -------
-        Trace
-            Empty trace initialized for JAX.
-        """
-
-        trace = Trace(
-            model_class_name=getattr(model, "__name__", type(model).__name__),
-            output_device="same",
-            activation_transform=None,
-            grad_transform=None,
-            save_raw_activations=True,
-            save_raw_gradients=True,
+        return new_preview_function_trace(
+            backend_name=self.name,
+            model=model,
             keep_orphans=keep_orphans,
-            save_arg_values=False,
-            save_grads=None,
-            detach_saved_activations=False,
-            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
-            optimizer=None,
-            save_code_context=False,
-            save_rng_states=False,
             recurrence_detection=recurrence_detection,
             verbose=verbose,
-            backward_ready=False,
-            module_filter=None,
-            emit_nvtx=False,
-            transform=None,
+            name=name,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
             batch_render=batch_render,
-            output_transform=cast("Callable[[Any], Any] | None", output_transform),
+            output_transform=output_transform,
             save_raw_output=save_raw_output,
-            layer_visualizers=None,
-            save_visualizations=False,
+            param_source="pytree-derived",
+            compute_input_output_distances=compute_input_output_distances,
         )
-        trace.trace_label = name
-        trace.backend = cast(BackendName, self.name)
-        trace.module_identity_mode = "function_root"
-        trace.param_source = "pytree-derived"
-        trace.model_label = trace.model_class_name
-        trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
-        trace._pre_forward_rng_states = None
-        return trace
 
     def _emit_arg_sources(self, trace: Trace, args: Sequence[Any]) -> None:
         """Emit input source events for dynamic JAX argument leaves.
