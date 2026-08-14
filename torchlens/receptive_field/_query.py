@@ -490,7 +490,7 @@ def _map_to_parent(
             mapped[axis] = _IndexSet.interval(0, int(parent.shape[axis]) - 1)
         return tuple(mapped), bool(result.values.get("exact", True))
     if result.kind == "axis_map":
-        return _map_axis_mapping(parent, output_sets, result), True
+        return _map_axis_mapping(parent, output_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough(op, parent, output_sets, result), True
     return _map_composed_envelope(op, parent, output_sets), False
@@ -621,17 +621,59 @@ def _map_passthrough(
     return tuple(result)
 
 
-def _map_axis_mapping(parent: Op, output_sets: _AxisSets, result: _RuleResult) -> _AxisSets:
-    """Apply an explicit output-axis to parent-axis mapping."""
+def _map_axis_mapping(
+    parent: Op, output_sets: _AxisSets, result: _RuleResult
+) -> tuple[_AxisSets, bool]:
+    """Apply an explicit output-axis to parent-axis mapping.
+
+    Surviving sliced axes apply their recorded exact affine
+    (``parent = step * out + start``; the historical path copied index sets
+    through unshifted, dropping every slice offset — disputed-r2 b6/R20-2).
+    Scalar-selected parent axes narrow to their recorded singleton index;
+    a selected axis with no recorded index and extent > 1 falls back to its
+    conservative full extent and makes the hop non-exact (R20-3: the
+    conservative bound must be visible in the box's exactness claim).
+    """
     raw = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw, Mapping):
-        return (None,) * len(parent.shape)
+        return (None,) * len(parent.shape), True
+    raw_edges = result.values.get("out_axis_edges", {})
+    edges = raw_edges if isinstance(raw_edges, Mapping) else {}
+    raw_indices = result.values.get("selected_parent_indices", {})
+    selected_indices = raw_indices if isinstance(raw_indices, Mapping) else {}
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected_axes = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
     mapped: list[_IndexSet | None] = [None] * len(parent.shape)
+    exact = True
     for output_axis, parent_axis in raw.items():
         if isinstance(output_axis, int) and isinstance(parent_axis, int):
             if 0 <= output_axis < len(output_sets) and 0 <= parent_axis < len(mapped):
-                mapped[parent_axis] = output_sets[output_axis]
-    return tuple(mapped)
+                output_set = output_sets[output_axis]
+                edge = edges.get(output_axis)
+                if output_set is not None and edge is not None:
+                    step, start = int(edge[0]), int(edge[1])
+                    output_set = _IndexSet.from_values(
+                        (step * value + start for value in output_set.values()),
+                        exact=output_set.exact,
+                    )
+                mapped[parent_axis] = output_set
+    for parent_axis in selected_axes:
+        if not 0 <= parent_axis < len(mapped):
+            continue
+        index = selected_indices.get(parent_axis)
+        extent = int(parent.shape[parent_axis])
+        if isinstance(index, int) and 0 <= index < extent:
+            mapped[parent_axis] = _IndexSet.singleton(index)
+        elif extent == 1:
+            mapped[parent_axis] = _IndexSet.singleton(0)
+        else:
+            mapped[parent_axis] = _IndexSet.interval(0, extent - 1, exact=False)
+            exact = False
+    return tuple(mapped), exact
 
 
 def _map_window_edges(
@@ -928,7 +970,36 @@ def _build_box(
                 ReceptiveFieldBoxAxis(axis, "pointwise", None, None, None, None, None, None)
             )
         elif axis_descriptor.kind == "full":
-            box_axes.append(ReceptiveFieldBoxAxis(axis, "full", None, None, 0, extent, 0, extent))
+            narrowed = theoretical_sets[axis]
+            if narrowed is not None and not narrowed.is_empty:
+                # The query walk produced a real per-axis index set (for
+                # example a scalar-selected getitem axis narrowed to its
+                # recorded singleton). Serve the walk's tight bounds instead
+                # of the descriptor's conservative whole extent.
+                box_axes.append(
+                    ReceptiveFieldBoxAxis(
+                        axis,
+                        "full",
+                        None,
+                        None,
+                        narrowed.minimum,
+                        narrowed.maximum + 1,
+                        max(narrowed.minimum, 0),
+                        min(narrowed.maximum + 1, extent),
+                    )
+                )
+            else:
+                # No walk narrowing: the whole-extent claim is only as exact
+                # as the descriptor's own axis evidence. A conservative full
+                # axis (for example an unresolved scalar selection over
+                # extent > 1) must be visible in the box's exactness claim —
+                # the historical box derived `exact` from windowed terminals
+                # alone, so this dishonest-exact class was tripwire-BLIND
+                # (disputed-r2 b6/R20-3).
+                exact = exact and axis_descriptor.exact
+                box_axes.append(
+                    ReceptiveFieldBoxAxis(axis, "full", None, None, 0, extent, 0, extent)
+                )
         elif axis_descriptor.kind == "windowed":
             theoretical = theoretical_sets[axis]
             actual = clipped_sets[axis]

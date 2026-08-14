@@ -391,16 +391,20 @@ def _adjoint_probe_units(
 def _box_membership_contains(box: ReceptiveFieldBox, unit: tuple[int, ...]) -> bool:
     """Return whether a reverse-direction box contains one complete unit.
 
-    Windowed axes with concrete clipped bounds must contain the coordinate;
-    pointwise, full, and unbounded axes are treated as containing, so an
-    upper-bound or partially-unbounded reverse box can never produce a false
-    violation.
+    Any axis with concrete clipped bounds must contain the coordinate;
+    pointwise and unbounded axes are treated as containing, so an upper-bound
+    or partially-unbounded reverse box can never produce a false violation.
+    Non-windowed axes joined the comparison in the disputed-r2 b6/R20-3
+    strengthening: walk-narrowed full axes (for example a scalar-selected
+    getitem axis) carry sound over-approximate bounds, so a coordinate outside
+    them is truly outside the influence set — the historical windowed-only
+    test made over-approximated non-windowed axes tripwire-blind.
     """
 
     if box.empty:
         return False
     for axis in box.axes:
-        if axis.kind != "windowed":
+        if axis.kind not in {"windowed", "full"}:
             continue
         if axis.clipped_start is None or axis.clipped_stop is None:
             continue
