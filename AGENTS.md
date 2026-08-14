@@ -152,10 +152,14 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 Every task must pass before completion unless the task explicitly narrows verification:
 
 ```bash
+ruff format .
 ruff check . --fix
 mypy torchlens/
 pytest tests/ -m smoke -x --tb=short
 ```
+
+(CI lint runs `ruff format --check` plus `ruff check` over `torchlens tests scripts tools
+benchmarks examples notebooks`; run `ruff format` locally or the format-check leg fails.)
 
 For changes touching module boundaries or public API, also run:
 
