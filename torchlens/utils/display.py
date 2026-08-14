@@ -540,6 +540,17 @@ def user_stacklevel(extra: int = 0) -> int:
     return 2 + extra
 
 
+#: PID of the interpreter that imported this module (r-b6 R40-3b). A raw
+#: ``os.fork()`` child inherits the stamp with a different ``getpid()``, which
+#: is how ``warn_parallel`` sees through multiprocessing-invisible forks.
+_WARN_PARALLEL_IMPORT_PID: int = os.getpid()
+
+#: PID that first observed an initialized process group at capture entry.
+#: Inheriting another process's stamp marks a fork child of a rank, never a
+#: rank. Dict-in-a-slot so the fork-inherited copy stays readable.
+_DIST_GROUP_OBSERVED_PID: dict[str, int] = {}
+
+
 def warn_parallel() -> None:
     """Refuse capture from a non-rank CHILD PROCESS.
 
@@ -576,13 +587,30 @@ def warn_parallel() -> None:
         If called from a child process that is not a distributed rank
         (code ``child_process_capture_unsupported``).
     """
+    # r-b6 R40-3b: child detection does NOT trust ``process.name`` — it is a
+    # user-assignable constructor kwarg (``mp.Process(name="MainProcess")``),
+    # and a raw ``os.fork()`` child is invisible to multiprocessing entirely
+    # (it inherits the parent's process object wholesale). ``parent_process()``
+    # catches every multiprocessing child regardless of name; the import-time
+    # PID stamp catches raw-forked children, which inherit the module state
+    # (and the wrapped-torch toggle state that makes their captures unsafe).
     process = mp.current_process()
-    if process.name == "MainProcess":
+    if mp.parent_process() is None and os.getpid() == _WARN_PARALLEL_IMPORT_PID:
         return
     try:
         import torch.distributed as dist
 
         is_rank_process = not process.daemon and dist.is_available() and dist.is_initialized()
+        if is_rank_process:
+            # A FORKED child inherits the parent's initialized-group flag, so
+            # "initialized" alone does not prove this process is a rank. The
+            # first process to reach this check with an initialized group
+            # stamps its PID; an inheritor of somebody else's stamp is a fork
+            # child of a rank, not a rank (r-b6 R40-3b). A rank whose parent
+            # never captured is stamped here on ITS first capture — the stamp
+            # is per-interpreter state, reset by spawn's fresh import.
+            owner_pid = _DIST_GROUP_OBSERVED_PID.setdefault("pid", os.getpid())
+            is_rank_process = owner_pid == os.getpid()
     except Exception:
         is_rank_process = False
     if not is_rank_process:

@@ -862,7 +862,9 @@ def _run_neato(
         rendered_path,
         source_path,
     ]
-    return subprocess.run(cmd, timeout=render_timeout, capture_output=True, text=True)
+    return subprocess.run(
+        cmd, timeout=render_timeout, capture_output=True, text=True, start_new_session=True
+    )
 
 
 def _run_neato_with_fallbacks(

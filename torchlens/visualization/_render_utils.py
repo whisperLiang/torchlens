@@ -25,6 +25,18 @@ import graphviz
 
 from .._errors import InvalidArgumentError
 
+#: Live viewer child handles (r-b6 R40-1). Retained so every launch can reap
+#: previously-exited viewers; without this the discarded ``Popen`` handle left
+#: one persistent zombie per process (each new spawn reaped the previous
+#: corpse, so the census never returned to baseline).
+_VIEWER_PROCS: list[subprocess.Popen[bytes]] = []
+
+
+def _reap_finished_viewers() -> None:
+    """Drop (and thereby reap) every viewer child that has already exited."""
+
+    _VIEWER_PROCS[:] = [proc for proc in _VIEWER_PROCS if proc.poll() is None]
+
 
 def _is_interactive_display_context() -> bool:
     """Return whether launching a GUI viewer is reasonable in this process.
@@ -83,17 +95,20 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
     try:
         if sys.platform == "win32":
             os.startfile(filepath)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(
-                ["open", filepath],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
         else:
-            subprocess.Popen(
-                ["xdg-open", filepath],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            # r-b6 R40-1/3a: retain the handle and reap prior viewer children
+            # (the discarded Popen left one persistent zombie per process),
+            # and detach the viewer into its own session so a later render
+            # timeout kill cannot orphan its grandchildren onto us.
+            _reap_finished_viewers()
+            _VIEWER_PROCS.append(
+                subprocess.Popen(
+                    [opener, filepath],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
             )
         return True
     except (FileNotFoundError, OSError):
@@ -374,6 +389,7 @@ def render_dot_to_file(
             timeout=timeout_seconds,
             check=True,
             capture_output=True,
+            start_new_session=True,
         )
         render_succeeded = True
         if not save_only:

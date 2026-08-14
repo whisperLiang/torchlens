@@ -791,6 +791,7 @@ def _emit_and_finish_forward(
     if context.source_text is not None and not compose_code_panel:
         render_code_panel_subgraph(dot, context.source_text)
 
+    render_timeout = 120
     if in_notebook() and not target.save_only:
         try:
             from IPython.display import SVG, display  # #72: lazy import
@@ -801,17 +802,38 @@ def _emit_and_finish_forward(
             ) from error
 
         display_fn = cast(Any, display)
+        # r-b6 R40-2: render through the BOUNDED subprocess runner instead of
+        # ``dot.pipe()`` / ``display(dot)`` — graphviz 0.21 exposes no pipe
+        # timeout, so a wedged ``dot`` hung the kernel indefinitely while
+        # every CLI path was already bounded at ``render_timeout`` with a
+        # typed error. Timeout/failure map to the same typed raises.
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".dot", delete=False
+        ) as notebook_source_file:
+            notebook_source_file.write(dot.source)
+            notebook_source_path = notebook_source_file.name
+        try:
+            graph_svg = _render_graph_only_svg(dot.engine, notebook_source_path, render_timeout)
+        except subprocess.TimeoutExpired as error:
+            # The typed raise names the saved source path, so keep the file.
+            _raise_graphviz_timeout(
+                "forward graph (notebook display)",
+                f"{trace.num_tensors} nodes",
+                notebook_source_path,
+                render_timeout,
+                error,
+            )
+        except subprocess.CalledProcessError as error:
+            _raise_graphviz_failure("forward graph (notebook display)", notebook_source_path, error)
+        if os.path.exists(notebook_source_path):
+            os.remove(notebook_source_path)
         if compose_code_panel:
-            graph_svg = _inline_svg_local_images(dot.pipe(format="svg").decode("utf-8"))
-            combined_svg = compose_graph_with_code_panel(
+            graph_svg = compose_graph_with_code_panel(
                 graph_svg,
                 cast(str, context.source_text),
             )
-            display_fn(SVG(combined_svg))
-        else:
-            display_fn(dot)
+        display_fn(SVG(graph_svg))
 
-    render_timeout = 120
     source_override = None
     trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
     if forward_render_ir.ordering_constraints:
@@ -846,7 +868,13 @@ def _emit_and_finish_forward(
                 )
             else:
                 cmd = [dot.engine, f"-T{target.fileformat}", "-o", rendered_path, source_path]
-                subprocess.run(cmd, timeout=render_timeout, check=True, capture_output=True)
+                subprocess.run(
+                    cmd,
+                    timeout=render_timeout,
+                    check=True,
+                    capture_output=True,
+                    start_new_session=True,
+                )
                 if target.fileformat == "svg":
                     _inline_svg_file_local_images(rendered_path)
             _validate_rendered_output(rendered_path, source_path, "forward graph")
@@ -1094,6 +1122,7 @@ def _render_graph_only_svg(engine: str, source_path: str, timeout: int) -> str:
         timeout=timeout,
         check=True,
         capture_output=True,
+        start_new_session=True,
     )
     return _inline_svg_local_images(completed.stdout.decode("utf-8"))
 
@@ -1646,6 +1675,7 @@ def _layout_dot_plain(
             capture_output=True,
             text=True,
             timeout=120,
+            start_new_session=True,
         )
     finally:
         os.remove(source_path)
