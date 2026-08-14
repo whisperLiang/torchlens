@@ -75,6 +75,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
     global TEST_OUTPUTS_DIR, REPORTS_DIR, VIS_OUTPUT_DIR
 
+    # A CI run must never mutate goldens: any armed update/regen/record flag
+    # would silently rebaseline instead of verifying (b7 R53-3 / b10 R78-8).
+    from _oracle_env import golden_mutation_flags_armed_under_ci
+
+    armed = golden_mutation_flags_armed_under_ci(os.environ)
+    if armed:
+        raise pytest.UsageError(
+            "golden update/regen flags are forbidden under CI: " + ", ".join(armed)
+        )
+
     output_root = config._tmp_path_factory.getbasetemp() / "torchlens-generated"
     TEST_OUTPUTS_DIR = str(output_root)
     REPORTS_DIR = str(output_root / "reports")
@@ -219,7 +229,12 @@ def _is_full_usage_stats_run(config: pytest.Config) -> bool:
     if config.option.keyword:
         return False
     mark_expression = (config.option.markexpr or "").strip().replace("(", "").replace(")", "")
-    if mark_expression not in {"", "not rare"}:
+    # The coverage audit asserts called-functions ⊆ ArgSpec entries, so any
+    # broad subset is sound (a smaller run can only check less, never lie).
+    # Arm it on the nightly fast tier too: with only {"", "not rare"} accepted
+    # no CI invocation ever collected stats and the gate skipped in 100% of CI
+    # runs (b10 R79 / opus-R79-1).
+    if mark_expression not in {"", "not rare", "not slow and not rare"}:
         return False
     requested_paths = [Path(str(arg).split("::", maxsplit=1)[0]).resolve() for arg in config.args]
     return requested_paths == [Path(TESTS_DIR).resolve()]
@@ -393,9 +408,7 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
         if module is None:
             snapshots[(module_name, name)] = _MISSING
             continue
-        snapshots[(module_name, name)] = _copy_sentinel_value(
-            getattr(module, name, _MISSING)
-        )
+        snapshots[(module_name, name)] = _copy_sentinel_value(getattr(module, name, _MISSING))
         _set_sentinel_default(module, name, default)
 
     try:

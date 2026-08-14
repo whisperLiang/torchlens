@@ -204,7 +204,8 @@ def test_r69_ordinary_analysis_save_retains_raw_values(tmp_path: Path) -> None:
 def test_small_raw_input_pil_round_trips_bounded_image(tmp_path: Path) -> None:
     """PIL raw input should survive ``save_raw_input='small'`` as a bounded image."""
 
-    pil_image = pytest.importorskip("PIL.Image")
+    from PIL import Image as pil_image
+
     image = pil_image.new("RGB", (512, 300), color=(10, 120, 200))
     trace = trace_fn(_TinyImageInputModel(), image, layers_to_save="none")
     path = tmp_path / "pil_raw_input.tlspec"

@@ -71,7 +71,7 @@ SOURCE_AVAILABLE / ENV_SETUP / REIMPLEMENT / UNAVAILABLE / NOT_TRACEABLE class I
 import torchlens as tl
 
 log = tl.trace(model, x, save=tl.func("relu"))
-activation = log["linear_1_1"].out
+activation = log["relu_1_2"].out
 print(log.summary())
 print(tl.report.explain(log))
 log.draw(order_siblings=True)  # default: verified sibling ordering for dot/unrolled graphs
@@ -97,8 +97,10 @@ armed = tl.trace(model, x.requires_grad_(True),
 armed_op = armed["relu_1_2"]
 armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
 gradient = armed_op.receptive_field.gradient(armed_unit, retain_graph=True)
-overlay = armed_op.receptive_field.show(armed_unit, gradient=True)
 validated = tl.receptive_field.verify(armed, units="center")
+# show(gradient=True) recomputes the gradient WITHOUT retain_graph and frees the
+# autograd graph -- call it last (or re-capture) if later backward passes are needed.
+overlay = armed_op.receptive_field.show(armed_unit, gradient=True)
 # tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
 

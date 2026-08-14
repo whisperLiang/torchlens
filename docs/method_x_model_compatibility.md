@@ -1,5 +1,10 @@
 # Method x Model Compatibility
 
+<!-- GENERATED FILE; do not hand-edit. tests/test_schema_lockstep.py
+regenerates and diffs this doc. Refresh from the repo root with:
+python -c "import sys; sys.path.insert(0, 'tests'); import test_schema_lockstep as m; m.write_method_x_model_compatibility_doc()"
+-->
+
 Generated from `tl.compat.report` on representative eager PyTorch models. These rows are a
 smoke reference for ordinary dense eager execution, not a complete certification matrix.
 
@@ -30,14 +35,34 @@ for name, model in models.items():
 
 | Model | Rows | Non-pass rows |
 | --- | ---: | --- |
-| `linear_mlp` | 17 | none |
-| `conv_pool` | 17 | none |
+| `linear_mlp` | 23 | none |
+| `conv_pool` | 23 | none |
 
-Both representative models report `pass` for Hugging Face wrapper detection, Accelerate
-offload/device-map detection, bitsandbytes detection, tied parameters, multi-GPU RNG context,
-`nn.DataParallel`, DDP, FSDP, DeepSpeed, `torch.compile`, FX `GraphModule`, Lightning
-training-step context, functorch/vmap markers, quantized tensors/modules, device-context factory
-handling, and single-thread design.
+Both representative models report `pass` for every check:
+
+- HF Transformers wrapper
+- Accelerate device_map='auto'
+- Accelerate CPU/disk offload
+- bitsandbytes 8-bit/4-bit
+- Tied/shared parameters
+- Multi-GPU RNG
+- nn.DataParallel
+- DistributedDataParallel
+- FSDP
+- DTensor / sharded tensors
+- Device mesh
+- Tensor parallel (TP)
+- Pipeline parallel (PP)
+- DeepSpeed
+- torch.compile
+- FX GraphModule
+- Runtime capability snapshot
+- Lightning training_step mid-loop
+- vmap/functorch
+- Quantized tensors/modules
+- fp8 (float8_*) tensors
+- DeviceContext factory injection
+- Single-thread design
 
 Interpretation: plain eager dense PyTorch models are the compatibility baseline. For wrappers,
 compiled execution, sharding/offload, quantization, or concurrent capture, run

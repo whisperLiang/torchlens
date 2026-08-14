@@ -85,9 +85,7 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
     budget = getattr(request.session, "_tl_smoke_family_budget_value", 30.0)
     family_totals = getattr(request.session, "_tl_smoke_family_durations", {})
     offenders = [
-        (family, duration)
-        for family, duration in family_totals.items()
-        if duration > budget
+        (family, duration) for family, duration in family_totals.items() if duration > budget
     ]
     lines = [f"{family}: {duration:.1f}s (budget {budget:.0f}s)" for family, duration in offenders]
     assert not offenders, (
@@ -109,9 +107,7 @@ def test_smoke_module_imports_stay_within_duration_budget(
         if item.get_closest_marker("smoke") is not None
     }
     offenders = [
-        (path, durations[path])
-        for path in sorted(smoke_paths)
-        if durations.get(path, 0.0) > budget
+        (path, durations[path]) for path in sorted(smoke_paths) if durations.get(path, 0.0) > budget
     ]
     lines = [f"{path}: {duration:.1f}s (budget {budget:.0f}s)" for path, duration in offenders]
     assert not offenders, (
@@ -187,9 +183,7 @@ def test_warn_once_sentinel_census_matches_autouse_reset(
         request.config._tl_warn_once_sentinel_specs
     )
     configured = {(module_name, name) for module_name, name, _default in configured_specs}
-    runtime_only = {
-        ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED")
-    }
+    runtime_only = {("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED")}
     assert configured == discovered | runtime_only, (
         "Warn-once sentinel reset inventory drifted. Add/remove entries in "
         "tests/conftest.py::_WARN_ONCE_SENTINELS. "
@@ -199,7 +193,12 @@ def test_warn_once_sentinel_census_matches_autouse_reset(
 
 
 def _is_module_scoped_fixture(decorator: ast.expr) -> bool:
-    """Return whether a decorator declares a module-scoped pytest fixture.
+    """Return whether a decorator declares a long-lived pytest fixture.
+
+    Any scope wider than the default per-test function scope ("class",
+    "module", "package", "session") retains its Trace across tests, so all
+    of them need the teardown gate — matching only the literal "module"
+    left the wider scopes unguarded (b2p2 opus-B2P2-10 / sol-R77-2).
 
     Parameters
     ----------
@@ -209,7 +208,7 @@ def _is_module_scoped_fixture(decorator: ast.expr) -> bool:
     Returns
     -------
     bool
-        Whether the decorator is ``pytest.fixture(scope="module")``.
+        Whether the decorator is ``pytest.fixture(scope=<non-function>)``.
     """
 
     if not isinstance(decorator, ast.Call):
@@ -224,7 +223,7 @@ def _is_module_scoped_fixture(decorator: ast.expr) -> bool:
     return is_fixture and any(
         keyword.arg == "scope"
         and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == "module"
+        and keyword.value.value in {"class", "module", "package", "session"}
         for keyword in decorator.keywords
     )
 
@@ -271,9 +270,7 @@ def _module_trace_fixtures_without_yield(tests_root: Path) -> list[str]:
     for path in tests_root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         functions = (
-            node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
         for function in functions:
             if not any(_is_module_scoped_fixture(item) for item in function.decorator_list):

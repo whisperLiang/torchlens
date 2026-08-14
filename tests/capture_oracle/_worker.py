@@ -43,6 +43,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
 
     args = _parse_args(argv)
+
+    # Pin the execution environment the seeds alone do not cover: thread
+    # count and kernel selection both steer float bytes, and the goldens
+    # compare raw sha256 chunks (b10 R78-7). Pinning lives HERE so the regen
+    # path and the enforce path run under identical settings by construction.
+    import torch
+
+    torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
     print(json.dumps(characterize_case(args.case), sort_keys=True))
     return 0
 

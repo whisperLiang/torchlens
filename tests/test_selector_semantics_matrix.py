@@ -21,7 +21,10 @@ lifecycles (case sensitivity, label universes, error shapes). A diff against
 this file is therefore a *behavior change*: each one must be either an
 explicitly intended, enumerated change or a bug. Regenerate deliberately with::
 
-    TL_SELECTOR_MATRIX_REGEN=1 pytest tests/test_selector_semantics_matrix.py
+    TORCHLENS_UPDATE_SELECTOR_MATRIX=1 pytest tests/test_selector_semantics_matrix.py
+
+(a regeneration run reports SKIP, never green — re-run without the flag to
+verify against the freshly written golden)
 
 Cell values are either a sorted list of matched labels, ``"ERROR:<Class>"``,
 or a small dict of named sub-results.
@@ -50,7 +53,14 @@ from torchlens.intervention.selectors import (
 from torchlens.intervention.types import TargetSpec
 
 _GOLDEN_PATH = Path(__file__).parent / "golden" / "selector_semantics_matrix.json"
-_REGEN = bool(os.environ.get("TL_SELECTOR_MATRIX_REGEN"))
+_UPDATE_ENV = "TORCHLENS_UPDATE_SELECTOR_MATRIX"
+_REGEN = bool(os.environ.get(_UPDATE_ENV))
+if os.environ.get("TL_SELECTOR_MATRIX_REGEN"):
+    # One regen-flag convention repo-wide (b10 R78-8b): fail loudly instead of
+    # silently ignoring the retired spelling.
+    raise RuntimeError(
+        "TL_SELECTOR_MATRIX_REGEN was renamed; use TORCHLENS_UPDATE_SELECTOR_MATRIX=1"
+    )
 
 # Markers are additive: a file-level smoke pytestmark would keep the heavy test
 # in the `-m smoke` tier, so tier marks are applied per test instead.
@@ -642,14 +652,28 @@ def _matrix() -> dict[str, Any]:
     return _compute_matrix()
 
 
-@lru_cache(maxsize=1)
+_REGEN_WRITTEN = False
+
+
 def _golden() -> dict[str, Any]:
     if _REGEN:
-        matrix = _matrix()
-        _GOLDEN_PATH.write_text(json.dumps(matrix, indent=1, sort_keys=True) + "\n")
-        return matrix
+        # Write once, then SKIP every comparison: under the historical
+        # behavior a regen run compared the matrix to itself and reported
+        # green, blurring "verified" with "just rebaselined" (b10 R78-8d).
+        global _REGEN_WRITTEN
+        if not _REGEN_WRITTEN:
+            _GOLDEN_PATH.write_text(json.dumps(_matrix(), indent=1, sort_keys=True) + "\n")
+            _REGEN_WRITTEN = True
+        pytest.skip(
+            f"regenerated selector-semantics golden; re-run without {_UPDATE_ENV} to verify"
+        )
     if not _GOLDEN_PATH.exists():
-        pytest.fail(f"Missing golden {_GOLDEN_PATH}; regenerate with TL_SELECTOR_MATRIX_REGEN=1.")
+        pytest.fail(f"Missing golden {_GOLDEN_PATH}; regenerate with {_UPDATE_ENV}=1.")
+    return _load_golden()
+
+
+@lru_cache(maxsize=1)
+def _load_golden() -> dict[str, Any]:
     return json.loads(_GOLDEN_PATH.read_text())
 
 
@@ -690,5 +714,5 @@ def test_selector_semantics_cell(cell_key: str) -> None:
     assert matrix[cell_key] == golden[cell_key], (
         f"Behavior change in {cell_key}: golden={golden[cell_key]!r} "
         f"current={matrix[cell_key]!r}. If intended, enumerate it in the "
-        "consolidation report and regenerate with TL_SELECTOR_MATRIX_REGEN=1."
+        f"consolidation report and regenerate with {_UPDATE_ENV}=1."
     )

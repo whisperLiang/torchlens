@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
@@ -35,8 +36,6 @@ from torchlens.intervention.errors import ReplayPreconditionError
 from torchlens.intervention.save import load_intervention_spec
 from torchlens.intervention.types import InterventionSpec
 from torchlens.options import CaptureOptions
-
-pytest.importorskip("safetensors")
 
 
 def _supports_symlinks(tmp_path: Path) -> bool:

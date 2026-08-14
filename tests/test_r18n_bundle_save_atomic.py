@@ -16,9 +16,7 @@ import os
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("safetensors")
-
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 

@@ -67,6 +67,8 @@ Key entry points:
 Common unified capture patterns:
 
 ```python
+import torchlens as tl
+
 torch_trace = tl.trace(
     model,
     x,
@@ -85,8 +87,8 @@ windowed = tl.trace(
 patched = tl.trace(
     model,
     x,
-    save=tl.func("attn"),
-    intervene=tl.when(tl.func("attn"), tl.zero_ablate()),
+    save=tl.func("relu"),
+    intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
 )
 streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 recording = tl.record(model, x, save=tl.func("relu"))
@@ -116,8 +118,10 @@ armed_trace = tl.trace(model, x.requires_grad_(True),
 armed_op = armed_trace["relu_1_2"]
 armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
 rf_gradient = armed_op.receptive_field.gradient(armed_unit, retain_graph=True)
-rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 rf_results = tl.receptive_field.verify(armed_trace, units="center")
+# show(gradient=True) recomputes the gradient WITHOUT retain_graph and frees the
+# autograd graph -- call it last (or re-capture) if later backward passes are needed.
+rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 # tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
 

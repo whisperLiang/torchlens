@@ -83,7 +83,8 @@ def _rasterize(svg_path: Path) -> np.ndarray[Any, np.dtype[np.uint8]]:
     """
 
     cairosvg = pytest.importorskip("cairosvg")
-    pillow_image = pytest.importorskip("PIL.Image")
+    from PIL import Image as pillow_image
+
     png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=1200, output_height=800)
     image = pillow_image.open(BytesIO(png_bytes)).convert("RGB")
     return np.asarray(image, dtype=np.uint8)

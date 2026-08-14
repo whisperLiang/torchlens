@@ -306,7 +306,8 @@ def test_paddle_non_tensor_hook_return_refuses_typed() -> None:
 def test_paddle_torch_tensor_helper_arg_refuses_typed() -> None:
     """torch.Tensor helper arguments refuse instead of failing confusingly."""
 
-    torch = pytest.importorskip("torch")
+    import torch
+
     with pytest.raises(BackendUnsupportedError, match="torch.Tensor argument"):
         tl.trace(
             _mlp,

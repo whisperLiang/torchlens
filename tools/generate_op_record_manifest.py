@@ -5,11 +5,12 @@ cell naming its step-0 ingest source class. Regenerate-and-diff is CI-gated
 (``tests/producer_parity/test_p1_record_types.py``); editing the generated
 file by hand is a build failure.
 
-Run: ``python -m tools.generate_op_record_manifest``
+Run: ``python -m tools.generate_op_record_manifest [--check]``
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 HEADER = '''"""GENERATED FILE — do not edit. CellSourceManifest v{version}.
@@ -38,11 +39,22 @@ def generate() -> str:
     return "".join(lines)
 
 
-def main() -> None:
+def main() -> int:
+    """Generate (or with --check, verify) the manifest module."""
+
     target = Path(__file__).resolve().parents[1] / "torchlens" / "ir" / "op_record_manifest.py"
-    target.write_text(generate())
+    rendered = generate()
+    if "--check" in sys.argv:
+        current = target.read_text() if target.exists() else ""
+        if current != rendered:
+            print("stale: op_record_manifest.py differs from a fresh generation")
+            return 1
+        print("ok: op_record_manifest.py is current")
+        return 0
+    target.write_text(rendered)
     print(f"wrote {target}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

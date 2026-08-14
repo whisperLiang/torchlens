@@ -27,9 +27,13 @@ from torchlens.visualization._rank_layout_internal.layout import (
     get_node_placement_engine,
 )
 
+# Session-private output root (conftest exports it before collection); the
+# repo-local fallback raced across parallel worktree lanes (b2p2 R77).
 VIS_OUTPUT_DIR = os.path.join(
-    os.path.dirname(__file__),
-    "generated_outputs",
+    os.environ.get(
+        "TORCHLENS_TEST_OUTPUTS_DIR",
+        os.path.join(os.path.dirname(__file__), "generated_outputs"),
+    ),
     "visualizations",
     "large",
 )

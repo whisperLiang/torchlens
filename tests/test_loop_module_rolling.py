@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -13,7 +14,13 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.visualization._render_nodes import compute_default_node_lines
 
-OUTPUT_DIR = Path(__file__).parent / "generated_outputs" / "visualizations" / "loop_module_rolling"
+# Session-private output root (conftest exports it before collection); the
+# repo-local fallback raced across parallel worktree lanes (b2p2 R77).
+OUTPUT_DIR = (
+    Path(os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR", Path(__file__).parent / "generated_outputs"))
+    / "visualizations"
+    / "loop_module_rolling"
+)
 
 
 class ReusedReluLoop(nn.Module):

@@ -6,14 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
 import torchlens as tl
 import torchlens.postprocess as postprocess_module
-
-pytest.importorskip("safetensors")
-
 from torchlens import trace as trace_fn
 from torchlens._io import TorchLensIOError, streaming as streaming_module
 from torchlens._io.manifest import Manifest
@@ -410,7 +408,9 @@ def test_out_sink_receives_saved_tensors_and_is_mutually_exclusive(
     assert all(isinstance(label, str) and label for label, _ in received)
     assert all(isinstance(tensor, torch.Tensor) for _, tensor in received)
 
-    with pytest.raises(ValueError, match="choose either bundle_path/save_outs_to or out_callback/out_sink"):
+    with pytest.raises(
+        ValueError, match="choose either bundle_path/save_outs_to or out_callback/out_sink"
+    ):
         model2, inputs2 = _make_streaming_model()
         trace_fn(
             model2,

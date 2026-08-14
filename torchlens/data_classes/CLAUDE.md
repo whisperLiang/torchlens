@@ -141,8 +141,11 @@ Param -> _param_ref -> nn.Parameter
 ```
 
 The two Trace back-references are stored as `weakref.ref` in `_source_trace_ref` slots
-(`FieldPolicy.WEAKREF_STRIP`), so they do NOT form strong cycles and a dropped Trace is
-reclaimed without waiting for the cyclic collector; reading the back-reference after the
-Trace dies yields `None` (and consumers that need it, such as `ModuleCall.module`, raise).
-Still call `Trace.cleanup()` when retaining many logs or after
+(`FieldPolicy.WEAKREF_STRIP`), so these back-references themselves do NOT form strong
+cycles; reading one after the Trace dies yields `None` (and consumers that need it, such
+as `ModuleCall.module`, raise). Other strong reference cycles remain (core/facade
+reference tables and similar internal structure), so a dropped Trace is reclaimed by the
+CYCLIC collector, not by refcounting alone: measured on a live capture, `del trace` with
+`gc` disabled leaves the object alive until `gc.collect()` runs, with or without a prior
+`Trace.cleanup()`. Still call `Trace.cleanup()` when retaining many logs or after
 visualization-only workflows.

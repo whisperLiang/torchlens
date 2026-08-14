@@ -8,9 +8,9 @@ from typing import Any
 
 import numpy as np
 import pytest
+import safetensors  # noqa: F401
 from conftest import tensorflow_backend_modules
 
-pytest.importorskip("safetensors")
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()
 del keras
 

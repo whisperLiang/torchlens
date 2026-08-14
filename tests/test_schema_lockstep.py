@@ -27,13 +27,19 @@ so this module is the MECHANISM instead:
    checker reports it. A lockstep gate nobody has proved can fail is not a
    gate.
 
-Everything here is smoke-tier: the whole module is declaration arithmetic plus
-one small capture.
+Nearly everything here is smoke-tier: declaration arithmetic plus one small
+capture. The one exception is the collapse-gallery gate, which re-renders 14
+graphviz SVGs (~10s) and therefore carries ``heavy`` instead -- so the module
+applies ``smoke`` per test rather than module-wide (markers are additive; a
+module-level ``smoke`` could not be removed from the heavy test and would trip
+``tests/test_marker_lint.py``).
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +64,8 @@ from torchlens.data_classes.op import Op
 from torchlens.data_classes.param import Param
 from torchlens.data_classes.trace import Trace
 
-pytestmark = pytest.mark.smoke
+#: Applied per test (not module-wide) so the heavy gallery gate can opt out.
+smoke = pytest.mark.smoke
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -155,6 +162,7 @@ def catalog_registration_gaps(
     return declared - registered, registered - declared
 
 
+@smoke
 def test_every_field_catalog_is_registered() -> None:
     """Every ``*_FIELD_ORDER`` in constants has a lockstep registry entry."""
 
@@ -194,6 +202,7 @@ _PRIMARY_CATALOGS = tuple(c for c in CATALOGS if c.owner is not None)
 _ALIAS_CATALOGS = tuple(c for c in CATALOGS if c.alias_of is not None)
 
 
+@smoke
 @pytest.mark.parametrize("catalog", _PRIMARY_CATALOGS, ids=lambda c: c.constant)
 def test_catalog_is_generated_from_its_owning_field_policy(catalog: Catalog) -> None:
     """The checked-in catalog equals the view generated from ``FIELD_POLICY``."""
@@ -210,6 +219,7 @@ def test_catalog_is_generated_from_its_owning_field_policy(catalog: Catalog) -> 
     assert len(declared) == len(set(declared)), f"{catalog.constant} has duplicates"
 
 
+@smoke
 @pytest.mark.parametrize("catalog", _ALIAS_CATALOGS, ids=lambda c: c.constant)
 def test_alias_catalogs_share_the_primary_object(catalog: Catalog) -> None:
     """An alias catalog IS its primary, so the spellings cannot diverge."""
@@ -356,6 +366,7 @@ def private_ordered_field_gaps(
     return live - declared, declared - live
 
 
+@smoke
 def test_private_named_ordered_drop_fields_are_ledgered() -> None:
     """An ordered private DROP field must state why it is on the surface."""
 
@@ -367,6 +378,7 @@ def test_private_named_ordered_drop_fields_are_ledgered() -> None:
     assert not phantom, f"ledgered private ordered fields that no longer exist: {sorted(phantom)}"
 
 
+@smoke
 def test_private_named_ordered_persisted_fields_are_registered() -> None:
     """Ordering a private persisted field stays a reviewed one-line diff."""
 
@@ -378,6 +390,7 @@ def test_private_named_ordered_persisted_fields_are_registered() -> None:
     )
 
 
+@smoke
 def test_private_ordered_field_reasons_are_nonempty() -> None:
     """Every tier-A ledger entry carries a real reason, not a placeholder."""
 
@@ -419,16 +432,182 @@ def _render_op_record_manifest() -> str:
     return generate()
 
 
+def _render_perf_numbers_doc(baseline_name: str) -> str:
+    """Return a fresh rendering of one perf-numbers doc from its gate JSON.
+
+    IMPORTANT: this is a RENDERING check only. The measured numbers live in
+    the checked-in gate JSON under ``benchmarks/perf_baselines/``; this never
+    re-runs a benchmark, so the check is machine-invariant (a pure
+    JSON-to-Markdown projection of already-recorded measurements).
+
+    Parameters
+    ----------
+    baseline_name:
+        File name of the checked-in gate JSON baseline.
+
+    Returns
+    -------
+    str
+        Generated Markdown text.
+    """
+
+    from benchmarks.generate_perf_numbers import render_numbers_markdown
+    from benchmarks.perf_gate import load_gate_json
+
+    return render_numbers_markdown(
+        load_gate_json(_REPO_ROOT / "benchmarks" / "perf_baselines" / baseline_name)
+    )
+
+
+#: The generation snippet published verbatim in the compatibility doc; the
+#: renderer below must build its reports EXACTLY this way.
+_COMPAT_DOC_SNIPPET = """import torch
+from torch import nn
+import torchlens as tl
+
+models = {
+    "linear_mlp": nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.Linear(6, 2)).eval(),
+    "conv_pool": nn.Sequential(
+        nn.Conv2d(1, 2, 3), nn.ReLU(), nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten()
+    ).eval(),
+}
+inputs = {
+    "linear_mlp": torch.ones(1, 4),
+    "conv_pool": torch.ones(1, 1, 5, 5),
+}
+
+for name, model in models.items():
+    print(name)
+    print(tl.compat.report(model, inputs[name]).to_markdown())"""
+
+_COMPAT_DOC_REGENERATE_COMMAND = (
+    "python -c \"import sys; sys.path.insert(0, 'tests'); "
+    'import test_schema_lockstep as m; m.write_method_x_model_compatibility_doc()"'
+)
+
+
+def _compat_reference_reports() -> dict[str, Any]:
+    """Return the doc's representative ``tl.compat.report`` results.
+
+    Returns
+    -------
+    dict[str, Any]
+        Model name -> ``CompatReport``, built exactly as the published
+        snippet builds them.
+    """
+
+    models = {
+        "linear_mlp": nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.Linear(6, 2)).eval(),
+        "conv_pool": nn.Sequential(
+            nn.Conv2d(1, 2, 3), nn.ReLU(), nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten()
+        ).eval(),
+    }
+    inputs = {
+        "linear_mlp": torch.ones(1, 4),
+        "conv_pool": torch.ones(1, 1, 5, 5),
+    }
+    return {name: tl.compat.report(model, inputs[name]) for name, model in models.items()}
+
+
+def _render_method_x_model_compat() -> str:
+    """Return a fresh rendering of ``docs/method_x_model_compatibility.md``.
+
+    The doc is generated from the MACHINE-INVARIANT projection of the two
+    representative reports: the row LABELS (the check list, fixed by the
+    torchlens code), the row COUNT, and each row's pass/non-pass STATUS on the
+    toy CPU models (structural probes that never execute the model). Row
+    ``details``/``severity`` strings embed environment facts (torch build
+    capability flags, visible CUDA device counts) and are deliberately NOT
+    rendered, so the regenerate-and-diff gate cannot flap across hosts.
+
+    Returns
+    -------
+    str
+        Generated Markdown text.
+    """
+
+    reports = _compat_reference_reports()
+    label_sequences = {
+        name: tuple(row.label for row in report.rows) for name, report in reports.items()
+    }
+    (first_labels, *other_labels) = label_sequences.values()
+    if any(labels != first_labels for labels in other_labels):
+        raise RuntimeError(
+            "compat report rows differ across the representative models; "
+            f"the doc renderer needs a redesign: {label_sequences}"
+        )
+
+    lines = [
+        "# Method x Model Compatibility",
+        "",
+        "<!-- GENERATED FILE; do not hand-edit. tests/test_schema_lockstep.py",
+        "regenerates and diffs this doc. Refresh from the repo root with:",
+        _COMPAT_DOC_REGENERATE_COMMAND,
+        "-->",
+        "",
+        "Generated from `tl.compat.report` on representative eager PyTorch models. These rows are a",
+        "smoke reference for ordinary dense eager execution, not a complete certification matrix.",
+        "",
+        "Generation snippet:",
+        "",
+        "```python",
+        _COMPAT_DOC_SNIPPET,
+        "```",
+        "",
+        "## Representative Results",
+        "",
+        "| Model | Rows | Non-pass rows |",
+        "| --- | ---: | --- |",
+    ]
+    any_non_pass = False
+    for name, report in reports.items():
+        non_pass = [row.label for row in report.rows if row.status != "pass"]
+        any_non_pass = any_non_pass or bool(non_pass)
+        cell = ", ".join(f"`{label}`" for label in non_pass) if non_pass else "none"
+        lines.append(f"| `{name}` | {len(report.rows)} | {cell} |")
+    lines.append("")
+    if any_non_pass:
+        lines.append(
+            "Non-pass rows above name the checks that did not report `pass`; every other check"
+        )
+        lines.append("reported `pass`. The full check list:")
+    else:
+        lines.append("Both representative models report `pass` for every check:")
+    lines.append("")
+    lines.extend(f"- {label}" for label in first_labels)
+    lines.extend(
+        [
+            "",
+            "Interpretation: plain eager dense PyTorch models are the compatibility baseline. For"
+            " wrappers,",
+            "compiled execution, sharding/offload, quantization, or concurrent capture, run",
+            "`tl.compat.report(model, x)` on the exact model/input pair and include the report when"
+            " filing an",
+            "issue.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def write_method_x_model_compatibility_doc() -> None:
+    """Regenerate ``docs/method_x_model_compatibility.md`` in place."""
+
+    path = _REPO_ROOT / "docs" / "method_x_model_compatibility.md"
+    path.write_text(_render_method_x_model_compat(), encoding="utf-8")
+    print(f"wrote {path}")
+
+
 @dataclass(frozen=True)
 class GeneratedArtifact:
-    """One checked-in generated module and its in-process renderer.
+    """One checked-in generated text artifact and its in-process renderer.
 
     Parameters
     ----------
     path:
-        Repo-relative path of the generated module.
+        Repo-relative path of the generated artifact (a package module or a
+        generated doc).
     render:
-        Callable returning the freshly generated source text.
+        Callable returning the freshly generated text.
     regenerate_command:
         Command a developer runs to refresh the artifact.
     """
@@ -438,8 +617,12 @@ class GeneratedArtifact:
     regenerate_command: str
 
 
-#: Every generated module under ``torchlens/``. Kept exhaustive by
-#: ``test_every_generated_module_is_registered``.
+#: Every registered generated text artifact: the generated modules under
+#: ``torchlens/`` (kept exhaustive by
+#: ``test_every_generated_module_is_registered``) plus the generated docs
+#: (R53-6: docs were invisible to the old torchlens-only closure by
+#: construction, which is how the collapse gallery and the compat matrix
+#: drifted at birth).
 GENERATED_ARTIFACTS: tuple[GeneratedArtifact, ...] = (
     GeneratedArtifact(
         "torchlens/data_classes/_schema_bindings.py",
@@ -450,6 +633,57 @@ GENERATED_ARTIFACTS: tuple[GeneratedArtifact, ...] = (
         "torchlens/ir/op_record_manifest.py",
         _render_op_record_manifest,
         "python -m tools.generate_op_record_manifest",
+    ),
+    GeneratedArtifact(
+        "docs/_perf_numbers.md",
+        lambda: _render_perf_numbers_doc("linux-cpu.json"),
+        "python -m benchmarks.generate_perf_numbers "
+        "benchmarks/perf_baselines/linux-cpu.json --out docs/_perf_numbers.md",
+    ),
+    GeneratedArtifact(
+        "docs/_perf_numbers_provisional.md",
+        lambda: _render_perf_numbers_doc("linux-cpu-provisional.json"),
+        "python -m benchmarks.generate_perf_numbers "
+        "benchmarks/perf_baselines/linux-cpu-provisional.json "
+        "--out docs/_perf_numbers_provisional.md",
+    ),
+    GeneratedArtifact(
+        "docs/method_x_model_compatibility.md",
+        _render_method_x_model_compat,
+        _COMPAT_DOC_REGENERATE_COMMAND,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryArtifact:
+    """One checked-in generated directory gated through its script's --check.
+
+    Parameters
+    ----------
+    path:
+        Repo-relative path of the generated directory.
+    check_command:
+        Argv (relative to the repo root, run with the current interpreter)
+        that regenerates to a temp dir and byte-diffs; exits nonzero and
+        names the differing files when stale.
+    regenerate_command:
+        Command a developer runs to refresh the directory.
+    """
+
+    path: str
+    check_command: tuple[str, ...]
+    regenerate_command: str
+
+
+#: Generated directories too expensive for an in-process render (the collapse
+#: gallery re-traces four models and renders 14 graphviz SVGs), gated by the
+#: owning script's real --check mode in the heavy tier.
+GENERATED_DIRECTORY_ARTIFACTS: tuple[GeneratedDirectoryArtifact, ...] = (
+    GeneratedDirectoryArtifact(
+        "docs/images/collapse",
+        ("scripts/render_collapse_reference.py", "--check"),
+        "python scripts/render_collapse_reference.py",
     ),
 )
 
@@ -517,11 +751,23 @@ def artifact_registration_gaps(
     return found - registered, registered - found
 
 
+@smoke
 def test_every_generated_module_is_registered() -> None:
-    """Every self-declared generated module has a regenerate-and-diff entry."""
+    """Every self-declared generated module has a regenerate-and-diff entry.
+
+    The marker-scan closure covers ``torchlens/**/*.py``, so only the
+    registry's ``torchlens/`` entries participate in the phantom check; the
+    generated docs and directories carry explicit registry entries instead
+    (there is no header-marker universe to derive them from).
+    """
 
     unregistered, phantom = artifact_registration_gaps(
-        generated_module_paths(), {artifact.path for artifact in GENERATED_ARTIFACTS}
+        generated_module_paths(),
+        {
+            artifact.path
+            for artifact in GENERATED_ARTIFACTS
+            if artifact.path.startswith("torchlens/")
+        },
     )
     assert not unregistered, (
         "generated modules with no lockstep entry (register them in "
@@ -530,6 +776,7 @@ def test_every_generated_module_is_registered() -> None:
     assert not phantom, f"registered generated modules that no longer exist: {sorted(phantom)}"
 
 
+@smoke
 def test_ruff_excludes_every_generated_artifact() -> None:
     """Ruff must not touch a generated module, and must not exclude a hand-written one.
 
@@ -567,6 +814,7 @@ def test_ruff_excludes_every_generated_artifact() -> None:
     )
 
 
+@smoke
 @pytest.mark.parametrize("artifact", GENERATED_ARTIFACTS, ids=lambda a: a.path)
 def test_generated_artifact_is_current(artifact: GeneratedArtifact) -> None:
     """The checked-in generated module matches a fresh in-process generation.
@@ -579,6 +827,34 @@ def test_generated_artifact_is_current(artifact: GeneratedArtifact) -> None:
     checked_in = (_REPO_ROOT / artifact.path).read_text(encoding="utf-8")
     assert checked_in == artifact.render(), (
         f"{artifact.path} is stale -- run: {artifact.regenerate_command}"
+    )
+
+
+@pytest.mark.heavy
+@pytest.mark.parametrize("artifact", GENERATED_DIRECTORY_ARTIFACTS, ids=lambda a: a.path)
+def test_generated_directory_artifact_is_current(artifact: GeneratedDirectoryArtifact) -> None:
+    """The checked-in generated directory matches a fresh regeneration.
+
+    Runs the owning script's ``--check`` (regenerate to a temp dir, byte-diff,
+    name the differing files). Rendering is byte-deterministic on one host
+    (verified by double-render before the R53-4 regen), so a diff means the
+    committed gallery drifted from the current rendering code -- exactly the
+    born-stale class this gate exists to end. Heavy tier, not smoke: the
+    collapse gallery re-traces four models and renders 14 graphviz SVGs
+    (~10s). Byte output ties to the installed graphviz, so a legitimate
+    graphviz upgrade shows up here as a reviewed regen, never a silent drift.
+    """
+
+    result = subprocess.run(
+        [sys.executable, *artifact.check_command],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"{artifact.path} is stale -- run: {artifact.regenerate_command}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
@@ -745,6 +1021,7 @@ _RECORD_NAMES = (
 )
 
 
+@smoke
 @pytest.mark.parametrize("record_name", _RECORD_NAMES)
 def test_live_record_attributes_are_all_declared(lockstep_trace: Trace, record_name: str) -> None:
     """Every attribute a captured record carries is declared in FIELD_POLICY.
@@ -774,6 +1051,7 @@ def _postprocess_axis_names() -> list[str]:
     return [name for name, _ in iter_axes()]
 
 
+@smoke
 @pytest.mark.parametrize("axis_name", _postprocess_axis_names())
 def test_live_record_attributes_are_declared_on_every_capture_axis(axis_name: str) -> None:
     """The runtime-declaration gate runs on EVERY capture axis (B1-17).
@@ -821,6 +1099,7 @@ def test_live_record_attributes_are_declared_on_every_capture_axis(axis_name: st
         trace.cleanup()
 
 
+@smoke
 def test_the_axis_sweep_is_not_vacuous() -> None:
     """The widened gate really covers the axes that carried the leaks.
 
@@ -835,6 +1114,7 @@ def test_the_axis_sweep_is_not_vacuous() -> None:
     assert len(names) >= 20
 
 
+@smoke
 def test_all_live_records_sweeps_more_than_one_instance_per_family(
     lockstep_trace: Trace,
 ) -> None:
@@ -852,6 +1132,7 @@ def test_all_live_records_sweeps_more_than_one_instance_per_family(
         assert any(instance is representative for instance in families[family]), family
 
 
+@smoke
 def test_facade_plumbing_allowance_stays_minimal() -> None:
     """The undeclared-attribute allowance stays the two facade handles.
 
@@ -927,6 +1208,7 @@ def version_pin_drift(live: dict[str, int], pins: dict[str, int]) -> dict[str, t
     }
 
 
+@smoke
 def test_version_authorities_match_their_reviewed_pins() -> None:
     """A persistence version bump is a reviewed diff, never a silent one."""
 
@@ -957,6 +1239,7 @@ def documented_merged_versions(text: str) -> set[int]:
     return {int(match) for match in re.findall(r"tlspec_version[:`\s]+(\d+)", text)}
 
 
+@smoke
 def test_merged_contract_doc_states_the_shipped_version() -> None:
     """The merged contract doc's stated version tracks the code constant."""
 
@@ -975,6 +1258,7 @@ def test_merged_contract_doc_states_the_shipped_version() -> None:
 # ---------------------------------------------------------------------------
 
 
+@smoke
 class TestMechanismIsRedCapable:
     """Plant drift into each checker and prove it is reported.
 
@@ -1069,6 +1353,37 @@ class TestMechanismIsRedCapable:
         checked_in = (_REPO_ROOT / artifact.path).read_text(encoding="utf-8")
         assert checked_in + "# tampered\n" != artifact.render()
 
+    def test_generated_doc_diff_detects_a_mutated_doc(self) -> None:
+        """A byte-level edit to a generated doc is reported (R53-6/R53-7)."""
+
+        artifact = next(a for a in GENERATED_ARTIFACTS if a.path == "docs/_perf_numbers.md")
+        checked_in = (_REPO_ROOT / artifact.path).read_text(encoding="utf-8")
+        assert checked_in + "hand-edited number\n" != artifact.render()
+
+    def test_generated_doc_registry_covers_the_known_docs(self) -> None:
+        """The widened registry really carries the doc artifacts (R53-6)."""
+
+        registered = {artifact.path for artifact in GENERATED_ARTIFACTS}
+        assert {
+            "docs/_perf_numbers.md",
+            "docs/_perf_numbers_provisional.md",
+            "docs/method_x_model_compatibility.md",
+        } <= registered
+
+    def test_gallery_registry_points_at_a_real_check(self) -> None:
+        """The directory-artifact registry names a live script and gallery.
+
+        The gallery gate's red-capability was proven empirically: before the
+        R53-4 regeneration, ``--check`` flagged all 14 committed SVGs as
+        differing. This cheap control keeps the registration itself honest.
+        """
+
+        (artifact,) = GENERATED_DIRECTORY_ARTIFACTS
+        script = _REPO_ROOT / artifact.check_command[0]
+        assert script.is_file()
+        assert "--check" in artifact.check_command
+        assert list((_REPO_ROOT / artifact.path).glob("*.svg"))
+
     def test_runtime_declaration_checker_detects_an_undeclared_attribute(self) -> None:
         """An attribute outside the policy and the allowance is reported."""
 
@@ -1098,6 +1413,7 @@ class TestMechanismIsRedCapable:
         assert documented_merged_versions("nothing here") == set()
 
 
+@smoke
 def test_field_policy_entries_declare_a_portable_policy() -> None:
     """Every declared field carries a real portable policy value.
 
