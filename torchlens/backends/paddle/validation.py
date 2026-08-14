@@ -176,15 +176,59 @@ def _payloads_close(a: Any, b: Any) -> bool:
     with _state.pause_logging(), paddle.no_grad():
         left = np.asarray(a.numpy())
         right = np.asarray(b.numpy())
+    return _arrays_close(left, right)
+
+
+def _arrays_close(left: np.ndarray, right: np.ndarray) -> bool:
+    """Return whether two NumPy payload arrays agree within dtype-aware bands.
+
+    Float tolerances are derived per dtype from its own machine epsilon
+    (the ``utils.tensor_utils`` replay error model), replacing the former
+    dtype-blind fp32 decimal pair (rtol 1e-5 / atol 1e-6) that was wrong in
+    both directions: fp64 corruption thousands of times above fp64 round-off
+    read as agreement, while a legitimate one-ULP fp16 storage-rounding
+    difference false-failed.
+
+    * Accumulating dtypes (eps <= fp32's): the legacy fp32 relative band
+      rescaled by the eps ratio, so every dtype gets the SAME strictness
+      measured in its own ULPs (fp32 keeps exactly the historical 1e-5).
+    * Storage-rounding dtypes (eps > fp32's, i.e. fp16 transported as such):
+      values compute in a wider dtype and round ONCE to storage, so the
+      replay difference is a few storage ULPs (4-ULP headroom).
+    * The absolute term only absorbs jitter at the bottom of the
+      representable range (the relative band applied to the smallest normal
+      value); the former 1e-6 floor blessed total corruption of every
+      element below it.
+
+    Parameters
+    ----------
+    left
+        Left payload array.
+    right
+        Right payload array.
+
+    Returns
+    -------
+    bool
+        True when shape, dtype, and values match within backend tolerances.
+    """
+
     if left.shape != right.shape or left.dtype != right.dtype:
         return False
     if np.issubdtype(left.dtype, np.bool_) or np.issubdtype(left.dtype, np.integer):
         return bool(np.array_equal(left, right))
     if np.issubdtype(left.dtype, np.floating):
+        finfo = np.finfo(left.dtype)
+        eps32 = float(np.finfo(np.float32).eps)
+        if float(finfo.eps) > eps32:
+            rtol = 4.0 * float(finfo.eps)
+        else:
+            rtol = 1e-5 * float(finfo.eps) / eps32
+        atol = rtol * float(finfo.tiny)
         # equal_nan matches this backend's own replay oracle
         # (paddle/backend.py) and every sibling: identical NaN patterns are
         # agreement, NaN-vs-number still fails elementwise.
-        return bool(np.allclose(left, right, rtol=1e-5, atol=1e-6, equal_nan=True))
+        return bool(np.allclose(left, right, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left, right))
 
 
@@ -460,6 +504,7 @@ def _replace_template_paths(
 
 __all__ = [
     "RebuiltPaddleInputs",
+    "_arrays_close",
     "_coverage_oracle",
     "_parent_perturbations_change_output",
     "_payloads_close",

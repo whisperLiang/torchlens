@@ -931,7 +931,7 @@ def test_jax_rejects_nested_jit_closure_constants() -> None:
         del params
         return uses_hidden(x)
 
-    with pytest.raises(ValueError, match="unsupported nested call primitive: jit"):
+    with pytest.raises(BackendUnsupportedError, match="nested call primitive"):
         tl.trace(cast(Any, model), ({}, jnp.ones((2,), dtype=jnp.float32)), backend="jax")
 
 
@@ -966,7 +966,7 @@ def test_jax_rejects_donated_nested_jit_args() -> None:
         del params
         return donated_add(x)
 
-    with pytest.raises(ValueError, match="unsupported nested call primitive: jit"):
+    with pytest.raises(BackendUnsupportedError, match="nested call primitive"):
         tl.trace(cast(Any, model), ({}, jnp.ones((2,), dtype=jnp.float32)), backend="jax")
 
 
@@ -986,7 +986,7 @@ def test_jax_rejects_explicit_sharded_nested_jit() -> None:
         del params
         return sharded_add(x)
 
-    with pytest.raises(ValueError, match="unsupported nested call primitive: jit"):
+    with pytest.raises(BackendUnsupportedError, match="nested call primitive"):
         tl.trace(
             cast(Any, model),
             ({}, jnp.ones((len(devices),), dtype=jnp.float32)),
