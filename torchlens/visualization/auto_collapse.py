@@ -211,10 +211,55 @@ class CollapseAnalysis:
     elapsed_ms: float
 
 
-_ANALYSIS_CACHE: weakref.WeakKeyDictionary[Any, CollapseAnalysis] = weakref.WeakKeyDictionary()
-_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[Any, Mapping[str, str]] = (
-    weakref.WeakKeyDictionary()
-)
+_ANALYSIS_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[tuple[object, ...], CollapseAnalysis]
+] = weakref.WeakKeyDictionary()
+_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[tuple[object, ...], Mapping[str, str]]
+] = weakref.WeakKeyDictionary()
+
+
+def _collapse_graph_revision(trace: Trace) -> tuple[object, ...]:
+    """Return a by-value graph fingerprint for visualization cache invalidation.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose mutable graph and module relations are fingerprinted.
+
+    Returns
+    -------
+    tuple[object, ...]
+        Stable snapshot of collapse-relevant operation and module metadata.
+    """
+
+    op_revision = tuple(
+        (
+            op.label,
+            op.label_short,
+            op._label_raw,
+            op.layer_label,
+            op.layer_label_short,
+            tuple(op.parents),
+            tuple(op.children),
+            tuple(str(module) for module in (op.modules or ())),
+            op.func_name,
+            tuple(op.shape),
+            op.io_role,
+        )
+        for op in trace.ops
+    )
+    module_revision = tuple(
+        (
+            module.address,
+            getattr(module, "address_parent", None),
+            tuple(getattr(module, "address_children", ()) or ()),
+            getattr(module, "num_calls", None),
+            getattr(module, "num_params", None),
+        )
+        for module in trace.modules
+    )
+    return (op_revision, module_revision)
 
 
 def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
@@ -231,9 +276,10 @@ def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
         Unambiguous accessor label forms mapped to canonical operation labels.
     """
 
+    revision = _collapse_graph_revision(trace)
     cached = _OP_ADJACENCY_INDEX_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == revision:
+        return cached[1]
     unique_ops: dict[str, Op] = {}
     ambiguous_forms: set[str] = set()
     for op in trace.ops:
@@ -254,7 +300,7 @@ def _op_adjacency_index(trace: Trace) -> Mapping[str, str]:
             elif existing is not op:
                 ambiguous_forms.add(form)
     index = {form: op.label for form, op in unique_ops.items() if form not in ambiguous_forms}
-    _OP_ADJACENCY_INDEX_CACHE[trace] = index
+    _OP_ADJACENCY_INDEX_CACHE[trace] = (revision, index)
     return index
 
 
@@ -294,9 +340,10 @@ def analyze_collapse(trace: Trace) -> CollapseAnalysis:
         Cached signal, digest, peer, and score data.
     """
 
+    revision = _collapse_graph_revision(trace)
     cached = _ANALYSIS_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == revision:
+        return cached[1]
     start = time.perf_counter()
     signals_without_peers = _compute_signal_skeleton(trace)
     digests = _compute_structural_digests(trace, signals_without_peers)
@@ -335,7 +382,7 @@ def analyze_collapse(trace: Trace) -> CollapseAnalysis:
         child_flow_graphs=child_flow_graphs,
         elapsed_ms=(time.perf_counter() - start) * 1000.0,
     )
-    _ANALYSIS_CACHE[trace] = analysis
+    _ANALYSIS_CACHE[trace] = (revision, analysis)
     return analysis
 
 

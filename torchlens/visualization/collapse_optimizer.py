@@ -36,6 +36,7 @@ from .auto_collapse import (
     CollapseAnalysis,
     ModuleCollapseSignals,
     ModuleRepeatFold,
+    _collapse_graph_revision,
     _flow_ordered_child_addresses,
     _is_trunk_collapse,
     _make_run_fold,
@@ -283,13 +284,22 @@ class _MemoKey:
 
 
 _RESULT_CACHE: weakref.WeakKeyDictionary[
-    object, dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult]
+    object,
+    tuple[
+        tuple[object, ...],
+        dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult],
+    ],
 ] = weakref.WeakKeyDictionary()
-_SCHEDULE_CACHE: weakref.WeakKeyDictionary[object, dict[RenderContext, CollapseSchedule]] = (
-    weakref.WeakKeyDictionary()
-)
+_SCHEDULE_CACHE: weakref.WeakKeyDictionary[
+    object,
+    tuple[tuple[object, ...], dict[RenderContext, CollapseSchedule]],
+] = weakref.WeakKeyDictionary()
 _BOX_UNITS_CACHE: weakref.WeakKeyDictionary[
-    object, dict[RenderContext, Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]]
+    object,
+    tuple[
+        tuple[object, ...],
+        dict[RenderContext, Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]],
+    ],
 ] = weakref.WeakKeyDictionary()
 
 
@@ -325,7 +335,15 @@ def select_collapse_plan(
     # Weights are part of the cache identity: a weighted result must never be
     # served for a differently weighted call (stale-cache defect class).
     cache_key = (context, mode, resolved_weights)
-    cached_by_context = _RESULT_CACHE.setdefault(trace, {})
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _RESULT_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_context: dict[
+            tuple[RenderContext, str, OptimizerWeights], OptimizerResult
+        ] = {}
+        _RESULT_CACHE[trace] = (revision, cached_by_context)
+    else:
+        cached_by_context = cache_entry[1]
     cached = cached_by_context.get(cache_key)
     if cached is not None:
         return cached
@@ -559,7 +577,13 @@ def collapse_schedule(
     """
 
     _ = weights
-    cached_by_context = _SCHEDULE_CACHE.setdefault(trace, {})
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _SCHEDULE_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_context: dict[RenderContext, CollapseSchedule] = {}
+        _SCHEDULE_CACHE[trace] = (revision, cached_by_context)
+    else:
+        cached_by_context = cache_entry[1]
     cached = cached_by_context.get(context)
     if cached is not None:
         return cached
@@ -3235,7 +3259,16 @@ def _module_render_box_units(
         Rendered box calls and kept op occurrences keyed by module address.
     """
 
-    cached_by_trace = _BOX_UNITS_CACHE.setdefault(trace, {})
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _BOX_UNITS_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_trace: dict[
+            RenderContext,
+            Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]],
+        ] = {}
+        _BOX_UNITS_CACHE[trace] = (revision, cached_by_trace)
+    else:
+        cached_by_trace = cache_entry[1]
     cached = cached_by_trace.get(context)
     if cached is not None:
         return cached

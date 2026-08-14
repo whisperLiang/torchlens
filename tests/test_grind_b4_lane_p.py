@@ -28,6 +28,7 @@ from torchlens._io.state_keys import (
 )
 from torchlens._trace_selector_helpers import _predicate_cache_key
 from torchlens.utils.display import cleanup_trace_visualizer_dir, ensure_trace_visualizer_dir
+from torchlens.visualization.auto_collapse import analyze_collapse
 
 
 class _NonPersistentBufferModel(nn.Module):
@@ -245,3 +246,19 @@ def test_visualizer_cleanup_helper_is_idempotent() -> None:
     cleanup_trace_visualizer_dir(owner)
     cleanup_trace_visualizer_dir(owner)
     assert not output_dir.exists()
+
+
+def test_collapse_analysis_cache_invalidates_after_equal_size_graph_edit() -> None:
+    """Visualization caches fingerprint graph content rather than trace identity alone."""
+
+    trace = tl.trace(nn.Sequential(nn.ReLU()), torch.ones(1))
+    first = analyze_collapse(trace)
+    relu = next(op for op in trace.ops if op.func_name == "relu")
+    relu.func_name = "relu_cache_probe"
+
+    second = analyze_collapse(trace)
+
+    assert second is not first
+    assert any(
+        "relu_cache_probe" in signal.own_func_names for signal in second.signals.values()
+    )
