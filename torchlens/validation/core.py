@@ -198,6 +198,35 @@ class ValidationDecisionRecorder:
 
         return len({item.op_label for item in self.decisions if item.decision == decision})
 
+    def replay_validated_node_count(self) -> int:
+        """Return the number of distinct op labels validated by REPLAY.
+
+        ``node_count("validated")`` is phase-blind: it also counts the
+        ground-truth output decisions and the trace-level dispatch-census
+        decision (the ``op_label=None`` bucket), so the
+        ``no_nodes_replay_validated`` guard could be satisfied with ZERO
+        interior op replays -- a trace whose every interior op was
+        individually exempted but whose outputs matched ground truth
+        reported ``passed`` with an inflated count (b1-fable round-2 F1).
+        Only labeled ``phase="replay"`` validations are replayed nodes.
+
+        Returns
+        -------
+        int
+            Number of distinct operation labels with a replay-phase
+            ``validated`` decision.
+        """
+
+        return len(
+            {
+                item.op_label
+                for item in self.decisions
+                if item.decision == "validated"
+                and item.phase == "replay"
+                and item.op_label is not None
+            }
+        )
+
     def reason_counts(self, decision: ValidationDecisionKind) -> dict[str, int]:
         """Return reason-code counts for a given decision kind.
 
@@ -235,7 +264,7 @@ class ValidationDecisionRecorder:
         return ValidationReplayStatus.from_replay_counts(
             backend=backend,
             source="live",
-            replayed_node_count=self.node_count("validated"),
+            replayed_node_count=self.replay_validated_node_count(),
             unverified_node_count=self.node_count("unverified"),
             failed_node_count=self.node_count("failed"),
             unverified_reason_counts=self.reason_counts("unverified"),
