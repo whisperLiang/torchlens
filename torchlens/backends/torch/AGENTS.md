@@ -22,7 +22,7 @@
   the ONE commit tail `capture/projections.py::commit_op` (freeze -> atomic append): the
   three exhaustive `_make_layer_log_entry` sites via `ExhaustiveOpDraft` and the sparse
   `append_projected_event` sites via `SparseOpDraft`. The legacy `OpEvent` producer, its
-  `TORCHLENS_CAPTURE_PRODUCER` dual-path switch, `_op_event_from_log`, and
+  dual-path env switch, `_op_event_from_log`, and
   `_event_from_record` were deleted in P7.
 - Post-commit knowledge never mutates the op lane: it rides the typed `OpAmendment` lane
   (`CaptureEvents.append_amendment`, nine exact-set families) and folds through the ONE

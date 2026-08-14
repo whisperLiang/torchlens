@@ -19,6 +19,9 @@ from torchlens.backends.torch._tl import get_module_meta
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "module_containment"
 # Synthetic hook replacement is intentionally snapshotted with hook-stack semantics:
 # downstream ops stay in the dynamic call stack instead of inheriting a replaced module.
+# Hook-stack IS the only containment engine (the `_module_containment_engine` selector
+# was a validated-but-never-read knob, deleted in fixwave-2 R47-5), so these fixtures
+# no longer need any capture-option opt-in.
 HOOK_STACK_FIXTURES = {
     "raw_hook_replacement_synthetic",
 }
@@ -203,13 +206,8 @@ def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
     """Compare module-containment snapshot for one fixture."""
 
     model, input_args, fixture_name, hook_handle = _unpack_fixture(builder())
-    capture = (
-        tl.options.CaptureOptions(_module_containment_engine="hook_stack")
-        if fixture_name in HOOK_STACK_FIXTURES
-        else None
-    )
     try:
-        trace = tl.trace(model, input_args, capture=capture)
+        trace = tl.trace(model, input_args)
     finally:
         if hook_handle is not None:
             hook_handle.remove()

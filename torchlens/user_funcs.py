@@ -1250,7 +1250,6 @@ def _run_model_and_save_specified_outs(
     distributed_witness: str = "none",
     save_budget: SaveBudgetOption = "auto",
     raise_on_nan: bool = False,
-    module_containment_engine: str = "hook_stack",
     transform: Callable[[Any], Any] | None = None,
     raw_input: Any | None = None,
     save_raw_input: str | bool = "small",
@@ -1368,7 +1367,6 @@ def _run_model_and_save_specified_outs(
             before allocation; this is not a general OOM-prevention guarantee.
         raise_on_nan: If True, stop capture at the first NaN or Inf tensor and raise
             ``CaptureError`` with the offending operation metadata.
-        module_containment_engine: Internal module-containment diagnostic engine selector.
         transform: Optional callable used to produce model-ready inputs from raw user input.
         raw_input: Original user input before ``transform`` was applied.
         save_raw_input: Portable save policy for the original raw input.
@@ -1561,7 +1559,6 @@ def _run_model_and_save_specified_outs(
             num_context_lines,
             source_loading_enabled=save_code_context,
         )
-        trace._module_capture_ws.module_containment_engine = module_containment_engine
         forward_code = getattr(model.forward, "__code__", None)
         trace.forward_source_line = getattr(forward_code, "co_firstlineno", None)
         trace.intervention_ready = intervention_ready
@@ -2672,7 +2669,6 @@ def _trace_torch_model(
     cache_dir_value = capture_options.cache_dir
     module_filter_value = capture_options.module_filter
     raise_on_nan_value = capture_options.raise_on_nan
-    module_containment_engine = capture_options._module_containment_engine
     facet_recipes = None if isinstance(recipes, MissingType) else recipes
     if capture_options.stop_after is not None:
         raise NotImplementedError("stop_after is only supported by torchlens.peek.")
@@ -2950,7 +2946,6 @@ def _trace_torch_model(
             payload_policy=capture_options.payload_policy,
             save_preview=capture_options.save_preview,
             raise_on_nan=raise_on_nan_value,
-            _module_containment_engine=module_containment_engine,
         )
         recursive_save_options = SaveOptions(
             activation_transform=activation_transform,
@@ -3216,7 +3211,6 @@ def _trace_torch_model(
         distributed_witness=capture_options.distributed_witness,
         save_budget=capture_options.save_budget,
         raise_on_nan=raise_on_nan_value,
-        module_containment_engine=module_containment_engine,
         transform=input_transform,
         raw_input=raw_input,
         save_raw_input=save_raw_input_policy,

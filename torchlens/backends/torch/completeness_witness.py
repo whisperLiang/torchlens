@@ -378,7 +378,7 @@ HOST_VALUE_ESCAPE_METHODS = frozenset(
 
 These are the mode-independent belt for the aten census: every one is patched on
 ``torch.Tensor`` for the duration of one runnable forward and records its tensor operand(s)
-through the SAME ``_record_escape_source_tensor(..., invisible=True)`` attribution ladder as
+through the SAME ``_record_escape_source_tensor(...)`` attribution ladder as
 the census. Coupled to :data:`HOST_ESCAPE_OPERATORS` by the r39 census<->observer meta-test:
 a one-sided addition (a new census op without a method/module observer, or vice versa) fails
 CI. ``__repr__``/``__str__``/``__format__`` are deliberately NOT patched -- every string/format

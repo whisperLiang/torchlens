@@ -187,7 +187,19 @@ def _postprocess_assertions_enabled() -> bool:
         When the audit is armed but assertions are disabled (``-O`` / ``-OO``).
     """
 
-    enabled = os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get(_POSTPROCESS_ASSERT_ENV, "")
+    value = raw.lower()
+    if value not in {"", "0", "1", "false", "true", "no", "yes", "off", "on"}:
+        # Closed vocabulary (grind b7 R47-3): an audit knob whose typo turns
+        # the audit OFF is a disarmed tripwire. Unset/empty is the only
+        # implicit off; anything unrecognized refuses instead of silently
+        # capturing without the audit.
+        raise RuntimeError(
+            f"{_POSTPROCESS_ASSERT_ENV}={raw!r} is not a recognized value; "
+            "use '1'/'true'/'yes'/'on' to arm the audit, '0'/'false'/'no'/'off' "
+            "to disarm it explicitly, or unset the variable."
+        )
+    enabled = value in {"1", "true", "yes", "on"}
     if enabled and not __debug__:
         raise RuntimeError(
             f"{_POSTPROCESS_ASSERT_ENV} is set but Python assertions are disabled "
@@ -217,16 +229,47 @@ RECORDED_STEP_EFFECTIVE_WRITES: dict[str, set[str]] = {}
 
 
 def _write_audit_record_mode() -> bool:
-    """Return whether the write audit RECORDS instead of enforcing."""
+    """Return whether the write audit RECORDS instead of enforcing.
 
-    return os.environ.get(_WRITE_AUDIT_RECORD_ENV, "").lower() == "record"
+    Closed vocabulary (grind b7 R47-3): the historical ``== "record"``
+    comparison meant a typo (``recrod``) silently selected ENFORCE and any
+    other junk silently selected the default — a config knob that reroutes on
+    typos. Unrecognized values now refuse.
+    """
+
+    raw = os.environ.get(_WRITE_AUDIT_RECORD_ENV, "")
+    value = raw.lower()
+    if value not in {"", "record"}:
+        raise RuntimeError(
+            f"{_WRITE_AUDIT_RECORD_ENV}={raw!r} is not a recognized value; "
+            "use 'record' for recording mode or unset the variable for "
+            "enforcement mode."
+        )
+    return value == "record"
 
 
 def _read_audit_mode() -> str:
-    """Return the read-audit mode: '' (off), 'record', or 'enforce'."""
+    """Return the read-audit mode: '' (off), 'record', or 'enforce'.
 
-    mode = os.environ.get(_READ_AUDIT_ENV, "").lower()
-    return mode if mode in ("record", "enforce") else ""
+    Closed vocabulary (grind b7 R47-3): the historical parser mapped every
+    unrecognized value — a typo, ``1``, ``true``, a trailing space — to OFF
+    with no diagnostic, silently disarming the read audit. Unset/empty is the
+    only implicit off; anything else must be a recognized mode.
+
+    The read audit only runs inside the assertion-armed audit windows, so this
+    knob has NO effect unless ``TORCHLENS_POSTPROCESS_ASSERTIONS`` is also set
+    (grind b7 R47-6).
+    """
+
+    raw = os.environ.get(_READ_AUDIT_ENV, "")
+    mode = raw.lower()
+    if mode not in {"", "record", "enforce"}:
+        raise RuntimeError(
+            f"{_READ_AUDIT_ENV}={raw!r} is not a recognized value; use "
+            "'record' or 'enforce', or unset the variable to leave the read "
+            "audit off."
+        )
+    return mode
 
 
 def _open_step_write_audit(self: "Trace") -> None:

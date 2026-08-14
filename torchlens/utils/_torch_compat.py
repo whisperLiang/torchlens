@@ -1374,6 +1374,13 @@ true value) but do not drive WARN status; only genuine degradations do.
 def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
     """Mark a torch capability absent and emit at most one opt-out warning.
 
+    Setting the ``TORCHLENS_SUPPRESS_TORCH_CAPABILITY_WARNINGS`` environment
+    variable to any non-empty value suppresses the warning (the flag still
+    flips, and the degradation stays visible through
+    ``tl.compat.report()`` / ``tl.utils.doctor()``). This is the knob's only
+    documentation-of-record (grind b7 R47-7); keep it in sync with the
+    ``_CAPABILITY_WARNING_ENV`` constant above.
+
     Parameters
     ----------
     capability_name:

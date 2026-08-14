@@ -394,7 +394,7 @@ active label session; writes go through :func:`_record_label_version_snapshot`.
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
 
-# The producer-unification dual-path switch (TORCHLENS_CAPTURE_PRODUCER) died
+# The producer-unification dual-path env switch died
 # with the legacy producer in P7: every torch capture freezes decomposed
 # ``OpRecord`` rows. Preview backends keep emitting compat ``OpEvent``s until
 # S15 and adapt at the one ingest boundary (``op_record_from_event``).

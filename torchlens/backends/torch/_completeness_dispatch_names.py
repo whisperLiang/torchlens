@@ -117,17 +117,15 @@ def _record_escape_source_tensor(
     trace: Any,
     source: torch.Tensor,
     *,
-    invisible: bool,
     fail_closed: bool = True,
     resolve_origins: bool = True,
 ) -> None:
     """Record ONE tensor->host escape source, visible or census-invisible, uniformly.
 
-    ``invisible`` is ``True`` for a ``.tolist()`` / ``.numpy()`` / ``__array__``
-    conversion (observed by the scoped method patch) and ``False`` for an
-    ``aten._local_scalar_dense`` scalar escape (observed by the aten census). Both
-    mechanisms feed the SAME per-trace side tables so the runnable descriptor witnesses
-    every source class -- input, internal op, bound/unbound param, bound/unbound buffer --
+    Both observation mechanisms — the scoped method patch (``.tolist()`` /
+    ``.numpy()`` / ``__array__`` conversions) and the aten census
+    (``aten._local_scalar_dense`` scalar escapes) — feed the SAME per-trace side
+    tables so the runnable descriptor witnesses every source class -- input, internal op, bound/unbound param, bound/unbound buffer --
     by its capture-time digest through one uniform pass. Side tables are mutated via
     GIL-atomic ``set.add``/``dict`` writes (CPython), so cross-thread recording (r41)
     needs no extra locking.

@@ -82,10 +82,6 @@ class RecordFieldPolicy:
         Optional Trace fork policy for Trace/Op fields.
     default_fill:
         Default used when older serialized state is missing this field.
-    cleanup_class:
-        Reserved cleanup/reference family tag. ``None`` means no special cleanup
-        classification is recorded; cleanup dispatch is still implemented by
-        explicit scrubber helpers.
     user_facing:
         Whether the field belongs to the record's public FIELD_ORDER surface.
     """
@@ -95,7 +91,6 @@ class RecordFieldPolicy:
     portable_policy: FieldPolicy
     fork_policy: Any | None = None
     default_fill: Any = None
-    cleanup_class: str | None = None
     user_facing: bool = True
     storage: StorageBinding | None = None
 
@@ -109,7 +104,6 @@ def build_record_field_policy_table(
     *,
     fork_policy: Mapping[str, Any] | None = None,
     default_fill_state: Mapping[str, Any] | None = None,
-    cleanup_classes: Mapping[str, str] | None = None,
     schema_key: str | None = None,
 ) -> RecordFieldPolicyTable:
     """Build one structural policy table for a record class.
@@ -125,8 +119,6 @@ def build_record_field_policy_table(
         Optional fork-copy policy by field name.
     default_fill_state:
         Optional default-fill values by field name.
-    cleanup_classes:
-        Optional reserved cleanup/reference family tags by field name.
     schema_key:
         Declared-schema key ("op", "trace", ...) used to attach the
         checked-in ``StorageBinding`` for each field. ``None`` leaves the
@@ -141,7 +133,6 @@ def build_record_field_policy_table(
 
     fork_policy = fork_policy or {}
     default_fill_state = default_fill_state or {}
-    cleanup_classes = cleanup_classes or {}
     storage_bindings: Mapping[str, StorageBinding] = {}
     if schema_key is not None:
         # Deferred import: the bindings module is generated data that imports
@@ -159,7 +150,6 @@ def build_record_field_policy_table(
             portable_policy=portable_state_spec.get(field_name, FieldPolicy.KEEP),
             fork_policy=fork_policy.get(field_name),
             default_fill=default_fill_state.get(field_name),
-            cleanup_class=cleanup_classes.get(field_name),
             user_facing=True,
             storage=storage_bindings.get(field_name),
         )
@@ -172,7 +162,6 @@ def build_record_field_policy_table(
             portable_policy=portable_policy,
             fork_policy=fork_policy.get(field_name),
             default_fill=default_fill_state.get(field_name),
-            cleanup_class=cleanup_classes.get(field_name),
             user_facing=False,
             storage=storage_bindings.get(field_name),
         )

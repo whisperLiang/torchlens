@@ -164,7 +164,7 @@ def _record_host_escape_source(trace: Any, func: Any, args: tuple[Any, ...], res
     if not _output_is_host_value(result):
         return
     for source in _iter_tensor_operands(args):
-        _record_escape_source_tensor(trace, source, invisible=False)
+        _record_escape_source_tensor(trace, source)
 
 
 def _escape_storage_ptr(source: torch.Tensor) -> int | None:

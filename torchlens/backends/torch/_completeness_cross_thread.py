@@ -411,7 +411,7 @@ def record_host_string_escape_source(trace: Any, tensor: Any) -> None:
         if state.belt_armed:
             _nonowner_escape_observe(state, tensor)
         return
-    _record_escape_source_tensor(trace, tensor, invisible=True)
+    _record_escape_source_tensor(trace, tensor)
 
 
 def audit_disable_current_modes_sites() -> dict[str, tuple[str, ...]]:
