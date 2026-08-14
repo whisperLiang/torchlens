@@ -244,6 +244,19 @@ def _warn_dynamo_region_not_logged() -> None:
     )
 
 
+def _warn_functorch_region_not_logged() -> None:
+    """Emit the once-per-forward functorch transform-boundary warning."""
+
+    warnings.warn(
+        "TorchLens detected a functorch/vmap/grad/jacfwd transform "
+        "during this forward pass. Operations that run inside the "
+        "transform are not logged. The returned Trace will only "
+        "contain operations that ran OUTSIDE the transform.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def _warn_transform_boundary_collapse(transform_kind: str) -> None:
     """Warn that a transform boundary was collapsed.
 
@@ -695,9 +708,7 @@ def _decorate_transform_builders() -> None:
             _state._decorated_func_mapper[decorated] = current
             _state._decorated_func_mapper[current] = decorated
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(namespace, attr_name, decorated)
+            _setattr_ignoring_advisories(namespace, attr_name, decorated)
         except (AttributeError, TypeError):
             pass
 
@@ -729,9 +740,7 @@ def _decorate_direct_transforms() -> None:
             _state._decorated_func_mapper[decorated] = current
             _state._decorated_func_mapper[current] = decorated
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(namespace, attr_name, decorated)
+            _setattr_ignoring_advisories(namespace, attr_name, decorated)
         except (AttributeError, TypeError):
             pass
 
@@ -1446,6 +1455,28 @@ def _propagate_mutation_label_to_storage_aliases(
 # is ever emitted and consumers keep stale/absent parents (round-31 M6).
 # ``requires_grad`` / ``grad`` and similar setters change autograd bookkeeping,
 # not forward values, and are deliberately NOT listed.
+def _setattr_ignoring_advisories(namespace: Any, name: str, value: Any) -> None:
+    """Set a torch namespace attribute, suppressing ADVISORY warnings only.
+
+    Wrap/unwrap setattr over deprecated torch aliases legitimately fires
+    deprecation-family advisories, but the historical bare
+    ``simplefilter("ignore")`` also hid every OTHER warning category raised in
+    scope and invalidated the process ``__warningregistry__`` per entry
+    (B8-39). Only the advisory categories are ignored; a genuine torch
+    ``RuntimeWarning`` (or anything else) still reaches the user.
+    """
+
+    with warnings.catch_warnings():
+        for category in (
+            DeprecationWarning,
+            PendingDeprecationWarning,
+            FutureWarning,
+            UserWarning,
+        ):
+            warnings.simplefilter("ignore", category)
+        setattr(namespace, name, value)
+
+
 def _exit_own_witness_modes() -> list[Any] | None:
     """Pop TorchLens's own completeness-witness dispatch modes off the stack top.
 
@@ -1575,6 +1606,8 @@ def torch_func_decorator(
     canonical_capture_callable = None
     if func_name != "data" or property_accessor == "del":
         canonical_capture_callable = (func, func_name)
+    # See the barcode-transparency note inside ``wrapped_func`` (R16-5).
+    is_barcode_transparent = func_name == "as_subclass"
 
     @wraps(func)
     def wrapped_func(*args: Any, **kwargs: Any) -> Any:
@@ -1658,16 +1691,7 @@ def torch_func_decorator(
             if not _state._functorch_warning_emitted:
                 _state._functorch_warning_emitted = True
                 trace._raw_transform_escape_detected = True
-                import warnings
-
-                warnings.warn(
-                    "TorchLens detected a functorch/vmap/grad/jacfwd transform "
-                    "during this forward pass. Operations that run inside the "
-                    "transform are not logged. The returned Trace will only "
-                    "contain operations that ran OUTSIDE the transform.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+                _warn_functorch_region_not_logged()
             # A raw transform interior is outside the witness claim, but the witness-off
             # route retains its original logging state and avoids the context-manager cost.
             if _state._completeness_witness_mode == "shadow":
@@ -1722,6 +1746,17 @@ def torch_func_decorator(
             )
 
         # Reset barcode; skip metadata-only functions that would cause recursion.
+        # R16-5: ``as_subclass`` is barcode-TRANSPARENT. Torch's default
+        # ``__torch_function__`` return conversion calls ``ret.as_subclass(cls)``
+        # INSIDE the enclosing wrapped call (``torch.tanh(subclass_tensor)``),
+        # which used to steal the enclosing call's bottom-level barcode: the
+        # real op (tanh) never logged, and the trace showed a parentless
+        # bookkeeping ``as_subclass`` node flagged only by the provenance
+        # heuristic. The conversion still logs its own value flow, then
+        # restores the enclosing barcode so the outer call keeps its identity.
+        enclosing_barcode = (
+            trace._wrapper_runtime_ws.current_func_barcode if is_barcode_transparent else 0
+        )
         trace._wrapper_runtime_ws.current_func_barcode = 0
         if is_unlogged_func:
             if _diagnostic_edge_armed():
@@ -2185,6 +2220,9 @@ def torch_func_decorator(
                 producer_label,
             )
 
+        if is_barcode_transparent and enclosing_barcode:
+            trace._wrapper_runtime_ws.current_func_barcode = enclosing_barcode
+
         if out_orig is not out_before_hooks:
             return out_orig
         if force_distinct_return:
@@ -2551,9 +2589,7 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
             if id(orig_func) in _state._orig_to_decorated:
                 existing = _state._orig_to_decorated[id(orig_func)]
                 try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        setattr(local_func_namespace, func_name, existing)
+                    _setattr_ignoring_advisories(local_func_namespace, func_name, existing)
                 except (AttributeError, TypeError):
                     pass
                 continue
@@ -2562,9 +2598,7 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
             new_func = torch_func_decorator(orig_func, recorded_name)
             _stamp_wrapper_provenance(new_func, namespace_name, func_name)
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    setattr(local_func_namespace, func_name, new_func)
+                _setattr_ignoring_advisories(local_func_namespace, func_name, new_func)
                 mark_decorated_function(new_func)
                 # Bidirectional id-keyed mappings for fast lookup.
                 _state._orig_to_decorated[id(orig_func)] = new_func
@@ -2593,9 +2627,7 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
             mark_decorated_function(deleter_dec)
             new_property = property(getter_dec, setter_dec, deleter_dec, doc=func_name)
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    setattr(local_func_namespace, func_name, new_property)
+                _setattr_ignoring_advisories(local_func_namespace, func_name, new_property)
                 # #31: Only add mapper entries if setattr succeeded — otherwise
                 # we'd have dangling entries pointing to an uninstalled property.
                 cast(dict[int, Any], _state._orig_to_decorated)[id(orig_func)] = new_property
@@ -2801,9 +2833,7 @@ def _unwrap_torch_locked() -> None:
                 buried_sites.append(f"{namespace_name}.{func_name}")
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
 
@@ -2816,9 +2846,7 @@ def _unwrap_torch_locked() -> None:
         if orig is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
 
@@ -2831,9 +2859,7 @@ def _unwrap_torch_locked() -> None:
         if orig is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, orig)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
 
@@ -3041,9 +3067,7 @@ def _wrap_torch_locked(
         if decorated is None:
             continue
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                setattr(local_func_namespace, func_name, decorated)
+            _setattr_ignoring_advisories(local_func_namespace, func_name, decorated)
         except (AttributeError, TypeError):
             pass
 

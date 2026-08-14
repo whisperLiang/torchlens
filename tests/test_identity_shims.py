@@ -315,6 +315,45 @@ class TestSubclassCtorUnderWitness:
         assert tl.validation.validate_forward_pass(PlainCtorModel(), x)
 
 
+class _PlainTensorSubclass(torch.Tensor):
+    pass
+
+
+class TestAsSubclassOpIdentity:
+    # R16-5: torch's default __torch_function__ return conversion calls
+    # ret.as_subclass(cls) INSIDE the enclosing wrapped call, which used to
+    # steal its bottom-level barcode: the real op (tanh) never logged and the
+    # trace showed a parentless bookkeeping as_subclass node flagged only by
+    # the provenance heuristic. as_subclass is now barcode-transparent.
+
+    def test_ops_on_subclass_tensors_keep_their_identity(self):
+        class Model(nn.Module):
+            def forward(self, x):
+                s = torch.sigmoid(x).as_subclass(_PlainTensorSubclass)
+                return torch.tanh(s)
+
+        torch.manual_seed(0)
+        x = torch.randn(2, 3)
+        log = tl.trace(Model(), x)
+        names = [op.func_name for op in log.ops]
+        assert "tanh" in names, names
+        tanh_op = log["tanh"]
+        assert tanh_op.parents, "tanh must be connected to the graph"
+        assert "assubclass" in tanh_op.parents[0]
+        assert log.rescue_rerun is None, "a clean capture must not need a rescue"
+        expected = torch.tanh(torch.sigmoid(x))
+        assert torch.allclose(log["tanh"].out, expected, atol=1e-6)
+
+    def test_subclass_model_validates(self):
+        class Model(nn.Module):
+            def forward(self, x):
+                s = torch.sigmoid(x).as_subclass(_PlainTensorSubclass)
+                return torch.tanh(s)
+
+        torch.manual_seed(0)
+        assert tl.validation.validate_forward_pass(Model(), torch.randn(2, 3))
+
+
 class TestShimLifecycle:
     def test_shims_removed_on_unwrap_and_reinstalled_on_wrap(self):
         from torchlens.backends.torch import identity_shims
