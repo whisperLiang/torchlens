@@ -43,6 +43,7 @@ from .utils.rng import (
 
 if TYPE_CHECKING:
     from ._runnable_execution import (
+        _HOST_RNG_SOURCE_KIND,
         _INPUT_CHECK_UNAVAILABLE,
         _ambient_execution_context_restored,
         _bind_call_outputs,
@@ -533,6 +534,17 @@ def run_live_trace(
         # and non-tensor leaves) is VERIFIED. An output we could only approximate
         # from naive leaf paths is UNVERIFIABLE, never blessed with a wrong object.
         provisional = PathFaithfulness.VERIFIED if faithful else PathFaithfulness.UNVERIFIABLE
+        # Deephunt F2: the live report must declare the same capture-side host-RNG
+        # evidence the sparse producer derives ``host_rng`` from. VERIFIED stays
+        # correct for this provider (the fresh refresh is its own oracle-1 run),
+        # but two successive live runs of a host-RNG model can legitimately differ,
+        # so an empty tuple would misread as a deterministic verified.
+        runnable_seam = getattr(trace, "_runnable", None)
+        nondeterministic_sources: tuple[str, ...] = (
+            (_HOST_RNG_SOURCE_KIND,)
+            if runnable_seam is not None and bool(runnable_seam.host_rng_consumed)
+            else ()
+        )
         return _finalize_provider_run(
             fork=fork,
             output=output,
@@ -554,6 +566,7 @@ def run_live_trace(
             provisional_mismatch=None,
             numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
             divergence_policy=divergence_policy,
+            nondeterministic_sources=nondeterministic_sources,
         )
     except BaseException:
         _state._unregister_log(fork)

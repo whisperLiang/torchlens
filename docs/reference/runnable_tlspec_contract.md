@@ -1424,7 +1424,10 @@ recorded ambient context proves deterministic fill (`deterministic_algorithms` t
 `fill_uninitialized_memory` not false). `RunReport.nondeterministic_sources` is the closed,
 sorted, deduplicated declared-source vocabulary `seeded_rng | host_rng | uninitialized_alloc`,
 derived only by the single report finalizer; it distinguishes a declared-nondeterministic
-path-only `verified` from a deterministic one and never alters verdict semantics.
+path-only `verified` from a deterministic one and never alters verdict semantics. Both
+providers serve it: the live-refresh provider declares `host_rng` from the same capture-side
+host-RNG monitor evidence the sparse producer profiles, so a host-RNG-consuming model never
+presents a deterministic-looking empty tuple next to a live `verified`.
 
 ## 9. Runtime API and state lifecycle
 
