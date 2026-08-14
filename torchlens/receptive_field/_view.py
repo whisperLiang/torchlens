@@ -268,7 +268,7 @@ class ReceptiveFieldView:
 
         if descriptor.axes is None:
             raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
-        output_axes = tuple(
+        output_axes = sorted(
             cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
         )
         return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)

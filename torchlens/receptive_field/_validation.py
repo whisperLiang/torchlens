@@ -17,7 +17,7 @@ from ._forward_query import box_for_source_unit
 from ._gradient import gradient_for_unit
 from ._gradient_forward import _select_targets, projective_gradient_for_unit
 from ._path import resolve_graph_point
-from ._query import box_for_unit
+from ._query import _windowed_axes_in_unit_order, box_for_unit
 from ._types import (
     GradientReceptiveField,
     ReceptiveField,
@@ -149,10 +149,12 @@ def _box_for_descriptor(
     """
 
     assert descriptor.axes is not None
+    # Windowed unit coordinates are ordered by ascending output axis (the
+    # seed operation's own grid order), not descriptor (input-axis) order;
+    # the two differ whenever an axis permutation separates the endpoints.
     windowed = tuple(
         complete_unit[cast(int, axis.output_axis)]
-        for axis in descriptor.axes
-        if axis.kind == "windowed"
+        for axis in _windowed_axes_in_unit_order(descriptor)
     )
     if windowed:
         if direction is ReceptiveFieldDirection.RECEPTIVE:

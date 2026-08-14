@@ -202,7 +202,8 @@ def _view_box(
     windowed_axes = tuple(axis.output_axis for axis in descriptor.axes if axis.kind == "windowed")
     if any(axis is None for axis in windowed_axes):
         raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
-    coordinates = tuple(unit[cast(int, axis)] for axis in windowed_axes)
+    # ``at()`` consumes windowed coordinates in ascending output-axis order.
+    coordinates = tuple(unit[cast(int, axis)] for axis in sorted(cast("tuple[int, ...]", windowed_axes)))
     try:
         if direction is ReceptiveFieldDirection.RECEPTIVE:
             return cast(ReceptiveFieldBox, view.at(coordinates, input=selected))
