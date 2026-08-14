@@ -1965,6 +1965,7 @@ def run_and_log_inputs_through_model(
                     f"teardown failed: {type(teardown_exc).__name__}: "
                     f"{safe_exception_str(teardown_exc)}"
                 ),
+                exc=teardown_exc,
             )
             raise
         finally:

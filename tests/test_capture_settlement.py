@@ -581,3 +581,30 @@ def test_hostile_str_teardown_failure_still_demotes(monkeypatch) -> None:
     assert outcome.status is CaptureStatus.FAILED
     assert outcome.phase is CapturePhase.TEARDOWN
     assert "<unprintable _HostileStrError: __str__ raised>" in (outcome.reason or "")
+
+
+def test_teardown_demotion_carries_the_teardown_error_type(monkeypatch) -> None:
+    """The demoted record's error_type is the teardown exception's type.
+
+    Before the fix the demotion copied the pre-demotion record's error_type
+    -- always None for the only legal inputs (COMPLETE/HALTED) -- so a
+    FAILED/TEARDOWN outcome had no structured exception type and consumers
+    had to string-parse the free-text reason.
+    """
+
+    import torchlens.capture.trace as capture_trace
+
+    captured: list = []
+
+    def _boom(trace: object) -> None:
+        captured.append(trace)
+        raise KeyError("planted teardown failure")
+
+    monkeypatch.setattr(capture_trace, "_clear_saved_activation_dedup_caches", _boom)
+    with pytest.raises(KeyError):
+        tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    outcome = captured[0].outcome
+    assert outcome is not None
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.phase is CapturePhase.TEARDOWN
+    assert outcome.error_type == "KeyError"

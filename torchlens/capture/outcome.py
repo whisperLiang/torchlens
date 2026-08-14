@@ -1020,7 +1020,13 @@ def settle_failed(
     )
 
 
-def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome | None:
+def demote_outcome(
+    trace: object,
+    session: Any,
+    *,
+    note: str,
+    exc: BaseException | None = None,
+) -> CaptureOutcome | None:
     """Demote an already-settled outcome after a post-settlement teardown failure.
 
     The sole sanctioned post-settlement writer: permitted transitions are
@@ -1028,6 +1034,11 @@ def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome 
     the frozen record in both homes (trace sidecar and the session outcome's
     record slot); the session's ``TerminalState`` first-transition log is
     never revised. Anything already FAILED/ABORTED stays as settled.
+
+    ``exc`` is the teardown exception itself: it populates the demoted
+    record's structured ``error_type`` so consumers branch on the field, not
+    the free-text ``reason`` (the only legal pre-demotion statuses are
+    COMPLETE/HALTED, whose ``error_type`` is always None).
     """
 
     settled = outcome_for(trace)
@@ -1041,7 +1052,7 @@ def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome 
         phase=CapturePhase.TEARDOWN,
         origin=FailureOrigin.TORCHLENS,
         reason=note,
-        error_type=settled.error_type,
+        error_type=type(exc).__name__ if exc is not None else settled.error_type,
         boundary_kind=settled.boundary_kind,
         boundary_label=settled.boundary_label,
         frontier_labels=settled.frontier_labels,
