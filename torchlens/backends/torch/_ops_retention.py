@@ -151,6 +151,49 @@ def _commit_save_budget(
     )
 
 
+def _charge_saved_args_budget(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+) -> None:
+    """Charge ``save_arg_values`` argument snapshots against the save budget.
+
+    Parameters
+    ----------
+    trace:
+        Active trace, carrying the per-capture accountant.
+    fields_dict:
+        Operation fields whose ``saved_args``/``saved_kwargs`` deep copies were
+        just built.
+
+    Notes
+    -----
+    The argument snapshots are RAM retained for replay exactly like activation
+    payloads, but were invisible to the accountant: a ``save_arg_values``
+    capture could retain an unbounded second copy of every tensor argument
+    without ever tripping the budget. Charges are alias-aware and
+    release-credited, so an argument snapshot deduplicating onto
+    already-charged storage costs nothing extra.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None:
+        return
+    tensors: list[torch.Tensor] = []
+    stack: list[Any] = [fields_dict.get("saved_args"), fields_dict.get("saved_kwargs")]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, torch.Tensor):
+            tensors.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            stack.extend(value)
+    if not tensors:
+        return
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    budget.charge_retained(str(label), tuple(tensors))
+
+
 def _save_predicate_activation_fields(
     trace: "Trace",
     fields_dict: dict[str, Any],

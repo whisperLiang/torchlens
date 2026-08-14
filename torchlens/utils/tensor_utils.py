@@ -674,6 +674,42 @@ def _dense_tensor_memory_amount(t: torch.Tensor) -> int:
     return int(nelement(t) * element_size(t))
 
 
+_SPARSE_COMPONENT_ACCESSORS: dict[Any, tuple[str, ...]] = {
+    torch.sparse_coo: ("_indices", "_values"),
+    torch.sparse_csr: ("crow_indices", "col_indices", "values"),
+    torch.sparse_csc: ("ccol_indices", "row_indices", "values"),
+    torch.sparse_bsr: ("crow_indices", "col_indices", "values"),
+    torch.sparse_bsc: ("ccol_indices", "row_indices", "values"),
+}
+"""Physical component tensors per sparse layout: every index tensor AND values."""
+
+
+def sparse_component_tensors(t: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Return the physical component tensors of a sparse tensor.
+
+    Parameters
+    ----------
+    t:
+        Sparse tensor (COO or any compressed layout).
+
+    Returns
+    -------
+    tuple[torch.Tensor, ...]
+        Index tensor(s) and values tensor backing ``t``.
+
+    Raises
+    ------
+    ValueError
+        For non-strided layouts without a known component decomposition
+        (callers treat that as unmeasurable, never as zero-index-bytes).
+    """
+
+    accessors = _SPARSE_COMPONENT_ACCESSORS.get(t.layout)
+    if accessors is None:
+        raise ValueError(f"no known component decomposition for layout {t.layout}")
+    return tuple(getattr(t, name)() for name in accessors)
+
+
 def get_memory_amount(t: torch.Tensor) -> int:
     """Return the memory footprint of a tensor in bytes.
 
@@ -681,8 +717,11 @@ def get_memory_amount(t: torch.Tensor) -> int:
     TorchLens has decorated them, avoiding logging recursion without toggling
     global logging state for each tensor.
 
-    Meta tensors have no storage and return 0.  Sparse tensors report only
-    the size of their non-zero values.
+    Meta tensors have no storage and return 0. Sparse tensors (COO and the
+    compressed layouts) report their physical components: index storage AND
+    values storage. Counting only values ledgered a 1-nnz float32 COO cell as
+    4 bytes when its int64 indices alone hold 8 bytes per sparse dim, and the
+    dense fallback billed compressed layouts at logical-shape bytes.
 
     Args:
         t: Tensor to measure.
@@ -694,9 +733,10 @@ def get_memory_amount(t: torch.Tensor) -> int:
     try:
         if t.device.type == "meta":
             return 0
-        if t.is_sparse:
-            # Sparse tensors: only the values storage counts.
-            return _dense_tensor_memory_amount(t._values())
+        if t.layout is not torch.strided:
+            return sum(
+                _dense_tensor_memory_amount(component) for component in sparse_component_tensors(t)
+            )
         return _dense_tensor_memory_amount(t)
     except Exception:
         return 0
@@ -728,7 +768,9 @@ def get_memory_amount_from_metadata(
     try:
         if t.device.type == "meta":
             return 0
-        if t.is_sparse:
+        if t.layout is not torch.strided:
+            # Sparse layouts (COO and compressed): physical component bytes,
+            # never logical shape * itemsize.
             return get_memory_amount(t)
         return int(prod(shape) * dtype.itemsize)
     except Exception:
@@ -1165,6 +1207,14 @@ def _alias_covers_whole_storage(alias: torch.Tensor, storage_nbytes: int) -> boo
 # this threshold to keep window arming O(1) per op.
 _DEFER_PRUNE_THRESHOLD = 2048
 
+# Next-prune size: doubles away from the live population after each sweep.
+# A fixed threshold alone is quadratic on large captures: once the LIVE
+# pending population crosses it, every per-op window arming re-swept the
+# whole registry and removed nothing (measured O(n^2), the dominant term at
+# 4k ops). Doubling makes total prune work linear in total insertions while
+# a mostly-dead registry still prunes and resets the watermark back down.
+_defer_prune_watermark = _DEFER_PRUNE_THRESHOLD
+
 
 def prune_dead_deferred_entries() -> None:
     """Drop registry entries whose aliases were garbage-collected.
@@ -1188,9 +1238,10 @@ def prune_dead_deferred_entries() -> None:
 
 def arm_deferred_payload_window(state_storage_ptrs: frozenset[int]) -> None:
     """Arm the clone-on-write payload window (wrapper-managed, nestable)."""
-    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS
-    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _DEFER_PRUNE_THRESHOLD:
+    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS, _defer_prune_watermark
+    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _defer_prune_watermark:
         prune_dead_deferred_entries()
+        _defer_prune_watermark = max(_DEFER_PRUNE_THRESHOLD, 2 * len(_DEFER_PENDING))
     _DEFER_WINDOW_DEPTH += 1
     _DEFER_STATE_PTRS = state_storage_ptrs
 
@@ -1212,6 +1263,12 @@ def disarm_deferred_payload_window() -> None:
 #: observe partial bytes from an unfinished ``non_blocking=True`` copy.
 _CPU_ASYNC_PENDING_EVENTS: list[Any] = []
 
+#: Hard bound on accumulated fence events (R36): a capture that never reaches
+#: a drain seam (or an exotic failure path) must not grow the list without
+#: limit across captures. Crossing it drains inline — a fence, so strictly
+#: correctness-neutral; it only reduces async overlap for that one copy.
+_CPU_ASYNC_PENDING_EVENTS_MAX = 512
+
 
 def _record_cpu_async_copy_event(device: torch.device) -> None:
     """Record a stream event fencing one ``cpu_async`` D2H copy (R36-1).
@@ -1230,6 +1287,8 @@ def _record_cpu_async_copy_event(device: torch.device) -> None:
         _CPU_ASYNC_PENDING_EVENTS.append(event)
     else:
         _CPU_ASYNC_PENDING_EVENTS.append(device)
+    if len(_CPU_ASYNC_PENDING_EVENTS) > _CPU_ASYNC_PENDING_EVENTS_MAX:
+        synchronize_pending_cpu_async_copies()
 
 
 def synchronize_pending_cpu_async_copies() -> None:
@@ -1253,7 +1312,15 @@ def synchronize_pending_cpu_async_copies() -> None:
                 torch_module = torch_attr(entry.type)
                 sync = getattr(torch_module, "synchronize", None)
                 if sync is not None:
-                    sync(entry)
+                    try:
+                        sync(entry)
+                    except TypeError:
+                        # torch.mps.synchronize() (and kin) take no device
+                        # argument. The unguarded call raised TypeError from
+                        # the drain — on the failure-scrub arms that masked
+                        # the ORIGINAL capture exception with a drain
+                        # traceback.
+                        sync()
         else:
             entry.synchronize()
 

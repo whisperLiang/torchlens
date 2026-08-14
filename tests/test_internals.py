@@ -342,8 +342,11 @@ class TestGetTensorMemory:
 
         assert get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype) == 48
 
-    def test_metadata_memory_uses_sparse_fallback(self) -> None:
-        """Sparse metadata memory should preserve non-zero-value accounting.
+    def test_metadata_memory_counts_sparse_index_storage(self) -> None:
+        """Sparse metadata memory counts index AND values storage.
+
+        The values-only figure ledgered this 3-nnz COO tensor as 12 bytes
+        while its int64 index storage alone holds 48 physical bytes.
 
         Returns
         -------
@@ -355,7 +358,65 @@ class TestGetTensorMemory:
         values = torch.tensor([3.0, 4.0, 5.0])
         sparse = torch.sparse_coo_tensor(indices, values, (2, 3))
 
-        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 12
+        # 3 float32 values (12) + 2x3 int64 indices (48).
+        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 60
+        assert get_memory_amount(sparse) == 60
+
+    def test_compressed_sparse_memory_is_physical_not_logical(self) -> None:
+        """Compressed sparse layouts bill component bytes, not shape * itemsize.
+
+        The dense fallback billed a CSR tensor at its LOGICAL shape
+        (``prod(shape) * itemsize``); the physical footprint is
+        crow_indices + col_indices + values.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        coo = torch.sparse_coo_tensor(
+            torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4)
+        ).coalesce()
+        csr = coo.to_sparse_csr()
+
+        expected = sum(
+            component.numel() * component.element_size()
+            for component in (csr.crow_indices(), csr.col_indices(), csr.values())
+        )
+        assert get_memory_amount(csr) == expected
+        assert get_memory_amount_from_metadata(csr, tuple(csr.shape), csr.dtype) == expected
+        # The logical-dense figure the bug produced.
+        assert expected != 16 * csr.dtype.itemsize
+
+    def test_save_budget_identity_charges_sparse_components(self) -> None:
+        """The budget's storage identity charges sparse index + values bytes.
+
+        The generic fallback billed sparse payloads at LOGICAL dense bytes
+        under an id-based identity: index storage unledgered, values
+        overcounted at dense shape, and no alias dedup across payloads
+        sharing the same components.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        from torchlens._save_budget import _retained_storage_identity
+
+        coo = torch.sparse_coo_tensor(torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4))
+        identity, num_bytes = _retained_storage_identity(coo)
+
+        physical = sum(
+            int(component.untyped_storage().nbytes())
+            for component in (coo._indices(), coo._values())
+        )
+        assert num_bytes == physical
+        assert num_bytes != coo.numel() * coo.element_size()  # not logical dense
+        # Identity is component-storage-based and stable across reads.
+        assert identity == _retained_storage_identity(coo)[0]
+        assert "tensor" not in identity  # never the id-based fallback
 
 
 # ---------------------------------------------------------------------------
@@ -700,3 +761,141 @@ class TestDisplayUsesLoggedShape:
             entry = log[label]
             if entry.out is not None:
                 assert tuple(entry.out.shape) == tuple(entry.shape)
+
+
+class TestDeferredRegistryPruneAmortization:
+    def test_prune_backs_off_when_registry_is_live(self) -> None:
+        """A live registry past the threshold must not re-sweep per arming.
+
+        The fixed threshold alone was quadratic on large captures: once the
+        LIVE pending population crossed 2048 keys, EVERY per-op window arming
+        swept the whole registry and removed nothing (the dominant measured
+        term at 4k ops). The watermark now doubles away from the live
+        population after each sweep, so repeated armings stop paying it.
+        """
+
+        import weakref
+        from types import SimpleNamespace
+
+        from torchlens.utils import tensor_utils as tu
+
+        class _Referent:
+            """Weak-referenceable stand-in for a pending alias."""
+
+        keepalive = [_Referent() for _ in range(3000)]
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_watermark = tu._defer_prune_watermark
+        saved_prune = tu.prune_dead_deferred_entries
+        calls = {"n": 0}
+
+        def counting_prune() -> None:
+            calls["n"] += 1
+            saved_prune()
+
+        try:
+            tu._DEFER_PENDING.clear()
+            for index, obj in enumerate(keepalive):
+                tu._DEFER_PENDING[("test", index)] = [SimpleNamespace(ref=weakref.ref(obj))]
+            tu._defer_prune_watermark = tu._DEFER_PRUNE_THRESHOLD
+            tu.prune_dead_deferred_entries = counting_prune
+            for _ in range(10):
+                tu.arm_deferred_payload_window(frozenset())
+                tu.disarm_deferred_payload_window()
+            # One sweep, then the watermark (2 * 3000 live keys) suppresses
+            # the rest. The historical behavior swept all 10 times.
+            assert calls["n"] == 1
+            assert tu._defer_prune_watermark == 6000
+            # Growth past the watermark prunes again, and a mostly-dead
+            # registry resets the watermark back to the floor.
+            keepalive.clear()
+            del obj  # the population loop variable pins the last referent
+            for index in range(3500):
+                dead = _Referent()
+                tu._DEFER_PENDING[("dead", index)] = [SimpleNamespace(ref=weakref.ref(dead))]
+                del dead
+            tu.arm_deferred_payload_window(frozenset())
+            tu.disarm_deferred_payload_window()
+            assert calls["n"] == 2
+            assert len(tu._DEFER_PENDING) == 0
+            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
+        finally:
+            tu.prune_dead_deferred_entries = saved_prune
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_prune_watermark = saved_watermark
+
+
+class TestAliasContractPositionScan:
+    def test_contract_lookup_semantics_unchanged(self) -> None:
+        """Contract coverage keys on contract positions, not a full arg scan.
+
+        The full scan cost O(fan_in) per parent — O(fan_in^2) per op for
+        variadic ops like a 4k-arg ``stack`` — with the common EMPTY contract.
+        """
+
+        from torchlens.backends.torch.aliasing import parent_label_has_alias_contract
+
+        positions = {
+            "args": {i: f"parent_{i}" for i in range(50)},
+            "kwargs": {"out": "parent_out"},
+        }
+        # Empty contract: never covered.
+        assert not parent_label_has_alias_contract("parent_3", positions, ())
+        # Covered arg position.
+        assert parent_label_has_alias_contract("parent_3", positions, (3,))
+        # Covered kwargs position.
+        assert parent_label_has_alias_contract("parent_out", positions, ("out",))
+        # Contract position exists but holds a different parent.
+        assert not parent_label_has_alias_contract("parent_3", positions, (4,))
+        # Parent present only at a non-contract position.
+        assert not parent_label_has_alias_contract("parent_7", positions, (3, "out"))
+
+
+class TestStorageAliasBucketLayout:
+    """SF-52: the per-storage alias index single-alias fast path."""
+
+    def test_single_alias_is_one_weakref_and_upgrades_on_second(self) -> None:
+        """One labeled tensor per storage stores a bare ref; two upgrade.
+
+        A full WeakIdKeyDictionary per bucket cost ~6 marginal objects per op
+        (measured -6.95 obj/op on the pinned linear602 census after this
+        change). Candidate reads must be identical across both layouts.
+        """
+
+        import weakref
+
+        from torch.utils.weak import WeakIdKeyDictionary
+
+        from torchlens.backends.torch import _tl
+
+        session = _tl._LabelSession(token=1)
+        t1 = torch.randn(4)
+        t2 = t1.view(2, 2)  # distinct object, same storage
+        ptr = t1.untyped_storage().data_ptr()
+
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+        # Idempotent re-registration keeps the slim layout.
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+
+        saved_session = _tl._ACTIVE_LABEL_SESSION
+        try:
+            _tl._ACTIVE_LABEL_SESSION = session
+            assert _tl.session_storage_alias_candidates(ptr) == [t1]
+
+            # Second live distinct alias upgrades in place.
+            _tl._register_storage_alias(session, ptr, t2)
+            assert isinstance(session.by_storage_ptr[ptr], WeakIdKeyDictionary)
+            candidates = _tl.session_storage_alias_candidates(ptr)
+            assert {id(c) for c in candidates} == {id(t1), id(t2)}
+
+            # A dead single-alias entry reads as no candidates and is
+            # replaced by the next registration.
+            t3 = torch.randn(4)
+            ptr3 = t3.untyped_storage().data_ptr()
+            _tl._register_storage_alias(session, ptr3, t3)
+            del t3
+            assert _tl.session_storage_alias_candidates(ptr3) == []
+        finally:
+            _tl._ACTIVE_LABEL_SESSION = saved_session

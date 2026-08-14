@@ -42,6 +42,12 @@ from ._runtime_handles import source_model_from_trace
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 from .op import GradientRecord, GradientRecordAccessor
 
+#: Per-accessor id -> position maps for ``Param.ordinal_index`` (weakly keyed
+#: so a dropped accessor releases its map). Entries are verified by identity
+#: against the accessor's current ``_list`` before use, so a stale map can
+#: only trigger a rebuild, never a wrong answer.
+_ORDINAL_INDEX_CACHE: "weakref.WeakKeyDictionary[Any, dict[int, int]]" = weakref.WeakKeyDictionary()
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -269,12 +275,34 @@ class Param:
 
     @property
     def ordinal_index(self) -> int:
-        """Return this Param's 0-based position in ``trace.params``."""
+        """Return this Param's 0-based position in ``trace.params``.
+
+        Amortized O(1): the historical ``list(trace.params).index(self)``
+        materialized the accessor (through its ref-rehydrating ``__iter__``)
+        and identity-scanned it on EVERY read, so a full-table sweep measured
+        a ~2.1 scaling exponent. The id-keyed position map is cached per
+        accessor and verified by identity before use (stale caches rebuild),
+        so results are exactly the historical identity semantics.
+        """
 
         trace = self.source_trace
         if trace is None:
             return -1
-        return list(trace.params).index(self)
+        accessor = trace.params
+        items = getattr(accessor, "_list", None)
+        if not isinstance(items, list):
+            return list(accessor).index(self)
+        cache = _ORDINAL_INDEX_CACHE.get(accessor)
+        if cache is not None and len(cache) == len(items):
+            index = cache.get(id(self))
+            if index is not None and items[index] is self:
+                return index
+        cache = {id(param): position for position, param in enumerate(items)}
+        _ORDINAL_INDEX_CACHE[accessor] = cache
+        index = cache.get(id(self))
+        if index is None:
+            raise ValueError(f"{self.address!r} is not in trace.params")
+        return index
 
     @property
     def module(self) -> Any:

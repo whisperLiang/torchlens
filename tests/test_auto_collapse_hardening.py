@@ -1784,3 +1784,84 @@ def test_run_builder_refuses_box_owned_exit_op():
     assert unguarded == ("relu_7_17", "relu_8_18", "tanh_2_19", "sigmoid_2_20"), (
         "control: without the guard set the absorbing run forms, so the guard is what refuses it"
     )
+
+
+class TestIndexedChildStemLinearParser:
+    """The indexed-child stem parser (regex-backtracking replacement)."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("layer12", "layer"),
+            ("block_3a", "block"),
+            ("block.3", "block"),
+            ("1234", ""),
+            ("_5", ""),
+            ("a.12b", "a."),
+            ("3a7", "3a"),
+            ("12ab", None),  # two trailing letters: not an indexed suffix
+            ("layer", None),
+            ("", None),
+            ("layer12\n", None),  # regex `$` newline quirk deliberately dropped
+        ],
+    )
+    def test_stem_semantics(self, name: str, expected: str | None) -> None:
+        """Pin the lazy-stem/longest-suffix semantics of the old regex.
+
+        The historical ``^(?P<stem>.*?)(?:\\.?\\d+|_?\\d+[a-z]?)$`` pattern
+        backtracked quadratically on artifact-supplied names (measured 26s at
+        40k chars); the manual parser was fuzz-checked equivalent over 20k
+        random names from the {a, b, _, ., 0, 1, 9, z} alphabet.
+        """
+
+        from torchlens.visualization.auto_collapse import _indexed_child_stem
+
+        assert _indexed_child_stem(name) == expected
+
+    def test_pathological_input_is_linear(self) -> None:
+        """The all-digits-plus-junk adversarial name parses instantly."""
+
+        from torchlens.visualization.auto_collapse import _indexed_child_stem
+
+        assert _indexed_child_stem("9" * 100_000 + "!!") is None
+
+
+class TestNameConsecutiveTrailingDigitSplit:
+    """collapse_optimizer._members_are_name_consecutive digit parsing."""
+
+    def test_consecutive_and_rejections(self) -> None:
+        """Trailing-digit semantics match the old (.*?)(\\d+) fullmatch."""
+
+        from torchlens.visualization.collapse_optimizer import _members_are_name_consecutive
+
+        assert _members_are_name_consecutive(("m.block1", "m.block2", "m.block3"))
+        assert not _members_are_name_consecutive(("m.block1", "m.block3"))
+        assert not _members_are_name_consecutive(("m.block1", "n.block2"))
+        assert not _members_are_name_consecutive(("m.block1", "m.layer2"))
+        assert not _members_are_name_consecutive(("m.block", "m.block2"))
+        # Adversarial leaf: linear, and correctly not consecutive.
+        assert not _members_are_name_consecutive(("m." + "9" * 100_000 + "x", "m.b2"))
+
+
+class TestRenderDisclosureCeiling:
+    """R60: draw() disclosure warning above the Graphviz-hostile size."""
+
+    def test_small_render_is_silent(self) -> None:
+        import warnings as _warnings
+
+        from torchlens.visualization.render_ir import (
+            _warn_if_render_exceeds_disclosure_ceiling,
+        )
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            _warn_if_render_exceeds_disclosure_ceiling(100, 200)
+
+    def test_oversized_render_warns_with_remedies(self) -> None:
+        from torchlens.visualization.render_ir import (
+            RENDER_DISCLOSURE_NODE_CEILING,
+            _warn_if_render_exceeds_disclosure_ceiling,
+        )
+
+        with pytest.warns(UserWarning, match="collapse"):
+            _warn_if_render_exceeds_disclosure_ceiling(RENDER_DISCLOSURE_NODE_CEILING + 1, 0)

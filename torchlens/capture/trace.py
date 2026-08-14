@@ -615,6 +615,10 @@ def save_new_outs(
         verbose=getattr(self, "verbose", False),
         backward_ready=getattr(self, "backward_ready", False),
         inference_only=getattr(self, "inference_only", False),
+        # A refresh retains payloads like any capture; dropping the configured
+        # budget here silently rebudgeted every refresh/run() forward at the
+        # default "auto" (or left a save_budget=None session budgeted).
+        save_budget=getattr(self, "save_budget", "auto"),
         # F2: a refresh re-arms the nonfinite tripwire. The historical refresh
         # forwarded only inference_only, so a raise_on_nan capture silently
         # lost its abort policy on every refreshed forward.

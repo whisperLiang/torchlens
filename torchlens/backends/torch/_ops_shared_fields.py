@@ -343,6 +343,11 @@ def _get_parent_output_version_snapshot(
         otherwise ``None``.
     """
 
+    # Cheap gate first: without save_arg_values this function always returns
+    # None, so the per-parent contract scan below was pure waste on the
+    # default capture path.
+    if not self.save_arg_values:
+        return None
     contract_positions = tuple(mutated_input_positions) + tuple(aliased_output_inputs)
     should_snapshot_by_contract = parent_label_has_alias_contract(
         parent_label,
@@ -350,7 +355,7 @@ def _get_parent_output_version_snapshot(
         contract_positions,
     )
     should_snapshot_by_value = parent_has_saved_activation
-    if not (self.save_arg_values and (should_snapshot_by_contract or should_snapshot_by_value)):
+    if not (should_snapshot_by_contract or should_snapshot_by_value):
         return None
 
     parent_tensor_contents = get_parent_contents_for_contract_position(

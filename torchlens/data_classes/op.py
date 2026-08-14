@@ -1276,6 +1276,12 @@ def apply_transform(
         Value returned by ``transform``.
     """
 
+    # R36: a cpu_async payload may still be an in-flight pinned buffer; a
+    # user transform is a host-side byte read and must never observe partial
+    # bytes. No-op unless async fence events are actually pending.
+    from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    synchronize_pending_cpu_async_copies()
     try:
         with pause_logging():
             return transform(tensor)
@@ -1538,6 +1544,15 @@ def _tensor_content_hash(value: torch.Tensor) -> str:
     -------
     str
         SHA-256 digest.
+
+    Notes
+    -----
+    The digest frames the LOGICAL dtype, captured before the bf16 -> float32
+    transport upcast numpy requires: framing the post-upcast dtype made a
+    bfloat16 tensor collide with the float32 tensor of the same values, so
+    content-mode dedup could alias payloads across dtypes. The payload is
+    hashed through the buffer protocol (no whole-payload ``tobytes`` copy);
+    digest bytes are unchanged for non-bf16 tensors.
     """
 
     if is_functorch_wrapped_tensor(value):
@@ -1545,13 +1560,68 @@ def _tensor_content_hash(value: torch.Tensor) -> str:
 
     with pause_logging():
         tensor = safe_copy(value, detach_tensor=True).cpu().contiguous()
+        logical_dtype = str(tensor.dtype)
         if tensor.dtype is torch.bfloat16:
             tensor = tensor.to(torch.float32)
-        payload = tensor.numpy().tobytes()
-    hasher = hashlib.sha256()
-    hasher.update(repr((tuple(tensor.shape), str(tensor.dtype))).encode("utf-8"))
-    hasher.update(payload)
+        shape = tuple(tensor.shape)
+        payload = memoryview(tensor.reshape(-1).view(torch.uint8).numpy()).cast("B")
+        hasher = hashlib.sha256()
+        hasher.update(repr((shape, logical_dtype)).encode("utf-8"))
+        hasher.update(payload)
     return hasher.hexdigest()
+
+
+def _dedup_cached_identity_out(
+    trace: "Trace | None",
+    source_tensor: torch.Tensor,
+    annotations: dict[str, Any],
+    save_arg_values: bool,
+) -> torch.Tensor | None:
+    """Return the already-saved payload for this live source, or ``None``.
+
+    Parameters
+    ----------
+    trace:
+        Trace that owns the per-pass dedup caches.
+    source_tensor:
+        Live output tensor about to be copied for retention.
+    annotations:
+        Mutable annotation dictionary for the saved output.
+    save_arg_values:
+        Whether argument values are being saved (disables activation dedup).
+
+    Notes
+    -----
+    Pre-copy identity probe: the historical order CLONED the payload first
+    and only consulted the identity cache afterwards, discarding the fresh
+    clone on every hit — a full wasted payload copy per repeated-source save
+    (dedup-after-copy ordering). Hit semantics, annotations, and the miss
+    path (which still inserts post-copy via
+    :func:`_dedup_saved_activation_out`) are unchanged.
+    """
+
+    if trace is None or save_arg_values or source_tensor.is_meta:
+        return None
+    if getattr(trace, "_out_dedup_mode", "identity") != "identity":
+        return None
+    identity_cache = getattr(trace, "_out_identity_cache", None)
+    if identity_cache is None:
+        return None
+    source_key = id(source_tensor)
+    from ..backends.torch.completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        source_version = tensor_version_or_none(source_tensor)
+    cached = identity_cache.get(source_key)
+    if cached is None:
+        return None
+    cached_source, cached_label, cached_out, cached_version = cached
+    if cached_source is source_tensor and cached_version == source_version:
+        annotations["dedup_source_id"] = source_key
+        annotations["dedup_source_version"] = source_version
+        annotations["dedup_reference_label"] = cached_label
+        return cast(torch.Tensor, cached_out)
+    return None
 
 
 def _dedup_saved_activation_out(
@@ -1599,6 +1669,12 @@ def _dedup_saved_activation_out(
         if hash_cache is None:
             hash_cache = {}
             setattr(trace, "_out_hash_cache", hash_cache)
+        # R36: the content digest is a host-side byte read; a cpu_async
+        # payload may still be an in-flight pinned buffer. No-op unless
+        # async fence events are pending.
+        from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+        synchronize_pending_cpu_async_copies()
         out_hash = _tensor_content_hash(raw_out)
         if out_hash in hash_cache:
             annotations["dedup_out_hash"] = out_hash
@@ -3970,16 +4046,30 @@ class Op:
                     get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype),
                 )
             )
-            # Clone the tensor, optionally detaching from autograd graph.
-            raw_out = copy_tensor_payload(
-                t,
-                detach_tensor=self.detach_saved_activations,
-                save_mode=save_mode,
+            save_raw_activations = getattr(trace, "save_raw_activations", True)
+            store_raw = save_raw_activations or activation_transform is None
+            # Pre-copy identity probe (dedup-after-copy ordering): a hit
+            # reuses the already-saved payload and skips the clone entirely.
+            # Restricted to plain "copy" mode -- reference/view copies are
+            # free and cpu_async has fence side effects.
+            dedup_cached_out = (
+                _dedup_cached_identity_out(trace, t, self.annotations, save_arg_values)
+                if store_raw and save_mode == "copy"
+                else None
             )
-            # Move to the user-requested output device if needed.
-            if self.output_device not in [str(raw_out.device), "same"]:
-                raw_out = safe_to(raw_out, self.output_device)
-            _stamp_reference_out(self.annotations, raw_out, save_mode)
+            if dedup_cached_out is not None:
+                raw_out = dedup_cached_out
+            else:
+                # Clone the tensor, optionally detaching from autograd graph.
+                raw_out = copy_tensor_payload(
+                    t,
+                    detach_tensor=self.detach_saved_activations,
+                    save_mode=save_mode,
+                )
+                # Move to the user-requested output device if needed.
+                if self.output_device not in [str(raw_out.device), "same"]:
+                    raw_out = safe_to(raw_out, self.output_device)
+                _stamp_reference_out(self.annotations, raw_out, save_mode)
 
             self.shape = tuple(raw_out.shape)
             self.dtype = raw_out.dtype
@@ -3987,17 +4077,16 @@ class Op:
                 get_memory_amount_from_metadata(raw_out, self.shape, self.dtype)
             )
 
-            save_raw_activations = getattr(trace, "save_raw_activations", True)
-            store_raw = save_raw_activations or activation_transform is None
             if store_raw:
-                raw_out = _dedup_saved_activation_out(
-                    trace,
-                    t,
-                    raw_out,
-                    self._layer_label_raw,
-                    self.annotations,
-                    save_arg_values,
-                )
+                if dedup_cached_out is None:
+                    raw_out = _dedup_saved_activation_out(
+                        trace,
+                        t,
+                        raw_out,
+                        self._layer_label_raw,
+                        self.annotations,
+                        save_arg_values,
+                    )
                 if isinstance(raw_out, torch.Tensor):
                     mark_detached_saved_activation(t, raw_out, self._layer_label_raw)
             self._internal_set("out", raw_out if store_raw else None)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 import time
 import warnings
 import weakref
@@ -27,7 +26,53 @@ if TYPE_CHECKING:
 GENERIC_CONTAINER_CLASSES = frozenset({"Sequential", "ModuleList", "ModuleDict", "ParameterList"})
 _COUNT_MISMATCH_WARNING_EMITTED = False
 JUNCTION_FUNC_NAMES = frozenset({"__add__", "add", "cat", "concat", "concatenate"})
-_INDEXED_CHILD_RE = re.compile(r"^(?P<stem>.*?)(?:\.?\d+|_?\d+[a-z]?)$")
+
+
+def _indexed_child_stem(name: str) -> str | None:
+    """Return the stem of an indexed child name, or ``None`` when unindexed.
+
+    Manual, linear-time equivalent of the historical
+    ``^(?P<stem>.*?)(?:\\.?\\d+|_?\\d+[a-z]?)$`` regex, whose lazy stem plus
+    digit-run alternation backtracked QUADRATICALLY on artifact-supplied
+    names like ``"9"*n + "!!"`` (measured 26s at 40k chars). The lazy stem
+    means the LONGEST valid suffix wins: trailing decimal digits reaching
+    the end (optionally preceded by one ``.`` or ``_``), or reaching one
+    final ``a``-``z`` letter for the underscore form. ``str.isdecimal`` is
+    exactly the ``\\d`` character class. One deliberate tightening: the
+    regex ``$`` also matched before a trailing newline; a newline-bearing
+    name now reads as unindexed.
+
+    Parameters
+    ----------
+    name:
+        Leaf child name.
+
+    Returns
+    -------
+    str | None
+        Stem before the numeric suffix, or ``None`` for unindexed names.
+    """
+
+    end = len(name)
+    suffix_starts: list[int] = []
+    # Form A: optional "." + decimal digits running to the end.
+    cut = end
+    while cut > 0 and name[cut - 1].isdecimal():
+        cut -= 1
+    if cut < end:
+        suffix_starts.append(cut - 1 if cut > 0 and name[cut - 1] == "." else cut)
+    # Form B: optional "_" + decimal digits + optional ONE final a-z letter.
+    tail = end - 1 if end and "a" <= name[end - 1] <= "z" else end
+    cut = tail
+    while cut > 0 and name[cut - 1].isdecimal():
+        cut -= 1
+    if cut < tail:
+        suffix_starts.append(cut - 1 if cut > 0 and name[cut - 1] == "_" else cut)
+    if not suffix_starts:
+        return None
+    return name[: min(suffix_starts)]
+
+
 RUN_FOLD_MIN_LENGTH = 3
 
 
@@ -1076,19 +1121,30 @@ def _split_run_by_member_uniformity(
         each with structurally uniform members.
     """
 
+    # Uniformity is "all members share ONE structural signature", so the
+    # maximal uniform window starting at any index is exactly the run of
+    # consecutive equal signatures from that index. Computing one signature
+    # per member and grouping equal neighbours is output-identical to the
+    # historical grow-every-window scan, which recomputed signatures for
+    # every (start, end) pair — near-cubic on long runs (b6/b4-sol
+    # instrumented) — while this is linear in run length.
     total = len(run)
+    if total < RUN_FOLD_MIN_LENGTH:
+        return
+    signatures = [
+        _module_structural_signature(cast("Module", trace.modules[address])) for address in run
+    ]
     index = 0
     while index < total:
-        best: tuple[str, ...] = ()
-        for end in range(index + RUN_FOLD_MIN_LENGTH, total + 1):
-            candidate = run[index:end]
-            if _run_fold_members_uniform(trace, candidate):
-                best = candidate
-        if best:
-            yield best
-            index += len(best)
-        else:
-            index += 1
+        end = index + 1
+        while end < total and signatures[end] == signatures[index]:
+            end += 1
+        if end - index >= RUN_FOLD_MIN_LENGTH:
+            yield run[index:end]
+        # Windows inside a shorter-than-minimum equal-signature block can
+        # never reach the minimum length, so skipping the whole block is
+        # output-identical to the historical index += 1 rescan.
+        index = end
 
 
 def _iter_collapsible_runs(
@@ -1263,11 +1319,11 @@ def _indexed_parent_stem(address: str) -> str:
         parent, name = address.rsplit(".", 1)
     else:
         parent, name = "", address
-    match = _INDEXED_CHILD_RE.match(name)
-    if match is None:
+    indexed_stem = _indexed_child_stem(name)
+    if indexed_stem is None:
         stem = name
     else:
-        stem = match.group("stem").rstrip("._") or ""
+        stem = indexed_stem.rstrip("._") or ""
     return f"{parent}.{stem}" if parent and stem else parent or stem or name
 
 
@@ -2619,10 +2675,10 @@ def _sibling_stem(address: str) -> str:
     """Return a relaxed sibling-address stem for stage-like module names."""
 
     name = address.rsplit(".", 1)[-1]
-    match = _INDEXED_CHILD_RE.match(name)
-    if match is None:
+    indexed_stem = _indexed_child_stem(name)
+    if indexed_stem is None:
         return name
-    stem = match.group("stem").rstrip("._")
+    stem = indexed_stem.rstrip("._")
     return stem or name
 
 

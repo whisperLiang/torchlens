@@ -56,6 +56,7 @@ from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
 from ...data_classes.internal_types import FuncExecutionContext
 from ...data_classes.op import (
     Op,
+    _dedup_cached_identity_out,
     _dedup_saved_activation_out,
     _dtype_or_none,
     _effective_activation_save_mode,
@@ -777,6 +778,7 @@ _stream_activation_fields = _rebind_function(_ops_activations._stream_activation
 _retention_device = _rebind_function(_ops_activations._retention_device, globals())
 _admit_save_budget = _rebind_function(_ops_retention._admit_save_budget, globals())
 _commit_save_budget = _rebind_function(_ops_retention._commit_save_budget, globals())
+_charge_saved_args_budget = _rebind_function(_ops_retention._charge_saved_args_budget, globals())
 _save_predicate_activation_fields = _rebind_function(
     _ops_retention._save_predicate_activation_fields, globals()
 )

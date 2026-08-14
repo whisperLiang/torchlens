@@ -291,6 +291,15 @@ def _record_destroyed_group(state: _ArmedState, group: Any) -> None:
                 install_epoch=state.arming.install_epoch,
             )
         )
+        # Bounded growth: a destroyed uid can never tick again (a recreated
+        # group gets a NEW lifetime_ordinal, so its counters start fresh at 0
+        # under a different key). Dropping the dead keys keeps seq_counters
+        # sized to the LIVE group population in create/destroy-loop programs
+        # instead of growing without bound; issued correlation keys are
+        # unaffected (they were stamped at issue time).
+        dead_uid = (identity.membership_digest, identity.lifetime_ordinal)
+        for key in [k for k in state.seq_counters if (k[0], k[1]) == dead_uid]:
+            del state.seq_counters[key]
     if group is None:
         return
     _ = dist  # narrow: dist retained for parity with the None branch above

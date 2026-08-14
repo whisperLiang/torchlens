@@ -659,7 +659,110 @@ def test_trace_pickle_strips_process_local_release_watchers() -> None:
     assert len(accountant._payload_watchers) == n_watchers
     restored_accountant = restored.__dict__["_save_budget_accountant"]
     assert restored_accountant._payload_watchers == {}
+    assert restored_accountant._self_ref is None
     assert restored_accountant.ledgers.keys() == accountant.ledgers.keys()
     for key, ledger in accountant.ledgers.items():
         assert restored_accountant.ledgers[key].committed_bytes == ledger.committed_bytes
+    trace.cleanup()
+
+
+def test_release_watchers_share_one_budget_self_ref() -> None:
+    """Every armed release watcher rides ONE shared budget self-ref (R32).
+
+    The closure-based watchers this pins against minted a fresh
+    ``weakref.ref(budget)`` plus a closure (function object + cells) per
+    retained payload — ~7 marginal objects per op on the default capture
+    path, a measured regression on the LOCKED R32 obj/op metric. The slim
+    watcher is a single ``weakref.ref`` subclass carrying its charge
+    coordinates in slots; the budget reference is the accountant's one
+    hoisted ``_self_ref``.
+    """
+
+    from torchlens._save_budget import _PayloadWatcher
+
+    trace = tl.trace(_model(), _input())
+    accountant = trace.__dict__["_save_budget_accountant"]
+    assert accountant is not None
+    watchers = list(accountant._payload_watchers.values())
+    assert watchers, "fixture must have live payload watchers"
+    assert accountant._self_ref is not None
+    assert accountant._self_ref() is accountant
+    for watcher in watchers:
+        assert isinstance(watcher, _PayloadWatcher)
+        assert watcher.budget_ref is accountant._self_ref
+    trace.cleanup()
+
+
+def test_saved_arg_value_copies_are_charged() -> None:
+    """``save_arg_values`` argument snapshots are budget-visible retained RAM.
+
+    The deep copies retained for replay were invisible to the accountant: a
+    ``save_arg_values`` capture could hold a second copy of every tensor
+    argument without moving ``committed_bytes`` at all.
+    """
+
+    model = _model()
+    x = _input()
+    torch.manual_seed(0)
+    plain = tl.trace(model, x)
+    torch.manual_seed(0)
+    with_args = tl.trace(model, x, save_arg_values=True)
+
+    plain_committed = sum(
+        ledger.committed_bytes
+        for ledger in plain.__dict__["_save_budget_accountant"].ledgers.values()
+    )
+    args_committed = sum(
+        ledger.committed_bytes
+        for ledger in with_args.__dict__["_save_budget_accountant"].ledgers.values()
+    )
+    assert args_committed > plain_committed
+    plain.cleanup()
+    with_args.cleanup()
+
+
+def test_restored_accountant_strips_dead_identity_keys_with_watchers() -> None:
+    """Identity keys ride with the watchers across pickle/fork state.
+
+    An identity key without its release watcher is a DEAD key: a later
+    allocation recycling the same ``data_ptr`` at equal size dedupes against
+    it for a ZERO-byte commit — the exact ptr-reuse bug release crediting
+    fixed. ``Trace.fork()`` copies the accountant through ``__getstate__``
+    (deepcopy rides it) and forks DO capture again via ``run()`` /
+    ``save_new_outs``, so the stripped form must not carry the identity map.
+    """
+
+    import pickle
+
+    trace = tl.trace(_model(), _input())
+    accountant = trace.__dict__["_save_budget_accountant"]
+    assert any(ledger.retained_storage for ledger in accountant.ledgers.values())
+
+    restored = pickle.loads(pickle.dumps(trace))
+    restored_accountant = restored.__dict__["_save_budget_accountant"]
+    for key, ledger in accountant.ledgers.items():
+        restored_ledger = restored_accountant.ledgers[key]
+        assert restored_ledger.retained_storage == {}
+        # Charges stay permanent (conservative), only the identities drop.
+        assert restored_ledger.committed_bytes == ledger.committed_bytes
+    # The SOURCE accountant's live identity maps are untouched.
+    assert any(ledger.retained_storage for ledger in accountant.ledgers.values())
+    trace.cleanup()
+
+
+def test_refresh_inherits_the_configured_save_budget() -> None:
+    """``save_new_outs`` refresh honors the session budget, not the default.
+
+    The refresh corridor (also under ``run()`` on a live trace) rebuilt the
+    capture with the DEFAULT ``"auto"`` budget regardless of what the session
+    configured, so a tiny absolute budget silently stopped guarding every
+    refreshed forward.
+    """
+
+    model = _model()
+    x = _input()
+    trace = tl.trace(model, x)
+    trace.save_budget = 64
+    with pytest.raises(SaveBudgetExceededError):
+        trace.save_new_outs(model, x)
     trace.cleanup()

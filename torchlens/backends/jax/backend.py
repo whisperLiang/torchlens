@@ -1970,6 +1970,9 @@ class JAXBackend:
                 param_log_by_source_label[op_log.label] = trace.param_logs[param_address]
 
             if param_log_by_source_label:
+                from .._finalize import _attach_param_usage
+
+                usage_membership: dict[int, tuple[set[str], set[str], set[str]]] = {}
                 for op_log in trace.layer_list:
                     seen_barcodes: set[str] = set()
                     consumed_params: list[Param] = []
@@ -1994,13 +1997,9 @@ class JAXBackend:
                     op_log.param_memory = Bytes(
                         sum(int(param.param_memory) for param in consumed_params)
                     )
-                    for param in consumed_params:
-                        if op_log.label not in param.used_by_ops:
-                            param.used_by_ops.append(op_log.label)
-                        if op_log.layer_label not in param.used_by_layers:
-                            param.used_by_layers.append(op_log.layer_label)
-                        if op_log.layer_label not in trace.layers_with_params[param.barcode]:
-                            trace.layers_with_params[param.barcode].append(op_log.layer_label)
+                    # Set-memoized usage cross-links (the bare list scans were
+                    # O(m^2) for a param consumed by m ops).
+                    _attach_param_usage(trace, op_log, usage_membership)
 
             # Recompute the trace-level aggregate param counters from the
             # (now-correct) per-op attribution, deduplicating by
@@ -2082,11 +2081,14 @@ class JAXBackend:
             Op parameter fields and reverse parameter usage lists are updated.
         """
 
+        from .._finalize import _attach_param_usage
+
         equation_labels = [
             label
             for label in trace._raw_graph_ws.raw_layer_labels_list
             if not trace._raw_graph_ws.raw_layer_dict[label].is_input
         ]
+        usage_membership: dict[int, tuple[set[str], set[str], set[str]]] = {}
         for label, capture in zip(equation_labels, captures, strict=False):
             op_log = trace._raw_graph_ws.raw_layer_dict[label]
             param_addresses: list[str] = []
@@ -2106,13 +2108,9 @@ class JAXBackend:
             )
             op_log.num_params_frozen = op_log.num_params - op_log.num_params_trainable
             op_log.param_memory = sum(int(param.param_memory) for param in params)
-            for param in params:
-                if op_log.label not in param.used_by_ops:
-                    param.used_by_ops.append(op_log.label)
-                if op_log.layer_label not in param.used_by_layers:
-                    param.used_by_layers.append(op_log.layer_label)
-                if op_log.layer_label not in trace.layers_with_params[param.barcode]:
-                    trace.layers_with_params[param.barcode].append(op_log.layer_label)
+            # Set-memoized usage cross-links (the bare list scans were
+            # O(m^2) for a param consumed by m ops).
+            _attach_param_usage(trace, op_log, usage_membership)
         trace.num_layers_with_params = len(
             {op.layer_label for op in trace.layer_list if op.uses_params}
         )

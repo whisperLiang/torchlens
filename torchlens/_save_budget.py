@@ -305,6 +305,65 @@ class _BudgetReservation:
     site: str = "primary"
 
 
+def _credit_payload_release(ref: _PayloadWatcher) -> None:
+    """Credit one payload release back to its budget when the payload dies.
+
+    Parameters
+    ----------
+    ref:
+        Fired release watcher carrying its charge coordinates.
+    """
+
+    budget = ref.budget_ref()
+    if budget is None:
+        return
+    budget._payload_watchers.pop(id(ref), None)
+    budget._credit_release(ref.ledger_key, ref.identity)
+
+
+class _PayloadWatcher(weakref.ref):
+    """Release watcher on one retained payload, carrying its charge coordinates.
+
+    A ``weakref.ref`` subclass so one allocation covers the watcher AND its
+    coordinates: the closure-based watcher this replaces cost a function
+    object, three cells, and a fresh budget weakref per retained payload
+    (~7 marginal objects/op on the default capture path — the R32 regression).
+    The callback is the module-level :func:`_credit_payload_release`; the
+    budget is held weakly through the accountant's one shared self-ref so the
+    accountant never keeps itself alive through its own watchers.
+    """
+
+    __slots__ = ("budget_ref", "ledger_key", "identity")
+
+    budget_ref: weakref.ref
+    ledger_key: str
+    identity: tuple[Any, ...]
+
+    def __new__(
+        cls,
+        payload: torch.Tensor,
+        budget_ref: weakref.ref,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> _PayloadWatcher:
+        self = super().__new__(cls, payload, _credit_payload_release)
+        self.budget_ref = budget_ref
+        self.ledger_key = ledger_key
+        self.identity = identity
+        return self
+
+    def __init__(
+        self,
+        payload: torch.Tensor,
+        budget_ref: weakref.ref,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> None:
+        # weakref.ref implements __init__ (not just __new__) and would refuse
+        # the extra coordinate arguments; forward only its own pair.
+        super().__init__(payload, _credit_payload_release)  # type: ignore[call-arg]
+
+
 @dataclass
 class SaveBudget:
     """Per-device running accountant for retained activation bytes.
@@ -329,6 +388,9 @@ class SaveBudget:
     _payload_watchers: dict[int, weakref.ref] = field(
         default_factory=dict, repr=False, compare=False
     )
+    # One shared weakref on self, minted lazily on the first watched payload;
+    # every _PayloadWatcher holds this instead of a fresh per-payload ref.
+    _self_ref: weakref.ref | None = field(default=None, repr=False, compare=False)
 
     def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with the process-local release watchers stripped.
@@ -336,7 +398,8 @@ class SaveBudget:
         Returns
         -------
         dict[str, Any]
-            Instance state whose ``_payload_watchers`` map is empty.
+            Instance state whose ``_payload_watchers`` map is empty and whose
+            per-device ``retained_storage`` identity maps are empty.
 
         Notes
         -----
@@ -344,12 +407,34 @@ class SaveBudget:
         by construction and unpicklable. A restored accountant keeps its committed
         charges permanently (the same conservative direction as a payload that
         cannot be weak-referenced); the source accountant's live watchers are
-        untouched. Restored traces never capture again, so the lost crediting
-        cannot mis-admit a later save.
+        untouched.
+
+        The retained-storage identity maps ride with the watchers: an identity
+        key without its release watcher is a DEAD key that a later allocation
+        recycling the same ``data_ptr`` at equal size dedupes against for a
+        ZERO-byte commit — the exact ptr-reuse bug the watchers fixed.
+        ``Trace.fork()`` copies this accountant through this state (deepcopy
+        rides ``__getstate__``) and forks DO capture again (``run()`` /
+        ``save_new_outs`` refresh), so stripping one without the other re-opens
+        the corridor. With both stripped, a restored/forked accountant
+        re-charges fresh storage (conservative: at worst an alias double-count,
+        never a zero-commit).
         """
 
         state = self.__dict__.copy()
         state["_payload_watchers"] = {}
+        state["_self_ref"] = None
+        state["ledgers"] = {
+            key: _DeviceLedger(
+                committed_bytes=ledger.committed_bytes,
+                num_saved=ledger.num_saved,
+                limit_bytes=ledger.limit_bytes,
+                available_bytes=ledger.available_bytes,
+                measured=ledger.measured,
+                retained_storage={},
+            )
+            for key, ledger in self.ledgers.items()
+        }
         return state
 
     @classmethod
@@ -498,6 +583,52 @@ class SaveBudget:
         reserved_ledger.committed_bytes -= reservation.num_bytes
         reserved_ledger.num_saved -= 1
 
+        self._charge_physical(reservation.label, payloads, phase=_SITE_PHASES[reservation.site][1])
+
+    def charge_retained(
+        self,
+        label: str,
+        payloads: tuple[torch.Tensor | None, ...],
+    ) -> None:
+        """Charge already-allocated retained payloads with no prior admission.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in a refusal.
+        payloads:
+            RAM-retained tensors (non-tensors are skipped).
+
+        Notes
+        -----
+        For retained copies whose size is only knowable after they exist —
+        ``save_arg_values`` argument snapshots are the motivating case. Charges
+        are alias-aware and release-credited exactly like :meth:`commit`; the
+        refusal phase is the post-allocation reconciliation phase, matching the
+        transform-delta disclosure.
+        """
+
+        self._charge_physical(label, payloads, phase=_SITE_PHASES["primary"][1])
+
+    def _charge_physical(
+        self,
+        label: str,
+        payloads: tuple[torch.Tensor | None, ...],
+        *,
+        phase: str,
+    ) -> None:
+        """Charge alias-aware physical storage for retained payloads.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in a refusal.
+        payloads:
+            Retained payloads; non-tensors are skipped.
+        phase:
+            Accounting phase for a refusal raised here.
+        """
+
         for payload in payloads:
             if not isinstance(payload, torch.Tensor):
                 continue
@@ -515,12 +646,7 @@ class SaveBudget:
             self._watch_payload(payload, ledger_key, identity)
             ledger.committed_bytes += physical_bytes
             ledger.num_saved += 1
-            self._raise_if_over_budget(
-                reservation.label,
-                payload.device,
-                ledger,
-                phase=_SITE_PHASES[reservation.site][1],
-            )
+            self._raise_if_over_budget(label, payload.device, ledger, phase=phase)
 
     def _watch_payload(
         self,
@@ -546,17 +672,11 @@ class SaveBudget:
         keeps the historical permanent charge (conservative: never a zero-commit).
         """
 
-        budget_ref = weakref.ref(self)
-
-        def _on_release(ref: weakref.ref) -> None:
-            budget = budget_ref()
-            if budget is None:
-                return
-            budget._payload_watchers.pop(id(ref), None)
-            budget._credit_release(ledger_key, identity)
-
+        budget_ref = self._self_ref
+        if budget_ref is None:
+            budget_ref = self._self_ref = weakref.ref(self)
         try:
-            watcher = weakref.ref(payload, _on_release)
+            watcher = _PayloadWatcher(payload, budget_ref, ledger_key, identity)
         except TypeError:
             return
         self._payload_watchers[id(watcher)] = watcher
@@ -702,15 +822,44 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
     -------
     tuple[tuple[Any, ...], int]
         Stable identity while the retained storage is live, plus physical bytes.
+
+    Notes
+    -----
+    Sparse payloads (COO and compressed layouts) have no top-level storage;
+    they are identified and charged through their physical component storages
+    (index tensor(s) AND values). The historical fallback billed them at
+    ``numel() * element_size()`` — LOGICAL dense bytes — under an id-based
+    identity, so index storage went unledgered while the values were
+    overcounted at dense shape.
     """
 
     from ._state import pause_logging
 
     with pause_logging():
         try:
+            if tensor.layout is not torch.strided:
+                from .utils.tensor_utils import sparse_component_tensors
+
+                component_ptrs: list[int] = []
+                num_bytes = 0
+                for component in sparse_component_tensors(tensor):
+                    storage = component.untyped_storage()
+                    component_ptrs.append(int(storage.data_ptr()))
+                    num_bytes += int(storage.nbytes())
+                sparse_identity: tuple[Any, ...] = (
+                    str(tensor.device),
+                    str(tensor.layout),
+                    tuple(component_ptrs),
+                    num_bytes,
+                )
+                return sparse_identity, num_bytes
             storage = tensor.untyped_storage()
             num_bytes = int(storage.nbytes())
-            identity = (str(tensor.device), int(storage.data_ptr()), num_bytes)
+            identity: tuple[Any, ...] = (
+                str(tensor.device),
+                int(storage.data_ptr()),
+                num_bytes,
+            )
             return identity, num_bytes
         except Exception:
             num_bytes = int(tensor.numel() * tensor.element_size())

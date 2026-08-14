@@ -383,17 +383,23 @@ def _compute_call_depths(module_dict: dict[str, "Module"], root_module: "Module"
                 queue.append(child_addr)
 
 
-def _append_unique_child_label(child_labels: list[str], child_label: str) -> None:
+def _append_unique_child_label(
+    child_labels: list[str], seen_labels: set[str], child_label: str
+) -> None:
     """Append a child label if it has not been seen yet.
 
     Parameters
     ----------
     child_labels:
         Ordered list being accumulated.
+    seen_labels:
+        Membership set mirroring ``child_labels`` (the bare list scan made
+        each aggregate projection O(k^2) in its child count -- R52).
     child_label:
         Child label to append.
     """
-    if child_label not in child_labels:
+    if child_label not in seen_labels:
+        seen_labels.add(child_label)
         child_labels.append(child_label)
 
 
@@ -534,9 +540,11 @@ def _merge_layer_log_conditional_fields(
         )
         for branch_kind, child_labels in branch_children.items():
             merged_child_labels = merged_branch_children.setdefault(branch_kind, [])
+            merged_seen = set(merged_child_labels)
             for child_label in child_labels:
                 _append_unique_child_label(
                     merged_child_labels,
+                    merged_seen,
                     _strip_pass_suffix(child_label),
                 )
 
@@ -554,29 +562,35 @@ def _rebuild_layer_log_conditional_views(layer_log: "Layer") -> None:
     )
 
     conditional_entry_children: list[str] = []
+    entry_seen: set[str] = set()
     for _, pass_log in sorted(layer_log.ops.items()):
         for child_label in pass_log.conditional_entry_children:
             _append_unique_child_label(
                 conditional_entry_children,
+                entry_seen,
                 _strip_pass_suffix(child_label),
             )
     layer_log.conditional_entry_children = conditional_entry_children
 
     conditional_then_children: list[str] = []
+    then_seen: set[str] = set()
     conditional_elif_children: dict[int, list[str]] = {}
+    elif_seen_by_index: dict[int, set[str]] = {}
     conditional_else_children: list[str] = []
+    else_seen: set[str] = set()
     for branch_children in layer_log.conditional_arm_children.values():
         for child_label in branch_children.get("then", []):
-            _append_unique_child_label(conditional_then_children, child_label)
+            _append_unique_child_label(conditional_then_children, then_seen, child_label)
         for branch_kind, child_labels in branch_children.items():
             if not branch_kind.startswith("elif_"):
                 continue
             elif_index = int(branch_kind.split("_", 1)[1])
             elif_children = conditional_elif_children.setdefault(elif_index, [])
+            elif_seen = elif_seen_by_index.setdefault(elif_index, set())
             for child_label in child_labels:
-                _append_unique_child_label(elif_children, child_label)
+                _append_unique_child_label(elif_children, elif_seen, child_label)
         for child_label in branch_children.get("else", []):
-            _append_unique_child_label(conditional_else_children, child_label)
+            _append_unique_child_label(conditional_else_children, else_seen, child_label)
 
     layer_log.conditional_then_children = conditional_then_children
     layer_log.conditional_elif_children = conditional_elif_children
