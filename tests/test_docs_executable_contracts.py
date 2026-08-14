@@ -16,6 +16,8 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
 
+pytestmark = pytest.mark.smoke
+
 PYTHON_FENCE_RE = re.compile(r"```python\n(?P<code>.*?)\n```", re.DOTALL)
 
 

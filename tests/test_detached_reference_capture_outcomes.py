@@ -188,6 +188,8 @@ def test_module_class_and_default_refs_are_captured(corpus_env: _CorpusEnv) -> N
 from typing import Any
 from torch import relu, sigmoid, tanh
 
+pytestmark = pytest.mark.smoke
+
 module_ref = relu
 
 

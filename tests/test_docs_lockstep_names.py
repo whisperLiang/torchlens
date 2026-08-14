@@ -6,7 +6,11 @@ import importlib
 import re
 from pathlib import Path
 
+import pytest
+
 import torchlens as tl
+
+pytestmark = pytest.mark.smoke
 
 PUBLIC_SURFACE_SIZE = 96
 PUBLIC_SURFACE_DOCS = (
