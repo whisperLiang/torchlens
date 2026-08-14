@@ -298,8 +298,14 @@ def save(
 
     Warnings
     --------
-    Portable bundles contain a pickle file. Only load bundles from trusted
-    sources. Loading an untrusted bundle can execute arbitrary code.
+    Portable bundles contain a pickle file, but the default load path decodes
+    it through a restricted, default-deny unpickler: only allowlisted
+    constructors resolve, and foreign ``custom`` callable modules are never
+    imported unless explicitly trusted via ``trust_custom_callables=True`` or
+    ``allowed_custom_callable_modules=...``. The exposure is that residual
+    trust model, not ordinary arbitrary-code execution: opting into trusted
+    custom-callable execution imports and runs module top-level code, so only
+    grant it to artifacts whose provenance you trust.
     """
 
     # A MergedTrace is a presenter, never a Trace: tl.save() refuses it typed
@@ -1117,8 +1123,14 @@ def load(
 
     Warnings
     --------
-    Portable bundles contain a pickle file. Only load bundles from trusted
-    sources. Loading an untrusted bundle can execute arbitrary code.
+    Portable bundles contain a pickle file, but the default load path decodes
+    it through a restricted, default-deny unpickler: only allowlisted
+    constructors resolve, and foreign ``custom`` callable modules are never
+    imported unless explicitly trusted via ``trust_custom_callables=True`` or
+    ``allowed_custom_callable_modules=...``. The exposure is that residual
+    trust model, not ordinary arbitrary-code execution: opting into trusted
+    custom-callable execution imports and runs module top-level code, so only
+    grant it to artifacts whose provenance you trust.
     """
 
     # Load boundary: force every memoized class-owned static lookup to re-validate
