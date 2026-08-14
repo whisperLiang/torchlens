@@ -43,7 +43,7 @@ _ALIAS_RETRY_KINDS = ("label", "contains", "regex")
 #: hooks over ``torch.*`` calls that reject MLX arrays, so the curated
 #: appliers below are the genuine mechanism — anything outside this table
 #: refuses typed rather than half-working.
-_SUPPORTED_HELPER_NAMES = (
+_MLX_SUPPORTED_HELPER_NAMES = (
     "zero_ablate",
     "scale",
     "add",
@@ -302,7 +302,7 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
         return MLXHookApplier(identity, _replace)
     raise BackendUnsupportedError(
         f"MLX backend has no native application for intervention helper {name!r}; "
-        f"supported helpers are {', '.join(_SUPPORTED_HELPER_NAMES)}, plus callable "
+        f"supported helpers are {', '.join(_MLX_SUPPORTED_HELPER_NAMES)}, plus callable "
         "transforms written against mx.array. The torch helper factories build "
         "torch-only hooks that reject MLX arrays, so admitting them would silently "
         "fail; use a callable transform instead."

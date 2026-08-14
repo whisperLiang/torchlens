@@ -29,13 +29,18 @@ from ...validation.status import (
     REGION_REPLAY_PROVENANCE_KEY,
 )
 from ..registry import BackendUnsupportedError
-from .op_callback_capture import TFCaptureResult, TFInputCapture, TFOpCapture, TFSourceRecord
+from .op_callback_capture import (
+    _MAX_SNAPSHOT_BYTES,
+    TFCaptureResult,
+    TFInputCapture,
+    TFOpCapture,
+    TFSourceRecord,
+)
 
 _CONTROL_FLOW_OP_TYPES = frozenset(
     {"If", "StatelessIf", "While", "StatelessWhile", "Case", "Switch", "Merge"}
     | {"StatefulPartitionedCall"}
 )
-_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)

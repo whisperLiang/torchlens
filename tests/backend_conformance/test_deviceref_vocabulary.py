@@ -97,3 +97,30 @@ def test_paddle_place_normalizer_yields_hardware_class(
 @pytest.mark.smoke
 def test_paddle_place_normalizer_unknown_is_none() -> None:
     assert _device_ref_from_paddle_place(None) is None
+
+
+@pytest.mark.smoke
+def test_unknown_module_identity_mode_refuses_typed_on_all_five_previews() -> None:
+    """An unknown module_identity_mode is a CAPABILITY refusal on every preview.
+
+    jax historically raised a bare ValueError while the four siblings raised
+    BackendUnsupportedError (R17-7); the resolvers are pure functions, so the
+    parity is pinned runtime-free.
+    """
+
+    from torchlens.backends import BackendUnsupportedError
+    from torchlens.backends.jax.backend import _resolve_jax_module_identity_mode
+    from torchlens.backends.mlx.backend import _resolve_mlx_module_identity_mode
+    from torchlens.backends.paddle.backend import _resolve_paddle_module_identity_mode
+    from torchlens.backends.tf.backend import _resolve_tf_module_identity_mode
+    from torchlens.backends.tinygrad.backend import _resolve_tinygrad_module_identity_mode
+
+    for resolver in (
+        _resolve_jax_module_identity_mode,
+        _resolve_mlx_module_identity_mode,
+        _resolve_paddle_module_identity_mode,
+        _resolve_tf_module_identity_mode,
+        _resolve_tinygrad_module_identity_mode,
+    ):
+        with pytest.raises(BackendUnsupportedError, match="module_identity_mode"):
+            resolver("bogus_mode", None)

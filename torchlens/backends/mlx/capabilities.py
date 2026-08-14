@@ -13,6 +13,7 @@ supports_intervention = _CAPABILITIES.interventions
 supports_intermediate_derived_grads = _CAPABILITIES.intermediate_derived_grads
 supports_payload_materialization = _CAPABILITIES.payload_materialization
 supports_rng_replay = _CAPABILITIES.rng_replay
+supports_streaming = _CAPABILITIES.streaming
 supports_validation_replay = _CAPABILITIES.validation_replay
 input_container_structure = _CAPABILITIES.input_container_structure
 output_container_structure = _CAPABILITIES.output_container_structure
@@ -29,6 +30,7 @@ __all__ = [
     "supports_intermediate_derived_grads",
     "supports_payload_materialization",
     "supports_rng_replay",
+    "supports_streaming",
     "supports_validation_replay",
     "module_identity_modes",
     "payload_policy",

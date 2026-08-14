@@ -2698,7 +2698,9 @@ def _resolve_jax_module_identity_mode(
     """
 
     if value not in {None, "function_root", "pytree_module"}:
-        raise ValueError(
+        # Typed like the four sibling previews: an unknown identity mode is a
+        # capability refusal, not a plain value error.
+        raise BackendUnsupportedError(
             "JAX module_identity_mode must be None, 'function_root', or 'pytree_module'."
         )
     if value == "pytree_module" and module_tree is None:
