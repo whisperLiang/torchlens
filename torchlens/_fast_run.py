@@ -44,6 +44,7 @@ from ._runnable_execution import (
     _output_container_spec,
     _output_not_reproduced,
     _path_faithfulness,
+    _post_execution_contract_checks,
     _raise_failed_contract_as_divergence,
     _raise_first_divergence,
     _require_loaded_sparse_provider,
@@ -889,6 +890,25 @@ class _FastSparseSession:
             if host_rng_saved is not None:
                 restore_host_rng(host_rng_saved)
         output = self._reconstruct_output(slot_values, call_outputs, ceiling=ceiling)
+        # The ordinary transaction's per-run contract-check set, verbatim: the
+        # input-structure (r67 C2), container, and conditional-arm-entry
+        # witness families have their ONLY runtime consumer here, so skipping
+        # it left an exact-class-swapped container input replaying the
+        # recorded path with a wrong value stamped verified.
+        post_checks = _post_execution_contract_checks(
+            self.descriptor,
+            inputs=inputs,
+            output=output,
+            slot_values=slot_values,
+            fork=self.target,
+        )
+        checks.extend(post_checks)
+        failed_post = next((check for check in post_checks if not check.passed), None)
+        if failed_post is not None:
+            # This iteration's saved activations are already refreshed on the
+            # reused target; poison before raising, as in the mid-loop arm.
+            mark_trace_path_status(self.target, PathFaithfulness.DIVERGED, failed_post.diagnostic)
+            _raise_failed_contract_as_divergence(failed_post, fork=None)
         checks.append(
             _contract_check(
                 "fast_static_guard",

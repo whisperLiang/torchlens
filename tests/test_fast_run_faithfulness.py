@@ -506,3 +506,103 @@ def test_fast_sparse_mid_loop_divergence_poisons_reused_target(tmp_path: Path) -
         loaded.run(inputs=-torch.ones(2, 3) * 5, fast=True)
 
     assert ok.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
+
+
+def test_fast_sparse_runs_post_execution_contract_checks(tmp_path: Path) -> None:
+    """An exact-class-swapped container input diverges under BOTH providers.
+
+    ``fast=True`` skipped ``_post_execution_contract_checks`` entirely, so
+    the ``input_structure``/``container``/``conditional_arm_entry`` witness
+    families had NO fast-provider consumer: a namedtuple input whose exact
+    class changed passed the fast input contract (identical leaves/literals)
+    and the recorded path replayed with a numerically wrong output stamped
+    verified, where ``fast=False`` on the same artifact and input raises.
+    """
+
+    import collections
+
+    from torchlens.errors import PathDivergenceError
+
+    box_a = collections.namedtuple("BoxA", ["t"])
+    box_b = collections.namedtuple("BoxB", ["t"])
+
+    class ClassRoutedModel(nn.Module):
+        """Route on the exact input container class."""
+
+        def forward(self, box: object) -> torch.Tensor:
+            """Scale by a class-identity-selected constant."""
+
+            return box.t * (2.0 if type(box).__name__ == "BoxA" else 3.0)
+
+    model = ClassRoutedModel().eval()
+    tensor = torch.ones(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(
+            model,
+            box_a(t=tensor),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    path = tmp_path / "m.tlspec"
+    tl.save(captured, path, level="runnable", include_weights=True)
+
+    ordinary = tl.load(path)
+    with pytest.raises(PathDivergenceError):
+        ordinary.run(inputs=box_b(t=tensor))
+
+    fast = tl.load(path)
+    verify_once = fast.run(inputs=box_a(t=tensor), fast=True)
+    assert verify_once.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with pytest.raises(PathDivergenceError):
+        fast.run(inputs=box_b(t=tensor), fast=True)
+    assert verify_once.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
+
+
+def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
+    """Every registry runtime consumer is reachable from the fast provider.
+
+    The r71 registry-closure meta-test only asserts the consumer NAME exists;
+    nothing gated the fast provider against the declared consumer set, so a
+    family added to ``_post_execution_contract_checks`` could silently miss
+    ``fast=True`` with no test failure (exactly how the input_structure/
+    container/conditional_arm_entry gap shipped).
+    """
+
+    import inspect
+
+    import torchlens._fast_run as fast_run_module
+    from torchlens.runnable import WITNESS_FAMILY_REGISTRY
+
+    source = inspect.getsource(fast_run_module)
+    # Consumers reached transitively through helpers the fast provider calls:
+    # the three structure-family checks run inside the shared
+    # _post_execution_contract_checks aggregator, and state_metadata facts are
+    # reproduced by run preparation.
+    transitive_anchors = {
+        "_post_execution_contract_checks": (
+            "_conditional_arm_check",
+            "_input_structure_witness_check",
+            "_structure_witness_check",
+        ),
+        "prepare_runnable_state": ("_apply_state_metadata_facts",),
+    }
+    reachable = set()
+    for anchor, consumers in transitive_anchors.items():
+        if anchor in source:
+            reachable.update(consumers)
+    symbolic = {"terminal_slot_accounting", "strict_state_preparation"}
+    missing = [
+        (family, spec.runtime_consumer)
+        for family, spec in WITNESS_FAMILY_REGISTRY.items()
+        if spec.runtime_consumer not in source
+        and spec.runtime_consumer not in reachable
+        and spec.runtime_consumer not in symbolic
+    ]
+    assert missing == [], (
+        "witness families with no fast-provider consumer (add the consumer to "
+        f"_FastSparseSession.run or declare its transitive anchor): {missing}"
+    )
