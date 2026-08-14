@@ -434,6 +434,14 @@ def test_torch_capability_snapshot_contract() -> None:
         # runtime capabilities of the interpreter, so mirror the live values.
         "HAS_CODE_POSITIONS": tc.HAS_CODE_POSITIONS,
         "HAS_CODE_QUALNAME": tc.HAS_CODE_QUALNAME,
+        # Identity-shim sites (sf-fastpath): torch-internal `x is F.y` checks
+        # normalized while wrappers are installed. The transformer flag and the
+        # private expanded-weights machinery exist across the supported range
+        # (hardcoded True); CausalBias postdates the floor, so mirror the live
+        # value (its absence is OPTIONAL, a healthy old-torch install).
+        "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG": True,
+        "HAS_ATTENTION_CAUSAL_BIAS": tc.HAS_ATTENTION_CAUSAL_BIAS,
+        "HAS_EXPANDED_WEIGHTS_CONV_PICKER": True,
         "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
         # r35 decision E: ambient execution-context knobs are feature-detected and
         # surfaced in the capability snapshot (values are runtime-dependent).
