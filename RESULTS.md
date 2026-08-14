@@ -2,6 +2,12 @@
 
 Public summary of TorchLens test suite outcomes. Updated after each release.
 
+> **HISTORICAL SNAPSHOT — the figures below describe the v0.18.0-era suite (2026-03-08)
+> and are far below the current suite.** As of 2026-08-14 the suite collects 12,093 tests
+> with 4,412 in the `smoke` tier (see `CLAUDE.md` "Testing Tiers" for current tier
+> definitions and measured costs). The per-file table below is retained as a dated record
+> until this page is regenerated.
+
 **Last updated**: v0.18.0 · 2026-03-08 · PyTorch 2.8 · CPU + CUDA
 
 ---
