@@ -1023,6 +1023,68 @@ def test_index_put_overwrite_proof_rejects_negative_index_aliasing() -> None:
     assert _index_put_destination_is_fully_overwritten(dest, negative_full_layer)
 
 
+def test_equivalence_symmetry_catches_suffixed_in_module_group_corruption() -> None:
+    """Symmetric group corruption on a suffixed in-module layer must FAIL.
+
+    Per-op ``equivalence_class`` carries the module suffix appended at op
+    creation, while ``trace.op_equivalence_classes`` keys are pre-suffix, so
+    the key-based group lookup missed for EVERY parameterized in-module layer
+    and the group-symmetry comparison silently skipped: corrupting
+    ``equivalent_ops`` identically on all passes of a shared Linear (and its
+    Layer, keeping the pass-agreement checks satisfied) passed the full
+    invariant suite while the same corruption on an unsuffixed op was caught
+    instantly (deephunt finding H4). Membership lookup restores the invariant.
+    """
+
+    class SharedLinearModel(nn.Module):
+        """Model applying one Linear twice so its passes form a group."""
+
+        def __init__(self) -> None:
+            """Initialize the model."""
+
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the shared linear twice.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Twice-transformed output.
+            """
+
+            return self.lin(self.lin(x))
+
+    model = SharedLinearModel().eval()
+    trace = tl.trace(model, torch.randn(2, 4))
+    check_metadata_invariants(trace)
+
+    linear_ops = [op for op in trace.layer_list if op.func_name == "linear"]
+    assert len(linear_ops) == 2
+    # The vacuousness precondition: the suffixed per-op key misses the
+    # pre-suffix trace-dict keys, while membership still resolves the group.
+    assert all(op.equivalence_class not in trace.op_equivalence_classes for op in linear_ops), (
+        "suffix mismatch precondition gone -- update or retire this regression test"
+    )
+    expected_group = {op.label for op in linear_ops}
+    assert any(group == expected_group for group in trace.op_equivalence_classes.values())
+
+    wrong_group = {linear_ops[0].label}
+    for op in linear_ops:
+        op.equivalent_ops = set(wrong_group)
+    layer = trace.layer_logs[linear_ops[0].layer_label]
+    layer.equivalent_ops = set(wrong_group)
+
+    with pytest.raises(MetadataInvariantError, match="equivalent_ops"):
+        check_metadata_invariants(trace)
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 
