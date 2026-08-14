@@ -193,7 +193,16 @@ def _payloads_close(a: Any, b: Any) -> bool:
     if a_np.shape != b_np.shape or a_np.dtype != b_np.dtype:
         return False
     if a_np.dtype.kind in ("f", "c"):
-        tolerance = 1e-2 if a_np.dtype.itemsize <= 2 else 1e-5
+        # Per-dtype bands: fp16 (eps 9.8e-4) was lumped with every other
+        # 2-byte float under one 1e-2 band -- ~10x looser than fp16's own ULP
+        # scale, sized for bf16 (eps 7.8e-3). fp16 now gets its own ~1-ULP
+        # band; other 2-byte floats (the bf16 class) keep 1e-2.
+        if a_np.dtype == np.float16:
+            tolerance = 1e-3
+        elif a_np.dtype.itemsize <= 2:
+            tolerance = 1e-2
+        else:
+            tolerance = 1e-5
         return bool(np.allclose(a_np, b_np, rtol=tolerance, atol=tolerance, equal_nan=True))
     return bool(np.array_equal(a_np, b_np))
 

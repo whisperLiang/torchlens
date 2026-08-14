@@ -471,11 +471,16 @@ def _within_layout_reduction_tolerance(recomputed: torch.Tensor, archived: torch
     archived64 = archived64[finite_mask]
     difference = (recomputed64 - archived64).abs()
     eps = float(torch.finfo(archived.dtype).eps)
-    # 256 ULP relative + absolute floor: comfortably covers reduction-order noise
-    # (verified ~5e-7 for float32 == ~4 ULP on eval MHA) while a corruption stays
-    # hundreds of times larger. Scaled by dtype so fp16/bf16 keep a proportional
-    # band and fp64 a far tighter one.
-    tolerance = 256.0 * eps * (archived64.abs() + 1.0)
+    # 64 ULP relative + absolute floor. Observed basis: reduction-order noise
+    # on eval MHA measures ~5e-7 for float32 == ~4 ULP, so 64 gives 16x
+    # headroom over the worst observation while a real corruption (sign flip,
+    # stale buffer, zeroed value) stays thousands of ULPs outside the band.
+    # The former 256 (64x headroom) was asserted from that single observation
+    # with no derivation and classified 4x more divergence as "benign"; this
+    # band gates a not_applicable-instead-of-raise downgrade, so looseness
+    # here silently launders corruption. Scaled by dtype eps so fp16/bf16
+    # keep a proportional band and fp64 a far tighter one.
+    tolerance = 64.0 * eps * (archived64.abs() + 1.0)
     return bool((difference <= tolerance).all().item())
 
 

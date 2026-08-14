@@ -1034,7 +1034,11 @@ def _payloads_close(left: Any, right: Any) -> bool:
     if np.issubdtype(left_array.dtype, np.bool_) or np.issubdtype(left_array.dtype, np.integer):
         return bool(np.array_equal(left_array, right_array))
     if np.issubdtype(left_array.dtype, np.floating):
-        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6))
+        # equal_nan matches the jax/mlx/paddle sibling oracles and torch's
+        # tensor_nanequal doctrine: an identical NaN pattern is agreement,
+        # NaN-vs-number still fails elementwise. Omitting it false-FAILED
+        # every legitimately NaN-bearing TF payload.
+        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
 
 

@@ -180,7 +180,10 @@ def _payloads_close(a: Any, b: Any) -> bool:
     if np.issubdtype(left.dtype, np.bool_) or np.issubdtype(left.dtype, np.integer):
         return bool(np.array_equal(left, right))
     if np.issubdtype(left.dtype, np.floating):
-        return bool(np.allclose(left, right, rtol=1e-5, atol=1e-6))
+        # equal_nan matches this backend's own replay oracle
+        # (paddle/backend.py) and every sibling: identical NaN patterns are
+        # agreement, NaN-vs-number still fails elementwise.
+        return bool(np.allclose(left, right, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left, right))
 
 
