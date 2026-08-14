@@ -218,3 +218,28 @@ def test_backward_finalize_drains_pending_cpu_async_copies() -> None:
     finally:
         if fence in tensor_utils._CPU_ASYNC_PENDING_EVENTS:
             tensor_utils._CPU_ASYNC_PENDING_EVENTS.remove(fence)
+
+
+@pytest.mark.smoke
+def test_backward_graph_task_id_routes_through_torch_compat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The graph-task-id probe routes through the _torch_compat chokepoint.
+
+    The LOCKED compat doctrine requires every fragile torch-private-API probe
+    to flip a named HAS_* capability flag; the inline
+    ``getattr(torch._C, "_current_graph_task_id", None)`` probe bypassed it.
+    """
+
+    from torchlens.backends.torch import tensor_tracking
+    from torchlens.utils import _torch_compat
+
+    assert hasattr(_torch_compat, "HAS_CURRENT_GRAPH_TASK_ID")
+    assert "HAS_CURRENT_GRAPH_TASK_ID" in _torch_compat._CAPABILITY_ATTRS
+
+    # Routing: the hook-side helper must consume the compat accessor, not a
+    # private inline torch._C probe.
+    monkeypatch.setattr(tensor_tracking, "get_current_graph_task_id_fn", lambda: lambda: 42)
+    assert tensor_tracking._current_backward_graph_task_id() == 42
+    monkeypatch.setattr(tensor_tracking, "get_current_graph_task_id_fn", lambda: None)
+    assert tensor_tracking._current_backward_graph_task_id() is None

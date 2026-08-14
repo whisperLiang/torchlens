@@ -362,6 +362,12 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_DEVICE_CONTEXT_DISPATCH": True,
         "HAS_DEVICE_CONSTRUCTORS": True,
         "HAS_ACCUMULATE_GRAD_CLASS": True,
+        # fix-bwgrad F6: the autograd graph-task-id resolver distinguishes
+        # separate engine invocations for implicit backward pass boundaries.
+        # torch._C._current_graph_task_id is present across the whole
+        # supported range -- hardcoded True as a tripwire; a build without it
+        # degrades to the open-bracket heuristic behind this named flag.
+        "HAS_CURRENT_GRAPH_TASK_ID": True,
         "HAS_FX_GRAPH_MODULE": True,
         "HAS_NAMED_TENSOR_API": tc.HAS_NAMED_TENSOR_API,
         "HAS_CACHED_UNTYPED_STORAGE_WRAPPER": tc.HAS_CACHED_UNTYPED_STORAGE_WRAPPER,

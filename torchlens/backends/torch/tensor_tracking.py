@@ -18,6 +18,7 @@ from ...data_classes.op import Op
 from ...fastlog.types import CaptureSpec
 from ...intervention.selectors import BaseSelector
 from ...ir.events import BackwardPassStart, OpGradObserved
+from ...utils._torch_compat import get_current_graph_task_id_fn
 from ...utils.display import _record_phase_timing
 from ...utils.hashing import make_random_barcode, make_short_barcode_from_input
 from ...utils.tensor_utils import SaveMode, safe_copy
@@ -321,7 +322,7 @@ def _current_backward_graph_task_id() -> int | None:
         installed torch build exposes no such capability.
     """
 
-    resolver = getattr(torch._C, "_current_graph_task_id", None)
+    resolver = get_current_graph_task_id_fn()
     if resolver is None:
         return None
     try:
