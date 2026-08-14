@@ -88,6 +88,7 @@ step 17.5 (the contracted container-adoption + workspace-drop seam).
 | 10 | `_rename_model_history_layer_names` | Rename global refs (field reorder removed — scrub order is now deterministic) |
 | 11 | `_build_lookup_keys_and_finalize_retained_layers` | Build lookup keys and finalize retained layer lists |
 | 11.5 | `_populate_var_names` | Resolve source assignment names through `ast_branches.py` |
+| 11.75 | executor `_run_step_11_75` | Resolve deferred retention decisions through the attached `CaptureSession` (saves selected payloads; runs only when a capture session is attached) |
 | 12 | `_undecorate_all_saved_tensors` | Strip TorchLens attrs from saved tensors |
 | 13 | `torch.cuda.empty_cache` | Optional CUDA cache clear |
 | 14 | `_log_time_elapsed` | Capture timing |

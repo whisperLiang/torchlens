@@ -153,8 +153,8 @@ Save everything, or select exactly what you need:
 # Save only relu activations
 log = tl.trace(model, x, save=tl.func('relu'))
 
-# Save all ops inside the 'encoder' submodule
-log = tl.trace(model, x, save=tl.in_module('encoder'))
+# Save all ops inside the 'classifier' submodule
+log = tl.trace(model, x, save=tl.in_module('classifier'))
 
 # Save conv2d ops that are immediately followed by a relu, keeping a 4-op lookback window
 conv_before_relu = tl.func('conv2d') & tl.followed_by(tl.func('relu'))
@@ -162,7 +162,7 @@ log = tl.trace(model, x, save=conv_before_relu,
                lookback=4, lookback_payload_policy='detached_raw')
 
 # Stop capture early (can be faster than a plain forward pass)
-log = tl.trace(model, x, save=tl.in_module('layer2'), halt=tl.in_module('layer2'))
+log = tl.trace(model, x, save=tl.in_module('features.6'), halt=tl.in_module('features.6'))
 
 # Lightweight sparse recording for tight loops -- materialize structure later
 recording = tl.record(model, x, save=tl.func('relu'))
@@ -171,11 +171,10 @@ trace = recording.to_trace()
 # One-line activation pull
 act = tl.pluck(model, x, 'relu_1_2')   # returns tensor directly
 
-# Batch extraction across a dataset
-# `dataset` is an application-provided iterable of input batches; for example:
-# dataset = [torch.randn(1, 3, 224, 224) for _ in range(8)]
+# Batch extraction across a dataset (any iterable of unbatched samples works)
+dataset = [torch.randn(3, 224, 224) for _ in range(8)]
 tl.extract_dataset(model, dataset, layers=['relu_1_2', 'conv2d_3_7'],
-                   batch_size=32, output_dir='/tmp/torchlens-activations/')
+                   batch_size=32, output_dir='torchlens-activations/')
 ```
 
 **Performance note:** With `halt=` and `tl.record`, capture can run *faster
@@ -229,7 +228,9 @@ rf = target.receptive_field
 unit = rf.center_unit(batch_index=0)
 box = rf.at((3, 3))
 check = rf.check(unit)
-outgoing = target.projective_field.at((3, 3))
+# Projective geometry needs a windowed path; AlexNet's dense classifier head is not,
+# so select a downstream conv endpoint explicitly with target=.
+outgoing = target.projective_field.at((3, 3), target=log['features.8'])
 ```
 
 <img src="images/receptive_projective_fields.svg" width="70%" alt="Receptive and projective field directions through a neural-network graph">
@@ -306,11 +307,11 @@ class SimpleRecurrent(torch.nn.Module):
             x = x * 2
         return x
 
-model = SimpleRecurrent()
-x = torch.randn(6, 5)
-log = tl.trace(model, x)
-print(log['linear_1:2'].out)     # second pass of the linear layer
-log.draw(vis_mode='rolled')
+recurrent_model = SimpleRecurrent()
+seq = torch.randn(6, 5)
+recurrent_log = tl.trace(recurrent_model, seq)
+print(recurrent_log['linear_1:2'].out)     # second pass of the linear layer
+recurrent_log.draw(vis_mode='rolled')
 ```
 
 ### 5. Interventions
@@ -342,8 +343,11 @@ for the full reference.
 Compare multiple runs side by side with `tl.bundle`:
 
 ```python
+clean_log = tl.trace(model, x, save=tl.func('relu'))
+patched_log = tl.trace(model, x, save=tl.func('relu'),
+                       intervene=tl.when(tl.func('relu'), tl.zero_ablate()))
 bundle = tl.bundle({'clean': clean_log, 'patched': patched_log}, baseline='clean')
-bundle.compare_at(tl.func('relu'))
+bundle.compare_at('relu_1_2')   # one site; a multi-site selector must resolve uniquely
 ```
 
 **Facets** provide named sub-views for attention heads, LSTM outputs, and
@@ -353,6 +357,7 @@ The following is an API sketch; `vit_model` and `lstm` must be models whose modu
 structures provide the shown paths, and are not defined by this generic example.
 
 ```python
+# API sketch; `vit_model` and `lstm` are application-supplied models with these paths.
 # ViT / transformer model with attention blocks
 log = tl.trace(vit_model, x)
 q = log.modules['blocks.0.attn'].facets['q']    # query vectors for head 0
@@ -470,11 +475,11 @@ Use the provisional address-free structural hash to catch an unintended graph ch
 pinning model weights or module names:
 
 ```python
-# `model` and `example_input` must be supplied by the application.
+# `model` and `x` are your model and a representative example input.
 import torchlens as tl
 
-pinned = tl.assert_unchanged(model, example_input, expected=None)  # prints and returns a hash
-tl.assert_unchanged(model, example_input, pinned)  # raises if the architecture changes
+pinned = tl.assert_unchanged(model, x, expected=None)  # prints and returns a hash
+tl.assert_unchanged(model, x, pinned)  # raises if the architecture changes
 ```
 
 See [`tl.hash`](docs/reference/hash.md) for trace-level hashing and its structural scope.
@@ -493,10 +498,19 @@ print(compat.to_markdown())
 input tensors, CUDA visibility, and common framework markers, then reports
 each row as `pass`, `known_broken`, `scope`, or `not_tested`.
 
-TorchLens is **not** compatible with `torch.compile`'d models, TorchScript,
-or `torch.export` -- the forward pass does not run as ordinary Python, so the
-wrappers cannot intercept ops. It also has specific behaviors around FSDP,
-sparse tensors, meta tensors, quantization, and `torch.func.vmap`.
+`torch.compile` coexists with capture. On torch >= 2.6, every capture holds the
+public `torch.compiler.set_stance("force_eager")` scoped to the forward, so
+compiled regions run their original eager Python: the interior is fully logged
+with full verified semantics, zero graph breaks or new compiles happen during
+capture, compiled caches stay intact, and wrapper install/uninstall costs at
+most one bounded recompile on the next compiled call. On torch < 2.6 the
+historical fallback holds: a Dynamo-traced region reached mid-capture is
+bypassed with a one-per-forward warning and the returned trace honestly
+contains only what ran outside it (`capture_verified=False`, reason
+`"dynamo_region_not_logged"`). TorchLens remains **not** compatible with
+TorchScript or `torch.export` -- those forwards do not run as ordinary Python,
+so the wrappers cannot intercept ops. It also has specific behaviors around
+FSDP, sparse tensors, meta tensors, quantization, and `torch.func.vmap`.
 
 See [LIMITATIONS.md](docs/LIMITATIONS.md) for the full matrix: what fails, what
 works, and the recommended workaround for each context.
