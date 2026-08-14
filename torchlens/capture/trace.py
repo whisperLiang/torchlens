@@ -1904,14 +1904,31 @@ def run_and_log_inputs_through_model(
                     warnings.warn(note, RuntimeWarning, stacklevel=2)
             self.__dict__.pop("_capture_producer_policy", None)
         finally:
-            settle_failed(
-                self,
-                capture_session,
-                interrupt_exc,
-                interrupted=True,
-                n_ops_committed=committed_ops,
-            )
-            _scrub_failed_capture_transients(self)
+            try:
+                settle_failed(
+                    self,
+                    capture_session,
+                    interrupt_exc,
+                    interrupted=True,
+                    n_ops_committed=committed_ops,
+                )
+                _scrub_failed_capture_transients(self)
+            except Exception as settle_exc:
+                # B8-23 applies here too: an ordinary settlement/scrub failure
+                # inside this ``finally`` would replace the unwinding
+                # KeyboardInterrupt/SystemExit (demoting it to __context__),
+                # letting a caller's ``except Exception`` swallow Ctrl-C.
+                # Attach the failure to the interrupt instead; an unsettled
+                # outcome reads UNKNOWN (most restrictive), never blessed.
+                note = (
+                    "TorchLens settlement/scrub also failed while handling "
+                    f"this interrupt: {type(settle_exc).__name__}: {settle_exc}"
+                )
+                add_note = getattr(interrupt_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
         raise
 
     finally:
@@ -1922,6 +1939,11 @@ def run_and_log_inputs_through_model(
         # Placed before the teardown ladder so a teardown double-fault cannot
         # skip it.
         _drop_semantic_output_transients(self)
+        # Snapshot the exception this ``finally`` is unwinding through (None on
+        # the normal return path): the teardown double-fault guard below needs
+        # to know whether an ordinary teardown Exception would be replacing a
+        # control-flow BaseException.
+        inflight_exc = sys.exc_info()[1]
         try:
             try:
                 _clear_saved_activation_dedup_caches(self)
@@ -1944,4 +1966,26 @@ def run_and_log_inputs_through_model(
                 capture_session,
                 note=f"teardown failed: {type(teardown_exc).__name__}: {teardown_exc}",
             )
+            if (
+                inflight_exc is not None
+                and not isinstance(inflight_exc, Exception)
+                and isinstance(teardown_exc, Exception)
+            ):
+                # R63 (B8-23 one frame out): an ordinary teardown Exception
+                # must not replace an unwinding KeyboardInterrupt/SystemExit
+                # (demoting it to ``__context__``), or a caller's
+                # ``except Exception`` retry loop swallows Ctrl-C. Keep the
+                # demotion, attach the teardown failure, and re-raise the
+                # ORIGINAL interrupt (the teardown exception stays visible as
+                # its ``__context__``).
+                note = (
+                    "TorchLens post-settlement teardown also failed while handling "
+                    f"this interrupt: {type(teardown_exc).__name__}: {teardown_exc}"
+                )
+                add_note = getattr(inflight_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
+                raise inflight_exc
             raise
