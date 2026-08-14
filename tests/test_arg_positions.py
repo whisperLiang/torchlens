@@ -14,7 +14,10 @@ from torchlens import _state
 from torchlens.capture.arg_positions import FUNC_ARG_SPECS, _normalize_func_name
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_OUTPUTS_DIR = opj(TESTS_DIR, "generated_outputs")
+# Session-private output root (conftest pytest_configure exports it before
+# collection); the historical repo-local tests/generated_outputs fallback
+# raced across parallel worktree lanes (b2p2 R77).
+TEST_OUTPUTS_DIR = os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR", opj(TESTS_DIR, "generated_outputs"))
 REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
 
 
