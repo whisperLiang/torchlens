@@ -213,8 +213,17 @@ def _population_state(value: Any) -> str:
     return "populated"
 
 
-def _flatten_nested_population(value: Any, prefix: str, result: dict[str, str]) -> None:
+def _flatten_nested_population(
+    value: Any, prefix: str, result: dict[str, str], depth: int = 0
+) -> None:
     """Flatten selected nested dataclass population into dotted paths.
+
+    Descent is DEPTH-BOUNDED: the record decomposition introduced facets that
+    reference large producer-side object graphs (``recording.record_context``
+    reaches the whole sparse-recorder context), and an unbounded walk turned
+    the goldens into hundreds of megabytes. Three levels covers every
+    per-op capture fact shape (``facet.field``, ``list[i].field``) while
+    anything deeper collapses to its own population scalar.
 
     Parameters
     ----------
@@ -224,20 +233,23 @@ def _flatten_nested_population(value: Any, prefix: str, result: dict[str, str]) 
         Current field path.
     result:
         Destination population mapping.
+    depth:
+        Current nesting depth below the event field.
     """
 
-    if is_dataclass(value) and not isinstance(value, type):
+    if depth < 3 and is_dataclass(value) and not isinstance(value, type):
         for field_info in fields(value):
             child = getattr(value, field_info.name)
-            _flatten_nested_population(child, f"{prefix}.{field_info.name}", result)
+            _flatten_nested_population(child, f"{prefix}.{field_info.name}", result, depth + 1)
         return
     if (
-        isinstance(value, (tuple, list))
+        depth < 3
+        and isinstance(value, (tuple, list))
         and value
         and all(is_dataclass(item) and not isinstance(item, type) for item in value)
     ):
         for index, item in enumerate(value):
-            _flatten_nested_population(item, f"{prefix}[{index}]", result)
+            _flatten_nested_population(item, f"{prefix}[{index}]", result, depth + 1)
         return
     result[prefix] = _population_state(value)
 
@@ -265,13 +277,32 @@ def _event_population(event: OpEvent) -> dict[str, str]:
         "backend_semantics",
         "policy",
     }
+    # The P1/P7 record decomposition changed the storage layout twice over:
+    # facet containers became the dataclass fields (``core``, ``graph``,
+    # ``ancestry``, ...), and the seven declared nested views became
+    # facet-backed PROPERTIES that ``fields(event)`` no longer yields. Either
+    # change alone silently collapsed this oracle's population coverage
+    # (~80 paths -> ~25). Flatten EVERY dataclass-valued field generically
+    # (``_flatten_nested_population`` already classifies non-dataclass values
+    # as scalars) and read the declared nested views through ``getattr``, so
+    # the characterization keeps maximal flat coverage regardless of how the
+    # record stores its facts.
+    # Producer-side context objects whose CONTENTS are the recorder's own
+    # object graph, not per-op capture facts: characterize their presence
+    # only (unbounded descent through record_context reached megabytes of
+    # sparse-recorder internals per event).
+    opaque_fields = {"recording", "record_context"}
     result: dict[str, str] = {}
+    seen: set[str] = set()
     for field_info in fields(event):
+        seen.add(field_info.name)
         value = getattr(event, field_info.name)
-        if field_info.name in nested_fields:
-            _flatten_nested_population(value, field_info.name, result)
-        else:
+        if field_info.name in opaque_fields:
             result[field_info.name] = _population_state(value)
+        else:
+            _flatten_nested_population(value, field_info.name, result)
+    for name in sorted(nested_fields - seen):
+        _flatten_nested_population(getattr(event, name), name, result)
     for path in _GROUND_TRUTH_EXCLUDED_POPULATION_PATHS:
         result.pop(path, None)
     return dict(sorted(result.items()))
