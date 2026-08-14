@@ -43,6 +43,7 @@ import torch
 from .errors._base import CaptureError
 
 __all__ = [
+    "ACCOUNTING_PHASES",
     "DEFAULT_SAVE_BUDGET_FRACTION",
     "SaveBudget",
     "SaveBudgetExceededError",
@@ -278,6 +279,15 @@ _SITE_PHASES = {
 
 _ADMISSION_PHASES = frozenset(phases[0] for phases in _SITE_PHASES.values())
 
+ACCOUNTING_PHASES: tuple[str, ...] = tuple(
+    phase for phases in _SITE_PHASES.values() for phase in phases
+)
+"""Closed vocabulary of ``accounting_phase`` values on ``SaveBudgetExceededError``.
+
+Every refusal's ``fields["accounting_phase"]`` is one of these; callers branch on
+this vocabulary, never on message text.
+"""
+
 
 @dataclass(frozen=True)
 class _BudgetReservation:
@@ -300,15 +310,14 @@ class SaveBudget:
 
     Notes
     -----
-    ``charge`` is on the capture hot path, once per retained payload. It is one
-    dict lookup, one integer add, and one compare in the common case; device
-    headroom is measured lazily on a device's first charge, so a capture that
-    retains nothing pays nothing.
+    ``admit`` and ``commit`` are on the capture hot path, once per retained
+    payload. Each is a few dict lookups, integer adds, and one compare in the
+    common case; device headroom is measured lazily on a device's first charge,
+    so a capture that retains nothing pays nothing.
     """
 
     spec: _BudgetSpec
     ledgers: dict[str, _DeviceLedger] = field(default_factory=dict)
-    tripped: bool = False
     # Keyed by id(watcher): weakref containers hash/compare through the live
     # referent, and tensor ``==`` is elementwise (and wrapped during capture).
     _payload_watchers: dict[int, weakref.ref] = field(
@@ -543,32 +552,6 @@ class SaveBudget:
         ledger.committed_bytes -= entry.physical_bytes
         ledger.num_saved -= 1
 
-    def charge(self, label: str, device: torch.device, num_bytes: int) -> None:
-        """Charge retained payload bytes and refuse when the budget is crossed.
-
-        Parameters
-        ----------
-        label:
-            Layer label of the operation whose payload is being retained, used to
-            name the tripping site.
-        device:
-            Device the payload is retained on.
-        num_bytes:
-            Payload size in bytes.
-
-        Raises
-        ------
-        SaveBudgetExceededError
-            When this device's committed total crosses its budget.
-        """
-
-        if num_bytes <= 0:
-            return
-        ledger = self._ledger_for(device)
-        ledger.committed_bytes += int(num_bytes)
-        ledger.num_saved += 1
-        self._raise_if_over_budget(label, device, ledger, phase="running_charge")
-
     def _raise_if_over_budget(
         self,
         label: str,
@@ -594,7 +577,6 @@ class SaveBudget:
         limit = ledger.limit_bytes
         if limit is None or ledger.committed_bytes <= limit:
             return
-        self.tripped = True
         raise SaveBudgetExceededError(
             self._message(label, device, ledger, phase=phase),
             accounted_bytes=ledger.committed_bytes,
@@ -611,18 +593,6 @@ class SaveBudget:
             label=label,
             accounting_phase=phase,
         )
-
-    def unbudgeted_devices(self) -> tuple[str, ...]:
-        """Return devices that were charged but could not be budgeted.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Device strings whose headroom could not be measured, so no budget was
-            enforced for them.
-        """
-
-        return tuple(key for key, ledger in self.ledgers.items() if not ledger.measured)
 
     def _message(
         self,

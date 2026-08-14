@@ -29,6 +29,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._save_budget import (
+    ACCOUNTING_PHASES,
     DEFAULT_SAVE_BUDGET_FRACTION,
     SaveBudget,
     SaveBudgetExceededError,
@@ -130,9 +131,10 @@ def test_unmeasurable_device_is_unbudgeted_not_assumed_infinite() -> None:
     budget = SaveBudget.from_option("auto")
     assert budget is not None
     with pytest.warns(UserWarning, match="cannot measure.*mps"):
-        budget.charge("op", torch.device("mps"), 1)
-    assert budget.unbudgeted_devices() == ("mps",)
-    assert budget.tripped is False
+        budget.admit("op", torch.device("mps"), 1)
+    ledger = budget.ledgers["mps"]
+    assert ledger.measured is False
+    assert ledger.limit_bytes is None
 
 
 def test_host_headroom_is_measurable_on_this_platform() -> None:
@@ -369,19 +371,18 @@ def test_typed_error_is_reachable_from_public_errors_namespace() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_accountant_charges_cumulatively_and_trips_once_over() -> None:
-    """The ledger accumulates across ops and trips on the crossing charge."""
+def test_accountant_admits_cumulatively_and_trips_on_the_crossing_admission() -> None:
+    """The ledger accumulates across ops and trips on the crossing admission."""
 
     budget = SaveBudget.from_option(100)
     assert budget is not None
     cpu = torch.device("cpu")
-    budget.charge("a", cpu, 40)
-    budget.charge("b", cpu, 40)
-    assert budget.tripped is False
+    budget.admit("a", cpu, 40)
+    budget.admit("b", cpu, 40)
     with pytest.raises(SaveBudgetExceededError) as excinfo:
-        budget.charge("c", cpu, 40)
-    assert excinfo.value.fields["committed_bytes"] == 120
-    assert excinfo.value.fields["projected_bytes"] is None
+        budget.admit("c", cpu, 40)
+    assert excinfo.value.fields["projected_bytes"] == 120
+    assert excinfo.value.fields["committed_bytes"] is None
     assert excinfo.value.fields["num_saved"] == 3
     assert excinfo.value.fields["label"] == "c"
 
@@ -391,8 +392,8 @@ def test_exactly_at_the_budget_is_allowed() -> None:
 
     budget = SaveBudget.from_option(100)
     assert budget is not None
-    budget.charge("a", torch.device("cpu"), 100)
-    assert budget.tripped is False
+    budget.admit("a", torch.device("cpu"), 100)
+    assert budget.ledgers["cpu"].committed_bytes == 100
 
 
 def test_budgets_are_tracked_per_device() -> None:
@@ -402,11 +403,10 @@ def test_budgets_are_tracked_per_device() -> None:
     assert budget is not None
     # 80 bytes on each of two devices: 160 total, but neither device crosses its
     # own 100-byte ceiling, so nothing trips. A single shared ledger would.
-    budget.charge("a", torch.device("cpu"), 80)
-    budget.charge("b", torch.device("meta"), 80)
+    budget.admit("a", torch.device("cpu"), 80)
+    budget.admit("b", torch.device("meta"), 80)
     assert budget.ledgers["cpu"].committed_bytes == 80
     assert budget.ledgers["meta"].committed_bytes == 80
-    assert budget.tripped is False
 
 
 def test_zero_byte_payloads_are_not_counted() -> None:
@@ -414,8 +414,23 @@ def test_zero_byte_payloads_are_not_counted() -> None:
 
     budget = SaveBudget.from_option(1)
     assert budget is not None
-    budget.charge("a", torch.device("cpu"), 0)
+    assert budget.admit("a", torch.device("cpu"), 0) is None
     assert budget.ledgers == {}
+
+
+def test_accounting_phases_are_a_closed_vocabulary() -> None:
+    """Refusal phases come from the exported vocabulary; sites fail closed."""
+
+    assert ACCOUNTING_PHASES == (
+        "pre_allocation_admission",
+        "post_transform_reconciliation",
+        "lookback_window_admission",
+        "lookback_window_reconciliation",
+    )
+    budget = SaveBudget.from_option(100)
+    assert budget is not None
+    with pytest.raises(ValueError, match="admission site"):
+        budget.admit("a", torch.device("cpu"), 40, site="not_a_site")
 
 
 # ---------------------------------------------------------------------------
