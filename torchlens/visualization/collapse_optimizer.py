@@ -2206,8 +2206,6 @@ def _members_are_name_consecutive(addresses: tuple[str, ...]) -> bool:
     leaf names share one parent and one stem and count up by exactly one.
     """
 
-    import re
-
     parents = {address.rsplit(".", 1)[0] if "." in address else "" for address in addresses}
     if len(parents) != 1:
         return False
@@ -2215,11 +2213,18 @@ def _members_are_name_consecutive(addresses: tuple[str, ...]) -> bool:
     values: list[int] = []
     for address in addresses:
         leaf = address.rsplit(".", 1)[-1]
-        match = re.fullmatch(r"(.*?)(\d+)", leaf)
-        if match is None:
+        # Manual trailing-digit split, equivalent to
+        # ``re.fullmatch(r"(.*?)(\d+)", leaf)`` (lazy stem = maximal digit
+        # suffix): that pattern backtracks QUADRATICALLY on
+        # artifact-supplied leaves like "9"*n + "x" (measured 9s at 40k
+        # chars). ``str.isdecimal`` is exactly the ``\d`` character class.
+        cut = len(leaf)
+        while cut > 0 and leaf[cut - 1].isdecimal():
+            cut -= 1
+        if cut == len(leaf):
             return False
-        stems.append(match.group(1))
-        values.append(int(match.group(2)))
+        stems.append(leaf[:cut])
+        values.append(int(leaf[cut:]))
     if len(set(stems)) != 1:
         return False
     return all(right == left + 1 for left, right in zip(values, values[1:]))

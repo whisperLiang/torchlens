@@ -315,11 +315,46 @@ def build_render_ir(
     )
     edges = _build_forward_edges_from_universe(universe)
     regions = _build_regions(trace, nodes, edges)
+    _warn_if_render_exceeds_disclosure_ceiling(len(nodes), len(edges))
     return RenderIR(
         context=resolved_context,
         nodes=nodes,
         edges=edges,
         regions=regions,
+    )
+
+
+#: Disclosure ceiling for one render (R60): draw() has no hard node/edge cap
+#: anywhere — a hard refusal is a public-behavior decision (it would break
+#: legitimate giant renders such as menagerie sweeps) — but past this size
+#: Graphviz layout time and memory grow super-linearly, so the user gets an
+#: actionable warning instead of an unexplained multi-minute hang.
+RENDER_DISCLOSURE_NODE_CEILING = 10_000
+RENDER_DISCLOSURE_EDGE_CEILING = 40_000
+
+
+def _warn_if_render_exceeds_disclosure_ceiling(num_nodes: int, num_edges: int) -> None:
+    """Warn once per render when the resolved graph is Graphviz-hostile.
+
+    Parameters
+    ----------
+    num_nodes:
+        Resolved visible node count.
+    num_edges:
+        Resolved visible edge count.
+    """
+
+    if num_nodes <= RENDER_DISCLOSURE_NODE_CEILING and num_edges <= RENDER_DISCLOSURE_EDGE_CEILING:
+        return
+    import warnings
+
+    warnings.warn(
+        f"TorchLens is rendering {num_nodes} nodes / {num_edges} edges; Graphviz "
+        "layout beyond ~10k nodes can take minutes and gigabytes. Consider "
+        "collapse='auto' / collapse='max', show_containers=False, or drawing a "
+        "focused subgraph.",
+        UserWarning,
+        stacklevel=4,
     )
 
 
@@ -352,6 +387,7 @@ def build_backward_render_ir(
     nodes, visible_by_pass = _normalize_backward_nodes(trace, vis_mode, pass_filter)
     edges = _normalize_backward_edges(trace, vis_mode, pass_filter, visible_by_pass)
     regions = _normalize_backward_regions(nodes, visible_by_pass)
+    _warn_if_render_exceeds_disclosure_ceiling(len(nodes), len(edges))
     return RenderIR(
         context=RenderContext(vis_mode=vis_mode),
         nodes=nodes,
