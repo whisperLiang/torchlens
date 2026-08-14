@@ -341,3 +341,41 @@ def test_collapse_analysis_fingerprints_once_per_entry(
     monkeypatch.setattr(auto_collapse, "_collapse_graph_revision", counting_revision)
     analyze_collapse(trace)
     assert calls <= 2, f"{calls} fingerprint walks for {edge_count} edges"
+
+
+def test_over_ceiling_entry_is_refused_at_store_not_wiped_at_evict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry above the byte ceiling must never poison the cache (r2 F39-2).
+
+    The store path had no size gate: an over-ceiling trace was fully pickled
+    to disk on EVERY capture, the eviction pass then deleted every OTHER
+    valid entry to satisfy the byte cap (the just-written ``keep`` is exempt
+    but its bytes still count), and the read ceiling refused the entry on
+    every later load -- one huge capture wiped the cache each run and could
+    itself never hit. The store now refuses (with a warning) instead.
+    """
+
+    x = torch.ones(1, 1)
+    for value in (1.0, 2.0):
+        model = nn.Linear(1, 1, bias=False)
+        model.weight.data.fill_(value)
+        tl.trace(model, x, cache=True, cache_dir=tmp_path)
+    cache_root = tmp_path / "capture"
+    small_entries = sorted(path.name for path in cache_root.glob("*.pkl"))
+    assert len(small_entries) == 2
+    total_small = sum(path.stat().st_size for path in cache_root.glob("*.pkl"))
+
+    # Ceiling above the two valid entries combined, below the big capture.
+    monkeypatch.setattr(user_funcs, "_CAPTURE_CACHE_MAX_BYTES", max(total_small + 4096, 200_000))
+
+    big = nn.Linear(1, 1, bias=False)
+    big.register_buffer("big_buffer", torch.arange(120_000, dtype=torch.float32))
+    with pytest.warns(UserWarning, match="above the .*byte cache-entry ceiling"):
+        first = tl.trace(big, x, cache=True, cache_dir=tmp_path)
+    assert first.capture_cache_hit is False
+
+    surviving = sorted(path.name for path in cache_root.glob("*.pkl"))
+    assert surviving == small_entries, (
+        "refusing the oversized store must leave every valid entry in place"
+    )
