@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 from ..visualization.bundle_diff import bundle_diff
 from . import batch_summary as _batch_summary
 from .batch_summary import montage, text_table
-from .feature_maps import feature_map_evolution, feature_map_node_spec
+from .feature_maps import _draw_more_marker, feature_map_evolution, feature_map_node_spec
 from .node_plots import render_heatmap, render_image_scatter, render_lineplot
 
 __all__ = [
@@ -91,9 +91,16 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
     Parameters
     ----------
     n:
-        Maximum number of channels to render.
+        Maximum number of channels to render. When the tensor has more
+        channels, the grid shows the FIRST ``n`` and draws a ``+K more``
+        marker for the hidden remainder.
     max_size:
         Maximum width or height of the rendered grid.
+
+    Notes
+    -----
+    Each tile is independently min-max normalized: tiles share no common
+    scale, and a constant channel renders as a uniform tile.
 
     Returns
     -------
@@ -125,7 +132,8 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
         channels = _to_channel_stack(tensor)
         if channels is None:
             return None
-        count = min(n, int(channels.shape[0]))
+        total = int(channels.shape[0])
+        count = min(n, total)
         cols = int(math.ceil(math.sqrt(count)))
         rows = int(math.ceil(count / cols))
         cell_images = [_array_to_grayscale_image(channels[index]) for index in range(count)]
@@ -136,6 +144,15 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
             x = (index % cols) * cell_size
             y = (index // cols) * cell_size
             grid.paste(tile, (x, y))
+        if total > count:
+            # Disclose the cap in the image itself: a 16-of-512 grid must
+            # never read as the complete channel set.
+            _draw_more_marker(
+                ImageDraw.Draw(grid),
+                width=grid.width,
+                height=grid.height,
+                text=f"+{total - count} more",
+            )
         return _resize_image(grid, max_size=max_size)
 
     return visualizer

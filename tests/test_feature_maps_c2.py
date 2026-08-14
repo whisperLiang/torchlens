@@ -427,3 +427,41 @@ def test_heatmap_cells_mark_nonfinite_and_keep_finite_scale() -> None:
     # NaN and Inf pixels are visibly marked, not laundered into real values.
     assert np.array_equal(pixels[-1, 0], nan_color)
     assert np.array_equal(pixels[-1, -1], nan_color)
+
+
+def test_node_spec_tooltip_discloses_per_cell_normalization(tmp_path: Path) -> None:
+    """Every grid cell is independently min-max scaled; the tooltip says so."""
+
+    trace = _conv_trace(n_stimuli=2)
+    feature_map_evolution(trace)
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "norm_disclosure"),
+    )
+
+    assert "cells independently normalized" in dot
+
+
+def test_constant_cells_are_labeled_and_distinct_from_zero() -> None:
+    """Constant maps carry their value; constant-5 never renders as all-zero."""
+
+    shape = (1, 1, 4, 4)
+    constant_five = torch.full(shape, 5.0)
+    all_zero = torch.zeros(shape)
+    kwargs: dict[str, Any] = {
+        "raw_images": None,
+        "overlay": False,
+        "alpha": 0.55,
+        "cmap": "magma",
+        "cell_size": 72,
+        "more_count": 0,
+    }
+    stimuli = torch.tensor([0])
+    channels = torch.tensor([[0]])
+
+    five_image = _render_feature_map_grid(constant_five, stimuli, channels, **kwargs)
+    zero_image = _render_feature_map_grid(all_zero, stimuli, channels, **kwargs)
+
+    assert ImageChops.difference(five_image, zero_image).getbbox() is not None

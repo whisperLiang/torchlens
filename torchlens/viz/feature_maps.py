@@ -265,7 +265,10 @@ def feature_map_node_spec(
         image_path = _write_feature_map_image(trace, key, grid)
         caption = str(getattr(layer, "layer_label", None) or getattr(layer, "label", key))
         mode_name = _mode_name(int(counts[4].item()))
-        tooltip = f"Feature maps for {key}: {mode_name}, {int(counts[2].item())} stimuli"
+        tooltip = (
+            f"Feature maps for {key}: {mode_name}, {int(counts[2].item())} stimuli"
+            "; cells independently normalized"
+        )
         if overlay and not overlay_available:
             tooltip = f"{tooltip}; overlay unavailable"
         if more_count > 0:
@@ -726,6 +729,13 @@ def _render_feature_map_grid(
                 stimulus_index=int(stimulus_indices[row_index].item()),
                 channel_id=int(channel_ids[row_index, col_index].item()),
             )
+            _draw_constant_cell_label(
+                draw,
+                map_tensor=maps[row_index, col_index],
+                x=x,
+                y=y,
+                cell_size=cell_size,
+            )
     if more_count > 0:
         _draw_more_marker(draw, width=width, height=height, text=f"+{more_count} more")
     return canvas
@@ -849,6 +859,54 @@ def _draw_cell_label(
     rect = (x + 2, y + 2, x + text_width + 8, y + text_height + 6)
     draw.rectangle(rect, fill=_LABEL_FILL, outline=_LABEL_OUTLINE)
     draw.text((x + 5, y + 4), label, fill=_TEXT_COLOR)
+
+
+def _draw_constant_cell_label(
+    draw: ImageDraw.ImageDraw,
+    *,
+    map_tensor: torch.Tensor,
+    x: int,
+    y: int,
+    cell_size: int,
+) -> None:
+    """Label a constant cell with its value when the label fits.
+
+    Every cell is independently min-max normalized, so a constant map has no
+    scale of its own and would render byte-identically to an all-zero map.
+    The value label is the only thing distinguishing dead, saturated, and
+    genuinely zero channels.
+
+    Parameters
+    ----------
+    draw:
+        PIL drawing context.
+    map_tensor:
+        The cell's two-dimensional map tensor.
+    x:
+        Cell left coordinate.
+    y:
+        Cell top coordinate.
+    cell_size:
+        Cell side length.
+    """
+
+    finite = map_tensor[torch.isfinite(map_tensor)]
+    if finite.numel() == 0:
+        return
+    low = float(finite.min())
+    high = float(finite.max())
+    if high != low:
+        return
+    label = f"={low:.3g}"
+    bbox = draw.textbbox((0, 0), label)
+    text_width = int(bbox[2] - bbox[0])
+    text_height = int(bbox[3] - bbox[1])
+    if text_width + 8 > cell_size or 2 * (text_height + 6) > cell_size:
+        return
+    y0 = y + cell_size - text_height - 6
+    rect = (x + 2, y0, x + text_width + 8, y0 + text_height + 4)
+    draw.rectangle(rect, fill=_LABEL_FILL, outline=_LABEL_OUTLINE)
+    draw.text((x + 5, y0 + 1), label, fill=_TEXT_COLOR)
 
 
 def _draw_more_marker(draw: ImageDraw.ImageDraw, *, width: int, height: int, text: str) -> None:
