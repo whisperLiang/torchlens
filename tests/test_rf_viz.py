@@ -118,10 +118,12 @@ class _View:
         _ = unit, input
         return self._box
 
-    def gradient(self, unit: Sequence[int], *, input: Any | None = None) -> GradientReceptiveField:
+    def gradient(
+        self, unit: Sequence[int], *, input: Any | None = None, retain_graph: bool = False
+    ) -> GradientReceptiveField:
         """Return the configured empirical result."""
 
-        _ = unit, input
+        _ = unit, input, retain_graph
         assert self._gradient is not None
         return self._gradient
 
@@ -229,3 +231,39 @@ def test_node_spec_draws_ancestor_cone_with_tooltips(tmp_path: Any) -> None:
         _rules._RF_RULES.clear()
         _rules._RF_RULES.update(saved_rules)
         _rules._RF_RULES_EPOCH = saved_epoch
+
+
+def test_show_gradient_retain_graph_supports_repeated_probes() -> None:
+    """R81: show(gradient=True) must plumb retain_graph to the empirical probe.
+
+    Without the kwarg the internal gradient call freed the captured autograd
+    graph, so the canonical doc sequence -- gradient(retain_graph=True) then
+    repeated show(gradient=True) -- raised a raw RuntimeError ("backward
+    through the graph a second time") on the second render.
+    """
+
+    class _Small(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.one = nn.Conv2d(1, 2, 3, padding=1)
+            self.two = nn.Conv2d(2, 2, 3, padding=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.two(torch.relu(self.one(x)))
+
+    torch.manual_seed(0)
+    armed = tl.trace(
+        _Small().eval(),
+        torch.randn(1, 1, 12, 12, requires_grad=True),
+        capture=tl.options.CaptureOptions(backward_ready=True),
+        save_mode="reference",
+    )
+    op = armed["relu_1_2"]
+    unit = op.receptive_field.center_unit(batch_index=0)
+    op.receptive_field.gradient(unit, retain_graph=True)
+    first = op.receptive_field.show(unit, gradient=True, retain_graph=True)
+    second = op.receptive_field.show(unit, gradient=True, retain_graph=True)
+    assert isinstance(first, Image.Image)
+    assert isinstance(second, Image.Image)
+    # A final non-retaining probe consumes the graph and still succeeds.
+    op.receptive_field.gradient(unit, retain_graph=False)

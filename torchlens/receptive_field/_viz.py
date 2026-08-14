@@ -37,6 +37,7 @@ def show(
     target: Any | None = None,
     image: Image.Image | None = None,
     gradient: bool = False,
+    retain_graph: bool = False,
     slice: tuple[int, int] | None = None,
     box_color: str = "#FF3B30",
     alpha: float = 0.6,
@@ -56,6 +57,9 @@ def show(
         Optional base image overriding the captured raw stimulus.
     gradient:
         Whether to alpha-blend the empirical gradient magnitude.
+    retain_graph:
+        Whether the empirical gradient probe retains autograd buffers, so a
+        later backward over the same captured graph stays possible.
     slice:
         Required ``(input_axis, index)`` plane selection for three spatial axes.
     box_color:
@@ -85,7 +89,11 @@ def show(
     if gradient and unit is None:
         raise ReceptiveFieldError("gradient=True requires an explicit complete output unit.")
     box = None if unit is None else _view_box(view, unit, descriptor, selected, direction)
-    gradient_result = _view_gradient(view, unit, selected, direction) if gradient else None
+    gradient_result = (
+        _view_gradient(view, unit, selected, direction, retain_graph=retain_graph)
+        if gradient
+        else None
+    )
     spatial_axes = _spatial_axes(descriptor, gradient_result)
     rendered_axes = _rendered_axes(spatial_axes, slice)
     base = _base_image(view, descriptor, image, rendered_axes)
@@ -223,14 +231,18 @@ def _view_gradient(
     unit: Sequence[int] | None,
     selected: Any | None,
     direction: ReceptiveFieldDirection,
+    *,
+    retain_graph: bool = False,
 ) -> GradientReceptiveField:
     """Obtain and disambiguate one empirical gradient result."""
 
     assert unit is not None
     if direction is ReceptiveFieldDirection.RECEPTIVE:
-        result = view.gradient(tuple(unit), input=selected)
+        result = view.gradient(tuple(unit), input=selected, retain_graph=retain_graph)
     else:
-        result = view.gradient(tuple(unit), direction=direction, target=selected)
+        result = view.gradient(
+            tuple(unit), direction=direction, target=selected, retain_graph=retain_graph
+        )
     if isinstance(result, Mapping):
         if len(result) != 1:
             raise AmbiguousInputError("Select one reachable input before rendering a gradient.")
