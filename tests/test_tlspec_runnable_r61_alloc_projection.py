@@ -43,6 +43,7 @@ import resource
 import types
 from collections.abc import Iterator
 from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,58 @@ def _build(tmp_path: Path, name: str, model: nn.Module, x: torch.Tensor) -> Path
     return bundle
 
 
+def _recompute_runtime_fingerprints(manifest: dict[str, Any]) -> None:
+    """Rewrite each call's ``runtime_fingerprint`` per the loader recipe.
+
+    Naive manifest tampers are now caught at PARSE time by c9904d19's
+    ``_verify_runtime_fingerprints`` check (sha256 over callable key, argument
+    names, arity, output slot shapes/dtypes, and execution context), which
+    would pre-empt the deeper gates this suite pins. Recomputing the
+    fingerprints after the tamper keeps these tests exercising the deeper
+    run-prep gates (``op_allocation_preflight`` etc.), which is their point.
+    """
+
+    run = manifest["run"]
+    keys_by_registry_id = {entry["registry_id"]: entry["key"] for entry in run["callable_registry"]}
+    slots_by_id = {slot["slot_id"]: slot for slot in run["tensor_slots"]}
+    for call in run["calls"]:
+        key = keys_by_registry_id[call["registry_id"]]
+        context = call["execution_context"]
+        payload = {
+            "callable": {
+                "namespace": key["namespace"],
+                "qualname": key["qualname"],
+                "dispatch_kind": key["dispatch_kind"],
+                "version": key["version"],
+                "import_path": key.get("import_path"),
+            },
+            "argument_names": list(call["argument_names"]),
+            "num_positional_args": int(call["num_positional_args"]),
+            "num_keyword_args": int(call["num_keyword_args"]),
+            "outputs": [
+                {
+                    "shape": list(slots_by_id[slot_id]["shape"]),
+                    "dtype": slots_by_id[slot_id]["dtype"],
+                }
+                for slot_id in call["output_slot_ids"]
+            ],
+            "execution_context": {
+                "autocast": [
+                    {
+                        "device_type": entry["device_type"],
+                        "enabled": entry["enabled"],
+                        "dtype": entry.get("dtype"),
+                    }
+                    for entry in context["autocast"]
+                ],
+                "grad_enabled": context["grad_enabled"],
+                "inference_mode": context["inference_mode"],
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        call["runtime_fingerprint"] = sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _tamper_literal(bundle: Path, kind: str, target: Any, replacement: Any) -> int:
     """Replace the first ``(kind, value == target)`` literal atom in any call's tree."""
 
@@ -122,6 +175,7 @@ def _tamper_literal(bundle: Path, kind: str, target: Any, replacement: Any) -> i
         for literal in call.get("literal_arguments", []):
             if _walk(literal):
                 break
+    _recompute_runtime_fingerprints(manifest)
     path.write_text(json.dumps(manifest))
     return count
 
@@ -136,6 +190,7 @@ def _tamper_input_slot_shape(bundle: Path, shape: list[int]) -> int:
         if slot.get("role") == "model_input":
             slot["shape"] = list(shape)
             count += 1
+    _recompute_runtime_fingerprints(manifest)
     path.write_text(json.dumps(manifest))
     return count
 
@@ -152,6 +207,7 @@ def _tamper_slot_shapes(bundle: Path, old: list[int], new: list[int]) -> int:
         if list(slot.get("shape", ())) == list(old):
             slot["shape"] = list(new)
             count += 1
+    _recompute_runtime_fingerprints(manifest)
     path.write_text(json.dumps(manifest))
     return count
 
