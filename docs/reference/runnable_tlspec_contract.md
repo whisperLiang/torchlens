@@ -1121,6 +1121,7 @@ numeric_attestation_failed
 poisoned_run_refused
 collective_boundary_runnable_unsupported
 halted_capture_not_runnable
+user_intervention_not_replayable
 ```
 
 `halted_capture_not_runnable` (early-stopping unification, N4) is the SAVE-time runnable
@@ -1128,6 +1129,16 @@ preflight refusal for a HALTED capture: the taken-path DAG ends at the halt fron
 runnable descriptor would replay a truncated program while claiming faithfulness to the full
 forward. Analysis-level saves of halted captures remain allowed; the refusal surfaces as
 `RunnablePreflightError` at `tl.save(level="runnable")` entry.
+
+`user_intervention_not_replayable` is the SAVE-time producer refusal (stage
+`producer_user_intervention`) for a capture whose taken path carries at least one
+user-intervention-replaced op (`trace(intervene=...)`, `set`, or a raw forward hook that
+substituted a value). The replacement value has no traceable function, so a sparse runnable
+replay could only recompute the UN-intervened computation -- a different function than the
+provenance the artifact archives -- and would permanently ceiling `unverifiable`. The
+diagnostic names every replaced op label. An armed selector that fired on zero sites leaves
+the capture unreplaced and runnable; analysis-level saves of intervened captures remain
+allowed, and the intervention spec itself stays separately saveable.
 
 `collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
 refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal
