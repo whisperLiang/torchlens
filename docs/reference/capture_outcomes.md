@@ -125,7 +125,12 @@ latch a stop request on the active trace before raising. If the forward then
 returns "normally" — user code swallowed the control signal in a broad
 `except:` — the boundary checkpoint raises
 `tl.errors.StopSignalSwallowedError` and the capture settles FAILED, never
-COMPLETE. A swallowed nonfinite abort is FAILED, never a clean
+COMPLETE. The halt-capable preview backends (paddle's shipped `halt=`, MLX's
+halt selector) hold the same contract: their `HaltSignal` raise sites latch
+the request on the trace, and `stamp_backend_finalized` — the one preview
+settlement stamp — consumes the latch, refusing a latched-but-unhalted
+capture with the same typed error and a FAILED settlement instead of the
+COMPLETE arm. A swallowed nonfinite abort is FAILED, never a clean
 ABORTED_NONFINITE (the abort did not actually stop the forward). Imperative
 `halt()` outside any capture propagates to the caller exactly as before.
 

@@ -21,7 +21,7 @@ from ...backends import (
     get_backend_spec,
     require_capability_implementation,
 )
-from ...capture.outcome import stamp_backend_finalized
+from ...capture.outcome import StopRequest, stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -1876,6 +1876,16 @@ class MLXBackend:
         )
         events.extend(emitted)
         if halt_label is not None:
+            # F6 latch parity with torch's evaluate_halt: the stop request is
+            # latched on the trace BEFORE the signal is raised, so a user
+            # broad-except that swallows the HaltSignal can never reach the
+            # settlement stamp as a blessable COMPLETE -- the one preview
+            # stamp checks the latch at the capture boundary.
+            trace.__dict__["_stop_requested"] = StopRequest(
+                kind="halt",
+                reason=halt_label,
+                boundary_label=halt_label,
+            )
             raise HaltSignal(halt_label, frontier_output=output)
         return output
 

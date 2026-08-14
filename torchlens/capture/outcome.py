@@ -1144,8 +1144,31 @@ def stamp_backend_finalized(trace: object) -> CaptureOutcome:
     UNKNOWN, taking N1 re-save and N2 validation entry down with it. Backends
     with no halt path are unaffected: ``halted`` is falsey and the COMPLETE
     arm is byte-identical to before.
+
+    SWALLOW-PROOF (F6 parity, R06 round 3). The halt-capable preview raise
+    sites latch a :class:`StopRequest` on the trace before raising their
+    ``HaltSignal`` -- exactly the torch ``evaluate_halt`` contract. A user
+    broad-``except`` that eats the signal leaves the latch set with no
+    structural ``halted`` write, so this stamp is the boundary checkpoint:
+    it settles FAILED and raises :class:`StopSignalSwallowedError`, never
+    blessing the swallowed capture COMPLETE. The latch is consumed on every
+    arm, so a normally-halted capture stamps HALTED exactly as before.
     """
 
+    stop_request = trace.__dict__.pop("_stop_requested", None)
+    if isinstance(stop_request, StopRequest) and not bool(getattr(trace, "halted", False)):
+        swallowed = StopSignalSwallowedError(
+            "TorchLens raised a halt stop signal during this forward, but the "
+            "capture reached its settlement stamp un-halted: user code "
+            "swallowed the control signal (typically a broad `except:` or "
+            "`except BaseException:` around the model body). The capture "
+            "cannot be trusted as complete. Stop boundary: "
+            f"{stop_request.boundary_label or stop_request.reason!r}.",
+            kind=stop_request.kind,
+            boundary_label=stop_request.boundary_label,
+        )
+        settle_failed(trace, None, swallowed)
+        raise swallowed
     if bool(getattr(trace, "halted", False)):
         reason = getattr(trace, "halt_reason", None)
         frontier_label = getattr(trace, "halt_frontier", None)

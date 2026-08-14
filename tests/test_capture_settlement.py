@@ -10,6 +10,7 @@ pre-settlement arms, and post-settlement teardown failures demote.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 import torch
@@ -400,7 +401,12 @@ def test_preview_backends_stamp_at_return_boundary() -> None:
         for line in source.splitlines():
             if "stamp_backend_finalized(trace)" in line:
                 break
-        assert "from ...capture.outcome import stamp_backend_finalized" in source, backend
+        # The stamp must come from the settlement authority (halt-capable
+        # backends also import StopRequest on the same line, so pin the
+        # module path and the imported name rather than one exact spelling).
+        assert re.search(
+            r"from \.\.\.capture\.outcome import [^\n]*\bstamp_backend_finalized\b", source
+        ), backend
 
 
 def test_unrelated_capture_error_after_swallowed_nonfinite_settles_failed() -> None:

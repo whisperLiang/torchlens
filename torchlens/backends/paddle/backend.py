@@ -13,7 +13,7 @@ from ... import _state
 from ..._deprecations import MISSING, MissingType
 from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
-from ...capture.outcome import stamp_backend_finalized
+from ...capture.outcome import StopRequest, stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -1088,6 +1088,16 @@ class PaddleBackend:
                 site = reserved[output_index]
                 ctx = self.build_record_context(trace, site, func_event_input, tensor)
                 if runtime.evaluate_halt(ctx):
+                    # F6 latch parity with torch's evaluate_halt: latch the
+                    # stop request on the trace BEFORE raising, so a user
+                    # broad-except that swallows the HaltSignal can never
+                    # settle COMPLETE at the one preview stamp.
+                    trace.__dict__["_stop_requested"] = StopRequest(
+                        kind="halt",
+                        reason=site.label_raw,
+                        boundary_kind=getattr(ctx, "kind", None),
+                        boundary_label=site.label_raw,
+                    )
                     raise HaltSignal(site.label_raw, frontier_output=final_output)
         return final_output
 
