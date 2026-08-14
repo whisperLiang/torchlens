@@ -30,9 +30,15 @@ repos:
     # test_packaging_diet.py::test_ruff_pin_is_identical_across_declaration_sites.
     rev: v0.15.4
     hooks:
-      - id: ruff-format
+      # Lint fixes FIRST, formatter LAST (ruff's documented hook order): a
+      # `--fix` rewrite can produce unformatted code, so the formatter must
+      # have the final word locally exactly like `ruff format --check` has the
+      # final word in the Lint workflow. The reverse order let a locally
+      # accepted checkout be CI-rejected. Pinned by tests/
+      # test_ci_packaging_gates.py::test_precommit_ruff_fix_runs_before_ruff_format.
       - id: ruff
         args: [--fix]
+      - id: ruff-format
   - repo: local
     hooks:
       - id: no-breaking-markers-commit-msg

@@ -19,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -82,6 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -113,6 +116,52 @@ jobs:
           # "always excluded unless explicitly requested". Conjoin `not rare` to
           # preserve that contract.
           pytest tests/ -m "not slow and not rare" --tb=short
+
+  capture-byte-oracle:
+    name: Capture-characterization byte oracle (torch 2.13.0, py 3.10)
+    runs-on: ubuntu-24.04
+    # The capture-characterization goldens embed raw float-byte digests, so
+    # they are enforceable only on their recording environment (py3.10 +
+    # torch 2.13.0; the version gate strips the build tag, mirroring
+    # tests/_oracle_env.py). The 31-case matrix regenerates each record in an
+    # isolated subprocess (~8 min), so it runs nightly rather than
+    # PR-blocking. The executed-floor attestation proves the suite actually
+    # ran instead of version-skipping to green (T13.2).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install the goldens' recording-environment torch
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.13.0+cpu" \
+            numpy
+          uv pip check
+          python -c 'import torch; assert torch.__version__ == "2.13.0+cpu", torch.__version__'
+
+      - name: Run the slow capture-characterization matrix
+        run: |
+          pytest tests/capture_oracle/ -m slow --tb=short -q \
+            --junitxml="${{ runner.temp }}/capture-oracle.junit.xml"
+
+      - name: Fail on an under-executed capture-oracle matrix
+        # Floor at roughly half the 31-case matrix: a version-gate or golden
+        # drift that mass-skips the characterization must go red, while
+        # adding/removing individual cases does not.
+        run: |
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/capture-oracle.junit.xml" 16
 
   preview-backends:
     name: Preview backend tests (${{ matrix.backend }})
@@ -168,6 +217,8 @@ jobs:
             executed_floor: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -212,6 +263,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -234,3 +287,20 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           wheel-venv/bin/python -c "import torch, torchlens as tl; from torch import nn; from torchlens.validation import validate_tlspec; path='wheel-smoke.tlspec'; trace=tl.trace(nn.Linear(2, 1), torch.randn(1, 2), layers_to_save='none'); trace.save(path); validate_tlspec(path); loaded=tl.load(path); assert loaded.num_ops == trace.num_ops"
+
+      - name: Run the packaging manifest tripwires
+        # The wheel-diet and sdist-governance tests are slow-marked, so the
+        # weekly slow tier was their only run and a packaging regression could
+        # ship unnoticed for up to a week. Run them nightly, where the
+        # artifacts are actually built (T13.5).
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.8.0+cpu"
+          pytest \
+            "tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet" \
+            "tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed" \
+            --tb=short -q

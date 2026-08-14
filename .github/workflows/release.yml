@@ -42,6 +42,13 @@ jobs:
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Minimal scope (zizmor github-app, T13.3): without an explicit
+          # permission input the minted token inherits the App installation's
+          # FULL permission set, and checkout persists it to disk for the
+          # whole job — including the pip install and semantic-release steps.
+          # Everything this job does (push the release commit + tag, create
+          # the GitHub Release) needs exactly repository contents: write.
+          permission-contents: write
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -51,7 +58,11 @@ jobs:
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.9"
+          # Must satisfy the package's requires-python (>=3.10): semantic-release's
+          # build_command builds the shipped sdist/wheel on THIS interpreter, and a
+          # 3.9 builder produced release artifacts on a Python the package itself
+          # refuses to install on (T13.7).
+          python-version: "3.11"
 
       # The version TAG push invokes git-lfs (a few .research/*.md files are
       # LFS-tracked). CI checks out with lfs disabled (pointers only, no LFS

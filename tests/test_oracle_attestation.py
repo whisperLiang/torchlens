@@ -24,6 +24,7 @@ from pathlib import Path
 import _oracle_env
 import pytest
 from _oracle_env import (
+    ENFORCE_ENV_VAR,
     RECORD_ENV_VAR,
     env_fingerprint,
     golden_mutation_flags_armed_under_ci,
@@ -99,7 +100,7 @@ def _fake_env(monkeypatch: pytest.MonkeyPatch, fingerprint: str, **env: str | No
     """Pin the fingerprint and the relevant environment variables."""
 
     monkeypatch.setattr(_oracle_env, "env_fingerprint", lambda: fingerprint)
-    for name in ("CI", RECORD_ENV_VAR):
+    for name in ("CI", RECORD_ENV_VAR, ENFORCE_ENV_VAR):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         if value is not None:
@@ -149,6 +150,42 @@ def test_missing_off_canonical_golden_skips_visibly_under_ci(
     with pytest.raises(pytest.skip.Exception, match="no committed golden"):
         require_env_golden(goldens, "case.json", "TORCHLENS_UPDATE_X")
     assert not (goldens / "env-py8.8-torch8.8.8").exists(), "CI must never write"
+
+
+@pytest.mark.smoke
+def test_enforcing_leg_fails_closed_instead_of_ci_skipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared enforcing leg FAILS on a missing golden even under CI.
+
+    Without the enforce declaration a matrix torch bump silently moves the
+    one enforcing CI leg off-canonical, every golden case skips, and the
+    byte oracles enforce on NO leg at all while staying green (T13.1).
+    """
+
+    goldens = _goldens_dir(tmp_path, "py9.9-torch9.9.9")
+    _fake_env(monkeypatch, "py8.8-torch8.8.8", CI="true", **{ENFORCE_ENV_VAR: "1"})
+    with pytest.raises(pytest.fail.Exception, match="an enforcing leg never skips"):
+        require_env_golden(goldens, "case.json", "TORCHLENS_UPDATE_X")
+    assert not (goldens / "env-py8.8-torch8.8.8").exists(), "refusal must not write"
+
+
+@pytest.mark.smoke
+def test_enforcing_leg_refuses_the_record_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enforcement outranks recording: enforce + record opt-in still fails.
+
+    A leg that both enforces and records would self-baseline the very bytes
+    it claims to verify — the record opt-in is for provisioning NEW
+    long-lived boxes, never the enforcing leg.
+    """
+
+    goldens = _goldens_dir(tmp_path, "py9.9-torch9.9.9")
+    _fake_env(monkeypatch, "py8.8-torch8.8.8", **{RECORD_ENV_VAR: "1", ENFORCE_ENV_VAR: "1"})
+    with pytest.raises(pytest.fail.Exception, match="an enforcing leg never skips"):
+        require_env_golden(goldens, "case.json", "TORCHLENS_UPDATE_X")
+    assert not (goldens / "env-py8.8-torch8.8.8").exists(), "refusal must not write"
 
 
 @pytest.mark.smoke
