@@ -889,10 +889,14 @@ def validate_saved_outs(
         ValidationFailure,
         describe_tensor_mismatch,
         record_validation_failure,
+        reset_validation_diagnostics,
         reset_validation_failure,
     )
 
     reset_validation_failure(self)
+    # THIS-run semantics for the diagnostics ledger too (b8 B8-43): only the
+    # failure slot was reset here, so diagnostics accumulated across runs.
+    reset_validation_diagnostics(self)
     # Per-run cache for the orphan-arg sweep; stale entries from a previous
     # validation of a since-mutated trace must never leak into this run.
     self.__dict__.pop("_validation_orphan_candidate_index", None)
@@ -911,7 +915,8 @@ def validate_saved_outs(
             f"{dispatch_count} dispatched vs {captured_count} captured "
             f"+ {pruned_count} orphan-pruned + {buffer_write_count} buffer-write."
         )
-        print(message)
+        if verbose:
+            print(message)
         record_validation_failure(
             self,
             ValidationFailure(
@@ -987,7 +992,8 @@ def validate_saved_outs(
                 "Trace output boundary count does not match ground truth: "
                 f"{len(self.output_layers)} logged vs {len(ground_truth_output_tensors)} expected."
             )
-            print(message)
+            if verbose:
+                print(message)
             record_validation_failure(
                 self,
                 ValidationFailure(
@@ -1015,7 +1021,8 @@ def validate_saved_outs(
                 self, output_layer_label, output_label_counts
             )
             if output_layer.out is None:
-                print(f"The {i}th output layer, {output_layer_label}, has no saved out.")
+                if verbose:
+                    print(f"The {i}th output layer, {output_layer_label}, has no saved out.")
                 record_validation_failure(
                     self,
                     ValidationFailure(
@@ -1037,9 +1044,11 @@ def validate_saved_outs(
             if not _ground_truth_output_matches_saved(
                 output_layer.out, ground_truth_output_tensors[i]
             ):
-                print(
-                    f"The {i}th output layer, {output_layer_label}, does not match the ground truth output tensor."
-                )
+                if verbose:
+                    print(
+                        f"The {i}th output layer, {output_layer_label}, does not "
+                        "match the ground truth output tensor."
+                    )
                 record_validation_failure(
                     self,
                     describe_tensor_mismatch(
@@ -1112,10 +1121,11 @@ def validate_saved_outs(
     expected_layers = {layer.layer_label for layer in self.layer_list}
     if len(validated_layers) < len(expected_layers):
         unreached = expected_layers - validated_layers
-        print(
-            f"All saved outs were accurate, but some layers were not reached (check that "
-            f"child args logged accurately): {unreached}"
-        )
+        if verbose:
+            print(
+                f"All saved outs were accurate, but some layers were not reached (check "
+                f"that child args logged accurately): {unreached}"
+            )
         record_validation_failure(
             self,
             ValidationFailure(
@@ -1243,7 +1253,7 @@ def validate_parents_of_saved_layer(
     # Check that the arguments are logged correctly when the evidence is
     # available. Unverified evidence is recorded but does not preempt replay.
     arg_logging_result = _check_layer_arguments_logged_correctly(
-        self, layer_to_validate_parents_for_label
+        self, layer_to_validate_parents_for_label, verbose=verbose
     )
     arg_logging_result = _classify_user_excluded_replay_surface(
         self, layer_to_validate_parents_for, arg_logging_result
@@ -1273,10 +1283,12 @@ def validate_parents_of_saved_layer(
         if arg_logging_result.reason == "not_saved_by_user":
             skip_replay_after_arg_logging = True
     elif arg_logging_result.failed:
-        print(
-            f"Parent arguments for layer {layer_to_validate_parents_for_label} are not logged properly; "
-            f"either a parent wasn't logged as an argument, or was logged an extra time"
-        )
+        if verbose:
+            print(
+                f"Parent arguments for layer {layer_to_validate_parents_for_label} are "
+                "not logged properly; either a parent wasn't logged as an argument, or "
+                "was logged an extra time"
+            )
         from .diagnostics import CHECK_ARG_LOGGING, ValidationFailure, record_validation_failure
 
         record_validation_failure(
@@ -1728,7 +1740,7 @@ def _validation_ops_for_entry(entry: Any) -> list[Op]:
 
 
 def _check_layer_arguments_logged_correctly(
-    self: "Trace", target_layer_label: str
+    self: "Trace", target_layer_label: str, verbose: bool = False
 ) -> ValidationCheckResult:
     """Check whether the outs of the parent layers match the saved arguments of
     the target layer, and that the argument locations have been logged correctly.
@@ -1789,7 +1801,7 @@ def _check_layer_arguments_logged_correctly(
                     return ValidationCheckResult.unverified("missing_saved_args")
                 for key, val in iterfunc(saved_values):  # type: ignore[operator]
                     validation_result_for_arg_and_layer = _validate_layer_against_arg(
-                        self, target_layer, parent_layer, arg_type, key, val
+                        self, target_layer, parent_layer, arg_type, key, val, verbose=verbose
                     )
                     if validation_result_for_arg_and_layer.decision != "validated":
                         return validation_result_for_arg_and_layer
@@ -1803,7 +1815,7 @@ def _check_layer_arguments_logged_correctly(
         # saved args instead: every unattributed non-trivial tensor arg slot
         # whose value provably matches a recorded producer in this trace is a
         # dropped-edge failure.
-        orphan_result = _check_unattributed_arg_slots(self, target_layer)
+        orphan_result = _check_unattributed_arg_slots(self, target_layer, verbose=verbose)
         if orphan_result.failed:
             return orphan_result
     return ValidationCheckResult.validated("arg_logging_matched")
@@ -1845,6 +1857,7 @@ def _validate_layer_against_arg(
     arg_type: str,
     key: Any,
     val: Any,
+    verbose: bool = False,
 ) -> ValidationCheckResult:
     """Validate whether a parent layer is logged correctly for one argument.
 
@@ -1873,7 +1886,7 @@ def _validate_layer_against_arg(
         for v, subval in enumerate(val):
             argloc_key = (key, v)
             validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-                self, target_layer, parent_layer, arg_type, argloc_key, subval
+                self, target_layer, parent_layer, arg_type, argloc_key, subval, verbose=verbose
             )
             if validation_result_for_arg_and_layer.decision != "validated":
                 return validation_result_for_arg_and_layer
@@ -1882,14 +1895,14 @@ def _validate_layer_against_arg(
         for subkey, subval in val.items():
             argloc_key = (key, subkey)
             validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-                self, target_layer, parent_layer, arg_type, argloc_key, subval
+                self, target_layer, parent_layer, arg_type, argloc_key, subval, verbose=verbose
             )
             if validation_result_for_arg_and_layer.decision != "validated":
                 return validation_result_for_arg_and_layer
     else:
         argloc_key = key
         validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-            self, target_layer, parent_layer, arg_type, argloc_key, val
+            self, target_layer, parent_layer, arg_type, argloc_key, val, verbose=verbose
         )
         if validation_result_for_arg_and_layer.decision != "validated":
             return validation_result_for_arg_and_layer
@@ -1948,6 +1961,7 @@ def _check_arglocs_correct_for_arg(
     arg_type: str,
     argloc_key: str | tuple[Any, ...],
     saved_arg_val: Any,
+    verbose: bool = False,
 ) -> ValidationCheckResult:
     """Check bidirectional consistency between a parent's tensor and a child's arg slot.
 
@@ -2032,11 +2046,12 @@ def _check_arglocs_correct_for_arg(
             is not None
         )
     ):
-        print(
-            f"Parent {parent_layer_label} of {target_layer_label} has outs that match "
-            f"{arg_type} {argloc_key} for {target_layer_label}, but is not logged as "
-            f"such in parent_arg_positions."
-        )
+        if verbose:
+            print(
+                f"Parent {parent_layer_label} of {target_layer_label} has outs that match "
+                f"{arg_type} {argloc_key} for {target_layer_label}, but is not logged as "
+                f"such in parent_arg_positions."
+            )
         return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
     # Case 2 exemption: in-place RNG ops (bernoulli_) mutate the tensor
@@ -2051,10 +2066,12 @@ def _check_arglocs_correct_for_arg(
 
     # Case 3: parent is logged at this position but values don't match.
     if (not parent_layer_matches_arg) and parent_layerged_as_arg:
-        print(
-            f"Parent {parent_layer_label} of {target_layer_label} is logged as {arg_type} {argloc_key} to "
-            f"{target_layer_label}, but its saved outs don't match the saved argument."
-        )
+        if verbose:
+            print(
+                f"Parent {parent_layer_label} of {target_layer_label} is logged as "
+                f"{arg_type} {argloc_key} to {target_layer_label}, but its saved outs "
+                "don't match the saved argument."
+            )
         return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
     return ValidationCheckResult.validated("arg_logging_matched")
@@ -2244,7 +2261,9 @@ def _foreach_sibling_attributes_slot(
     return False
 
 
-def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> ValidationCheckResult:
+def _check_unattributed_arg_slots(
+    self: "Trace", target_layer: Op, verbose: bool = False
+) -> ValidationCheckResult:
     """Fail when an unattributed saved tensor arg matches a recorded producer.
 
     This is the INVERSE of Case 1 in ``_check_arglocs_correct_for_arg``:
@@ -2283,11 +2302,13 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
     # instead of validating silently.
     dropped_edge_positions = tuple(getattr(target_layer, "dropped_edge_tensor_args", ()) or ())
     if dropped_edge_positions:
-        print(
-            f"Capture identity witness for {target_layer.layer_label}: tensor argument(s) at "
-            f"{', '.join(dropped_edge_positions)} have a live traced producer that is not a "
-            f"recorded parent edge -- a parent edge was dropped."
-        )
+        if verbose:
+            print(
+                f"Capture identity witness for {target_layer.layer_label}: tensor "
+                f"argument(s) at {', '.join(dropped_edge_positions)} have a live traced "
+                "producer that is not a recorded parent edge -- a parent edge was "
+                "dropped."
+            )
         from .diagnostics import (
             CHECK_ARG_LOGGING,
             ValidationFailure,
@@ -2410,11 +2431,12 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
                         break
                 if ambiguous:
                     continue
-                print(
-                    f"Saved {arg_type} {argloc_key!r} of {target_layer.layer_label} matches "
-                    f"the out of {candidate.layer_label}, but no parent is attributed at "
-                    f"that position -- a parent edge was dropped."
-                )
+                if verbose:
+                    print(
+                        f"Saved {arg_type} {argloc_key!r} of {target_layer.layer_label} "
+                        f"matches the out of {candidate.layer_label}, but no parent is "
+                        "attributed at that position -- a parent edge was dropped."
+                    )
                 from .diagnostics import (
                     CHECK_ARG_LOGGING,
                     ValidationFailure,
@@ -3192,10 +3214,11 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
             if reduction_depth is not None
             else ""
         )
-        print(
-            f"Saved outs for layer {layer_to_validate_parents_for_label} do not match the "
-            f"values computed based on the parent layers {layer.parents}{depth_note}."
-        )
+        if verbose:
+            print(
+                f"Saved outs for layer {layer_to_validate_parents_for_label} do not match "
+                f"the values computed based on the parent layers {layer.parents}{depth_note}."
+            )
         from .diagnostics import (
             CHECK_REPLAY,
             describe_tensor_mismatch,

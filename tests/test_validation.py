@@ -2938,21 +2938,19 @@ def test_skip_perturbation_entirely_are_strings():
 def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     """Keep ``full`` value-sensitive and pin the perturbation exemption registry."""
 
+    # b1p2 D2 adjudication: the six torchvision PyCapsule ops left this
+    # whole-op registry for coordinate-arg-only rows in
+    # STRUCTURAL_ARG_POSITIONS (a NARROWING; their feature/score value edges
+    # are perturbation-tested again).
     assert sorted(SKIP_PERTURBATION_ENTIRELY) == [
         "broadcast_tensors",
-        "deform_conv2d",
         "exponential_",
         "meshgrid",
         "new_ones",
         "new_zeros",
-        "nms",
         "ones_like",
-        "ps_roi_align",
-        "ps_roi_pool",
         "rand_like",
         "randn_like",
-        "roi_align",
-        "roi_pool",
         "zero_",
         "zeros_like",
     ]
@@ -2964,6 +2962,12 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     # the genuinely structural slots are exempt.
     assert STRUCTURAL_ARG_POSITIONS["fill_"] == {0}
     assert STRUCTURAL_ARG_POSITIONS["expand_as"] == {1}
+    # b1p2 D2 narrowing: torchvision ops skip ONLY the coordinate/offset arg
+    # (native-kernel OOB segfault safety); everything else stays tested.
+    assert STRUCTURAL_ARG_POSITIONS["nms"] == {0}
+    assert STRUCTURAL_ARG_POSITIONS["deform_conv2d"] == {1}
+    for tv_op in ("roi_align", "roi_pool", "ps_roi_align", "ps_roi_pool"):
+        assert STRUCTURAL_ARG_POSITIONS[tv_op] == {1}
 
 
 def test_copy_source_is_value_sensitive_and_destination_is_structural() -> None:
@@ -6530,9 +6534,10 @@ def test_corruption_distance_min_gt_max():
             lpl.min_distance_from_input = lpl.max_distance_from_input + 1
             break
     else:
-        # If no layer has distances, skip (mark_layer_depths might be False)
+        # A silent `return` here is a VACUOUS PASS that can green out a
+        # disarmed tripwire (b9 R71-3): make the missing precondition loud.
         log.cleanup()
-        return
+        pytest.skip("no layer with positive distances; distance plant has no target")
     with pytest.raises(MetadataInvariantError, match="distance_invariants"):
         check_metadata_invariants(log)
     log.cleanup()
@@ -6542,8 +6547,10 @@ def test_corruption_distance_input_nonzero():
     """Input layer with nonzero distance_from_input triggers error."""
     log = _make_clean_log()
     if not log.mark_layer_depths:
+        # Vacuous-pass conversion (b9 R71-3): a plant with no armed target
+        # must SKIP, not silently green.
         log.cleanup()
-        return
+        pytest.skip("mark_layer_depths is off; input-distance plant has no target")
     for label in log.input_layers:
         lpl = log.layer_dict_all_keys[label]
         lpl.min_distance_from_input = 5
@@ -6558,8 +6565,10 @@ def test_corruption_distance_ancestor_flag():
     """Mismatch between has_input_ancestor and input_ancestors triggers error."""
     log = _make_clean_log()
     if not log.mark_layer_depths:
+        # Vacuous-pass conversion (b9 R71-3): a plant with no armed target
+        # must SKIP, not silently green.
         log.cleanup()
-        return
+        pytest.skip("mark_layer_depths is off; ancestor-flag plant has no target")
     for lpl in log.layer_list:
         if lpl.has_input_ancestor and len(lpl.input_ancestors) > 0:
             lpl.has_input_ancestor = False
@@ -6567,6 +6576,263 @@ def test_corruption_distance_ancestor_flag():
     with pytest.raises(MetadataInvariantError, match="distance_invariants"):
         check_metadata_invariants(log)
     log.cleanup()
+
+
+# -- N2. Raw-label survival roster: dict-shaped surfaces + closure --
+
+
+def test_corruption_raw_label_in_elif_children_dict():
+    """A raw label planted in conditional_elif_children VALUES trips the scan.
+
+    The full pipeline also goes red earlier (the conditional-projection
+    cross-check sees the inconsistent plant), so the raw-label arm is proven
+    red-capable by direct call: it is the guard for the case where a producer
+    mints raw labels CONSISTENTLY into both the branch records and the
+    projection, which the cross-check cannot see.
+    """
+
+    from torchlens.validation.invariants import _check_graph_ordering
+
+    log = _make_clean_log()
+    log.layer_list[1].conditional_elif_children = {0: ["relu_1_1_raw"]}
+    with pytest.raises(MetadataInvariantError, match="Raw label"):
+        _check_graph_ordering(log)
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(log)
+    log.cleanup()
+
+
+def test_corruption_raw_label_in_parent_arg_positions_key():
+    """A raw label planted as a parent_arg_positions KEY trips the scan."""
+
+    log = _make_clean_log()
+    positions = dict(log.layer_list[1].parent_arg_positions or {})
+    positions["linear_1_1_raw"] = 0
+    log.layer_list[1].parent_arg_positions = positions
+    with pytest.raises(MetadataInvariantError, match="graph_ordering"):
+        check_metadata_invariants(log)
+    log.cleanup()
+
+
+class _ElifBranchModel(nn.Module):
+    """Taken-branch elif model populating the conditional relation surfaces."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Take the elif arm and return a derived tensor.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Rectified branch result.
+        """
+
+        s = x.sum()
+        if s > 1e9:
+            y = x * 2
+        elif s > -1e9:
+            y = x + 1
+        else:
+            y = x - 1
+        return torch.relu(y)
+
+
+def _collect_strings(value: Any, depth: int = 0) -> set[str]:
+    """Return every string reachable in a shallowly nested container.
+
+    Parameters
+    ----------
+    value:
+        Arbitrary field value.
+    depth:
+        Current recursion depth (bounded to keep the walk cheap).
+
+    Returns
+    -------
+    set[str]
+        Strings found in the value, its elements, and its dict keys/values.
+    """
+
+    if depth > 3:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        found: set[str] = set()
+        for item in value:
+            found |= _collect_strings(item, depth + 1)
+        return found
+    if isinstance(value, dict):
+        found = set()
+        for key, item in value.items():
+            found |= _collect_strings(key, depth + 1) | _collect_strings(item, depth + 1)
+        return found
+    return set()
+
+
+def test_raw_label_survival_roster_is_closed():
+    """Every field observed carrying another op's label is in the roster.
+
+    The roster is a manual name list (p2 #13 / R08): without this closure a
+    new label-bearing relation field ships unscanned by the raw-label
+    survival check, which is exactly how ``conditional_elif_children`` and
+    ``parent_arg_positions`` slipped through. Any field found carrying a
+    FOREIGN op label on a real trace must be in one of the three roster
+    shapes (or in the justified allowlist below).
+    """
+
+    from torchlens import constants
+    from torchlens.validation.invariants import (
+        _RAW_LABEL_BEARING_DICT_FIELDS,
+        _RAW_LABEL_BEARING_LIST_FIELDS,
+        _RAW_LABEL_BEARING_SCALAR_FIELDS,
+    )
+
+    rostered = (
+        set(_RAW_LABEL_BEARING_LIST_FIELDS)
+        | set(_RAW_LABEL_BEARING_SCALAR_FIELDS)
+        | set(_RAW_LABEL_BEARING_DICT_FIELDS)
+    )
+    # Fields that legitimately carry labels but are scanned through another
+    # authority, each with the reason it is not rostered here:
+    allowlist = {
+        # The op's own label family is covered by the trace-level
+        # ``ml.layer_labels`` loop in the same check.
+        "label",
+        "layer_label",
+        "equivalence_class",
+        # Conditional ROLE structures nest labels inside role/arm records that
+        # the conditional-invariant family re-derives and cross-checks
+        # exhaustively (_invariants_conditionals); a raw label there fails
+        # those checks by unresolvable-lookup construction.
+        "in_conditionals",
+        "terminal_bool_for",
+        "conditional_role_stacks",
+        "conditional_branch_stack_ops",
+        "conditional_arm_children",
+        "conditional_arm_entry_edges",
+        "conditional_entry_arg_keys",
+    }
+    log = trace_fn(_ElifBranchModel(), torch.randn(3, 3), random_seed=42)
+    labels = {lpl.layer_label for lpl in log.layer_list} | {
+        lpl.label for lpl in log.layer_list
+    }
+    fields = set(constants.OP_LOG_FIELD_ORDER) | set(constants.LAYER_LOG_FIELD_ORDER)
+    offenders: dict[str, list[str]] = {}
+    for lpl in log.layer_list:
+        foreign = labels - {lpl.layer_label, lpl.label}
+        for field in fields - rostered - allowlist:
+            hits = _collect_strings(getattr(lpl, field, None)) & foreign
+            if hits:
+                offenders.setdefault(field, sorted(hits)[:3])
+    log.cleanup()
+    assert not offenders, (
+        "label-bearing fields outside the raw-label survival roster (add them "
+        f"to a roster shape in validation/invariants.py): {offenders}"
+    )
+
+
+# -- N3. Equivalence-group symmetry plant (b9 R74/75-6) --
+
+
+class _TwiceLinearEquivalence(nn.Module):
+    """Apply one linear layer twice to mint a real equivalence group."""
+
+    def __init__(self) -> None:
+        """Build the shared linear layer."""
+
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the layer twice.
+
+        Parameters
+        ----------
+        x:
+            Input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Twice-transformed batch.
+        """
+
+        return self.fc(self.fc(x))
+
+
+def test_corruption_equivalence_symmetry_one_sided_group():
+    """A one-sided equivalent_ops rebind trips _check_equivalence_symmetry.
+
+    b9 R74/75-6: the symmetry check had exactly one arming test, and it lived
+    outside every invariant-focused file, so an invariant-suite lane reported
+    a false survivor. The plant corrupts through CELL ASSIGNMENT (dropping a
+    sibling from one member only): in-place mutation of the shared GroupRef
+    view is impossible by design, and a symmetric group-table edit would not
+    be a corruption at all.
+    """
+
+    log = trace_fn(_TwiceLinearEquivalence(), torch.randn(2, 4), random_seed=42)
+    groups = [op for op in log.compute_ops if op.equivalent_ops]
+    assert groups, "expected an equivalence group from the repeated layer"
+    victim = groups[0]
+    members = set(victim.equivalent_ops)
+    assert len(members) >= 2, "equivalence group too small to break one-sidedly"
+    victim.equivalent_ops = members - {sorted(members)[-1]}
+    with pytest.raises(MetadataInvariantError, match="equivalence_symmetry"):
+        check_metadata_invariants(log)
+    log.cleanup()
+
+
+# -- O2. Commit-tier canary: the tripwire fires on nothing legitimate --
+
+
+class _CanaryTupleOut(nn.Module):
+    """One-line model returning a tuple, for the plain-capture canary."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return a relu and its increment as a 2-tuple.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Two derived tensors.
+        """
+
+        y = torch.relu(x)
+        return y, y + 1
+
+
+@pytest.mark.smoke
+def test_smoke_canary_plain_captures_trip_no_invariants():
+    """Plain captures of one-line models pass every invariant and replay.
+
+    The b9 R71-2 canary: only 3/271 tests in this file were smoke-marked,
+    so a plain-capture tripwire firing on a trivial model was invisible to
+    the commit-level gate. This is the one canonical cheap case: if ANY
+    metadata invariant or replay check fires on these, capture minted bad
+    metadata -- never exempt the invariant, fix the producer.
+    """
+
+    cases = [
+        (nn.ReLU(), torch.randn(4)),
+        (nn.Linear(5, 3), torch.randn(2, 5)),
+        (_CanaryTupleOut(), torch.randn(3)),
+    ]
+    for model, x in cases:
+        log = trace_fn(model, x, random_seed=42)
+        check_metadata_invariants(log)
+        log.cleanup()
+        assert validate_forward_pass(model, [x], input_kwargs={})
 
 
 # -- P. Graph connectivity corruption --

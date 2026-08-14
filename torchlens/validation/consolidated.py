@@ -18,6 +18,26 @@ if TYPE_CHECKING:
     from ..receptive_field._types import ReceptiveFieldValidation
 
 
+def _rss_high_water_bytes() -> int | None:
+    """Return the process RSS high-water mark in bytes, or ``None`` off-POSIX.
+
+    Returns
+    -------
+    int | None
+        ``ru_maxrss`` scaled to bytes (kilobytes on Linux, bytes on macOS),
+        or ``None`` when the ``resource`` module is unavailable.
+    """
+
+    try:
+        import resource
+    except ImportError:
+        return None
+    import sys as _sys
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak) if _sys.platform == "darwin" else int(peak) * 1024
+
+
 @dataclass(frozen=True)
 class InterventionValidationReport:
     """Five-axis intervention validation result.
@@ -410,15 +430,35 @@ def validate(
     from ..user_funcs import validate_forward_pass
 
     if normalized_scope in {"forward", "saved"}:
-        return validate_forward_pass(
-            model,
-            input_args,
-            input_kwargs=input_kwargs,
-            random_seed=random_seed,
-            verbose=verbose,
-            validate_metadata=validate_metadata,
-            backend=backend,
-        )
+        # R33-2: validation is the product's largest transient peak and had no
+        # instrumentation. Record cheap peak observations around the run and
+        # publish them through ``last_validation_peak_memory()``; measurement
+        # only, never part of the verdict.
+        from .diagnostics import _LAST_RUN_PEAKS
+
+        _LAST_RUN_PEAKS.clear()
+        rss_before = _rss_high_water_bytes()
+        cuda_armed = torch.cuda.is_available() and torch.cuda.is_initialized()
+        if cuda_armed:
+            torch.cuda.reset_peak_memory_stats()
+        try:
+            return validate_forward_pass(
+                model,
+                input_args,
+                input_kwargs=input_kwargs,
+                random_seed=random_seed,
+                verbose=verbose,
+                validate_metadata=validate_metadata,
+                backend=backend,
+            )
+        finally:
+            rss_after = _rss_high_water_bytes()
+            if rss_before is not None and rss_after is not None:
+                _LAST_RUN_PEAKS["host_rss_peak_delta_bytes"] = max(0, rss_after - rss_before)
+            if cuda_armed:
+                _LAST_RUN_PEAKS["cuda_peak_allocated_bytes"] = int(
+                    torch.cuda.max_memory_allocated()
+                )
     return _intervention_report(
         model,
         input_args,

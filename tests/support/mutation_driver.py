@@ -1,0 +1,234 @@
+"""Tripwire mutation driver: prove the validation suite KILLS neutered checks.
+
+Institutionalized from the b9 hunt's throwaway seeds (R74/75-5), with the
+pristine-control protocol BAKED IN: an un-controlled adjudication on a tree
+with baseline reds hallucinated two kills during the b9 hunt, so this driver
+refuses to score mutants until the UNMUTATED suite is green in the same
+sandbox.
+
+Each mutant NEUTERS one tripwire check (inserts an unconditional early
+``return`` as the first statement after the docstring) and runs the bounded
+arming suite. A mutant that leaves the suite GREEN is a SURVIVOR -- a missing
+red capability that needs a new planted-corruption test, NEVER a reason to
+keep the mutation.
+
+Usage (from the repo root)::
+
+    python tests/support/mutation_driver.py --make-sandbox /tmp/tl-mut M04 M11
+    python tests/support/mutation_driver.py --sandbox /tmp/tl-mut/repo  # all
+
+The driver only ever writes inside the sandbox; running against the real
+checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
+red-capability *tests* live in the suite itself; this measures their margin.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+#: mutant id -> (relative file, function to neuter). Every entry names a
+#: verdict-steering invariant check; extend when a new contract lands.
+MUTANTS: dict[str, tuple[str, str]] = {
+    "M01": ("torchlens/validation/_invariants_topology.py", "_check_graph_topology"),
+    "M02": ("torchlens/validation/_invariants_payloads.py", "_check_op_log_fields"),
+    "M03": ("torchlens/validation/_invariants_connectivity.py", "_check_graph_connectivity"),
+    "M04": ("torchlens/validation/_invariants_connectivity.py", "_check_ancestry_closure"),
+    "M05": ("torchlens/validation/_invariants_equivalence.py", "_check_loop_detection_invariants"),
+    "M06": ("torchlens/validation/_invariants_equivalence.py", "_check_equivalence_symmetry"),
+    "M07": ("torchlens/validation/_invariants_connectivity.py", "_check_lookup_key_consistency"),
+    "M08": ("torchlens/validation/_invariants_conditional_modules.py", "_check_module_hierarchy"),
+    "M09": ("torchlens/validation/_invariants_topology.py", "_check_trace_self_consistency"),
+    "M10": ("torchlens/validation/_invariants_conditional_base.py", "_check_recurrence_invariants"),
+    "M11": ("torchlens/validation/_invariants_equivalence.py", "_check_graph_ordering"),
+    "M12": ("torchlens/validation/_invariants_modules_params.py", "_check_param_xrefs"),
+    # The flagship per-op replay comparator (R74/75-2): neutering the
+    # comparison result at the callsite must be killed by the corruption
+    # battery, not by a single diagnostics test.
+    "M13": ("torchlens/validation/core.py", "_deep_numeric_replay_matches_saved"),
+}
+
+#: Bounded arming suite: the files whose job is to kill the mutants above.
+SUITE = [
+    "tests/test_validation.py",
+    "tests/test_replay_corruption_battery.py",
+    "tests/test_internals.py",
+    "tests/test_ancestry_closure_invariant.py",
+    "tests/test_conditional_invariants.py",
+    "tests/test_loop_synthesis_ground_truth.py",
+    "tests/test_r29_capval_hardening.py",
+]
+
+#: Known baseline reds, deselected so a mutant verdict is never confounded.
+#: KEEP THIS LIST SHORT AND DATED; every entry weakens the margin measurement
+#: for whatever its tests would have killed.
+DESELECT = [
+    # ancestry_closure capture bug, FW2-CAPTURE-owned (b9 R71-1); red since
+    # 6fcb54f2 armed the closure. Remove once the capture fix lands.
+    "tests/test_validation.py::test_validate_forward_pass_uses_typed_ground_truth_leaf_order",
+    "tests/test_validation.py::test_plain_trace_internal_source_final_output_is_exempted",
+]
+
+
+def neuter(path: Path, func: str) -> str:
+    """Insert an early ``return None`` into ``func`` and return the original text.
+
+    Parameters
+    ----------
+    path:
+        File containing the function.
+    func:
+        Function name to neuter (first match wins).
+
+    Returns
+    -------
+    str
+        The file's original source, for restoration.
+    """
+
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func
+        ),
+        None,
+    )
+    if target is None:
+        raise SystemExit(f"function {func} not found in {path}")
+    body = target.body
+    first = body[0]
+    anchor = (
+        body[1]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and len(body) > 1
+        else first
+    )
+    lines = src.splitlines(keepends=True)
+    lines.insert(anchor.lineno - 1, f"{' ' * anchor.col_offset}return None  # R74-MUTANT\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    return src
+
+
+def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProcess:
+    """Run the bounded arming suite inside the sandbox.
+
+    Parameters
+    ----------
+    sandbox:
+        Sandbox repo root.
+    python:
+        Python executable to run pytest with.
+    tag:
+        Unique tag for basetemp/cache isolation.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        The finished pytest process.
+    """
+
+    cache = sandbox / f".cache-{tag}"
+    cache.mkdir(exist_ok=True)
+    cmd = [python, "-m", "pytest", *SUITE, "-p", "no:randomly", "-x", "-q", "--tb=no"]
+    cmd += ["--basetemp", str(sandbox / f".bt-{tag}")]
+    for node in DESELECT:
+        cmd += ["--deselect", node]
+    env = dict(
+        os.environ,
+        OMP_NUM_THREADS="2",
+        CUDA_VISIBLE_DEVICES="",
+        TORCHLENS_CACHE_DIR=str(cache),
+    )
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=sandbox)
+
+
+def main() -> None:
+    """Parse arguments, enforce the pristine control, and score each mutant."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mutants", nargs="*", default=[], help="mutant ids (default: all)")
+    parser.add_argument("--sandbox", type=Path, help="existing sandbox repo root")
+    parser.add_argument(
+        "--make-sandbox",
+        type=Path,
+        help="copy the current repo to DIR/repo and use it as the sandbox",
+    )
+    parser.add_argument("--python", default=sys.executable, help="python to run pytest with")
+    parser.add_argument(
+        "--skip-control",
+        action="store_true",
+        help="UNSAFE: skip the pristine control (only when just proven green)",
+    )
+    args = parser.parse_args()
+
+    repo = Path(__file__).resolve().parents[2]
+    if args.make_sandbox:
+        sandbox = args.make_sandbox / "repo"
+        if not sandbox.exists():
+            print(f"copying {repo} -> {sandbox} ...", flush=True)
+            shutil.copytree(
+                repo,
+                sandbox,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache", "*.egg-info"),
+            )
+    else:
+        sandbox = args.sandbox
+    if sandbox is None:
+        raise SystemExit("need --sandbox DIR or --make-sandbox DIR")
+    sandbox = sandbox.resolve()
+    if sandbox == repo:
+        raise SystemExit("refusing to mutate the real checkout; use --make-sandbox")
+
+    ids = args.mutants or sorted(MUTANTS)
+    unknown = [mid for mid in ids if mid not in MUTANTS]
+    if unknown:
+        raise SystemExit(f"unknown mutant ids: {unknown}")
+
+    # Pristine control: verdicts are meaningless over a red baseline (the b9
+    # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
+    if not args.skip_control:
+        control = run_suite(sandbox, args.python, "control")
+        if control.returncode != 0:
+            tail = "\n".join(control.stdout.strip().splitlines()[-8:])
+            raise SystemExit(
+                "PRISTINE CONTROL RED -- fix or deselect the baseline before "
+                f"scoring any mutant:\n{tail}"
+            )
+        print("control: GREEN", flush=True)
+
+    results: dict[str, dict[str, object]] = {}
+    for mid in ids:
+        rel, func = MUTANTS[mid]
+        path = sandbox / rel
+        original = neuter(path, func)
+        try:
+            proc = run_suite(sandbox, args.python, mid)
+        finally:
+            path.write_text(original, encoding="utf-8")
+        results[mid] = {
+            "file": rel,
+            "func": func,
+            "returncode": proc.returncode,
+            "verdict": "KILLED" if proc.returncode != 0 else "SURVIVOR",
+            "tail": proc.stdout.strip().splitlines()[-4:],
+        }
+        print(json.dumps({mid: results[mid]}), flush=True)
+
+    survivors = sorted(mid for mid, row in results.items() if row["verdict"] == "SURVIVOR")
+    print("RESULTS " + json.dumps(results))
+    if survivors:
+        print(f"SURVIVORS: {survivors} -- each needs a new planted-corruption test")
+        raise SystemExit(1)
+    print("all mutants KILLED")
+
+
+if __name__ == "__main__":
+    main()

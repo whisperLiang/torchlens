@@ -30,14 +30,27 @@ and raises ``MetadataInvariantError`` on the first failure.
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping
+
+# The imports below marked ``noqa: F401`` are LOAD-BEARING despite having no
+# reference in this file: ``_rebind_function`` rebinds every split-child
+# function onto THIS module's globals, so the rebound bodies resolve these
+# names here at call time (deleting them raises NameError inside the checks
+# -- verified live). Per-line noqa keeps F401 armed for genuinely dead code
+# in the rest of the file (b9 R43-3; the former file-wide blanket is gone).
+from collections import Counter, defaultdict  # noqa: F401 (rebound-child globals)
+from collections.abc import Callable, Iterable, Mapping  # noqa: F401 (rebound-child globals)
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast  # noqa: F401 (rebound-child globals)
 
 from .._split_rebind import rebind_function as _rebind_function
 from ..errors._base import ValidationError
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from ..ir.container import (  # noqa: F401 (rebound-child globals)
+    DataclassField,
+    DictKey,
+    HFKey,
+    NamedField,
+    TupleIndex,
+)
 from . import (
     _invariants_backward_domain as _invariants_backward_domain,
     _invariants_backward_flow as _invariants_backward_flow,
@@ -53,15 +66,12 @@ from . import (
     _invariants_payloads as _invariants_payloads,
     _invariants_topology as _invariants_topology,
 )
-from .status import has_importer_region_provenance, is_region_replay_annotation
-
-# ruff: noqa: F401
+from .status import (  # noqa: F401 (rebound-child globals)
+    has_importer_region_provenance,
+    is_region_replay_annotation,
+)
 
 if TYPE_CHECKING:
-    from ..backends import BackendSpec
-    from ..data_classes.layer import Layer
-    from ..data_classes.module import Module
-    from ..data_classes.op import Op
     from ..data_classes.trace import Trace
 
 InvariantApplicability = Literal["torch", "non_torch", "all"]
@@ -246,6 +256,14 @@ _RAW_LABEL_BEARING_LIST_FIELDS = (
     "recurrent_ops",
 )
 _RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call")
+
+# Dict-shaped relation metadata carrying labels on either axis:
+# ``conditional_elif_children`` holds label LISTS as values (int keys), and
+# ``parent_arg_positions`` holds labels as KEYS. Both are persisted KEEP and
+# relabeled, but the list-field scan iterates dict keys only and neither was
+# rostered, so they were structurally unscanned -- the exact class the roster
+# was built to stop (p2 #13 / R08). The scan checks keys AND value strings.
+_RAW_LABEL_BEARING_DICT_FIELDS = ("conditional_elif_children", "parent_arg_positions")
 
 
 # ---------------------------------------------------------------------------

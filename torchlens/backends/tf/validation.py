@@ -11,6 +11,7 @@ import numpy as np
 
 from ... import _state
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
+from .._validation_shared import ops_by_label as _ops_by_label
 from .op_callback_capture import TFOpCapture
 
 TFOpClass = Literal[
@@ -1100,43 +1101,6 @@ def _saved_payload(op: Any) -> Any:
     return getattr(op, "out")
 
 
-def _ops_by_label(trace: Any) -> dict[str, Any]:
-    """Return materialized trace operations keyed by labels.
-
-    Parameters
-    ----------
-    trace
-        Materialized TensorFlow trace.
-
-    Returns
-    -------
-    dict[str, Any]
-        Operations keyed by raw, layer, and public labels.
-
-    Notes
-    -----
-    Key precedence is load-bearing under recurrence grouping: a group
-    leader's RAW label doubles as the shared ``layer_label`` of every later
-    pass, so naive last-writer insertion would silently rebind a capture
-    record's ``label_raw`` to the wrong pass. Raw labels are the immutable
-    capture identity and always win; pass labels are unique; the ambiguous
-    layer label resolves to its first pass.
-    """
-
-    result: dict[str, Any] = {}
-    for op in getattr(trace, "layer_list", ()):
-        layer_label = getattr(op, "layer_label", None)
-        if isinstance(layer_label, str) and layer_label not in result:
-            result[layer_label] = op
-    for op in getattr(trace, "layer_list", ()):
-        label = getattr(op, "label", None)
-        if isinstance(label, str):
-            result[label] = op
-    for op in getattr(trace, "layer_list", ()):
-        label_raw = getattr(op, "_label_raw", None)
-        if isinstance(label_raw, str):
-            result[label_raw] = op
-    return result
 
 
 def _captures_by_label(trace: Any) -> dict[str, TFOpCapture]:

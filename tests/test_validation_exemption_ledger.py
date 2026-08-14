@@ -621,12 +621,10 @@ SKIP_PERTURBATION_JUSTIFICATIONS: dict[str, str] = {
         "same shared-zipped-parent limitation as meshgrid; retained with the same "
         "replay-side guard and the same pending narrowing"
     ),
-    "nms": "torchvision PyCapsule op; perturbed coordinates can segfault the native kernel",
-    "deform_conv2d": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "ps_roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "ps_roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "roi_align": "torchvision PyCapsule op; perturbation can segfault the native kernel",
-    "roi_pool": "torchvision PyCapsule op; perturbation can segfault the native kernel",
+    # The six torchvision PyCapsule rows left this ledger with the b1p2 D2
+    # adjudicated NARROWING: they now live in STRUCTURAL_ARG_POSITIONS keyed
+    # on the coordinate/offset arg only, so feature/score value edges are
+    # perturbation-tested again with zero segfault exposure.
     "exponential_": "in-place RNG draw; the output is determined by RNG state, not inputs",
 }
 
@@ -1083,6 +1081,93 @@ STRUCTURAL_POSITION_LEDGER: tuple[StructuralPositionExemption, ...] = (
             "lengths tensor reaching the call at another position or keyword"
         ),
     ),
+    # -- torchvision PyCapsule ops (b1p2 D2 adjudicated NARROWING) ----------
+    # Formerly whole-op rows in SKIP_PERTURBATION_ENTIRELY: the skip was wider
+    # than its segfault justification. Only the coordinate/offset arg is
+    # vehicle-limited (perturbed coordinates index out of bounds inside the
+    # native kernel, past Python exception handling); feature and score args
+    # returned to strict perturbation.
+    StructuralPositionExemption(
+        func_name="nms",
+        positions=frozenset({0}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "the arg-0 boxes ARE value-sensitive (coordinates decide suppression), but "
+            "perturbed coordinates can index out of bounds inside the torchvision "
+            "PyCapsule kernel and segfault past Python exception handling, so no safe "
+            "in-domain alternative can be synthesized by the vehicle; forward replay "
+            "still re-runs the real call from the saved boxes. Scores (arg 1) stay "
+            "strictly perturbation-tested (the b1p2 D2 narrowing)"
+        ),
+        refuses="the arg-1 scores, whose values order and gate every kept box",
+    ),
+    StructuralPositionExemption(
+        func_name="deform_conv2d",
+        positions=frozenset({1}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "the arg-1 sampling offsets ARE value-sensitive, but out-of-domain offsets "
+            "index outside the feature map inside the native kernel and can segfault, "
+            "so the vehicle cannot perturb them safely; forward replay still re-runs "
+            "the real call from the saved offsets. Input, weight, bias, and modulation "
+            "mask stay strictly perturbation-tested"
+        ),
+        refuses=(
+            "the arg-0 input and the weight/bias/mask arguments, whose values flow "
+            "arithmetically into every output element"
+        ),
+    ),
+    StructuralPositionExemption(
+        func_name="roi_align",
+        positions=frozenset({1}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "the arg-1 boxes ARE value-sensitive (they place the pooling windows), but "
+            "perturbed box coordinates can address out-of-bounds feature-map memory in "
+            "the PyCapsule kernel; forward replay still re-runs the real call from the "
+            "saved boxes. The arg-0 feature map stays strictly perturbation-tested"
+        ),
+        refuses="the arg-0 feature map, whose values are averaged into every output bin",
+    ),
+    StructuralPositionExemption(
+        func_name="roi_pool",
+        positions=frozenset({1}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "same coordinate-safety limitation as roi_align for the arg-1 boxes; the "
+            "arg-0 feature map stays strictly perturbation-tested and replay re-runs "
+            "the real call from the saved boxes"
+        ),
+        refuses="the arg-0 feature map, whose values are pooled into every output bin",
+    ),
+    StructuralPositionExemption(
+        func_name="ps_roi_align",
+        positions=frozenset({1}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "position-sensitive variant of roi_align with the same arg-1 coordinate "
+            "safety limitation; the arg-0 feature map stays strictly tested and replay "
+            "re-runs the real call from the saved boxes"
+        ),
+        refuses="the arg-0 feature map, whose values are averaged into every output bin",
+    ),
+    StructuralPositionExemption(
+        func_name="ps_roi_pool",
+        positions=frozenset({1}),
+        contract=_C2,
+        proof_kind="vehicle_limited",
+        justification=(
+            "position-sensitive variant of roi_pool with the same arg-1 coordinate "
+            "safety limitation; the arg-0 feature map stays strictly tested and replay "
+            "re-runs the real call from the saved boxes"
+        ),
+        refuses="the arg-0 feature map, whose values are pooled into every output bin",
+    ),
 )
 
 #: Per-entry audit records for ``CUSTOM_EXEMPTION_CHECKS``.
@@ -1410,6 +1495,14 @@ STRUCTURAL_KWARG_ALIAS_LEDGER: dict[str, dict[int, frozenset[str]]] = {
     "_pack_padded_sequence": {1: frozenset({"lengths"})},
     "_pad_packed_sequence": {1: frozenset({"lengths"})},
     "type_as": {1: frozenset({"tensor", "other"})},
+    # torchvision coordinate args (b1p2 D2 narrowing): keyword spellings of
+    # the SAME audited positions above, nothing wider.
+    "nms": {0: frozenset({"boxes"})},
+    "deform_conv2d": {1: frozenset({"offset"})},
+    "roi_align": {1: frozenset({"boxes", "rois"})},
+    "roi_pool": {1: frozenset({"boxes", "rois"})},
+    "ps_roi_align": {1: frozenset({"boxes", "rois"})},
+    "ps_roi_pool": {1: frozenset({"boxes", "rois"})},
 }
 
 

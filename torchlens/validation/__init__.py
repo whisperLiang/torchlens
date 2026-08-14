@@ -24,6 +24,8 @@ from .diagnostics import (
     ValidationFailure,
     get_validation_diagnostics,
     get_validation_failure,
+    last_validation_failure,
+    last_validation_peak_memory,
 )
 from .invariants import MetadataInvariantError, check_metadata_invariants
 from .status import ValidationReplayState, ValidationReplayStatus
@@ -1287,6 +1289,8 @@ __all__ = [
     "ValidationReplayStatus",
     "get_validation_failure",
     "get_validation_diagnostics",
+    "last_validation_failure",
+    "last_validation_peak_memory",
     "validate_backward_pass",
     "validate_batch_of_models_and_inputs",
     "validate",

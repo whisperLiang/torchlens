@@ -161,9 +161,56 @@ class ValidationDiagnostic:
         return {"check": self.check, "message": self.message, "extra": dict(self.extra)}
 
 
+#: Mirror of the CURRENT run's first failure. The internal validation trace
+#: never escapes ``tl.validate`` / ``validate_forward_pass`` (they collapse to
+#: a bool), so this module-level slot is the one place a caller can read the
+#: rich record from (b8 B8-42). Cleared by ``reset_validation_failure`` at
+#: each run entry; single-threaded by design like the rest of capture.
+_LAST_RUN_FAILURE: list[ValidationFailure] = []
+
+#: Upper bound on retained per-run diagnostics (b8 B8-43): the ledger is
+#: per-run evidence, not an unbounded process log.
+MAX_VALIDATION_DIAGNOSTICS = 256
+
+
+#: Peak-memory observation of the most recent ``tl.validate`` run (b6 R33-2):
+#: validation is the largest peak in the product (measured 11.5x the model's
+#: own grad-on forward) and previously had NO instrumentation at all.
+_LAST_RUN_PEAKS: dict[str, int] = {}
+
+
+def last_validation_peak_memory() -> dict[str, int] | None:
+    """Return peak-memory observations from the most recent ``tl.validate`` run.
+
+    Returns
+    -------
+    dict[str, int] | None
+        ``host_rss_peak_delta_bytes`` (growth of the process RSS high-water
+        mark across the run -- a lower bound, ``0`` when validation fit in
+        already-resident headroom) and, when CUDA ran,
+        ``cuda_peak_allocated_bytes``. ``None`` before any instrumented run.
+    """
+
+    return dict(_LAST_RUN_PEAKS) if _LAST_RUN_PEAKS else None
+
+
+def last_validation_failure() -> ValidationFailure | None:
+    """Return the first failure recorded by the most recent validation run.
+
+    Returns
+    -------
+    ValidationFailure | None
+        The structured first mismatch of the last ``validate_saved_outs`` /
+        ``tl.validate`` run, or ``None`` when it passed (or never ran).
+    """
+
+    return _LAST_RUN_FAILURE[0] if _LAST_RUN_FAILURE else None
+
+
 def reset_validation_failure(trace: Any) -> None:
     """Clear any previously-recorded failure on a Trace (best-effort, no raise)."""
 
+    del _LAST_RUN_FAILURE[:]
     try:
         setattr(trace, TRACE_FAILURE_ATTR, None)
     except Exception:
@@ -186,6 +233,8 @@ def record_validation_failure(trace: Any, failure: ValidationFailure) -> None:
         Structured failure description to stash.
     """
 
+    if not _LAST_RUN_FAILURE:
+        _LAST_RUN_FAILURE.append(failure)
     try:
         if getattr(trace, TRACE_FAILURE_ATTR, None) is None:
             setattr(trace, TRACE_FAILURE_ATTR, failure)
@@ -203,6 +252,25 @@ def get_validation_failure(trace: Any) -> ValidationFailure | None:
     return failure if isinstance(failure, ValidationFailure) else None
 
 
+def reset_validation_diagnostics(trace: Any) -> None:
+    """Clear retained diagnostics so a run reports THIS-run evidence only.
+
+    b8 B8-43: ``validate_saved_outs`` claims this-run semantics, but only the
+    failure slot was reset at entry -- diagnostics accumulated across runs on
+    a reused trace. Best-effort, never raises.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose diagnostic ledger should be emptied.
+    """
+
+    try:
+        setattr(trace, TRACE_DIAGNOSTICS_ATTR, ())
+    except Exception:
+        pass
+
+
 def record_validation_diagnostic(trace: Any, diagnostic: ValidationDiagnostic) -> None:
     """Append a non-failing validation diagnostic to a live trace.
 
@@ -216,12 +284,17 @@ def record_validation_diagnostic(trace: Any, diagnostic: ValidationDiagnostic) -
     Notes
     -----
     Recording is deliberately best-effort: diagnostics must never turn a
-    validation warning into a validation failure.
+    validation warning into a validation failure. The ledger is bounded at
+    :data:`MAX_VALIDATION_DIAGNOSTICS` entries per run (first-N-wins, matching
+    the failure slot's first-mismatch semantics); the former
+    copy-the-whole-tuple append was also O(history) per record (b8 B8-43).
     """
 
     try:
         existing = getattr(trace, TRACE_DIAGNOSTICS_ATTR, ())
         diagnostics = list(existing) if isinstance(existing, (list, tuple)) else []
+        if len(diagnostics) >= MAX_VALIDATION_DIAGNOSTICS:
+            return
         diagnostics.append(diagnostic)
         setattr(trace, TRACE_DIAGNOSTICS_ATTR, tuple(diagnostics))
     except Exception:
