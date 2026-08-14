@@ -520,6 +520,7 @@ def save(
             trace=trace,
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
+            include_source=include_source,
         )
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
@@ -3020,6 +3021,7 @@ def _build_manifest(
     trace: Trace,
     tensor_entries: list[TensorEntry],
     unsupported_tensors: list[dict[str, str]],
+    include_source: bool = True,
 ) -> Manifest:
     """Create a manifest instance for a finished bundle save.
 
@@ -3031,6 +3033,9 @@ def _build_manifest(
         Persisted tensor entries.
     unsupported_tensors:
         Unsupported tensor records accumulated under ``strict=False``.
+    include_source:
+        When ``False`` the environment-provenance git commit hash is omitted, so
+        ``include_source=False`` also drops the cwd repo's HEAD commit (B8-19).
 
     Returns
     -------
@@ -3063,17 +3068,23 @@ def _build_manifest(
         n_auxiliary_blobs=n_auxiliary_blobs,
         tensors=tensor_entries,
         unsupported_tensors=unsupported_tensors,
-        provenance=_collect_provenance(trace),
+        provenance=_collect_provenance(trace, include_source=include_source),
     )
 
 
-def _collect_provenance(trace: Trace) -> Provenance:
+def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provenance:
     """Collect a best-effort, bounded provenance certificate for one save.
 
     Parameters
     ----------
     trace:
         Source trace whose already-recorded capture facts should be certified.
+    include_source:
+        When ``False`` the cwd repo's HEAD commit hash is omitted (B8-19): the
+        manifest otherwise embedded the git commit of whatever repository contained
+        the working directory at save time, with no opt-out. Tying it to the
+        existing source-embedding flag lets ``include_source=False`` drop this
+        environment detail along with the source it already withholds.
 
     Returns
     -------
@@ -3141,7 +3152,7 @@ def _collect_provenance(trace: Trace) -> Provenance:
         rng_state_digests=rng_digests,
         input_hash=input_hash,
         model_structure_hash=model_structure_hash,
-        git_commit_hash=_git_commit_hash(Path.cwd()),
+        git_commit_hash=_git_commit_hash(Path.cwd()) if include_source else None,
     )
 
 

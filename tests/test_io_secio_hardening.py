@@ -189,6 +189,40 @@ def test_visualizer_path_inside_bundle_is_reanchored(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# B8-19: git-commit provenance follows include_source                          #
+# --------------------------------------------------------------------------- #
+
+
+def _manifest_git_hash(spec: Path) -> object:
+    import json
+
+    manifest = json.loads((spec / "manifest.json").read_text())
+    return manifest.get("provenance", {}).get("git_commit_hash")
+
+
+def test_git_commit_hash_is_dropped_when_source_excluded(tmp_path: Path) -> None:
+    """include_source=False must not embed the cwd repo's HEAD commit.
+
+    Fail-before: the manifest embedded the git commit of whatever repository
+    contained the working directory at save time, with no opt-out or disclosure.
+    """
+
+    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
+    excluded = tmp_path / "no_source.tlspec"
+    tl.save(trace, str(excluded), include_source=False)
+    assert _manifest_git_hash(excluded) is None
+
+    included = tmp_path / "with_source.tlspec"
+    tl.save(trace, str(included), include_source=True)
+    # When source is kept the field is populated iff git resolves a commit for cwd;
+    # either way it is unchanged from the pre-fix default behavior.
+    from torchlens._io.bundle import _git_commit_hash
+
+    expected = _git_commit_hash(Path.cwd())
+    assert _manifest_git_hash(included) == expected
+
+
+# --------------------------------------------------------------------------- #
 # R27-3: typed recursion refusal during rehydration                            #
 # --------------------------------------------------------------------------- #
 
