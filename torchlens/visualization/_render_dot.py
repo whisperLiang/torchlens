@@ -408,13 +408,11 @@ def _build_graphviz_shell(
     }
     if request.collapse_fn is not None:
         graph_args["newrank"] = "true"
-    visualizer_dir = getattr(trace, "_visualizer_dir", None)
-    if visualizer_dir:
-        # r-b6 R19-6: node image attributes are emitted RELATIVE to the trace
-        # visualizer scratch root; this one graph attribute supplies the root,
-        # so the per-run mkdtemp path appears exactly once in the DOT instead
-        # of in every image node.
-        graph_args["imagepath"] = str(visualizer_dir)
+    # r-b6 R19-6 / T9 (grind-p3): node image attributes are emitted RELATIVE
+    # to the trace visualizer scratch root, and the root is supplied to
+    # Graphviz OUT OF BAND (subprocess cwd at render time), never as an
+    # in-source ``imagepath`` — a baked per-run mkdtemp path made every
+    # user-saved DOT unrenderable once the trace's scratch dir was GC'd.
     graph_args.update(theme_graph_attrs(theme, font_size=request.font_size, dpi=request.dpi))
     overrides = cast(VisualizationOverrides, request.overrides)
     for arg_name, arg_val in overrides.graph.items():  # type: ignore[union-attr]
@@ -766,7 +764,13 @@ def _emit_and_finish_forward(
         }
         rank_visualizer_dir = getattr(trace, "_visualizer_dir", None)
         if rank_visualizer_dir and "imagepath" not in resolved_graph_overrides:
-            # r-b6 R19-6: same one-attribute image root as the dot path.
+            # r-b6 R19-6: one-attribute image root for the rank engine. T9
+            # (grind-p3) removed the in-source root on the dot path (cwd
+            # replaces it); the rank renderer runs neato internally and its
+            # source file is deleted after a successful render, so the
+            # remaining temp-path exposure here is the returned source
+            # string and a failure-path leftover — a disclosed residual
+            # until the rank internals grow a cwd-based root.
             resolved_graph_overrides["imagepath"] = str(rank_visualizer_dir)
         with _timed_phase(trace, "render:graphviz:forward"):
             result = render_rank_layout(
@@ -867,13 +871,13 @@ def _emit_and_finish_forward(
                 raise
             _warn_sibling_order_fallback_once(exc)
 
+    # r-b6 R19-6 / T9 (grind-p3): the visualizer scratch dir is created
+    # LAZILY while nodes render (raw-input montages, feature maps). The root
+    # is passed to the Graphviz subprocess as its working directory below,
+    # never written into the source: user-saved DOT keeps only stable
+    # relative image refs instead of a per-run mkdtemp path that dies with
+    # the trace.
     late_visualizer_dir = getattr(trace, "_visualizer_dir", None)
-    if late_visualizer_dir and "imagepath=" not in dot.source:
-        # r-b6 R19-6: the visualizer scratch dir is created LAZILY while
-        # nodes render (raw-input montages, feature maps), i.e. after the
-        # graph attributes were set — so the relative image root is injected
-        # here, once, before the source is written.
-        dot.attr(imagepath=str(late_visualizer_dir))
     final_source = source_override if source_override is not None else dot.source
     source_path = dot.save(target.outpath)
     with open(source_path, "w", encoding="utf-8") as source_file:
@@ -893,13 +897,23 @@ def _emit_and_finish_forward(
                     render_image_root,
                 )
             else:
-                cmd = [dot.engine, f"-T{target.fileformat}", "-o", rendered_path, source_path]
+                cmd = [
+                    dot.engine,
+                    f"-T{target.fileformat}",
+                    "-o",
+                    os.path.abspath(rendered_path),
+                    os.path.abspath(source_path),
+                ]
                 subprocess.run(
                     cmd,
                     timeout=render_timeout,
                     check=True,
                     capture_output=True,
                     start_new_session=True,
+                    # T9 (grind-p3): relative node image refs resolve against
+                    # the scratch root via cwd, keeping the per-run temp path
+                    # out of the saved DOT source.
+                    cwd=str(render_image_root) if render_image_root else None,
                 )
                 if target.fileformat == "svg":
                     _inline_svg_file_local_images(rendered_path, render_image_root)
@@ -1143,14 +1157,20 @@ def _add_orphan_island_nodes(
 def _render_graph_only_svg(
     engine: str, source_path: str, timeout: int, image_root: Path | None = None
 ) -> str:
-    """Render a saved DOT source to an SVG string (no code panel)."""
+    """Render a saved DOT source to an SVG string (no code panel).
+
+    T9 (grind-p3): ``image_root`` doubles as the subprocess working
+    directory so relative node image refs resolve without an in-source
+    ``imagepath`` (the saved DOT must not carry the per-run temp path).
+    """
 
     completed = subprocess.run(
-        [engine, "-Tsvg", source_path],
+        [engine, "-Tsvg", os.path.abspath(source_path)],
         timeout=timeout,
         check=True,
         capture_output=True,
         start_new_session=True,
+        cwd=str(image_root) if image_root else None,
     )
     return _inline_svg_local_images(completed.stdout.decode("utf-8"), image_root)
 
