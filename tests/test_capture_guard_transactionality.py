@@ -31,8 +31,8 @@ import torchlens.backends.torch.wrappers as wrappers_module
 from torchlens.backends.torch.wrappers import (
     get_orig_torch_funcs,
     is_decorated_function,
-    nested_getattr,
 )
+from torchlens.utils.introspection import nested_getattr
 
 pytestmark = pytest.mark.smoke
 
