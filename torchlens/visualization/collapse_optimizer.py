@@ -189,11 +189,15 @@ class OptimizerResult:
 
         segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in self.plan.nodes)
         descriptor_count = len(self.segments or {})
-        assert descriptor_count == segment_nodes, (
-            f"OptimizerResult segment descriptor cardinality {descriptor_count} != "
-            f"plan segment nodes {segment_nodes}; publishing this result would "
-            "silently render hidden structure"
-        )
+        # r-b7 R24-2: a raise, not an assert — this guards the label-honesty
+        # contract on the DEFAULT draw(collapse=) path, and `python -O` strips
+        # asserts, which would let segment boxes under-report hidden calls.
+        if descriptor_count != segment_nodes:
+            raise RuntimeError(
+                f"OptimizerResult segment descriptor cardinality {descriptor_count} != "
+                f"plan segment nodes {segment_nodes}; publishing this result would "
+                "silently render hidden structure"
+            )
 
 
 @dataclass(frozen=True)
@@ -1381,14 +1385,19 @@ def _assert_segment_descriptor_parity(
     nodes: Sequence[PlanNode],
     segments: Mapping[str, SegmentDescriptor],
 ) -> None:
-    """Fail loudly when segment descriptors collide before renderer exposure."""
+    """Fail loudly when segment descriptors collide before renderer exposure.
+
+    r-b7 R24-2: a raise, not an assert — label honesty must survive
+    ``python -O``.
+    """
 
     segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in nodes)
-    assert len(segments) == segment_nodes, (
-        f"segment descriptor cardinality {len(segments)} != plan segment "
-        f"nodes {segment_nodes}; a non-injective segment identity would "
-        "silently drop rendered structure"
-    )
+    if len(segments) != segment_nodes:
+        raise RuntimeError(
+            f"segment descriptor cardinality {len(segments)} != plan segment "
+            f"nodes {segment_nodes}; a non-injective segment identity would "
+            "silently drop rendered structure"
+        )
 
 
 def _legal_plan_op_segment_run(

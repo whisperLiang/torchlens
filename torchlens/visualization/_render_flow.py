@@ -1797,16 +1797,34 @@ def _assert_sibling_backstops(
     chains: tuple[SiblingOrderChain, ...],
     captured_edges: list[CapturedForwardEdge],
 ) -> None:
-    """Assert sibling-ordering structural backstops."""
+    """Check sibling-ordering structural backstops, raising on violation.
+
+    r-b7 R24-3: raises, not asserts — ``order_siblings=True`` is the shipped
+    DEFAULT, and under ``python -O`` an assert-based backstop vanishes
+    entirely, so an invisible ordering edge coinciding with real dataflow
+    would no longer be rejected.
+    """
 
     real_edges = {(edge.tail_name, edge.head_name) for edge in captured_edges}
-    assert len(baseline.nodes) == len(injected.nodes)
+    if len(baseline.nodes) != len(injected.nodes):
+        raise RuntimeError(
+            f"sibling-order injection changed the node population: baseline "
+            f"{len(baseline.nodes)} nodes vs injected {len(injected.nodes)}"
+        )
     for chain in chains:
         for target in chain.targets:
-            assert target in baseline.nodes
+            if target not in baseline.nodes:
+                raise RuntimeError(
+                    f"sibling-order chain names {target!r}, which is not a "
+                    "baseline layout node"
+                )
         for left, right in zip(chain.targets, chain.targets[1:]):
-            assert (left, right) not in real_edges
-            assert (right, left) not in real_edges
+            if (left, right) in real_edges or (right, left) in real_edges:
+                raise RuntimeError(
+                    f"sibling-order chain pair ({left!r}, {right!r}) coincides "
+                    "with a real dataflow edge; the invisible ordering edge "
+                    "would distort the rendered graph"
+                )
 
 
 def _inject_sibling_rank_groups(source: str, chains: tuple[SiblingOrderChain, ...]) -> str:

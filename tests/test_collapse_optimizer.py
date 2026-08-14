@@ -1757,3 +1757,19 @@ def test_segment_run_prefix_work_does_not_grow_with_component_size() -> None:
         "probes did not fall far below the naive one-per-prefix count: "
         f"{counts[256][1]} probes for {counts[256][0]} candidate prefixes"
     )
+
+
+def test_segment_descriptor_parity_guard_survives_python_O() -> None:
+    """The label-honesty cardinality guards raise, not assert (r-b7 R24-2).
+
+    ``python -O`` strips asserts; these two guards defend the segment-box /
+    ``(xN)`` / ellipsis honesty contract on the DEFAULT ``draw(collapse=)``
+    path, so they must fire with assertions disabled too.
+    """
+
+    from torchlens.visualization.collapse_optimizer import (
+        _assert_segment_descriptor_parity,
+    )
+
+    with pytest.raises(RuntimeError, match="segment descriptor cardinality"):
+        _assert_segment_descriptor_parity((), {"phantom": object()})  # type: ignore[arg-type]
