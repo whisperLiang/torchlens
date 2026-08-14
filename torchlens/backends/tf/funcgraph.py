@@ -20,7 +20,7 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.predicate import RecordContext
-from ...ir.refs import DeviceRef, DtypeRef, TensorRef
+from ...ir.refs import DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...validation.status import (
     REGION_REPLAY_CLASS,
@@ -1425,7 +1425,9 @@ def _record_context_for_symbolic(
         input_output_address=None,
         shape=_shape_tuple(output),
         dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-        tensor_device=DeviceRef(backend="tf", name=""),
+        # Static FuncGraph import has no runtime placement; unknown stays None
+        # (an empty DeviceRef would be malformed under the metadata invariant).
+        tensor_device=None,
         tensor_requires_grad=None,
         output_index=output_index,
         is_bottom_level_func=True,

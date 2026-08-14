@@ -1158,7 +1158,7 @@ class PaddleBackend:
             input_output_address=None,
             shape=self._shape(output),
             dtype=DtypeRef(backend="paddle", name=str(self._dtype(output))),
-            tensor_device=DeviceRef(backend="paddle", name=str(self._device(output))),
+            tensor_device=_device_ref_from_paddle_place(self._device(output)),
             tensor_requires_grad=requires_grad,
             output_index=None,
             is_bottom_level_func=func_event_input.is_bottom_level_func,
@@ -1749,7 +1749,7 @@ def paddle_param_logs(tree: PaddleModuleTree, trace: Trace) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="paddle", name=dtype)
-        param.device_ref = DeviceRef(backend="paddle", name=str(getattr(value, "place", None)))
+        param.device_ref = _device_ref_from_paddle_place(getattr(value, "place", None))
         param.backend_address = f"object:{existing_address}"
         param.resolver_status = "resolved"
         param._param_ref = cast(Any, value)
@@ -1922,6 +1922,36 @@ def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) 
         if candidate in metadata:
             return candidate
     return "self" if "self" in metadata else None
+
+
+def _device_ref_from_paddle_place(place: object) -> DeviceRef | None:
+    """Build a vocabulary-honest ``DeviceRef`` from a Paddle place.
+
+    ``DeviceRef.backend`` is the HARDWARE device class (``"cpu"``, ``"gpu"``),
+    never the framework namespace. Paddle spells placement as ``Place(cpu)``
+    or ``Place(gpu:0)``; the canonical device string is the interior, routed
+    through :meth:`DeviceRef.from_value` like every other preview backend.
+
+    Parameters
+    ----------
+    place
+        Paddle place object, its string form, or ``None`` when unknown.
+
+    Returns
+    -------
+    DeviceRef | None
+        Neutral device reference, or ``None`` when placement is unknown.
+    """
+
+    if place is None:
+        return None
+    text = str(place)
+    if text.startswith("Place(") and text.endswith(")"):
+        text = text[len("Place(") : -1]
+    text = text.strip().lower()
+    if not text:
+        return None
+    return DeviceRef.from_value(text)
 
 
 def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
