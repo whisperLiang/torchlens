@@ -88,9 +88,12 @@ def test_overwrite_failure_preserves_existing_bundle(
     _build_bundle(0).save(target, overwrite=True)
     assert list(tl.load(target).members) == ["m0"]
 
-    real_rename = os.rename
+    # The atomic writer swaps with ``os.replace`` (cross-platform atomic
+    # overwrite; hardened from ``os.rename`` in 6689447a), so the failure
+    # injection must hook the syscall the writer actually issues.
+    real_replace = os.replace
 
-    def failing_rename(src: object, dst: object, *args: object, **kwargs: object) -> None:
+    def failing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
         # Fail ONLY the forward swap ``tmp.<hex> -> target``; allow the
         # recovery restore ``tmp.bak.<hex> -> target`` so the transient error
         # does not also block rollback.
@@ -101,9 +104,9 @@ def test_overwrite_failure_preserves_existing_bundle(
             and not src_name.startswith("tmp.bak.")
         ):
             raise OSError("injected final rename failure")
-        return real_rename(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+        return real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(os, "rename", failing_rename)
+    monkeypatch.setattr(os, "replace", failing_replace)
     with pytest.raises(OSError, match="injected final rename failure"):
         _build_bundle(1).save(target, overwrite=True)
     monkeypatch.undo()
