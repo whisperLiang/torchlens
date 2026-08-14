@@ -169,6 +169,15 @@ def _capture_backward_call_context(trace: Any) -> FuncCallLocation | None:
     -------
     FuncCallLocation | None
         User-visible call-site location, or ``None`` if no external frame is found.
+
+    Notes
+    -----
+    Contract: an IMPLICIT backward (orphan hook-only autograd flow that never passes
+    through a wrapped TorchLens backward trigger) has no user call site, so its
+    ``backward_call_context`` must stay ``None``. No stable public fixture currently
+    forces that path, so the contract lives here rather than as a skipped test
+    (disputed-r2 b10/R79); if such a fixture is ever found, pin it in
+    ``tests/test_backward_call_context.py``.
     """
 
     frame = inspect.currentframe()

@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import pytest
 import torch
 from torch import nn
 
@@ -95,14 +94,3 @@ def test_backward_call_context_survives_tlspec_round_trip(tmp_path: Path) -> Non
         assert location.line_number == expected_line
     finally:
         trace.cleanup()
-
-
-@pytest.mark.rare
-@pytest.mark.skip(
-    reason=(
-        "No stable public fixture currently forces orphan hook-only implicit backward without "
-        "TorchLens' wrapped backward triggers."
-    )
-)
-def test_implicit_backward_call_context_is_none() -> None:
-    """Implicit backward passes have no explicit Python TorchLens call site."""
