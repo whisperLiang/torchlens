@@ -1125,6 +1125,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_param_logs",
                 "_source_trace_ref",
                 "activation_memory",
+                # Reviewed widening (fix/mergedannot 130b3f80): Layer
+                # construction seeds layer_log.annotations["collective"] as an
+                # independent deep copy of the first pass's reserved
+                # collective_boundary_v1 payload; only that reserved key is
+                # consumed, other op annotation keys stay op-only.
+                "annotations",
                 "autograd_memory",
                 "bool_value",
                 "conditional_arm_children",
@@ -2888,6 +2894,11 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             frozenset(
                 (
                     "activation_memory",
+                    # Layer construction mirrors the reserved "collective"
+                    # annotations key from its first pass (fix/mergedannot
+                    # 130b3f80), so the layer build must see step 11.75's
+                    # settled annotation writes.
+                    "annotations",
                     "dtype",
                     "shape",
                     "transformed_activation_memory",
