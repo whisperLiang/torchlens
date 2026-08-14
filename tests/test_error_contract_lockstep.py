@@ -40,6 +40,29 @@ _CODE_PATTERN = re.compile(r'\bcode(?:\s*:\s*str)?\s*=\s*"([a-z0-9_]+)"')
 
 _DOC_ROW_PATTERN = re.compile(r"^\| `([a-z0-9_]+)` \| (.*?) \| (.*?) \|$")
 
+# Constant-spelled refusal identifiers (surfaced on ``fields["kind"]`` rather
+# than ``fields["code"]``, spelled as module constants rather than inline
+# literals). The inline-literal scanner cannot see them, which is exactly how
+# the three collective refusal kinds shipped documented NOWHERE (grind R25-5):
+# each is enrolled here as ``code -> (declaring file, constant name)`` and
+# verified against the source, so a constant rename or string drift fails this
+# gate exactly like an inline-code drift. New constant-spelled kinds must be
+# enrolled here AND documented in the contract's constant-spelled table.
+_CONSTANT_SPELLED_CODES: dict[str, tuple[str, str]] = {
+    "ambiguous_group_lifetime": (
+        "torchlens/distributed/_lifecycle.py",
+        "AMBIGUOUS_GROUP_LIFETIME",
+    ),
+    "uncaptured_collective_op": (
+        "torchlens/distributed/_recognizer.py",
+        "UNCAPTURED_COLLECTIVE_OP",
+    ),
+    "wildcard_recv_unsupported": (
+        "torchlens/backends/torch/collectives.py",
+        "WILDCARD_RECV_UNSUPPORTED",
+    ),
+}
+
 
 def _documented_codes() -> dict[str, tuple[str, str]]:
     """Return the contract table as ``code -> (refusal, remedy class)``.
@@ -77,6 +100,18 @@ def _source_codes() -> dict[str, set[str]]:
             declared.setdefault(match.group(1), set()).add(
                 str(path.relative_to(_PACKAGE_ROOT.parent))
             )
+    for code, (rel_path, constant_name) in _CONSTANT_SPELLED_CODES.items():
+        source_path = _PACKAGE_ROOT.parent / rel_path
+        if not source_path.exists():
+            # Enrollment integrity is enforced separately by
+            # test_constant_spelled_codes_resolve_in_source against the real
+            # tree; the red-capability test points _PACKAGE_ROOT elsewhere.
+            continue
+        pattern = re.compile(
+            rf'^{re.escape(constant_name)}\s*(?::\s*[^=]+)?=\s*"{re.escape(code)}"', re.M
+        )
+        if pattern.search(source_path.read_text()):
+            declared.setdefault(code, set()).add(rel_path)
     return declared
 
 
@@ -116,10 +151,40 @@ def test_every_source_code_is_documented() -> None:
         "refusal codes declared in torchlens/ but absent from "
         "docs/reference/error_refusal_contract.md: "
         + "; ".join(
-            f"{code} ({', '.join(sorted(declared[code]))})"
-            for code in sorted(undocumented)
+            f"{code} ({', '.join(sorted(declared[code]))})" for code in sorted(undocumented)
         )
     )
+
+
+def test_constant_spelled_codes_resolve_in_source() -> None:
+    """Every enrolled constant-spelled kind exists with its exact string value.
+
+    A rename of the constant, a move to another module, or a drift of the
+    string value fails HERE with the enrollment row named, rather than as an
+    opaque missing-code diff in the set-equality tests.
+    """
+
+    for code, (rel_path, constant_name) in _CONSTANT_SPELLED_CODES.items():
+        source_path = _PACKAGE_ROOT.parent / rel_path
+        assert source_path.exists(), (
+            f"constant-spelled code {code!r} enrolled against a missing file {rel_path}"
+        )
+        pattern = re.compile(
+            rf'^{re.escape(constant_name)}\s*(?::\s*[^=]+)?=\s*"{re.escape(code)}"', re.M
+        )
+        assert pattern.search(source_path.read_text()), (
+            f'constant {constant_name} = "{code}" not found in {rel_path}; '
+            "update the enrollment table and the contract doc's constant-spelled "
+            "table in the same change as the source"
+        )
+
+
+def test_constant_spelled_codes_are_documented() -> None:
+    """Every enrolled constant-spelled kind has a contract-doc row."""
+
+    documented = set(_documented_codes())
+    missing = set(_CONSTANT_SPELLED_CODES) - documented
+    assert missing == set(), f"constant-spelled kinds missing contract-doc rows: {sorted(missing)}"
 
 
 def test_lockstep_scanners_are_red_capable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

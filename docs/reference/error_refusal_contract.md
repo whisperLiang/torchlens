@@ -46,7 +46,7 @@ add names to the top-level `torchlens` namespace:
 | `batch_render_invalid` | Batch render policy is unknown or malformed | Choose a documented batch_render policy |
 | `backend_ambiguity` | Auto-resolution found multiple equal backend matches | Pass `backend=` explicitly |
 | `backend_capability_conformance` | Advertised backend capability has no implementation | Disable it or register its implementation |
-| `backend_error` | Generic backend registry request failed | Pass a compatible registered backend |
+| `backend_error` | Base-class default of the backend registry family — never raised directly; every live registry refusal carries one of the specific `backend_*`/`unknown_backend` codes below | Branch on the specific backend codes; this row exists only so an unmigrated future subclass is still documented |
 | `backend_mismatch` | Explicit backend cannot handle the model or inputs | Select the owning backend |
 | `backend_payload_unsupported` | Backend payload has no supported codec | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
@@ -184,5 +184,26 @@ add names to the top-level `torchlens` namespace:
 | `visualization_node_style_invalid` | Node style is unknown | Choose a documented style |
 | `wrappers_removed_before_capture` | A concurrent `unwrap_torch()` removed the torch wrappers between model preparation and capture admission | Do not call `unwrap_torch()` concurrently with capture entry; re-run `tl.trace` to re-install the wrappers |
 
+## Constant-spelled refusal kinds (distributed collective capture)
+
+Three distributed-capture refusals identify themselves on `exc.fields["kind"]` (one
+entry per structured finding) rather than `exc.fields["code"]`, and their identifier
+strings are spelled as module-level constants rather than inline `code="..."`
+literals. They are part of the same stable public vocabulary: branch on the kind
+string, never on message text. The lockstep gate enrolls each constant explicitly
+(`tests/test_error_contract_lockstep.py`), so renaming the constant or drifting its
+string value fails the gate exactly like an inline code.
+
+| Code | Refusal | Remedy class |
+|---|---|---|
+| `ambiguous_group_lifetime` | A collective used a process group whose pre-arming lifetime cannot be proven | Call `tl.distributed.arm()` at process start, before any group is created |
+| `uncaptured_collective_op` | Arm-time recognizer set-inequality or dispatcher schema scan found a collective the wraps would not capture | Upgrade TorchLens to a build whose recognizer covers the installed torch, or avoid the unrecognized collective in the traced forward |
+| `wildcard_recv_unsupported` | A point-to-point receive from `ANY_SOURCE` cannot be attributed to a sender | Pass an explicit source rank to `recv`/`irecv` |
+
+The related `group_lifetime_evidence_conflict` kind is governed by the merged-trace
+contract (`docs/reference/merged_trace_contract.md`), where it is also a
+`MergedErrorCode` member.
+
 Adding or renaming a code is a public vocabulary change and must update this table and the
-corresponding typed-door test in the same change.
+corresponding typed-door test in the same change. Constant-spelled kinds must additionally
+update the enrollment table in `tests/test_error_contract_lockstep.py`.
