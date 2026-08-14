@@ -39,7 +39,7 @@ import time as _time_module
 import uuid as _uuid_module
 import warnings as _warnings_module
 import weakref as _weakref_module
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence, Set as AbstractSet
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import (
@@ -1923,24 +1923,6 @@ genuine pre-monitor value.
 """
 
 
-def active_in_window_thread_idents() -> AbstractSet[int]:
-    """Return the thread idents profile-hooked during the active capture window.
-
-    The tensor->host escape belt (``completeness_witness``) consults this registry to
-    classify a non-owner escape thread as IN-WINDOW (started during the forward and
-    hooked by ``threading.setprofile`` -- registered during thread bootstrap BEFORE its
-    first user statement, so even an escape-first thread is classified) versus
-    PRE-EXISTING/foreign. Entries only ever come from hooked threads, so ident reuse
-    cannot misclassify a foreign thread as in-window. Returns an empty set when no
-    monitor window is active.
-    """
-
-    monitor = _ACTIVE_MONITOR
-    if monitor is None:
-        return frozenset()
-    return monitor._in_window_thread_idents
-
-
 @contextmanager
 def _suppress_active_monitor_marks() -> Iterator[None]:
     """Suppress channel marks for a TorchLens-OWNED RNG bookkeeping bracket (r65 Z).
@@ -2036,8 +2018,9 @@ class host_nondeterminism_monitor:
       ``threading.setprofile`` (threads STARTED in-window; measured E2: a pre-existing
       worker is unreachable). Each hook chains its own exact predecessor and is
       identity-restored on success and exception. The threading hook additionally
-      records each hooked thread's ident into the in-window registry consumed by the
-      cross-thread escape belt (r41; see :func:`active_in_window_thread_idents`).
+      records each hooked thread's ident into an in-window DIAGNOSTIC registry
+      (its r41 escape-belt 3-class consumer was deleted in r43, replaced by the
+      binary owner/non-owner check in ``_completeness_cross_thread.py``).
 
     Entropy / instance / construction / clock positives mark from any COVERED thread. A
     REALISTIC pre-existing-thread RNG use (a background worker drawing from a MODEL-HELD
@@ -2124,8 +2107,10 @@ class host_nondeterminism_monitor:
         # and re-resolved dynamically on a receiver miss, so a device default
         # populated mid-forward still selects the default column.
         self._default_generator_ids: frozenset[int] = frozenset()
-        # r41 hon2_1: idents of threads hooked by the in-window threading profile hook,
-        # consumed by the escape belt's 3-class thread gate via ``_ACTIVE_MONITOR``.
+        # r41 hon2_1: idents of threads hooked by the in-window threading profile
+        # hook. DIAGNOSTIC-only since r43 deleted the escape belt's 3-class thread
+        # gate (replaced by the binary owner/non-owner check in
+        # ``_completeness_cross_thread.py``); no production verdict reads it.
         self._in_window_thread_idents: set[int] = set()
         # NumPy 2.x binds Generator/RandomState Cython callables as Python methods
         # that emit no profile ``c_call`` event. The feature-detected fallback
@@ -3799,6 +3784,33 @@ class host_nondeterminism_monitor:
         return snapshots
 
     @staticmethod
+    def _exact_state_repr(state: Any) -> str:
+        """Render an RNG state tree EXACTLY, independent of display options.
+
+        ``repr`` of an ndarray obeys the user-global ``np.set_printoptions``
+        ``threshold`` (commonly small in notebooks), truncating the 624-word
+        MT19937 key to head/tail -- hanging a verdict-steering digest off a
+        DISPLAY knob. Arrays render as ``(dtype, shape, tobytes)`` and
+        containers recurse, so the digest is bytes-exact and
+        printoptions-independent.
+        """
+
+        if isinstance(state, np.ndarray):
+            return f"ndarray({state.dtype!s},{state.shape!r},{state.tobytes()!r})"
+        if isinstance(state, dict):
+            rendered = ",".join(
+                f"{key!r}:{host_nondeterminism_monitor._exact_state_repr(value)}"
+                for key, value in state.items()
+            )
+            return "{" + rendered + "}"
+        if isinstance(state, (tuple, list)):
+            rendered = ",".join(
+                host_nondeterminism_monitor._exact_state_repr(item) for item in state
+            )
+            return f"{type(state).__name__}({rendered})"
+        return repr(state)
+
+    @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
         """Return a comparable state digest for one RNG holder.
 
@@ -3809,15 +3821,16 @@ class host_nondeterminism_monitor:
         undrawn stateless engine is not nondeterminism.
         """
 
+        exact = host_nondeterminism_monitor._exact_state_repr
         if isinstance(holder, np.random.Generator):
-            return repr(holder.bit_generator.state)
+            return exact(holder.bit_generator.state)
         if isinstance(holder, np.random.RandomState):
-            return repr(holder.get_state())
+            return exact(holder.get_state())
         # r41 (Sol): a BARE model-held BitGenerator (``self.bg = PCG64(...)`` drawn
         # through a wrapping Generator) advances its own ``state``; digest it directly
         # so the registry's BitGenerator claim is digest-true.
         if isinstance(holder, np.random.BitGenerator):
-            return repr(holder.state)
+            return exact(holder.state)
         if isinstance(holder, random.Random):
             try:
                 state = holder.getstate()
@@ -3835,7 +3848,7 @@ class host_nondeterminism_monitor:
                 # exception from ``getstate()`` (a genuinely broken state read)
                 # still propagates to the fail-closed inventory error path.
                 raise _NotADigestableRng from None
-            return repr(state)
+            return host_nondeterminism_monitor._exact_state_repr(state)
         raise _NotADigestableRng
 
     @staticmethod
@@ -4673,7 +4686,8 @@ class host_nondeterminism_monitor:
         # are the r37/base mechanism (base runs them and is fast); the owner hook catches
         # owner-thread numpy Generator instance draws and the immutable ``datetime`` readers,
         # the threading hook catches an in-window helper-thread draw (hon1_1/corr2_2) and
-        # records each hooked thread's ident for the escape belt's 3-class gate (r41).
+        # records each hooked thread's ident in the diagnostic registry (the r41
+        # escape-belt 3-class consumer was deleted r43; owner/non-owner is binary now).
         self._previous_sys_profile = _sys_module.getprofile()
         self._sys_hook = self._make_profile_hook(self._previous_sys_profile)
         _sys_module.setprofile(self._sys_hook)

@@ -134,6 +134,35 @@ def test_flag_uncertain_detail_is_deduped_and_capped() -> None:
 
 
 @pytest.mark.smoke
+def test_rng_state_digest_is_printoptions_independent() -> None:
+    """The verdict-steering RandomState digest never rides np.set_printoptions.
+
+    ``repr(RandomState.get_state())`` obeys the user-global ``threshold``
+    (commonly small in notebooks), truncating the 624-word MT19937 key. The
+    digest must be bytes-exact: identical under any display options, and
+    distinct for two states differing only INSIDE the truncated region.
+    """
+
+    digest = host_nondeterminism_monitor._digest_rng_instance
+    state = np.random.RandomState(3)
+    saved_printoptions = np.get_printoptions()
+    try:
+        baseline = digest(state)
+        np.set_printoptions(threshold=5)
+        assert digest(state) == baseline
+
+        # Two states differing only mid-key (the region repr truncates away).
+        keys, pos = state.get_state()[1], state.get_state()[2]
+        twin = np.random.RandomState(3)
+        twin_key = keys.copy()
+        twin_key[300] ^= 1
+        twin.set_state(("MT19937", twin_key, pos, 0, 0.0))
+        assert digest(twin) != digest(state)
+    finally:
+        np.set_printoptions(**saved_printoptions)
+
+
+@pytest.mark.smoke
 def test_flag_uncertain_hot_loop_is_fast() -> None:
     """1e5 repeated flags finish in well under a second (was O(N^2) copies)."""
 
