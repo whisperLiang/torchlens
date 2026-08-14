@@ -97,6 +97,7 @@ from ...intervention.types import (
     Unsupported,
 )
 from ...ir.container import (
+    _SAFE_DEFAULT_FACTORIES,
     ContainerSpec,
     DataclassField,
     DictKey,
@@ -533,25 +534,6 @@ class ExhaustiveOpDraft:
             module_stack=self.module_stack,
             call_ref_box=self.call_ref_box,
         )
-
-
-# ``defaultdict`` factory callables we can faithfully restore on load WITHOUT
-# importing an arbitrary callable (which would execute foreign code). Anything
-# else makes the mapping non-reconstructable -> recorded opaquely -> UNVERIFIABLE.
-_SAFE_DEFAULT_FACTORIES: dict[str, Any] = {
-    "list": list,
-    "dict": dict,
-    "set": set,
-    "tuple": tuple,
-    "frozenset": frozenset,
-    "int": int,
-    "float": float,
-    "str": str,
-    "bool": bool,
-    "bytes": bytes,
-    "bytearray": bytearray,
-    "complex": complex,
-}
 
 
 # Canonical set lives in ``torchlens.utils._callable_safety`` so this capture-side

@@ -107,3 +107,67 @@ class TestSecurityDriftGateIsRedCapable:
             return value in {"os", "sys"}
 
         assert authority_drift((canonical, planted), require_identity=True) == (1,)
+
+
+def test_runnable_wire_vocabulary_uses_one_authority_per_concept() -> None:
+    """Writers and readers alias the same prefix and closed-vocabulary objects."""
+
+    from torchlens import _input_walk, _runnable_execution, _runnable_state
+    from torchlens._io import runnable_load
+    from torchlens.backends.torch import ops
+    from torchlens.ir import container
+    from torchlens.utils import _callable_safety
+
+    authority_groups = (
+        (
+            _runnable_state._INPUT_STRUCTURE_SITE_PREFIX,
+            _runnable_execution._INPUT_STRUCTURE_SITE_PREFIX,
+            runnable_load._INPUT_STRUCTURE_SITE_PREFIX,
+        ),
+        (
+            _runnable_state._STATE_METADATA_FACT_SITE_PREFIX,
+            _runnable_execution._STATE_METADATA_FACT_SITE_PREFIX,
+            runnable_load._STATE_METADATA_FACT_SITE_PREFIX,
+        ),
+        (_input_walk.INPUT_CONTAINER_KINDS, runnable_load._INPUT_STRUCTURE_NODE_KINDS),
+        (
+            _callable_safety._PURE_TENSOR_PROPERTY_NAMES,
+            ops._SAFE_TENSOR_PROPERTY_NAMES,
+            runnable_load._SAFE_TENSOR_PROPERTY_NAMES,
+        ),
+        (container._SAFE_DEFAULT_FACTORIES, ops._SAFE_DEFAULT_FACTORIES),
+    )
+    for values in authority_groups:
+        assert not authority_drift(values, require_identity=True)
+
+
+class TestRunnableWireDriftGateIsRedCapable:
+    """Plant wire-format divergence and prove each closed-set gate reports it."""
+
+    def test_site_prefix_drift_is_detected(self) -> None:
+        """A reader prefix that differs from its writer is reported."""
+
+        assert authority_drift(
+            ("input_structure:", "input_structure_v2:"), require_identity=False
+        ) == (1,)
+
+    def test_container_kind_drift_is_detected(self) -> None:
+        """A parse-only container kind is reported."""
+
+        canonical = frozenset({"tensor", "mapping", "leaf"})
+        planted = canonical | {"planted"}
+        assert authority_drift((canonical, planted), require_identity=False) == (1,)
+
+    def test_safe_property_drift_is_detected(self) -> None:
+        """A capture-only safe tensor property is reported."""
+
+        canonical = frozenset({"T", "real"})
+        planted = canonical | {"data"}
+        assert authority_drift((canonical, planted), require_identity=False) == (1,)
+
+    def test_default_factory_drift_is_detected(self) -> None:
+        """A capture-only default factory is reported."""
+
+        canonical = {"list": list, "dict": dict}
+        planted = {**canonical, "set": set}
+        assert authority_drift((canonical, planted), require_identity=False) == (1,)

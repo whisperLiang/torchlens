@@ -19,6 +19,8 @@ from typing import Any, cast
 import torch
 
 from .. import _state
+from .._input_walk import INPUT_CONTAINER_KINDS
+from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
 from ..constants import get_orig_torch_funcs
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
@@ -256,9 +258,6 @@ class ContextFieldInvalidError(ValueError):
         self.detail = detail
 
 
-_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
-"""``site_label`` prefix of a persisted declared state-metadata fact witness (r65 F-1)."""
-
 _STATE_METADATA_FACT_ALLOWED_NAMES = frozenset({"requires_grad", "grad_fn"})
 """CLOSED parse-side vocabulary of declared state-metadata fact names (r65 F-1).
 
@@ -269,12 +268,7 @@ preparation could apply an attacker-chosen bit to staged state.
 """
 
 
-_INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
-"""``site_label`` prefix of a persisted input-boundary structure fact (r67 C2)."""
-
-_INPUT_STRUCTURE_NODE_KINDS = frozenset(
-    {"tensor", "empty", "namedtuple", "dataclass", "mapping", "sequence", "registered", "leaf"}
-)
+_INPUT_STRUCTURE_NODE_KINDS = INPUT_CONTAINER_KINDS
 """Closed node-kind vocabulary accepted from a persisted input-structure fact."""
 
 
