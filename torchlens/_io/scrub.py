@@ -876,8 +876,23 @@ def _relativize_source_text(value: Any) -> Any:
     )
 
 
-_SOURCE_FILE_FIELDS = ("class_source_file", "init_source_file", "forward_source_file")
-_DOCSTRING_FIELDS = ("class_docstring", "init_docstring", "forward_docstring")
+# ``backward_*`` are only present on ``GradFn`` logs (for Python-inspectable custom
+# autograd Functions); Trace/Module logs lack them, and each field is guarded by an
+# ``in scrubbed_state`` check, so listing them here is inert where absent. Including
+# them closes B8-21: the backward source path/docstring were outside the belt and
+# persisted an absolute path unscrubbed.
+_SOURCE_FILE_FIELDS = (
+    "class_source_file",
+    "init_source_file",
+    "forward_source_file",
+    "backward_source_file",
+)
+_DOCSTRING_FIELDS = (
+    "class_docstring",
+    "init_docstring",
+    "forward_docstring",
+    "backward_docstring",
+)
 
 
 def _apply_source_metadata_policy(scrubbed_state: dict[str, Any], options: _ScrubOptions) -> None:
