@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -220,3 +221,86 @@ def test_non_release_checkouts_do_not_persist_credentials() -> None:
     assert not offenders, (
         f"checkout steps persisting credentials without needing to push: {offenders}"
     )
+
+
+def test_a_smoke_row_covers_the_sys_monitoring_python() -> None:
+    """At least one PR-blocking row runs Python >= 3.12.
+
+    Advertised 3.12/3.13 support selects the ``sys.monitoring``
+    escape-detection path, which 3.10/3.11 rows can never execute: without a
+    >=3.12 row that whole path ships untested (its only >=3.12-gated unit
+    test had already rotted unnoticed, T13.4).
+    """
+
+    rows = [
+        row for row in _smoke_job()["strategy"]["matrix"]["include"] if row.get("scope") == "smoke"
+    ]
+    versions = [tuple(int(part) for part in str(row["python"]).split(".")) for row in rows]
+    assert any(version >= (3, 12) for version in versions), (
+        "no smoke row runs Python >= 3.12; the sys.monitoring escape-detection "
+        "path has no CI coverage"
+    )
+
+
+def test_packaging_tripwires_run_on_the_nightly_wheel_leg() -> None:
+    """Nightly builds run the wheel-diet and sdist manifest tripwires.
+
+    The nightly wheel job used to build and smoke-install a wheel WITHOUT
+    running the diet manifest test (slow-marked, weekly-only), so a packaging
+    regression could ship for up to a week before the tripwire fired (T13.5).
+    """
+
+    wheel_job = _load_yaml(_WORKFLOWS / "nightly.yml")["jobs"]["wheel"]
+    runs = "\n".join(step.get("run", "") for step in wheel_job["steps"])
+    assert "test_built_wheel_manifest_is_diet" in runs, (
+        "the nightly wheel job must run the wheel-diet tripwire, not just build"
+    )
+    assert "test_built_sdist_manifest_is_governed" in runs, (
+        "the nightly wheel job must run the sdist manifest tripwire"
+    )
+
+
+@pytest.mark.slow
+def test_built_sdist_manifest_is_governed(tmp_path: Path) -> None:
+    """Assert the built sdist's manifest: package + metadata in, half-suites OUT.
+
+    With no MANIFEST.in the default manifest shipped every ``tests/*.py``
+    file WITHOUT its goldens, ENV markers, or data — an unrunnable half-suite
+    — and nothing pinned the sdist at all (T13.5).
+    """
+
+    import subprocess
+    import sys
+    import tarfile
+
+    sdist_dir = tmp_path / "sdist"
+    sdist_dir.mkdir()
+    subprocess.run(
+        [sys.executable, "-m", "build", "--sdist", "--outdir", str(sdist_dir)],
+        cwd=_PROJECT_ROOT,
+        check=True,
+    )
+    archives = sorted(sdist_dir.glob("torchlens-*.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0]) as archive:
+        members = [name.split("/", 1)[1] for name in archive.getnames() if "/" in name]
+
+    for required in (
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "pyproject.toml",
+        "torchlens/__init__.py",
+        "torchlens/py.typed",
+    ):
+        assert required in members, f"sdist lost required member {required}"
+    assert any(m.startswith("torchlens/schemas/") and m.endswith(".json") for m in members), (
+        "sdist must ship the torchlens schema data files"
+    )
+    for banned_prefix in ("tests/", "menagerie/", "docs/", "examples/", "notebooks/"):
+        offenders = [m for m in members if m.startswith(banned_prefix)]
+        assert not offenders, (
+            f"sdist ships {len(offenders)} member(s) under {banned_prefix} — the sdist "
+            "is the wheel's source, not a repo snapshot (half-shipped suites are "
+            "unrunnable; use a checkout)"
+        )

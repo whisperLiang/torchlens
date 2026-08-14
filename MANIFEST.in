@@ -1,0 +1,21 @@
+# Explicit sdist governance (grind-p3 T13.5). Before this file existed the
+# default setuptools manifest shipped the ~700 tests/*.py files WITHOUT their
+# goldens, ENV markers, or data artifacts — a half-shipped, unrunnable test
+# suite — while excluding everything else. The sdist is the wheel's source:
+# the importable package plus licensing/build metadata, nothing more. Tests,
+# docs, the menagerie corpus, and the dev tooling live in the repo checkout.
+# Enforced by tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed.
+include LICENSE
+include NOTICE
+include README.md
+include pyproject.toml
+recursive-include torchlens *.py py.typed *.json *.md
+prune tests
+prune menagerie
+prune docs
+prune examples
+prune notebooks
+prune benchmarks
+prune scripts
+prune tools
+prune templates
