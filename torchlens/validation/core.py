@@ -46,6 +46,7 @@ from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.tensor_utils import (
     derive_float_tolerances,
     fp8_safe_comparison_pair,
+    get_fp8_dtypes,
     tensor_all_nan,
     tensor_nanequal,
 )
@@ -438,9 +439,13 @@ DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM = 4.0
 def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float, float]:
     """Return derived ``(base_rel, outlier_rel, mean_rel)`` band-C bounds.
 
-    ``payload_dtype`` is the dtype actually compared (post-fp8-widening).
-    fp16/bf16 accumulate in fp32, fp64/complex128 in fp64; everything else in
-    fp32. Each bound is capped by its historical ceiling literal.
+    ``payload_dtype`` is the dtype actually compared (post-fp8-widening), so
+    an fp8 payload's ``storage_term`` is DELIBERATELY fp32's, not fp8's --
+    the same strict-direction fp8 doctrine as ``fp8_safe_comparison_pair``
+    (an fp8-eps storage term of 4 x 2^-3 would dominate every bound and
+    bless multi-ULP fp8 corruption). fp16/bf16 accumulate in fp32,
+    fp64/complex128 in fp64; everything else in fp32. Each bound is capped
+    by its historical ceiling literal.
     """
 
     if payload_dtype in (torch.float64, torch.complex128):
@@ -487,7 +492,15 @@ _GROUND_TRUTH_DEFAULT_ULP_HEADROOM = 8.0
 
 
 def _ground_truth_tolerances(dtype: torch.dtype) -> tuple[float, float]:
-    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``."""
+    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``.
+
+    One DELIBERATE exception to the same-strictness-in-own-ULPs model: fp8
+    payloads are widened exactly to float32 first and measured at the fp32
+    row with a zeroed absolute term (see the fp8 doctrine on
+    ``fp8_safe_comparison_pair`` and the caller) -- an own-ULP fp8 row
+    (4 x 2^-3 eps) would read a genuine one-ULP fp8 corruption as equal.
+    Strictly tighter, never looser.
+    """
 
     headroom = _GROUND_TRUTH_ULP_HEADROOM.get(dtype, _GROUND_TRUTH_DEFAULT_ULP_HEADROOM)
     try:
@@ -813,9 +826,16 @@ def _ground_truth_output_matches_saved(
 
     from .._state import pause_logging
 
+    original_dtype = saved_output.dtype
+
     with pause_logging():
-        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, so the
-        # tolerance below stays the float32-grade one (see fp8_safe_comparison_pair).
+        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, and
+        # the tolerance below DELIBERATELY stays the float32-grade row rather
+        # than fp8's own coarse 2^-3/2^-2 epsilon (the documented fp8
+        # doctrine on fp8_safe_comparison_pair: an own-ULP row would read a
+        # genuine one-ULP fp8 corruption as equal). This is the one dtype
+        # family measured in the WIDENED dtype's ULPs by design -- strictly
+        # tighter, never looser (b4-opus F13-2a adjudication).
         saved_output, ground_truth_output = fp8_safe_comparison_pair(
             saved_output, ground_truth_output
         )
@@ -826,6 +846,11 @@ def _ground_truth_output_matches_saved(
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
         ground_truth_nonan = torch.nan_to_num(ground_truth_output, 0.7234691827346)
         rtol, atol = _ground_truth_tolerances(saved_nonan.dtype)
+        if original_dtype in get_fp8_dtypes():
+            # Mirror tensor_nanequal's rtol-only fp8 rule: even a
+            # denormal-scale float32 absolute term is measured against the
+            # wrong dtype's bottom-of-range once the payload started as fp8.
+            atol = 0.0
         return bool(
             torch.allclose(
                 saved_nonan,

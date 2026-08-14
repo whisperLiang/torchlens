@@ -4385,6 +4385,41 @@ def test_ground_truth_output_check_is_dtype_aware() -> None:
     assert not _ground_truth_output_matches_saved(f32, f32 * (1.0 + 1e-5))
 
 
+def test_ground_truth_fp8_doctrine_stays_strict() -> None:
+    """PIN the deliberate fp8 exception to the own-ULP tolerance model.
+
+    fp8 payloads widen exactly to float32 and are measured at the fp32-grade
+    row with a zeroed absolute term (the fp8_safe_comparison_pair doctrine):
+    an own-ULP fp8 row (4 x 2^-3 eps = rtol 0.5) would read a genuine
+    one-ULP fp8 corruption as EQUAL. This pin makes that deviation
+    load-bearing -- a future "consistency" refactor that hands fp8 its own
+    derived row goes red here (b4-opus F13-2a adjudication: strict by
+    design, never loosen).
+    """
+
+    from torchlens.utils.tensor_utils import get_fp8_dtypes
+    from torchlens.validation.core import _ground_truth_output_matches_saved
+
+    fp8_dtypes = get_fp8_dtypes()
+    if not fp8_dtypes:
+        pytest.skip("this torch build ships no fp8 dtypes")
+    e4m3 = torch.float8_e4m3fn
+    assert e4m3 in fp8_dtypes
+
+    exact = torch.tensor([1.0, 0.5, 0.25], dtype=e4m3)
+    assert _ground_truth_output_matches_saved(exact, exact.clone())
+
+    # One fp8 ULP at 1.0 (1.0 -> 1.125) must FAIL: 12.5% relative is real
+    # corruption even though it is a single fp8 quantum.
+    one_ulp = torch.tensor([1.125, 0.5, 0.25], dtype=e4m3)
+    assert not _ground_truth_output_matches_saved(exact, one_ulp)
+
+    # No absolute floor may bless small-magnitude fp8 corruption: subnormal
+    # fp8 values vs an all-zero output must FAIL (atol is zeroed for fp8).
+    sub = torch.tensor([0.001953125, 0.00390625], dtype=e4m3)
+    assert not _ground_truth_output_matches_saved(sub, torch.zeros_like(sub))
+
+
 def test_deep_numeric_replay_outlier_bound_scales_with_depth() -> None:
     """LOAD-BEARING: band C's outlier lane derives its bound from depth.
 
