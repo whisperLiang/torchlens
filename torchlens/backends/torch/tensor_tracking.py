@@ -447,6 +447,20 @@ def _should_save_grad_payload(trace: "Trace", layer_label: str) -> bool:
     if policy is True or policy == "all":
         return True
     if layer_label not in getattr(trace, "layer_dict_all_keys", {}):
+        param_log = _param_log_for_exact_address(trace, layer_label)
+        if param_log is not None:
+            # Parameter gradients honor selector/callable policies through a
+            # param-shaped context (grad_kind="param_grad") instead of being
+            # silently dropped. Ordinal/label-string selections name OPS;
+            # parameters are outside that vocabulary and stay unsaved there.
+            if callable(policy) or isinstance(policy, BaseSelector):
+                decision = policy(
+                    _ParamGradPayloadContext(
+                        param=param_log, pass_index=_current_backward_pass(trace)
+                    )
+                )
+                return _grad_payload_decision_saves_out(decision)
+            return False
         ctx = getattr(trace, "_fastlog_grad_contexts", {}).get(layer_label)
         if ctx is None:
             return False
@@ -619,6 +633,62 @@ class _GradPayloadContext:
         self.shape = op.shape
         self.dtype = op.dtype
         self.tensor_device = getattr(op, "output_device", None)
+
+
+def _param_log_for_exact_address(trace: "Trace", address: str) -> Any | None:
+    """Return the Param record for an exact address, or None.
+
+    Membership is checked against the exact address mapping, never the
+    accessor's fuzzy short-name/substring resolution, so an op label can
+    never accidentally resolve to a parameter.
+    """
+
+    param_logs = getattr(trace, "param_logs", None)
+    if param_logs is None:
+        return None
+    exact = getattr(param_logs, "_dict", None)
+    if exact is not None:
+        return exact.get(address)
+    if isinstance(param_logs, Mapping):
+        return param_logs.get(address)
+    return None
+
+
+class _ParamGradPayloadContext:
+    """Minimal predicate context for parameter gradient retention."""
+
+    def __init__(self, *, param: Any, pass_index: int | None) -> None:
+        """Initialize a parameter gradient predicate context.
+
+        Parameters
+        ----------
+        param:
+            Param record whose gradient was observed.
+        pass_index:
+            One-based backward pass number, when known.
+        """
+
+        self.label = param.address
+        self.layer_label = param.address
+        self.op_label = param.address
+        self.raw_label = None
+        self.param_address = param.address
+        self.param_name = param.name
+        self.func_name = None
+        self.layer_type = "param"
+        self.type = "param"
+        self.module_stack = ()
+        module_address = getattr(param, "module_address", None)
+        self.modules = (module_address,) if module_address else ()
+        self.output_of_module_calls = ()
+        self.has_forward_op = False
+        self.has_op = False
+        self.grad_kind = "param_grad"
+        self.pass_index = pass_index
+        self.backward_pass_index = pass_index
+        self.shape = param.shape
+        self.dtype = param.dtype
+        self.tensor_device = None
 
 
 class _FastlogGradPayloadContext:

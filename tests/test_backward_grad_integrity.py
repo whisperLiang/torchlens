@@ -143,3 +143,40 @@ def test_op_grad_payloads_charge_the_save_budget() -> None:
         "op gradient payloads bypassed the save-budget accountant: "
         f"committed {committed_before} -> {committed_after}, grads {grad_bytes}"
     )
+
+
+@pytest.mark.smoke
+def test_selective_save_grads_consults_predicate_for_params() -> None:
+    """Callable save_grads policies see parameter gradients, not a silent drop.
+
+    A selector/callable policy used to bypass parameters entirely (no param
+    context existed), so every param grad payload silently dropped no matter
+    what the predicate asked for.
+    """
+
+    seen_kinds: set[str] = set()
+
+    def keep_param_grads(ctx: object) -> bool:
+        """Retain exactly the parameter gradients."""
+
+        kind = getattr(ctx, "grad_kind", None)
+        if isinstance(kind, str):
+            seen_kinds.add(kind)
+        return kind == "param_grad"
+
+    trace = _armed_trace()
+    trace.log_backward(_loss(trace), save_grads=keep_param_grads)
+
+    param_payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    assert param_payloads, "expected parameter gradient records"
+    assert "param_grad" in seen_kinds, "predicate never saw a parameter context"
+    assert all(isinstance(p, torch.Tensor) for p in param_payloads), (
+        "selective save_grads silently dropped parameter gradients"
+    )
+    # The same predicate rejected op gradients, so none retain payloads.
+    op_payloads = [
+        record.out if hasattr(record, "out") else record.grad
+        for layer in trace.layer_list
+        for record in layer.grads
+    ]
+    assert all(not isinstance(p, torch.Tensor) for p in op_payloads)
