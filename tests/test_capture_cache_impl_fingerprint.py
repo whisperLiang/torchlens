@@ -293,3 +293,46 @@ def test_edited_hook_implementation_is_a_cache_miss(tmp_path) -> None:
         )
     finally:
         handle.remove()
+
+
+def test_input_requires_grad_flip_is_a_cache_miss(tmp_path) -> None:
+    """requires_grad changes grad_fn/backward metadata: the key must see it.
+
+    grind-r2 b4-fable R39-2: shape + dtype + CPU bytes were the whole tensor
+    hash, so freezing params or flipping input requires_grad between
+    cache=True runs hit the stale entry with wrong tensor_requires_grad /
+    grad_fn metadata.
+    """
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    second = tl.trace(model, x.clone().requires_grad_(True), capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "an input requires_grad flip must not hit the no-grad cached trace"
+    )
+
+
+def test_frozen_parameters_are_a_cache_miss(tmp_path) -> None:
+    """Freezing params (requires_grad_(False)) changes captured grad metadata."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False
+
+
+def test_tensor_content_hash_covers_device_and_requires_grad() -> None:
+    """Unit coverage for the hash axes (CUDA device flip untestable on CPU CI)."""
+
+    from torchlens._capture_state_helpers import _hash_tensor_content
+
+    base = torch.ones(3)
+    flagged = torch.ones(3).requires_grad_(True)
+    assert _hash_tensor_content(base) != _hash_tensor_content(flagged)
+    assert _hash_tensor_content(base) == _hash_tensor_content(torch.ones(3))

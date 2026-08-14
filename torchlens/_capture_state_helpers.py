@@ -1482,7 +1482,11 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     Returns
     -------
     str
-        SHA-256 digest over tensor metadata and CPU bytes.
+        SHA-256 digest over tensor metadata and CPU bytes. Metadata includes
+        the ORIGINAL tensor's device and ``requires_grad`` flag: a CPU->CUDA
+        move or a freeze between ``cache=True`` runs changes ``device_ref``,
+        timing/memory, and grad_fn metadata on the capture, so it must be a
+        cache miss even though the bytes match.
     """
 
     with _state.pause_logging():
@@ -1491,7 +1495,16 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
             cpu = cpu.to(torch.float32)
         payload = cpu.numpy().tobytes()
     hasher = hashlib.sha256()
-    hasher.update(repr((tuple(cpu.shape), str(cpu.dtype))).encode("utf-8"))
+    hasher.update(
+        repr(
+            (
+                tuple(cpu.shape),
+                str(cpu.dtype),
+                str(tensor.device),
+                bool(tensor.requires_grad),
+            )
+        ).encode("utf-8")
+    )
     hasher.update(payload)
     return hasher.hexdigest()
 
@@ -1533,6 +1546,11 @@ def _fingerprint_model_content(model: nn.Module) -> str:
     for name, tensor in model.state_dict().items():
         hasher.update(name.encode("utf-8"))
         hasher.update(_hash_tensor_content(tensor).encode("utf-8"))
+    # ``state_dict()`` detaches, so a live parameter's requires_grad flag never
+    # reaches the tensor hash: fold the flags explicitly (freezing params
+    # changes captured grad metadata and must be a cache miss).
+    for name, parameter in model.named_parameters():
+        hasher.update(repr((name, bool(parameter.requires_grad))).encode("utf-8"))
     for module_name, module in model.named_modules():
         hasher.update(repr((module_name, bool(module.training))).encode("utf-8"))
         for buffer_name in sorted(module._non_persistent_buffers_set):
