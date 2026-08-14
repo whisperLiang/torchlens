@@ -77,6 +77,7 @@ from ._render_utils import (
     compute_module_penwidth,
     direction_to_rankdir,
     make_module_cluster_attrs,
+    relativize_visualizer_image,
 )
 from .code_panel import (
     CodePanelOption,
@@ -808,6 +809,7 @@ __all__ = [
     "_SVG_ROOT_RE",
     "_SVG_VIEWBOX_RE",
     "_open_file_quietly",
+    "relativize_visualizer_image",
     "_timed_phase",
     "_vprint",
     "apply_theme_to_spec",

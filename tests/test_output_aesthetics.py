@@ -1592,6 +1592,7 @@ class TestVisualizationBugfixes:
             timeout: int,
             check: bool,
             capture_output: bool,
+            start_new_session: bool = False,
         ) -> subprocess.CompletedProcess[bytes]:
             """Raise a Graphviz process failure after the DOT source is written."""
 

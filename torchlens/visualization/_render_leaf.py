@@ -1580,7 +1580,8 @@ def _node_spec_to_graphviz_args(spec: NodeSpec) -> dict[str, str]:
         "color": spec.color,
         "penwidth": spec.penwidth,
         "tooltip": spec.tooltip,
-        "image": spec.image,
+        # r-b6 R19-6: relative to the visualizer root (graph-level imagepath).
+        "image": relativize_visualizer_image(spec.image) if spec.image else spec.image,
     }
     for attr_name, attr_value in optional_attrs.items():
         if attr_value is not None:

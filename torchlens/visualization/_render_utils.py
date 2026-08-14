@@ -138,6 +138,30 @@ MIN_MODULE_PENWIDTH = 2
 PENWIDTH_RANGE = MAX_MODULE_PENWIDTH - MIN_MODULE_PENWIDTH
 
 
+_VISUALIZER_DIR_MARKER = "torchlens_visualizers_"
+
+
+def relativize_visualizer_image(path: str) -> str:
+    """Return an image path relative to the trace visualizer scratch root.
+
+    r-b6 R19-6: node ``image=`` attributes used to embed the absolute
+    ``tempfile.mkdtemp`` visualizer path, so every run's DOT differed in
+    every image node and byte-comparison/golden hashing was impossible for
+    those features. Emitting the path RELATIVE to the scratch root (with the
+    root supplied once through the graph-level ``imagepath`` attribute)
+    confines the per-run bytes to a single graph attribute. Paths outside a
+    visualizer scratch dir (user-supplied images) pass through unchanged.
+    """
+
+    marker_index = path.find(_VISUALIZER_DIR_MARKER)
+    if marker_index == -1:
+        return path
+    separator_index = path.find(os.sep, marker_index)
+    if separator_index == -1:
+        return path
+    return path[separator_index + 1 :]
+
+
 def strip_known_extension(outpath: str) -> str:
     """Strip a recognised image extension off ``outpath`` if present.
 

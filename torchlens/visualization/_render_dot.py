@@ -408,6 +408,13 @@ def _build_graphviz_shell(
     }
     if request.collapse_fn is not None:
         graph_args["newrank"] = "true"
+    visualizer_dir = getattr(trace, "_visualizer_dir", None)
+    if visualizer_dir:
+        # r-b6 R19-6: node image attributes are emitted RELATIVE to the trace
+        # visualizer scratch root; this one graph attribute supplies the root,
+        # so the per-run mkdtemp path appears exactly once in the DOT instead
+        # of in every image node.
+        graph_args["imagepath"] = str(visualizer_dir)
     graph_args.update(theme_graph_attrs(theme, font_size=request.font_size, dpi=request.dpi))
     overrides = cast(VisualizationOverrides, request.overrides)
     for arg_name, arg_val in overrides.graph.items():  # type: ignore[union-attr]
@@ -757,6 +764,10 @@ def _emit_and_finish_forward(
             key: str(val(trace)) if callable(val) else str(val)
             for key, val in overrides.graph.items()  # type: ignore[union-attr]
         }
+        rank_visualizer_dir = getattr(trace, "_visualizer_dir", None)
+        if rank_visualizer_dir and "imagepath" not in resolved_graph_overrides:
+            # r-b6 R19-6: same one-attribute image root as the dot path.
+            resolved_graph_overrides["imagepath"] = str(rank_visualizer_dir)
         with _timed_phase(trace, "render:graphviz:forward"):
             result = render_rank_layout(
                 forward_render_ir,
@@ -852,6 +863,13 @@ def _emit_and_finish_forward(
                 raise
             _warn_sibling_order_fallback_once(exc)
 
+    late_visualizer_dir = getattr(trace, "_visualizer_dir", None)
+    if late_visualizer_dir and "imagepath=" not in dot.source:
+        # r-b6 R19-6: the visualizer scratch dir is created LAZILY while
+        # nodes render (raw-input montages, feature maps), i.e. after the
+        # graph attributes were set — so the relative image root is injected
+        # here, once, before the source is written.
+        dot.attr(imagepath=str(late_visualizer_dir))
     final_source = source_override if source_override is not None else dot.source
     source_path = dot.save(target.outpath)
     with open(source_path, "w", encoding="utf-8") as source_file:

@@ -193,3 +193,44 @@ def test_condensed_away_clusters_are_not_emitted_empty(tmp_path: Path) -> None:
             f"cluster {name!r} was emitted with attributes only (no nodes, no "
             "edges) — an empty box making a connectivity claim about nothing"
         )
+
+
+def test_image_node_attrs_are_visualizer_relative(tmp_path: Path) -> None:
+    """DOT ``image=`` attrs never embed the mkdtemp visualizer path (R19-6).
+
+    The absolute scratch path used to appear in every image node, defeating
+    byte-comparison and golden hashing for image-bearing features; it now
+    appears exactly once, as the graph-level ``imagepath`` root.
+    """
+
+    pytest.importorskip("PIL")
+    import numpy as np
+    from PIL import Image
+
+    images = [Image.new("RGB", (8, 8), (40 * i % 255, 0, 0)) for i in range(4)]
+
+    def _to_batch(raw):
+        return torch.stack(
+            [torch.tensor(np.array(im), dtype=torch.float32).permute(2, 0, 1) for im in raw]
+        )
+
+    class _Net(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(x)
+
+    trace = tl.trace(
+        _Net(),
+        images,
+        capture=tl.options.CaptureOptions(transform=_to_batch, save_raw_input=True),
+    )
+    trace.draw(
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(tmp_path / "img"),
+    )
+    source = (tmp_path / "img.dot").read_text()
+    image_attrs = re.findall(r'image="?([^",\]]+)"?', source)
+    assert image_attrs, "probe expects at least one image node"
+    absolute = [attr for attr in image_attrs if attr.startswith(("/", "\\"))]
+    assert not absolute, f"absolute visualizer paths leaked into image attrs: {absolute}"
+    assert "imagepath=" in source, "relative image attrs need the imagepath root"

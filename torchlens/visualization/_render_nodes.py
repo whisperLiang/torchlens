@@ -963,7 +963,8 @@ def _render_raw_input_image_batch(
     width_in = max(width_px / 96.0, 0.1)
     height_in = max((height_px + 24 * len(label_lines)) / 96.0, 0.1)
     return {
-        "image": str(image_path),
+        # r-b6 R19-6: relative to the visualizer root (graph-level imagepath).
+        "image": relativize_visualizer_image(str(image_path)),
         "imagescale": "true",
         "fixedsize": "true",
         "width": f"{width_in:.3f}",
