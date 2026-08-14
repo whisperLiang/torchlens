@@ -377,12 +377,12 @@ def _snapshot_declared_state(model: Any) -> dict[str, Any] | None:
         return None
     snapshot: dict[str, Any] = {}
     with _state.pause_logging(), torch.no_grad():
-        for name, tensor in model.named_parameters():
-            if tensor is not None:
-                snapshot[f"param:{name}"] = tensor.detach().clone()
-        for name, tensor in model.named_buffers():
-            if tensor is not None:
-                snapshot[f"buffer:{name}"] = tensor.detach().clone()
+        for name, parameter in model.named_parameters():
+            if parameter is not None:
+                snapshot[f"param:{name}"] = parameter.detach().clone()
+        for name, buffer in model.named_buffers():
+            if buffer is not None:
+                snapshot[f"buffer:{name}"] = buffer.detach().clone()
     return snapshot
 
 
