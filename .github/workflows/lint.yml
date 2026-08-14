@@ -43,3 +43,21 @@ jobs:
 
       - name: Ruff check
         run: ruff check torchlens tests scripts tools benchmarks examples notebooks
+
+  # Workflow-file lint authority (schema, expressions, embedded shell via
+  # shellcheck). Advisory CI job for now: whether it becomes a REQUIRED status
+  # check is the queued R82-4 repo-settings decision (disputed-r2 b10/R82).
+  # Version + checksum pinned to the official GitHub release.
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install actionlint 1.7.12 (checksum-pinned)
+        run: |
+          curl -sSLo actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c
+          tar -xzf actionlint.tar.gz actionlint
+
+      - name: Run actionlint on all workflow files
+        run: ./actionlint -color
