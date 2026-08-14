@@ -113,7 +113,7 @@ def run(
     _warn_if_direct_writes_will_be_overlaid(log)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
     old_raw_hash = getattr(log, "_raw_event_shape_hash", None)
@@ -314,7 +314,7 @@ def _append_rerun(
     _warn_if_batch_sensitive_train_modules(model)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     _validate_append_hook_plan(log, hook_plan)
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
@@ -1098,6 +1098,36 @@ def _build_ledger_record(
         "old_raw_event_shape_hash": old_raw_hash,
         "new_raw_event_shape_hash": new_raw_hash,
     }
+
+
+def _assign_unique_plan_ids(hook_plan: list[NormalizedHookEntry]) -> list[NormalizedHookEntry]:
+    """Give every planned entry a unique, stable accounting identifier.
+
+    The fallback identifier ladder (plan id -> hook id -> helper name ->
+    callable qualname) can COLLIDE across entries with different targets, and
+    the fire audit compares ``Counter`` values keyed by that string: two
+    fires of one entry hid the other entry's total miss (``fired=2``,
+    ``unfired=()``), so a partially-applied plan claimed every entry fired
+    (incomplete f9f5b140). Colliding identifiers get a stable occurrence
+    suffix stamped into ``metadata["plan_id"]``, which live execution writes
+    into each ``FireResult``, so the audit is per-entry; unique identifiers
+    are preserved verbatim.
+    """
+
+    import dataclasses as _dataclasses
+
+    counts = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    seen: Counter[str] = Counter()
+    unique_plan: list[NormalizedHookEntry] = []
+    for entry in hook_plan:
+        base = _hook_plan_identifier(entry)
+        if counts[base] > 1:
+            metadata = dict(entry.metadata)
+            metadata["plan_id"] = f"{base}#occ{seen[base]}"
+            entry = _dataclasses.replace(entry, metadata=metadata)
+        seen[base] += 1
+        unique_plan.append(entry)
+    return unique_plan
 
 
 def _hook_plan_identifier(entry: NormalizedHookEntry) -> str:
