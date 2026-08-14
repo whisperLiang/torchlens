@@ -2357,8 +2357,12 @@ def force_eager_stance_scope() -> Iterator[bool]:
     compiled callable reached in the scope, triggers zero new compiles during
     the scope (including on never-seen input shapes), and leaves every warm
     compiled artifact reproduced bitwise after exit. Reading the probe never
-    imports ``torch._dynamo``; a process that never imported Dynamo cannot hold
-    a compiled callable, so skipping the stance there is exact, not heuristic.
+    imports ``torch._dynamo``. Skipping the stance when Dynamo is absent is
+    exact for every callable that EXISTS at scope entry (compiling one imports
+    Dynamo), but NOT for a callable created inside the scope: a forward whose
+    first ``torch.compile`` happens mid-capture imports Dynamo after this
+    check, so that callable runs compiled and is bypassed-and-disclosed
+    (``dynamo_region_not_logged``) rather than eager-logged.
     """
 
     if not HAS_SET_STANCE or "torch._dynamo" not in sys.modules:

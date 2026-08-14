@@ -431,3 +431,26 @@ def test_device_context_factory_injection_during_active_logging() -> None:
     tl.trace(model, torch.randn(1), capture=CaptureOptions(layers_to_save="none"))
 
     assert model.factory_device_type == "meta"
+
+
+def test_torch_compile_row_discloses_mid_forward_creation_exception() -> None:
+    """The clean-preflight compile row must not overclaim stance coverage.
+
+    The stance engages only when Dynamo is already imported at capture entry,
+    so a compiled callable CREATED inside the forward (the process's first
+    torch._dynamo import happening mid-capture) is bypassed-and-disclosed, not
+    logged. The row's claim must carry that exception instead of stating that
+    every compiled callable "runs eager and is logged" (b6-opus R16, measured:
+    inline torch.compile interior absent while the row read pass/logged).
+    """
+
+    from torchlens.utils import _torch_compat
+
+    if not _torch_compat.HAS_SET_STANCE:
+        pytest.skip("set_stance unavailable on this torch")
+
+    row = report(SmallCnn(), torch.randn(2, 1, 4, 4)).row("torch_compile")
+
+    assert row.detected is False
+    assert "created inside the forward" in row.details.lower()
+    assert "dynamo_region_not_logged" in row.details
