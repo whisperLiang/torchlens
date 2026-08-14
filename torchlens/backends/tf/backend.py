@@ -34,7 +34,11 @@ from .._options import (
     reject_extra_trace_kwargs,
     reject_unsupported_trace_options,
 )
-from .._selective_save import _STATIC_SELECTOR_KINDS, reject_selector_outside_kinds
+from .._selective_save import (
+    _STATIC_SELECTOR_KINDS,
+    reject_selector_outside_kinds,
+    warn_zero_match_save_predicate,
+)
 from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
 from .modules import TFModuleTree, discover_tf_module_tree, tf_param_logs
@@ -369,6 +373,12 @@ class TFBackend:
                 audit_tf_site_reachability(intervention_plan, session)
             else:
                 result = session.run()
+        if save_predicate is not None and session.save_predicate_match_count == 0:
+            # TF gates retention per-op (the shared post-finalization resolver
+            # never runs here), so the zero-match disclosure fires from the
+            # capture entry: a typo'd save= must never complete COMPLETE
+            # silently with zero payloads (R17 parity with sibling previews).
+            warn_zero_match_save_predicate("tf")
         trace.forward_duration = Duration(time.time() - trace.capture_start_time)
         trace.raw_output = output_transform(result.output) if callable(output_transform) else None
         trace.capture_events = result.events

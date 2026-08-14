@@ -655,6 +655,7 @@ def _selected_fetch_names(
     """
 
     names: list[str] = []
+    predicate_matches = 0
     for op in graph.get_operations():
         for output_index, output in enumerate(op.outputs):
             if output.name in output_names or save_predicate is None:
@@ -672,7 +673,15 @@ def _selected_fetch_names(
                 modules=_module_frames_from_name(op.name),
             )
             if bool(save_predicate(context)):
+                predicate_matches += 1
                 names.append(output.name)
+    if save_predicate is not None and predicate_matches == 0:
+        # Graph outputs are always fetched, so a typo'd predicate still
+        # produced payloads for them -- but the SELECTOR matched nothing,
+        # exactly the silent-typo case the shared disclosure family warns on.
+        from .._selective_save import warn_zero_match_save_predicate
+
+        warn_zero_match_save_predicate("tf")
     return tuple(dict.fromkeys((*output_names, *names)))
 
 
