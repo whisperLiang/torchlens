@@ -130,6 +130,16 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
         raise _refuse(f"{where} has no group membership record", source=source)
     if not isinstance(group.get("my_global_rank"), int):
         raise _refuse(f"{where} has no my_global_rank", source=source)
+    global_ranks = group["global_ranks"]
+    if any(not isinstance(rank, int) or isinstance(rank, bool) for rank in global_ranks):
+        raise _refuse(f"{where} group membership contains a non-integer rank", source=source)
+    if len(set(global_ranks)) != len(global_ranks):
+        raise _refuse(f"{where} group membership contains duplicate ranks", source=source)
+    if group["my_global_rank"] not in global_ranks:
+        raise _refuse(
+            f"{where} claims rank {group['my_global_rank']} outside its group membership",
+            source=source,
+        )
     events = entry.get("events")
     if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)
@@ -179,11 +189,26 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
         )
     boundaries = record["boundaries"]
     ranks: set[int] = set()
+    seen_correlation_keys: set[tuple[str, int, str, int]] = set()
     for index, entry in enumerate(boundaries):
         if not isinstance(entry, dict):
             raise _refuse(f"boundary {index} of {source} is not a mapping", source=source)
         _validate_boundary(entry, index, source)
         ranks.add(int(entry["group"]["my_global_rank"]))
+        correlation = entry["correlation"]
+        correlation_key = (
+            correlation["membership_digest"],
+            correlation["lifetime_ordinal"],
+            correlation["channel"],
+            correlation["seq"],
+        )
+        if correlation_key in seen_correlation_keys:
+            raise _refuse(
+                f"boundary {index} of {source} duplicates rank-local correlation key "
+                f"{correlation_key}",
+                source=source,
+            )
+        seen_correlation_keys.add(correlation_key)
     if len(ranks) != 1:
         raise MergeInputError(
             f"Merge input {source} claims multiple global ranks {sorted(ranks)}; "

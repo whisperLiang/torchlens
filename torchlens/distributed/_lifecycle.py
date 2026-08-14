@@ -323,15 +323,16 @@ def _install_lifecycle_wraps(state: _ArmedState) -> None:
         """Build the group-destruction wrap for one c10d entry point."""
 
         def wrapped(group: Any = None, *args: Any, **kwargs: Any) -> Any:
-            """Record the destruction before delegating, resolving a non-member group to ``None``."""
+            """Delegate destruction, then record it only after backend success."""
 
+            result = original(group, *args, **kwargs)
             with _LOCK:
                 if _STATE is state:
                     resolved = group
                     if resolved is not None and not _is_member_group(resolved):
                         resolved = None
                     _record_destroyed_group(state, resolved)
-            return original(group, *args, **kwargs)
+            return result
 
         wrapped.__wrapped__ = original  # type: ignore[attr-defined]
         wrapped.__name__ = getattr(original, "__name__", "wrapped")
@@ -399,18 +400,25 @@ def _arm(source: str) -> ArmingRecord:
             from ..backends.torch.collectives import install_collective_wraps
 
             install_collective_wraps(state.originals)
-        except BaseException:
+        except BaseException as arm_error:
             # Arming installs TWO independent wrap families before publishing ``_STATE``.
             # A failure (or a Ctrl-C) between them left unguarded wraps installed with
             # ``_STATE is None``, so nothing owned them: a later ``disarm()`` had no
             # record to restore from, and a re-arm wrapped the STALE WRAPS -- each failed
             # arm adding another passthrough layer that could never be peeled back to the
             # pristine functions. Restore whatever was recorded, then re-raise.
-            for (module, name), original in state.originals.items():
+            restore_error: Exception | None = None
+            for (module, name), original in list(state.originals.items()):
                 try:
                     setattr(module, name, original)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if restore_error is None:
+                        restore_error = exc
+                    continue
+                state.originals.pop((module, name), None)
+            if restore_error is not None:
+                _STATE = state
+                raise restore_error from arm_error
             raise
         _STATE = state
         return arming
@@ -468,11 +476,17 @@ def disarm() -> None:
         state = _STATE
         if state is None:
             return
-        for (module, name), original in state.originals.items():
+        first_failure: Exception | None = None
+        for (module, name), original in list(state.originals.items()):
             try:
                 setattr(module, name, original)
-            except Exception:
-                pass
+            except Exception as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            state.originals.pop((module, name), None)
+        if first_failure is not None:
+            raise first_failure
         _STATE = None
         _AUTO_ARM_WARNED = False
 
@@ -513,8 +527,8 @@ def resolve_group_identity(group: Any) -> GroupIdentity:
         return _seed_group_locked(state, group)
 
 
-def _alive_same_membership_count(digest: str) -> int:
-    """Count live registry groups whose membership digest equals ``digest``."""
+def _alive_same_membership_count(digest: str) -> int | None:
+    """Count matching live groups, or return ``None`` when any membership is unreadable."""
 
     dist = torch.distributed
     world = getattr(getattr(dist, "distributed_c10d", None), "_world", None)
@@ -526,7 +540,7 @@ def _alive_same_membership_count(digest: str) -> int:
         try:
             ranks = _group_global_ranks(candidate)
         except Exception:
-            continue
+            return None
         if membership_digest_for_ranks(ranks) == digest:
             count += 1
     return count
@@ -559,6 +573,11 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
             "membership cannot be generation 0"
         )
     alive = _alive_same_membership_count(digest)
+    if alive is None:
+        raise refuse(
+            "the live process-group registry contains an entry whose membership "
+            "cannot be read, so the same-membership alive count is incomplete"
+        )
     if alive > 1:
         raise refuse(
             f"{alive} live groups share this membership; the seed cannot prove "

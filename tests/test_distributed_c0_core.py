@@ -7,6 +7,8 @@ sims for boundary capture live in ``test_distributed_boundary_gloo.py``.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -107,6 +109,93 @@ class TestGroupLifecycleLedger:
         ledger = _ledger([("create", M, 0, "wrapped", "seeded")])
         with pytest.raises(ValueError):
             ledger.append(_event(0, "create", M2, 0, "wrapped", "seeded"))
+
+
+class TestLifecycleFailureAtomicity:
+    """Lifecycle uncertainty and teardown failures remain visible and repairable."""
+
+    def test_alive_membership_scan_failure_refuses_seeding(self, monkeypatch) -> None:
+        """An unreadable live group cannot lower the ambiguity count."""
+
+        target = object()
+        unreadable = object()
+        fake_world = SimpleNamespace(pg_map={unreadable: object()})
+        fake_dist = SimpleNamespace(distributed_c10d=SimpleNamespace(_world=fake_world))
+        monkeypatch.setattr(torch, "distributed", fake_dist)
+
+        def ranks_for(group: object) -> tuple[int, ...]:
+            """Resolve only the target group's membership."""
+
+            if group is target:
+                return (0, 1)
+            raise RuntimeError("registry membership unavailable")
+
+        monkeypatch.setattr(lifecycle, "_group_global_ranks", ranks_for)
+        state = lifecycle._ArmedState(
+            arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
+            recognizer=object(),
+        )
+        with pytest.raises(AmbiguousGroupLifetimeError, match="registry"):
+            lifecycle._seed_group_locked(state, target)
+        assert state.ledger.events == ()
+
+    def test_disarm_retains_state_when_restore_fails(self, monkeypatch) -> None:
+        """A failed restore keeps the original-function ledger available for retry."""
+
+        original = object()
+
+        class RefusingModule:
+            """Module-like object that rejects restoration of one attribute."""
+
+            def __setattr__(self, name: str, value: object) -> None:
+                """Reject the pristine function while allowing setup values."""
+
+                if name == "all_reduce" and value is original:
+                    raise RuntimeError("restore refused")
+                object.__setattr__(self, name, value)
+
+        module = RefusingModule()
+        module.all_reduce = object()
+        state = lifecycle._ArmedState(
+            arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
+            recognizer=object(),
+            originals={(module, "all_reduce"): original},
+        )
+        monkeypatch.setattr(lifecycle, "_STATE", state)
+        with pytest.raises(RuntimeError, match="restore refused"):
+            lifecycle.disarm()
+        assert lifecycle.armed_state() is state
+        assert state.originals[(module, "all_reduce")] is original
+
+    def test_destroy_is_recorded_only_after_delegate_succeeds(self, monkeypatch) -> None:
+        """A failed destroy call must leave the live-group ledger unchanged."""
+
+        group = object()
+
+        def failing_destroy(group_arg: object = None) -> None:
+            """Simulate a backend destroy failure."""
+
+            _ = group_arg
+            raise RuntimeError("destroy failed")
+
+        class PatchModule:
+            """Hashable module-like holder for the destroy function."""
+
+        module = PatchModule()
+        module.destroy_process_group = failing_destroy
+        monkeypatch.setattr(lifecycle, "_patch_modules", lambda: [module])
+        state = lifecycle._ArmedState(
+            arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
+            recognizer=object(),
+            identities={
+                id(group): lifecycle.GroupIdentity(M, 0, "seeded", (0, 1), "gloo")
+            },
+        )
+        lifecycle._install_lifecycle_wraps(state)
+        with pytest.raises(RuntimeError, match="destroy failed"):
+            module.destroy_process_group(group)
+        assert state.ledger.events == ()
+        assert id(group) in state.identities
 
 
 class TestPreJoinLineageAudit:
