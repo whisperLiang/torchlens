@@ -1,0 +1,5 @@
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+recorded: 2026-08-14T12:25:21.342981+00:00
