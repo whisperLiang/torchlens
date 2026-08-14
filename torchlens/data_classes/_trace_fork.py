@@ -19,6 +19,18 @@ failed partials) take the detached fallback: every record shell binds a
 fresh single-row ``DetachedOpStore`` holding isolated copies of its public
 state — the same storage class those records already use after pickle
 restore.
+
+Cost disclosure (measured 2026-08-14, small linear/BN/relu stack, 83 ops,
+gc-tracked-object census with no-op and known-allocation calibration
+guards; a prior uncalibrated probe over-counted 20x, and gc UNTRACKS
+atomic-only dicts/tuples, so calibrate before trusting any count): the COW
+fork is cheap in PAYLOAD BYTES (tensors and sealed columns are shared, and
+those dominate real models) but NOT near-free in objects — it retained ~61
+gc-tracked objects and ~13.5 KB of new small allocations per op (~68% of a
+steady-state capture's tracked-object retention). The bulk is the eager
+fork-time isolation of mutable container cells, the per-record shells, and
+the Layer shadow dicts — all load-bearing for the bidirectional isolation
+contract, so the object count scales O(graph), not O(1).
 """
 
 from __future__ import annotations
@@ -36,8 +48,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from .. import _state
-from .._trace_core.op_store import _MISSING, DetachedOpStore, cow_copy_value
+from .._trace_core.op_store import _MISSING, DetachedOpStore, PooledCell, cow_copy_value
 from .._trace_core.record_rows import CORE_KEY, ROW_KEY
+from ..capture.outcome import stamp_forked
 from ..intervention.types import MODEL_LOG_FIELD_FORK_POLICY, ForkFieldPolicy
 from ._accessor_base import Accessor
 from ._state_adapter import state_items, state_new, state_restore
@@ -172,6 +185,7 @@ class _RecordTranslator:
     """
 
     __slots__ = (
+        "__weakref__",
         "_fork_ref",
         "_guards",
         "_keepalive",
@@ -403,9 +417,14 @@ def _fill_detached_record(parent_record: Any, shell: Any, translator: _RecordTra
     detached = DetachedOpStore(layout)
     for fid in range(layout.n_fields):
         value = store.cell_get(row, fid)
-        # Decode compacted singleton-label cells (M14 slice 2) while
-        # copying: a detached shell has no registry to decode them later.
-        if value.__class__ is str and store.compacted_singleton(row, fid, value):
+        # Decode BOTH internal cell encodings (M14) while copying: a detached
+        # shell has no pool/registry to decode them later, and
+        # ``DetachedOpStore.items`` streams cells verbatim — a leaked
+        # ``PooledCell`` would poison the record's pickle state and make every
+        # fork serialization (pickle AND tl.save/tl.load) fail downstream.
+        if value.__class__ is PooledCell:
+            value = value.hydrate()
+        elif value.__class__ is str and store.compacted_singleton(row, fid, value):
             value = [value]
         detached.cell_set(0, fid, cow_copy_value(value, translator))
     shell.__dict__[CORE_KEY] = detached
@@ -617,6 +636,12 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     dict.update(memo, translator.map)
     dict.update(memo, layer_shells)
     if fork_core is not None:
+        # The views hold the translator WEAKLY (a retained fork Op reaching
+        # the fork Trace through translator-mapped shells would root the
+        # whole fork graph and disarm last-owner payload eviction); the fork
+        # core is its strong anchor, so translation lives exactly as long as
+        # the fork itself.
+        fork_core._record_translator = translator
         for view in fork_core.store_views():
             view.record_translator = translator
 
@@ -650,6 +675,11 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     fork._warned_mutate_in_place = False
     fork._warned_direct_write = False
     fork.__dict__.pop("_validation_replay_status", None)
+    # The fork is the sanctioned mutation surface, so it settles a DERIVED
+    # outcome (UNATTESTED for a complete parent) instead of inheriting the
+    # parent's blessed attestation by identity -- a hand-edited fork must
+    # never save as a bit-identical attested COMPLETE.
+    stamp_forked(fork, parent)
 
     # Phase 3: fill. COW ops rebind their owner weakref and drop session
     # caches in the fork view; detached fallbacks duplicate isolated state.

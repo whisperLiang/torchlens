@@ -579,6 +579,14 @@ class TraceInterventionMixin(_TraceMixinBase):
     def fork(self: "Trace", name: str | None = None) -> "Trace":
         """Create a copy-on-write intervention fork of this log.
 
+        Tensor payloads and sealed metadata columns are SHARED with this
+        trace (the dominant bytes on real models), but the fork is not
+        near-free: isolating every mutation surface retains on the order of
+        ~60 gc-tracked objects / ~13 KB of small allocations per op
+        (measured; see ``_trace_fork``). The fork settles a DERIVED capture
+        outcome (UNATTESTED for a complete parent), never this trace's
+        attested settle stamp -- a fork is the sanctioned mutation surface.
+
         Parameters
         ----------
         name:

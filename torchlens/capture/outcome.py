@@ -1033,6 +1033,35 @@ def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome 
     return demoted
 
 
+def stamp_forked(fork: object, parent: object) -> CaptureOutcome:
+    """Settle one fork with a DERIVED outcome, never the parent's attestation.
+
+    A fork is TorchLens's sanctioned mutation surface: its contents may be
+    hand-edited after creation, so inheriting the parent's blessed settle
+    stamp by identity would let a mutated fork save as a bit-identical
+    attested product. The fork settles through the same structural
+    derivation lattice an attestation-less artifact uses (R06 doctrine:
+    derivation emits HALTED / UNATTESTED / UNKNOWN, never a blessed
+    COMPLETE), keeping the parent's committed-op count and recording fork
+    provenance in the settlement note. Capability parity is preserved: a
+    COMPLETE parent's fork settles UNATTESTED, whose every capability cell
+    is allow/allow-scoped.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    parent_outcome = outcome_for(parent)
+    derived = derive_outcome_from_structural_state(getattr(fork, "__dict__", {}))
+    parent_status = "unsettled" if parent_outcome is None else parent_outcome.status.value
+    derived = dataclass_replace(
+        derived,
+        n_ops_committed=(None if parent_outcome is None else parent_outcome.n_ops_committed),
+        settlement_note=f"forked_from={parent_status}",
+    )
+    fork.__dict__["_capture_outcome"] = derived
+    return derived
+
+
 def stamp_cooked(
     trace: object,
     *,
@@ -1151,5 +1180,6 @@ __all__ = [
     "settle_halted",
     "stamp_backend_finalized",
     "stamp_cooked",
+    "stamp_forked",
     "stamp_recording_outcome",
 ]

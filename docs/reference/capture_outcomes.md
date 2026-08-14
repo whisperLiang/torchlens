@@ -32,6 +32,13 @@ that never steers a capability gate.
   conservatively from the construction status for legacy/recovered
   recordings.
 - `PartialTrace.outcome` — forwards the inner trace's sidecar.
+- `Trace.fork().outcome` — a DERIVED record settled by `stamp_forked`, never
+  the parent's attestation by identity: a fork is the sanctioned mutation
+  surface, so it settles through the structural lattice (UNATTESTED for a
+  complete parent, HALTED-derived for a halted one), keeps the parent's
+  committed-op count, and records `forked_from=<parent status>` in the
+  settlement note. Capability parity holds (every UNATTESTED cell is
+  allow/allow-scoped), so nothing a fork could do before is newly refused.
 - `RunOutcome.capture_outcome` — the session-side copy; `RunOutcome.state`
   remains the first-transition log and is never revised (demotion replaces
   only the record).

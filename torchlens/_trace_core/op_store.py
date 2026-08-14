@@ -26,6 +26,7 @@ value); facade descriptors translate ``_MISSING`` into the exact
 
 from __future__ import annotations
 
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -141,6 +142,8 @@ class OpRowStore:
         "_mutable_keys",
         "_n_rows",
         "_overlay",
+        "_payload_owner_count",
+        "_payload_views",
         "_sweep_plan",
         "_rows",
         "_sealed",
@@ -205,6 +208,98 @@ class OpRowStore:
         # (identity-guarded stale entries are harmless, and the str is
         # already retained by the cell/hydrated list, so no extra pinning).
         self._compacted_singletons: dict[int, str] | None = None
+        # Count of live owning TraceCores (the capture's own core plus one
+        # per fork core viewing this base). When the LAST owner is
+        # garbage-collected, tensor payload cells are evicted so a retained
+        # ``Op`` facade -- which holds this store strongly -- keeps its
+        # metadata readable without pinning every captured activation.
+        self._payload_owner_count = 0
+        # Weak references to every OpStoreView over this base: row-major
+        # views SNAPSHOT the row lists (and every view has private
+        # overlays), so last-owner payload eviction must sweep surviving
+        # views too -- a retained fork Op reads through its view's
+        # snapshot, never the live base rows. Weak so the base never
+        # extends a dead fork's view lifetime.
+        self._payload_views: list[Any] = []
+
+    def adopt_payload_owner(self, owner: Any) -> None:
+        """Register one owning ``TraceCore`` whose death releases payload pins.
+
+        Called at the capture freeze seam for the original core and at
+        ``TraceCore.fork()`` for each fork core sharing this base. The
+        finalizer holds this store strongly, which adds no pinning beyond
+        the owner's own strong reference and is dropped when it fires.
+
+        Parameters
+        ----------
+        owner:
+            Weak-referenceable owning object (a ``TraceCore``).
+        """
+
+        self._payload_owner_count += 1
+        weakref.finalize(owner, self._release_payload_owner)
+
+    def _release_payload_owner(self) -> None:
+        """Drop one owner; evict tensor payloads when the last owner dies."""
+
+        self._payload_owner_count -= 1
+        if self._payload_owner_count == 0 and self._sealed:
+            self._evict_tensor_payloads()
+
+    def _evict_tensor_payloads(self) -> None:
+        """Release top-level tensor-valued cells once no owning core is alive.
+
+        A retained ``Op`` is a two-word view over this shared store, so one
+        live facade used to pin EVERY captured payload after its Trace died.
+        With no owning TraceCore left, no store view can still serve another
+        trace, so tensor cells (saved ``out`` payloads and friends) are
+        replaced with ``None`` -- the existing "no payload retained"
+        spelling -- while every metadata cell stays readable. Tensors nested
+        inside non-tensor containers are a disclosed residual (top-level
+        cells only). Keep the source Trace alive (or clone the tensor) to
+        keep payloads past the trace's lifetime.
+        """
+
+        import torch
+
+        tensor_cls = torch.Tensor
+        rows = self._rows
+        if rows is not None:
+            for row_cells in rows:
+                for fid, value in enumerate(row_cells):
+                    if isinstance(value, tensor_cls):
+                        row_cells[fid] = None
+        columns = self._columns
+        if columns is not None:
+            for column in columns:
+                if column.packed:
+                    continue
+                values = column.values
+                for index, value in enumerate(values):
+                    if isinstance(value, tensor_cls):
+                        values[index] = None
+        overlay = self._overlay
+        for key, value in overlay.items():
+            if isinstance(value, tensor_cls):
+                overlay[key] = None
+        # Surviving views (reachable only through retained fork Ops now that
+        # every owning core is dead) read their own snapshot surfaces, so
+        # they are swept too. Shared snapshot lists (fork chains) evict
+        # idempotently.
+        for view_ref in self._payload_views:
+            view = view_ref()
+            if view is None:
+                continue
+            snapshot_rows = view._base_rows
+            if snapshot_rows is not None:
+                for row_cells in snapshot_rows:
+                    for fid, value in enumerate(row_cells):
+                        if isinstance(value, tensor_cls):
+                            row_cells[fid] = None
+            for view_overlay in (view._base_overlay, view._overlay):
+                for key, value in view_overlay.items():
+                    if isinstance(value, tensor_cls):
+                        view_overlay[key] = None
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
@@ -1342,15 +1437,37 @@ class OpStoreView:
     """
 
     __slots__ = (
+        "__weakref__",
         "_base_overlay",
         "_base_rows",
         "_group_refs",
         "_group_tables",
         "_overlay",
+        "_record_translator_ref",
         "base",
         "fact_blocks",
-        "record_translator",
     )
+
+    @property
+    def record_translator(self) -> Callable[[Any], Any] | None:
+        """Return the fork's record translator while its owning core lives.
+
+        Held WEAKLY (the translator is anchored on the owning fork
+        ``TraceCore``): a retained fork ``Op`` must not root the whole fork
+        graph through ``view -> translator -> fork shells -> fork Trace`` --
+        that chain kept the fork core alive forever, so the last-owner
+        payload eviction could never fire. After the fork dies, reads
+        proceed untranslated (dead-trace view semantics).
+        """
+
+        ref = self._record_translator_ref
+        return ref() if ref is not None else None
+
+    @record_translator.setter
+    def record_translator(self, translator: Callable[[Any], Any] | None) -> None:
+        """Bind the translator weakly (``None`` clears it)."""
+
+        self._record_translator_ref = None if translator is None else weakref.ref(translator)
 
     def __init__(
         self,
@@ -1392,6 +1509,10 @@ class OpStoreView:
         self._overlay: dict[int, Any] = {}
         self._group_tables = group_tables
         self._group_refs: dict[tuple[int, int], GroupRef] = {}
+        # Last-owner payload eviction must reach this view's snapshot
+        # surfaces (a retained fork Op reads through them, never the live
+        # base rows), so the root store tracks its views weakly.
+        self.base._payload_views.append(weakref.ref(self))
         self.record_translator: Callable[[Any], Any] | None = None
         self.fact_blocks = (
             _ViewFactBlocks(self.base.fact_blocks, self)
