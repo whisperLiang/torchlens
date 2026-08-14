@@ -302,15 +302,12 @@ def test_recover_depth_bomb_tail_line_degrades_to_truncated_tail(tmp_path: Path)
     assert len(recovered.records) > 0
 
 
-def test_recover_oversized_index_refuses_with_recovery_error(
+def test_recover_oversized_index_refuses_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An index over the size ceiling refuses typed instead of allocating it."""
 
-    import functools
     import importlib
-
-    from torchlens._io._json import read_bytes_bounded
 
     # ``torchlens.fastlog.recover`` the ATTRIBUTE is the re-exported recover()
     # function; import_module reaches the shadowed submodule itself.
@@ -320,11 +317,9 @@ def test_recover_oversized_index_refuses_with_recovery_error(
         _write_bundle(tmp_path / "source.tlfast").bundle_path, tmp_path / "oversized"
     )
     (bundle_path / "manifest.json").unlink()
-    monkeypatch.setattr(
-        recover_module, "read_bytes_bounded", functools.partial(read_bytes_bounded, max_bytes=8)
-    )
+    monkeypatch.setattr(recover_module, "_INDEX_MAX_BYTES", 8)
 
-    with pytest.raises(RecoveryError, match="maximum recoverable size"):
+    with pytest.raises(TorchLensIOError, match="ceiling"):
         tl.fastlog.recover(bundle_path)
 
 
@@ -347,8 +342,8 @@ def test_recovery_warnings_capped_with_accurate_suppression_count(tmp_path: Path
     """Thousands of bad index lines retain a bounded warning list (B8-41).
 
     A corrupt index with 200k malformed lines used to retain one string per
-    line (15+ MB of ``recovery_warnings``). The list is now capped per warning
-    kind with one final ``(+N more suppressed)`` entry keeping the total count
+    line (15+ MB of ``recovery_warnings``). The sink now hard-caps the retained
+    diagnostics and appends one summary entry keeping the suppressed count
     accurate.
     """
 
@@ -366,9 +361,9 @@ def test_recovery_warnings_capped_with_accurate_suppression_count(tmp_path: Path
 
     warning_list = recovered.recovery_warnings
     malformed = [w for w in warning_list if w.startswith("malformed line")]
-    assert len(malformed) == 20
-    assert len(warning_list) <= 25
-    assert warning_list[-1] == "(+2980 more suppressed)"
+    assert len(malformed) == 200
+    assert len(warning_list) == 201
+    assert warning_list[-1] == "2800 additional recovery warnings suppressed"
     assert len(recovered.records) == n_records
 
 
