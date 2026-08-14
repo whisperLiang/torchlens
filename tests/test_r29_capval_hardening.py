@@ -413,7 +413,18 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
         _MulTrivialProducer().eval(), torch.randn(4), layers_to_save="all", save_arg_values=True
     )
     assert state["dropped"] > 0, "injection did not drop any edge -- inconclusive"
-    with pytest.raises(MetadataInvariantError, match="capture_edge_survival"):
+    # Two independent tripwires catch this plant: the capture-sealed
+    # edge-survival witness (the original pin) and, since the R08/R75
+    # multiplicity witness landed, edge_use_parent_arg_consistency -- the
+    # post-freeze drop leaves the CSR occurrence in place while the
+    # parents/parent_arg_positions roots lose it, so the count cross-check
+    # fires first in dispatch order. Either name proves the drop is caught;
+    # the capture-sealed witness staying independently armed is pinned by
+    # the CSR-scrubbed plants in test_oracle_independence.py.
+    with pytest.raises(
+        MetadataInvariantError,
+        match="capture_edge_survival|edge_use_parent_arg_consistency",
+    ):
         check_metadata_invariants(trace)
 
 
