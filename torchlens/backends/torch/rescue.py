@@ -300,6 +300,46 @@ def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
     return tuple(labels)
 
 
+def _partial_buffer_write_labels(exc: BaseException) -> tuple[str, ...] | None:
+    """Buffer addresses ACTUALLY written by a FAILED primary forward.
+
+    The failed-capture cleanup stamps the value-changing journal record on
+    the exception (``_torchlens_actual_buffer_writes``) while the journal is
+    still live — postprocess never ran, so materialized op fields do not
+    exist, and session cleanup clears ``capture_events`` before the driver
+    sees the partial. Mirrors :func:`_buffer_write_labels`: only
+    value-changing (or unknown-change, fail closed) events count. The live
+    partial journal is read as a fallback for paths that skipped the stamp.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        Addresses of actual writes (empty tuple = provably none), or ``None``
+        when the write record is unreachable/unarmed — the caller must treat
+        ``None`` as unprovable and refuse the re-run.
+    """
+
+    stamped = getattr(exc, "_torchlens_actual_buffer_writes", None)
+    if stamped is not None:
+        return tuple(str(address) for address in stamped)
+    partial = getattr(exc, "partial_log", None)
+    trace = getattr(partial, "trace", None)
+    if trace is None:
+        return None
+    if getattr(trace, "capture_mode", None) != "exhaustive":
+        # The buffer-write tracker only arms exhaustive sessions; an empty
+        # journal on any other mode proves nothing.
+        return None
+    events = getattr(getattr(trace, "capture_events", None), "buffer_write_events", None)
+    if events is None:
+        return None
+    return tuple(
+        str(getattr(event, "address", None) or "?")
+        for event in events
+        if getattr(event, "value_changed", None) is not False
+    )
+
+
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """Stamp the rescue disclosure onto a trace (session-time facts).
 
@@ -376,6 +416,38 @@ def capture_with_rescue(
 
     if primary_error is not None:
         trigger = "output_attribution_failed"
+        # R16-2 applies to EVERY trigger: an attribution-failed rescue also
+        # runs the forward a second time, so a primary that WROTE buffer
+        # state (train-mode BatchNorm counters and running stats) refuses the
+        # re-run here too — the failed capture's journal is the write record.
+        # An unreadable record is unprovable and refuses fail-closed.
+        partial_writes = _partial_buffer_write_labels(primary_error)
+        if partial_writes is None or partial_writes:
+            _flush_deferred_warnings(primary_deferred)
+            shown = (
+                ", ".join(partial_writes[:3]) if partial_writes else "buffer-write state unprovable"
+            )
+            warnings.warn(
+                "TorchLens skipped the rescue re-run after the output-attribution "
+                f"failure: the forward wrote module buffer state ({shown}), and "
+                "re-running it would double-apply those writes. Call model.eval() "
+                "(or fix the stale torch reference) and re-capture.",
+                UserWarning,
+                stacklevel=3,
+            )
+            partial_trace = getattr(getattr(primary_error, "partial_log", None), "trace", None)
+            if partial_trace is not None:
+                try:
+                    partial_trace.rescue_rerun = _disclosure(
+                        trigger=trigger,
+                        recovered=False,
+                        primary_error=str(primary_error),
+                        skipped_reason="buffer_writes_double_forward",
+                        forward_runs=1,
+                    )
+                except Exception:  # noqa: BLE001 — disclosure is best-effort
+                    pass
+            raise primary_error
     else:
         assert primary is not None
         signal = _escape_signal(primary)

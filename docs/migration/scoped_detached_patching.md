@@ -52,7 +52,9 @@ repair stale bindings. Coverage is now:
   `forward_runs == 1`). The refusal keys on a VALUE-CHANGING write, not on journal presence:
   fused norm mutators are journaled unconditionally, so eval-mode BN/IN/GN captures carry
   `buffer_value_changed == False` records and stay rescuable; an unknown change status refuses
-  fail-closed. On rescued (eval-mode) captures, a custom
+  fail-closed. The refusal covers EVERY trigger, including an output-attribution failure — there
+  the re-run is refused, the failure propagates with its `exc.partial_log`, and the skip is
+  disclosed on the partial's trace (`rescue_rerun`). On rescued (eval-mode) captures, a custom
   in-forward PYTHON-attribute counter (not a registered buffer) still mutates twice: a declared
   residual of the double forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
 - The capture-attempt-failed advisory ("Partial diagnostics ride the exception") is emitted on a
