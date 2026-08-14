@@ -135,7 +135,7 @@ from .options import (
 )
 from .types import ActivationPostfunc, GradientPostfunc
 from .utils._torch_compat import is_dynamo_compiled_callable
-from .utils.display import _vprint, atomic_write_text, ensure_trace_visualizer_dir, warn_parallel
+from .utils.display import _vprint, ensure_trace_visualizer_dir, warn_parallel
 from .utils.introspection import _get_code_context
 from .utils.tensor_utils import SaveMode
 from .visualization.code_panel import (
@@ -171,20 +171,30 @@ _MLX_STATIC_LABEL_SAVE_SELECTOR_KINDS = frozenset(
 #    bits are stripped from the two directories torchlens owns; a root owned by another
 #    user, or one whose permissions cannot be tightened, refuses typed. Ancestors ABOVE
 #    the configured cache directory are the caller's to secure and are not inspected.
-# 2. Every entry carries an HMAC-SHA256 tag keyed by a 0600 secret inside that
-#    directory. Bytes we cannot authenticate are NEVER handed to ``pickle`` -- they are
-#    a cache MISS with a warning, so a planted, stale, or corrupt entry is inert while
-#    a legitimate pre-upgrade cache simply refills.
+# 2. Every entry is ONE self-authenticating record: a fixed-size header (magic +
+#    HMAC-SHA256 tag keyed by a 0600 secret inside that directory) followed by the
+#    pickled payload, committed by a single ``os.replace``. Bytes we cannot
+#    authenticate are NEVER handed to ``pickle`` -- they are a cache MISS with a
+#    warning, so a planted, stale, or corrupt entry is inert while a legitimate
+#    pre-upgrade cache simply refills. The historical payload + ``.hmac`` sidecar
+#    PAIR was retired because its two-step commit had a torn-generation window
+#    (crash or concurrent reader between the payload swap and the tag write saw a
+#    payload against the wrong generation's tag); the single record makes a torn
+#    payload/tag state unrepresentable.
 #
 # (2) is the load-bearing guard and (1) is defense in depth: a mode check alone cannot
 # speak to a file planted while the mode was briefly permissive, nor to bytes copied in
 # from an untrusted archive, while the tag makes any such entry inert.
 
 _CAPTURE_CACHE_SECRET_FILE = ".capture_cache_secret"
+# Legacy pair-format sidecar suffix: recognized only for cleanup/eviction debris.
 _CAPTURE_CACHE_TAG_SUFFIX = ".hmac"
 _CAPTURE_CACHE_SECRET_BYTES = 32
 _CAPTURE_CACHE_MAX_ENTRIES = 64
 _CAPTURE_CACHE_MAX_BYTES = 2 * 1024**3
+_CAPTURE_CACHE_MAGIC = b"TLCCv3\n"
+_CAPTURE_CACHE_TAG_HEX_CHARS = 64  # HMAC-SHA256 hexdigest length
+_CAPTURE_CACHE_HEADER_BYTES = len(_CAPTURE_CACHE_MAGIC) + _CAPTURE_CACHE_TAG_HEX_CHARS + 1
 
 
 def _capture_cache_io_error(message: str) -> Exception:
@@ -389,11 +399,8 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     import hashlib
     import hmac
 
-    tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
-    if cache_path.is_symlink() or tag_path.is_symlink():
-        reason = "the entry or its tag is a symlink"
-    elif not tag_path.is_file():
-        reason = "no authentication tag accompanies it"
+    if cache_path.is_symlink():
+        reason = "the entry is a symlink"
     else:
         # SINGLE read: the bytes that are authenticated MUST be the exact bytes that
         # are unpickled. Streaming the HMAC from one ``open`` and then unpickling from
@@ -402,27 +409,42 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
         # (attacker-writable-by-hypothesis) cache directory could swap the payload
         # after the tag verified over the benign bytes and before the load, turning a
         # cache hit into arbitrary code execution. Reading once binds authentication to
-        # the exact bytes consumed. The cost is one transient buffer of the serialized
-        # trace, which ``pickle`` would materialize as a live object graph regardless.
+        # the exact bytes consumed (the embedded tag rides in the same read). The cost
+        # is one transient buffer of the serialized trace, which ``pickle`` would
+        # materialize as a live object graph regardless.
         data: bytes | None = None
         try:
-            recorded = tag_path.read_text(encoding="ascii").strip()
             size = cache_path.stat().st_size
-            if size > _CAPTURE_CACHE_MAX_BYTES:
+            if size > _CAPTURE_CACHE_MAX_BYTES + _CAPTURE_CACHE_HEADER_BYTES:
                 reason = (
                     f"it is {size} bytes, above the {_CAPTURE_CACHE_MAX_BYTES}-byte "
                     "cache-entry ceiling"
                 )
             else:
                 data = cache_path.read_bytes()
-        except (OSError, UnicodeError) as exc:
-            reason = f"its authentication metadata cannot be read ({exc})"
+        except OSError as exc:
+            reason = f"it cannot be read ({exc})"
         if data is not None:
-            observed = hmac.new(secret, data, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(recorded, observed):
-                reason = "its authentication tag does not match its bytes"
+            header_end = _CAPTURE_CACHE_HEADER_BYTES
+            if (
+                not data.startswith(_CAPTURE_CACHE_MAGIC)
+                or len(data) < header_end
+                or data[header_end - 1 : header_end] != b"\n"
+            ):
+                reason = (
+                    "it is not a single-record authenticated cache entry "
+                    "(pre-upgrade pair format, or foreign bytes)"
+                )
             else:
-                return pickle.loads(data)
+                recorded = data[len(_CAPTURE_CACHE_MAGIC) : header_end - 1].decode(
+                    "ascii", errors="replace"
+                )
+                payload = data[header_end:]
+                observed = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(recorded, observed):
+                    reason = "its embedded authentication tag does not match its bytes"
+                else:
+                    return pickle.loads(payload)
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
@@ -434,21 +456,24 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
 
 
 def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: bytes) -> None:
-    """Write a cache entry plus the HMAC tag that authenticates it.
+    """Commit a self-authenticating cache entry in ONE atomic step.
+
+    The record is ``magic + hex HMAC tag + newline + pickled payload``. The
+    payload is streamed through the tagging writer after a placeholder header,
+    the real tag is seeked back into the header, and the finished record is
+    installed by a single ``os.replace`` -- so no observer (crash recovery or
+    concurrent reader) can ever see a payload paired with another generation's
+    tag, which the historical payload + ``.hmac`` sidecar two-step commit
+    allowed.
 
     Parameters
     ----------
     trace
         Trace to cache.
     cache_path
-        Destination pickle path.
+        Destination entry path.
     secret
-        Secret keying the entry's tag.
-
-    Returns
-    -------
-    None
-        Writes the payload and its tag in place.
+        Secret keying the entry's embedded tag.
     """
 
     import hashlib
@@ -462,17 +487,20 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
     temporary_path = Path(temporary_name)
     try:
         # Streamed, so caching a multi-GiB trace does not additionally materialize
-        # the whole pickle in memory just to tag it.
-        with os.fdopen(descriptor, "wb") as file:
+        # the whole pickle in memory just to tag it; the header placeholder is
+        # overwritten in place once the streaming MAC settles.
+        with os.fdopen(descriptor, "wb+") as file:
+            file.write(_CAPTURE_CACHE_MAGIC + b"0" * _CAPTURE_CACHE_TAG_HEX_CHARS + b"\n")
             pickle.dump(trace, _TaggingWriter(file, mac))
+            file.flush()
+            file.seek(len(_CAPTURE_CACHE_MAGIC))
+            file.write(mac.hexdigest().encode("ascii"))
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary_path, cache_path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
-    tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
-    atomic_write_text(tag_path, mac.hexdigest(), encoding="ascii")
 
 
 def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
@@ -488,22 +516,26 @@ def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
 
     entries: list[tuple[int, int, Path, Path]] = []
     for payload in cache_root.glob("*.pkl"):
+        # Legacy pair-format ``.hmac`` sidecars are unreadable debris under the
+        # single-record format; they ride along with their payload's eviction.
         tag = payload.with_name(payload.name + _CAPTURE_CACHE_TAG_SUFFIX)
-        if payload.is_symlink() or tag.is_symlink() or not tag.is_file():
+        if payload.is_symlink() or tag.is_symlink():
             continue
         try:
             payload_stat = payload.stat()
-            tag_stat = tag.stat()
         except OSError:
             continue
-        entries.append(
-            (
-                max(payload_stat.st_mtime_ns, tag_stat.st_mtime_ns),
-                payload_stat.st_size + tag_stat.st_size,
-                payload,
-                tag,
-            )
-        )
+        mtime_ns = payload_stat.st_mtime_ns
+        total_size = payload_stat.st_size
+        if tag.is_file():
+            try:
+                tag_stat = tag.stat()
+            except OSError:
+                tag_stat = None
+            if tag_stat is not None:
+                mtime_ns = max(mtime_ns, tag_stat.st_mtime_ns)
+                total_size += tag_stat.st_size
+        entries.append((mtime_ns, total_size, payload, tag))
     entries.sort(reverse=True)
     total_bytes = sum(entry[1] for entry in entries)
     retained = len(entries)
@@ -2881,10 +2913,8 @@ def _trace_torch_model(
                 "Trace | None", _load_authenticated_capture_cache(cache_path, cache_secret)
             )
             if cached_log is not None:
-                tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
                 try:
                     os.utime(cache_path, None)
-                    os.utime(tag_path, None)
                 except OSError:
                     pass
                 cached_log.capture_cache_hit = True
