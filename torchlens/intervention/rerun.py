@@ -921,6 +921,10 @@ def _capture_with_active_spec(
         normalized_hook_plan=hook_plan,
         verbose=getattr(log, "verbose", False),
         backward_ready=getattr(log, "backward_ready", False),
+        # An intervention rerun retains payloads like any capture; inherit the
+        # source log's configured budget rather than silently rebudgeting at
+        # the default.
+        save_budget=getattr(log, "save_budget", "auto"),
         output_transform=output_transform,
         save_raw_output=getattr(log, "save_raw_output", "small"),
         save_predicate=save_predicate,

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from .ops import (
         _SETTER_MUTATION_FUNC_NAMES,
         _admit_save_budget,
+        _charge_saved_args_budget,
         _commit_save_budget,
         _is_inplace_augmented_assignment_dunder,
         _label_version_baseline,
@@ -512,6 +513,7 @@ def _save_activation_fields(
             fields_dict["saved_kwargs"] = {
                 key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
             }
+            _charge_saved_args_budget(trace, fields_dict)
         else:
             fields_dict["saved_args"] = None
             fields_dict["saved_kwargs"] = None

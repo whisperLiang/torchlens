@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         _append_trace_predicate_context,
         _apply_retroactive_decision,
         _build_trace_predicate_context,
+        _charge_saved_args_budget,
         _retain_lookback_candidate,
         _save_activation_fields,
         _save_predicate_activation_fields,
@@ -257,6 +258,7 @@ def _make_layer_log_entry(
         fields_dict["saved_kwargs"] = {
             key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
         }
+        _charge_saved_args_budget(self, fields_dict)
     # r29 F3b: seal this record's capture-time (slot -> producer) truth on the
     # Trace, keyed by raw label. The witness (``dropped_edge_tensor_args``) is
     # stamped at CAPTURE, so an edge dropped DOWNSTREAM of it -- anywhere in the

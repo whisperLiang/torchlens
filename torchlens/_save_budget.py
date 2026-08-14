@@ -398,7 +398,8 @@ class SaveBudget:
         Returns
         -------
         dict[str, Any]
-            Instance state whose ``_payload_watchers`` map is empty.
+            Instance state whose ``_payload_watchers`` map is empty and whose
+            per-device ``retained_storage`` identity maps are empty.
 
         Notes
         -----
@@ -406,13 +407,34 @@ class SaveBudget:
         by construction and unpicklable. A restored accountant keeps its committed
         charges permanently (the same conservative direction as a payload that
         cannot be weak-referenced); the source accountant's live watchers are
-        untouched. Restored traces never capture again, so the lost crediting
-        cannot mis-admit a later save.
+        untouched.
+
+        The retained-storage identity maps ride with the watchers: an identity
+        key without its release watcher is a DEAD key that a later allocation
+        recycling the same ``data_ptr`` at equal size dedupes against for a
+        ZERO-byte commit — the exact ptr-reuse bug the watchers fixed.
+        ``Trace.fork()`` copies this accountant through this state (deepcopy
+        rides ``__getstate__``) and forks DO capture again (``run()`` /
+        ``save_new_outs`` refresh), so stripping one without the other re-opens
+        the corridor. With both stripped, a restored/forked accountant
+        re-charges fresh storage (conservative: at worst an alias double-count,
+        never a zero-commit).
         """
 
         state = self.__dict__.copy()
         state["_payload_watchers"] = {}
         state["_self_ref"] = None
+        state["ledgers"] = {
+            key: _DeviceLedger(
+                committed_bytes=ledger.committed_bytes,
+                num_saved=ledger.num_saved,
+                limit_bytes=ledger.limit_bytes,
+                available_bytes=ledger.available_bytes,
+                measured=ledger.measured,
+                retained_storage={},
+            )
+            for key, ledger in self.ledgers.items()
+        }
         return state
 
     @classmethod
@@ -561,6 +583,52 @@ class SaveBudget:
         reserved_ledger.committed_bytes -= reservation.num_bytes
         reserved_ledger.num_saved -= 1
 
+        self._charge_physical(reservation.label, payloads, phase=_SITE_PHASES[reservation.site][1])
+
+    def charge_retained(
+        self,
+        label: str,
+        payloads: tuple[torch.Tensor | None, ...],
+    ) -> None:
+        """Charge already-allocated retained payloads with no prior admission.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in a refusal.
+        payloads:
+            RAM-retained tensors (non-tensors are skipped).
+
+        Notes
+        -----
+        For retained copies whose size is only knowable after they exist —
+        ``save_arg_values`` argument snapshots are the motivating case. Charges
+        are alias-aware and release-credited exactly like :meth:`commit`; the
+        refusal phase is the post-allocation reconciliation phase, matching the
+        transform-delta disclosure.
+        """
+
+        self._charge_physical(label, payloads, phase=_SITE_PHASES["primary"][1])
+
+    def _charge_physical(
+        self,
+        label: str,
+        payloads: tuple[torch.Tensor | None, ...],
+        *,
+        phase: str,
+    ) -> None:
+        """Charge alias-aware physical storage for retained payloads.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in a refusal.
+        payloads:
+            Retained payloads; non-tensors are skipped.
+        phase:
+            Accounting phase for a refusal raised here.
+        """
+
         for payload in payloads:
             if not isinstance(payload, torch.Tensor):
                 continue
@@ -578,12 +646,7 @@ class SaveBudget:
             self._watch_payload(payload, ledger_key, identity)
             ledger.committed_bytes += physical_bytes
             ledger.num_saved += 1
-            self._raise_if_over_budget(
-                reservation.label,
-                payload.device,
-                ledger,
-                phase=_SITE_PHASES[reservation.site][1],
-            )
+            self._raise_if_over_budget(label, payload.device, ledger, phase=phase)
 
     def _watch_payload(
         self,
