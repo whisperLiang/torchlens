@@ -28,6 +28,7 @@ import torch
 from torch.overrides import handle_torch_function, has_torch_function_unary  # noqa: F401
 
 from ... import _state
+from ..._deprecations import MISSING, MissingType
 from ..._errors import CaptureContextError
 from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
 from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
@@ -2723,8 +2724,8 @@ def _configure_completeness_witness(
 
 def wrap_torch(
     *,
-    patch_policy: str | None = None,
-    patch_modules: tuple[str, ...] = (),
+    patch_policy: str | None | MissingType = MISSING,
+    patch_modules: tuple[str, ...] | MissingType = MISSING,
     escape_detector: EscapeDetectorMode | None = None,
     completeness_witness: bool | CompletenessWitnessMode | None = None,
 ) -> None:
@@ -2752,7 +2753,10 @@ def wrap_torch(
         Opt-in aten dispatcher census. ``True`` or ``"shadow"`` reports
         unaccounted dispatches and marks traces unverified; default is off.
     """
-    if patch_policy is not None or patch_modules:
+    # r-b4 R48: MISSING sentinels so ANY explicit pass warns -- the truthiness
+    # guard silently swallowed patch_modules=[]/()/{} (and an explicit
+    # patch_policy=None), the exact silent-deprecation shape the census misses.
+    if patch_policy is not MISSING or patch_modules is not MISSING:
         warnings.warn(
             "wrap_torch(patch_policy=, patch_modules=) are deprecated and ignored: "
             "the detached-reference crawler was replaced by the stage-2 rescue "
@@ -2855,8 +2859,8 @@ def _wrap_torch_locked(
 @contextmanager
 def wrapped(
     *,
-    patch_policy: str | None = None,
-    patch_modules: tuple[str, ...] = (),
+    patch_policy: str | None | MissingType = MISSING,
+    patch_modules: tuple[str, ...] | MissingType = MISSING,
     escape_detector: EscapeDetectorMode | None = None,
     completeness_witness: bool | CompletenessWitnessMode | None = None,
 ) -> Iterator[None]:
