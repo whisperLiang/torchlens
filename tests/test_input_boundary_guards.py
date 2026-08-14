@@ -201,3 +201,126 @@ def test_copy_arg_tree_distinct_containers_stay_distinct() -> None:
     right = [torch.ones(1)]
     copied = copy_arg_tree([left, right])
     assert copied[0] is not copied[1]
+
+
+# --- grind-p3 T11.4: one ceiling, and stack exhaustion refuses typed ------------------
+
+
+def _tight_stack(fn: Any, headroom: int = 130) -> Any:
+    """Run ``fn`` with just enough recursion headroom that a ~100-level walk dies.
+
+    Parameters
+    ----------
+    fn:
+        Zero-argument callable to run.
+    headroom:
+        Python frames granted above the CURRENT stack depth: enough for the
+        guard machinery, far less than the walkers' ~2-3 frames per level over
+        100 levels.
+    """
+
+    import sys
+
+    depth = 0
+    frame = sys._getframe()
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(depth + headroom)
+    try:
+        return fn()
+    finally:
+        sys.setrecursionlimit(old_limit)
+
+
+def test_input_search_ceiling_locksteps_the_shared_ceiling() -> None:
+    """The tensor-extraction walker's ceiling covers the boundary contract.
+
+    ``INPUT_SEARCH_DEPTH_LIMIT`` was a private 64 while the boundary ceiling
+    is 200, so a legal depth-65..200 input passed every walker and then
+    silently dropped its tensor leaves into a traversal gap.
+    """
+
+    from torchlens.utils.introspection import INPUT_SEARCH_DEPTH_LIMIT
+
+    assert INPUT_SEARCH_DEPTH_LIMIT > INPUT_TREE_MAX_DEPTH
+
+
+def test_input_search_walker_reaches_ceiling_depth_tensor_leaves() -> None:
+    """A tensor leaf at legal depth (>64, <=ceiling) is enumerated, gap-free."""
+
+    from torchlens.utils.introspection import (
+        INPUT_SEARCH_DEPTH_LIMIT,
+        get_vars_of_type_from_obj,
+    )
+
+    for depth in (100, INPUT_TREE_MAX_DEPTH):
+        leaf = torch.ones(1)
+        gaps: list[str] = []
+        found = get_vars_of_type_from_obj(
+            _deep_list(depth, leaf),
+            torch.Tensor,
+            search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+            depth_exceeded_paths=gaps,
+        )
+        assert any(item is leaf for item in found), f"leaf at depth {depth} dropped"
+        assert gaps == [], f"legal depth {depth} recorded a traversal gap"
+
+
+def test_walk_input_boundary_stack_exhaustion_refuses_typed() -> None:
+    """A LEGAL 100-deep input under a consumed stack refuses typed, never raw."""
+
+    deep = _deep_list(100, torch.ones(1))
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        _tight_stack(
+            lambda: walk_input_boundary(
+                deep, key_component=raw_mapping_key_component, on_tensor=lambda t, p: None
+            )
+        )
+    assert excinfo.value.fields["code"] == "input_tree_stack_exhausted"
+
+
+def test_snapshot_input_boundary_stack_exhaustion_refuses_typed() -> None:
+    """The snapshot spine shares the typed stack-budget refusal."""
+
+    deep = _deep_list(100, torch.ones(1))
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        _tight_stack(lambda: snapshot_input_boundary(deep))
+    assert excinfo.value.fields["code"] == "input_tree_stack_exhausted"
+
+
+def test_copy_arg_tree_stack_exhaustion_refuses_typed() -> None:
+    """The capture-entry input copier shares the typed stack-budget refusal.
+
+    The copier burns ~1 frame per level (fewer than the walkers), so this
+    uses the full legal ceiling depth to exceed the tightened headroom.
+    """
+
+    deep = _deep_list(INPUT_TREE_MAX_DEPTH, torch.ones(1))
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        _tight_stack(lambda: copy_arg_tree(deep))
+    assert excinfo.value.fields["code"] == "input_tree_stack_exhausted"
+
+
+def test_simple_leaves_stack_exhaustion_refuses_typed() -> None:
+    """Backend-resolution leaf sniffing shares the typed stack-budget refusal."""
+
+    deep = _deep_list(100, torch.ones(1))
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        _tight_stack(lambda: _simple_leaves(deep))
+    assert excinfo.value.fields["code"] == "input_tree_stack_exhausted"
+
+
+def test_walkers_still_complete_legal_depths_on_a_healthy_stack() -> None:
+    """No false stack refusal: the same legal input walks fine untightened."""
+
+    deep = _deep_list(100, torch.ones(1))
+    seen: list[tuple[Any, ...]] = []
+    walk_input_boundary(
+        deep, key_component=raw_mapping_key_component, on_tensor=lambda t, p: seen.append(p)
+    )
+    assert len(seen) == 1
+    assert snapshot_input_boundary(deep)["refusals"] == []
+    assert isinstance(copy_arg_tree(deep), list)
+    assert len(_simple_leaves(deep)) == 1

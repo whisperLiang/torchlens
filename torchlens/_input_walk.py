@@ -130,6 +130,38 @@ def raise_input_tree_depth_refusal(*, depth: int) -> None:
     )
 
 
+def raise_input_tree_stack_refusal(cause: BaseException | None = None) -> None:
+    """Raise the typed stack-budget input-boundary refusal (grind-p3 T11.4).
+
+    The nesting ceiling is a DEPTH bound, but the actual failure class is
+    STACK BUDGET: the live walkers burn ~2-3 interpreter frames per level, so
+    a LEGAL input (nesting <= the ceiling) still died in a raw
+    ``RecursionError`` whenever the caller entered capture with most of the
+    stack already consumed (deep user recursion, constrained
+    ``sys.setrecursionlimit``). Every walker entry converts that exhaustion
+    into this typed refusal instead of an untyped stdlib crash.
+
+    Parameters
+    ----------
+    cause:
+        The caught ``RecursionError``, chained as ``__cause__``.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    error = InvalidArgumentError(
+        "Walking the model-input tree exhausted the Python stack budget before "
+        f"reaching the depth ceiling ({INPUT_TREE_MAX_DEPTH}): capture was "
+        "entered with most of the interpreter stack already consumed.",
+        code="input_tree_stack_exhausted",
+        remedy=(
+            "Call the capture entry point from a shallower call stack, or raise "
+            "sys.setrecursionlimit() to leave headroom for the bounded input walk."
+        ),
+    )
+    raise error from cause
+
+
 def raise_input_tree_cycle_refusal(*, kind: str) -> None:
     """Raise the typed cyclic-container input-boundary refusal (r-b4 R27-1).
 
@@ -464,7 +496,12 @@ def walk_input_boundary(
         if on_leaf is not None:
             on_leaf(value, path)
 
-    _descend(value, path)
+    try:
+        _descend(value, path)
+    except RecursionError as exc:
+        # A legal (<= ceiling) tree can still exhaust the stack when the caller
+        # entered capture deep in its own recursion; refuse typed (T11.4).
+        raise_input_tree_stack_refusal(exc)
 
 
 # --- r67 C2: the input-boundary SNAPSHOT spine -----------------------------------------------
@@ -880,6 +917,58 @@ def instance_state_names(value: Any) -> frozenset[str]:
     return inspect_instance_state(value).names
 
 
+def _stock_tuplegetter_type() -> type:
+    """The stock namedtuple field-descriptor class, resolved from a probe.
+
+    ``collections.namedtuple`` binds every declared field to a
+    ``_collections._tuplegetter`` reading the field's own tuple position.
+    Resolved by probing rather than importing the private module so a
+    hypothetical pure-Python fallback still compares against THE class stock
+    namedtuples actually use.
+    """
+
+    global _TUPLEGETTER_TYPE_CACHE
+    if _TUPLEGETTER_TYPE_CACHE is None:
+        import collections as _collections
+
+        _TlDescriptorProbe = _collections.namedtuple("_TlDescriptorProbe", "x")
+        _TUPLEGETTER_TYPE_CACHE = type(_TlDescriptorProbe.__dict__["x"])
+    return _TUPLEGETTER_TYPE_CACHE
+
+
+_TUPLEGETTER_TYPE_CACHE: type | None = None
+
+
+def _namedtuple_field_descriptors_shadowed(value: Any) -> bool:
+    """Return whether any declared namedtuple field's descriptor is non-stock (T11.1).
+
+    Mirrors the slots rule: each declared field must resolve (raw MRO, never
+    ``getattr``) to the stock ``_tuplegetter`` bound to that field's OWN tuple
+    index. A ``property`` (or any other descriptor) shadowing a declared field
+    bypassed the declared-schema proof entirely: ``getattr`` in every walker
+    read the property's DECOY while the hidden physical slot steered forward
+    control flow via ``tuple.__getitem__`` -- physical arity matched, no
+    instance state existed, no hook was overridden, so no net fired and the
+    recorded path replayed VERIFIED against the decoy. A transposed stock
+    getter (bound to a different index) is refused for the same reason: the
+    witnessed field order would diverge from the physical layout replay
+    reconstructs.
+    """
+
+    getter_type = _stock_tuplegetter_type()
+    for index, name in enumerate(_instance_fields(value)):
+        descriptor = _raw_mro_attr(value, name)
+        if type(descriptor) is not getter_type:
+            return True
+        try:
+            bound_index = descriptor.__reduce__()[1][0]
+        except Exception:
+            return True
+        if bound_index != index:
+            return True
+    return False
+
+
 def _declared_schema_uninspectable(value: Any) -> bool:
     """Return whether a custom attribute hook blinds the declared-field proof (r71 C).
 
@@ -888,7 +977,10 @@ def _declared_schema_uninspectable(value: Any) -> bool:
     inertly prove field completeness WITHOUT invoking the untrusted hook. Raw-MRO
     resolution observes the hooks without executing them; any override short-circuits
     to uninspectable BEFORE any declared-field read. Namedtuples pass by default
-    (``tuple`` does not override ``__getattribute__`` and declares no ``__getattr__``).
+    (``tuple`` does not override ``__getattribute__`` and declares no ``__getattr__``)
+    but every declared field must additionally resolve to the stock positional
+    ``_tuplegetter`` (:func:`_namedtuple_field_descriptors_shadowed`, T11.1) --
+    a property-shadowed field reads a decoy no other net can catch.
     """
 
     import types as _types
@@ -914,7 +1006,12 @@ def _declared_schema_uninspectable(value: Any) -> bool:
             return True
     # ``object`` / ``tuple`` declare NO ``__getattr__``, so any MRO ``__getattr__`` is
     # a user-added hook that can compute or hide declared-field values.
-    return any("__getattr__" in cls.__dict__ for cls in type(value).__mro__)
+    if any("__getattr__" in cls.__dict__ for cls in type(value).__mro__):
+        return True
+    # T11.1: a declared namedtuple field whose winning descriptor is not the stock
+    # positional ``_tuplegetter`` executes user code on every field read and can
+    # present a decoy over hidden positional state -- fail closed before any read.
+    return declares_namedtuple_fields(value) and _namedtuple_field_descriptors_shadowed(value)
 
 
 def undeclared_instance_state(value: Any, kind: str) -> bool:
@@ -1228,16 +1325,35 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         compares equal to itself. Sequence nodes carry their exact kind so a
         ``tuple`` aux cannot launder into a ``list`` one.
 
+        Sequence admission is EXACT-TYPE (T11.9): the documented type-strict
+        schema accepted ``list``/``tuple`` SUBCLASSES via ``isinstance`` and
+        encoded them as their plain base kind, erasing the exact class -- the
+        very identity every other input-boundary edge witnesses -- plus any
+        instance state the subclass carries (a namedtuple aux flattened to a
+        bare ``tuple`` row). A subclass now refuses typed
+        (``registered_aux_unsafe``) instead of laundering.
+
         Raises
         ------
         ValueError
-            If the aux tree holds a value outside the canonical atom grammar or
-            nested lists/tuples of those.
+            If the aux tree holds a value outside the canonical atom grammar,
+            an exact-``list``/``tuple`` node of those, or a sequence SUBCLASS
+            carrying semantic type identity.
         """
 
+        if type(aux) in (list, tuple):
+            return ["tuple" if type(aux) is tuple else "list", [_safe_aux(i) for i in aux]]
         if isinstance(aux, (list, tuple)):
-            return ["tuple" if isinstance(aux, tuple) else "list", [_safe_aux(i) for i in aux]]
+            raise ValueError(
+                f"Registered-container aux node {aux!r} is a {type(aux).__name__} "
+                "(a list/tuple SUBCLASS): its exact type and instance state are "
+                "outside the type-strict aux grammar."
+            )
         return ["atom", encode_mapping_key(aux)]
 
-    _descend(value, ())
+    try:
+        _descend(value, ())
+    except RecursionError as exc:
+        # Same stack-budget class as the walk direction: typed, never raw (T11.4).
+        raise_input_tree_stack_refusal(exc)
     return {"nodes": nodes, "refusals": refusals}

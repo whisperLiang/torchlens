@@ -23,7 +23,15 @@ from typing import Any
 
 import torch
 
-_MAX_DEPTH = 8
+# Must be >= the capture-side output ceiling (``ir.container_registry.
+# OUTPUT_TREE_MAX_DEPTH``, 200) or the cross-check is ONE-SIDED: the consumer
+# fails only on leaves the independent walk finds that the adapter missed, so
+# a walker that stops shallower than capture cannot see -- and can never flag
+# -- a dropped deep leaf (a planted drop-last-leaf capture mutation validated
+# True for outputs nested past the old ceiling of 8). Kept as a literal, not
+# an import, so the traversal stays a genuinely independent second root;
+# ``tests/test_output_walker_independence.py`` locksteps the two ceilings.
+_MAX_DEPTH = 200
 
 
 def independent_output_tensor_ids(output: Any) -> list[int]:

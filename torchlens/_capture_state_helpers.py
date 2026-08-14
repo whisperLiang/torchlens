@@ -1274,7 +1274,22 @@ def _restore_simple_plain_attrs_on_copy(source: nn.Module, copied: nn.Module) ->
     """
 
     simple_types = (type(None), bool, int, float, complex, str, bytes)
-    for source_module, copied_module in zip(source.modules(), copied.modules()):
+    # The two trees are zipped POSITIONALLY, so a deepcopy that adds or drops a
+    # submodule (a __deepcopy__ hook, lazy child materialization) used to
+    # silently shift every later pair and align attributes onto the WRONG
+    # modules (T11.10). Arity is checked BEFORE the loop (a lazy strict zip
+    # would fire only at exhaustion, after shifted pairs already mutated the
+    # copy); on mismatch the caller's existing fallback validates against the
+    # live model with a disclosure.
+    source_modules = list(source.modules())
+    copied_modules = list(copied.modules())
+    if len(source_modules) != len(copied_modules):
+        raise ValueError(
+            "Validation deepcopy changed the module tree arity: source has "
+            f"{len(source_modules)} modules but the copy has {len(copied_modules)}; "
+            "positional attribute restoration would misalign."
+        )
+    for source_module, copied_module in zip(source_modules, copied_modules, strict=True):
         source_names = _module_plain_attr_names(source_module)
         copied_names = _module_plain_attr_names(copied_module)
         for name in sorted(source_names & copied_names):
