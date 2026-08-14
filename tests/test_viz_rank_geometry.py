@@ -14,7 +14,6 @@ producer and consumer sides, with sorted iteration for the remaining ties.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import subprocess

@@ -1960,6 +1960,15 @@ def _make_op_segment_descriptor(
     resolved = tuple(concrete) if concrete else tuple(labels)
     owner = _op_segment_owner_key(trace, resolved, context.vis_mode)
     label = _op_segment_label(trace, labels, resolved)
+    spanned = _op_segment_spanned_modules(trace, resolved, owner, context.vis_mode)
+    if spanned:
+        # r-b6 R19-5: a segment placed above its ops' module homes (top level
+        # or a shared ancestor) must DISCLOSE the modules it spans — the box
+        # otherwise silently strips module containment from every hidden op.
+        shown = ", ".join(f"@{module}" for module in spanned[:3])
+        if len(spanned) > 3:
+            shown += f", +{len(spanned) - 3} more"
+        label = f"{label} -- spans {shown}"
     name = f"{resolved[0].replace(':', 'pass')}__segment__{resolved[-1].replace(':', 'pass')}"
     return SegmentDescriptor(
         name=name,
@@ -2051,6 +2060,45 @@ def _trace_op_for_render_label(trace: Trace, label: str) -> Op:
         return trace.ops[f"{label}:1"]
     except (KeyError, IndexError):
         return trace.ops[label]
+
+
+def _op_segment_spanned_modules(
+    trace: Trace,
+    labels: tuple[str, ...],
+    owner: str | None,
+    vis_mode: str,
+) -> list[str]:
+    """Return the distinct module homes an op segment spans below its owner.
+
+    r-b6 R19-5: an op segment owns the honest LCA of its members, which can
+    sit ABOVE the modules the ops actually live in (top level when the
+    members straddle sibling modules). The rendered box then carries no
+    module containment at all, so the label must name the spanned modules.
+    Returns the ordered distinct immediate homes below ``owner`` when the
+    placement actually loses containment information, else ``[]``.
+    """
+
+    homes: list[str] = []
+    has_direct_member = False
+    for label in labels:
+        op = _trace_op_for_concrete_label(trace, label)
+        stack: tuple[str, ...] = _effective_render_module_stack(op)
+        if vis_mode == "rolled":
+            stack = tuple(value.rsplit(":", 1)[0] for value in stack)
+        if owner is None or owner not in stack:
+            home = stack[0] if stack else None
+        else:
+            owner_depth = stack.index(owner)
+            home = stack[owner_depth + 1] if owner_depth + 1 < len(stack) else None
+        if home is None:
+            has_direct_member = True
+        elif home not in homes:
+            homes.append(home)
+    if not homes:
+        return []
+    if len(homes) > 1 or owner is None or has_direct_member:
+        return homes
+    return []
 
 
 def _trace_op_for_concrete_label(trace: Trace, label: str) -> Op:

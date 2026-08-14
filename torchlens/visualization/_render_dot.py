@@ -1821,6 +1821,34 @@ def _setup_subgraphs(
     assert queued_rank_groups == emitted_rank_groups
 
 
+def _module_subtree_payload_empty(
+    module_edge_dict: dict,
+    module_submodule_dict: dict,
+    subgraph_name_w_pass: str,
+    vis_mode: str,
+) -> bool:
+    """Return whether a module cluster AND all its descendants would be empty.
+
+    r-b6 R19-3: when collapse="max" condenses a module's ops into a segment
+    OUTSIDE it, the module's whole subtree accumulates no nodes, edges, or
+    rank groups — emitting its cluster produces a labeled dashed husk that
+    both misplaces the ops and fabricates a "no input ancestor" claim about
+    nothing. The descent branch opens clusters before reaching the leaf
+    guard, so emptiness has to be decided for the SUBTREE up front.
+    """
+
+    payload_key = (
+        subgraph_name_w_pass if vis_mode == "unrolled" else subgraph_name_w_pass.split(":")[0]
+    )
+    payload = module_edge_dict[payload_key]
+    if payload.get("nodes") or payload.get("edges") or payload.get("rank_groups"):
+        return False
+    return all(
+        _module_subtree_payload_empty(module_edge_dict, module_submodule_dict, child, vis_mode)
+        for child in module_submodule_dict.get(subgraph_name_w_pass, ())
+    )
+
+
 def _setup_subgraphs_recurse(
     self: "Trace",
     starting_subgraph: graphviz.Digraph,
@@ -1878,6 +1906,12 @@ def _setup_subgraphs_recurse(
         subgraph_title = subgraph_module
 
     if call_depth < len(parent_graph_list) - 1:  # we haven't gotten to the bottom yet, keep going.
+        if _module_subtree_payload_empty(
+            module_edge_dict, module_submodule_dict, subgraph_name_w_pass, vis_mode
+        ):
+            # r-b6 R19-3: the whole subtree is empty — opening the cluster
+            # here would emit a labeled dashed husk (see helper docstring).
+            return 0
         with starting_subgraph.subgraph(name=cluster_name) as s:
             return _setup_subgraphs_recurse(
                 self,
@@ -1896,12 +1930,15 @@ def _setup_subgraphs_recurse(
     else:  # Leaf of this branch: create the subgraph and add all edges.
         emitted_rank_groups = 0
         cluster_payload = module_edge_dict[subgraph_name]
-        if (
-            sg_ml.num_layers <= 1  # type: ignore[union-attr]
-            and not module_submodule_dict[subgraph_name_w_pass]
-            and not cluster_payload.get("nodes")
-            and not cluster_payload.get("edges")
-            and not cluster_payload.get("rank_groups")
+        # r-b6 R19-3: an empty cluster is never emitted, whatever the module's
+        # layer count. When collapse="max" condenses a module's ops into a
+        # segment OUTSIDE it, the historical num_layers>1 carve-out still
+        # emitted the husk — a labeled, dashed ("no input ancestor") box with
+        # ZERO contents, both misplacing the ops and fabricating a
+        # disconnection claim about nothing. Module containment for such ops
+        # is disclosed on the segment label instead (R19-5).
+        if _module_subtree_payload_empty(
+            module_edge_dict, module_submodule_dict, subgraph_name_w_pass, vis_mode
         ):
             return emitted_rank_groups
         with starting_subgraph.subgraph(name=cluster_name) as s:

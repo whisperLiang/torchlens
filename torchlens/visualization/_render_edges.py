@@ -1395,20 +1395,24 @@ def _add_edges_for_node(
         if module != -1:
             module_key = cast(str, module)
             module_edge_dict[module_key]["edges"].append(edge_dict)
-            if parent_node.has_input_ancestor or child_node.has_input_ancestor:
-                module_edge_dict[module_key]["has_input_ancestor"] = True
-                for module in parent_node.modules:
-                    module_key = module.split(":")[0] if vis_mode == "rolled" else module
-                    module_edge_dict[module_key]["has_input_ancestor"] = True
-                    if module_key == module:
-                        break
-                for module in child_node.modules:
-                    module_key = module.split(":")[0] if vis_mode == "rolled" else module
-                    module_edge_dict[module_key]["has_input_ancestor"] = True
-                    if module_key == module:
-                        break
         else:
             graphviz_graph.edge(**edge_dict)
+        # r-b6 R19-4: input-connectivity marks EVERY module containing a
+        # connected endpoint, for every edge. The historical loop broke after
+        # the first entry (its guard compared a name to itself, so it was
+        # tautologically true in unrolled mode) and only ran when the edge
+        # had an in-module LCA — a nested module whose only edges crossed its
+        # boundary rendered DASHED ("no input ancestor") while every op
+        # inside had ``has_input_ancestor=True``, contradicting the rolled
+        # render of the same trace.
+        for endpoint_node in (parent_node, child_node):
+            if not endpoint_node.has_input_ancestor:
+                continue
+            for containing_module in endpoint_node.modules:
+                containing_key = (
+                    containing_module.split(":")[0] if vis_mode == "rolled" else containing_module
+                )
+                module_edge_dict[containing_key]["has_input_ancestor"] = True
 
         if captured_forward_edges is not None:
             captured_forward_edges.append(
