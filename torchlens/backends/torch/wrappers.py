@@ -38,6 +38,7 @@ from ...utils._torch_compat import (
     HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE,
     dynamo_is_compiling,
     fix_tensor_sequence_slot,
+    get_current_dispatch_mode_stack,
     get_current_function_mode_stack,
     get_device_constructors,
     get_device_context_type,
@@ -82,6 +83,7 @@ from .buffer_writes import (
 )
 from .completeness_witness import (
     CompletenessWitnessMode,
+    _CompletenessDispatchMode,
     completeness_scope_for_wrapper,
     internal_scalar_read,
     observe_nonowner_operands,
@@ -1444,6 +1446,49 @@ def _propagate_mutation_label_to_storage_aliases(
 # is ever emitted and consumers keep stale/absent parents (round-31 M6).
 # ``requires_grad`` / ``grad`` and similar setters change autograd bookkeeping,
 # not forward values, and are deliberately NOT listed.
+def _exit_own_witness_modes() -> list[Any] | None:
+    """Pop TorchLens's own completeness-witness dispatch modes off the stack top.
+
+    ``TensorBase.__new__`` with a strict Tensor SUBCLASS ``cls`` crashes whenever
+    ANY python ``TorchDispatchMode`` is active: torch materializes the interior
+    tensor's python object as plain ``Tensor`` on the mode's redispatch, and the
+    subsequent subclass association refuses (reproduced on stock torch with a
+    no-op mode — torch-inherent, not a wrapper effect). The completeness witness
+    is TorchLens's OWN mode (armed for validation and runnable-eligible
+    captures), so the wrapper exits it for exactly the original ctor call and
+    re-enters afterwards. The ctor op itself IS captured by this wrapper, so its
+    paused interior stays owned — the same opacity class as a fused kernel.
+    Foreign user modes are never popped: stock torch crashes under them too, and
+    popping them would change observable torch behavior relative to unwrapped
+    eager execution. Runs on the owner thread around one synchronous call, so
+    the exit/re-enter pair is LIFO-safe.
+
+    Returns
+    -------
+    list[Any] | None
+        The exited witness modes, outermost last, or ``None`` when the stack is
+        unreadable or holds no TorchLens witness mode on top (fail closed to
+        stock behavior).
+    """
+
+    stack = get_current_dispatch_mode_stack()
+    if not stack:
+        return None
+    exited: list[Any] = []
+    while stack and isinstance(stack[-1], _CompletenessDispatchMode):
+        mode = stack.pop()
+        mode.__exit__(None, None, None)
+        exited.append(mode)
+    return exited or None
+
+
+def _reenter_witness_modes(exited: list[Any]) -> None:
+    """Re-enter witness modes previously popped by ``_exit_own_witness_modes``."""
+
+    for mode in reversed(exited):
+        mode.__enter__()
+
+
 _MUTATING_TENSOR_PROPERTY_SETTERS = frozenset({"real", "imag", "data"})
 
 # Setters that rebind the receiver to the RHS's storage instead of writing in
@@ -1516,6 +1561,10 @@ def torch_func_decorator(
         or is_mutating_property_setter
     )
     force_distinct_return = func_name == "identity"
+    # ``TensorBase.__new__`` is the one wrapped callable whose ORIGINAL refuses
+    # to run under any python TorchDispatchMode when handed a strict Tensor
+    # subclass cls (see _exit_own_witness_modes); every other op pays nothing.
+    constructs_tensor_subclass = func_name == "__new__"
     # Decoration-time constant: ``propagate_detached_saved_activation`` is a
     # guaranteed no-op for any name outside the propagation allowlist, but its
     # ARGUMENTS (two tensor collections, each with a BFS fall-back for nested
@@ -1824,6 +1873,15 @@ def torch_func_decorator(
             else False
         )
         expected_token = None
+        exited_witness_modes = None
+        if (
+            constructs_tensor_subclass
+            and args
+            and isinstance(args[0], type)
+            and args[0] is not torch.Tensor
+            and issubclass(args[0], torch.Tensor)
+        ):
+            exited_witness_modes = _exit_own_witness_modes()
         # W3 F8: per-op duration must measure the USER op, not TorchLens
         # bookkeeping. The clock starts here -- after RNG/autocast snapshots
         # and container/intervention-site registration -- and stops right
@@ -1843,6 +1901,8 @@ def torch_func_decorator(
             else:
                 out_orig = func(*args, **kwargs)
         finally:
+            if exited_witness_modes is not None:
+                _reenter_witness_modes(exited_witness_modes)
             _nvtx_range_pop(nvtx_pushed)
         func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:
