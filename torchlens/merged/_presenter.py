@@ -388,7 +388,12 @@ class MergedTrace:
         for rank_id in self.rank_ids:
             try:
                 hits[rank_id] = self.ranks[rank_id][item]
-            except Exception:
+            except (KeyError, ValueError):
+                # Narrowed like super_op (b5 R45-2): a lookup miss is a miss,
+                # but any OTHER failure is a defect in the rank core and must
+                # surface -- a broad catch read a corrupt core as a miss and
+                # presented another rank's hit as an unambiguous single-rank
+                # result.
                 continue
         if not hits:
             raise KeyError(item)

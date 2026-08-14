@@ -916,6 +916,49 @@ class TestWitnessDerivation:
         assert d.stored_value_status is MergeValueStatus.ATTESTED_PARTIAL
 
 
+class TestPresenterLookupNarrowing:
+    """Deep-hunt F7: ``__getitem__``'s rank scan must not swallow core defects.
+
+    Fail-before: ``except Exception`` read a rank core whose lookup raised
+    ``RuntimeError`` as a MISS, so a defective core silently vanished and
+    another rank's hit presented as an unambiguous single-rank result --
+    ``super_op`` directly below was already narrowed (b5 R45-2) for exactly
+    this reason.
+    """
+
+    class _BrokenTrace:
+        def __getitem__(self, item):
+            raise RuntimeError("corrupt core: internal invariant violated")
+
+    class _GoodTrace:
+        def __getitem__(self, item):
+            return f"op<{item}>"
+
+    class _MissTrace:
+        def __getitem__(self, item):
+            raise KeyError(item)
+
+    def _merged(self, trace0, trace1):
+        from torchlens.merged._presenter import MergedTrace, _RankHandle
+
+        derivation = derive_merge(
+            {0: evidence(0, [boundary(0, 0)]), 1: evidence(1, [boundary(1, 0)])}
+        )
+        return MergedTrace(
+            derivation,
+            {0: _RankHandle(0, trace=trace0), 1: _RankHandle(1, trace=trace1)},
+        )
+
+    def test_rank_core_defect_surfaces_from_getitem(self):
+        merged = self._merged(self._BrokenTrace(), self._GoodTrace())
+        with pytest.raises(RuntimeError, match="corrupt core"):
+            merged["relu_1_2"]
+
+    def test_lookup_miss_still_reads_as_a_miss(self):
+        merged = self._merged(self._MissTrace(), self._GoodTrace())
+        assert merged["relu_1_2"] == "op<relu_1_2>"
+
+
 class TestExpectedRanksWidenOnly:
     def test_declared_ranks_without_cores_are_gaps(self):
         d = derive_merge(
