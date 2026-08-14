@@ -233,13 +233,21 @@ _DIAGNOSTIC_AUDIT_STATE = frozenset(
         ("torchlens/postprocess/__init__.py", "RECORDED_STEP_EFFECTIVE_WRITES"),
         ("torchlens/postprocess/__init__.py", "RECORDED_STEP_READS"),
         ("torchlens/postprocess/__init__.py", "RECORDED_STEP_WRITES"),
+        # Last-run validation readbacks (B8-42 / R33-2): the internal
+        # validation trace never escapes tl.validate, so the first failure
+        # and the peak observation mirror into these slots, cleared at each
+        # run entry. Diagnostics only -- never part of a verdict.
+        ("torchlens/validation/diagnostics.py", "_LAST_RUN_FAILURE"),
+        ("torchlens/validation/diagnostics.py", "_LAST_RUN_PEAKS"),
     }
 )
-"""Audit instrumentation armed only by an environment variable.
+"""Diagnostic side-channels: audit instrumentation and last-run readbacks.
 
-Empty and untouched in production runs (``TORCHLENS_POSTPROCESS_ASSERTIONS`` /
-``TORCHLENS_POSTPROCESS_READ_AUDIT`` off). They accumulate within one armed
-window and are scoped by the executor's begin/end pass.
+The audit rows are armed only by an environment variable and stay empty in
+production runs (``TORCHLENS_POSTPROCESS_ASSERTIONS`` /
+``TORCHLENS_POSTPROCESS_READ_AUDIT`` off); they accumulate within one armed
+window and are scoped by the executor's begin/end pass. The validation
+last-run slots are overwritten per run and never steer a verdict.
 """
 
 _WEAK_SUBJECT_TABLES = frozenset(

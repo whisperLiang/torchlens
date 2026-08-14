@@ -1489,9 +1489,23 @@ def _validate_forward_pass_torch(
             validation_plain_attr_snapshot,
         )
         # Step 3: Validate by replaying the forward pass from saved outs.
+        # validate_saved_outs resets the diagnostics ledger at entry so a
+        # DIRECT repeat call reports this-run evidence only (B8-43); the
+        # retrace diagnostics recorded above belong to THIS flow, so they are
+        # snapshotted and re-prepended after the replay run.
+        from .validation.diagnostics import (
+            MAX_VALIDATION_DIAGNOSTICS,
+            TRACE_DIAGNOSTICS_ATTR,
+            get_validation_diagnostics,
+        )
+
+        flow_diagnostics = get_validation_diagnostics(trace)
         validation_result = trace.validate_forward_pass(
             ground_truth_output_tensors, verbose, validate_metadata=validate_metadata
         )
+        if flow_diagnostics:
+            merged = flow_diagnostics + get_validation_diagnostics(trace)
+            setattr(trace, TRACE_DIAGNOSTICS_ATTR, merged[:MAX_VALIDATION_DIAGNOSTICS])
         if retrace_outcome == "mismatch":
             _downgrade_retrace_mismatch_to_unverified(trace)
             outs_are_valid = False
