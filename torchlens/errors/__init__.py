@@ -208,6 +208,10 @@ _LAZY_EXCEPTION_PATHS = {
         "BackendRuntimeCompatibilityError",
     ),
     "BackendUnsupportedError": ("torchlens.backends", "BackendUnsupportedError"),
+    "CaptureAttemptFailedWarning": (
+        "torchlens.backends.torch.rescue",
+        "CaptureAttemptFailedWarning",
+    ),
     "CaptureContextError": ("torchlens._errors", "CaptureContextError"),
     "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
     "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),

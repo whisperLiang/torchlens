@@ -392,6 +392,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "BundleMemberError": ("ValueError",),
     "BundleNotFinalizedError": ("RuntimeError",),
     "BundleRelationshipError": ("ValueError",),
+    "CaptureAttemptFailedWarning": ("Warning",),
     "CaptureContextError": ("RuntimeError",),
     "CaptureError": (),
     "ChunkedForwardConfigError": ("ValueError",),
