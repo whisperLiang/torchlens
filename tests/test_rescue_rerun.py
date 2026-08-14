@@ -479,3 +479,105 @@ def test_escape_detector_diagnostic_triggers_rescue(raw_cos: Any) -> None:
     finally:
         unwrap_torch()
         wrap_torch()
+
+
+def test_rescue_never_double_applies_in_forward_parameter_writes(raw_cos: Any) -> None:
+    """A forward that writes declared PARAMETER state must not be applied twice.
+
+    R02-1 regression: the journal-based refusal indexes registered-BUFFER
+    writes only, so a stale-ref escape on a param-mutating forward re-ran the
+    forward, doubled the write, and returned the second, differently
+    parameterized capture with no warning. The state snapshot now detects the
+    rescue's write, restores the duplicate application, and keeps the primary
+    with the escape disclosed.
+    """
+
+    class ParamWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            self.lin.weight.data.mul_(2.0)
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = ParamWriter()
+    model.eval()
+    baseline = model.lin.weight.detach().clone()
+
+    with pytest.warns(UserWarning, match="wrote model state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    # Exactly ONE forward's worth of mutation survives on the user's model.
+    assert torch.equal(model.lin.weight.detach(), baseline * 2.0)
+    # The rescue was attempted, detected as state-writing, undone, refused.
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["recovered"] is False
+    assert trace.rescue_rerun["skipped_reason"] == "state_writes_double_forward_undone"
+    assert trace.rescue_rerun["forward_runs"] == 2
+    assert trace.capture_verified is False
+
+
+def test_rescue_never_double_applies_journal_invisible_param_writes(raw_cos: Any) -> None:
+    """A write the buffer-write journal cannot see must not double-apply.
+
+    R02-2 regression: the success-path guard read an EMPTY buffer-write
+    journal as proof of no writes, but the journal is structurally blind to
+    PARAMETER storage (its index skips ``nn.Parameter``), so a host write
+    into a param during the forward left no record and the re-run
+    double-applied it. The state snapshot audits the re-run by bytes instead
+    of trusting journal emptiness.
+    """
+
+    class HiddenParamWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            # Journal-invisible write: raw host write into PARAMETER storage.
+            self.lin.weight.detach().numpy()[0, 0] += 1.0
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = HiddenParamWriter()
+    model.eval()
+    baseline = model.lin.weight.detach().clone()
+
+    with pytest.warns(UserWarning, match="wrote model state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    expected = baseline.clone()
+    expected[0, 0] += 1.0
+    assert torch.equal(model.lin.weight.detach(), expected)
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["skipped_reason"] == "state_writes_double_forward_undone"
+
+
+def test_journal_visible_buffer_writes_still_refuse_before_the_rerun(raw_cos: Any) -> None:
+    """Pin: a value-changing registered-buffer write still refuses PRE-rescue.
+
+    The cheap journal guard runs first and skips the second forward entirely
+    (forward_runs == 1); the snapshot transaction is the backstop for the
+    classes the journal cannot see, never a replacement for this fast path.
+    """
+
+    class BufferWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.register_buffer("count", torch.zeros(1))
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            self.count.detach().numpy()[0] += 1.0
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = BufferWriter()
+    model.eval()
+
+    with pytest.warns(UserWarning, match="wrote module buffer state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    assert float(model.count) == 1.0
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["skipped_reason"] == "buffer_writes_double_forward"
+    assert trace.rescue_rerun["forward_runs"] == 1

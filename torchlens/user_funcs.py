@@ -3285,7 +3285,7 @@ def _trace_torch_model(
         and grad_storage_path_value is None
         and halt is None
     )
-    trace = capture_with_rescue(run_capture, eligible=rescue_eligible)
+    trace = capture_with_rescue(run_capture, eligible=rescue_eligible, model=model)
     trace.profile_enabled = profile_enabled
     trace.save_grads = save_grads_policy
     if uses_selective_layers_to_save:
