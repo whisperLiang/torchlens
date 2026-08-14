@@ -1105,13 +1105,17 @@ def _uncached_output_shape_tuple(
     return collapse_optimizer._output_shape_tuple_for_address(state.trace, address)
 
 
-def _empty_op_adjacency_index(trace: tl.Trace) -> Mapping[str, str]:
+def _empty_op_adjacency_index(
+    trace: tl.Trace, revision: tuple[object, ...] | None = None
+) -> Mapping[str, str]:
     """Return an empty index to force the pre-optimization accessor path.
 
     Parameters
     ----------
     trace:
         Trace deliberately ignored by the reference path.
+    revision:
+        Precomputed fingerprint deliberately ignored by the reference path.
 
     Returns
     -------
@@ -1120,6 +1124,7 @@ def _empty_op_adjacency_index(trace: tl.Trace) -> Mapping[str, str]:
     """
 
     _ = trace
+    _ = revision
     return {}
 
 

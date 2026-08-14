@@ -5,7 +5,7 @@ produced by `tl.merge_ranks()` and persisted as `merged-directory` artifacts.
 It plays the same role for `torchlens.merged` that
 `runnable_tlspec_contract.md` plays for runnable artifacts: the enum and
 finding-kind tables below are release-gated against the code by
-ordered-list-equality tests (`tests/test_merged_ranks.py::TestContractLockstep`).
+ordered-list-equality tests (`tests/test_merged_engine.py::TestContractLockstep`).
 Editing either side without the other turns the gate red.
 
 ## 1. Scope (rung C1)
@@ -53,7 +53,6 @@ merge_conflict
 merged_schema_invalid
 merged_descriptor_tamper
 merge_run_unsupported
-merged_export_unsupported
 merged_selector_unsupported
 merged_surface_unsupported
 ```
@@ -184,9 +183,11 @@ must define it as a schema change here).
 
 - Canonical JSON (`torchlens-canonical-json-v1`): UTF-8, sorted keys, no
   NaN/Infinity, LF, no insignificant whitespace, trailing newline.
-- Canonical tree hash per rank core: sorted POSIX-relative paths; per file
-  `path \0 size \0 sha256(bytes)`; entries joined by `\n`; SHA-256 of the
-  concatenation. Symlinks are rejected at hash time.
+- Canonical tree hash per rank core: sorted POSIX-relative paths; each entry is
+  an 8-byte big-endian path length, the UTF-8 path bytes, 8-byte big-endian file
+  size, and 32 raw SHA-256 bytes. Framed entries are joined by one LF byte;
+  the tree hash is SHA-256 of that concatenation. Symlinks are rejected at hash
+  time.
 - The merged ROOT `manifest.json` is a different discriminated object from a
   trace bundle's manifest (no tensor table) and carries `tlspec_version: 7`,
   gated independently in the merged loader. Runtimes without the merged
@@ -238,3 +239,19 @@ members is byte-identical across runs; the determinism test pins this.
 - The `_distributed.py` refusal suggestion strings must reference
   `tl.merge_ranks` truthfully (dense explicit-collective captures merge;
   DTensor/TP/PP capture stays refused pending C2/C3).
+
+## 8. Lifetime and release
+
+`MergedTrace` holds each rank-core handle strongly for as long as the presenter
+is reachable. Dropping the presenter releases those handles; like ordinary
+`Trace` objects, member traces can contain cycles and may require Python's cyclic
+collector before memory is reclaimed. This release has no separate merged
+`cleanup()` surface; adding one is a future presenter contract change.
+
+`tl.distributed.arm()` intentionally keeps the process-wide group-lifecycle
+ledger for the whole armed interval because old generations are evidence needed
+to reject ambiguous ordinal reuse. Long-lived processes that have finished all
+distributed capture work should call `torchlens.distributed.disarm()`. A
+successful disarm restores every wrapper and releases the ledger; if any restore
+fails, disarm raises and retains the unresolved original-function entries so the
+operation can be retried rather than discarding repair state.

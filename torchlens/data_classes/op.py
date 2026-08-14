@@ -476,9 +476,142 @@ _POOLABLE_DEFAULT_FACTORIES = frozenset({list, set, dict, int, tuple})
 #: Nesting cap for container pool keys (cycles and pathological nesting
 #: simply refuse to pool).
 _CONTAINER_KEY_MAX_DEPTH = 4
+_CONTAINER_KEY_MAX_MEMBERS = 1024
+
+_DEEPCOPY_IMMUTABLE_TYPES = (
+    str,
+    bytes,
+    int,
+    float,
+    bool,
+    type(None),
+    torch.dtype,
+    torch.device,
+    Bytes,
+    Duration,
+    Flops,
+)
+
+_OUTPUT_NODE_REPLACED_FIELDS = frozenset(
+    {
+        "_edge_uses",
+        "_label_raw",
+        "_layer_label_raw",
+        "_param_barcodes",
+        "_param_logs",
+        "activation_memory",
+        "arg_names",
+        "atomic_module_call",
+        "autograd_memory",
+        "bytes_delta_at_call",
+        "bytes_peak_at_call",
+        "children",
+        "code_context",
+        "container_path",
+        "container_spec",
+        "dropped_edge_tensor_args",
+        "dtype",
+        "equivalence_class",
+        "equivalent_ops",
+        "func",
+        "func_config",
+        "func_duration",
+        "func_name",
+        "func_non_tensor_args",
+        "func_rng_states",
+        "grad_fn_class_name",
+        "has_children",
+        "has_out_variations",
+        "has_output_descendant",
+        "input_to_module_calls",
+        "internal_source_parents",
+        "intervention_replaced",
+        "interventions",
+        "io_role",
+        "is_atomic_module",
+        "is_buffer",
+        "is_final_output",
+        "is_input",
+        "is_internal_source",
+        "is_module_output",
+        "is_output",
+        "is_transform",
+        "layer_type",
+        "module",
+        "module_call_stack",
+        "modules",
+        "non_tensor_kwargs",
+        "non_tensor_pos_args",
+        "num_args_total",
+        "num_autograd_tensors",
+        "num_kwargs",
+        "num_params",
+        "num_params_frozen",
+        "num_params_trainable",
+        "num_passes",
+        "num_pos_args",
+        "out",
+        "out_versions_by_child",
+        "output_descendants",
+        "output_of_module_calls",
+        "output_of_modules",
+        "param_memory",
+        "param_shapes",
+        "parent_arg_positions",
+        "parent_param_ops",
+        "parent_params",
+        "parents",
+        "pass_index",
+        "raw_index",
+        "recurrent_ops",
+        "saved_args",
+        "saved_kwargs",
+        "shape",
+        "transform_chain",
+        "transform_config",
+        "transform_fn_name",
+        "transform_fn_qualname",
+        "transform_fn_source",
+        "transform_kind",
+        "transformed_activation_memory",
+        "transformed_out",
+        "transformed_out_dtype",
+        "transformed_out_shape",
+        "unattributed_tensor_args",
+        "var_names",
+    }
+)
 
 
-def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
+def _copy_op_field_value(value: Any) -> Any:
+    """Copy one Op field without deep-copy dispatch for immutable values.
+
+    Parameters
+    ----------
+    value:
+        Stored field value.
+
+    Returns
+    -------
+    Any
+        The original immutable value or an independent deep copy.
+    """
+
+    if isinstance(value, _DEEPCOPY_IMMUTABLE_TYPES):
+        return value
+    if isinstance(value, tuple) and all(
+        isinstance(member, _DEEPCOPY_IMMUTABLE_TYPES) for member in value
+    ):
+        return value
+    return copy.deepcopy(value)
+
+
+def _container_pool_key(
+    value: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int] | None = None,
+) -> Any:
     """Return an injective hashable content key for one mutable container.
 
     ``None`` means "do not pool": unknown member types, subclassed
@@ -489,7 +622,9 @@ def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
     alias guard.
     """
 
-    if depth > _CONTAINER_KEY_MAX_DEPTH:
+    if member_budget is None:
+        member_budget = [_CONTAINER_KEY_MAX_MEMBERS]
+    if depth > _CONTAINER_KEY_MAX_DEPTH or member_budget[0] <= 0:
         return None
     cls = value.__class__
     if cls is defaultdict:
@@ -499,17 +634,20 @@ def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
         if factory is not None and factory not in _POOLABLE_DEFAULT_FACTORIES:
             return None
         visited_ids.append(id(value))
-        items = _dict_member_keys(value, depth, visited_ids)
+        items = _dict_member_keys(value, depth, visited_ids, member_budget)
         return None if items is None else ("dd", factory, items)
     if cls is dict:
         visited_ids.append(id(value))
-        items = _dict_member_keys(value, depth, visited_ids)
+        items = _dict_member_keys(value, depth, visited_ids, member_budget)
         return None if items is None else ("d", items)
     if cls is list:
         visited_ids.append(id(value))
         member_keys = []
         for member in value:
-            member_key = _container_member_key(member, depth, visited_ids)
+            member_budget[0] -= 1
+            if member_budget[0] < 0:
+                return None
+            member_key = _container_member_key(member, depth, visited_ids, member_budget)
             if member_key is None:
                 return None
             member_keys.append(member_key)
@@ -518,6 +656,9 @@ def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
         visited_ids.append(id(value))
         member_keys = []
         for member in value:
+            member_budget[0] -= 1
+            if member_budget[0] < 0:
+                return None
             member_key = _pool_key(member)
             if member_key is None:
                 return None
@@ -526,34 +667,52 @@ def _container_pool_key(value: Any, depth: int, visited_ids: list[int]) -> Any:
     return None
 
 
-def _dict_member_keys(value: Any, depth: int, visited_ids: list[int]) -> Any:
+def _dict_member_keys(
+    value: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int],
+) -> Any:
     """Key the items of one dict-shaped container, or ``None`` to refuse."""
 
     items = []
     for key, member in value.items():
+        member_budget[0] -= 1
+        if member_budget[0] < 0:
+            return None
         key_key = _pool_key(key)
         if key_key is None:
             return None
-        member_key = _container_member_key(member, depth, visited_ids)
+        member_key = _container_member_key(member, depth, visited_ids, member_budget)
         if member_key is None:
             return None
         items.append((key_key, member_key))
     return tuple(items)
 
 
-def _container_member_key(member: Any, depth: int, visited_ids: list[int]) -> Any:
+def _container_member_key(
+    member: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int],
+) -> Any:
     """Key one container member: immutable leaf or nested exact container."""
 
     immutable_key = _pool_key(member)
     if immutable_key is not None:
         return ("i", immutable_key)
     if member.__class__ in _MUTABLE_CELL_CLASSES:
-        nested = _container_pool_key(member, depth + 1, visited_ids)
+        nested = _container_pool_key(member, depth + 1, visited_ids, member_budget)
         return None if nested is None else ("m", nested)
     return None
 
 
-def _count_container_ids(value: Any, id_counts: dict[int, int], depth: int) -> None:
+def _count_container_ids(
+    value: Any,
+    id_counts: dict[int, int],
+    expanded_ids: set[int],
+    depth: int,
+) -> None:
     """Count every exact builtin MUTABLE container id reachable from one cell.
 
     The alias census behind the pooling guard: a container whose id is seen
@@ -572,21 +731,24 @@ def _count_container_ids(value: Any, id_counts: dict[int, int], depth: int) -> N
     if cls is dict or cls is defaultdict:
         oid = id(value)
         id_counts[oid] = id_counts.get(oid, 0) + 1
-        if depth < 6:
+        if depth < 6 and oid not in expanded_ids:
+            expanded_ids.add(oid)
             for member in value.values():
-                _count_container_ids(member, id_counts, depth + 1)
+                _count_container_ids(member, id_counts, expanded_ids, depth + 1)
     elif cls is list:
         oid = id(value)
         id_counts[oid] = id_counts.get(oid, 0) + 1
-        if depth < 6:
+        if depth < 6 and oid not in expanded_ids:
+            expanded_ids.add(oid)
             for member in value:
-                _count_container_ids(member, id_counts, depth + 1)
+                _count_container_ids(member, id_counts, expanded_ids, depth + 1)
     elif cls is set:
         oid = id(value)
         id_counts[oid] = id_counts.get(oid, 0) + 1
-    elif cls is tuple and depth < 6:
+    elif cls is tuple and depth < 6 and id(value) not in expanded_ids:
+        expanded_ids.add(id(value))
         for member in value:
-            _count_container_ids(member, id_counts, depth + 1)
+            _count_container_ids(member, id_counts, expanded_ids, depth + 1)
 
 
 def _pool_container_cells(
@@ -608,6 +770,7 @@ def _pool_container_cells(
 
     swept: list[tuple[Any, Any, Any]] = []
     id_counts: dict[int, int] = {}
+    expanded_ids: set[int] = set()
     for store, fids in stores:
         rows = store.rows_building()
         if rows is None:
@@ -615,7 +778,7 @@ def _pool_container_cells(
         swept.append((store, rows, fids))
         for row_cells in rows:
             for value in row_cells:
-                _count_container_ids(value, id_counts, 0)
+                _count_container_ids(value, id_counts, expanded_ids, 0)
     if not swept:
         return
     candidates: list[tuple[Any, int, Any, Any]] = []
@@ -3681,8 +3844,47 @@ class Op:
         Returns:
             A new Op (or subclass) with the same field values.
         """
+        return self._copy_with_shallow_fields(frozenset(), _store=_store)
+
+    def _copy_for_output(self, *, _store: Any = None) -> "Op":
+        """Clone this op for immediate conversion into a synthetic output node.
+
+        Parameters
+        ----------
+        _store:
+            Optional owning row store for the synthesized node.
+
+        Returns
+        -------
+        Op
+            Clone whose soon-to-be-replaced fields avoid unnecessary deep copies.
+        """
+
+        return self._copy_with_shallow_fields(_OUTPUT_NODE_REPLACED_FIELDS, _store=_store)
+
+    def _copy_with_shallow_fields(
+        self,
+        extra_shallow_fields: frozenset[str],
+        *,
+        _store: Any = None,
+    ) -> "Op":
+        """Clone this op while sharing fields the caller replaces immediately.
+
+        Parameters
+        ----------
+        extra_shallow_fields:
+            Additional fields safe to share for this construction path.
+        _store:
+            Optional owning row store for the clone.
+
+        Returns
+        -------
+        Op
+            Selective-depth clone.
+        """
+
         fields_dict = {}
-        fields_not_to_deepcopy = [
+        fields_not_to_deepcopy = {
             "func",
             "grad_fn_class_name",
             "grad_fn_handle",
@@ -3698,7 +3900,7 @@ class Op:
             "transformed_grad",
             "out_versions_by_child",
             "container_spec",
-        ]
+        } | extra_shallow_fields
         from .._trace_core.op_store import row_clone_scope
 
         # The whole-schema getattr loop is a ROW-CLONE read, not a set of
@@ -3710,7 +3912,7 @@ class Op:
         with row_clone_scope(object.__getattribute__(self, "_core")):
             for field in LAYER_PASS_LOG_FIELD_ORDER:
                 if field not in fields_not_to_deepcopy:
-                    fields_dict[field] = copy.deepcopy(getattr(self, field, None))
+                    fields_dict[field] = _copy_op_field_value(getattr(self, field, None))
                 else:
                     fields_dict[field] = getattr(self, field, None)
         copied_entry = type(self)(fields_dict, _store=_store)

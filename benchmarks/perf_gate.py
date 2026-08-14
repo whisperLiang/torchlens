@@ -1,4 +1,26 @@
-"""Living regression gate for TorchLens benchmark JSON payloads."""
+"""Living regression gate for TorchLens benchmark JSON payloads.
+
+Tolerance policy (R28-2). The per-row tolerance is::
+
+    max(rel_tolerance * baseline_median_ms,
+        iqr_multiplier * baseline_iqr_ms,
+        floor_ms)
+
+Only the BASELINE spread widens the tolerance: a noisy current run must never
+widen the bar it is judged against (the pre-R28 ``max(baseline_iqr,
+current_iqr)`` term let a contaminated run pass its own regressions). Two
+candidate targets are drafted for the JMT fork on the default ``rel_tolerance``:
+
+- **Strict 2%** (``rel_tolerance=0.02``): catches real per-op regressions on
+  quiet, thread-pinned hosts (R28 F5 measured <=5.2% worst-row same-commit
+  drift, <2% typical, under the quiet protocol). Requires the R28-3 protocol
+  (pinned threads, recorded env, fresh process per cell) to avoid false reds.
+- **Lenient 10%** (``rel_tolerance=0.10``, current default): tolerant of
+  contaminated runners but silently passes up to ~9.9% real regression.
+
+The default stays 10% until the fork is decided; both are reachable via
+``--rel-tolerance``.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +30,9 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "torchlens.perf_gate.v1"
+DEFAULT_REL_TOLERANCE = 0.10
+DEFAULT_IQR_MULTIPLIER = 2.0
+DEFAULT_FLOOR_MS = 0.5
 
 
 def load_gate_json(path: Path) -> dict[str, Any]:
@@ -75,6 +100,10 @@ def normalize_gate_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def compare_gate_payloads(
     baseline: dict[str, Any],
     current: dict[str, Any],
+    *,
+    rel_tolerance: float = DEFAULT_REL_TOLERANCE,
+    iqr_multiplier: float = DEFAULT_IQR_MULTIPLIER,
+    floor_ms: float = DEFAULT_FLOOR_MS,
 ) -> dict[str, Any]:
     """Compare current benchmark rows against a committed baseline.
 
@@ -84,37 +113,78 @@ def compare_gate_payloads(
         Baseline gate payload.
     current:
         Current gate payload.
+    rel_tolerance:
+        Relative slowdown tolerance as a fraction of the baseline median.
+    iqr_multiplier:
+        Multiplier applied to the baseline IQR term of the tolerance.
+    floor_ms:
+        Absolute tolerance floor in milliseconds.
 
     Returns
     -------
     dict[str, Any]
-        Comparison summary with per-row verdicts.
+        Comparison summary with per-row verdicts. Gate-blocking lists:
+        ``regressions``, ``status_failures``, ``unmatched_current_rows``
+        (current rows with no baseline entry), ``missing_current_rows``
+        (TorchLens-owned baseline rows that disappeared from the current
+        run), and ``uncomparable_rows`` (matched ok TorchLens rows without
+        usable timing metrics). ``unmatched_baseline_rows`` discloses
+        vanished non-TorchLens rows without blocking.
     """
 
     validate_gate_payload(baseline)
     validate_gate_payload(current)
     baseline_by_key = {_row_key(row): row for row in baseline["rows"]}
+    current_keys = {_row_key(row) for row in current["rows"]}
     checks: list[dict[str, Any]] = []
-    missing: list[dict[str, str]] = []
+    unmatched_current: list[dict[str, str]] = []
+    uncomparable: list[dict[str, str]] = []
     status_failures: list[dict[str, str]] = []
     regressions: list[dict[str, Any]] = []
+    missing_current: list[dict[str, str]] = []
+    unmatched_baseline: list[dict[str, str]] = []
+    for key in baseline_by_key:
+        if key in current_keys:
+            continue
+        if _is_torchlens_operation(key[2]):
+            missing_current.append(_key_dict(key))
+        else:
+            unmatched_baseline.append(_key_dict(key))
     for row in current["rows"]:
         key = _row_key(row)
         base_row = baseline_by_key.get(key)
         if base_row is None:
-            missing.append(_key_dict(key))
+            unmatched_current.append(_key_dict(key))
             continue
         current_status = str(row.get("status", "ok"))
         if _is_torchlens_operation(key[2]) and current_status != "ok":
             status_failures.append(_key_dict(key) | {"status": current_status})
             continue
-        check = _compare_row(base_row, row)
+        check = _compare_row(
+            base_row,
+            row,
+            rel_tolerance=rel_tolerance,
+            iqr_multiplier=iqr_multiplier,
+            floor_ms=floor_ms,
+        )
         if check is None:
+            if (
+                _is_torchlens_operation(key[2])
+                and current_status == "ok"
+                and str(base_row.get("status", "ok")) == "ok"
+            ):
+                uncomparable.append(_key_dict(key))
             continue
         checks.append(check)
         if not check["passed"]:
             regressions.append(check)
-    passed = not missing and not status_failures and not regressions
+    passed = (
+        not unmatched_current
+        and not missing_current
+        and not uncomparable
+        and not status_failures
+        and not regressions
+    )
     return {
         "schema": SCHEMA,
         "passed": passed,
@@ -123,11 +193,16 @@ def compare_gate_payloads(
         "current_sha": current.get("source_sha")
         or current.get("environment", {}).get("torchlens_git_sha"),
         "checks": checks,
-        "missing_baseline_rows": missing,
+        "unmatched_current_rows": unmatched_current,
+        "missing_current_rows": missing_current,
+        "unmatched_baseline_rows": unmatched_baseline,
+        "uncomparable_rows": uncomparable,
         "status_failures": status_failures,
         "regressions": regressions,
-        "tolerance_policy": "current - baseline <= max(0.10 * baseline_median_ms, "
-        "2 * max(baseline_iqr_ms, current_iqr_ms), 0.5)",
+        "tolerance_policy": (
+            f"current - baseline <= max({rel_tolerance} * baseline_median_ms, "
+            f"{iqr_multiplier} * baseline_iqr_ms, {floor_ms})"
+        ),
     }
 
 
@@ -221,7 +296,14 @@ def _timing(row: dict[str, Any], key: str) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
-def _compare_row(base_row: dict[str, Any], current_row: dict[str, Any]) -> dict[str, Any] | None:
+def _compare_row(
+    base_row: dict[str, Any],
+    current_row: dict[str, Any],
+    *,
+    rel_tolerance: float,
+    iqr_multiplier: float,
+    floor_ms: float,
+) -> dict[str, Any] | None:
     """Compare one matched row.
 
     Parameters
@@ -230,6 +312,12 @@ def _compare_row(base_row: dict[str, Any], current_row: dict[str, Any]) -> dict[
         Baseline row.
     current_row:
         Current row.
+    rel_tolerance:
+        Relative slowdown tolerance as a fraction of the baseline median.
+    iqr_multiplier:
+        Multiplier applied to the baseline IQR term of the tolerance.
+    floor_ms:
+        Absolute tolerance floor in milliseconds.
 
     Returns
     -------
@@ -248,7 +336,7 @@ def _compare_row(base_row: dict[str, Any], current_row: dict[str, Any]) -> dict[
         or current_iqr is None
     ):
         return None
-    tolerance = max(0.10 * baseline_median, 2 * max(baseline_iqr, current_iqr), 0.5)
+    tolerance = max(rel_tolerance * baseline_median, iqr_multiplier * baseline_iqr, floor_ms)
     delta = current_median - baseline_median
     key = _row_key(current_row)
     return {
@@ -307,6 +395,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--rel-tolerance",
+        type=float,
+        default=DEFAULT_REL_TOLERANCE,
+        help="Relative slowdown tolerance as a fraction of the baseline median",
+    )
+    parser.add_argument(
+        "--iqr-multiplier",
+        type=float,
+        default=DEFAULT_IQR_MULTIPLIER,
+        help="Multiplier on the baseline IQR term of the tolerance",
+    )
+    parser.add_argument(
+        "--floor-ms",
+        type=float,
+        default=DEFAULT_FLOOR_MS,
+        help="Absolute tolerance floor in milliseconds",
+    )
     return parser.parse_args()
 
 
@@ -317,6 +423,9 @@ def main() -> None:
     comparison = compare_gate_payloads(
         load_gate_json(args.baseline),
         load_gate_json(args.current),
+        rel_tolerance=args.rel_tolerance,
+        iqr_multiplier=args.iqr_multiplier,
+        floor_ms=args.floor_ms,
     )
     if args.out is not None:
         write_comparison(args.out, comparison)

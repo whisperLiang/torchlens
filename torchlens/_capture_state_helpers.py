@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 from . import _state
+from ._trace_selector_helpers import _stable_cache_fragment
 from .data_classes.trace import Trace
 from .utils._torch_compat import (
     force_eager_stance_scope,
@@ -66,6 +67,7 @@ different type.
 _PLAIN_ATTR_IGNORED_NAMES = frozenset({"_parameters", "_buffers", "_modules"})
 _PLAIN_ATTR_MAX_CONTAINER_ITEMS = 128
 _PLAIN_ATTR_MAX_TENSOR_NUMEL = 4096
+_PLAIN_ATTR_MAX_DEPTH = 64
 _COMPILED_MODEL_UNWRAP_WARNED = False
 _COMPILED_FORCED_EAGER_WARNED = False
 
@@ -728,7 +730,13 @@ def _snapshot_module_plain_attr_value(module: nn.Module, name: str, attr_path: s
     return _snapshot_plain_attr_value(value, attr_path)
 
 
-def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
+def _snapshot_plain_attr_value(
+    value: Any,
+    attr_path: str,
+    *,
+    _seen: frozenset[int] = frozenset(),
+    _depth: int = 0,
+) -> Any:
     """Return a value snapshot for a plain module-tree attribute.
 
     Parameters
@@ -749,6 +757,22 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
         If the value is not small and value-comparable enough for the fallback
         validation restore. External objects remain unsupported in this path.
     """
+
+    if _depth > _PLAIN_ATTR_MAX_DEPTH:
+        raise RuntimeError(
+            "TorchLens validation deepcopy fallback cannot snapshot plain "
+            f"attribute '{attr_path}' beyond {_PLAIN_ATTR_MAX_DEPTH} container levels."
+        )
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        value_id = id(value)
+        if value_id in _seen:
+            raise RuntimeError(
+                "TorchLens validation deepcopy fallback cannot snapshot cyclic plain "
+                f"attribute '{attr_path}'."
+            )
+        child_seen = _seen | {value_id}
+    else:
+        child_seen = _seen
 
     if isinstance(
         value,
@@ -778,7 +802,12 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
                 f"attribute '{attr_path}' because its list has {len(value)} items."
             )
         return [
-            _snapshot_plain_attr_value(item, f"{attr_path}[{index}]")
+            _snapshot_plain_attr_value(
+                item,
+                f"{attr_path}[{index}]",
+                _seen=child_seen,
+                _depth=_depth + 1,
+            )
             for index, item in enumerate(value)
         ]
     if isinstance(value, tuple):
@@ -795,10 +824,20 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
                     f"attribute '{attr_path}' because its e3nn Irreps has {tuple_len} items."
                 )
             items = tuple(
-                _snapshot_plain_attr_value(tuple.__getitem__(value, index), f"{attr_path}[{index}]")
+                _snapshot_plain_attr_value(
+                    tuple.__getitem__(value, index),
+                    f"{attr_path}[{index}]",
+                    _seen=child_seen,
+                    _depth=_depth + 1,
+                )
                 for index in range(tuple_len)
             )
-            attributes = _snapshot_plain_attr_value(dict(vars(value)), f"{attr_path}.__dict__")
+            attributes = _snapshot_plain_attr_value(
+                dict(vars(value)),
+                f"{attr_path}.__dict__",
+                _seen=child_seen,
+                _depth=_depth + 1,
+            )
             return _PlainAttrE3nnTupleSnapshot(
                 value=copy.deepcopy(value),
                 items=items,
@@ -817,7 +856,12 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
                 f"attribute '{attr_path}' because its tuple has {tuple_len} items."
             )
         return tuple(
-            _snapshot_plain_attr_value(item, f"{attr_path}[{index}]")
+            _snapshot_plain_attr_value(
+                item,
+                f"{attr_path}[{index}]",
+                _seen=child_seen,
+                _depth=_depth + 1,
+            )
             for index, item in enumerate(value)
         )
     if isinstance(value, dict):
@@ -829,7 +873,12 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
         snapshot = {}
         for key, item in value.items():
             try:
-                key_snapshot = _snapshot_plain_attr_value(key, f"{attr_path}.<key>")
+                key_snapshot = _snapshot_plain_attr_value(
+                    key,
+                    f"{attr_path}.<key>",
+                    _seen=child_seen,
+                    _depth=_depth + 1,
+                )
             except RuntimeError as exc:
                 raise RuntimeError(
                     "TorchLens validation deepcopy fallback cannot snapshot plain "
@@ -843,7 +892,12 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
                     f"attribute '{attr_path}' because one of its dict keys is unhashable "
                     "after snapshotting."
                 ) from exc
-            snapshot[key_snapshot] = _snapshot_plain_attr_value(item, f"{attr_path}[{key!r}]")
+            snapshot[key_snapshot] = _snapshot_plain_attr_value(
+                item,
+                f"{attr_path}[{key!r}]",
+                _seen=child_seen,
+                _depth=_depth + 1,
+            )
         return snapshot
     if isinstance(value, (set, frozenset)):
         if len(value) > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
@@ -851,7 +905,15 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
                 "TorchLens validation deepcopy fallback cannot snapshot plain "
                 f"attribute '{attr_path}' because its set has {len(value)} items."
             )
-        snapshot_items = [_snapshot_plain_attr_value(item, f"{attr_path}.<item>") for item in value]
+        snapshot_items = [
+            _snapshot_plain_attr_value(
+                item,
+                f"{attr_path}.<item>",
+                _seen=child_seen,
+                _depth=_depth + 1,
+            )
+            for item in value
+        ]
         try:
             return type(value)(snapshot_items)
         except TypeError as exc:
@@ -1455,6 +1517,15 @@ def _fingerprint_model_content(model: nn.Module) -> str:
     for name, tensor in model.state_dict().items():
         hasher.update(name.encode("utf-8"))
         hasher.update(_hash_tensor_content(tensor).encode("utf-8"))
+    for module_name, module in model.named_modules():
+        hasher.update(repr((module_name, bool(module.training))).encode("utf-8"))
+        for buffer_name in sorted(module._non_persistent_buffers_set):
+            buffer = module._buffers.get(buffer_name)
+            hasher.update(repr((module_name, buffer_name)).encode("utf-8"))
+            if isinstance(buffer, torch.Tensor):
+                hasher.update(_hash_tensor_content(buffer).encode("utf-8"))
+            else:
+                hasher.update(repr(buffer).encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -1503,7 +1574,8 @@ def _capture_cache_key(
     """
 
     payload = {
-        "schema": 1,
+        "schema": 2,
+        "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
         "model": _fingerprint_model_content(model),
         "inputs": _hash_nested_tensor_content((input_args, input_kwargs)),
@@ -1517,7 +1589,7 @@ def _facet_recipe_cache_key(
     recipes: list[Callable[[Any], dict[str, Any]]]
     | tuple[Callable[[Any], dict[str, Any]], ...]
     | None,
-) -> tuple[str, ...]:
+) -> tuple[object, ...]:
     """Return stable-ish recipe identities for capture cache separation.
 
     Parameters
@@ -1527,13 +1599,13 @@ def _facet_recipe_cache_key(
 
     Returns
     -------
-    tuple[str, ...]
-        Function module/qualname identities for cache configuration.
+    tuple[object, ...]
+        Stable callable identities including executable-code digests.
     """
 
     if recipes is None:
         return ()
-    return tuple(f"{recipe.__module__}.{recipe.__qualname__}" for recipe in recipes)
+    return tuple(_stable_cache_fragment(recipe) for recipe in recipes)
 
 
 def _capture_output_metadata_from_model_config(trace: Trace, model: nn.Module) -> None:

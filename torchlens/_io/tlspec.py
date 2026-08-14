@@ -282,8 +282,8 @@ class _TlSpecWriter:
             # ``_restore_backup``).
             if target_path.exists():
                 backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
-                os.rename(target_path, backup_path)
-            os.rename(tmp_path, target_path)
+                os.replace(target_path, backup_path)
+            os.replace(tmp_path, target_path)
             if backup_path is not None:
                 # The overwrite is complete; discarding the backup can never
                 # lose the new bundle, so a cleanup failure must not fail the
@@ -300,7 +300,7 @@ class _TlSpecWriter:
                 # exactly where it was. If this restore itself fails, the old
                 # bundle survives under ``backup_path`` as a recovery artifact.
                 try:
-                    os.rename(backup_path, target_path)
+                    os.replace(backup_path, target_path)
                 except OSError:
                     pass
             raise

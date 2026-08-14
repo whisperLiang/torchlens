@@ -1623,25 +1623,30 @@ def _finalize_streamed_bundle(self: "Trace") -> None:
 
     from .._io.scrub import scrub_for_save
 
-    scrubbed_state, blob_specs, unsupported_tensor_records = scrub_for_save(
-        self,
-        include_outs=True,
-        include_grads=_has_retained_gradient_payloads(self),
-        include_saved_args=self.save_arg_values,
-        include_rng_states=self.save_rng_states,
-    )
-    scrubbed_state, blob_specs = _reuse_streamed_blob_ids(
-        self,
-        scrubbed_state=scrubbed_state,
-        blob_specs=blob_specs,
-        writer=writer,
-    )
-    final_path = writer.finalize(
-        scrubbed_state=scrubbed_state,
-        blob_specs=blob_specs,
-        unsupported=unsupported_tensor_records,
-        trace=self,
-    )
+    try:
+        scrubbed_state, blob_specs, unsupported_tensor_records = scrub_for_save(
+            self,
+            include_outs=True,
+            include_grads=_has_retained_gradient_payloads(self),
+            include_saved_args=self.save_arg_values,
+            include_rng_states=self.save_rng_states,
+        )
+        scrubbed_state, blob_specs = _reuse_streamed_blob_ids(
+            self,
+            scrubbed_state=scrubbed_state,
+            blob_specs=blob_specs,
+            writer=writer,
+        )
+        final_path = writer.finalize(
+            scrubbed_state=scrubbed_state,
+            blob_specs=blob_specs,
+            unsupported=unsupported_tensor_records,
+            trace=self,
+        )
+    except BaseException as exc:
+        if not getattr(writer, "_closed", False):
+            writer.abort(str(exc))
+        raise
     setattr(self, "_source_bundle_path", Path(final_path))
     setattr(
         self,

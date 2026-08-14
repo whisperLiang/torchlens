@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import collections.abc
+import functools
+import hashlib
+import types
 from collections.abc import Iterable
 from typing import Any, cast
 
@@ -220,6 +223,7 @@ def _predicate_cache_key(predicate: object) -> object:
             "callable",
             str(module),
             str(qualname),
+            _callable_code_digest(predicate),
             _stable_cache_fragment(defaults),
             closure_values,
         )
@@ -258,12 +262,59 @@ def _stable_cache_fragment(value: object) -> object:
         return tuple(_stable_cache_fragment(item) for item in value)
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((_stable_cache_fragment(item) for item in value), key=repr))
+    if isinstance(value, functools.partial):
+        return (
+            "partial",
+            _stable_cache_fragment(value.func),
+            _stable_cache_fragment(value.args),
+            _stable_cache_fragment(value.keywords),
+        )
     if callable(value):
         module = getattr(value, "__module__", None)
         qualname = getattr(value, "__qualname__", None)
         if module is not None and qualname is not None:
-            return ("callable", str(module), str(qualname))
+            return (
+                "callable",
+                str(module),
+                str(qualname),
+                _callable_code_digest(value),
+            )
     return ("object", type(value).__module__, type(value).__qualname__)
+
+
+def _callable_code_digest(value: object) -> str | None:
+    """Return a stable digest of a Python callable's executable code.
+
+    Parameters
+    ----------
+    value:
+        Callable candidate.
+
+    Returns
+    -------
+    str | None
+        SHA-256 digest for Python code objects, otherwise ``None``.
+    """
+
+    code = getattr(value, "__code__", None)
+    if not isinstance(code, types.CodeType):
+        return None
+    hasher = hashlib.sha256()
+
+    def update_code(current: types.CodeType) -> None:
+        """Add one code object and its nested constants to ``hasher``."""
+
+        hasher.update(current.co_code)
+        hasher.update(repr(current.co_names).encode("utf-8"))
+        hasher.update(repr(current.co_varnames).encode("utf-8"))
+        for constant in current.co_consts:
+            if isinstance(constant, types.CodeType):
+                update_code(constant)
+            else:
+                hasher.update(repr((type(constant).__qualname__, constant)).encode("utf-8"))
+
+    update_code(code)
+    return hasher.hexdigest()
 
 
 def _layers_to_save_mentions_output(layers_to_save: object) -> bool:

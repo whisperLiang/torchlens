@@ -324,6 +324,28 @@ class SaveBudget:
         default_factory=dict, repr=False, compare=False
     )
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Return pickle state with the process-local release watchers stripped.
+
+        Returns
+        -------
+        dict[str, Any]
+            Instance state whose ``_payload_watchers`` map is empty.
+
+        Notes
+        -----
+        Watchers are ``weakref.ref`` objects on live payload tensors: process-local
+        by construction and unpicklable. A restored accountant keeps its committed
+        charges permanently (the same conservative direction as a payload that
+        cannot be weak-referenced); the source accountant's live watchers are
+        untouched. Restored traces never capture again, so the lost crediting
+        cannot mis-admit a later save.
+        """
+
+        state = self.__dict__.copy()
+        state["_payload_watchers"] = {}
+        return state
+
     @classmethod
     def from_option(cls, value: SaveBudgetOption) -> SaveBudget | None:
         """Build a budget from a user-facing option value.

@@ -56,6 +56,9 @@ __all__ = [
 WILDCARD_RECV_UNSUPPORTED = "wildcard_recv_unsupported"
 """Finding kind for refused wildcard (any-source) recv during capture."""
 
+COLLECTIVE_BOUNDARY_FASTLOG_UNSUPPORTED = "collective_boundary_fastlog_unsupported"
+"""Finding kind for fastlog's refusal of an executed collective boundary."""
+
 BOUNDARY_SCHEMA = "collective_boundary_v1"
 
 # Backends whose runtime honors p2p tags; on these the tag is part of the
@@ -335,6 +338,7 @@ def _build_payload(
     peer_info: dict[str, Any] | None,
     inputs: list[torch.Tensor],
     outputs: list[torch.Tensor],
+    contribution_digests: list[str] | None,
     async_op: bool,
     witness_policy: str,
     group: Any,
@@ -379,7 +383,7 @@ def _build_payload(
         "not_present_reason": None,
     }
     if witness_policy == "digest":
-        witness["contribution_digests"] = [_digest_tensor(t) for t in inputs]
+        witness["contribution_digests"] = contribution_digests
         if async_op:
             witness["not_present_reason"] = "async_completion_unobserved"
         else:
@@ -670,6 +674,13 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
                 return original(*args, **kwargs)
 
         trace = _state._active_trace
+        if getattr(trace, "capture_mode", None) == "predicate":
+            raise CompatibilityError(
+                "Fastlog cannot represent collective boundary journals; refusing before "
+                "the collective executes instead of returning a Recording that omits it.",
+                kind=COLLECTIVE_BOUNDARY_FASTLOG_UNSUPPORTED,
+                func=f"torch.distributed.{site.attr}",
+            )
         role = _RankRole(my_global_rank=int(dist.get_rank()), root_global_rank=root_global)
         inputs = site.inputs(bound, role)
         async_op = bool(bound.get("async_op", False)) or site.attr in ("isend", "irecv")
@@ -680,26 +691,29 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
         save_rng = getattr(trace, "save_rng_states", False)
         rng_states = log_current_rng_states(torch_only=True) if save_rng else {}
         autocast_state = log_current_autocast_state()
-        start = time.time()
+        contribution_digests: list[str] | None = None
         with _BoundaryScope(), _state.pause_logging():
+            if witness_policy == "digest":
+                contribution_digests = [_digest_tensor(tensor) for tensor in inputs]
+            start = time.time()
             result = original(*args, **kwargs)
-        elapsed = time.time() - start
-
-        outputs = site.outputs(bound, role)
-        payload = _build_payload(
-            site,
-            bound,
-            identity,
-            channel,
-            seq,
-            state.arming,
-            peer_info,
-            inputs,
-            outputs,
-            async_op,
-            witness_policy,
-            group,
-        )
+            elapsed = time.time() - start
+            outputs = site.outputs(bound, role)
+            payload = _build_payload(
+                site,
+                bound,
+                identity,
+                channel,
+                seq,
+                state.arming,
+                peer_info,
+                inputs,
+                outputs,
+                contribution_digests,
+                async_op,
+                witness_policy,
+                group,
+            )
         op_labels: list[str] = []
         if not site.tensorless:
             op_labels = _emit_boundary_op(
@@ -722,17 +736,6 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
     return wrapped_collective
 
 
-def _patch_modules() -> list[Any]:
-    """Modules whose collective-function attributes are patched."""
-
-    dist = torch.distributed
-    modules = [dist]
-    c10d = getattr(dist, "distributed_c10d", None)
-    if c10d is not None:
-        modules.append(c10d)
-    return modules
-
-
 def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
     """Install the boundary wrappers on every module holding a reference.
 
@@ -745,6 +748,8 @@ def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     if not torch.distributed.is_available():
         return
+    from torchlens.distributed._lifecycle import _patch_modules
+
     for module in _patch_modules():
         for site in COLLECTIVE_SITES:
             current = getattr(module, site.attr, None)
@@ -757,10 +762,15 @@ def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 def remove_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
     """Restore pristine collective functions recorded at install time."""
 
+    first_failure: Exception | None = None
     for (module, attr), original in list(originals.items()):
         if any(attr == site.attr for site in COLLECTIVE_SITES):
             try:
                 setattr(module, attr, original)
-            except Exception:
-                pass
+            except Exception as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
             originals.pop((module, attr), None)
+    if first_failure is not None:
+        raise first_failure

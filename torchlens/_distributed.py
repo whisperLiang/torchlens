@@ -60,12 +60,16 @@ __all__ = [
 MAX_REPORTED_SITES = 5
 """Number of named sites listed in a finding before eliding the remainder."""
 
-REFUSING_KINDS: frozenset[str] = frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"})
+REFUSING_KINDS: frozenset[str] = frozenset(
+    {"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"}
+)
 """Finding kinds that make a capture provably wrong and therefore refuse it.
 
-``device_mesh`` alone is informational. Active tensor-parallel styles refuse even
-when parameters remain dense: ``PrepareModuleInput`` installs hooks whose rank
-redistribution runs below TorchLens' capture layer and would otherwise be omitted.
+``device_mesh`` alone is informational. ``scan_incomplete`` refuses when an
+inspection boundary could hide refusing state. Active tensor-parallel styles
+refuse even when parameters remain dense: ``PrepareModuleInput`` installs hooks
+whose rank redistribution runs below TorchLens' capture layer and would otherwise
+be omitted.
 """
 
 # Namespaces whose presence in ``sys.modules`` is a precondition for any live
@@ -102,7 +106,7 @@ _SHARDED_TENSOR_MODULE_SENTINELS: tuple[str, ...] = (
 )
 
 _DOCS_POINTER = (
-    "See the 'Distributed and sharded execution' section of LIMITATIONS.md; run "
+    "See 'Distributed and Sharded Execution' in LIMITATIONS.md; run "
     "torchlens.compat.report(model, x) for the full compatibility table."
 )
 
@@ -140,7 +144,8 @@ class DistributedFinding:
     ----------
     kind:
         Stable machine-readable condition key: ``"dtensor"``,
-        ``"device_mesh"``, ``"tensor_parallel"``, or ``"pipeline_parallel"``.
+        ``"device_mesh"``, ``"tensor_parallel"``, ``"pipeline_parallel"``, or
+        ``"scan_incomplete"``.
     detail:
         Explanation of what was detected and why capture cannot be trusted.
     suggestion:
@@ -218,6 +223,7 @@ class _Evidence:
     tp_module_exact: bool = True
     pp_sites: list[str] = field(default_factory=list)
     pp_exact: bool = True
+    scan_incomplete_sites: list[str] = field(default_factory=list)
 
 
 def _distributed_namespace_imported() -> bool:
@@ -413,13 +419,18 @@ def _is_device_mesh(value: Any) -> tuple[bool, bool]:
     return False, True
 
 
-def _iter_named_state(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+def _iter_named_state(
+    model: nn.Module,
+    evidence: _Evidence,
+) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield ``(name, tensor)`` for every parameter and buffer without dedupe.
 
     Parameters
     ----------
     model:
         Model to inspect.
+    evidence:
+        Collector that receives a fail-closed scan-incomplete site.
 
     Yields
     ------
@@ -444,6 +455,7 @@ def _iter_named_state(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
             try:
                 items = list(getter())
             except Exception:
+                evidence.scan_incomplete_sites.append(f"model.{accessor}()")
                 continue
         for name, tensor in items:
             if isinstance(tensor, torch.Tensor):
@@ -593,6 +605,7 @@ def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
     try:
         named_modules = list(model.named_modules())
     except Exception:
+        evidence.scan_incomplete_sites.append("model.named_modules()")
         named_modules = [("", model)]
 
     for name, module in named_modules:
@@ -867,9 +880,9 @@ def detect_distributed_state(
     Returns
     -------
     tuple[DistributedFinding, ...]
-        Findings in stable order: ``dtensor``, ``tensor_parallel``,
-        ``pipeline_parallel``, ``device_mesh``. Empty when nothing distributed
-        was detected.
+        Findings in stable order: ``scan_incomplete``, ``dtensor``,
+        ``tensor_parallel``, ``pipeline_parallel``, ``device_mesh``. Empty when
+        nothing distributed was detected and the scan completed.
 
     Notes
     -----
@@ -889,7 +902,7 @@ def detect_distributed_state(
 
     if isinstance(model, nn.Module):
         if scan_tensors:
-            for name, tensor in _iter_named_state(model):
+            for name, tensor in _iter_named_state(model, evidence):
                 _record_tensor(name, tensor, evidence)
         _collect_module_evidence(model, evidence)
 
@@ -918,6 +931,25 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
     """
 
     findings: list[DistributedFinding] = []
+
+    incomplete_sites = tuple(dict.fromkeys(evidence.scan_incomplete_sites))
+    if incomplete_sites:
+        findings.append(
+            DistributedFinding(
+                kind="scan_incomplete",
+                detail=(
+                    "The bounded distributed-state entry scan could not read one or more "
+                    "model enumeration surfaces, so absence of sharded or parallel state "
+                    "cannot be established."
+                ),
+                suggestion=(
+                    "Enter the wrapper's state-materialization context or expose standard "
+                    "named_parameters/named_buffers/named_modules accessors, then retry."
+                ),
+                sites=incomplete_sites,
+                exact=True,
+            )
+        )
 
     sharded_tensor_sites = tuple(dict.fromkeys(evidence.dtensor_sites + evidence.shard_sites))
     if sharded_tensor_sites:

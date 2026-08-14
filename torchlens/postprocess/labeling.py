@@ -152,7 +152,7 @@ def _log_final_info_for_layers(self: "Trace") -> None:
     # pass; see ``_replace_layer_names_for_layer_entry`` for why the shared
     # results are safe.
     equivalent_ops_memo: dict[int, tuple[Any, Any]] = {}
-    recurrent_ops_memo: dict[tuple[str, ...], list[str]] = {}
+    recurrent_ops_memo: dict[str, list[str]] = {}
 
     for _t, layer_entry in enumerate(self):
         _normalize_io_role_flags(layer_entry)
@@ -360,7 +360,7 @@ def _replace_layer_names_for_layer_entry(
     self: "Trace",
     layer_entry: Op,
     equivalent_ops_memo: dict[int, tuple[Any, Any]] | None = None,
-    recurrent_ops_memo: dict[tuple[str, ...], list[str]] | None = None,
+    recurrent_ops_memo: dict[str, list[str]] | None = None,
 ) -> None:
     """Replace all raw labels in a Op's fields with final labels.
 
@@ -381,12 +381,11 @@ def _replace_layer_names_for_layer_entry(
     (``_COPY_ON_READ_SET_FIELDS`` in ``data_classes/op.py``), so no holder of the
     shared group can alias-corrupt a sibling Op.
 
-    ``recurrent_ops`` gets the same canonical-container treatment, but keyed on
-    VALUE rather than identity: loop detection hands every member of a
-    recurrence group its own pre-rename list (equal contents, distinct
-    objects), so an identity memo would never hit. Renaming is a pure function
-    of the contents, and group symmetry guarantees every member carries the
-    same ordered labels, so equal inputs share one canonical renamed list. On a
+    ``recurrent_ops`` gets the same canonical-container treatment, indexed by
+    every raw member label during the first group visit. Loop detection hands
+    every member its own pre-rename list, so identity memoization would miss;
+    indexing all members makes later visits O(1) while group symmetry guarantees
+    they receive the same canonical renamed list. On a
     512-step loop the per-op lists were 4.41 MB of spines for THREE distinct
     group contents. Safe for the same reason as above: ``Op.recurrent_ops``
     reads hand back a private copy (``_COPY_ON_READ_LIST_FIELDS``).
@@ -398,9 +397,9 @@ def _replace_layer_names_for_layer_entry(
             alive in the value is what makes keying on ``id`` sound: the key
             object cannot be freed, so its address cannot be reused. ``None``
             builds a throwaway table (single-Op callers, test doubles).
-        recurrent_ops_memo: Cross-Op ``tuple(raw labels) -> renamed list``
-            table for the current rename sweep. ``None`` builds a throwaway
-            table (single-Op callers, test doubles).
+        recurrent_ops_memo: Cross-Op ``raw member label -> renamed list`` table
+            for the current rename sweep. ``None`` builds a throwaway table
+            (single-Op callers, test doubles).
     """
     mapping = self._raw_to_final_layer_labels
     layer_mapping = self._raw_to_final_parent_layer_labels
@@ -443,11 +442,11 @@ def _replace_layer_names_for_layer_entry(
             if not orig:
                 continue
             if isinstance(orig, list):
-                key = tuple(orig)
-                renamed_list = recurrent_ops_memo.get(key)
+                renamed_list = recurrent_ops_memo.get(layer_entry._label_raw)
                 if renamed_list is None:
                     renamed_list = [op_mapping[raw] for raw in orig]
-                    recurrent_ops_memo[key] = renamed_list
+                    for raw_label in orig:
+                        recurrent_ops_memo[raw_label] = renamed_list
                 set_entry_field(field, renamed_list)
             else:  # legacy non-list value: preserve type, no sharing
                 set_entry_field(field, type(orig)(op_mapping[raw] for raw in orig))

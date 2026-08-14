@@ -631,3 +631,31 @@ def test_saved_trace_round_trips_with_the_default_budget(tmp_path: Path) -> None
     # DROP means the ceiling is not round-tripped: a loaded trace retains nothing,
     # so it is restored to the default rather than to this session's setting.
     assert loaded.save_budget == "auto"
+
+
+def test_trace_pickle_strips_process_local_release_watchers() -> None:
+    """Whole-trace pickle survives live watchers and never carries them across.
+
+    Release watchers are ``weakref.ref`` objects on live payload tensors:
+    process-local and unpicklable. A trace with retained activations must still
+    pickle (deepcopy and spawn-based tests ride the same path); the restored
+    accountant keeps its committed charges permanently while the source
+    accountant's live watchers stay armed.
+    """
+
+    import pickle
+
+    trace = tl.trace(_model(), _input())
+    accountant = trace.__dict__["_save_budget_accountant"]
+    assert accountant is not None
+    n_watchers = len(accountant._payload_watchers)
+    assert n_watchers > 0
+
+    restored = pickle.loads(pickle.dumps(trace))
+
+    assert len(accountant._payload_watchers) == n_watchers
+    restored_accountant = restored.__dict__["_save_budget_accountant"]
+    assert restored_accountant._payload_watchers == {}
+    assert restored_accountant.ledgers.keys() == accountant.ledgers.keys()
+    for key, ledger in accountant.ledgers.items():
+        assert restored_accountant.ledgers[key].committed_bytes == ledger.committed_bytes

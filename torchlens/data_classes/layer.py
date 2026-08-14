@@ -184,6 +184,7 @@ _LAYER_MIRROR_SPEC: dict[str, tuple[str, Any]] = {
             "output_device",
             "visualizer_path",
             "activation_transform",
+            "annotations",
             "intervention_replaced",
             "detach_saved_activations",
             "save_grads",
@@ -891,7 +892,6 @@ class Layer:
         self._source_trace_ref: weakref.ReferenceType[Trace] | None = (
             weakref.ref(_sml) if _sml is not None else None
         )
-        self.annotations: dict[str, Any] = {}
         # Build-time SNAPSHOTS, not mirrors: ``_build_conditional_records``
         # (end of step 15.5) rebinds these two fields on the OPS after the
         # aggregate Layers are built, and the public Layer contract keeps the

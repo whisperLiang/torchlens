@@ -482,7 +482,6 @@ def set_random_seed(seed: int) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
         # Keep torchlens's private barcode RNG in lockstep with the seed so a fixed
         # capture seed yields reproducible tensor barcodes (a fork replay reuses the
         # original seed; matching barcodes keep tensor/op/param cross-references
@@ -2999,7 +2998,7 @@ class host_nondeterminism_monitor:
                 except Exception:
                     self._flag_uncertain("profile_predecessor_error")
 
-        hook._tl_owner = self  # dead-chain restore walks use this (non-LIFO fix).
+        cast(Any, hook)._tl_owner = self  # dead-chain restore walks use this (non-LIFO fix).
         return hook
 
     @staticmethod

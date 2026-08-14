@@ -28,6 +28,7 @@ import os
 import sys
 import types
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -39,6 +40,10 @@ from torchlens._distributed import (
     DistributedCaptureUnsupportedError,
     DistributedFinding,
     detect_distributed_state,
+)
+from torchlens.backends.torch._ops_interventions import (
+    _pop_tensor_live_fire_results,
+    _set_tensor_live_fire_results,
 )
 
 DISTRIBUTED_ROW_KEYS = ("dtensor", "device_mesh", "tensor_parallel", "pipeline_parallel")
@@ -192,6 +197,69 @@ def test_all_four_rows_are_always_present() -> None:
     keys = {row.key for row in report.rows}
     for key in DISTRIBUTED_ROW_KEYS:
         assert key in keys
+
+
+def test_unreadable_state_scan_refuses_instead_of_passing(monkeypatch) -> None:
+    """Accessor failures produce a typed scan-incomplete refusal."""
+
+    class UnreadableModel(TinyModel):
+        """Model whose distributed state accessors require an unavailable context."""
+
+        def named_parameters(self, *args: Any, **kwargs: Any) -> Any:
+            """Refuse both supported named-parameter call spellings."""
+
+            _ = args, kwargs
+            raise RuntimeError("state requires summon context")
+
+    import torchlens._distributed as distributed_mod
+
+    monkeypatch.setattr(distributed_mod, "_distributed_namespace_imported", lambda: True)
+    monkeypatch.setattr(distributed_mod, "_sharded_tensor_namespace_imported", lambda: True)
+    findings = detect_distributed_state(UnreadableModel(), torch.randn(2, 4))
+    scan = _find(findings, "scan_incomplete")
+    assert scan.refuses_capture is True
+    with pytest.raises(DistributedCaptureUnsupportedError) as excinfo:
+        distributed_mod.check_distributed_capture(UnreadableModel(), torch.randn(2, 4))
+    assert [finding.kind for finding in excinfo.value.fields["findings"]] == ["scan_incomplete"]
+
+
+def test_unreadable_module_scan_refuses_instead_of_root_only_fallback(monkeypatch) -> None:
+    """A failed child-module traversal cannot be treated as a complete root scan."""
+
+    class UnreadableModules(TinyModel):
+        """Model that rejects recursive module enumeration."""
+
+        def named_modules(self, *args: Any, **kwargs: Any) -> Any:
+            """Refuse module enumeration."""
+
+            _ = args, kwargs
+            raise RuntimeError("modules unavailable")
+
+    import torchlens._distributed as distributed_mod
+
+    monkeypatch.setattr(distributed_mod, "_distributed_namespace_imported", lambda: True)
+    monkeypatch.setattr(distributed_mod, "_distributed_initialized", lambda: True)
+    findings = detect_distributed_state(UnreadableModules(), torch.randn(2, 4))
+    assert _find(findings, "scan_incomplete").refuses_capture is True
+
+
+def test_fire_results_survive_tensor_attribute_rejection() -> None:
+    """Intervention evidence falls back out of band when tensor attrs reject writes."""
+
+    class RejectingTensor(torch.Tensor):
+        """Tensor subclass that rejects TorchLens fire-result attributes."""
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            """Reject only the transient intervention-evidence attribute."""
+
+            if name == "_tl_live_fire_results":
+                raise RuntimeError("dynamic attributes disabled")
+            super().__setattr__(name, value)
+
+    tensor = torch.ones(2).as_subclass(RejectingTensor)
+    marker = object()
+    _set_tensor_live_fire_results(tensor, (marker,))  # type: ignore[arg-type]
+    assert _pop_tensor_live_fire_results(tensor) == (marker,)
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +536,9 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
 def test_refusing_kinds_is_the_single_source_of_truth() -> None:
     """Every active distributed execution mode that omits work refuses."""
 
-    assert frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"}) == REFUSING_KINDS
+    assert frozenset(
+        {"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"}
+    ) == REFUSING_KINDS
 
 
 def test_site_list_is_bounded_with_explicit_remainder() -> None:
