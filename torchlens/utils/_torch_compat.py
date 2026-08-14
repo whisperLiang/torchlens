@@ -1363,6 +1363,107 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
 _CAPABILITY_ATTR_SET: frozenset[str] = frozenset(_CAPABILITY_ATTRS)
 
 
+_LAZY_PROBE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "_C10D_ABORT_PG_PROBED": ("HAS_C10D_ABORT_PG",),
+    "_C10D_GROUP_REGISTRY_PROBED": ("HAS_C10D_GROUP_REGISTRY",),
+    "_C10D_GROUP_SEQ_PROBED": ("HAS_C10D_GROUP_SEQ",),
+    "_DEVICE_MESH_PROBED": ("HAS_DEVICE_MESH", "_DEVICE_MESH_TYPE"),
+    "_DISABLE_TORCH_FUNCTION_PROBED": (
+        "HAS_DISABLE_TORCH_FUNCTION",
+        "_DISABLE_TORCH_FUNCTION_CLS",
+    ),
+    "_DISPATCH_MODE_STACK_PROBED": (
+        "HAS_DISPATCH_MODE_STACK_QUERY",
+        "_DISPATCH_MODE_STACK_FN",
+    ),
+    "_DTENSOR_PROBED": ("HAS_DTENSOR", "_DTENSOR_TYPE"),
+    "_DTENSOR_SHARD_GEOMETRY_PROBED": (
+        "HAS_DTENSOR_SHARD_GEOMETRY",
+        "_DTENSOR_SHARD_GEOMETRY_FN",
+    ),
+    "_DYNAMO_COMPILE_COUNTERS_PROBED": (
+        "HAS_DYNAMO_COMPILE_COUNTERS",
+        "_DYNAMO_COMPILE_COUNTERS",
+    ),
+    "_DYNAMO_IS_COMPILING_PROBED": ("HAS_DYNAMO_IS_COMPILING", "_DYNAMO_IS_COMPILING_FN"),
+    "_DYNAMO_OPTIMIZED_MODULE_PROBED": (
+        "HAS_DYNAMO_OPTIMIZED_MODULE",
+        "_DYNAMO_OPTIMIZED_MODULE_TYPE",
+    ),
+    "_DYNAMO_ORIG_CALLABLE_MARKER_PROBED": ("HAS_DYNAMO_ORIG_CALLABLE_MARKER",),
+    "_FAKE_TENSOR_MODE_PROBED": ("HAS_FAKE_TENSOR_MODE", "_FAKE_TENSOR_MODE_CLS"),
+    "_FP8_DTYPES_PROBED": ("HAS_FP8_DTYPES", "_FP8_DTYPES"),
+    "_FSDP_WRAPPER_PROBED": ("HAS_FSDP_WRAPPER", "_FSDP_WRAPPER_TYPE"),
+    "_JIT_SCHEMA_ENUMERATION_PROBED": (
+        "HAS_JIT_SCHEMA_ENUMERATION",
+        "_JIT_SCHEMA_ENUMERATION_FN",
+    ),
+    "_PIPELINING_PROBED": ("HAS_PIPELINING", "_PIPELINING_TYPES"),
+    "_TENSORBASE_CLASS_PROBED": ("HAS_TENSORBASE_CLASS", "_TENSORBASE_CLASS"),
+    "_TRACING_TENSOR_TYPES_PROBED": ("HAS_TRACING_TENSOR_TYPES", "_TRACING_TENSOR_TYPES"),
+    "_VARIABLE_FUNCTIONS_CLASS_PROBED": (
+        "HAS_VARIABLE_FUNCTIONS_CLASS",
+        "_VARIABLE_FUNCTIONS_CLASS",
+    ),
+}
+"""Every LAZY capability latch: ``*_PROBED`` flag -> the family attrs it gates.
+
+The import-time ``HAS_*`` probes above run once against the real torch and are
+process facts; the LAZY families here latch on FIRST USE, which makes them the
+one capability class a test can poison: a probe fired while ``sys.modules`` is
+stubbed latches the wrong verdict for the whole process (the recorded
+``b7fe953e`` incident -- later compat snapshots and generated-doc gates flap).
+``capability_probe_snapshot()`` / ``restore_capability_probes()`` exist so the
+test suite can restore the pre-test latch state systemically instead of
+per-test by hand; production code never calls them. A meta-test pins this
+registry against the module's actual ``*_PROBED`` attrs so a new lazy latch
+cannot land outside it.
+"""
+
+
+def capability_probe_snapshot() -> dict[str, object]:
+    """Return the current lazy capability-latch state for exact restoration.
+
+    Returns
+    -------
+    dict[str, object]
+        Attribute name -> current value for every ``*_PROBED`` latch, its
+        family attrs, and the lazy-import warm flag.
+    """
+
+    module = sys.modules[__name__]
+    snapshot: dict[str, object] = {"_LAZY_TORCH_IMPORTS_WARMED": _LAZY_TORCH_IMPORTS_WARMED}
+    for probed_attr, family in _LAZY_PROBE_FAMILIES.items():
+        snapshot[probed_attr] = getattr(module, probed_attr)
+        for attr in family:
+            snapshot[attr] = getattr(module, attr)
+    return snapshot
+
+
+def restore_capability_probes(snapshot: dict[str, object]) -> None:
+    """Restore lazy capability latches captured by :func:`capability_probe_snapshot`.
+
+    Un-poisons the ``b7fe953e`` incident class: a probe that latched under a
+    stubbed ``sys.modules`` (or any other transient runtime shim) is reset to
+    the snapshotted state, so the next consumer re-probes against the real
+    runtime instead of inheriting the poisoned verdict for the process.
+
+    Parameters
+    ----------
+    snapshot:
+        Mapping returned by :func:`capability_probe_snapshot`.
+
+    Returns
+    -------
+    None
+        Module latch state is rebound in place.
+    """
+
+    module = sys.modules[__name__]
+    for attr, value in snapshot.items():
+        setattr(module, attr, value)
+
+
 class TorchCapabilityWarning(UserWarning):
     """Graceful torch-capability degradation warning (r-b4 R26-6d).
 
