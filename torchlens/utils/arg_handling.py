@@ -68,9 +68,15 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
     cycle of mutable containers) are handled without a ``RecursionError``: a
     mutable container being built is registered in ``_in_progress`` before its
     elements are recursed, so a self-reference resolves to the same in-progress
-    copy and the cycle is reproduced in the copy.  The registration is scoped to
-    the active recursion path only, so a non-cyclic structure that reuses the
-    same sub-container twice is still copied twice (unchanged behavior).
+    copy and the cycle is reproduced in the copy.  The memo is CALL-scoped
+    (retained across siblings, r-b4 R29-3): a DAG-shaped input that reuses one
+    sub-container under several paths is copied ONCE and stays aliased in the
+    copy -- which both matches the aliasing topology the model itself would see
+    and makes the copy O(nodes).  The historical path-scoped memo copied a
+    shared node once per PATH, i.e. exponentially in shared-substructure depth
+    (measured x2 per level; depth 25 hung capture entry for ~4 minutes).
+    Tensors remain leaves cloned per DISTINCT container occurrence and are
+    never memoized.
 
     Note: custom objects containing tensors are passed by reference.  If the
     model is on a different device, _fetch_label_move_input_tensors may
@@ -105,7 +111,8 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
     arg_id = id(arg)
     existing = _in_progress.get(arg_id)
     if existing is not None:
-        # A container on the current recursion path referred back to itself.
+        # Cycle (a container reachable from itself) or DAG reuse (one container
+        # under several paths): both resolve to the one memoized copy.
         return existing
     if isinstance(arg, (defaultdict, dict, list, tuple)) and _depth >= INPUT_TREE_MAX_DEPTH:
         # r-b4 R27-1: the canonical per-capture input copier is depth-bounded with the
@@ -119,31 +126,22 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         # A plain dict() constructor would lose default_factory.
         copied: Any = defaultdict(arg.default_factory)
         _in_progress[arg_id] = copied
-        try:
-            for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
-        finally:
-            _in_progress.pop(arg_id, None)
+        for key, value in arg.items():
+            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         return copied
     elif isinstance(arg, dict):
         # type(arg)() preserves OrderedDict and other dict subclasses; populate
         # after registering so a cyclic value can point back at this copy.
         copied = type(arg)()
         _in_progress[arg_id] = copied
-        try:
-            for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
-        finally:
-            _in_progress.pop(arg_id, None)
+        for key, value in arg.items():
+            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         return copied
     elif isinstance(arg, list):
         copied = type(arg)()
         _in_progress[arg_id] = copied
-        try:
-            for item in arg:
-                copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
-        finally:
-            _in_progress.pop(arg_id, None)
+        for item in arg:
+            copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
         return copied
     elif isinstance(arg, tuple):
         # Tuples are immutable and cannot self-reference directly; any cycle
@@ -151,8 +149,11 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         # registered above, so recursing eagerly here is safe.
         items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
         # NamedTuples have _fields and need *args construction; plain tuples
-        # take an iterable.
-        return type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
+        # take an iterable. Memoized after construction (immutable, so no cycle
+        # can pass through the tuple itself) so tuple-shaped DAGs are O(nodes).
+        copied = type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
+        _in_progress[arg_id] = copied
+        return copied
     else:
         # Non-container, non-tensor objects (ints, strings, custom wrappers)
         # are returned by reference — shallow enough to avoid circular ref issues.

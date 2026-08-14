@@ -155,3 +155,33 @@ def test_moderate_nesting_still_traces() -> None:
 
     log = tl.trace(nn.Identity(), _deep_list(30, torch.ones(1)))
     assert len(log) > 0
+
+
+def test_copy_arg_tree_dag_is_linear_and_preserves_aliasing() -> None:
+    """r-b4 R29-3: a DAG-shaped input copies O(nodes), not O(paths).
+
+    The historical path-scoped memo copied a shared sub-container once per PATH
+    (x2 per shared-substructure level; depth 25 hung capture entry ~4 minutes).
+    The call-scoped memo copies it once and PRESERVES the aliasing topology the
+    model itself would have seen.
+    """
+
+    import time
+
+    node: object = [torch.ones(1)]
+    for _ in range(60):  # 2**60 paths under the old memo: only a linear memo finishes
+        node = [node, node]
+    start = time.perf_counter()
+    copied = copy_arg_tree(node)
+    assert time.perf_counter() - start < 5.0
+    assert copied[0] is copied[1]  # shared substructure stays aliased in the copy
+    assert copied[0] is not node[0]  # ...but is a genuine copy
+
+
+def test_copy_arg_tree_distinct_containers_stay_distinct() -> None:
+    """Equal-valued but DISTINCT containers still copy to distinct objects."""
+
+    left = [torch.ones(1)]
+    right = [torch.ones(1)]
+    copied = copy_arg_tree([left, right])
+    assert copied[0] is not copied[1]
