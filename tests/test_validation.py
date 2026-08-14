@@ -4294,6 +4294,112 @@ def test_op_reduction_depth_non_additive_scatter_reduce_is_ineligible() -> None:
         assert _op_reduction_depth(pos_layer) == 1024, f"{mode} positional eligible"
 
 
+def test_tensor_nanequal_tolerances_are_dtype_derived_boundary() -> None:
+    """LOAD-BEARING boundary gate for the ULP-derived replay tolerance table.
+
+    Every float dtype must accept drift at its ULP headroom and reject drift
+    at ~10000x its own eps. The former decimal literals were wrong in BOTH
+    directions: bf16's atol=1e-2 blessed TOTAL corruption of every element
+    below 1e-2 (all post-softmax/post-norm activations), and float64 inherited
+    fp32's rtol=1e-4 = 4.5e11 float64 ULPs.
+    """
+
+    from torchlens.utils.tensor_utils import _tolerances_for_dtype
+
+    for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        eps = torch.finfo(dtype).eps
+        rtol, atol = _tolerances_for_dtype(dtype)
+        # The absolute term must never bless small-normal-value corruption: it
+        # stays at denormal scale (a few quanta above the representable floor).
+        assert atol <= 4.0 * torch.finfo(dtype).tiny, dtype
+        base = torch.full((8,), 0.73, dtype=dtype)
+        within = (base.double() * (1.0 + 0.5 * rtol)).to(dtype)
+        beyond = (base.double() * (1.0 + 10_000.0 * eps)).to(dtype)
+        assert tensor_nanequal(base, within, allow_tolerance=True), dtype
+        assert not tensor_nanequal(base, beyond, allow_tolerance=True), dtype
+
+    # The exact probe shapes from the finding:
+    # bf16 small values vs an all-zero replay must NOT read equal...
+    small = torch.full((16,), 5e-3, dtype=torch.bfloat16)
+    assert not tensor_nanequal(small, torch.zeros_like(small), allow_tolerance=True)
+    # ...nor a full sign flip of sub-1e-2 values...
+    flip = torch.full((16,), 4e-3, dtype=torch.bfloat16)
+    assert not tensor_nanequal(flip, -flip, allow_tolerance=True)
+    # ...nor the fp16 analogue...
+    small16 = torch.full((16,), 5e-4, dtype=torch.float16)
+    assert not tensor_nanequal(small16, torch.zeros_like(small16), allow_tolerance=True)
+    # ...nor a 2.25e11-ULP float64 divergence.
+    f64 = torch.tensor([1.0], dtype=torch.float64)
+    assert not tensor_nanequal(f64, f64 + 5e-5, allow_tolerance=True)
+
+    # Unknown-to-the-table float dtypes derive their OWN row instead of
+    # inheriting fp32's (the float64 failure shape).
+    c_rtol, _c_atol = _tolerances_for_dtype(torch.complex128)
+    assert c_rtol < 1e-12
+
+
+def test_ground_truth_output_check_is_dtype_aware() -> None:
+    """The GT direct-forward bar is a few ULPs of the OUTPUT dtype, both ways.
+
+    The former dtype-blind rtol=1e-6/atol=1e-8 passed a materially wrong fp64
+    output (5e-7 = 2.25e9 fp64 ULPs) and false-FAILED a genuine one-ULP bf16
+    rounding difference (~7800x tighter than bf16 eps).
+    """
+
+    from torchlens.validation.core import _ground_truth_output_matches_saved
+
+    # fp64: 5e-7 relative divergence must now FAIL.
+    f64 = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    assert not _ground_truth_output_matches_saved(f64, f64 * (1.0 + 5e-7))
+    # ...while a few-ULP fp64 drift passes.
+    eps64 = torch.finfo(torch.float64).eps
+    assert _ground_truth_output_matches_saved(f64, f64 * (1.0 + 2.0 * eps64))
+
+    # bf16: a genuine one-ULP rounding difference must PASS.
+    bf = torch.tensor([0.5, -1.25], dtype=torch.bfloat16)
+    one_ulp = torch.nextafter(bf, torch.ones_like(bf))
+    assert _ground_truth_output_matches_saved(bf, one_ulp)
+    # ...but bf16 corruption (many ULPs) still fails.
+    assert not _ground_truth_output_matches_saved(bf, bf * 1.5)
+
+    # fp32 keeps its historical ~1e-6 strength: multi-thread reduction-order
+    # drift (~3e-7 relative) passes, a 1e-5 relative mismatch fails.
+    f32 = torch.tensor([2.0, -3.0], dtype=torch.float32)
+    assert _ground_truth_output_matches_saved(f32, f32 * (1.0 + 3e-7))
+    assert not _ground_truth_output_matches_saved(f32, f32 * (1.0 + 1e-5))
+
+
+def test_deep_numeric_replay_outlier_bound_scales_with_depth() -> None:
+    """LOAD-BEARING: band C's outlier lane derives its bound from depth.
+
+    The former fixed literals admitted ~4-5% corruption of a single element at
+    ANY eligible depth (probes: depth-128 reduction with one element 1.049 vs
+    1.0 passed; one 4%-corrupted element in 200k passed all three lanes). The
+    per-element bound now scales as k*sqrt(depth)*eps, so those probes FAIL
+    while genuine sqrt(depth)-scale reorder noise still passes.
+    """
+
+    weight = torch.zeros(16, 128)
+    saved_out = torch.empty(64, 3200).uniform_(0.5, 1.5)
+    layer = _make_deep_numeric_layer(
+        "linear", [torch.zeros(64, 128), weight], saved_out
+    )
+    assert _op_reduction_depth(layer) == 128
+    assert _op_reduction_depth(layer) >= DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH
+
+    # One element corrupted by 4.9% in 204800 elements: outlier fraction is
+    # far below 1e-4, so only the derived per-element bound can catch it.
+    recomputed = saved_out.clone()
+    recomputed[0, 0] = saved_out[0, 0] + 0.049 * saved_out[0, 0].abs()
+    assert _deep_numeric_replay_matches_saved(layer, recomputed) is False
+
+    # Genuine depth-scaled reorder noise (a few sqrt(depth)*eps) passes.
+    eps32 = torch.finfo(torch.float32).eps
+    noise_scale = 4.0 * (128.0**0.5) * eps32
+    noisy = saved_out * (1.0 + noise_scale * torch.empty_like(saved_out).uniform_(-1.0, 1.0))
+    assert _deep_numeric_replay_matches_saved(layer, noisy) is True
+
+
 def test_validation_with_getitem_tensor_index():
     model = _GetItemTensorIndex()
     x = torch.randn(5, 3)

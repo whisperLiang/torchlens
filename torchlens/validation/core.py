@@ -14,6 +14,7 @@ Exemption decisions (which ops to skip, which args are structural) are
 delegated to the registries in ``exemptions.py``.
 """
 
+import math
 from collections import Counter, defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -42,7 +43,12 @@ if TYPE_CHECKING:
 
 from ..utils.collections import assign_to_sequence_or_dict
 from ..utils.rng import execute_with_restored_rng_autocast
-from ..utils.tensor_utils import fp8_safe_comparison_pair, tensor_all_nan, tensor_nanequal
+from ..utils.tensor_utils import (
+    derive_float_tolerances,
+    fp8_safe_comparison_pair,
+    tensor_all_nan,
+    tensor_nanequal,
+)
 from .exemptions import (
     CUSTOM_EXEMPTION_CHECKS,
     SKIP_PERTURBATION_ENTIRELY,
@@ -406,6 +412,17 @@ _DIM_REDUCE_FUNCS = frozenset(
     }
 )
 
+# Band-C bounds are DERIVED per op from its measured reduction depth (see
+# _deep_numeric_replay_matches_saved); the literals below are absolute
+# CEILINGS the derived bounds can never exceed, preserving the historical
+# outer envelope. Error model: reordering a depth-D accumulation perturbs the
+# result by ~sqrt(D) * eps of the ACCUMULATION dtype (random-walk round-off),
+# relative to the magnitude of the accumulated terms; low-precision storage
+# adds a few ULPs of the storage dtype for the final rounding. The base lane
+# gets 16x that sqrt(D)*eps scale (worst-case constants above the random-walk
+# std), the outlier lane 128x. The former fixed literals admitted ~4-5%
+# corruption of single elements at ANY depth (probe: depth-128 reduction, one
+# element 1.049 vs 1.0 passed all three lanes).
 DEEP_NUMERIC_REPLAY_RTOL = 1e-3
 DEEP_NUMERIC_REPLAY_ATOL = 1e-4
 DEEP_NUMERIC_REPLAY_OUTLIER_RTOL = 5e-2
@@ -413,8 +430,71 @@ DEEP_NUMERIC_REPLAY_OUTLIER_ATOL = 1e-2
 DEEP_NUMERIC_REPLAY_MAX_OUTLIER_FRACTION = 1e-4
 DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF = 5e-2
 DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF = 1e-3
-GROUND_TRUTH_OUTPUT_RTOL = 1e-6
-GROUND_TRUTH_OUTPUT_ATOL = 1e-8
+DEEP_NUMERIC_REPLAY_BASE_SQRT_DEPTH_FACTOR = 16.0
+DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR = 128.0
+DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM = 4.0
+
+
+def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float, float]:
+    """Return derived ``(base_rel, outlier_rel, mean_rel)`` band-C bounds.
+
+    ``payload_dtype`` is the dtype actually compared (post-fp8-widening).
+    fp16/bf16 accumulate in fp32, fp64/complex128 in fp64; everything else in
+    fp32. Each bound is capped by its historical ceiling literal.
+    """
+
+    if payload_dtype in (torch.float64, torch.complex128):
+        acc_eps = float(torch.finfo(torch.float64).eps)
+    else:
+        acc_eps = float(torch.finfo(torch.float32).eps)
+    storage_eps = float(torch.finfo(payload_dtype).eps)
+    sqrt_depth = math.sqrt(max(depth, 1))
+    storage_term = DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM * storage_eps
+    base_rel = min(
+        DEEP_NUMERIC_REPLAY_BASE_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps + storage_term,
+        DEEP_NUMERIC_REPLAY_RTOL,
+    )
+    outlier_rel = min(
+        DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps
+        + 2.0 * storage_term,
+        DEEP_NUMERIC_REPLAY_OUTLIER_RTOL,
+    )
+    mean_rel = min(base_rel, DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF)
+    return base_rel, outlier_rel, mean_rel
+# Ground-truth output tolerances are DERIVED per dtype (ULP-denominated) via
+# tensor_utils.derive_float_tolerances, replacing the former dtype-blind
+# rtol=1e-6/atol=1e-8 literals: those were ~8 fp32 ULP (fine for fp32) but
+# 2.25e9 float64 ULPs (a materially wrong fp64 output passed) and ~1/7800 of a
+# bf16 ULP (a genuine one-ULP bf16 rounding difference false-FAILED).
+#
+# Headroom model: the direct forward and the logged forward run the same eager
+# kernels in the same process, so the only legitimate divergence is inter-run
+# multi-thread reduction-order drift -- measured ~3e-7 relative (~2.5 fp32 ULP)
+# on the spectral-GCN family (see _user_public_impls.py thread-pin notes; the
+# menagerie harness retries a strict failure once under num_threads=1, where
+# the comparison goes bit-exact). 8 ULP keeps the fp32 bar at its historical
+# ~1e-6 strength with ~3x headroom over that drift. fp16/bf16 forwards
+# accumulate in fp32 and round once to storage, so their drift is
+# storage-rounding dominated: 4 ULP of the storage dtype.
+_GROUND_TRUTH_ULP_HEADROOM: dict[torch.dtype, float] = {
+    torch.float16: 4.0,
+    torch.bfloat16: 4.0,
+    torch.float32: 8.0,
+    torch.float64: 8.0,
+}
+_GROUND_TRUTH_DEFAULT_ULP_HEADROOM = 8.0
+
+
+def _ground_truth_tolerances(dtype: torch.dtype) -> tuple[float, float]:
+    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``."""
+
+    headroom = _GROUND_TRUTH_ULP_HEADROOM.get(dtype, _GROUND_TRUTH_DEFAULT_ULP_HEADROOM)
+    try:
+        return derive_float_tolerances(dtype, headroom)
+    except (TypeError, ValueError):
+        # No finfo (non-float dtype): callers only reach the tolerance branch
+        # for floating payloads, but stay strict if one slips through.
+        return derive_float_tolerances(torch.float64, headroom)
 
 
 def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
@@ -704,8 +784,9 @@ def _ground_truth_output_matches_saved(
     """Return whether a saved model output matches the direct forward output.
 
     The direct output check is exact first. For floating-point outputs, it then
-    allows only sub-ULP wrapper noise, which covers models whose logged full
-    forward produces numerically equivalent logits that differ at ~1e-11 scale.
+    allows only a few ULPs of the output's own dtype (see
+    ``_GROUND_TRUTH_ULP_HEADROOM``), covering inter-run multi-thread
+    reduction-order drift between two clean forwards of the same model.
 
     Parameters
     ----------
@@ -718,7 +799,7 @@ def _ground_truth_output_matches_saved(
     -------
     bool
         True if the outputs are exactly equal or differ only by the tight
-        output-only floating-point tolerance.
+        dtype-derived output-only floating-point tolerance.
     """
     if tensor_nanequal(saved_output, ground_truth_output, allow_tolerance=False):
         return True
@@ -743,12 +824,13 @@ def _ground_truth_output_matches_saved(
             return False
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
         ground_truth_nonan = torch.nan_to_num(ground_truth_output, 0.7234691827346)
+        rtol, atol = _ground_truth_tolerances(saved_nonan.dtype)
         return bool(
             torch.allclose(
                 saved_nonan,
                 ground_truth_nonan,
-                rtol=GROUND_TRUTH_OUTPUT_RTOL,
-                atol=GROUND_TRUTH_OUTPUT_ATOL,
+                rtol=rtol,
+                atol=atol,
             )
         )
 
@@ -2925,19 +3007,36 @@ def _deep_numeric_replay_matches_saved(
         recomputed_nonan = torch.nan_to_num(recomputed_output, 0.7234691827346)
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
 
+        if recomputed_nonan.numel() == 0:
+            # Shapes already matched: two empty tensors are equal.
+            return True
+
+        # Derived bounds (see the constants block): relative bounds scale with
+        # sqrt(depth) * accumulation-dtype eps; the absolute terms scale that
+        # same relative bound by the TENSOR's magnitude (cancellation noise in
+        # a deep reduction is proportional to the accumulated terms' scale,
+        # not to the near-zero result it lands on), each capped by its
+        # historical ceiling literal.
+        base_rel, outlier_rel, mean_rel = _band_c_bounds(depth, recomputed_nonan.dtype)
+        out_scale = float(
+            torch.maximum(recomputed_nonan.abs().max(), saved_nonan.abs().max()).item()
+        )
+        base_atol = min(base_rel * out_scale, DEEP_NUMERIC_REPLAY_ATOL)
+        outlier_atol = min(outlier_rel * out_scale, DEEP_NUMERIC_REPLAY_OUTLIER_ATOL)
+
         if torch.allclose(
             recomputed_nonan,
             saved_nonan,
-            rtol=DEEP_NUMERIC_REPLAY_RTOL,
-            atol=DEEP_NUMERIC_REPLAY_ATOL,
+            rtol=base_rel,
+            atol=base_atol,
         ):
             return True
 
         close = torch.isclose(
             recomputed_nonan,
             saved_nonan,
-            rtol=DEEP_NUMERIC_REPLAY_OUTLIER_RTOL,
-            atol=DEEP_NUMERIC_REPLAY_OUTLIER_ATOL,
+            rtol=outlier_rel,
+            atol=outlier_atol,
         )
         outlier_fraction = (~close).sum().item() / close.numel()
         if outlier_fraction > DEEP_NUMERIC_REPLAY_MAX_OUTLIER_FRACTION:
@@ -2947,8 +3046,8 @@ def _deep_numeric_replay_matches_saved(
         scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs()) + 1e-12
         scaled_diff = diff / scale
         return bool(
-            scaled_diff.max().item() <= DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF
-            and scaled_diff.mean().item() <= DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF
+            scaled_diff.max().item() <= min(outlier_rel, DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF)
+            and scaled_diff.mean().item() <= mean_rel
         )
 
 

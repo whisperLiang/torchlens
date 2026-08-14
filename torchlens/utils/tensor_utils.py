@@ -31,23 +31,92 @@ from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
 
 SaveMode = Literal["copy", "reference", "view", "cpu_async"]
 
-# Maximum absolute tolerance for floating-point comparison in tensor_nanequal.
-# Used by validation replay to allow tiny numerical differences caused by
-# non-deterministic GPU reductions or float16 rounding.  Set conservatively
-# tight to catch genuine mismatches while tolerating hardware noise.
-MAX_FLOATING_POINT_TOLERANCE = 1e-5
+# Replay comparison tolerances are DERIVED from each dtype's machine epsilon
+# rather than spelled as decimal literals, so every dtype gets the same
+# strictness measured in its own ULPs.  Error model for a faithful replay of
+# one op (same kernel family, same device, possibly different accumulation
+# order / thread count):
+#
+# * fp32 / fp64 payloads accumulate in their own precision; reduction-order
+#   round-off for the shallow (< band-C-depth) ops this tolerance covers is a
+#   small multiple of eps, so the headroom is 512 ULP (~6e-5 relative for
+#   fp32, a mild tightening of the former 1e-4 literal's ~840 ULP) -- far
+#   below any real corruption (a sign flip, a zeroed value, a stale buffer
+#   all read as many thousands of ULPs) while comfortably above observed
+#   reorder noise (~4 ULP on eval MHA, see _runnable_path_faithfulness.py).
+# * fp16 / bf16 payloads accumulate in fp32 and round ONCE to storage, so the
+#   replay difference is storage-rounding dominated: a few ULPs of the
+#   storage dtype. Headroom 4 ULP.
+#
+# The absolute term exists ONLY to absorb jitter at the very bottom of the
+# representable range (denormal quanta): it is the same ULP headroom applied
+# to the smallest subnormal step (finfo.tiny * eps).  The former decimal
+# atol floors (1e-3 fp16 / 1e-2 bf16 / 1e-5 fp32+fp64) silently blessed
+# TOTAL corruption of every element below the floor -- post-softmax and
+# post-norm bf16 activations live almost entirely below 1e-2 -- and are gone.
+_LOW_PRECISION_REPLAY_ULP_HEADROOM = 4.0
+_ACCUMULATING_REPLAY_ULP_HEADROOM = 512.0
 
-# Maximum relative tolerance for floating-point comparison in tensor_nanequal.
-# Deep convolution replays can differ by a few ULPs above the absolute floor
-# while still matching the saved operation numerically.
-REL_FLOATING_POINT_TOLERANCE = 1e-4
+_REPLAY_ULP_HEADROOM: dict[torch.dtype, float] = {
+    torch.float16: _LOW_PRECISION_REPLAY_ULP_HEADROOM,
+    torch.bfloat16: _LOW_PRECISION_REPLAY_ULP_HEADROOM,
+    torch.float32: _ACCUMULATING_REPLAY_ULP_HEADROOM,
+    torch.float64: _ACCUMULATING_REPLAY_ULP_HEADROOM,
+}
+
+
+def derive_float_tolerances(dtype: torch.dtype, ulp_headroom: float) -> tuple[float, float]:
+    """Derive an ``(rtol, atol)`` pair from a dtype's finfo and a ULP budget.
+
+    ``rtol`` is ``ulp_headroom`` machine epsilons; ``atol`` is the same
+    headroom applied to the dtype's smallest subnormal step
+    (``finfo.tiny * finfo.eps``), i.e. it forgives jitter only at the very
+    bottom of the representable range and never blesses corruption of small
+    normal values.  Complex dtypes derive from their component real dtype
+    (``torch.finfo`` already reports component precision for complex).
+    """
+
+    finfo = torch.finfo(dtype)
+    rtol = ulp_headroom * float(finfo.eps)
+    atol = ulp_headroom * float(finfo.tiny) * float(finfo.eps)
+    return rtol, atol
+
 
 _DTYPE_FLOAT_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
-    torch.float16: (1e-3, 1e-3),
-    torch.bfloat16: (1e-2, 1e-2),
-    torch.float32: (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
-    torch.float64: (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
+    dtype: derive_float_tolerances(dtype, headroom)
+    for dtype, headroom in _REPLAY_ULP_HEADROOM.items()
 }
+
+# Legacy names, kept because they are exported through the torchlens.utils
+# facade.  They now expose the DERIVED fp32 replay row instead of the former
+# hand-picked literals (rtol 1e-4 was ~840 fp32 ULP; atol 1e-5 blessed total
+# corruption of every element below 1e-5).
+REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE = _DTYPE_FLOAT_TOLERANCES[
+    torch.float32
+]
+
+# Gradient-validation tolerance pairs, spelled ONCE here (formerly bare
+# literals repeated across validation/backward.py, validation/consolidated.py,
+# validation/_layer_grad_report.py, and receptive_field/__init__.py, where two
+# backward checks of the same capture disagreed 10x with no error model).
+#
+# Error model (fp32 gradients, the overwhelmingly common case):
+# * PARAMETER grads are REDUCTIONS -- autograd sums each parameter's
+#   contribution over the batch and every spatial/sequence position, so the
+#   candidate-vs-stock difference carries accumulation-order round-off
+#   proportional to that depth. rtol 1e-4 (~840 fp32 ULP) with a small
+#   absolute floor for near-zero grads.
+# * LAYER (module-output) grads and receptive-field empirical-adjoint probes
+#   are compared ELEMENTWISE -- each element is one chain-rule product with no
+#   cross-element reduction between the two pipelines under comparison, so
+#   they earn a 10x tighter pair: rtol 1e-5, atol 1e-6.
+# NaN handling at every consumer follows tensor_nanequal's doctrine: identical
+# NaN patterns compare EQUAL (``equal_nan=True``), so a correct NaN-bearing
+# gradient can never false-FAIL, while NaN-vs-number still fails.
+PARAM_GRAD_VALIDATION_RTOL = 1e-4
+PARAM_GRAD_VALIDATION_ATOL = 1e-5
+LAYER_GRAD_VALIDATION_RTOL = 1e-5
+LAYER_GRAD_VALIDATION_ATOL = 1e-6
 
 # Cached result of torch.cuda.is_available().  Evaluated once per process
 # because CUDA availability cannot change at runtime.  Avoids repeated
@@ -112,6 +181,13 @@ def _is_cuda_initialized() -> bool:
 def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
     """Return replay comparison tolerances for ``dtype``.
 
+    Rows are derived from ``torch.finfo(dtype).eps`` (see the error model on
+    ``_REPLAY_ULP_HEADROOM``).  A float or complex dtype outside the
+    precomputed table (e.g. ``complex64``, or a future torch float format)
+    derives its own row at the accumulating headroom instead of inheriting
+    another dtype's literals -- inheriting fp32's decimal row is exactly how
+    float64 used to get an rtol worth 4.5e11 of its own ULPs.
+
     Parameters
     ----------
     dtype:
@@ -123,10 +199,17 @@ def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
         ``(rtol, atol)`` pair for ``torch.allclose``.
     """
 
-    return _DTYPE_FLOAT_TOLERANCES.get(
-        dtype,
-        (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
-    )
+    cached = _DTYPE_FLOAT_TOLERANCES.get(dtype)
+    if cached is not None:
+        return cached
+    try:
+        derived = derive_float_tolerances(dtype, _ACCUMULATING_REPLAY_ULP_HEADROOM)
+    except (TypeError, ValueError):
+        # Non-float dtype (no finfo): exact comparison paths handle these;
+        # return the strictest float row so a misrouted call stays strict.
+        derived = _DTYPE_FLOAT_TOLERANCES[torch.float64]
+    _DTYPE_FLOAT_TOLERANCES[dtype] = derived
+    return derived
 
 
 def _is_fp8_tensor(tensor: torch.Tensor) -> bool:
@@ -304,9 +387,9 @@ def tensor_nanequal(
     Args:
         tensor_a: First tensor.
         tensor_b: Second tensor.
-        allow_tolerance: If True, allow element-wise differences up to
-            :data:`MAX_FLOATING_POINT_TOLERANCE` (for floating-point
-            non-determinism on GPU).
+        allow_tolerance: If True, allow element-wise differences within the
+            dtype-derived ULP band from :func:`_tolerances_for_dtype` (for
+            floating-point non-determinism on GPU).
 
     Returns:
         True if the tensors are considered equal.
@@ -394,9 +477,10 @@ def tensor_nanequal(
         if allow_tolerance and (payload_dtype.is_floating_point or payload_dtype.is_complex):
             rtol, atol = _tolerances_for_dtype(payload_dtype)
             if original_dtype in get_fp8_dtypes():
-                # Widening is exact, but float32's absolute floor (1e-5) is larger
-                # than adjacent subnormal values in e5m2fnuz/e8m0fnu. An absolute
-                # tolerance would therefore bless a genuine one-ULP divergence.
+                # Widening is exact, but even a denormal-scale float32 absolute
+                # term is measured against the WRONG dtype here: adjacent
+                # subnormal values in e5m2fnuz/e8m0fnu sit far above float32's
+                # bottom-of-range quanta, so keep the fp8 comparison rtol-only.
                 atol = 0.0
             if torch.allclose(tensor_a_nonan, tensor_b_nonan, rtol=rtol, atol=atol):
                 return True
