@@ -302,9 +302,6 @@ BARE_JSON_READ_LEDGER = {
     # PERMANENT: reads a first-party file shipped inside the wheel
     # (torchlens/autoroute/data/imagenet1k_labels.json), not an artifact boundary.
     "autoroute/_builtin_output.py": "package-shipped label table, not untrusted input",
-    # PENDING: a fastlog bundle IS an untrusted on-disk artifact, but fastlog/ is
-    # outside the artifact-boundary lane's write territory (r58 A3f residual).
-    "fastlog/recover.py": "untrusted fastlog bundle; owned by another lane",
 }
 
 

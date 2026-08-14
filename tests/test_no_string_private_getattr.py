@@ -76,7 +76,11 @@ _FAIL_CLOSED_PACKAGES = frozenset({"merged", "distributed"})
 #: ``_rank_raw_to_final_op_labels``: direct private read, absence typed) or
 #: with a public accessor, then lower the count here.
 _TRACE_REACHIN_LEDGER: dict[str, int] = {
-    "<root>": 14,
+    # 14 -> 15 (2026-08-14 fix-wave reconcile, f2bc65a6 fix/interv F2): the
+    # live-refresh run report reads the optional `_runnable` seam in
+    # _runnable_transaction.py; absent on non-runnable traces, so the None
+    # default is the correct "no runnable seam" reading.
+    "<root>": 15,
     "_io": 24,
     "autoroute": 2,
     "backends/jax": 7,
@@ -88,11 +92,19 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # ops.py/completeness_witness.py file splits nets +1, dominated by the
     # intended safetynet stage-2 rescue path (rescue.py) and backward-projection
     # additions against removed `_layer_counter` reads.
-    "backends/torch": 112,
+    # 112 -> 114 (2026-08-14 fix-wave reconcile, 6d5fdf64 fix/bwgrad): the
+    # op-gradient budget charge reads the optional session-time
+    # `_save_budget_accountant` in tensor_tracking.py (x2), the same idiom as
+    # the pre-existing _ops_retention.py reads of the same field.
+    "backends/torch": 114,
     "bridge": 1,
     "bundle": 1,
     "capture": 20,
-    "data_classes": 25,
+    # 25 -> 27 (2026-08-14 fix-wave reconcile, 7f90a885 fix/walkers): the
+    # linear ordinal_index cache keys its per-trace memo on the session-time
+    # `_backward_projection_revision` counter in grad_fn_call.py (x2); absent
+    # on loaded traces, so the None default is the correct reading.
+    "data_classes": 27,
     "experimental": 1,
     "fastlog": 2,
     "intervention": 43,
@@ -111,7 +123,9 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
     # consolidation into _render_dot.py) against removed `_raw_layer_dict` /
     # _render_nodes.py sites.
-    "visualization": 23,
+    # 23 -> 22 (2026-08-14 fix-wave reconcile, fix/vizr2 2d1371ac): one
+    # reach-in discharged with the imagepath-out-of-saved-DOT rework.
+    "visualization": 22,
     # 2 -> 1 (2026-08-14 fixwave-2 reconcile): one reach-in discharged upstream.
     "viz": 1,
 }

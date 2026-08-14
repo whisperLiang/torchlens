@@ -62,11 +62,6 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     "torchlens/backends/torch/completeness_witness.py": frozenset(
         {"from torch.utils._python_dispatch", "import torch._ops"}
     ),
-    # Guarded getattr probes with explicit degraded fallbacks: graph-task-id
-    # attribution returns None (capability absent, callers degrade typed).
-    "torchlens/backends/torch/tensor_tracking.py": frozenset(
-        {"torch._C", "getattr(torch._C, '_current_graph_task_id')"}
-    ),
     # Expanded-weights identity shim (SF-53 census): the conv/RNN per-sample-grad
     # picker compares the dispatched func against torch's OWN
     # ``_cudnn_rnn_flatten_weight`` symbol, so the shim must read that exact private

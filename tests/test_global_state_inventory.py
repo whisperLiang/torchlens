@@ -111,6 +111,16 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         # popped by the shim uninstall, so it is install bookkeeping, not capture
         # state.
         ("torchlens/backends/torch/identity_shims.py", "_installed"),
+        # Meta-path finder handle for the lazy causal-bias shim (fix/rescue
+        # dcd0ca9c): installed once so a post-wrap `import transformers` still
+        # gets the shim, removed by the shim uninstall alongside _installed.
+        ("torchlens/backends/torch/identity_shims.py", "_import_hook"),
+        # First-read source digests for conditional/source attribution (deep-hunt
+        # C4, fix/postproc 7a58a021). Deliberately NOT a _PROCESS_CACHES row:
+        # clearing it is not correctness-neutral (the pin is the fail-closed
+        # baseline that a rebuilt _file_cache entry must match), so it survives
+        # LRU eviction and is cleared only by explicit invalidate_cache().
+        ("torchlens/postprocess/ast_branches.py", "_pinned_source_digests"),
         ("torchlens/backends/torch/wrappers.py", "_DEVICE_CONSTRUCTOR_NAMES"),
         ("torchlens/backends/torch/wrappers.py", "_DeviceContext"),
         # One-way "decorate_all_once() ran to COMPLETION" sentinel; deliberately
@@ -144,6 +154,9 @@ _WARN_ONCE_STATE = frozenset(
         ("torchlens/data_classes/op.py", "_WARNED_REFERENCE_SAVE_MODE"),
         ("torchlens/distributed/_lifecycle.py", "_AUTO_ARM_WARNED"),
         ("torchlens/fastlog/_storage_resolver.py", "_WARNED_REFERENCE_SAVE_MODE"),
+        # Once-per-file source-drift disclosure for the C4 pinned-digest refusal
+        # (fix/postproc 7a58a021); reset row lives in tests/conftest.py.
+        ("torchlens/postprocess/ast_branches.py", "_source_drift_warned"),
         ("torchlens/utils/_torch_compat.py", "_warned_missing_capabilities"),
         ("torchlens/utils/introspection.py", "_col_offset_cache_warned"),
         ("torchlens/validation/_stock_layer_grads.py", "_PASS_INDEX_PARSE_WARNED"),
@@ -302,6 +315,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
+        # Per-trace grad_fn-call ordinal index (fix/walkers f399c63a, linear
+        # ordinal_index): keyed weakly by the owning trace, dies with it.
+        ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -343,6 +359,10 @@ they carry an epoch/version counter where downstream caches must invalidate.
 
 _PROCESS_CACHES = frozenset(
     {
+        # Write-once memo of the CPython tuplegetter descriptor type, probed
+        # for the property-shadowed-namedtuple walkers (fix/walkers f399c63a);
+        # holds only a builtin type, re-derivable at any time.
+        ("torchlens/_input_walk.py", "_TUPLEGETTER_TYPE_CACHE"),
         ("torchlens/_input_walk.py", "_STOCK_NP_SCALAR_CACHE"),
         ("torchlens/_io/bundle.py", "_NESTED_BLOB_KINDS"),
         ("torchlens/_io/payload_codec.py", "_CODECS"),
@@ -833,6 +853,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
+        ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
