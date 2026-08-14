@@ -341,16 +341,30 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
     raw_labels = tuple(self._raw_graph_ws.raw_layer_labels_list)
     raw_label_set = set(raw_labels)
     effective_equivalence = _differentiated_param_equivalence_classes(self)
-    equivalent_labels_memo: dict[int, tuple[Any, tuple[str, ...]]] = {}
+    equivalent_labels_memo: dict[tuple[int, str], tuple[Any, tuple[str, ...]]] = {}
     recurrent_labels_memo: dict[int, tuple[Any, tuple[str, ...]]] = {}
 
     for label in raw_labels:
         node = self[label]
+        effective_key = effective_equivalence.get(label, node.equivalence_class)
         raw_equivalent_labels = node._slot("equivalent_ops")
-        equivalent_labels_cached = equivalent_labels_memo.get(id(raw_equivalent_labels))
+        # ``equivalent_labels`` must agree with ``equivalence_key``: the argsig
+        # split subdivides a capture-time equivalence class, and passing the
+        # UNSPLIT membership let every split key seed isomorphic expansion from
+        # ALL original class members -- foreign-argsig subgraphs contributed
+        # adjacency/param evidence and each split key re-ran a full expansion
+        # over the same mixed seed set (deep-hunt L2). Members of one
+        # capture-time class share ``equivalence_class`` by construction, so a
+        # member's effective key defaults to this node's raw class.
+        memo_key = (id(raw_equivalent_labels), effective_key)
+        equivalent_labels_cached = equivalent_labels_memo.get(memo_key)
         if equivalent_labels_cached is None:
-            equivalent_labels = tuple(raw_equivalent_labels)
-            equivalent_labels_memo[id(raw_equivalent_labels)] = (
+            equivalent_labels = tuple(
+                member
+                for member in raw_equivalent_labels
+                if effective_equivalence.get(member, node.equivalence_class) == effective_key
+            )
+            equivalent_labels_memo[memo_key] = (
                 raw_equivalent_labels,
                 equivalent_labels,
             )
@@ -373,7 +387,7 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
         nodes[label] = RecurrenceNode(
             label=label,
             raw_order=node.raw_index,
-            equivalence_key=effective_equivalence.get(label, node.equivalence_class),
+            equivalence_key=effective_key,
             equivalent_labels=equivalent_labels,
             data_parents=tuple(parent for parent in node.parents if parent in raw_label_set),
             data_children=tuple(child for child in node.children if child in raw_label_set),

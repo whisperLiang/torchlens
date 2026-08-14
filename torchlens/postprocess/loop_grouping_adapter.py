@@ -53,7 +53,11 @@ class RecurrenceNode:
         Backend-provided structural key used for isomorphic matching.
     equivalent_labels:
         Backend-provided candidate labels considered equivalent enough to seed
-        an expansion round. Torch supplies its existing ``equivalent_ops`` set.
+        an expansion round. Torch supplies its existing ``equivalent_ops`` set,
+        filtered to members sharing this node's ``equivalence_key``: when a
+        backend subdivides a raw equivalence class (torch's argsig split), the
+        membership here must agree with the split, or foreign-key members seed
+        cross-contaminated isomorphic expansions (deep-hunt L2).
     data_parents:
         Parent labels connected by value/data edges only.
     data_children:

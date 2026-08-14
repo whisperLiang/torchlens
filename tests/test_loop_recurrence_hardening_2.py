@@ -485,3 +485,47 @@ def test_arg_signature_mixed_key_dict_is_order_and_address_free() -> None:
     )
 
     assert _structural_arg_signature(first) == _structural_arg_signature(second)
+
+
+# ---------------------------------------------------------------------------
+# Deep-hunt L2: the argsig split must propagate into equivalent_labels
+# ---------------------------------------------------------------------------
+
+
+def test_grouping_graph_equivalent_labels_respect_argsig_split(monkeypatch) -> None:
+    """The neutral feed never hands a split node its unsplit class as seeds.
+
+    Deep-hunt L2: ``equivalence_key`` was overridden with the argsig-split key
+    while ``equivalent_labels`` still carried the UNSPLIT capture-time class,
+    so ``_expand_isomorphic_subgraphs`` seeded every split key's expansion from
+    ALL original members -- foreign-argsig subgraphs contributed adjacency and
+    parameter evidence, and each split key re-ran a full expansion over the
+    same mixed seed set. The neutral contract requires every member of a
+    node's ``equivalent_labels`` to share that node's ``equivalence_key``.
+    """
+    import torchlens.postprocess.loop_detection as loop_detection
+
+    captured: dict[str, object] = {}
+    real_group = loop_detection.group_recurrent_nodes
+
+    def _spy(graph):
+        captured["graph"] = graph
+        return real_group(graph)
+
+    monkeypatch.setattr(loop_detection, "group_recurrent_nodes", _spy)
+    torch.manual_seed(0)
+    trace_fn(_SharedKernelConvs("padding"), torch.randn(1, 1, 8, 8))
+
+    graph = captured["graph"]
+    conv_nodes = [
+        node for node in graph.nodes.values() if node.func_name == "conv2d" and node.uses_params
+    ]
+    assert len(conv_nodes) == 2
+    assert conv_nodes[0].equivalence_key != conv_nodes[1].equivalence_key
+
+    for node in graph.nodes.values():
+        for member in node.equivalent_labels:
+            assert graph.nodes[member].equivalence_key == node.equivalence_key, (
+                f"{node.label} carries foreign-key seed {member}: "
+                f"{graph.nodes[member].equivalence_key} != {node.equivalence_key}"
+            )
