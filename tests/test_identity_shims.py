@@ -219,6 +219,47 @@ class TestExpandedWeightsDispatch:
         assert result is None
 
 
+class TestDisclosedResiduals:
+    def test_pickle_while_wrapped_residual_shape(self):
+        # DISCLOSED RESIDUAL (same namespace-identity root, USER-side check):
+        # pickle's save_global identity-compares a stored original function
+        # against the (wrapped) namespace read, so pickling a module holding
+        # F.relu fails WHILE wrappers are installed. Pre-existing before the
+        # identity shims (default-constructed and pre-wrap-constructed layers
+        # always stored the original); fixing it would require restoring the
+        # namespace between captures -- a wrapper-lifecycle design change, not
+        # a shim. unwrap_torch() or a fresh process pickles fine. This test
+        # pins the residual's shape so a silent change gets noticed.
+        import io
+        import pickle
+
+        if not _flag("HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG"):
+            pytest.skip("no transformer fastpath flag on this torch build")
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        assert layer.activation is _resolve(F.relu)
+        with pytest.raises(pickle.PicklingError, match="relu"):
+            pickle.dump(layer, io.BytesIO())
+
+    def test_pickle_after_unwrap_succeeds(self):
+        import io
+        import pickle
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        if not _flag("HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG"):
+            pytest.skip("no transformer fastpath flag on this torch build")
+        _ensure_wrapped()
+        layer = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+        try:
+            unwrap_torch()
+            buffer = io.BytesIO()
+            pickle.dump(layer, buffer)
+            assert buffer.getvalue()
+        finally:
+            wrap_torch()
+
+
 class TestShimLifecycle:
     def test_shims_removed_on_unwrap_and_reinstalled_on_wrap(self):
         from torchlens.backends.torch import identity_shims
