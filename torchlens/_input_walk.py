@@ -880,6 +880,57 @@ def instance_state_names(value: Any) -> frozenset[str]:
     return inspect_instance_state(value).names
 
 
+def _stock_tuplegetter_type() -> type:
+    """The stock namedtuple field-descriptor class, resolved from a probe.
+
+    ``collections.namedtuple`` binds every declared field to a
+    ``_collections._tuplegetter`` reading the field's own tuple position.
+    Resolved by probing rather than importing the private module so a
+    hypothetical pure-Python fallback still compares against THE class stock
+    namedtuples actually use.
+    """
+
+    global _TUPLEGETTER_TYPE_CACHE
+    if _TUPLEGETTER_TYPE_CACHE is None:
+        import collections as _collections
+
+        _TUPLEGETTER_TYPE_CACHE = type(_collections.namedtuple("_TlDescriptorProbe", "x").x)
+    return _TUPLEGETTER_TYPE_CACHE
+
+
+_TUPLEGETTER_TYPE_CACHE: type | None = None
+
+
+def _namedtuple_field_descriptors_shadowed(value: Any) -> bool:
+    """Return whether any declared namedtuple field's descriptor is non-stock (T11.1).
+
+    Mirrors the slots rule: each declared field must resolve (raw MRO, never
+    ``getattr``) to the stock ``_tuplegetter`` bound to that field's OWN tuple
+    index. A ``property`` (or any other descriptor) shadowing a declared field
+    bypassed the declared-schema proof entirely: ``getattr`` in every walker
+    read the property's DECOY while the hidden physical slot steered forward
+    control flow via ``tuple.__getitem__`` -- physical arity matched, no
+    instance state existed, no hook was overridden, so no net fired and the
+    recorded path replayed VERIFIED against the decoy. A transposed stock
+    getter (bound to a different index) is refused for the same reason: the
+    witnessed field order would diverge from the physical layout replay
+    reconstructs.
+    """
+
+    getter_type = _stock_tuplegetter_type()
+    for index, name in enumerate(_instance_fields(value)):
+        descriptor = _raw_mro_attr(value, name)
+        if type(descriptor) is not getter_type:
+            return True
+        try:
+            bound_index = descriptor.__reduce__()[1][0]
+        except Exception:
+            return True
+        if bound_index != index:
+            return True
+    return False
+
+
 def _declared_schema_uninspectable(value: Any) -> bool:
     """Return whether a custom attribute hook blinds the declared-field proof (r71 C).
 
@@ -888,7 +939,10 @@ def _declared_schema_uninspectable(value: Any) -> bool:
     inertly prove field completeness WITHOUT invoking the untrusted hook. Raw-MRO
     resolution observes the hooks without executing them; any override short-circuits
     to uninspectable BEFORE any declared-field read. Namedtuples pass by default
-    (``tuple`` does not override ``__getattribute__`` and declares no ``__getattr__``).
+    (``tuple`` does not override ``__getattribute__`` and declares no ``__getattr__``)
+    but every declared field must additionally resolve to the stock positional
+    ``_tuplegetter`` (:func:`_namedtuple_field_descriptors_shadowed`, T11.1) --
+    a property-shadowed field reads a decoy no other net can catch.
     """
 
     import types as _types
@@ -914,7 +968,12 @@ def _declared_schema_uninspectable(value: Any) -> bool:
             return True
     # ``object`` / ``tuple`` declare NO ``__getattr__``, so any MRO ``__getattr__`` is
     # a user-added hook that can compute or hide declared-field values.
-    return any("__getattr__" in cls.__dict__ for cls in type(value).__mro__)
+    if any("__getattr__" in cls.__dict__ for cls in type(value).__mro__):
+        return True
+    # T11.1: a declared namedtuple field whose winning descriptor is not the stock
+    # positional ``_tuplegetter`` executes user code on every field read and can
+    # present a decoy over hidden positional state -- fail closed before any read.
+    return declares_namedtuple_fields(value) and _namedtuple_field_descriptors_shadowed(value)
 
 
 def undeclared_instance_state(value: Any, kind: str) -> bool:
