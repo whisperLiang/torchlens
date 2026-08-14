@@ -92,8 +92,8 @@ class _ProbeSubTensor(torch.Tensor):
 def _from_file_args() -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Build args/kwargs for the ``torch.from_file`` probe, backed by a temp file.
 
-    The temp file is deliberately left on disk: the probe's tensor may share its
-    storage, so unlinking it here would invalidate the probe.
+    The caller removes the temporary path after the probe call. ``shared=False``
+    means the returned tensor does not require the pathname to remain present.
     """
 
     array = np.array([0.25, 0.5], dtype=np.float32)
@@ -146,6 +146,12 @@ _member_map: dict[int, Any] | None = None
 
 _swept_module_ids: dict[int, Callable[[], Any | None]] = {}
 """Module identities already swept this wrapper epoch (weak where possible)."""
+
+_swept_sys_modules_size = -1
+"""``len(sys.modules)`` at the last complete belt sweep."""
+
+_swept_modules_dirty = False
+"""Whether a previously swept weak module reference has died."""
 
 _ledger: list[tuple[Callable[[], Any | None], str, Any, Any]] = []
 """(module_ref, attr_name, original, replacement) reversal entries."""
@@ -206,14 +212,23 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
             unprobed += 1
             continue
         mode = _CountingMode()
+        cleanup_path: str | None = None
         try:
             with _state.pause_logging():
                 args, kwargs = recipe()
+                if (namespace_name, func_name) == ("torch", "from_file"):
+                    cleanup_path = str(args[0])
                 with mode:
                     result = original(*args, **kwargs)
         except Exception:
             probe_failures.append((namespace_name, func_name))
             continue
+        finally:
+            if cleanup_path is not None:
+                try:
+                    os.unlink(cleanup_path)
+                except FileNotFoundError:
+                    pass
         if mode.calls:
             probed_visible.append((namespace_name, func_name))
             continue
@@ -279,6 +294,23 @@ def _weak_module_ref(module: types.ModuleType) -> Callable[[], Any | None]:
         return lambda: module
 
 
+def _weak_swept_module_ref(
+    module: types.ModuleType,
+) -> Callable[[], Any | None]:
+    """Return a module reference that invalidates the sweep watermark on collection."""
+
+    def _mark_sweep_dirty(_reference: weakref.ReferenceType[types.ModuleType]) -> None:
+        """Mark the module inventory dirty after a swept module is collected."""
+
+        global _swept_modules_dirty
+        _swept_modules_dirty = True
+
+    try:
+        return weakref.ref(module, _mark_sweep_dirty)
+    except TypeError:
+        return lambda: module
+
+
 def sweep_stale_belt_references() -> int:
     """Patch stale module-level references to belt members, with a ledger.
 
@@ -294,16 +326,20 @@ def sweep_stale_belt_references() -> int:
         Number of slots patched by this sweep.
     """
 
+    global _swept_modules_dirty, _swept_sys_modules_size
     report = belt_report()
     if report is None or _member_map is None or not _member_map:
+        return 0
+    if len(sys.modules) == _swept_sys_modules_size and not _swept_modules_dirty:
         return 0
     patched = 0
     for mod_key, module in list(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
             continue
-        if id(module) in _swept_module_ids:
+        previous_ref = _swept_module_ids.get(id(module))
+        if previous_ref is not None and previous_ref() is module:
             continue
-        _swept_module_ids[id(module)] = _weak_module_ref(module)
+        _swept_module_ids[id(module)] = _weak_swept_module_ref(module)
         if mod_key.startswith(_SKIP_MODULE_PREFIXES) or ".dist-info" in mod_key:
             continue
         try:
@@ -322,6 +358,8 @@ def sweep_stale_belt_references() -> int:
                 continue
             _ledger.append((_weak_module_ref(module), attr_name, attr_val, replacement))
             patched += 1
+    _swept_sys_modules_size = len(sys.modules)
+    _swept_modules_dirty = False
     return patched
 
 
@@ -332,6 +370,7 @@ def restore_belt_references() -> None:
     installed; user reassignments made after the sweep are preserved.
     """
 
+    global _swept_modules_dirty, _swept_sys_modules_size
     for module_ref, attr_name, original, replacement in reversed(_ledger):
         module = module_ref()
         if module is None:
@@ -344,3 +383,5 @@ def restore_belt_references() -> None:
             continue
     _ledger.clear()
     _swept_module_ids.clear()
+    _swept_sys_modules_size = -1
+    _swept_modules_dirty = False

@@ -857,6 +857,7 @@ def _fix_buffer_layers(self: Trace) -> None:
     # Merge buffers with the same hash AND the same tensor value.
     # Buffers sharing the same hash but different values are kept as separate
     # unique buffers (the for/else clause appends unmatched buffers to unique_buffers).
+    deferred_buffer_removals: dict[str, tuple[Op, Op]] = {}
     for _, buffers_orig in buffer_hash_groups.items():
         buffers = buffers_orig[1:]
         unique_buffers = buffers_orig[:1]
@@ -869,11 +870,18 @@ def _fix_buffer_layers(self: Trace) -> None:
                     and (unique_buffer.out is not None)
                     and (torch.equal(buffer.out, unique_buffer.out))
                 ):
-                    _merge_buffer_entries(self, unique_buffer, buffer)
+                    _merge_buffer_entries(
+                        self,
+                        unique_buffer,
+                        buffer,
+                        deferred_removals=deferred_buffer_removals,
+                    )
                     rewired_buffers.append(unique_buffer._label_raw)
                     break
             else:
                 unique_buffers.append(buffer_label)
+
+    _finish_deferred_buffer_removals(self, deferred_buffer_removals)
 
     _repropagate_ancestry_after_buffer_wiring(self, rewired_buffers)
 
@@ -969,7 +977,13 @@ def _buffer_source_value_matches(source: Op, buffer_layer: Op) -> bool:
             return False
 
 
-def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) -> None:
+def _merge_buffer_entries(
+    self: Trace,
+    source_buffer: Op,
+    buffer_to_remove: Op,
+    *,
+    deferred_removals: dict[str, tuple[Op, Op]] | None = None,
+) -> None:
     """Merge a duplicate buffer into a source buffer, rewiring all edges.
 
     Transfers all child and parent connections from ``buffer_to_remove`` to
@@ -1025,6 +1039,10 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
         if parent_layer not in source_buffer.internal_source_parents:
             source_buffer.internal_source_parents.append(parent_layer)
 
+    if deferred_removals is not None:
+        deferred_removals[buffer_to_remove._label_raw] = (source_buffer, buffer_to_remove)
+        return
+
     self._raw_graph_ws.raw_layer_labels_list.remove(buffer_to_remove._label_raw)
     self._raw_graph_ws.raw_layer_dict.pop(buffer_to_remove._label_raw)
 
@@ -1049,3 +1067,56 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
                 arg_positions[0] = source_buffer._label_raw
 
     self._remove_log_entry(buffer_to_remove, remove_references=True)
+
+
+def _finish_deferred_buffer_removals(
+    self: Trace,
+    removals: dict[str, tuple[Op, Op]],
+) -> None:
+    """Apply all trace-wide buffer substitutions in one graph scan.
+
+    Parameters
+    ----------
+    self:
+        Trace whose duplicate buffers were locally rewired.
+    removals:
+        Removed raw label to ``(survivor, removed op)`` mapping.
+    """
+
+    if not removals:
+        return
+    replacement_labels = {
+        removed_label: source._label_raw
+        for removed_label, (source, _removed) in removals.items()
+    }
+    removed_labels = set(removals)
+    for layer in self:
+        root_hits = layer.root_ancestors & removed_labels
+        if root_hits:
+            layer.root_ancestors.difference_update(root_hits)
+            layer.root_ancestors.update(replacement_labels[label] for label in root_hits)
+        source_hits = layer.internal_source_ancestors & removed_labels
+        if source_hits:
+            layer.internal_source_ancestors.difference_update(source_hits)
+            layer.internal_source_ancestors.update(
+                replacement_labels[label] for label in source_hits
+            )
+        replacement = replacement_labels.get(layer.buffer_source)
+        if replacement is not None:
+            old_source = layer.buffer_source
+            layer.buffer_source = replacement
+            arg_positions = layer.parent_arg_positions.get("args")
+            if arg_positions is not None and arg_positions.get(0) == old_source:
+                arg_positions[0] = replacement
+
+    self._raw_graph_ws.raw_layer_labels_list[:] = [
+        label
+        for label in self._raw_graph_ws.raw_layer_labels_list
+        if label not in removed_labels
+    ]
+    for removed_label in removed_labels:
+        self._raw_graph_ws.raw_layer_dict.pop(removed_label, None)
+    self._batch_remove_log_entries(
+        (removed for _source, removed in removals.values()),
+        remove_references=True,
+    )

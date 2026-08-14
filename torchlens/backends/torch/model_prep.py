@@ -77,9 +77,13 @@ from .sources import log_source_tensor
 from .tensor_tracking import _append_module_suffix_to_equivalence_class
 
 # Cache class-level module metadata (inspect.getsourcelines, inspect.signature, etc.)
-# shared across instances of the same class type. Cleared at the start of each
-# session in _prepare_model_session to avoid stale data from reloaded modules.
+# shared across instances during one capture. Cleanup releases it at the end of
+# the session; the next capture rebuilds from the current class definitions.
 _module_class_metadata_cache: dict[type, dict[str, Any]] = {}
+_module_namespace_container_slots: weakref.WeakKeyDictionary[
+    ModuleType,
+    tuple[int, tuple[str, ...]],
+] = weakref.WeakKeyDictionary()
 
 # Process-stable memo for source start lines. ``inspect.findsource`` re-tokenizes
 # (functions) or fully AST-parses (classes, CPython < 3.13) the defining file on
@@ -515,7 +519,6 @@ def _prepare_model_session(
     # reachable from ``set_tensor_label`` itself, which is the choke point every
     # label stamp flows through and which has no Trace in scope.
     begin_label_session()
-    _module_class_metadata_cache.clear()
     _state._dir_cache.clear()
     trace._module_capture_ws.exhaustive_module_stack = []
     trace.model_class_name = str(type(model).__name__)
@@ -2636,7 +2639,21 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
         seen.add(obj_id)
         namespace = getattr(value, "__dict__", None)
         if isinstance(namespace, dict):
-            for item in list(namespace.values()):
+            cached_slots = _module_namespace_container_slots.get(value)
+            if cached_slots is None or cached_slots[0] != len(namespace):
+                slot_names = tuple(
+                    name
+                    for name, item in namespace.items()
+                    if isinstance(
+                        item,
+                        (torch.Tensor, dict, list, tuple, set, frozenset, deque),
+                    )
+                )
+                _module_namespace_container_slots[value] = (len(namespace), slot_names)
+            else:
+                slot_names = cached_slots[1]
+            for name in slot_names:
+                item = namespace.get(name)
                 if isinstance(item, torch.Tensor) and not isinstance(item, torch.nn.Parameter):
                     clear_meta(item)
                 elif isinstance(item, (dict, list, tuple, set, frozenset, deque)):
@@ -2834,14 +2851,10 @@ def _ensure_model_prepared(model: nn.Module) -> None:
     1. ``wrap_torch()`` — Ensures torch functions are wrapped (no-op if already wrapped,
        re-wraps after ``unwrap_torch()``, first-time decoration on first call).
     2. ``_prepare_model_once(model)`` — Phase 1 model prep (cached per instance).
-    3. ``sweep_stale_belt_references()`` — Incremental module-attr patching for
-       the derived protocol-invisible belt set. All other stale-reference
-       classes are covered by the rescue re-run (stage 2); TorchLens no longer
-       crawls sys.modules broadly or mutates user model instances.
+    ``wrap_torch()`` performs the incremental stale-reference belt sweep as part
+    of wrapper installation/revalidation, so this chokepoint does not repeat it.
     """
-    from .belt import sweep_stale_belt_references
     from .wrappers import wrap_torch
 
     wrap_torch()  # idempotent — no-op if already wrapped; auto-rewraps after unwrap
     _prepare_model_once(model)  # idempotent — cached in _state._prepared_models
-    sweep_stale_belt_references()

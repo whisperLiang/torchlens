@@ -1715,17 +1715,25 @@ def _compute_signal_skeleton(trace: Trace) -> dict[str, ModuleCollapseSignals]:
     ops = list(trace.ops)
     op_by_label = {op.label: op for op in ops}
     stack_by_label = {op.label: _module_address_stack(op) for op in ops}
+    labels_by_stack: dict[tuple[str, ...], list[str]] = defaultdict(list)
 
     for op in ops:
         stack = stack_by_label[op.label]
-        for address in stack:
-            op_labels_by_module[address].append(op.label)
+        labels_by_stack[stack].append(op.label)
         if stack:
             own_func_names_by_module[stack[-1]].append(_op_func_name(op))
 
+    # Most ops share an enclosing module stack. Expand each distinct stack once,
+    # rather than repeating the same ancestry walk for every op in the module.
+    for stack, labels in labels_by_stack.items():
+        for address in stack:
+            op_labels_by_module[address].extend(labels)
+
+    stack_sets = {stack: frozenset(stack) for stack in labels_by_stack}
+
     for parent in ops:
         parent_stack = stack_by_label[parent.label]
-        parent_set = set(parent_stack)
+        parent_set = stack_sets.setdefault(parent_stack, frozenset(parent_stack))
         for child_label in parent.children:
             child = op_by_label.get(child_label)
             if child is None:
@@ -1734,7 +1742,7 @@ def _compute_signal_skeleton(trace: Trace) -> dict[str, ModuleCollapseSignals]:
                 op_by_label[child.label] = child
                 stack_by_label[child.label] = _module_address_stack(child)
             child_stack = stack_by_label[child.label]
-            child_set = set(child_stack)
+            child_set = stack_sets.setdefault(child_stack, frozenset(child_stack))
             edge = (parent.label, child.label)
             for address in parent_set & child_set:
                 internal_edges[address].add(edge)
