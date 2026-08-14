@@ -20,12 +20,7 @@ from ..options import CaptureOptions
 from ..utils.arg_handling import normalize_input_args
 from ..utils.display import warn_parallel
 from ..utils.rng import set_random_seed
-from ..utils.tensor_utils import (
-    LAYER_GRAD_VALIDATION_ATOL,
-    LAYER_GRAD_VALIDATION_RTOL,
-    PARAM_GRAD_VALIDATION_ATOL,
-    PARAM_GRAD_VALIDATION_RTOL,
-)
+from ..utils.tensor_utils import param_grad_tolerances_for_dtype
 
 _SUM_IN_PROGRESS = object()
 """Memo sentinel: this container is on the current descent chain (a cycle)."""
@@ -416,8 +411,8 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = PARAM_GRAD_VALIDATION_ATOL,
-    rtol: float = PARAM_GRAD_VALIDATION_RTOL,
+    atol: float | None = None,
+    rtol: float | None = None,
     validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
@@ -445,25 +440,31 @@ def validate_backward_pass(
         Fixed RNG seed for stock and candidate passes. Auto-generated if None.
     atol:
         Absolute tolerance for the parameter-gradient ``torch.allclose``.
-        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_ATOL`
-        (parameter grads are batch/position REDUCTIONS, so they carry
-        accumulation-order round-off; see the error model on the constants).
+        ``None`` (default) derives the tolerance PER GRADIENT DTYPE via
+        :func:`~torchlens.utils.tensor_utils.param_grad_tolerances_for_dtype`
+        (fp32 resolves to the legacy
+        :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_ATOL`;
+        fp64 tightens by the eps ratio, fp16/bf16 get a few-storage-ULP
+        budget). An explicit float applies to every dtype unchanged.
     rtol:
         Relative tolerance for the parameter-gradient ``torch.allclose``.
-        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_RTOL`.
+        ``None`` (default) derives per gradient dtype (fp32 row ==
+        :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_RTOL`).
     validate_layer_grads:
         If True (default), validate captured per-module-output gradients in
         addition to parameter gradients. False preserves the legacy
         parameter-only validation path as an explicit opt-out.
     layer_grad_atol:
         Optional absolute tolerance for per-module-output gradients. ``None``
-        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_ATOL`
-        (module-output grads are compared ELEMENTWISE with no cross-element
-        reduction, so they earn a 10x tighter pair than parameter grads;
-        they previously inherited the looser parameter pair).
+        derives per gradient dtype via
+        :func:`~torchlens.utils.tensor_utils.layer_grad_tolerances_for_dtype`
+        (fp32 row == :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_ATOL`;
+        module-output grads are compared ELEMENTWISE with no cross-element
+        reduction, so they earn a 10x tighter pair than parameter grads).
     layer_grad_rtol:
         Optional relative tolerance for per-module-output gradients. ``None``
-        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_RTOL`.
+        derives per gradient dtype (fp32 row ==
+        :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_RTOL`).
 
     Returns
     -------
@@ -589,8 +590,11 @@ def validate_backward_pass(
                 trace,
                 stock_module_grads,
                 stock_identity_addresses,
-                atol=layer_grad_atol if layer_grad_atol is not None else LAYER_GRAD_VALIDATION_ATOL,
-                rtol=layer_grad_rtol if layer_grad_rtol is not None else LAYER_GRAD_VALIDATION_RTOL,
+                # None flows through: the comparator derives the tolerance per
+                # gradient dtype (R13: the fp32 constants applied to fp64
+                # masked corruption ~4.5e11 fp64 ULPs above round-off).
+                atol=layer_grad_atol,
+                rtol=layer_grad_rtol,
             )
             if not bool(layer_report):
                 return False
@@ -639,17 +643,24 @@ def validate_backward_pass(
             return False
         # equal_nan follows tensor_nanequal's doctrine: an identical NaN
         # pattern in candidate and stock grads is agreement, not a mismatch
-        # (NaN-vs-number still fails elementwise).
-        params_passed = all(
-            torch.allclose(
+        # (NaN-vs-number still fails elementwise). Tolerances resolve PER
+        # GRADIENT DTYPE when not explicitly overridden: the fp32 constants
+        # applied to every dtype checked fp64 grads ~4.5e11 of their own ULPs
+        # loose and false-failed fp16 grads (R13; the derivation shipped in
+        # c9734a7e but had zero verdict-site consumers).
+        params_passed = True
+        for name in expected_param_grads:
+            expected_grad = expected_param_grads[name]
+            derived_rtol, derived_atol = param_grad_tolerances_for_dtype(expected_grad.dtype)
+            if not torch.allclose(
                 observed_param_grads[name],
-                expected_param_grads[name],
-                atol=atol,
-                rtol=rtol,
+                expected_grad,
+                atol=atol if atol is not None else derived_atol,
+                rtol=rtol if rtol is not None else derived_rtol,
                 equal_nan=True,
-            )
-            for name in expected_param_grads
-        )
+            ):
+                params_passed = False
+                break
         return params_passed
     finally:
         model.load_state_dict(state_dict)

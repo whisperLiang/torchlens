@@ -123,3 +123,153 @@ def test_non_float_dtype_stays_strict() -> None:
     rtol, _ = param_grad_tolerances_for_dtype(torch.int64)
     fp64_rtol, _ = param_grad_tolerances_for_dtype(torch.float64)
     assert rtol <= fp64_rtol
+
+
+# ---------------------------------------------------------------------------
+# Consumer wiring (R13): the derivation above must actually decide verdicts.
+# The functions shipped in c9734a7e with ZERO verdict-site consumers, so fp64
+# param grads were still checked with the fp32 decimal row (~4.5e11 fp64 ULPs
+# loose) and fp16 grads still false-failed. These tests drive the REAL
+# validate_backward_pass verdict sites.
+# ---------------------------------------------------------------------------
+
+
+def _perturb_second_param_grad_census(monkeypatch: pytest.MonkeyPatch, scale: float) -> None:
+    """Scale the OBSERVED (second) parameter-grad census by ``scale``.
+
+    ``validate_backward_pass`` calls ``_param_grads`` twice: first for the
+    stock autograd census, then for the captured candidate census. Scaling
+    only the second call plants a relative corruption between the two
+    pipelines without touching either backward implementation.
+    """
+
+    import torchlens.validation.backward as backward_validation
+
+    real_param_grads = backward_validation._param_grads
+    call_count = {"n": 0}
+
+    def _wrapped(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+        call_count["n"] += 1
+        grads = real_param_grads(model)
+        if call_count["n"] == 2:
+            return {name: grad * scale for name, grad in grads.items()}
+        return grads
+
+    monkeypatch.setattr(backward_validation, "_param_grads", _wrapped)
+
+
+def test_fp64_param_grad_corruption_fails_the_backward_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 1e-6-relative fp64 param-grad corruption must FAIL validation.
+
+    1e-6 relative is ~4.5e9 fp64 ULPs -- far above fp64 accumulation
+    round-off -- yet it sat 100x inside the fp32 decimal rtol (1e-4) that the
+    verdict site applied to every dtype, so it was blessed (red-capable: this
+    test FAILS before the dtype-aware wiring).
+    """
+
+    import torchlens.validation.backward as backward_validation
+
+    _perturb_second_param_grad_census(monkeypatch, 1.0 + 1e-6)
+    model = torch.nn.Linear(4, 3).double().eval()
+    assert not backward_validation.validate_backward_pass(
+        model,
+        torch.randn(2, 4, dtype=torch.float64),
+        random_seed=11,
+        validate_metadata=False,
+        validate_layer_grads=False,
+    )
+
+
+def test_fp64_param_grad_clean_run_still_passes() -> None:
+    """The tightened fp64 row must not false-fail an honest fp64 capture."""
+
+    import torchlens.validation.backward as backward_validation
+
+    model = torch.nn.Linear(4, 3).double().eval()
+    assert backward_validation.validate_backward_pass(
+        model,
+        torch.randn(2, 4, dtype=torch.float64),
+        random_seed=11,
+        validate_metadata=False,
+        validate_layer_grads=False,
+    )
+
+
+def test_fp16_few_ulp_param_grad_agreement_is_not_a_false_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2-fp16-ULP census difference is storage rounding, not corruption.
+
+    Under the fp32 decimal row (rtol 1e-4, ~1/10 of an fp16 ULP) this
+    legitimate storage-rounding difference FALSE-FAILED; the fp16 row budgets
+    a few storage ULPs (red-capable: this test FAILS before the wiring).
+    """
+
+    import torchlens.validation.backward as backward_validation
+
+    eps16 = float(torch.finfo(torch.float16).eps)
+    _perturb_second_param_grad_census(monkeypatch, 1.0 + 2.0 * eps16)
+    model = torch.nn.Linear(4, 3).half().eval()
+    assert backward_validation.validate_backward_pass(
+        model,
+        torch.randn(2, 4, dtype=torch.float16),
+        random_seed=11,
+        validate_metadata=False,
+        validate_layer_grads=False,
+    )
+
+
+def test_explicit_tolerances_still_override_every_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit atol/rtol pair applies unchanged to every dtype."""
+
+    import torchlens.validation.backward as backward_validation
+
+    _perturb_second_param_grad_census(monkeypatch, 1.0 + 1e-6)
+    model = torch.nn.Linear(4, 3).double().eval()
+    # The same corruption the fp64 default now catches stays blessed under an
+    # explicit legacy-loose override -- explicit user tolerances are honored.
+    assert backward_validation.validate_backward_pass(
+        model,
+        torch.randn(2, 4, dtype=torch.float64),
+        random_seed=11,
+        validate_metadata=False,
+        validate_layer_grads=False,
+        atol=PARAM_GRAD_VALIDATION_ATOL,
+        rtol=PARAM_GRAD_VALIDATION_RTOL,
+    )
+
+
+def test_fp64_layer_grad_corruption_fails_the_backward_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 1e-6-relative fp64 LAYER-grad corruption must FAIL validation.
+
+    The layer-grad comparator applied the fp32 elementwise row (rtol 1e-5) to
+    every dtype, so a 1e-6-relative fp64 module-output-grad corruption --
+    ~4.5e9 fp64 ULPs -- was blessed (red-capable pre-wiring).
+    """
+
+    import torchlens.validation.backward as backward_validation
+    from torchlens.validation import _stock_layer_grads as stock_module
+
+    real_stock_layer_grads = stock_module._stock_layer_grads
+
+    def _perturbed(*args: object, **kwargs: object) -> object:
+        stock_grads, identity_addresses = real_stock_layer_grads(*args, **kwargs)
+        return (
+            {key: grad * (1.0 + 1e-6) for key, grad in stock_grads.items()},
+            identity_addresses,
+        )
+
+    monkeypatch.setattr(stock_module, "_stock_layer_grads", _perturbed)
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4)).double().eval()
+    assert not backward_validation.validate_backward_pass(
+        model,
+        torch.randn(2, 4, dtype=torch.float64),
+        random_seed=11,
+        validate_metadata=False,
+    )

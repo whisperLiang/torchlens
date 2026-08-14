@@ -11,7 +11,6 @@ from torch import nn
 
 from ..backends import BackendName, BackendUnsupportedError, resolve_backend_spec
 from ..options import CaptureOptions
-from ..utils.tensor_utils import PARAM_GRAD_VALIDATION_ATOL, PARAM_GRAD_VALIDATION_RTOL
 from .backward import validate_backward_pass
 
 if TYPE_CHECKING:
@@ -121,8 +120,8 @@ def _validate_scope_keywords(
     *,
     loss_fn: Callable[[Any], torch.Tensor] | None,
     perturb_saved_grads: bool,
-    atol: float,
-    rtol: float,
+    atol: float | None,
+    rtol: float | None,
     validate_layer_grads: bool | None,
     layer_grad_atol: float | None,
     layer_grad_rtol: float | None,
@@ -138,9 +137,9 @@ def _validate_scope_keywords(
     perturb_saved_grads:
         Backward perturbation flag.
     atol:
-        Backward absolute tolerance.
+        Backward absolute tolerance (``None`` = dtype-derived default).
     rtol:
-        Backward relative tolerance.
+        Backward relative tolerance (``None`` = dtype-derived default).
     validate_layer_grads:
         Backward layer-gradient validation flag, or None when omitted.
     layer_grad_atol:
@@ -155,9 +154,9 @@ def _validate_scope_keywords(
         _raise_backward_only("loss_fn", scope)
     if perturb_saved_grads:
         _raise_backward_only("perturb_saved_grads", scope)
-    if atol != PARAM_GRAD_VALIDATION_ATOL:
+    if atol is not None:
         _raise_backward_only("atol", scope)
-    if rtol != PARAM_GRAD_VALIDATION_RTOL:
+    if rtol is not None:
         _raise_backward_only("rtol", scope)
     if validate_layer_grads is not None:
         _raise_backward_only("validate_layer_grads", scope)
@@ -327,8 +326,8 @@ def validate(
     validate_metadata: bool = True,
     loss_fn: Callable[[Any], torch.Tensor] | None = None,
     perturb_saved_grads: bool = False,
-    atol: float = PARAM_GRAD_VALIDATION_ATOL,
-    rtol: float = PARAM_GRAD_VALIDATION_RTOL,
+    atol: float | None = None,
+    rtol: float | None = None,
     validate_layer_grads: bool | None = None,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
@@ -358,9 +357,11 @@ def validate(
     perturb_saved_grads:
         Backward-only perturbation flag.
     atol:
-        Backward-only absolute tolerance.
+        Backward-only absolute tolerance. ``None`` (default) derives per
+        gradient dtype in ``validate_backward_pass``.
     rtol:
-        Backward-only relative tolerance.
+        Backward-only relative tolerance. ``None`` derives per dtype
+        likewise.
     validate_layer_grads:
         Backward-only layer-gradient validation flag. Omission enables honest
         captured-gradient validation by default for backward scope.
