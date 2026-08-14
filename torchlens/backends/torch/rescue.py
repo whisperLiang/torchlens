@@ -45,7 +45,24 @@ from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
-__all__ = ["RescueTorchFunctionMode", "capture_with_rescue"]
+__all__ = [
+    "CaptureAttemptFailedWarning",
+    "RescueTorchFunctionMode",
+    "capture_with_rescue",
+]
+
+
+class CaptureAttemptFailedWarning(RuntimeWarning):
+    """Warning category for the one capture-attempt-failed advisory.
+
+    A dedicated category (still a ``RuntimeWarning``, so user filters keep
+    matching) lets the rescue driver DEFER the advisory while a rescue re-run
+    is still possible: the warning tells the user diagnostics ride the
+    exception (``exc.partial_log``), which is only truthful when that
+    exception actually propagates. A successful rescue swallows the failure,
+    so the deferred advisory is dropped; every path that re-raises flushes it
+    first.
+    """
 
 
 _thread_local = threading.local()
@@ -147,6 +164,45 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
         yield
     finally:
         warnings.showwarning = forward
+
+
+@contextmanager
+def _defer_capture_failed_warnings(
+    deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]],
+) -> Iterator[None]:
+    """Hold back capture-attempt-failed advisories; forward everything else.
+
+    The advisory points the user at ``exc.partial_log`` — truthful only when
+    the exception propagates. While a rescue re-run may still swallow the
+    failure, the advisory is parked in ``deferred``; the driver flushes it on
+    every re-raising path and drops it when the rescue succeeds.
+    """
+
+    forward = warnings.showwarning
+
+    def hold(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        """Park capture-failed advisories in ``deferred``; forward the rest."""
+
+        if isinstance(category, type) and issubclass(category, CaptureAttemptFailedWarning):
+            deferred.append((message, category, args, kwargs))
+            return
+        forward(message, category, *args, **kwargs)
+
+    warnings.showwarning = hold
+    try:
+        yield
+    finally:
+        warnings.showwarning = forward
+
+
+def _flush_deferred_warnings(
+    deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]],
+) -> None:
+    """Re-emit parked advisories through the current warning handler."""
+
+    for message, category, args, kwargs in deferred:
+        warnings.showwarning(message, category, *args, **kwargs)
+    deferred.clear()
 
 
 def _escape_signal(trace: Trace) -> str | None:
@@ -303,11 +359,20 @@ def capture_with_rescue(
     primary: Trace | None = None
     primary_error: OutputAttributionError | None = None
     emitted_warnings: set[tuple[type, str]] = set()
+    primary_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
-        with _record_emitted_warnings(emitted_warnings):
+        with (
+            _record_emitted_warnings(emitted_warnings),
+            _defer_capture_failed_warnings(primary_deferred),
+        ):
             primary = run_capture()
     except OutputAttributionError as exc:
         primary_error = exc
+    except BaseException:
+        # No rescue for this failure class: the parked advisory is truthful
+        # (the exception propagates with its diagnostics), so re-emit it.
+        _flush_deferred_warnings(primary_deferred)
+        raise
 
     if primary_error is not None:
         trigger = "output_attribution_failed"
@@ -350,12 +415,23 @@ def capture_with_rescue(
             return primary
 
     _thread_local.rescue_active = True
+    rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
         set_rng_from_saved_states(rng_snapshot)
-        with _suppress_repeated_warnings(emitted_warnings), RescueTorchFunctionMode():
+        # The rescue run's own capture-failed advisory is deferred too: its
+        # exception never propagates (the primary's error or trace does), so
+        # an advisory pointing at ITS exc.partial_log would always be untrue.
+        with (
+            _suppress_repeated_warnings(emitted_warnings),
+            _defer_capture_failed_warnings(rescue_deferred),
+            RescueTorchFunctionMode(),
+        ):
             rescued = run_capture()
     except Exception as exc:
         if primary_error is not None:
+            # The primary's failure propagates with its diagnostics attached,
+            # so its parked advisory is truthful again — re-emit it.
+            _flush_deferred_warnings(primary_deferred)
             raise primary_error from None
         assert primary is not None
         _mark(

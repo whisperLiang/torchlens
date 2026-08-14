@@ -55,6 +55,10 @@ repair stale bindings. Coverage is now:
   fail-closed. On rescued (eval-mode) captures, a custom
   in-forward PYTHON-attribute counter (not a registered buffer) still mutates twice: a declared
   residual of the double forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
+- The capture-attempt-failed advisory ("Partial diagnostics ride the exception") is emitted on a
+  dedicated `RuntimeWarning` subclass and DEFERRED while a rescue re-run may still swallow the
+  failure: a successful rescue drops it (the rescue is disclosed on the returned trace), and
+  every re-raising path flushes it, so it never points at an exception the user does not receive.
 - A rescue that would count as recovery must produce a strict SUPERSET of the primary's op
   multiset. Mode presence can de-fuse fused fast paths; any op LOSS keeps the mode-free primary
   authoritative, with both deltas disclosed (`recovered_ops` / `lost_ops`).

@@ -287,6 +287,35 @@ def test_eval_mode_batchnorm_capture_still_rescues_end_to_end(raw_cos: Any) -> N
     assert trace.capture_verification_reason == "mode_rescue_rerun"
 
 
+def test_successful_attribution_rescue_suppresses_failure_advisory(raw_cos: Any) -> None:
+    """A rescued attribution failure emits NO capture-attempt-failed advisory.
+
+    The advisory tells the user diagnostics ride the exception
+    (``exc.partial_log``) — untruthful when the rescue swallowed the failure
+    and returned a trace. It is deferred while a rescue is possible and
+    dropped on success; re-raising paths flush it (pinned by
+    ``test_capture_failure_reporting``).
+    """
+
+    import warnings as warnings_module
+
+    wrap_torch()
+
+    class Model(nn.Module):
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return raw_cos(torch.sigmoid(v))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        trace = tl.trace(Model(), torch.tensor([0.25, 0.5]))
+    info = trace.rescue_rerun
+    assert info is not None
+    assert info["trigger"] == "output_attribution_failed"
+    assert info["recovered"] is True
+    advisories = [w for w in caught if "capture attempt failed" in str(w.message)]
+    assert not advisories, [str(w.message) for w in advisories]
+
+
 def test_stateless_primary_still_rescues() -> None:
     """R16-2 control: no buffer writes -> the re-run proceeds."""
 

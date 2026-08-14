@@ -1190,13 +1190,19 @@ class TorchBackend:
         # return_partial flows, corrupted machine-readable stdout, and was
         # unfilterable. One accurate ROUTED warning replaces it, naming what
         # actually happened and where the diagnostics live; stacklevel targets
-        # the user's tl.trace call through the driver frames.
+        # the user's tl.trace call through the driver frames. The dedicated
+        # category (a RuntimeWarning subclass, so user filters keep matching)
+        # lets the rescue driver defer it while a rescue re-run can still
+        # swallow this failure — a successful rescue drops the advisory
+        # instead of pointing users at an exception they never receive.
+        from .rescue import CaptureAttemptFailedWarning
+
         warnings.warn(
             "TorchLens capture attempt failed "
             f"({type(exc).__name__}); the model and torch environment were "
             "restored. Partial diagnostics ride the exception (exc.partial_log "
             "/ torchlens.partial.from_failed_capture).",
-            RuntimeWarning,
+            CaptureAttemptFailedWarning,
             stacklevel=4,
         )
 
