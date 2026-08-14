@@ -36,7 +36,7 @@ from ._enums import (
     MERGED_TLSPEC_VERSION,
     MergedErrorCode,
 )
-from ._errors import MergedArtifactError
+from ._errors import MergedArtifactError, MergeInputError
 from ._evidence import extract_rank_evidence
 from ._presenter import MergedTrace, _RankHandle
 
@@ -663,6 +663,7 @@ def load_merged(path: str | Path) -> MergedTrace:
     # previously escaped the documented typed refusal as a raw
     # KeyError/TypeError (p2 R58 sol-R58-1).
     validated_members: dict[int, tuple[str, str]] = {}
+    seen_paths: set[str] = set()
     for entry in members:
         if not isinstance(entry, dict):
             raise _schema_refusal("descriptor member entry is not a JSON object")
@@ -679,6 +680,16 @@ def load_merged(path: str | Path) -> MergedTrace:
             raise _schema_refusal(f"descriptor member rank {rank} is duplicated")
         if not isinstance(entry["path"], str):
             raise _schema_refusal(f"rank {rank} member path is not a string")
+        # Defense in depth for the rank-identity binding below: two ranks that
+        # name the SAME member directory would each hash the one honest core.
+        # The load-time evidence.rank check catches the swap, but a duplicated
+        # path is itself incoherent -- every rank core is its own directory.
+        if entry["path"] in seen_paths:
+            raise _schema_refusal(
+                f"descriptor member path {entry['path']!r} is shared by more than "
+                "one rank; every rank core is a distinct member directory"
+            )
+        seen_paths.add(entry["path"])
         recorded = entry["tree_sha256"]
         if (
             not isinstance(recorded, str)
@@ -708,14 +719,48 @@ def load_merged(path: str | Path) -> MergedTrace:
     evidence = {}
     handles: dict[int, _RankHandle] = {}
     load_degradations: list[str] = []
-    for rank, member_path in sorted(member_paths.items()):
+    for declared_rank, member_path in sorted(member_paths.items()):
         try:
             trace = load_bundle(member_path)
-            evidence[rank] = extract_rank_evidence(trace, str(member_path))
         except Exception as exc:
-            load_degradations.append(f"rank {rank} core no longer parses on this runtime: {exc}")
+            # A member bundle that no longer LOADS on this runtime is a genuine
+            # environmental degradation (torch/codec drift). It caps the
+            # effective alignment at partial but is never a tamper.
+            load_degradations.append(
+                f"rank {declared_rank} core no longer parses on this runtime: {exc}"
+            )
             continue
-        handles[rank] = _RankHandle(rank, trace=trace, path=str(member_path))
+        # A member that loads as a bundle but is NOT a valid rank core (no
+        # distributed evidence, malformed boundary journal) is a tampered
+        # artifact -- a non-rank-core bundle dropped into a member slot -- not
+        # an environmental degradation. Laundering it into the runtime-parse
+        # channel silently caps the merge at partial instead of refusing
+        # (b3-opus). Refuse typed.
+        try:
+            rank_evidence = extract_rank_evidence(trace, str(member_path))
+        except MergeInputError as exc:
+            raise _tamper(
+                f"rank {declared_rank} member core loaded but carries no coherent "
+                f"rank-core evidence ({exc}); a member that parses yet is not a "
+                "valid rank capture is a tampered artifact, never a runtime "
+                "degradation"
+            ) from exc
+        # Rank-IDENTITY binding (b3-opus HIGH): the descriptor's member table
+        # merely LABELS which rank each slot holds, but each core proves its OWN
+        # global rank from its boundary records. Nothing tied the two, so one
+        # honest core byte-duplicated across N member slots read back as N
+        # distinct attesting ranks -- making ATTESTED_COMPLETE structurally
+        # guaranteed and bypassing the R18-1 digest fix. The core's self-proven
+        # rank is the authority; a slot/label disagreement is tamper.
+        if rank_evidence.rank != declared_rank:
+            raise _tamper(
+                f"descriptor labels a member slot as rank {declared_rank} but the "
+                f"core's own boundary records prove it is rank {rank_evidence.rank}; "
+                "a core placed at the wrong slot (or one core duplicated across "
+                "slots) cannot attest as multiple ranks"
+            )
+        evidence[declared_rank] = rank_evidence
+        handles[declared_rank] = _RankHandle(declared_rank, trace=trace, path=str(member_path))
 
     if not evidence:
         raise _schema_refusal(
@@ -726,7 +771,19 @@ def load_merged(path: str | Path) -> MergedTrace:
     cached = descriptor.get("derivation")
     if not isinstance(cached, dict):
         raise _schema_refusal("descriptor derivation cache is absent")
+    # ``expected_ranks`` feeds straight into ``derive_merge`` (``int(r)`` over
+    # every element); a forged non-iterable or non-integer element escaped as a
+    # raw TypeError/ValueError instead of the documented typed refusal. Validate
+    # against the closed shape (null or a list of non-negative ints) first.
     expected = cached.get("expected_ranks")
+    if expected is not None and (
+        not isinstance(expected, list)
+        or any(isinstance(r, bool) or not isinstance(r, int) or r < 0 for r in expected)
+    ):
+        raise _schema_refusal(
+            "descriptor derivation cache expected_ranks is not null or a list of "
+            "non-negative integers"
+        )
     rederived = derive_merge(evidence, expected)
 
     if not load_degradations:
