@@ -1,6 +1,5 @@
 """Trace accessor helpers."""
 
-import weakref
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -341,21 +340,38 @@ class TraceGradFnCallAccessor(Accessor[Any]):
         return None
 
 
-_TRACE_OP_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, TraceOpAccessor]] = (
-    weakref.WeakKeyDictionary()
-)
-_TRACE_LAYER_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, Any]] = (
-    weakref.WeakKeyDictionary()
-)
-# The flattened ModuleCall accessor is memoized on the owning Trace instance,
-# NOT in a module-global weak-keyed dict. The accessor holds ModuleCall records
-# and ``ModuleCall._source_trace`` keeps a strong reference to its Trace, so a
-# module-global WeakKeyDictionary value would reach its own weak key and no
-# Trace could ever be collected (the leak fixed here, and re-opened once
-# before). An instance attribute makes that edge an ordinary intra-object cycle
-# that ``gc`` collects normally. It is registered ``FieldPolicy.DROP`` in
-# ``Trace.PORTABLE_STATE_SPEC``, like the other lazy per-instance solutions.
+# EVERY lazy Trace accessor is memoized on the owning Trace instance, NOT in
+# a module-global weak-keyed dict. A record held by an accessor can reach its
+# Trace strongly (``ModuleCall._source_trace``, and since M11 any fork record
+# through ``OpStoreView.record_translator`` -> translated shells ->
+# ``_source_trace_strong`` stamped by ``_rebind_fork_owner_refs``), so a
+# module-global WeakKeyDictionary value would reach its own weak key and the
+# Trace could never be collected. That class re-opened a THIRD time as the
+# ``trace.run()`` fork leak (R37): the op-accessor cache entry populated
+# during ``run()`` pinned the entire result fork, payloads included, for the
+# process lifetime. An instance attribute makes the same edge an ordinary
+# intra-object cycle that ``gc`` collects normally. All three attrs are
+# registered ``FieldPolicy.DROP`` in ``Trace.PORTABLE_STATE_SPEC``, like the
+# other lazy per-instance solutions. Do NOT reintroduce a module-global
+# weak-keyed cache whose value holds records.
+_TRACE_OP_ACCESSOR_ATTR = "_op_accessor_cache"
+_TRACE_LAYER_ACCESSOR_ATTR = "_layer_accessor_cache"
 _TRACE_MODULE_CALL_ACCESSOR_ATTR = "_module_call_accessor"
+
+
+def _invalidate_trace_op_layer_accessor_caches(trace: Any) -> None:
+    """Drop the cached op/layer accessors for one Trace.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose layer or op population changed.
+    """
+
+    instance_dict = getattr(trace, "__dict__", None)
+    if instance_dict is not None:
+        instance_dict.pop(_TRACE_OP_ACCESSOR_ATTR, None)
+        instance_dict.pop(_TRACE_LAYER_ACCESSOR_ATTR, None)
 
 
 def _invalidate_trace_module_call_accessor_cache(trace: Any) -> None:

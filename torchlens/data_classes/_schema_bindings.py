@@ -247,6 +247,8 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_tf_validation_result": StorageBinding(StorageKind.RUNTIME),
         "_tl_save_selector_fire_count": StorageBinding(StorageKind.RUNTIME),
         "_module_call_accessor": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
+        "_op_accessor_cache": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
+        "_layer_accessor_cache": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
         "_receptive_field_solution": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
         "_rf_source_solutions": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
         "_rf_target_solutions": StorageBinding(StorageKind.RUNTIME, annotation='typing.Any'),
