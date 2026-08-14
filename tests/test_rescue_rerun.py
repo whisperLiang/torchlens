@@ -606,3 +606,31 @@ def test_minted_source_nodes_do_not_refuse_a_perfect_rescue() -> None:
     assert result.rescue_rerun["recovered"] is True
     assert result.rescue_rerun["recovered_ops"] == ("cos",)
     assert result.rescue_rerun["lost_ops"] == ()
+
+
+def test_module_consumed_stale_ref_is_disclosed_and_rescued(raw_cos: Any) -> None:
+    """R16: module-entry adoption must not LAUNDER a stale-ref escape.
+
+    A stale pre-wrap reference whose output is first consumed by a MODULE
+    (``self.lin(stale_fn(x))`` -- the overwhelmingly common shape) used to be
+    adopted as a clean ``internalsource`` node: op absent, zero warnings,
+    ``rescue_rerun`` None -- indistinguishable from a clean capture, while the
+    identical escape consumed by a wrapped FUNCTION warned and rescued.
+    Disclosure must not be consumption-order-dependent.
+    """
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return self.lin(raw_cos(v))
+
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(Model(), torch.randn(3, 4))
+
+    assert "cos" in [op.func_name for op in trace.ops]
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["recovered"] is True
+    assert trace.capture_verification_reason == "mode_rescue_rerun"
