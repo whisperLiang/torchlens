@@ -6,6 +6,7 @@ import html
 import inspect
 import math
 import re
+import subprocess
 import textwrap
 import weakref
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from torch import nn
 
 from .._errors import ArgumentTypeError, InvalidArgumentError, RecordBindingError
 from .._source_links import file_line_text
+from ._render_utils import RENDER_TIMEOUT_SECONDS
 
 CodePanelMode: TypeAlias = Literal["forward", "class", "init+forward"]
 CodePanelOption: TypeAlias = bool | CodePanelMode | Callable[[nn.Module], str]
@@ -357,7 +359,19 @@ def render_code_panel_svg(source_text: str) -> str:
             fontname="Courier",
             margin="0",
         )
-    return panel.pipe(format="svg").decode("utf-8")
+    # T9 (grind-p3): render through the same bounded subprocess discipline
+    # as every other Graphviz invocation (timeout + fresh session) instead
+    # of graphviz-python's unbounded ``pipe()``, which can hang the caller
+    # forever and leave orphaned dot processes behind.
+    completed = subprocess.run(
+        [panel.engine, "-Tsvg"],
+        input=panel.source.encode("utf-8"),
+        timeout=RENDER_TIMEOUT_SECONDS,
+        check=True,
+        capture_output=True,
+        start_new_session=True,
+    )
+    return completed.stdout.decode("utf-8")
 
 
 def _parse_svg_geometry(svg: str) -> SimpleNamespace:
