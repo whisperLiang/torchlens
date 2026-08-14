@@ -516,6 +516,37 @@ def derive_merge(
     declared = None if expected_ranks is None else tuple(sorted({int(r) for r in expected_ranks}))
     findings: list[MergedFinding] = []
 
+    # Evidence extraction enforces this for public merge inputs. Repeat the
+    # authority check here because load rederivation and internal callers can
+    # construct ``RankEvidence`` directly: presence outside membership must
+    # never participate in a join or complete a witness verdict.
+    for rank in input_ranks:
+        seen_correlation_keys: set[tuple[str, int, str, int]] = set()
+        for entry in evidence[rank].boundaries:
+            members = tuple(int(member) for member in entry["group"]["global_ranks"])
+            if rank not in members:
+                raise MergeInputError(
+                    f"Rank {rank} presents a collective boundary for membership {members}, "
+                    "but presence must be a subset of the recorded membership.",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                    rank=rank,
+                )
+            correlation = entry["correlation"]
+            correlation_key = (
+                str(correlation["membership_digest"]),
+                int(correlation["lifetime_ordinal"]),
+                str(correlation["channel"]),
+                int(correlation["seq"]),
+            )
+            if correlation_key in seen_correlation_keys:
+                raise MergeInputError(
+                    f"Rank {rank} presents duplicate correlation key {correlation_key}; "
+                    "rank-local issue sequence values must be unique.",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                    rank=rank,
+                )
+            seen_correlation_keys.add(correlation_key)
+
     # 1. PRE-JOIN membership-lineage audit, before ANY joining or gaps (1.3).
     epochs = cast(
         "Mapping[int, InstallEpoch]",
@@ -618,6 +649,11 @@ def derive_merge(
                 )
                 joined_nodes[(rank, index)] = key
             presence = tuple(sorted(per_rank))
+            if not set(presence).issubset(membership):
+                raise MergeInputError(
+                    f"Join key {key} has presence {presence} outside membership {membership}.",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                )
             missing = tuple(sorted(set(membership) - set(presence)))
             findings.extend(
                 _relation_findings(key, entries[presence[0]]["kind"], membership, entries)

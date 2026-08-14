@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,7 +30,7 @@ from torchlens.merged import (
     derive_merge,
 )
 from torchlens.merged._errors import MergeInputError
-from torchlens.merged._evidence import RankEvidence
+from torchlens.merged._evidence import RankEvidence, extract_rank_evidence
 
 WORLD = membership_digest_for_ranks([0, 1])
 
@@ -149,6 +150,33 @@ def digest_kwargs(dest: str = "aa") -> dict:
         "contribution_digests": ["cc"],
         "destination_digests": [dest],
     }
+
+
+def trace_for_boundaries(boundaries: list[dict], ledger: GroupLifecycleLedger) -> SimpleNamespace:
+    """Build the minimal trace surface consumed by rank-evidence extraction.
+
+    Parameters
+    ----------
+    boundaries:
+        Synthetic collective-boundary journal.
+    ledger:
+        Matching group-lifecycle ledger.
+
+    Returns
+    -------
+    SimpleNamespace
+        Trace-shaped object carrying distributed annotations.
+    """
+
+    return SimpleNamespace(
+        annotations={
+            "distributed": {
+                "boundaries": boundaries,
+                "group_lifecycle_ledger": ledger.to_payload(),
+                "install_epoch": "seeded",
+            }
+        }
+    )
 
 
 class TestDeltaAlignment:
@@ -316,6 +344,52 @@ class TestScopeAndInputRefusals:
         with pytest.raises(MergeInputError) as excinfo:
             derive_merge({0: core})
         assert excinfo.value.fields["code"] == MergedErrorCode.MERGE_SCOPE_UNSUPPORTED.value
+
+    def test_parse_refuses_rank_outside_recorded_membership(self) -> None:
+        """A rank core cannot claim evidence for a group it does not belong to."""
+
+        forged = boundary(5, 0, members=(0, 1), **digest_kwargs())
+        with pytest.raises(MergeInputError) as excinfo:
+            extract_rank_evidence(
+                trace_for_boundaries([forged], seeded_ledger()),
+                "forged-rank-5",
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_join_refuses_presence_outside_recorded_membership(self) -> None:
+        """Direct engine callers receive the same presence-subset refusal."""
+
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge(
+                {
+                    0: evidence(0, [boundary(0, 0, **digest_kwargs())]),
+                    5: evidence(5, [boundary(5, 0, **digest_kwargs())]),
+                }
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_parse_refuses_duplicate_rank_local_sequence(self) -> None:
+        """Duplicate absolute sequence keys cannot overwrite a boundary silently."""
+
+        duplicated = [boundary(0, 7), boundary(0, 7)]
+        with pytest.raises(MergeInputError) as excinfo:
+            extract_rank_evidence(
+                trace_for_boundaries(duplicated, seeded_ledger()),
+                "duplicate-seq-rank-0",
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_join_refuses_duplicate_rank_local_sequence(self) -> None:
+        """Direct engine evidence cannot exploit duplicate-sequence overwrite."""
+
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge(
+                {
+                    0: evidence(0, [boundary(0, 7), boundary(0, 7)]),
+                    1: evidence(1, [boundary(1, 3)]),
+                }
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
 
 
 class TestRelationsAndCrossChecks:
@@ -667,3 +741,11 @@ class TestContractLockstep:
         assert match is not None
         doc_kinds = [line.strip() for line in match.group(1).strip().split("\n")]
         assert doc_kinds == list(MERGE_FINDING_KINDS)
+
+    def test_tree_hash_framing_matches_frozen_contract(self) -> None:
+        """The tree-hash prose must name the implementation's unambiguous framing."""
+
+        doc = self.DOC.read_text()
+        assert "8-byte big-endian path length" in doc
+        assert re.search(r"8-byte big-endian\s+file\s+size", doc)
+        assert "32 raw SHA-256 bytes" in doc

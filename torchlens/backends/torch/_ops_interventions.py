@@ -1,6 +1,8 @@
 """Legacy and predicate-mode live interventions."""
 
+import weakref
 from collections.abc import Callable, Iterator
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -18,6 +20,7 @@ from ...capture.projections import (
     get_active_recording_state,
 )
 from ...data_classes.internal_types import FuncExecutionContext
+from ...errors._base import CompatibilityError
 from ...fastlog.types import (
     RecordContext,
 )
@@ -55,6 +58,85 @@ if TYPE_CHECKING:
         _replace_output_value,
         _walk_output_tensors_with_paths,
     )
+
+
+_LIVE_FIRE_RESULTS_STORAGE_ATTR = "_tl_live_fire_results_by_tensor_id"
+
+
+def _clear_out_of_band_fire_results(
+    tensor_id: int,
+    storage_reference: weakref.ReferenceType[Any],
+    reference: weakref.ReferenceType[torch.Tensor],
+) -> None:
+    """Drop a storage-owned fire record when its tensor is reclaimed."""
+
+    storage = storage_reference()
+    if storage is None:
+        return
+    records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
+    if not isinstance(records, dict):
+        return
+    current = records.get(tensor_id)
+    if current is not None and current[0] is reference:
+        records.pop(tensor_id, None)
+    if not records:
+        try:
+            delattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR)
+        except (AttributeError, RuntimeError):
+            return
+
+
+def _store_out_of_band_fire_results(
+    tensor: torch.Tensor,
+    fire_results: tuple[FireResult, ...],
+) -> None:
+    """Store fire results on the tensor's storage with weak tensor ownership."""
+
+    tensor_id = id(tensor)
+    try:
+        with pause_logging():
+            storage = tensor.untyped_storage()
+        records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
+        if records is None:
+            records = {}
+            setattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, records)
+        if not isinstance(records, dict):
+            raise TypeError("storage fire-result side table has an invalid type")
+        storage_reference = weakref.ref(storage)
+        reference = weakref.ref(
+            tensor,
+            partial(_clear_out_of_band_fire_results, tensor_id, storage_reference),
+        )
+    except (AttributeError, RuntimeError, TypeError) as side_table_error:
+        raise CompatibilityError(
+            "An intervention changed execution, but its tensor accepts neither "
+            "transient metadata nor storage-backed evidence.",
+            kind="intervention_fire_results_unrecordable",
+        ) from side_table_error
+    records[tensor_id] = (reference, fire_results)
+
+
+def _take_out_of_band_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
+    """Take fire results for ``tensor`` from its storage-owned side table."""
+
+    try:
+        with pause_logging():
+            storage = tensor.untyped_storage()
+        records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
+    except (AttributeError, RuntimeError, TypeError):
+        return ()
+    if not isinstance(records, dict):
+        return ()
+    fallback = records.pop(id(tensor), None)
+    if not records:
+        try:
+            delattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR)
+        except (AttributeError, RuntimeError):
+            pass
+    if fallback is not None and fallback[0]() is tensor:
+        return fallback[1]
+    return ()
+
 
 __all__ = (
     "_apply_live_hooks_to_outputs_legacy",
@@ -540,7 +622,12 @@ def _set_tensor_live_fire_results(
     try:
         setattr(tensor, _LIVE_FIRE_RESULTS_ATTR, fire_results)
     except Exception:
-        pass
+        # ``ops.py`` rebinds this function into its own global namespace. Import
+        # the implementation slice explicitly so the side table has one owner
+        # under both direct and rebound calls.
+        from . import _ops_interventions as intervention_state
+
+        intervention_state._store_out_of_band_fire_results(tensor, fire_results)
 
 
 def _pop_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
@@ -557,9 +644,26 @@ def _pop_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...
         Hook fire results associated with the tensor, if any.
     """
 
-    fire_results = getattr(tensor, _LIVE_FIRE_RESULTS_ATTR, ())
+    attached = False
     try:
-        delattr(tensor, _LIVE_FIRE_RESULTS_ATTR)
+        fire_results = getattr(tensor, _LIVE_FIRE_RESULTS_ATTR, ())
+        attached = bool(fire_results)
     except Exception:
-        pass
+        fire_results = ()
+    from . import _ops_interventions as intervention_state
+
+    fallback = intervention_state._take_out_of_band_fire_results(tensor)
+    if not fire_results:
+        fire_results = fallback
+    if attached:
+        try:
+            delattr(tensor, _LIVE_FIRE_RESULTS_ATTR)
+        except Exception as exc:
+            from ...errors._base import CompatibilityError
+
+            raise CompatibilityError(
+                "Intervention fire metadata could not be cleared after consumption; "
+                "refusing rather than allowing stale evidence into a later capture.",
+                kind="intervention_fire_results_cleanup_failed",
+            ) from exc
     return tuple(fire_results)

@@ -24,8 +24,10 @@ pytestmark = pytest.mark.skipif(
 import torchlens as tl  # noqa: E402
 from torchlens.backends.torch.collectives import (  # noqa: E402
     WildcardRecvUnsupportedError,
+    remove_collective_wraps,
 )
 from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
+from torchlens.errors._base import CompatibilityError  # noqa: E402
 
 
 @pytest.fixture()
@@ -75,7 +77,8 @@ class TestBoundaryNode:
     def test_boundary_carries_collective_boundary_v1_payload(self, gloo_world):
         lifecycle.arm()
         log = tl.trace(HandRolledTP(), torch.randn(2, 4))
-        info = [op for op in log.ops if op.type == "allreduce"][0].annotations["collective"]
+        boundary = [op for op in log.ops if op.type == "allreduce"][0]
+        info = boundary.annotations["collective"]
         assert info["schema"] == "collective_boundary_v1"
         assert info["kind"] == "all_reduce"
         correlation = info["correlation"]
@@ -93,6 +96,8 @@ class TestBoundaryNode:
         assert evidence["install_epoch"] in ("armed_before_any_group", "seeded")
         assert evidence["arming_source"] == "explicit"
         assert info["witness"]["policy_resolved"] == "none"
+        layer = log[boundary.layer_label]
+        assert layer.annotations["collective"] == info
         # The payload is portable plain data.
         json.dumps(info)
 
@@ -220,6 +225,28 @@ class TestBoundaryNode:
         lifecycle.disarm()
         assert dist.all_reduce is original
 
+    def test_failed_collective_restore_retains_original_for_retry(self) -> None:
+        """A teardown failure cannot discard the pristine function ledger entry."""
+
+        original = object()
+
+        class RefusingModule:
+            """Hashable module-like object that rejects one restoration."""
+
+            def __setattr__(self, name: str, value: object) -> None:
+                """Reject restoration while permitting test setup."""
+
+                if name == "all_reduce" and value is original:
+                    raise RuntimeError("restore refused")
+                object.__setattr__(self, name, value)
+
+        module = RefusingModule()
+        module.all_reduce = object()
+        originals = {(module, "all_reduce"): original}
+        with pytest.raises(RuntimeError, match="restore refused"):
+            remove_collective_wraps(originals)
+        assert originals[(module, "all_reduce")] is original
+
     def test_unarmed_capture_is_status_quo(self, gloo_world):
         # Arm is refused/absent -> no boundary nodes, capture itself intact
         # (the pre-tier-(b) behavior). Force unarmed by disarming and making
@@ -250,6 +277,28 @@ class TestWitnessPolicy:
         # The destination digest is byte-exact evidence: recomputing it over
         # the saved boundary output must reproduce it.
         assert witness["destination_digests"] == [_digest_tensor(boundary.out)]
+
+    def test_digest_witness_does_not_change_captured_graph(self, gloo_world) -> None:
+        """Capture-internal digest operations must remain outside the user graph."""
+
+        lifecycle.arm()
+        model = HandRolledTP()
+        sample = torch.randn(2, 4)
+        plain = tl.trace(model, sample)
+        witnessed = tl.trace(
+            model,
+            sample,
+            capture=tl.options.CaptureOptions(distributed_witness="digest"),
+        )
+        assert [op.type for op in witnessed.ops] == [op.type for op in plain.ops]
+
+    def test_fastlog_collective_refuses_instead_of_dropping_journal(self, gloo_world) -> None:
+        """Fastlog must not return a product that omits an executed collective."""
+
+        lifecycle.arm()
+        with pytest.raises(CompatibilityError) as excinfo:
+            tl.record(HandRolledTP(), torch.randn(2, 4), save=tl.func("relu"))
+        assert excinfo.value.fields["kind"] == "collective_boundary_fastlog_unsupported"
 
     def test_async_digest_destination_not_present(self, gloo_world):
         dist = gloo_world
@@ -349,6 +398,7 @@ def _tp_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
     import torch.distributed as dist
 
     import torchlens as tl
+    from torchlens.backends.torch.collectives import _digest_tensor
     from torchlens.distributed import arm
 
     store = dist.FileStore(init_file, world_size)
@@ -372,12 +422,17 @@ def _tp_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
     model = TP()
     torch.manual_seed(77)  # identical input on every rank
     x = torch.randn(2, 4)
-    log = tl.trace(model, x)
+    log = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(distributed_witness="digest"),
+    )
 
     # Ground truth from a bare model built identically.
     torch.manual_seed(1234)
     reference = TP()
-    expected = reference.fc(x) * world_size
+    contribution = reference.fc(x)
+    expected = contribution * world_size
     boundary_out = [op for op in log.ops if op.type == "allreduce"][0].out
     assert torch.allclose(boundary_out, expected, atol=1e-6), "captured all_reduce value wrong"
 
@@ -395,6 +450,9 @@ def _tp_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
             for entry in log.annotations["distributed"]["boundaries"]
         ],
         "op_types": sorted({op.type for op in log.ops}),
+        "witness": log.annotations["distributed"]["boundaries"][0]["witness"],
+        "expected_contribution_digest": _digest_tensor(contribution),
+        "expected_destination_digest": _digest_tensor(expected),
     }
     with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
         json.dump(payload, handle)
@@ -428,6 +486,11 @@ class TestTwoRankSims:
             assert "allreduce" in payload["op_types"]
             assert "allgather" in payload["op_types"]
             assert [b["kind"] for b in payload["boundaries"]] == ["all_reduce", "all_gather"]
+            witness = payload["witness"]
+            assert witness["contribution_digests"] == [
+                payload["expected_contribution_digest"]
+            ]
+            assert witness["destination_digests"] == [payload["expected_destination_digest"]]
         # Correlation keys agree cross-rank per boundary: same membership
         # digest, same lifetime ordinal, same channel, same seq.
         for entry0, entry1 in zip(rank0["boundaries"], rank1["boundaries"]):
