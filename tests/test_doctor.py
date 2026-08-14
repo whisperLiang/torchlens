@@ -85,3 +85,47 @@ def test_declared_extra_probes_track_packaging_metadata() -> None:
     assert {"jax", "mlx", "paddle", "profiler", "sae", "tensorflow", "tf", "tinygrad"} <= set(
         probes
     )
+
+
+def test_capability_row_optional_absences_do_not_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r-b4 R26-4: absent OPTIONAL features keep a healthy install at PASS.
+
+    Interpreter-version surfaces (PEP 657), upstream-removed APIs, and
+    not-installed optional backends are reported with their true value under
+    ``optional_absent=`` but never drive WARN -- a permanent false alarm
+    trains users to ignore the row.
+    """
+
+    from torchlens.utils import _probe_torch_capabilities, _torch_compat as tc
+
+    for flag in ("HAS_CODE_POSITIONS", "HAS_CODE_QUALNAME", "HAS_NAMED_TENSOR_API"):
+        monkeypatch.setattr(tc, flag, False)
+    row = _probe_torch_capabilities()
+    assert row.status == "PASS"
+    assert "optional_absent=" in row.detail
+    assert "missing=" not in row.detail
+
+
+def test_capability_row_genuine_degradation_still_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuine degradation (non-optional flag False) still drives WARN."""
+
+    from torchlens.utils import _probe_torch_capabilities, _torch_compat as tc
+
+    monkeypatch.setattr(tc, "HAS_VARIABLE_FUNCTIONS", False)
+    row = _probe_torch_capabilities()
+    assert row.status == "WARN"
+    assert "missing=HAS_VARIABLE_FUNCTIONS" in row.detail
+
+
+def test_tf_snapshot_empty_without_tensorflow() -> None:
+    """r-b4 R26-4: a torch-only install merges NO TF flags into the snapshot."""
+
+    import importlib.util
+
+    from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+
+    snapshot = get_tf_capability_snapshot()
+    if importlib.util.find_spec("tensorflow") is None:
+        assert snapshot == {}
+    else:
+        assert "HAS_TF_OP_CALLBACKS" in snapshot

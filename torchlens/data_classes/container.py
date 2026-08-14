@@ -348,6 +348,10 @@ class Container:
     def _append_repr_lines(self, lines: list[str], *, indent: int) -> None:
         """Append child tree lines to a representation buffer.
 
+        Bounded display walk (r-b4 R27-5): nesting past 50 levels renders a
+        ``<max-depth>`` marker instead of crashing ``repr`` on an over-deep
+        (or forged self-referential) container spec.
+
         Parameters
         ----------
         lines:
@@ -356,6 +360,9 @@ class Container:
             Current indentation width.
         """
 
+        if indent > 100:
+            lines.append(f"{' ' * indent}<max-depth>")
+            return
         if self.spec is None:
             lines.append(f"{' ' * indent}<path-only>")
             return

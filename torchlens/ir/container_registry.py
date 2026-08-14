@@ -430,6 +430,18 @@ class ContainerRegistry:
         return entry
 
 
+OUTPUT_TREE_MAX_DEPTH: int = 200
+"""The model-OUTPUT boundary nesting ceiling (r-b4 R27-4).
+
+Mirrors the input-boundary ceiling (``torchlens._input_walk.INPUT_TREE_MAX_DEPTH``)
+and the artifact-side decode bound. The output walkers cannot raise mid-capture
+(the forward already ran), so a deeper or self-referential output container
+DEGRADES to the existing honest ``kind="opaque"`` lane -- reconstructable=False,
+runnable save refuses typed -- instead of dying in a raw ``RecursionError``.
+Cycle guards are PATH-scoped so DAG-shaped outputs stay fully walked.
+"""
+
+
 def _object_kind(container: object) -> str:
     """Return a portable display kind for a container object.
 
@@ -570,8 +582,14 @@ def _snapshot_matches_site(snapshot: ContainerSnapshot, site: Site) -> bool:
     return snapshot.site == site or site in snapshot.site_aliases
 
 
-def _container_has_tensor_leaf(value: Any, *, memo: set[int]) -> bool:
-    """Return whether ``value`` contains a tensor leaf at any nesting depth."""
+def _container_has_tensor_leaf(value: Any, *, memo: set[int], depth: int = 0) -> bool:
+    """Return whether ``value`` contains a tensor leaf at any nesting depth.
+
+    Beyond the output nesting ceiling the answer is conservatively ``True``
+    (r-b4 R27-4): the spec build then runs and degrades the over-deep subtree to
+    the honest ``opaque`` lane. Answering ``False`` there would forge a
+    "no tensor leaves" witness for a subtree that was never actually scanned.
+    """
 
     if isinstance(value, torch.Tensor):
         return not isinstance(value, torch.nn.Parameter)
@@ -579,12 +597,14 @@ def _container_has_tensor_leaf(value: Any, *, memo: set[int]) -> bool:
         return False
     if inspect.isgenerator(value) or isinstance(value, Iterator):
         return False
+    if depth >= OUTPUT_TREE_MAX_DEPTH:
+        return True
     object_id = id(value)
     if object_id in memo:
         return False
     memo.add(object_id)
     for _component, child in _iter_container_children(value):
-        if _container_has_tensor_leaf(child, memo=memo):
+        if _container_has_tensor_leaf(child, memo=memo, depth=depth + 1):
             return True
     return False
 
@@ -622,8 +642,18 @@ def _children_are_reconstructable(
     return True
 
 
-def _build_container_spec(value: Any) -> ContainerSpec | None:
-    """Build a portable spec for a supported container value."""
+def _build_container_spec(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> ContainerSpec | None:
+    """Build a portable spec for a supported container value.
+
+    Over-deep and self-referential subtrees degrade to the honest ``opaque``
+    lane (r-b4 R27-4); the cycle guard is path-scoped so DAG-shaped outputs
+    keep one spec per occurrence.
+    """
 
     if _is_literal(value) or isinstance(value, torch.Size):
         return ContainerSpec(kind="literal", literal_value=value)
@@ -633,10 +663,31 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             type_module=type(value).__module__,
             type_qualname=type(value).__qualname__,
         )
+    if _in_progress is None:
+        _in_progress = set()
+    value_id = id(value)
+    if _depth >= OUTPUT_TREE_MAX_DEPTH or value_id in _in_progress:
+        module, qualname = _container_type_ref(value)
+        return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
+    _in_progress.add(value_id)
+    try:
+        return _build_container_spec_unguarded(value, _depth=_depth, _in_progress=_in_progress)
+    finally:
+        _in_progress.discard(value_id)
+
+
+def _build_container_spec_unguarded(
+    value: Any,
+    *,
+    _depth: int,
+    _in_progress: set[int],
+) -> ContainerSpec | None:
+    """Build one guarded container node's spec (dispatch body of the above)."""
+
     children = tuple(_iter_container_children(value))
     child_specs: list[tuple[OutputPathComponent, ContainerSpec]] = []
     for component, child in children:
-        child_spec = _build_container_spec(child)
+        child_spec = _build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
         if child_spec is not None:
             child_specs.append((component, child_spec))
     registered = get_registered_container(type(value))
@@ -721,8 +772,15 @@ def _walk_tensor_occurrences(
     value: Any,
     *,
     path: tuple[OutputPathComponent, ...],
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
 ) -> Iterator[ContainerLeafOccurrence]:
-    """Yield tensor leaf occurrences with stable container paths."""
+    """Yield tensor leaf occurrences with stable container paths.
+
+    Bounded by the SAME ceiling/cycle policy as ``_build_container_spec``
+    (r-b4 R27-4): a subtree the spec degraded to ``opaque`` yields no
+    occurrences here, so the two walks can never disagree about a path.
+    """
 
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
@@ -734,11 +792,24 @@ def _walk_tensor_occurrences(
                 occ_index=0,
             )
         return
-    for component, child in _iter_container_children(value):
-        yield from _walk_tensor_occurrences(child, path=(*path, component))
+    if _in_progress is None:
+        _in_progress = set()
+    value_id = id(value)
+    if _depth >= OUTPUT_TREE_MAX_DEPTH or value_id in _in_progress:
+        return
+    _in_progress.add(value_id)
+    try:
+        for component, child in _iter_container_children(value):
+            yield from _walk_tensor_occurrences(
+                child, path=(*path, component), _depth=_depth + 1, _in_progress=_in_progress
+            )
+    finally:
+        _in_progress.discard(value_id)
 
 
-def _iter_tensor_leaves(value: Any, *, memo: set[int] | None = None) -> Iterator[torch.Tensor]:
+def _iter_tensor_leaves(
+    value: Any, *, memo: set[int] | None = None, _depth: int = 0
+) -> Iterator[torch.Tensor]:
     """Yield tensor leaves from the complete supported container tree.
 
     Parameters
@@ -747,6 +818,9 @@ def _iter_tensor_leaves(value: Any, *, memo: set[int] | None = None) -> Iterator
         Tensor or supported nested container value.
     memo:
         Object identities already visited while breaking container cycles.
+    _depth:
+        Internal recursion depth; descent stops at ``OUTPUT_TREE_MAX_DEPTH``
+        (r-b4 R27-4) instead of exhausting the interpreter stack.
 
     Yields
     ------
@@ -763,8 +837,10 @@ def _iter_tensor_leaves(value: Any, *, memo: set[int] | None = None) -> Iterator
     if isinstance(value, torch.Tensor):
         yield value
         return
+    if _depth >= OUTPUT_TREE_MAX_DEPTH:
+        return
     for _component, child in _iter_container_children(value):
-        yield from _iter_tensor_leaves(child, memo=memo)
+        yield from _iter_tensor_leaves(child, memo=memo, _depth=_depth + 1)
 
 
 def _iter_container_children(value: Any) -> Iterator[tuple[OutputPathComponent, Any]]:

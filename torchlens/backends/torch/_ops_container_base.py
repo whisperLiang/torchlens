@@ -323,13 +323,22 @@ def _iter_sequence_items(value: Any) -> tuple[tuple[int, Any], ...] | None:
         raise
 
 
-def _try_build_container_spec(value: Any) -> ContainerSpec | None:
+def _try_build_container_spec(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> ContainerSpec | None:
     """Build a child container spec, treating opaque non-iterables as leaves.
 
     Parameters
     ----------
     value
         Child output value to describe.
+    _depth
+        Internal recursion depth forwarded to the guarded builder (r-b4 R27-4).
+    _in_progress
+        Internal path-scoped container-id set forwarded to the guarded builder.
 
     Returns
     -------
@@ -338,7 +347,7 @@ def _try_build_container_spec(value: Any) -> ContainerSpec | None:
     """
 
     try:
-        return _build_container_spec(value)
+        return _build_container_spec(value, _depth=_depth, _in_progress=_in_progress)
     except TypeError as exc:
         if _non_iterable_type_error(exc):
             return None

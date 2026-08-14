@@ -111,6 +111,7 @@ from ...ir.container import (
     reconstruction_is_lossy,
 )
 from ...ir.container_registry import (
+    OUTPUT_TREE_MAX_DEPTH,
     ContainerLeafOccurrence,
     FuncSite,
     Phase,
@@ -648,11 +649,20 @@ _mapping_reconstruction = _rebind_function(_ops_container_base._mapping_reconstr
 _object_holds_tensor = _rebind_function(_ops_container_base._object_holds_tensor, globals())
 _leaf_is_reconstructable = _rebind_function(_ops_container_base._leaf_is_reconstructable, globals())
 _build_container_spec = _rebind_function(_ops_containers._build_container_spec, globals())
+_build_container_spec_unguarded = _rebind_function(
+    _ops_containers._build_container_spec_unguarded, globals()
+)
+_known_output_container_children = _rebind_function(
+    _ops_containers._known_output_container_children, globals()
+)
 _walk_supported_output_container = _rebind_function(
     _ops_containers._walk_supported_output_container, globals()
 )
 _prove_runnable_output_lossless = _rebind_function(
     _ops_containers._prove_runnable_output_lossless, globals()
+)
+_prove_runnable_output_lossless_unguarded = _rebind_function(
+    _ops_containers._prove_runnable_output_lossless_unguarded, globals()
 )
 runnable_output_losslessness = _rebind_function(
     _ops_containers.runnable_output_losslessness, globals()

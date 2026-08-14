@@ -447,9 +447,23 @@ def _tf_runtime_supported(tf: object, keras: object) -> bool:
     Returns
     -------
     bool
-        True for Keras 3 on TensorFlow >= 2.16.
+        True for the Keras-3 multi-backend surface (TF >= 2.16 ships it).
+
+    Notes
+    -----
+    r-b4 R26-6b: feature-probed, not version-parsed. The historical
+    ``Version(...) >= 2.16 and >= 3`` gate returned ``False`` on
+    ``InvalidVersion``, so an odd/custom build string silently made
+    ``backend="tf"`` unavailable. ``keras.ops`` ships only in Keras 3 and the
+    multi-backend selector ``keras.backend.backend`` is the exact surface the
+    TF preview consumes; a parseable version pair is still honored as a
+    fallback signal when the structural probe is inconclusive.
     """
 
+    if hasattr(keras, "ops") and callable(
+        getattr(getattr(keras, "backend", None), "backend", None)
+    ):
+        return True
     try:
         tf_version = Version(str(getattr(tf, "__version__", "0")))
         keras_version = Version(str(getattr(keras, "__version__", "0")))
@@ -514,13 +528,26 @@ def _has_saved_model_signatures(value: object) -> bool:
     return isinstance(signatures, Mapping) and bool(signatures)
 
 
-def _simple_leaves(value: object) -> tuple[object, ...]:
+def _simple_leaves(
+    value: object,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> tuple[object, ...]:
     """Return leaves from simple Python containers.
+
+    Runs at backend RESOLUTION on the raw user input, so it is the first walker a
+    hostile/degenerate input tree reaches. Depth and cycles refuse typed through
+    the shared input-boundary guard (r-b4 R27-1) instead of dying in a raw
+    ``RecursionError`` (probe: ~350 user levels crossed the interpreter limit).
 
     Parameters
     ----------
     value:
         Candidate tree.
+    _depth:
+        Internal recursion depth (callers must not supply this).
+    _in_progress:
+        Internal path-scoped container-id set (callers must not supply this).
 
     Returns
     -------
@@ -528,10 +555,32 @@ def _simple_leaves(value: object) -> tuple[object, ...]:
         Flat leaves.
     """
 
-    if isinstance(value, dict):
-        return tuple(leaf for child in value.values() for leaf in _simple_leaves(child))
-    if isinstance(value, tuple | list):
-        return tuple(leaf for child in value for leaf in _simple_leaves(child))
+    if isinstance(value, dict | tuple | list):
+        from .._input_walk import (
+            INPUT_TREE_MAX_DEPTH,
+            raise_input_tree_cycle_refusal,
+            raise_input_tree_depth_refusal,
+        )
+
+        if _depth >= INPUT_TREE_MAX_DEPTH:
+            raise_input_tree_depth_refusal(depth=_depth)
+        if _in_progress is None:
+            _in_progress = set()
+        value_id = id(value)
+        if value_id in _in_progress:
+            raise_input_tree_cycle_refusal(
+                kind="mapping" if isinstance(value, dict) else "sequence"
+            )
+        _in_progress.add(value_id)
+        try:
+            children = value.values() if isinstance(value, dict) else value
+            return tuple(
+                leaf
+                for child in children
+                for leaf in _simple_leaves(child, _depth + 1, _in_progress)
+            )
+        finally:
+            _in_progress.discard(value_id)
     return (value,)
 
 

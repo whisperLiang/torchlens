@@ -79,21 +79,25 @@ def dtensor_dual_geometry(value: Any) -> dict[str, Any] | None:
         pass
 
     shard_offset: list[int] | None = None
-    try:
-        from torch.distributed.tensor._utils import (
-            compute_local_shape_and_global_offset,
-        )
+    # r-b4 R26-2: the geometry helper routes through _torch_compat
+    # (HAS_DTENSOR_SHARD_GEOMETRY), so "the private API moved" flips a named
+    # flag visible in doctor/compat instead of collapsing into the same silent
+    # None as a legitimately off-mesh rank.
+    from ..utils._torch_compat import get_dtensor_shard_geometry_fn
 
-        computed_local, global_offset = compute_local_shape_and_global_offset(
-            tuple(logical_shape or ()), mesh, tuple(placements)
-        )
-        shard_offset = _as_int_list(global_offset)
-        if local_shape is None:
-            local_shape = _as_int_list(computed_local)
-    except Exception:
-        # Private-API drift or an off-mesh rank: the offset is unprovable and
-        # stays None rather than guessed.
-        pass
+    compute_local_shape_and_global_offset = get_dtensor_shard_geometry_fn()
+    if compute_local_shape_and_global_offset is not None:
+        try:
+            computed_local, global_offset = compute_local_shape_and_global_offset(
+                tuple(logical_shape or ()), mesh, tuple(placements)
+            )
+            shard_offset = _as_int_list(global_offset)
+            if local_shape is None:
+                local_shape = _as_int_list(computed_local)
+        except Exception:
+            # An off-mesh rank (or geometry the helper rejects): the offset is
+            # genuinely unprovable and stays None rather than guessed.
+            pass
 
     logical_numel = None
     if logical_shape is not None:

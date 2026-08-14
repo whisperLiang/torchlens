@@ -90,6 +90,65 @@ r67 C2 adds ``registered`` (a ``tl.register_container`` type, descended through 
 
 
 MAX_INPUT_CONTAINER_DEPTH: int = 200
+
+INPUT_TREE_MAX_DEPTH: int = MAX_INPUT_CONTAINER_DEPTH
+"""The shared model-input boundary nesting ceiling (r-b4 R27-1).
+
+Mirrors the artifact-side literal-decode ceiling
+(``_runnable_execution._MAX_DECODE_NESTING_DEPTH`` / the ``_io`` parse quartet):
+200 sits far above any real input nesting and well below the interpreter's
+default recursion crash depth (the live walkers burn ~2-3 frames per level, so
+an unbounded walk died with a raw ``RecursionError`` at ~350 user levels).
+Every capture-entry input walker (``walk_input_boundary``,
+``snapshot_input_boundary``, ``backends.default_specs._simple_leaves``,
+``utils.arg_handling.copy_arg_tree``) enforces this ONE ceiling with a typed
+refusal instead of an untyped stdlib crash.
+"""
+
+
+def raise_input_tree_depth_refusal(*, depth: int) -> None:
+    """Raise the typed over-depth input-boundary refusal (r-b4 R27-1).
+
+    Parameters
+    ----------
+    depth:
+        Nesting depth at which the ceiling was crossed.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "Model-input tree nesting exceeds the supported input-boundary depth "
+        f"ceiling ({INPUT_TREE_MAX_DEPTH}).",
+        code="input_tree_depth_exceeded",
+        remedy=(
+            "Flatten the nested input containers (or unwrap the deep wrapper "
+            "object) before tracing; the ceiling matches the portable-artifact "
+            "nesting bound."
+        ),
+        depth=depth,
+    )
+
+
+def raise_input_tree_cycle_refusal(*, kind: str) -> None:
+    """Raise the typed cyclic-container input-boundary refusal (r-b4 R27-1).
+
+    Parameters
+    ----------
+    kind:
+        Container kind (closed vocabulary) at which the cycle closed.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        f"Model-input tree contains a self-referential {kind} container "
+        "(a container reachable from itself).",
+        code="input_tree_cycle",
+        remedy="Remove the container reference cycle from the model input.",
+        kind=kind,
+    )
+
 """Declared nesting bound for the input-boundary walk, mirroring the DECODE direction.
 
 ``_runnable_execution._MAX_DECODE_NESTING_DEPTH`` bounds the symmetric decode direction

@@ -58,6 +58,9 @@ __all__ = [
     "AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED",
     "HAS_ACCUMULATE_GRAD_CLASS",
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
+    "HAS_C10D_ABORT_PG",
+    "HAS_C10D_GROUP_REGISTRY",
+    "HAS_C10D_GROUP_SEQ",
     "HAS_CUDA_MATMUL_TF32",
     "HAS_CUDNN_FLAGS",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
@@ -72,9 +75,16 @@ __all__ = [
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
     "HAS_DEVICE_MESH",
+    "HAS_DISABLE_TORCH_FUNCTION",
+    "HAS_DISPATCH_MODE_STACK_QUERY",
     "HAS_DTENSOR",
+    "HAS_DTENSOR_SHARD_GEOMETRY",
     "HAS_DYNAMO_COMPILE_COUNTERS",
     "HAS_DYNAMO_IS_COMPILING",
+    "HAS_FAKE_TENSOR_MODE",
+    "HAS_JIT_SCHEMA_ENUMERATION",
+    "HAS_TENSORBASE_CLASS",
+    "HAS_VARIABLE_FUNCTIONS_CLASS",
     "HAS_FP8_DTYPES",
     "HAS_PIPELINING",
     "HAS_SET_STANCE",
@@ -92,7 +102,6 @@ __all__ = [
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_FSDP_WRAPPER",
-    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
@@ -104,12 +113,20 @@ __all__ = [
     "HAS_TORCH_VF",
     "HAS_VARIABLE_FUNCTIONS",
     "TorchCapabilitySnapshot",
+    "TorchCapabilityWarning",
     "saved_tensors_default_hooks_active",
     "RunnableTorchAlias",
     "autocast_get_dtype",
     "autocast_is_enabled",
     "get_accumulate_grad_class",
+    "get_current_dispatch_mode_stack",
     "get_current_function_mode_stack",
+    "get_disable_torch_function_context",
+    "get_dtensor_shard_geometry_fn",
+    "get_fake_tensor_mode_class",
+    "get_jit_all_schemas",
+    "get_tensorbase_class",
+    "get_variable_functions_class",
     "get_device_constructors",
     "get_device_context_type",
     "get_device_mesh_type",
@@ -1119,7 +1136,12 @@ HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_se
 HAS_SAFE_WEIGHTS_ONLY_LOAD: bool = _probe_safe_weights_only_load()
 HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
-HAS_ROLL_TENSOR_SHIFTS: bool = _probe_roll_tensor_shifts()
+# r-b4 R26-5a: ROLL_TENSOR_SHIFTS_SUPPORTED is a TEST HELPER, not a published
+# capability. It tracks a user-side torch spelling limitation (torch.roll with a
+# bare 0-dim tensor `shifts`: 2.8 rejects, 2.13 accepts) on which TorchLens does
+# NOT degrade -- zero library consumers exist, so publishing it made doctor WARN
+# across most of the declared support range for nothing TorchLens does.
+ROLL_TENSOR_SHIFTS_SUPPORTED: bool = _probe_roll_tensor_shifts()
 HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspection()
 HAS_SAVED_TENSORS_HOOKS_PATCHABLE: bool = _probe_saved_tensors_hooks_patchable()
 HAS_CODE_POSITIONS: bool = _probe_code_positions()
@@ -1158,6 +1180,28 @@ HAS_C10D_GROUP_SEQ: bool = False
 _C10D_GROUP_SEQ_PROBED: bool = False
 HAS_C10D_ABORT_PG: bool = False
 _C10D_ABORT_PG_PROBED: bool = False
+HAS_DISPATCH_MODE_STACK_QUERY: bool = False
+_DISPATCH_MODE_STACK_FN: Callable[[], Any] | None = None
+_DISPATCH_MODE_STACK_PROBED: bool = False
+# r-b4 R26-2: previously-unrouted private probes, each with a named flag.
+HAS_JIT_SCHEMA_ENUMERATION: bool = False
+_JIT_SCHEMA_ENUMERATION_FN: Callable[[], Any] | None = None
+_JIT_SCHEMA_ENUMERATION_PROBED: bool = False
+HAS_TENSORBASE_CLASS: bool = False
+_TENSORBASE_CLASS: type[Any] | None = None
+_TENSORBASE_CLASS_PROBED: bool = False
+HAS_DISABLE_TORCH_FUNCTION: bool = False
+_DISABLE_TORCH_FUNCTION_CLS: Any | None = None
+_DISABLE_TORCH_FUNCTION_PROBED: bool = False
+HAS_VARIABLE_FUNCTIONS_CLASS: bool = False
+_VARIABLE_FUNCTIONS_CLASS: Any | None = None
+_VARIABLE_FUNCTIONS_CLASS_PROBED: bool = False
+HAS_FAKE_TENSOR_MODE: bool = False
+_FAKE_TENSOR_MODE_CLS: type[Any] | None = None
+_FAKE_TENSOR_MODE_PROBED: bool = False
+HAS_DTENSOR_SHARD_GEOMETRY: bool = False
+_DTENSOR_SHARD_GEOMETRY_FN: Callable[..., Any] | None = None
+_DTENSOR_SHARD_GEOMETRY_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1184,6 +1228,13 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DTENSOR",
     "HAS_DEVICE_MESH",
     "HAS_PIPELINING",
+    "HAS_DISPATCH_MODE_STACK_QUERY",
+    "HAS_JIT_SCHEMA_ENUMERATION",
+    "HAS_TENSORBASE_CLASS",
+    "HAS_DISABLE_TORCH_FUNCTION",
+    "HAS_VARIABLE_FUNCTIONS_CLASS",
+    "HAS_FAKE_TENSOR_MODE",
+    "HAS_DTENSOR_SHARD_GEOMETRY",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_SET_STANCE",
     "HAS_DYNAMO_COMPILE_COUNTERS",
@@ -1195,7 +1246,6 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
-    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
     "HAS_CODE_POSITIONS",
@@ -1207,6 +1257,39 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_SDP_TOGGLES",
     "HAS_FILL_UNINITIALIZED_MEMORY",
 )
+
+
+class TorchCapabilityWarning(UserWarning):
+    """Graceful torch-capability degradation warning (r-b4 R26-6d).
+
+    A dedicated subclass so CI suppression can key on the CATEGORY instead of
+    the message text (``pyproject.toml`` matched the literal message string, so
+    editing the wording would have turned every legitimate matrix degradation
+    into a suite-wide error under ``error::UserWarning:torchlens``). Subclasses
+    ``UserWarning``, so existing category filters keep matching.
+    """
+
+
+OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
+    {
+        # PEP 657 / 3.11 code-object surfaces: an interpreter feature, not a
+        # torch-private degradation -- CPython 3.10 installs are healthy.
+        "HAS_CODE_POSITIONS",
+        "HAS_CODE_QUALNAME",
+        # Named-tensor API was REMOVED upstream (torch 2.13): its absence tracks
+        # torch's own public surface, so there is nothing for TorchLens to
+        # degrade on -- named-dim metadata simply cannot exist on such builds.
+        "HAS_NAMED_TENSOR_API",
+    }
+)
+"""Capability flags whose ``False`` is an absent OPTIONAL feature, not a degradation.
+
+r-b4 R26-4: doctor/compat previously presented every ``False`` flag as a
+graceful-degradation WARN, so every healthy torch-only / CPython-3.10 install
+showed a permanent warning row with no actionable remedy -- training users to
+ignore the row. Flags listed here still appear in the snapshot (with their
+true value) but do not drive WARN status; only genuine degradations do.
+"""
 
 
 def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
@@ -1235,7 +1318,7 @@ def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
     _warned_missing_capabilities.add(capability_name)
     warnings.warn(
         f"TorchLens torch capability {capability_name} is unavailable; {detail}",
-        UserWarning,
+        TorchCapabilityWarning,
         stacklevel=3,
     )
 
@@ -1267,6 +1350,16 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_fp8_dtypes(force_probe=True)
     get_dynamo_compile_counters(force_probe=True)
     probe_c10d_capabilities(force_probe=True)
+    get_current_dispatch_mode_stack()
+    # r-b4 R26-2 lazily-probed accessors: resolve so the snapshot reports the
+    # real capability, not the pre-probe placeholder. Degradation warnings are
+    # deduped once-per-process and the probes are cached.
+    get_jit_all_schemas()
+    get_tensorbase_class()
+    get_disable_torch_function_context()
+    get_variable_functions_class()
+    get_fake_tensor_mode_class()
+    get_dtensor_shard_geometry_fn()
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
@@ -1482,6 +1575,212 @@ def get_current_function_mode_stack() -> Iterable[Any] | None:
         )
         return None
     return stack_getter()
+
+
+def get_current_dispatch_mode_stack() -> list[Any] | None:
+    """Return the current thread's TorchDispatchMode stack when available.
+
+    Returns
+    -------
+    list[Any] | None
+        Active ``TorchDispatchMode`` instances, or ``None`` when the private
+        ``torch.utils._python_dispatch._get_current_dispatch_mode_stack`` probe
+        is absent or raises. ``None`` means "cannot answer": the host-escape
+        belt census check (its one consumer) must treat that as census-INACTIVE
+        so the belt records the escape (fail closed) rather than silently
+        standing down (r-b4 R26-1).
+
+    Notes
+    -----
+    Probed once and cached as a bound callable because this sits on the
+    host-value escape path (``item()`` / ``__bool__`` during capture). A probe
+    that raises is demoted to permanently-absent so later calls short-circuit.
+    """
+
+    global HAS_DISPATCH_MODE_STACK_QUERY, _DISPATCH_MODE_STACK_FN, _DISPATCH_MODE_STACK_PROBED
+
+    if not _DISPATCH_MODE_STACK_PROBED:
+        candidate = _import_module_attr_or_none(
+            "torch.utils._python_dispatch", "_get_current_dispatch_mode_stack"
+        )
+        _DISPATCH_MODE_STACK_FN = candidate if callable(candidate) else None
+        HAS_DISPATCH_MODE_STACK_QUERY = _DISPATCH_MODE_STACK_FN is not None
+        _DISPATCH_MODE_STACK_PROBED = True
+    probe = _DISPATCH_MODE_STACK_FN
+    if probe is None:
+        mark_torch_capability_missing(
+            "HAS_DISPATCH_MODE_STACK_QUERY",
+            "the host-escape belt records without census-activity suppression (fail closed)",
+        )
+        return None
+    try:
+        return list(probe())
+    except Exception:
+        _DISPATCH_MODE_STACK_FN = None
+        mark_torch_capability_missing(
+            "HAS_DISPATCH_MODE_STACK_QUERY",
+            "the host-escape belt records without census-activity suppression (fail closed)",
+        )
+        return None
+
+
+def get_jit_all_schemas() -> list[Any] | None:
+    """Return every registered dispatcher schema, or ``None`` when unavailable.
+
+    Backs the arm-time collective-recognizer census (r-b4 R26-2). ``None``
+    means the caller must refuse TYPED (an unvetted dispatcher surface can
+    never silently read as "no uncaptured collectives").
+    """
+
+    global HAS_JIT_SCHEMA_ENUMERATION, _JIT_SCHEMA_ENUMERATION_FN
+    global _JIT_SCHEMA_ENUMERATION_PROBED
+
+    if not _JIT_SCHEMA_ENUMERATION_PROBED:
+        candidate = _nested_getattr_or_none(torch, ("_C", "_jit_get_all_schemas"))
+        _JIT_SCHEMA_ENUMERATION_FN = candidate if callable(candidate) else None
+        HAS_JIT_SCHEMA_ENUMERATION = _JIT_SCHEMA_ENUMERATION_FN is not None
+        _JIT_SCHEMA_ENUMERATION_PROBED = True
+    probe = _JIT_SCHEMA_ENUMERATION_FN
+    if probe is None:
+        mark_torch_capability_missing(
+            "HAS_JIT_SCHEMA_ENUMERATION",
+            "distributed arming refuses typed (the recognizer census cannot be vetted)",
+        )
+        return None
+    try:
+        return list(probe())
+    except Exception:
+        _JIT_SCHEMA_ENUMERATION_FN = None
+        mark_torch_capability_missing(
+            "HAS_JIT_SCHEMA_ENUMERATION",
+            "distributed arming refuses typed (the recognizer census cannot be vetted)",
+        )
+        return None
+
+
+def get_tensorbase_class() -> type[Any] | None:
+    """Return the C tensor base class (``TensorBase``/legacy ``_TensorBase``).
+
+    The ONE probe for every consumer (completeness witness originals,
+    callable-safety method-owner census; r-b4 R26-2). ``None`` flips the flag;
+    consumers that structurally REQUIRE the class raise explicitly (never an
+    ``assert`` stripped under ``python -O``).
+    """
+
+    global HAS_TENSORBASE_CLASS, _TENSORBASE_CLASS, _TENSORBASE_CLASS_PROBED
+
+    if not _TENSORBASE_CLASS_PROBED:
+        candidate = _nested_getattr_or_none(torch, ("_C", "TensorBase"))
+        if candidate is None:
+            candidate = _nested_getattr_or_none(torch, ("_C", "_TensorBase"))
+        _TENSORBASE_CLASS = candidate if isinstance(candidate, type) else None
+        HAS_TENSORBASE_CLASS = _TENSORBASE_CLASS is not None
+        _TENSORBASE_CLASS_PROBED = True
+    if _TENSORBASE_CLASS is None:
+        mark_torch_capability_missing(
+            "HAS_TENSORBASE_CLASS",
+            "C-level tensor-base introspection is unavailable",
+        )
+    return _TENSORBASE_CLASS
+
+
+def get_disable_torch_function_context() -> Any | None:
+    """Return ``torch._C.DisableTorchFunction``, or ``None`` when unavailable.
+
+    ``None`` means an ambient torch-FUNCTION mode CANNOT be neutralized for
+    import-time probes (r-b4 R26-2): the caller's fallback does not neutralize
+    such a mode, so the degradation must be disclosed by the flag rather than
+    silently absorbed.
+    """
+
+    global HAS_DISABLE_TORCH_FUNCTION, _DISABLE_TORCH_FUNCTION_CLS
+    global _DISABLE_TORCH_FUNCTION_PROBED
+
+    if not _DISABLE_TORCH_FUNCTION_PROBED:
+        _DISABLE_TORCH_FUNCTION_CLS = _nested_getattr_or_none(torch, ("_C", "DisableTorchFunction"))
+        HAS_DISABLE_TORCH_FUNCTION = _DISABLE_TORCH_FUNCTION_CLS is not None
+        _DISABLE_TORCH_FUNCTION_PROBED = True
+    if _DISABLE_TORCH_FUNCTION_CLS is None:
+        mark_torch_capability_missing(
+            "HAS_DISABLE_TORCH_FUNCTION",
+            "import-time probes cannot neutralize an ambient torch-function mode",
+        )
+    return _DISABLE_TORCH_FUNCTION_CLS
+
+
+def get_variable_functions_class() -> Any | None:
+    """Return ``torch._C._VariableFunctionsClass``, or ``None`` when unavailable.
+
+    Backs the internal-torch-builtin registry-key lane (r-b4 R26-2): without
+    it, a captured internal builtin is classified through the public ``torch``
+    wrapper -- a DIFFERENT argument convention for replay -- so the downgrade
+    must flip the flag instead of happening silently.
+    """
+
+    global HAS_VARIABLE_FUNCTIONS_CLASS, _VARIABLE_FUNCTIONS_CLASS
+    global _VARIABLE_FUNCTIONS_CLASS_PROBED
+
+    if not _VARIABLE_FUNCTIONS_CLASS_PROBED:
+        _VARIABLE_FUNCTIONS_CLASS = _nested_getattr_or_none(torch, ("_C", "_VariableFunctionsClass"))
+        HAS_VARIABLE_FUNCTIONS_CLASS = _VARIABLE_FUNCTIONS_CLASS is not None
+        _VARIABLE_FUNCTIONS_CLASS_PROBED = True
+    if _VARIABLE_FUNCTIONS_CLASS is None:
+        mark_torch_capability_missing(
+            "HAS_VARIABLE_FUNCTIONS_CLASS",
+            "internal torch builtins record public-wrapper replay keys",
+        )
+    return _VARIABLE_FUNCTIONS_CLASS
+
+
+def get_fake_tensor_mode_class() -> type[Any] | None:
+    """Return torch's ``FakeTensorMode`` class, or ``None`` when unavailable.
+
+    The runnable allocation preflight deliberately fails OPEN without it
+    (refusing a legitimate run over a missing estimator would be worse), but
+    the degradation flips ``HAS_FAKE_TENSOR_MODE`` so it is visible in
+    doctor/compat instead of silently vanishing (r-b4 R26-2).
+    """
+
+    global HAS_FAKE_TENSOR_MODE, _FAKE_TENSOR_MODE_CLS, _FAKE_TENSOR_MODE_PROBED
+
+    if not _FAKE_TENSOR_MODE_PROBED:
+        candidate = _import_module_attr_or_none("torch._subclasses.fake_tensor", "FakeTensorMode")
+        _FAKE_TENSOR_MODE_CLS = candidate if isinstance(candidate, type) else None
+        HAS_FAKE_TENSOR_MODE = _FAKE_TENSOR_MODE_CLS is not None
+        _FAKE_TENSOR_MODE_PROBED = True
+    if _FAKE_TENSOR_MODE_CLS is None:
+        mark_torch_capability_missing(
+            "HAS_FAKE_TENSOR_MODE",
+            "the runnable allocation preflight is disabled (falls back to the recorded bound)",
+        )
+    return _FAKE_TENSOR_MODE_CLS
+
+
+def get_dtensor_shard_geometry_fn() -> Callable[..., Any] | None:
+    """Return DTensor's shard-geometry helper, or ``None`` when unavailable.
+
+    Backs the per-site dual geometry of the DTensor refusal (r-b4 R26-2).
+    ``None`` distinguishes "the private API moved" (flag flips, visible in
+    doctor/compat) from a legitimately off-mesh rank (helper present, raises
+    at computation), which previously collapsed into one silent ``None``.
+    """
+
+    global HAS_DTENSOR_SHARD_GEOMETRY, _DTENSOR_SHARD_GEOMETRY_FN
+    global _DTENSOR_SHARD_GEOMETRY_PROBED
+
+    if not _DTENSOR_SHARD_GEOMETRY_PROBED:
+        candidate = _import_module_attr_or_none(
+            "torch.distributed.tensor._utils", "compute_local_shape_and_global_offset"
+        )
+        _DTENSOR_SHARD_GEOMETRY_FN = candidate if callable(candidate) else None
+        HAS_DTENSOR_SHARD_GEOMETRY = _DTENSOR_SHARD_GEOMETRY_FN is not None
+        _DTENSOR_SHARD_GEOMETRY_PROBED = True
+    if _DTENSOR_SHARD_GEOMETRY_FN is None:
+        mark_torch_capability_missing(
+            "HAS_DTENSOR_SHARD_GEOMETRY",
+            "refused-DTensor findings omit shard offsets (geometry helper unavailable)",
+        )
+    return _DTENSOR_SHARD_GEOMETRY_FN
 
 
 def get_torch_function_mode_stack_length() -> int | None:
@@ -1764,8 +2063,14 @@ def dynamo_is_compiling() -> bool:
     -------
     bool
         True while a ``torch.compile`` region is being traced. False when the
-        capability is unavailable, so an absent probe degrades to "not
-        compiling" rather than disabling capture.
+        capability is structurally ABSENT (no probe resolved), so an absent
+        probe degrades to "not compiling" rather than disabling capture. True
+        when a resolved probe RAISES (r-b4 R26-3): "cannot answer" is treated
+        as possibly-compiling so the wrapper takes the disclosed dynamo-region
+        bypass (``capture_verified=False`` + ``dynamo_region_not_logged``)
+        instead of silently logging data-free FakeTensors -- the documented
+        crash class the guard exists to prevent. Both degraded paths flip
+        ``HAS_DYNAMO_IS_COMPILING``.
 
     Notes
     -----
@@ -1797,7 +2102,12 @@ def dynamo_is_compiling() -> bool:
     try:
         return bool(probe())
     except Exception:
-        return False
+        mark_torch_capability_missing(
+            "HAS_DYNAMO_IS_COMPILING",
+            "Dynamo-tracing detection raised; frames are treated as possibly-compiling "
+            "so compiled regions degrade to the disclosed bypass",
+        )
+        return True
 
 
 @contextlib.contextmanager

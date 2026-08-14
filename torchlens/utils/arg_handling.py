@@ -14,9 +14,12 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .._input_walk import INPUT_TREE_MAX_DEPTH
 from .tensor_utils import (
+    TensorByteFootprint,
     _clone_tensor_payload,
     _copy_tensor_payload,
+    tensor_byte_footprint,
     touched_bytes_relation,
 )
 
@@ -48,7 +51,7 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
-def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
+def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: int = 0) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
     Why not ``copy.deepcopy``?  Many third-party tensor wrappers hold
@@ -67,9 +70,15 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
     cycle of mutable containers) are handled without a ``RecursionError``: a
     mutable container being built is registered in ``_in_progress`` before its
     elements are recursed, so a self-reference resolves to the same in-progress
-    copy and the cycle is reproduced in the copy.  The registration is scoped to
-    the active recursion path only, so a non-cyclic structure that reuses the
-    same sub-container twice is still copied twice (unchanged behavior).
+    copy and the cycle is reproduced in the copy.  The memo is CALL-scoped
+    (retained across siblings, r-b4 R29-3): a DAG-shaped input that reuses one
+    sub-container under several paths is copied ONCE and stays aliased in the
+    copy -- which both matches the aliasing topology the model itself would see
+    and makes the copy O(nodes).  The historical path-scoped memo copied a
+    shared node once per PATH, i.e. exponentially in shared-substructure depth
+    (measured x2 per level; depth 25 hung capture entry for ~4 minutes).
+    Tensors remain leaves cloned per DISTINCT container occurrence and are
+    never memoized.
 
     Note: custom objects containing tensors are passed by reference.  If the
     model is on a different device, _fetch_label_move_input_tensors may
@@ -84,6 +93,9 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
         Internal recursion state mapping ``id()`` of a mutable container being
         built to its (partially populated) copy, used to terminate reference
         cycles. Callers should not supply this.
+    _depth
+        Internal recursion depth used to enforce the shared input-boundary
+        nesting ceiling (r-b4 R27-1). Callers should not supply this.
 
     Returns
     -------
@@ -101,47 +113,49 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None) -> Any:
     arg_id = id(arg)
     existing = _in_progress.get(arg_id)
     if existing is not None:
-        # A container on the current recursion path referred back to itself.
+        # Cycle (a container reachable from itself) or DAG reuse (one container
+        # under several paths): both resolve to the one memoized copy.
         return existing
+    if isinstance(arg, (defaultdict, dict, list, tuple)) and _depth >= INPUT_TREE_MAX_DEPTH:
+        # r-b4 R27-1: the canonical per-capture input copier is depth-bounded with the
+        # SAME shared ceiling as every other input-boundary walker -- a deeper tree
+        # refuses typed at capture entry instead of dying in a raw RecursionError.
+        from .._input_walk import raise_input_tree_depth_refusal
+
+        raise_input_tree_depth_refusal(depth=_depth)
     if isinstance(arg, defaultdict):
         # defaultdict(factory, {k: v, ...}) — preserve the default_factory (#127).
         # A plain dict() constructor would lose default_factory.
         copied: Any = defaultdict(arg.default_factory)
         _in_progress[arg_id] = copied
-        try:
-            for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress)
-        finally:
-            _in_progress.pop(arg_id, None)
+        for key, value in arg.items():
+            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         return copied
     elif isinstance(arg, dict):
         # type(arg)() preserves OrderedDict and other dict subclasses; populate
         # after registering so a cyclic value can point back at this copy.
         copied = type(arg)()
         _in_progress[arg_id] = copied
-        try:
-            for key, value in arg.items():
-                copied[key] = copy_arg_tree(value, _in_progress)
-        finally:
-            _in_progress.pop(arg_id, None)
+        for key, value in arg.items():
+            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
         return copied
     elif isinstance(arg, list):
         copied = type(arg)()
         _in_progress[arg_id] = copied
-        try:
-            for item in arg:
-                copied.append(copy_arg_tree(item, _in_progress))
-        finally:
-            _in_progress.pop(arg_id, None)
+        for item in arg:
+            copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
         return copied
     elif isinstance(arg, tuple):
         # Tuples are immutable and cannot self-reference directly; any cycle
         # through a tuple passes through a mutable container that is already
         # registered above, so recursing eagerly here is safe.
-        items = [copy_arg_tree(item, _in_progress) for item in arg]
+        items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
         # NamedTuples have _fields and need *args construction; plain tuples
-        # take an iterable.
-        return type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
+        # take an iterable. Memoized after construction (immutable, so no cycle
+        # can pass through the tuple itself) so tuple-shaped DAGs are O(nodes).
+        copied = type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
+        _in_progress[arg_id] = copied
+        return copied
     else:
         # Non-container, non-tensor objects (ints, strings, custom wrappers)
         # are returned by reference — shallow enough to avoid circular ref issues.
@@ -312,35 +326,146 @@ def _record_unpreserved_tensor_aliases(
     None
         Appends one diagnostic for every potentially overlapping pair whose
         topology cannot be preserved without severing autograd linkage.
+
+    Notes
+    -----
+    r-b4 R29-2: the historical implementation ran ``touched_bytes_relation`` on
+    every pair -- O(T^2) in tensor-leaf count (measured 0.72 s at 4k leaves even
+    with every storage disjoint). Candidate pairs are now pre-filtered by a
+    device-scoped byte-interval sweep (:func:`_alias_candidate_pairs`) that drops
+    ONLY pairs the relation ladder provably answers ``disjoint`` from bounding
+    intervals alone; every surviving pair still runs the exact same per-pair
+    ladder, so verdicts and diagnostic text are byte-identical.
     """
 
-    for left_index, (left_path, left, left_transparent) in enumerate(tensor_records):
-        for right_path, right, right_transparent in tensor_records[left_index + 1 :]:
-            if left is right:
-                if require_distinct_tensor_sites:
-                    semantic_gaps.append(
-                        f"{left_path} <-> {right_path}: runnable input sites share "
-                        "one tensor identity, which the sparse descriptor cannot encode"
-                    )
-                continue
-            if left_transparent and right_transparent and not require_distinct_tensor_sites:
-                continue
-            try:
-                relation = touched_bytes_relation(left, right)
-            except (RuntimeError, TypeError, NotImplementedError):
-                relation = "unknown"
-            if relation == "disjoint":
-                continue
+    if len(tensor_records) < 2:
+        return
+    footprints: list[TensorByteFootprint | None] = []
+    for _left_path, tensor, _transparent in tensor_records:
+        try:
+            footprints.append(tensor_byte_footprint(tensor))
+        except (RuntimeError, TypeError, NotImplementedError):
+            footprints.append(None)
+    for left_index, right_index in sorted(_alias_candidate_pairs(tensor_records, footprints)):
+        left_path, left, left_transparent = tensor_records[left_index]
+        right_path, right, right_transparent = tensor_records[right_index]
+        if left is right:
             if require_distinct_tensor_sites:
                 semantic_gaps.append(
-                    f"{left_path} <-> {right_path}: runnable input sites have "
-                    f"{relation} storage, which the sparse descriptor cannot encode"
+                    f"{left_path} <-> {right_path}: runnable input sites share "
+                    "one tensor identity, which the sparse descriptor cannot encode"
                 )
-            else:
-                semantic_gaps.append(
-                    f"{left_path} <-> {right_path}: grad-preserving clones cannot prove "
-                    f"the original tensor alias topology ({relation})"
-                )
+            continue
+        if left_transparent and right_transparent and not require_distinct_tensor_sites:
+            continue
+        try:
+            relation = touched_bytes_relation(left, right)
+        except (RuntimeError, TypeError, NotImplementedError):
+            relation = "unknown"
+        if relation == "disjoint":
+            continue
+        if require_distinct_tensor_sites:
+            semantic_gaps.append(
+                f"{left_path} <-> {right_path}: runnable input sites have "
+                f"{relation} storage, which the sparse descriptor cannot encode"
+            )
+        else:
+            semantic_gaps.append(
+                f"{left_path} <-> {right_path}: grad-preserving clones cannot prove "
+                f"the original tensor alias topology ({relation})"
+            )
+
+
+def _alias_candidate_pairs(
+    tensor_records: list[tuple[str, torch.Tensor, bool]],
+    footprints: list["TensorByteFootprint | None"],
+) -> set[tuple[int, int]]:
+    """Return the record-index pairs the alias scan cannot silently skip (r-b4 R29-2).
+
+    A pair is EXCLUDED only when ``touched_bytes_relation`` provably answers
+    ``disjoint`` without a per-pair proof: both footprints known, distinct
+    objects, and either (a) an empty view on one side, (b) distinct device
+    types, (c) same device type with two CONCRETE, different indexes, or
+    (d) the same device key with non-overlapping absolute byte intervals.
+    Everything else -- identity pairs, unprovable footprints, same-type
+    None-vs-concrete device indexes, interval overlaps -- stays a candidate and
+    runs the unchanged exact ladder.
+
+    Parameters
+    ----------
+    tensor_records:
+        Tensor input paths, original tensors, and storage-deepcopy eligibility.
+    footprints:
+        Pre-computed ``tensor_byte_footprint`` per record (``None`` = unprovable).
+
+    Returns
+    -------
+    set[tuple[int, int]]
+        Candidate ``(left_index, right_index)`` pairs with ``left < right``.
+    """
+
+    total = len(tensor_records)
+    candidates: set[tuple[int, int]] = set()
+
+    # Identity pairs (one object at several sites) always reach the loop body:
+    # the caller's identity branch decides them before any footprint logic.
+    by_identity: dict[int, list[int]] = {}
+    for index, (_path, tensor, _transparent) in enumerate(tensor_records):
+        by_identity.setdefault(id(tensor), []).append(index)
+    for indices in by_identity.values():
+        for position, left_index in enumerate(indices):
+            for right_index in indices[position + 1 :]:
+                candidates.add((left_index, right_index))
+
+    # An unprovable footprint relates ``unknown`` to every partner (checked
+    # before the empty-view rule in the ladder, so zero-numel partners count).
+    for index, footprint in enumerate(footprints):
+        if footprint is not None:
+            continue
+        for other in range(total):
+            if other != index:
+                candidates.add((min(index, other), max(index, other)))
+
+    # Provable footprints with a nonzero span, grouped by exact device key as
+    # (start_byte, end_byte, record_index) interval entries.
+    by_device_key: dict[tuple[str, int | None], list[tuple[int, int, int]]] = {}
+    for index, footprint in enumerate(footprints):
+        if footprint is None or footprint.numel == 0:
+            continue
+        by_device_key.setdefault(footprint.device_key, []).append(
+            (footprint.start_byte, footprint.end_byte, index)
+        )
+
+    # Same device TYPE under two different keys is provably disjoint only when
+    # both indexes are concrete; a None-vs-concrete index answers ``unknown``.
+    keys_by_type: dict[str, list[tuple[str, int | None]]] = {}
+    for device_key in by_device_key:
+        keys_by_type.setdefault(device_key[0], []).append(device_key)
+    for device_keys in keys_by_type.values():
+        for key_position, left_key in enumerate(device_keys):
+            for right_key in device_keys[key_position + 1 :]:
+                if left_key[1] is not None and right_key[1] is not None:
+                    continue
+                for _, _, left_index in by_device_key[left_key]:
+                    for _, _, right_index in by_device_key[right_key]:
+                        candidates.add(
+                            (min(left_index, right_index), max(left_index, right_index))
+                        )
+
+    # Interval sweep inside one exact device key: only pairs whose absolute
+    # byte spans overlap survive (disjoint spans are the ladder's own verdict).
+    for entries in by_device_key.values():
+        if len(entries) < 2:
+            continue
+        entries.sort()
+        active: list[tuple[int, int]] = []  # (end_byte, record_index)
+        for start_byte, end_byte, index in entries:
+            active = [entry for entry in active if entry[0] > start_byte]
+            for _, other in active:
+                candidates.add((min(index, other), max(index, other)))
+            active.append((end_byte, index))
+
+    return candidates
 
 
 def safe_copy_input_tree(

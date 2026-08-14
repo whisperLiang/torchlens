@@ -28,6 +28,7 @@ import torch
 from torch.overrides import handle_torch_function, has_torch_function_unary  # noqa: F401
 
 from ... import _state
+from ..._deprecations import MISSING, MissingType
 from ..._errors import CaptureContextError
 from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
 from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
@@ -49,7 +50,7 @@ from ...utils._torch_compat import (
 from ...utils.arg_handling import copy_arg_tree
 from ...utils.display import identity
 from ...utils.hashing import make_random_barcode
-from ...utils.introspection import get_vars_of_type_from_obj, nested_getattr
+from ...utils.introspection import get_vars_of_type_from_obj
 from ...utils.rng import log_current_autocast_state, log_current_rng_states
 from ...utils.tensor_utils import (
     _DEFER_ENABLED as _COW_ENABLED,
@@ -709,9 +710,9 @@ def _decorate_direct_transforms() -> None:
     """
 
     for namespace_name, attr_name, transform_kind, func_name in DIRECT_TRANSFORM_SITES:
-        namespace_key = namespace_name.removeprefix("torch.")
-        namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(namespace, attr_name):
+        # r-b4 R26-5b: tolerant resolution, matching _decorate_transform_builders.
+        namespace = get_optional_torch_namespace(namespace_name)
+        if namespace is None or not hasattr(namespace, attr_name):
             continue
         current = getattr(namespace, attr_name)
         if id(current) in _state._decorated_to_orig:
@@ -2418,18 +2419,16 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
         # first swallow all the others' registrations.
         if func_name in _state._arg_names:
             continue
-        namespace_key = namespace_name.replace("torch.", "")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         orig_func = getattr(local_func_namespace, func_name)
         get_arg_names(orig_func, func_name)
 
     # --- Pass 2: Decorate all functions ---
     for namespace_name, func_name in func_pairs:
-        namespace_key = namespace_name.replace("torch.", "")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         orig_func = getattr(local_func_namespace, func_name)
 
@@ -2624,9 +2623,11 @@ def _unwrap_torch_locked() -> None:
         return
 
     for namespace_name, func_name in get_orig_torch_funcs():
-        namespace_key = namespace_name.replace("torch.", "")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
+        # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
+        # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,
+        # leaving torch partially wrapped (a process-global leak).
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         current = getattr(local_func_namespace, func_name)
         orig = _state._decorated_to_orig.get(id(current))
@@ -2640,11 +2641,8 @@ def _unwrap_torch_locked() -> None:
             pass
 
     for namespace_name, func_name, _transform_kind in TRANSFORM_BUILDER_SITES:
-        namespace_key = namespace_name.removeprefix("torch.")
-        local_func_namespace = (
-            torch if namespace_name == "torch" else nested_getattr(torch, namespace_key)
-        )
-        if not hasattr(local_func_namespace, func_name):
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         current = getattr(local_func_namespace, func_name)
         orig = _state._decorated_to_orig.get(id(current))
@@ -2658,9 +2656,8 @@ def _unwrap_torch_locked() -> None:
             pass
 
     for namespace_name, func_name, _transform_kind, _label_name in DIRECT_TRANSFORM_SITES:
-        namespace_key = namespace_name.removeprefix("torch.")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         current = getattr(local_func_namespace, func_name)
         orig = _state._decorated_to_orig.get(id(current))
@@ -2743,8 +2740,8 @@ def _configure_completeness_witness(
 
 def wrap_torch(
     *,
-    patch_policy: str | None = None,
-    patch_modules: tuple[str, ...] = (),
+    patch_policy: str | None | MissingType = MISSING,
+    patch_modules: tuple[str, ...] | MissingType = MISSING,
     escape_detector: EscapeDetectorMode | None = None,
     completeness_witness: bool | CompletenessWitnessMode | None = None,
 ) -> None:
@@ -2772,7 +2769,10 @@ def wrap_torch(
         Opt-in aten dispatcher census. ``True`` or ``"shadow"`` reports
         unaccounted dispatches and marks traces unverified; default is off.
     """
-    if patch_policy is not None or patch_modules:
+    # r-b4 R48: MISSING sentinels so ANY explicit pass warns -- the truthiness
+    # guard silently swallowed patch_modules=[]/()/{} (and an explicit
+    # patch_policy=None), the exact silent-deprecation shape the census misses.
+    if patch_policy is not MISSING or patch_modules is not MISSING:
         warnings.warn(
             "wrap_torch(patch_policy=, patch_modules=) are deprecated and ignored: "
             "the detached-reference crawler was replaced by the stage-2 rescue "
@@ -2837,9 +2837,11 @@ def _wrap_torch_locked(
 
     # Re-install from existing maps (after a prior unwrap_torch)
     for namespace_name, func_name in get_orig_torch_funcs():
-        namespace_key = namespace_name.replace("torch.", "")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
+        # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
+        # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,
+        # leaving torch partially wrapped (a process-global leak).
+        local_func_namespace = get_optional_torch_namespace(namespace_name)
+        if local_func_namespace is None or not hasattr(local_func_namespace, func_name):
             continue
         current = getattr(local_func_namespace, func_name)
         decorated = None
@@ -2875,8 +2877,8 @@ def _wrap_torch_locked(
 @contextmanager
 def wrapped(
     *,
-    patch_policy: str | None = None,
-    patch_modules: tuple[str, ...] = (),
+    patch_policy: str | None | MissingType = MISSING,
+    patch_modules: tuple[str, ...] | MissingType = MISSING,
     escape_detector: EscapeDetectorMode | None = None,
     completeness_witness: bool | CompletenessWitnessMode | None = None,
 ) -> Iterator[None]:

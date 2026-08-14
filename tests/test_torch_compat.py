@@ -141,6 +141,9 @@ def _reset_capability(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
         monkeypatch.setattr(tc, "_DYNAMO_OPTIMIZED_MODULE_PROBED", False)
     if name == "HAS_DYNAMO_ORIG_CALLABLE_MARKER":
         monkeypatch.setattr(tc, "_DYNAMO_ORIG_CALLABLE_MARKER_PROBED", False)
+    if name == "HAS_DISPATCH_MODE_STACK_QUERY":
+        monkeypatch.setattr(tc, "_DISPATCH_MODE_STACK_FN", None)
+        monkeypatch.setattr(tc, "_DISPATCH_MODE_STACK_PROBED", False)
     tc._warned_missing_capabilities.discard(name)
 
 
@@ -256,6 +259,7 @@ def test_nested_private_helper_absence_marks_capability(
         ("get_torch_function_mode_stack_length", "HAS_DEVICE_CONTEXT_DISPATCH", None),
         ("get_device_constructors", "HAS_DEVICE_CONSTRUCTORS", None),
         ("get_dynamo_optimized_module_type", "HAS_DYNAMO_OPTIMIZED_MODULE", None),
+        ("get_current_dispatch_mode_stack", "HAS_DISPATCH_MODE_STACK_QUERY", None),
     ],
 )
 def test_imported_private_helper_absence_marks_capability(
@@ -311,6 +315,7 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_DYNAMO_OPTIMIZED_MODULE",
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
         "HAS_TENSOR_SEQUENCE_SLOT_FIX",
+        "HAS_DISPATCH_MODE_STACK_QUERY",
     }
     # NOT floor-required, verified rather than assumed: HAS_NAMED_TENSOR_API is
     # False on torch 2.13 (the named-tensor surface was REMOVED upstream), so its
@@ -358,10 +363,6 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE": (
             tc.HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE
         ),
-        # r29 F4: whether torch.roll accepts a bare 0-dim tensor `shifts`
-        # (2.8 rejects, 2.13 accepts); behavioral probe, version-dependent, so
-        # mirror the live capability like AUTOCAST.
-        "HAS_ROLL_TENSOR_SHIFTS": tc.HAS_ROLL_TENSOR_SHIFTS,
         "HAS_DYNAMO_OPTIMIZED_MODULE": True,
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER": tc.HAS_DYNAMO_ORIG_CALLABLE_MARKER,
         "HAS_DYNAMO_EXPLAIN": tc.HAS_DYNAMO_EXPLAIN,
@@ -383,6 +384,22 @@ def test_torch_capability_snapshot_contract() -> None:
         # InternalTorchDynamoError, and fake/functional tensors fall back to
         # structural name matching. Build-dependent, so mirror the live values.
         "HAS_DYNAMO_IS_COMPILING": tc.HAS_DYNAMO_IS_COMPILING,
+        # r-b4 R26-1: the host-escape belt census check depends on this private
+        # dispatch-stack query and FAILS CLOSED without it. Hardcoded True as a
+        # tripwire: a torch build that loses the probe must fail this test
+        # loudly, not degrade silently.
+        "HAS_DISPATCH_MODE_STACK_QUERY": True,
+        # r-b4 R26-2: previously-unrouted private probes, now behind named
+        # flags. The four torch._C surfaces are present across the whole
+        # supported range -- hardcoded True as tripwires. FakeTensorMode and
+        # the DTensor geometry helper are build-dependent (distributed may be
+        # absent), so mirror the live post-snapshot capability.
+        "HAS_JIT_SCHEMA_ENUMERATION": True,
+        "HAS_TENSORBASE_CLASS": True,
+        "HAS_DISABLE_TORCH_FUNCTION": True,
+        "HAS_VARIABLE_FUNCTIONS_CLASS": True,
+        "HAS_FAKE_TENSOR_MODE": tc.HAS_FAKE_TENSOR_MODE,
+        "HAS_DTENSOR_SHARD_GEOMETRY": tc.HAS_DTENSOR_SHARD_GEOMETRY,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
         # compiled callables through their original eager Python, and Dynamo's
@@ -454,3 +471,116 @@ def test_tensor_has_named_dims_short_circuits_when_api_absent(
     monkeypatch.setattr(tc, "HAS_NAMED_TENSOR_API", False)
     sentinel = cast(torch.Tensor, _UnreadableNamesSentinel())
     assert tc.tensor_has_named_dims(sentinel) is False
+
+
+def test_completeness_census_check_fails_closed_on_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed dispatch-stack probe reads as census-INACTIVE (belt records).
+
+    r-b4 R26-1: the historical inline ``except Exception: return True`` failed
+    OPEN -- a private-API rename silently disarmed the host-escape belt inside
+    the census-blind ``_disable_current_modes()`` regions it exists to cover.
+    """
+
+    from torchlens.backends.torch import completeness_witness as cw
+
+    monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: None)
+    assert cw._completeness_census_active() is False
+
+
+def test_completeness_census_check_reads_live_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The census check still discriminates active vs inactive census modes."""
+
+    from torchlens.backends.torch import completeness_witness as cw
+
+    census_mode = cw._CompletenessDispatchMode.__new__(cw._CompletenessDispatchMode)
+    monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: [census_mode])
+    assert cw._completeness_census_active() is True
+    monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: [])
+    assert cw._completeness_census_active() is False
+
+
+def test_dispatch_mode_stack_probe_demotes_on_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that raises is demoted to permanently absent, not fail-open."""
+
+    def _raising_probe() -> list[object]:
+        raise RuntimeError("private dispatch-stack API drifted")
+
+    _reset_capability(monkeypatch, "HAS_DISPATCH_MODE_STACK_QUERY")
+    monkeypatch.setattr(tc, "_DISPATCH_MODE_STACK_FN", _raising_probe)
+    monkeypatch.setattr(tc, "_DISPATCH_MODE_STACK_PROBED", True)
+    with pytest.warns(UserWarning, match="HAS_DISPATCH_MODE_STACK_QUERY"):
+        assert tc.get_current_dispatch_mode_stack() is None
+    assert tc.HAS_DISPATCH_MODE_STACK_QUERY is False
+    assert tc._DISPATCH_MODE_STACK_FN is None
+
+
+def test_dispatch_mode_stack_probe_resolves_on_supported_torch() -> None:
+    """The dispatch-stack query resolves and returns a list on supported torch."""
+
+    stack = tc.get_current_dispatch_mode_stack()
+    assert isinstance(stack, list)
+    assert tc.HAS_DISPATCH_MODE_STACK_QUERY is True
+
+
+def test_dynamo_is_compiling_raising_probe_discloses_possibly_compiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising is_compiling probe flips the flag and reads possibly-compiling.
+
+    r-b4 R26-3: the raising path used to return False WITHOUT flipping
+    HAS_DYNAMO_IS_COMPILING -- the wrapper then logged data-free FakeTensors
+    (the documented crash class) instead of taking the disclosed bypass.
+    """
+
+    def _raising_probe() -> bool:
+        raise RuntimeError("dynamo probe drifted")
+
+    _reset_capability(monkeypatch, "HAS_DYNAMO_IS_COMPILING")
+    monkeypatch.setattr(tc, "_DYNAMO_IS_COMPILING_FN", _raising_probe)
+    monkeypatch.setattr(tc, "_DYNAMO_IS_COMPILING_PROBED", True)
+    with pytest.warns(UserWarning, match="HAS_DYNAMO_IS_COMPILING"):
+        assert tc.dynamo_is_compiling() is True
+    assert tc.HAS_DYNAMO_IS_COMPILING is False
+
+
+def test_capability_warning_category_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r-b4 R26-6d: degradation warnings carry TorchCapabilityWarning.
+
+    CI suppression can key on the CATEGORY; the subclass still isinstance-
+    matches UserWarning so existing filters keep working.
+    """
+
+    _reset_capability(monkeypatch, "HAS_TORCH_VF")
+    monkeypatch.setattr(tc, "HAS_TORCH_VF", True)
+    monkeypatch.setattr(torch, "_VF", None, raising=False)
+    with pytest.warns(tc.TorchCapabilityWarning, match="HAS_TORCH_VF"):
+        assert tc.get_torch_vf_namespace() is None
+    assert issubclass(tc.TorchCapabilityWarning, UserWarning)
+
+
+def test_tf_runtime_support_is_feature_probed() -> None:
+    """r-b4 R26-6b: an odd version string no longer disables backend='tf'."""
+
+    from torchlens.backends.default_specs import _tf_runtime_supported
+
+    class _Backend:
+        @staticmethod
+        def backend() -> str:
+            return "tensorflow"
+
+    keras3 = SimpleNamespace(ops=object(), backend=_Backend, __version__="weird+build")
+    odd_tf = SimpleNamespace(__version__="2.16.custom.oddity")
+    assert _tf_runtime_supported(odd_tf, keras3) is True
+
+    keras2 = SimpleNamespace(__version__="2.15.0")
+    old_tf = SimpleNamespace(__version__="2.12.0")
+    assert _tf_runtime_supported(old_tf, keras2) is False
+
+    unparseable_keras2 = SimpleNamespace(__version__="not-a-version")
+    assert _tf_runtime_supported(old_tf, unparseable_keras2) is False

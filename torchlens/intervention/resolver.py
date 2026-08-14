@@ -90,7 +90,13 @@ def _internal_torch_builtin_key(
         otherwise ``None``.
     """
 
-    internal = getattr(getattr(torch._C, "_VariableFunctionsClass", None), name, None)
+    from ..utils._torch_compat import get_variable_functions_class
+
+    # r-b4 R26-2: routed through _torch_compat (HAS_VARIABLE_FUNCTIONS_CLASS) --
+    # namespace drift used to silently downgrade the recorded replay key to the
+    # public torch wrapper (a different argument convention); it now flips the
+    # named flag so the downgrade is visible in doctor/compat.
+    internal = getattr(get_variable_functions_class(), name, None)
     # r47 secD_1: resolve the public alias through ``torch_attr`` so an attacker callable ``name``
     # reads ``torch.__dict__`` directly and never fires the PEP-562 lazy ``torch.__getattr__``.
     public = torch_attr(name)
@@ -130,7 +136,9 @@ def _resolve_internal_torch_builtin_key(
         or qualname != key.qualname
     ):
         return None
-    resolved = getattr(getattr(torch._C, "_VariableFunctionsClass", None), qualname, None)
+    from ..utils._torch_compat import get_variable_functions_class
+
+    resolved = getattr(get_variable_functions_class(), qualname, None)
     return cast(Callable[..., Any], resolved) if callable(resolved) else None
 
 

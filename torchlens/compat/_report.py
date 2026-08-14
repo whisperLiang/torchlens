@@ -1302,13 +1302,22 @@ def _torch_capabilities_row() -> CompatRow:
         Report row summarizing private runtime capability probes.
     """
 
+    from ..utils._torch_compat import OPTIONAL_CAPABILITY_FLAGS
+
     snapshot = _runtime_capability_snapshot()
-    missing = [name for name, available in snapshot.items() if not available]
+    absent = [name for name, available in snapshot.items() if not available]
+    # r-b4 R26-4: only genuine DEGRADATIONS drive the warning severity; an
+    # absent optional feature keeps its true value in the details but leaves a
+    # healthy install at pass/ok.
+    missing = [name for name in absent if name not in OPTIONAL_CAPABILITY_FLAGS]
+    optional_absent = [name for name in absent if name in OPTIONAL_CAPABILITY_FLAGS]
     status: Status = "not_tested" if missing else "pass"
     severity: Severity = "warning" if missing else "ok"
     details = "Runtime capabilities: " + _format_capability_snapshot(snapshot)
     if missing:
         details += "; missing=" + ", ".join(missing)
+    if optional_absent:
+        details += "; optional_absent=" + ", ".join(optional_absent)
     suggestion = (
         "Run torchlens.utils.doctor() for the same snapshot; missing flags indicate graceful "
         "degradation of private runtime integration points."

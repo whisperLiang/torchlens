@@ -65,8 +65,12 @@ from ..._split_rebind import (
     rebind_function as _rebind_function,
 )
 from ...errors import ScalarEscapeWarning
+from ...utils import _torch_compat
 from ...utils._callable_safety import private_c_forward_op_module_names
-from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER, tensor_version_or_none
+from ...utils._torch_compat import (
+    get_tensorbase_class,
+    tensor_version_or_none,
+)
 from ...utils._torch_symbols import torch_attr
 from . import (
     _completeness_boundaries as _completeness_boundaries,
@@ -1050,9 +1054,16 @@ it); a freed-then-reused address has only dead weakrefs and never matches. Meta/
 # shadows ``torch.Tensor`` only), and ``UntypedStorage.data_ptr`` IS patched per-forward, so both
 # originals must be snapshotted here.
 # ``torch._C.TensorBase`` (torch >= 2.2) vs ``torch._C._TensorBase`` (torch 2.1):
-# feature-detect the base class rather than parse the version.
-_TENSORBASE_CLS = getattr(torch._C, "TensorBase", None) or getattr(torch._C, "_TensorBase", None)
-assert _TENSORBASE_CLS is not None, "torch >= 2.1 exposes torch._C.TensorBase / _TensorBase"
+# feature-detected through the ONE _torch_compat accessor (HAS_TENSORBASE_CLASS,
+# r-b4 R26-2). The witness originals below are structurally REQUIRED, so absence
+# raises explicitly -- a module-level ``assert`` here was stripped under
+# ``python -O``, leaving ``_TENSORBASE_CLS = None`` and a delayed AttributeError.
+_TENSORBASE_CLS = get_tensorbase_class()
+if _TENSORBASE_CLS is None:  # pragma: no cover - torch >= 2.1 exposes the C base.
+    raise RuntimeError(
+        "TorchLens requires torch._C.TensorBase / _TensorBase (torch >= 2.1) for the "
+        "completeness witness originals; this torch build exposes neither."
+    )
 _ORIG_TENSORBASE_UNTYPED_STORAGE = _TENSORBASE_CLS.untyped_storage
 _ORIG_UNTYPED_STORAGE_DATA_PTR = torch.UntypedStorage.data_ptr
 # r67 C3: the true-original byte-count accessor, for TorchLens's OWN base-geometry reads

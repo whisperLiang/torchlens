@@ -509,17 +509,17 @@ def _is_allocator_death(exc: BaseException) -> bool:
 def _fake_tensor_mode_class() -> type[Any] | None:
     """Return torch's ``FakeTensorMode`` class if importable, else ``None``.
 
-    Feature-detected per the ``_torch_compat`` convention (never a version
-    string): the projection is a runtime allocation preflight, not a capture-hot
-    probe, so an absent ``FakeTensorMode`` fails OPEN to the run-prep
-    recorded-output bound rather than refusing a legitimate run.
+    Routed through ``_torch_compat`` (``HAS_FAKE_TENSOR_MODE``, r-b4 R26-2):
+    the projection is a runtime allocation preflight, not a capture-hot probe,
+    so an absent ``FakeTensorMode`` still fails OPEN to the run-prep
+    recorded-output bound rather than refusing a legitimate run -- but the
+    degradation now flips a named flag visible in doctor/compat instead of
+    silently vanishing.
     """
 
-    try:
-        from torch._subclasses.fake_tensor import FakeTensorMode
-    except Exception:  # pragma: no cover - FakeTensorMode ships on supported torch.
-        return None
-    return FakeTensorMode
+    from .utils._torch_compat import get_fake_tensor_mode_class
+
+    return get_fake_tensor_mode_class()
 
 
 def _count_fake_tensor_leaves(tree: Any) -> int:
