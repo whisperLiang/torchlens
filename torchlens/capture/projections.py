@@ -5,7 +5,7 @@ from __future__ import annotations
 import traceback
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from math import prod
@@ -1005,6 +1005,263 @@ def _grad_fn_handle_from_index(trace: Trace, event: OpEvent) -> Any:
     return getattr(event, "grad_fn_handle", None)
 
 
+def _live_grad_fn_object_id(trace: Trace, event: OpEvent) -> Any:
+    """Return the id of the live autograd handle, if one is indexed."""
+
+    handle = _grad_fn_handle_from_index(trace, event)
+    return None if handle is None else id(handle)
+
+
+def _live_internal_source_parents(trace: Trace, event: OpEvent) -> list[str]:
+    """Return parent labels whose events carry an internal-source ancestor."""
+
+    return [
+        edge.parent_label_raw
+        for edge in event.parents
+        if trace.capture_events.live_index.require_event(
+            edge.parent_label_raw
+        ).has_internal_source_ancestor
+    ]
+
+
+def _live_interventions(trace: Trace, event: OpEvent) -> list[Any]:
+    """Return fire records minted for this event's interventions."""
+
+    return [result.fire_record for result in event.fire_results if result.fire_record is not None]
+
+
+# This is the capture-time equivalent of an Op property lookup.  Constructing
+# the complete Op-shaped dictionary made every single attribute read walk every
+# parameter, edge, child, and module field and allocate all mutable projections.
+# ``_LIVE_FIELD_GETTERS`` dispatches only the requested column through one
+# closed field->getter table (module-level 2-arg getters, built once at
+# import); mutable values remain fresh on every read, preserving the previous
+# adapter semantics.
+_LIVE_FIELD_GETTER_PAIRS: tuple[tuple[str, Callable[[Trace, OpEvent], Any]], ...] = (
+    ("_label_raw", lambda trace, event: event.label_raw),
+    ("_layer_label_raw", lambda trace, event: event.layer_label_raw),
+    ("raw_index", lambda trace, event: event.raw_index),
+    ("step_index", lambda trace, event: event.step_index),
+    ("source_trace", lambda trace, event: event.source_trace or trace),
+    ("_tracing_finished", lambda trace, event: event.tracing_finished),
+    ("_construction_done", lambda trace, event: event.construction_done),
+    ("type", lambda trace, event: event.layer_type),
+    ("type_index", lambda trace, event: event.type_index),
+    ("pass_index", lambda trace, event: event.pass_index),
+    ("num_passes", lambda trace, event: 1),
+    ("lookup_keys", lambda trace, event: []),
+    ("out", lambda trace, event: event.output.tensor.payload),
+    (
+        "transformed_out",
+        lambda trace, event: (
+            None
+            if event.output.transformed_tensor is None
+            else event.output.transformed_tensor.payload
+        ),
+    ),
+    ("has_saved_activation", lambda trace, event: event.output.has_saved_activation),
+    ("activation_transform", lambda trace, event: event.output.activation_transform),
+    ("annotations", lambda trace, event: _event_annotations(event, event.output.tensor.payload)),
+    ("output_device", lambda trace, event: event.output.output_device),
+    ("detach_saved_activations", lambda trace, event: event.output.detach_saved_activations),
+    (
+        "has_saved_args",
+        lambda trace, event: False if event.templates is None else event.templates.has_saved_args,
+    ),
+    (
+        "saved_args",
+        lambda trace, event: None if event.templates is None else event.templates.saved_args,
+    ),
+    (
+        "saved_kwargs",
+        lambda trace, event: None if event.templates is None else event.templates.saved_kwargs,
+    ),
+    (
+        "args_template",
+        lambda trace, event: None if event.templates is None else event.templates.args_template,
+    ),
+    (
+        "kwargs_template",
+        lambda trace, event: None if event.templates is None else event.templates.kwargs_template,
+    ),
+    ("shape", lambda trace, event: event.output.tensor.shape),
+    (
+        "transformed_out_shape",
+        lambda trace, event: (
+            None
+            if event.output.transformed_tensor is None
+            else event.output.transformed_tensor.shape
+        ),
+    ),
+    ("dtype", lambda trace, event: event.output.tensor.dtype),
+    (
+        "transformed_out_dtype",
+        lambda trace, event: (
+            None
+            if event.output.transformed_tensor is None
+            else event.output.transformed_tensor.dtype
+        ),
+    ),
+    ("activation_memory", lambda trace, event: event.output.tensor.memory),
+    (
+        "transformed_activation_memory",
+        lambda trace, event: (
+            None
+            if event.output.transformed_tensor is None
+            else event.output.transformed_tensor.memory
+        ),
+    ),
+    ("visualizer_path", lambda trace, event: event.output.visualizer_path),
+    ("bytes_delta_at_call", lambda trace, event: event.backend_semantics.bytes_delta_at_call),
+    ("bytes_peak_at_call", lambda trace, event: event.backend_semantics.bytes_peak_at_call),
+    ("autograd_memory", lambda trace, event: event.backend_semantics.autograd_memory),
+    ("num_autograd_tensors", lambda trace, event: event.backend_semantics.num_autograd_tensors),
+    ("has_out_variations", lambda trace, event: bool(event.output.child_versions)),
+    ("out_versions_by_child", lambda trace, event: dict(event.output.child_versions)),
+    ("func", lambda trace, event: event.function.func),
+    ("func_call_id", lambda trace, event: event.function.func_call_id),
+    ("func_name", lambda trace, event: event.function.func_name),
+    ("func_qualname", lambda trace, event: event.function.func_qualname),
+    ("code_context", lambda trace, event: list(event.function.code_context)),
+    ("func_duration", lambda trace, event: event.function.func_duration or 0),
+    ("flops_forward", lambda trace, event: event.function.flops_forward),
+    ("flops_backward", lambda trace, event: event.function.flops_backward),
+    ("func_rng_states", lambda trace, event: event.function.func_rng_states),
+    ("func_autocast_state", lambda trace, event: event.function.func_autocast_state),
+    ("arg_names", lambda trace, event: tuple(event.function.arg_names)),
+    ("num_args_total", lambda trace, event: event.function.num_args_total),
+    ("num_pos_args", lambda trace, event: event.function.num_pos_args),
+    ("num_kwargs", lambda trace, event: event.function.num_kwargs),
+    ("non_tensor_pos_args", lambda trace, event: list(event.function.non_tensor_pos_args)),
+    ("non_tensor_kwargs", lambda trace, event: dict(event.function.non_tensor_kwargs)),
+    ("func_non_tensor_args", lambda trace, event: list(event.function.func_non_tensor_args)),
+    ("is_inplace", lambda trace, event: event.function.is_inplace),
+    ("grad_fn_class_name", lambda trace, event: event.backend_semantics.grad_fn_class_name),
+    ("grad_fn_class_qualname", lambda trace, event: event.grad_fn_class_qualname),
+    ("grad_fn_object_id", _live_grad_fn_object_id),
+    ("grad_fn_handle", _grad_fn_handle_from_index),
+    ("grad_fn", lambda trace, event: None),
+    ("in_multi_output", lambda trace, event: event.output.in_multi_output),
+    ("multi_output_index", lambda trace, event: event.output.multi_output_index),
+    ("multi_output_name", lambda trace, event: None),
+    ("container_path", lambda trace, event: event.output.container_path),
+    ("container_spec", lambda trace, event: event.output.container_spec),
+    ("parent_params", lambda trace, event: list(event.parent_params)),
+    ("_param_barcodes", lambda trace, event: [param.barcode for param in event.params]),
+    (
+        "parent_param_ops",
+        lambda trace, event: {param.barcode: event.pass_index for param in event.params},
+    ),
+    ("param_shapes", lambda trace, event: [param.shape for param in event.params]),
+    (
+        "num_params",
+        lambda trace, event: sum(
+            0 if param.shape is None else prod(param.shape) for param in event.params
+        ),
+    ),
+    ("equivalence_class", lambda trace, event: event.equivalence_class),
+    ("equivalent_ops", lambda trace, event: {event.label_raw}),
+    ("recurrent_ops", lambda trace, event: []),
+    ("parents", lambda trace, event: [edge.parent_label_raw for edge in event.parents]),
+    ("parent_arg_positions", lambda trace, event: event.parent_arg_positions),
+    ("_edge_uses", lambda trace, event: list(event._edge_uses)),
+    ("root_ancestors", lambda trace, event: set(event.root_ancestors)),
+    (
+        "children",
+        lambda trace, event: list(trace.capture_events.live_index.children(event.label_raw)),
+    ),
+    (
+        "has_children",
+        lambda trace, event: bool(trace.capture_events.live_index.children(event.label_raw)),
+    ),
+    (
+        "is_input",
+        lambda trace, event: event.kind == "source" and event.layer_type == "input",
+    ),
+    ("input_was_parameter", lambda trace, event: event.input_was_parameter),
+    ("has_input_ancestor", lambda trace, event: bool(event.input_ancestors)),
+    ("input_ancestors", lambda trace, event: set(event.input_ancestors)),
+    ("is_output", lambda trace, event: False),
+    ("is_final_output", lambda trace, event: False),
+    ("has_output_descendant", lambda trace, event: False),
+    ("is_orphan", lambda trace, event: False),
+    ("is_output_parent", lambda trace, event: event.is_output_parent),
+    ("output_descendants", lambda trace, event: set()),
+    ("io_role", lambda trace, event: None),
+    (
+        "is_buffer",
+        lambda trace, event: event.kind == "source" and event.layer_type == "buffer",
+    ),
+    (
+        "is_internal_source",
+        lambda trace, event: event.layer_type != "input" and not event.parents,
+    ),
+    ("has_internal_source_ancestor", lambda trace, event: event.has_internal_source_ancestor),
+    ("internal_source_parents", _live_internal_source_parents),
+    ("internal_source_ancestors", lambda trace, event: set(event.internal_source_ancestors)),
+    ("is_internal_sink", lambda trace, event: False),
+    ("is_scalar_bool", lambda trace, event: event.is_scalar_bool),
+    ("bool_value", lambda trace, event: event.bool_value),
+    ("module", lambda trace, event: event.modules[-1] if event.modules else None),
+    ("modules", lambda trace, event: list(event.modules)),
+    (
+        "module_call_stack",
+        lambda trace, event: list(
+            trace.capture_events.live_index.module_stack_membership(event.label_raw)
+        ),
+    ),
+    ("input_to_module_calls", lambda trace, event: []),
+    ("output_of_modules", lambda trace, event: []),
+    ("output_of_module_calls", lambda trace, event: []),
+    ("module_entry_arg_keys", lambda trace, event: defaultdict(list)),
+    ("is_module_output", lambda trace, event: False),
+    ("is_atomic_module", lambda trace, event: False),
+    ("atomic_module_call", lambda trace, event: None),
+    ("interventions", _live_interventions),
+    ("intervention_replaced", lambda trace, event: event.intervention_replaced),
+    ("func_config", lambda trace, event: dict(event.function.func_config)),
+)
+
+
+def _build_live_field_getter_table() -> dict[str, Callable[[Trace, OpEvent], Any]]:
+    """Build the closed live-field dispatch table with surface checks.
+
+    Returns
+    -------
+    dict[str, Callable[[Trace, OpEvent], Any]]
+        Field-name -> 2-arg getter mapping.
+
+    Raises
+    ------
+    RuntimeError
+        If a field name is declared twice or collides with the known-late set
+        (either would silently shadow a branch of the LiveOpView surface).
+    """
+
+    table: dict[str, Callable[[Trace, OpEvent], Any]] = {}
+    for field_name, getter in _LIVE_FIELD_GETTER_PAIRS:
+        if field_name in table:
+            raise RuntimeError(f"Duplicate LiveOpView field getter for {field_name!r}.")
+        table[field_name] = getter
+    late_collisions = sorted(set(table) & _OPLOG_FIELDS_KNOWN_LATE)
+    if late_collisions:
+        raise RuntimeError(
+            f"LiveOpView fields declared both live and known-late: {late_collisions}."
+        )
+    return table
+
+
+_LIVE_FIELD_GETTERS: dict[str, Callable[[Trace, OpEvent], Any]] = _build_live_field_getter_table()
+
+LIVE_OP_VIEW_FIELDS: frozenset[str] = frozenset(_LIVE_FIELD_GETTERS) | _OPLOG_FIELDS_KNOWN_LATE
+"""The complete documented LiveOpView field surface (live + known-late).
+
+Closed-surface authority for the lockstep test: a new Op field must be
+explicitly declared either as a live getter or as known-late; it cannot
+silently land in the ``AttributeError`` tail.
+"""
+
+
 def _event_live_field(trace: Trace, event: OpEvent, name: str) -> Any:
     """Return a forward-time field projected from an operation event.
 
@@ -1023,235 +1280,9 @@ def _event_live_field(trace: Trace, event: OpEvent, name: str) -> Any:
         Event-backed field value.
     """
 
-    output = event.output
-    function = event.function
-    semantics = event.backend_semantics
-    templates = event.templates
-
-    # This is the capture-time equivalent of an Op property lookup.  Constructing
-    # the complete Op-shaped dictionary here made every single attribute read walk
-    # every parameter, edge, child, and module field and allocate all mutable
-    # projections.  Dispatch only the requested column; mutable values remain fresh
-    # on every read, preserving the previous adapter semantics.
-    if name == "_label_raw":
-        return event.label_raw
-    if name == "_layer_label_raw":
-        return event.layer_label_raw
-    if name == "raw_index":
-        return event.raw_index
-    if name == "step_index":
-        return event.step_index
-    if name == "source_trace":
-        return event.source_trace or trace
-    if name == "_tracing_finished":
-        return event.tracing_finished
-    if name == "_construction_done":
-        return event.construction_done
-    if name == "type":
-        return event.layer_type
-    if name == "type_index":
-        return event.type_index
-    if name == "pass_index":
-        return event.pass_index
-    if name == "num_passes":
-        return 1
-    if name == "lookup_keys":
-        return []
-    if name == "out":
-        return output.tensor.payload
-    if name == "transformed_out":
-        return None if output.transformed_tensor is None else output.transformed_tensor.payload
-    if name == "has_saved_activation":
-        return output.has_saved_activation
-    if name == "activation_transform":
-        return output.activation_transform
-    if name == "annotations":
-        return _event_annotations(event, output.tensor.payload)
-    if name == "output_device":
-        return output.output_device
-    if name == "detach_saved_activations":
-        return output.detach_saved_activations
-    if name == "has_saved_args":
-        return False if templates is None else templates.has_saved_args
-    if name == "saved_args":
-        return None if templates is None else templates.saved_args
-    if name == "saved_kwargs":
-        return None if templates is None else templates.saved_kwargs
-    if name == "args_template":
-        return None if templates is None else templates.args_template
-    if name == "kwargs_template":
-        return None if templates is None else templates.kwargs_template
-    if name == "shape":
-        return output.tensor.shape
-    if name == "transformed_out_shape":
-        return None if output.transformed_tensor is None else output.transformed_tensor.shape
-    if name == "dtype":
-        return output.tensor.dtype
-    if name == "transformed_out_dtype":
-        return None if output.transformed_tensor is None else output.transformed_tensor.dtype
-    if name == "activation_memory":
-        return output.tensor.memory
-    if name == "transformed_activation_memory":
-        return None if output.transformed_tensor is None else output.transformed_tensor.memory
-    if name == "visualizer_path":
-        return output.visualizer_path
-    if name == "bytes_delta_at_call":
-        return semantics.bytes_delta_at_call
-    if name == "bytes_peak_at_call":
-        return semantics.bytes_peak_at_call
-    if name == "autograd_memory":
-        return semantics.autograd_memory
-    if name == "num_autograd_tensors":
-        return semantics.num_autograd_tensors
-    if name == "has_out_variations":
-        return bool(output.child_versions)
-    if name == "out_versions_by_child":
-        return dict(output.child_versions)
-    if name == "func":
-        return function.func
-    if name == "func_call_id":
-        return function.func_call_id
-    if name == "func_name":
-        return function.func_name
-    if name == "func_qualname":
-        return function.func_qualname
-    if name == "code_context":
-        return list(function.code_context)
-    if name == "func_duration":
-        return function.func_duration or 0
-    if name == "flops_forward":
-        return function.flops_forward
-    if name == "flops_backward":
-        return function.flops_backward
-    if name == "func_rng_states":
-        return function.func_rng_states
-    if name == "func_autocast_state":
-        return function.func_autocast_state
-    if name == "arg_names":
-        return tuple(function.arg_names)
-    if name == "num_args_total":
-        return function.num_args_total
-    if name == "num_pos_args":
-        return function.num_pos_args
-    if name == "num_kwargs":
-        return function.num_kwargs
-    if name == "non_tensor_pos_args":
-        return list(function.non_tensor_pos_args)
-    if name == "non_tensor_kwargs":
-        return dict(function.non_tensor_kwargs)
-    if name == "func_non_tensor_args":
-        return list(function.func_non_tensor_args)
-    if name == "is_inplace":
-        return function.is_inplace
-    if name == "grad_fn_class_name":
-        return semantics.grad_fn_class_name
-    if name == "grad_fn_class_qualname":
-        return event.grad_fn_class_qualname
-    if name == "grad_fn_object_id":
-        handle = _grad_fn_handle_from_index(trace, event)
-        return None if handle is None else id(handle)
-    if name == "grad_fn_handle":
-        return _grad_fn_handle_from_index(trace, event)
-    if name == "grad_fn":
-        return None
-    if name == "in_multi_output":
-        return output.in_multi_output
-    if name == "multi_output_index":
-        return output.multi_output_index
-    if name == "multi_output_name":
-        return None
-    if name == "container_path":
-        return output.container_path
-    if name == "container_spec":
-        return output.container_spec
-    if name == "parent_params":
-        return list(event.parent_params)
-    if name == "_param_barcodes":
-        return [param.barcode for param in event.params]
-    if name == "parent_param_ops":
-        return {param.barcode: event.pass_index for param in event.params}
-    if name == "param_shapes":
-        return [param.shape for param in event.params]
-    if name == "num_params":
-        return sum(0 if param.shape is None else prod(param.shape) for param in event.params)
-    if name == "equivalence_class":
-        return event.equivalence_class
-    if name == "equivalent_ops":
-        return {event.label_raw}
-    if name == "recurrent_ops":
-        return []
-    if name == "parents":
-        return [edge.parent_label_raw for edge in event.parents]
-    if name == "parent_arg_positions":
-        return event.parent_arg_positions
-    if name == "_edge_uses":
-        return list(event._edge_uses)
-    if name == "root_ancestors":
-        return set(event.root_ancestors)
-    if name == "children":
-        return list(trace.capture_events.live_index.children(event.label_raw))
-    if name == "has_children":
-        return bool(trace.capture_events.live_index.children(event.label_raw))
-    if name == "is_input":
-        return event.kind == "source" and event.layer_type == "input"
-    if name == "input_was_parameter":
-        return event.input_was_parameter
-    if name == "has_input_ancestor":
-        return bool(event.input_ancestors)
-    if name == "input_ancestors":
-        return set(event.input_ancestors)
-    if name in {"is_output", "is_final_output", "has_output_descendant", "is_orphan"}:
-        return False
-    if name == "is_output_parent":
-        return event.is_output_parent
-    if name == "output_descendants":
-        return set()
-    if name == "io_role":
-        return None
-    if name == "is_buffer":
-        return event.kind == "source" and event.layer_type == "buffer"
-    if name == "is_internal_source":
-        return event.layer_type != "input" and not event.parents
-    if name == "has_internal_source_ancestor":
-        return event.has_internal_source_ancestor
-    if name == "internal_source_parents":
-        return [
-            edge.parent_label_raw
-            for edge in event.parents
-            if trace.capture_events.live_index.require_event(
-                edge.parent_label_raw
-            ).has_internal_source_ancestor
-        ]
-    if name == "internal_source_ancestors":
-        return set(event.internal_source_ancestors)
-    if name == "is_internal_sink":
-        return False
-    if name == "is_scalar_bool":
-        return event.is_scalar_bool
-    if name == "bool_value":
-        return event.bool_value
-    if name == "module":
-        return event.modules[-1] if event.modules else None
-    if name == "modules":
-        return list(event.modules)
-    if name == "module_call_stack":
-        return list(trace.capture_events.live_index.module_stack_membership(event.label_raw))
-    if name in {"input_to_module_calls", "output_of_modules", "output_of_module_calls"}:
-        return []
-    if name == "module_entry_arg_keys":
-        return defaultdict(list)
-    if name in {"is_module_output", "is_atomic_module"}:
-        return False
-    if name == "atomic_module_call":
-        return None
-    if name == "interventions":
-        return [
-            result.fire_record for result in event.fire_results if result.fire_record is not None
-        ]
-    if name == "intervention_replaced":
-        return event.intervention_replaced
-    if name == "func_config":
-        return dict(function.func_config)
+    getter = _LIVE_FIELD_GETTERS.get(name)
+    if getter is not None:
+        return getter(trace, event)
     if name in _OPLOG_FIELDS_KNOWN_LATE:
         raise LiveOpViewFieldNotYetWritten(
             f"LiveOpView.{name!r} is populated by postprocess Step 0; "

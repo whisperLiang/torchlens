@@ -169,7 +169,9 @@ def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
     """
 
     if source.source_trace is not trace or not _operation_is_live(source):
-        raise ReceptiveFieldConfigurationError("Receptive-field source operation does not belong to the supplied trace.")
+        raise ReceptiveFieldConfigurationError(
+            "Receptive-field source operation does not belong to the supplied trace."
+        )
 
     epoch = _rf_rules_epoch()
     graph_revision = _graph_revision(trace)
@@ -1046,6 +1048,8 @@ def _apply_axis_map(
         if isinstance(selected, Sequence) and not isinstance(selected, (str, bytes))
         else set()
     )
+    raw_edges = result.values.get("out_axis_edges", {})
+    out_axis_edges = raw_edges if isinstance(raw_edges, Mapping) else {}
     assert state.axes is not None
     axes = []
     for axis in state.axes:
@@ -1064,12 +1068,35 @@ def _apply_axis_map(
                 )
             )
         else:
+            new_output_axis = inverse[axis.output_axis]
+            geometry = axis.geometry
+            kind = axis.kind if axis.kind != "unknown" else "pointwise"
+            provenance = op.label if axis.kind == "unknown" else axis.provenance
+            edge = out_axis_edges.get(new_output_axis)
+            if edge is not None and isinstance(geometry, _Mapped):
+                # A surviving sliced axis carries the exact affine
+                # ``parent = step * out + start``; composing it here is what
+                # keeps the descriptor's window offsets in the CURRENT frame
+                # (the historical rank-changing path dropped the slice offset
+                # under an exact claim; disputed-r2 b6/R20-2).
+                step, start = int(edge[0]), int(edge[1])
+                local = _Mapped(
+                    _Affine(Fraction(step), Fraction(start)),
+                    _Affine(Fraction(step), Fraction(start)),
+                )
+                geometry = _compose(geometry, local)
+                if kind == "pointwise":
+                    # A non-identity coordinate map is no longer a pointwise
+                    # identity; present it as the windowed affine it is.
+                    kind = "windowed"
+                    provenance = op.label
             axes.append(
                 replace(
                     axis,
-                    output_axis=inverse[axis.output_axis],
-                    kind=axis.kind if axis.kind != "unknown" else "pointwise",
-                    provenance=op.label if axis.kind == "unknown" else axis.provenance,
+                    geometry=geometry,
+                    output_axis=new_output_axis,
+                    kind=kind,
+                    provenance=provenance,
                 )
             )
     return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)

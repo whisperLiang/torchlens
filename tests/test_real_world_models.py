@@ -3853,12 +3853,25 @@ def test_gptj():
 
 
 @pytest.mark.slow
-@pytest.mark.skip(
-    reason="GPTBigCode JIT-compiles attention internally, incompatible with TorchLens wrappers"
-)
 def test_gpt_bigcode():
-    """GPTBigCode (StarCoder arch): multi-query attention for code."""
+    """GPTBigCode (StarCoder arch): multi-query attention for code.
+
+    Compatibility canary: this was skipped for years as "JIT-compiles attention
+    internally, incompatible with TorchLens wrappers", but the CAPTURE
+    incompatibility has closed — the forward pass traces and replay-validates
+    cleanly. Kept executing so any return of an internal-compilation regime FAILS
+    here instead of hiding behind an unconditional skip (disputed-r2 b10/R79).
+
+    Disclosed residual: the transformers gpt_bigcode MODULE still
+    ``torch.jit.script``s a helper at import time, and TorchLens wrappers are not
+    TorchScript-scriptable, so importing it while wrappers are installed (any
+    earlier capture this session) raises. The import below therefore runs under
+    ``unwrap_torch()``; the capture itself re-wraps lazily.
+    """
     pytest.importorskip("transformers")
+    from torchlens.backends.torch.wrappers import unwrap_torch
+
+    unwrap_torch()
     from transformers import GPTBigCodeConfig, GPTBigCodeModel
 
     config = GPTBigCodeConfig(

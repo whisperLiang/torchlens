@@ -65,6 +65,14 @@
  },
  {
   "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/_io/bundle.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
   "field": "kind",
   "file": "torchlens/_io/manifest.py",
   "has_default": false,
@@ -1656,6 +1664,14 @@
   "via_getattr": false
  },
  {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/backends/torch/identity_shims.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
   "ambiguous": false,
   "field": "func_call_id",
   "file": "torchlens/backends/torch/model_prep.py",
@@ -1748,7 +1764,7 @@
   "field": "seq",
   "file": "torchlens/backends/torch/model_prep.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -2028,7 +2044,7 @@
   "field": "backend_semantics",
   "file": "torchlens/capture/projections.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 6,
   "via_getattr": false
  },
  {
@@ -2084,7 +2100,7 @@
   "field": "function",
   "file": "torchlens/capture/projections.py",
   "has_default": false,
-  "sites": 3,
+  "sites": 21,
   "via_getattr": false
  },
  {
@@ -2244,7 +2260,7 @@
   "field": "output",
   "file": "torchlens/capture/projections.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 29,
   "via_getattr": false
  },
  {
@@ -2348,7 +2364,7 @@
   "field": "templates",
   "file": "torchlens/capture/projections.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 10,
   "via_getattr": false
  },
  {
@@ -3272,6 +3288,14 @@
   "via_getattr": false
  },
  {
+  "ambiguous": false,
+  "field": "has_internal_source_ancestor",
+  "file": "torchlens/fastlog/types.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
   "ambiguous": true,
   "field": "kind",
   "file": "torchlens/fastlog/types.py",
@@ -3284,7 +3308,7 @@
   "field": "label_raw",
   "file": "torchlens/fastlog/types.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -3305,6 +3329,22 @@
  },
  {
   "ambiguous": false,
+  "field": "layer_type",
+  "file": "torchlens/fastlog/types.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/fastlog/types.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
   "field": "pass_index",
   "file": "torchlens/fastlog/types.py",
   "has_default": false,
@@ -3318,6 +3358,14 @@
   "has_default": true,
   "sites": 1,
   "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "root_ancestors",
+  "file": "torchlens/fastlog/types.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
  },
  {
   "ambiguous": false,
@@ -5456,11 +5504,19 @@
   "via_getattr": true
  },
  {
+  "ambiguous": false,
+  "field": "layer_type",
+  "file": "torchlens/semantic/patching.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": true,
   "field": "modules",
   "file": "torchlens/semantic/patching.py",
   "has_default": false,
-  "sites": 13,
+  "sites": 14,
   "via_getattr": false
  },
  {
@@ -5628,7 +5684,7 @@
   "field": "modules",
   "file": "torchlens/utils/_torch_compat.py",
   "has_default": false,
-  "sites": 9,
+  "sites": 10,
   "via_getattr": false
  },
  {

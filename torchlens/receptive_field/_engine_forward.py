@@ -687,6 +687,8 @@ def _transpose_axis_map(
             rule=rule_name,
         )
     mapping = {int(child_axis): int(parent_axis) for child_axis, parent_axis in raw_mapping.items()}
+    raw_edges = result.values.get("out_axis_edges", {})
+    out_axis_edges = raw_edges if isinstance(raw_edges, Mapping) else {}
     assert state.axes is not None
     axes: list[_AxisState] = []
     for axis in state.axes:
@@ -703,12 +705,33 @@ def _transpose_axis_map(
                 )
             )
         else:
+            geometry = axis.geometry
+            kind = axis.kind if axis.kind != "unknown" else "pointwise"
+            provenance = child.label if axis.kind == "unknown" else axis.provenance
+            edge = out_axis_edges.get(axis.output_axis)
+            if edge is not None and isinstance(geometry, _Mapped):
+                # Walking child->parent, the new frame coordinate ``p`` maps
+                # to the old child coordinate ``(p - start) / step``; without
+                # this inverse-affine composition every slice offset was
+                # dropped from the transposed relation (disputed-r2 b6/R20-2).
+                step, start = int(edge[0]), int(edge[1])
+                inverse_slope = Fraction(1, step)
+                local = _Mapped(
+                    _Affine(inverse_slope, Fraction(-start, step)),
+                    _Affine(inverse_slope, Fraction(-start, step)),
+                    sparse=inverse_slope.denominator != 1,
+                )
+                geometry = _compose(geometry, local)
+                if kind == "pointwise":
+                    kind = "windowed"
+                    provenance = child.label
             axes.append(
                 replace(
                     axis,
+                    geometry=geometry,
                     output_axis=mapping[axis.output_axis],
-                    kind=axis.kind if axis.kind != "unknown" else "pointwise",
-                    provenance=child.label if axis.kind == "unknown" else axis.provenance,
+                    kind=kind,
+                    provenance=provenance,
                 )
             )
     return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)

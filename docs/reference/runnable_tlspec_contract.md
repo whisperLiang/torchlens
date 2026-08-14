@@ -1551,6 +1551,18 @@ post-run tripwire asserts CUDA initialization did not flip during a seeded run w
 excluded it. Generators this executor does not seed (MPS/XPU/other accelerators) are never
 touched by a seeded run, so no state can leak into them.
 
+Cost disclosure: the all-device fork set is a deliberate isolation-totality choice, and it is not
+free on multi-GPU hosts. When CUDA is already initialized, forking a device's generator can force
+primary-context initialization on GPUs the artifact never touches (on the order of 300-600 MB of
+device memory per visible GPU, driver/toolkit dependent), and every seeded run pays a per-device
+generator fork/restore on those unused GPUs. Pin the process to the devices you intend
+(`CUDA_VISIBLE_DEVICES`) to bound the cost. Narrowing the fork set (for example to
+descriptor-named plus current devices) is NOT a permitted maintenance edit: recipe-recorded device
+arguments such as `device="cuda"` resolve at replay time rather than being descriptor slot
+devices, so any narrowing is a later explicit design change that must carry its own sufficiency
+proof and renegotiate the pinned exact-semantics test
+(`tests/test_tlspec_runnable_r35_exact_semantics.py`) in the same change.
+
 ## 11. Honesty, divergence, poison, and exactness
 
 All checks occur inside the transaction before exposure. `verified` requires every contract and
@@ -2718,6 +2730,22 @@ ships the model source.
   paths for the producer's own tooling.
 - Function signatures and source line numbers are structural interface metadata (like a type stub)
   and are retained even when source text is stripped.
+
+### Harvested module attributes and `include_custom_attributes` (privacy disclosure)
+
+Model preparation harvests every public, non-callable module instance attribute verbatim into
+`Module.custom_attributes`, and portable saves persist the whole channel by default -- arbitrary
+user values (config scalars, but equally tokens, host paths, usernames, or large containers a
+module happens to hold as public attributes) ship in the shareable artifact.
+`include_custom_attributes: bool = True` on `tl.save`/`Trace.save` is the opt-out: `False` drops
+the entire channel from the artifact (the live `Trace` is untouched). Values are NEVER rewritten
+or partially scrubbed -- the channel ships verbatim or not at all, because a save that silently
+mutates documented metadata values is worse than the disclosure problem it would paper over.
+Every save writes a `custom_attributes_disclosure` entry in `manifest.json` naming the channel:
+the effective `included` flag, the count of modules carrying attributes, and the bounded sorted
+union of top-level key names (names only, never values). Sparse runnable cores always drop the
+field regardless of the flag (it is in the sparse DROP set), and their disclosure records
+`included: false`.
 
 The complete implementation includes `load_state_dict`, transient state sources, initializer
 reporting, `run`, `RunResult`, transactional run forks, sparse input/call/output reconstruction,

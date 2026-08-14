@@ -10,7 +10,12 @@ from ._utils import int_tuple
 
 
 def _axis_map_result(
-    mapping: Mapping[int, int], *, note: str, selected_parent_axes: Sequence[int] = ()
+    mapping: Mapping[int, int],
+    *,
+    note: str,
+    selected_parent_axes: Sequence[int] = (),
+    out_axis_edges: Mapping[int, tuple[int, int]] | None = None,
+    selected_parent_indices: Mapping[int, int] | None = None,
 ) -> _RuleResult:
     """Build an axis-map result with optional fixed-index parent axes.
 
@@ -21,8 +26,18 @@ def _axis_map_result(
     note:
         Provenance note for the resulting rule.
     selected_parent_axes:
-        Parent axes removed by scalar indexing. These cannot be represented as
-        output-indexed grids and are conservatively bounded by their full extent.
+        Parent axes removed by scalar indexing. Without a recorded index they
+        cannot be represented as output-indexed grids and are conservatively
+        bounded by their full extent (honestly non-exact for extent > 1).
+    out_axis_edges:
+        Per-surviving-output-axis affine ``(step, start)`` slice maps
+        (``parent = step * out + start``). Omitted axes are identity. The
+        historical rank-changing path DISCARDED these computed edges, silently
+        dropping every slice offset under an exact claim (disputed-r2 b6/R20-2).
+    selected_parent_indices:
+        Normalized integer index per scalar-selected parent axis. A recorded
+        index lets the query walk narrow the axis to its exact singleton
+        instead of the conservative full-extent bound (R20-3).
 
     Returns
     -------
@@ -35,6 +50,8 @@ def _axis_map_result(
         {
             "out_to_parent_axis": dict(mapping),
             "selected_parent_axes": tuple(selected_parent_axes),
+            "out_axis_edges": dict(out_axis_edges or {}),
+            "selected_parent_indices": dict(selected_parent_indices or {}),
         },
         note,
     )
@@ -273,7 +290,9 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
     expanded.extend([slice(None)] * (len(parent_shape) - consumed))
     output_to_parent: dict[int, int] = {}
     selected: list[int] = []
+    selected_indices: dict[int, int] = {}
     edges: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    out_axis_edges: dict[int, tuple[int, int]] = {}
     parent_axis = 0
     output_axis = 0
     same_rank = True
@@ -287,6 +306,10 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
         if isinstance(item, int):
             same_rank = False
             selected.append(parent_axis)
+            extent = parent_shape[parent_axis]
+            normalized = item + extent if item < 0 else item
+            if 0 <= normalized < extent:
+                selected_indices[parent_axis] = normalized
             parent_axis += 1
             continue
         if not isinstance(item, slice):
@@ -294,6 +317,8 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
         start, _stop, step = item.indices(parent_shape[parent_axis])
         output_to_parent[output_axis] = parent_axis
         edges.append(((step, start), (step, start)))
+        if (step, start) != (1, 0):
+            out_axis_edges[output_axis] = (step, start)
         parent_axis += 1
         output_axis += 1
     if same_rank and len(edges) == len(parent_shape):
@@ -315,5 +340,8 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
     return _axis_map_result(
         output_to_parent,
         selected_parent_axes=selected,
-        note="getitem preserves surviving axes; fixed-index axes use a conservative extent bound",
+        out_axis_edges=out_axis_edges,
+        selected_parent_indices=selected_indices,
+        note="getitem preserves surviving axes with their exact slice affine maps; "
+        "fixed-index axes narrow to the recorded index",
     )

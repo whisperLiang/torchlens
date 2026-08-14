@@ -17,6 +17,7 @@ from typing import Any
 import torch
 
 from . import _state
+from ._transport import to_cpu_contiguous
 from .errors import RunCapabilityUnavailableError, RunPreconditionError, StateBindingError
 from .runnable import (
     CANONICAL_INITIALIZER_BY_ROLE,
@@ -2597,7 +2598,7 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
             code=RunnableErrorCode.INPUT_TREE_MISMATCH.value,
         )
     with _state.pause_logging():
-        cpu_value = value.detach().cpu().contiguous()
+        cpu_value = to_cpu_contiguous(value)
         payload = cpu_value.reshape(-1).view(torch.uint8).numpy().tobytes()
         logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode()
     return sha256(logical_prefix + payload).hexdigest()

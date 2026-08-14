@@ -120,6 +120,7 @@ class _ScrubOptions:
     include_saved_args: bool
     include_rng_states: bool
     include_source: bool = True
+    include_custom_attributes: bool = True
     sparse_runnable: bool = False
     backend_name: str = "torch"
     payload_materialization: bool = True
@@ -135,6 +136,7 @@ def scrub_for_save(
     include_saved_args: bool = False,
     include_rng_states: bool = False,
     include_source: bool = True,
+    include_custom_attributes: bool = True,
     backend_name: str | None = None,
     payload_materialization: bool = True,
     sparse_runnable: bool = False,
@@ -163,6 +165,13 @@ def scrub_for_save(
         so no ``$HOME`` / username / filesystem layout ever reaches the bundle.
         With ``include_source=False`` the source text, source-file references,
         and docstrings are dropped entirely.
+    include_custom_attributes:
+        Whether harvested public module instance attributes
+        (``Module.custom_attributes``) are persisted. These are arbitrary
+        user values (config scalars, but also anything a module holds as a
+        public attribute), so ``False`` drops the whole channel from the
+        artifact. Values are NEVER rewritten or partially scrubbed: the
+        channel ships verbatim or not at all.
     backend_name:
         Backend identifier for payload audit records. Defaults to
         ``trace.backend`` when present.
@@ -184,6 +193,7 @@ def scrub_for_save(
         include_saved_args=include_saved_args,
         include_rng_states=include_rng_states,
         include_source=include_source,
+        include_custom_attributes=include_custom_attributes,
         sparse_runnable=sparse_runnable,
         backend_name=str(backend_name or getattr(trace, "backend", "torch")),
         payload_materialization=payload_materialization,
@@ -257,7 +267,9 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             register_barcode(barcode)
 
     barcode_pattern = (
-        re.compile("|".join(re.escape(barcode) for barcode in sorted(barcode_map, key=len, reverse=True)))
+        re.compile(
+            "|".join(re.escape(barcode) for barcode in sorted(barcode_map, key=len, reverse=True))
+        )
         if barcode_map
         else None
     )
@@ -1208,6 +1220,11 @@ def _effective_policy(
     }:
         return FieldPolicy.DROP
 
+    if field_name == "custom_attributes" and not options.include_custom_attributes:
+        # Ungated the harvested module instance attributes were a silent
+        # portable-privacy channel (disputed-r2 b8/R62). The gate is
+        # whole-channel: drop entirely, never rewrite user values.
+        return FieldPolicy.DROP
     if field_name in {"out", "transformed_out"} and not options.include_outs:
         return FieldPolicy.DROP
     if field_name in {"grad", "transformed_grad"} and not options.include_grads:

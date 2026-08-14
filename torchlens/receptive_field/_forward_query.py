@@ -248,7 +248,7 @@ def _map_to_child(
     if result.kind == "full":
         return _map_full_forward(parent, child, parent_sets, result)
     if result.kind == "axis_map":
-        return _map_axis_forward(parent, child, parent_sets, result), True
+        return _map_axis_forward(parent, child, parent_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough_forward(parent, child, parent_sets, result), True
     _ = rule_name
@@ -521,18 +521,66 @@ def _map_passthrough_forward(
 
 def _map_axis_forward(
     parent: Op, child: Op, parent_sets: _AxisSets, result: _RuleResult
-) -> _AxisSets:
-    """Transpose an explicit child-axis to parent-axis mapping."""
+) -> tuple[_AxisSets, bool]:
+    """Transpose an explicit child-axis to parent-axis mapping.
+
+    Surviving sliced axes apply the inverse of their recorded exact affine
+    (``child = (parent - start) / step``, dropping coordinates off the slice
+    lattice); a scalar-selected parent axis whose constrained source set
+    excludes the recorded index prunes the whole forward influence to empty.
+    Both were silently ignored before (disputed-r2 b6/R20-2/R20-3), so a
+    projective query through a rank-changing getitem served unshifted,
+    over-covering images.
+    """
 
     raw = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw, Mapping):
-        return _whole_child_envelope(child, parent_sets)
+        return _whole_child_envelope(child, parent_sets), True
+    raw_edges = result.values.get("out_axis_edges", {})
+    edges = raw_edges if isinstance(raw_edges, Mapping) else {}
+    raw_indices = result.values.get("selected_parent_indices", {})
+    selected_indices = raw_indices if isinstance(raw_indices, Mapping) else {}
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected_axes = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
     mapped: list[_IndexSet | None] = [None] * len(child.shape)
+    exact = True
     for child_axis, parent_axis in raw.items():
         if isinstance(child_axis, int) and isinstance(parent_axis, int):
             if 0 <= child_axis < len(mapped) and 0 <= parent_axis < len(parent_sets):
-                mapped[child_axis] = parent_sets[parent_axis]
-    return tuple(mapped)
+                source_set = parent_sets[parent_axis]
+                edge = edges.get(child_axis)
+                if source_set is not None and edge is not None:
+                    step, start = int(edge[0]), int(edge[1])
+                    source_set = _IndexSet.from_values(
+                        (
+                            (value - start) // step
+                            for value in source_set.values()
+                            if (value - start) % step == 0 and value >= start
+                        ),
+                        exact=source_set.exact,
+                    )
+                mapped[child_axis] = source_set
+    for parent_axis in selected_axes:
+        if not 0 <= parent_axis < len(parent_sets):
+            continue
+        source_set = parent_sets[parent_axis]
+        if source_set is None:
+            continue
+        index = selected_indices.get(parent_axis)
+        if isinstance(index, int):
+            if index not in set(source_set.values()):
+                # The constrained source coordinates never take the selected
+                # index: nothing flows through this getitem at all.
+                return tuple(_IndexSet.empty() for _ in child.shape), exact
+        else:
+            # Unknown selected index over a constrained axis: the forward
+            # image may be empty, so the non-pruned claim is an upper bound.
+            exact = False
+    return tuple(mapped), exact
 
 
 def _map_full_forward(

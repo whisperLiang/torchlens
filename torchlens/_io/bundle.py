@@ -217,6 +217,7 @@ def save(
     include_weights: bool = False,
     include_activations: bool = False,
     include_source: bool = True,
+    include_custom_attributes: bool = True,
     strict: bool = True,
     overwrite: bool = False,
 ) -> None:
@@ -261,6 +262,17 @@ def save(
         (``$HOME``, OS username, site-packages / capturing-script layout) are
         always reduced to a bare basename, so no host filesystem PII is ever
         embedded. Applies at every save ``level``.
+    include_custom_attributes:
+        Whether harvested public module instance attributes
+        (``Module.custom_attributes`` — every public, non-callable attribute a
+        module instance holds, captured verbatim at prep time) are persisted
+        (default ``True``, the historical behavior). These are arbitrary user
+        values, so tokens, paths, or config blobs stored as module attributes
+        ride along in a shared bundle; set ``False`` to drop the whole channel.
+        Values are never rewritten or partially scrubbed. Every save discloses
+        the channel in ``manifest.json`` under ``custom_attributes_disclosure``
+        (module count + top-level key names). Sparse runnable cores always drop
+        the field regardless of this flag.
     strict:
         Whether unsupported tensors should abort the save instead of being skipped.
     overwrite:
@@ -431,6 +443,7 @@ def save(
             include_saved_args=include_saved_args,
             include_rng_states=include_rng_states,
             include_source=include_source,
+            include_custom_attributes=include_custom_attributes,
             sparse_runnable=sparse_run_descriptor is not None,
         )
         if sparse_run_descriptor is not None:
@@ -519,6 +532,10 @@ def save(
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
             include_source=include_source,
+            custom_attributes_disclosure=_custom_attributes_disclosure(
+                trace,
+                included=include_custom_attributes and sparse_run_descriptor is None,
+            ),
         )
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
@@ -2561,6 +2578,7 @@ def _scrub_trace_for_bundle(
     include_saved_args: bool,
     include_rng_states: bool,
     include_source: bool = True,
+    include_custom_attributes: bool = True,
     sparse_runnable: bool = False,
 ) -> tuple[dict[str, Any], list[BlobSpec], list[dict[str, str]]]:
     """Scrub a model log while excluding transient load-only private attrs.
@@ -2580,6 +2598,8 @@ def _scrub_trace_for_bundle(
     include_source:
         Whether captured model source text and docstrings are embedded; absolute
         source paths are relativized to basenames regardless.
+    include_custom_attributes:
+        Whether harvested public module instance attributes are persisted.
     sparse_runnable:
         Whether all sparse-core tensor payload families must be dropped.
 
@@ -2611,6 +2631,7 @@ def _scrub_trace_for_bundle(
             include_saved_args=include_saved_args,
             include_rng_states=include_rng_states,
             include_source=include_source,
+            include_custom_attributes=include_custom_attributes,
             sparse_runnable=sparse_runnable,
             backend_name=str(getattr(trace, "backend", "torch")),
             payload_materialization=get_backend_spec(
@@ -3043,12 +3064,58 @@ def _fast_copy_tensor_blob(
     )
 
 
+_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP = 100
+"""Bound on the number of distinct top-level key names a disclosure records."""
+
+
+def _custom_attributes_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:
+    """Summarize the harvested module-attribute channel for the manifest.
+
+    Save-time disclosure for disputed-r2 b8/R62: portable bundles persist every
+    public, non-callable module instance attribute verbatim, so the manifest
+    names the channel — whether it shipped, how many modules carry attributes,
+    and the (bounded, sorted) union of top-level key names. Key NAMES only;
+    values are never inspected or rewritten here.
+
+    Parameters
+    ----------
+    trace:
+        Source model log.
+    included:
+        Whether the save actually persisted the channel
+        (``include_custom_attributes`` and not a sparse runnable core).
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready disclosure mapping.
+    """
+
+    module_count = 0
+    top_level_keys: set[str] = set()
+    for module in getattr(trace, "modules", ()) or ():
+        attrs = getattr(module, "custom_attributes", None)
+        if not isinstance(attrs, Mapping) or not attrs:
+            continue
+        module_count += 1
+        for key in attrs:
+            top_level_keys.add(str(key))
+    truncated = len(top_level_keys) > _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP
+    return {
+        "included": bool(included),
+        "module_count": module_count,
+        "top_level_keys": sorted(top_level_keys)[:_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP],
+        "top_level_keys_truncated": truncated,
+    }
+
+
 def _build_manifest(
     *,
     trace: Trace,
     tensor_entries: list[TensorEntry],
     unsupported_tensors: list[dict[str, str]],
     include_source: bool = True,
+    custom_attributes_disclosure: dict[str, Any] | None = None,
 ) -> Manifest:
     """Create a manifest instance for a finished bundle save.
 
@@ -3063,6 +3130,8 @@ def _build_manifest(
     include_source:
         When ``False`` the environment-provenance git commit hash is omitted, so
         ``include_source=False`` also drops the cwd repo's HEAD commit (B8-19).
+    custom_attributes_disclosure:
+        Save-time disclosure of the harvested module-attribute channel.
 
     Returns
     -------
@@ -3096,6 +3165,7 @@ def _build_manifest(
         tensors=tensor_entries,
         unsupported_tensors=unsupported_tensors,
         provenance=_collect_provenance(trace, include_source=include_source),
+        custom_attributes_disclosure=custom_attributes_disclosure,
     )
 
 
