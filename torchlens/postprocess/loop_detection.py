@@ -73,8 +73,17 @@ def _append_signature_tokens(arg: Any, prefix: str, tokens: list[str], depth: in
         tokens.append(f"{prefix}={type(arg).__name__}:{arg!r}")
         return
     if isinstance(arg, dict):
-        for key in sorted(arg, key=repr):
-            _append_signature_tokens(arg[key], f"{prefix}.k{key!r}", tokens, depth + 1)
+        # Keys get the same identity-repr guard as values: emitting ``key!r``
+        # verbatim (and sorting by ``repr``) leaks ``<Foo object at 0x...>``
+        # addresses into the signature, so a fresh non-primitive key per call
+        # (``cfg={SomeObject(): 1}``) gave every pass of a genuine recurrence
+        # a different, ASLR-varying signature and silently ungrouped it.
+        entries = sorted(
+            ((_signature_key_token(key, depth + 1), key) for key in arg),
+            key=lambda entry: entry[0],
+        )
+        for key_token, key in entries:
+            _append_signature_tokens(arg[key], f"{prefix}.k{key_token}", tokens, depth + 1)
         return
     if isinstance(arg, (list, tuple, set, frozenset)):
         elements = (
@@ -92,6 +101,44 @@ def _append_signature_tokens(arg: Any, prefix: str, tokens: list[str], depth: in
         tokens.append(f"{prefix}={type_key[1]}:{arg!s}")
         return
     tokens.append(f"{prefix}=<{type_key[0]}.{type_key[1]}>")
+
+
+def _signature_key_token(key: Any, depth: int) -> str:
+    """Return a deterministic, address-free signature token for one dict key.
+
+    Mirrors the value-side policy of :func:`_append_signature_tokens`: primitive
+    and safe torch value types contribute type plus content, hashable containers
+    recurse element-wise, and anything else contributes its class name only, so
+    an object-identity ``repr`` can never make two identical calls differ.
+
+    Parameters
+    ----------
+    key:
+        Dict key to fingerprint.
+    depth:
+        Recursion depth guard inherited from the signature walk.
+
+    Returns
+    -------
+    str
+        Deterministic key token.
+    """
+
+    if depth > 6:
+        return "deep"
+    if isinstance(key, _SIGNATURE_VALUE_TYPES):
+        return f"{type(key).__name__}:{key!r}"
+    if isinstance(key, tuple):
+        inner = ",".join(_signature_key_token(element, depth + 1) for element in key)
+        return f"tuple[{inner}]"
+    if isinstance(key, frozenset):
+        inner = ",".join(sorted(_signature_key_token(element, depth + 1) for element in key))
+        return f"frozenset[{inner}]"
+    key_type = type(key)
+    type_key = (getattr(key_type, "__module__", ""), getattr(key_type, "__qualname__", ""))
+    if type_key in _SIGNATURE_SAFE_TORCH_TYPES:
+        return f"{type_key[1]}:{key!s}"
+    return f"<{type_key[0]}.{type_key[1]}>"
 
 
 def _signature_element_sort_key(arg: Any, depth: int) -> tuple[str, ...]:

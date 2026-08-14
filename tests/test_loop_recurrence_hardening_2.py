@@ -434,3 +434,54 @@ def test_rolled_render_displays_variation_not_pass_1(tmp_path) -> None:
     assert "(2..4, 4)" in label_line
     assert "(4, 4)," not in label_line
     assert check_metadata_invariants(traced)
+
+
+# ---------------------------------------------------------------------------
+# Deep-hunt L1: dict KEYS must get the same identity-repr guard as values
+# ---------------------------------------------------------------------------
+
+
+class _OpaqueKey:
+    """Non-primitive dict key with the default address-bearing ``repr``."""
+
+
+def test_arg_signature_ignores_object_key_identity() -> None:
+    """Object-identity dict keys never split a genuine recurrence signature.
+
+    Deep-hunt L1: ``_append_signature_tokens`` guarded VALUES against
+    identity-based reprs but emitted dict KEYS verbatim (``key!r``, sorted by
+    ``repr``), so a fresh non-primitive key per call (``cfg={SomeObject(): 1}``)
+    gave every pass a different, address-bearing (ASLR-varying) signature and
+    silently ungrouped real recurrence. Two structurally identical calls with
+    distinct key objects must share one signature; primitive key CONTENT must
+    still discriminate.
+    """
+    from types import SimpleNamespace
+
+    from torchlens.postprocess.loop_detection import _structural_arg_signature
+
+    def _op(key: object) -> SimpleNamespace:
+        return SimpleNamespace(non_tensor_pos_args=(), non_tensor_kwargs={"cfg": {key: 1}})
+
+    assert _structural_arg_signature(_op(_OpaqueKey())) == _structural_arg_signature(
+        _op(_OpaqueKey())
+    )
+    assert _structural_arg_signature(_op("alpha")) != _structural_arg_signature(_op("beta"))
+
+
+def test_arg_signature_mixed_key_dict_is_order_and_address_free() -> None:
+    """Mixed primitive/object key dicts sign identically across constructions."""
+    from types import SimpleNamespace
+
+    from torchlens.postprocess.loop_detection import _structural_arg_signature
+
+    first = SimpleNamespace(
+        non_tensor_pos_args=({_OpaqueKey(): 1, "z": 2},),
+        non_tensor_kwargs={},
+    )
+    second = SimpleNamespace(
+        non_tensor_pos_args=({"z": 2, _OpaqueKey(): 1},),
+        non_tensor_kwargs={},
+    )
+
+    assert _structural_arg_signature(first) == _structural_arg_signature(second)
