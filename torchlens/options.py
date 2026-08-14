@@ -910,7 +910,8 @@ class CaptureOptions:
     payload_policy:
         Declared payload materialization/codec policy passthrough.
     save_preview:
-        Declared preview flag for future ``save=`` semantics.
+        Non-torch preview backends' declared flag reserving extended ``save=``
+        semantics; the shipped torch ``save=`` kwarg is independent of it.
     emit_nvtx:
         Whether torch capture emits NVIDIA Tools Extension (NVTX) CUDA profiling
         ranges around each logged operation. NVTX markers are visible in NVIDIA
