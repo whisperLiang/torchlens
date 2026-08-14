@@ -21,6 +21,7 @@ from ...ir.container import (
     namedtuple_type_can_carry_instance_state,
     reconstruction_is_lossy,
 )
+from ...ir.container_registry import OUTPUT_TREE_MAX_DEPTH
 from ...utils.introspection import (
     get_vars_of_type_from_obj,
 )
@@ -45,20 +46,36 @@ if TYPE_CHECKING:
 
 __all__ = (
     "_build_container_spec",
+    "_build_container_spec_unguarded",
+    "_known_output_container_children",
     "_walk_supported_output_container",
     "_prove_runnable_output_lossless",
+    "_prove_runnable_output_lossless_unguarded",
     "runnable_output_losslessness",
     "_walk_output_tensors_with_paths",
 )
 
 
-def _build_container_spec(value: Any) -> ContainerSpec | None:
+def _build_container_spec(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> ContainerSpec | None:
     """Build a replay container spec for a supported output container.
+
+    Over-deep and self-referential subtrees degrade to the honest ``opaque``
+    lane (r-b4 R27-4) instead of exhausting the interpreter stack; the cycle
+    guard is path-scoped so DAG-shaped outputs keep one spec per occurrence.
 
     Parameters
     ----------
     value
         Output object to describe.
+    _depth
+        Internal recursion depth (callers must not supply this).
+    _in_progress
+        Internal path-scoped container-id set (callers must not supply this).
 
     Returns
     -------
@@ -68,12 +85,33 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
 
     if _literal_value_supported(value) or isinstance(value, torch.Size):
         return ContainerSpec(kind="literal", literal_value=value)
+    if _in_progress is None:
+        _in_progress = set()
+    value_id = id(value)
+    if _depth >= OUTPUT_TREE_MAX_DEPTH or value_id in _in_progress:
+        module, qualname = _container_type_ref(value)
+        return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
+    _in_progress.add(value_id)
+    try:
+        return _build_container_spec_unguarded(value, _depth=_depth, _in_progress=_in_progress)
+    finally:
+        _in_progress.discard(value_id)
+
+
+def _build_container_spec_unguarded(
+    value: Any,
+    *,
+    _depth: int,
+    _in_progress: set[int],
+) -> ContainerSpec | None:
+    """Build one guarded output container node's spec (dispatch body)."""
+
     child_specs: list[tuple[OutputPathComponent, ContainerSpec]] = []
     registered = get_registered_container(type(value))
     if registered is not None:
         children, aux_data = registered.flatten(value)
         for index, item in enumerate(children):
-            child_spec = _try_build_container_spec(item)
+            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
         module, qualname = _container_type_ref(value)
@@ -90,7 +128,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
         reconstructable = True
         for key in keys:
             child = value[key]
-            child_spec = _try_build_container_spec(child)
+            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((HFKey(key), child_spec))
                 if child_spec.kind == "opaque":
@@ -122,7 +160,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
         reconstructable = True
         for field_name in fields:
             child = getattr(value, field_name)
-            child_spec = _try_build_container_spec(child)
+            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((NamedField(field_name), child_spec))
                 if child_spec.kind == "opaque":
@@ -148,7 +186,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
         reconstructable = True
         for field_name in fields:
             child = getattr(value, field_name)
-            child_spec = _try_build_container_spec(child)
+            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((DataclassField(field_name), child_spec))
                 if child_spec.kind == "opaque":
@@ -176,7 +214,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
         reconstructable = all(isinstance(key, (str, int)) for key in keys)
         for key in keys:
             child = value[key]
-            child_spec = _try_build_container_spec(child)
+            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((DictKey(key), child_spec))
                 if child_spec.kind == "opaque":
@@ -207,7 +245,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             return None
         reconstructable = True
         for index, item in items:
-            child_spec = _try_build_container_spec(item)
+            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
                 if child_spec.kind == "opaque":
@@ -224,7 +262,7 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             return None
         reconstructable = True
         for index, item in items:
-            child_spec = _try_build_container_spec(item)
+            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
                 if child_spec.kind == "opaque":
@@ -238,13 +276,58 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
     return None
 
 
+def _known_output_container_children(
+    out: Any,
+) -> list[tuple[OutputPathComponent, Any]] | None:
+    """Return ``(component, child)`` pairs for a recognized output container.
+
+    ``None`` means the container kind is UNRECOGNIZED (the caller falls through
+    to the opaque-boundary tensor fallback). An empty list means recognized
+    with nothing to walk (the historical list/tuple ``_iter_sequence_items``
+    ``None`` early-return).
+    """
+
+    registered = get_registered_container(type(out))
+    if registered is not None:
+        children, _aux_data = registered.flatten(out)
+        return [(TupleIndex(index), item) for index, item in enumerate(children)]
+    if _is_hf_model_output(out):
+        return [(HFKey(key), out[key]) for key in out.keys()]
+    torch_fields = _torch_return_type_fields(out)
+    if _is_namedtuple_instance(out) or torch_fields:
+        fields = torch_fields or tuple(out._fields)
+        return [(NamedField(field_name), getattr(out, field_name)) for field_name in fields]
+    if dataclasses.is_dataclass(out) and not isinstance(out, type):
+        return [
+            (DataclassField(field.name), getattr(out, field.name))
+            for field in dataclasses.fields(out)
+        ]
+    if isinstance(out, dict):
+        return [(DictKey(key), value) for key, value in out.items()]
+    if isinstance(out, (list, tuple)):
+        items = _iter_sequence_items(out)
+        if items is None:
+            return []
+        return [(TupleIndex(index), item) for index, item in items]
+    return None
+
+
 def _walk_supported_output_container(
     out: Any,
     *,
     root_spec: ContainerSpec,
     path: tuple[OutputPathComponent, ...],
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
 ) -> Iterator[tuple[torch.Tensor, tuple[OutputPathComponent, ...], ContainerSpec | None]]:
     """Yield tensors from a supported output container.
+
+    Bounded by the same ceiling/cycle policy as the spec builders (r-b4 R27-4):
+    an over-deep or self-referential subtree is treated exactly like an
+    unrecognized container -- its tensors are yielded at the opaque boundary
+    path by the fallback below, matching the ``opaque`` spec node the builder
+    records at that same depth. The cycle guard is path-scoped, so DAG-shaped
+    outputs are walked once per occurrence.
 
     Parameters
     ----------
@@ -254,6 +337,10 @@ def _walk_supported_output_container(
         Spec for the outermost output container.
     path
         Path accumulated from the outermost output container.
+    _depth
+        Internal recursion depth (callers must not supply this).
+    _in_progress
+        Internal path-scoped container-id set (callers must not supply this).
 
     Yields
     ------
@@ -265,61 +352,25 @@ def _walk_supported_output_container(
         if not isinstance(out, torch.nn.Parameter):
             yield out, path, root_spec
         return
-    registered = get_registered_container(type(out))
-    if registered is not None:
-        children, _aux_data = registered.flatten(out)
-        for index, item in enumerate(children):
-            yield from _walk_supported_output_container(
-                item,
-                root_spec=root_spec,
-                path=(*path, TupleIndex(index)),
-            )
-        return
-    if _is_hf_model_output(out):
-        for key in out.keys():
-            yield from _walk_supported_output_container(
-                out[key],
-                root_spec=root_spec,
-                path=(*path, HFKey(key)),
-            )
-        return
-    torch_fields = _torch_return_type_fields(out)
-    if _is_namedtuple_instance(out) or torch_fields:
-        fields = torch_fields or tuple(out._fields)
-        for field_name in fields:
-            yield from _walk_supported_output_container(
-                getattr(out, field_name),
-                root_spec=root_spec,
-                path=(*path, NamedField(field_name)),
-            )
-        return
-    if dataclasses.is_dataclass(out) and not isinstance(out, type):
-        for field in dataclasses.fields(out):
-            yield from _walk_supported_output_container(
-                getattr(out, field.name),
-                root_spec=root_spec,
-                path=(*path, DataclassField(field.name)),
-            )
-        return
-    if isinstance(out, dict):
-        for key, value in out.items():
-            yield from _walk_supported_output_container(
-                value,
-                root_spec=root_spec,
-                path=(*path, DictKey(key)),
-            )
-        return
-    if isinstance(out, (list, tuple)):
-        items = _iter_sequence_items(out)
-        if items is None:
+    if _in_progress is None:
+        _in_progress = set()
+    out_id = id(out)
+    if _depth < OUTPUT_TREE_MAX_DEPTH and out_id not in _in_progress:
+        children = _known_output_container_children(out)
+        if children is not None:
+            _in_progress.add(out_id)
+            try:
+                for component, child in children:
+                    yield from _walk_supported_output_container(
+                        child,
+                        root_spec=root_spec,
+                        path=(*path, component),
+                        _depth=_depth + 1,
+                        _in_progress=_in_progress,
+                    )
+            finally:
+                _in_progress.discard(out_id)
             return
-        for index, item in items:
-            yield from _walk_supported_output_container(
-                item,
-                root_spec=root_spec,
-                path=(*path, TupleIndex(index)),
-            )
-        return
     # Unrecognized nested container (e.g. transformers DynamicCache nested inside
     # an HF ModelOutput, or a detectron2 Instances inside a list). The structured
     # walk cannot descend into this subtree to assign deeper stable paths, so every
@@ -344,7 +395,12 @@ def _walk_supported_output_container(
         yield tensor, (*path, *_fallback_address_to_path(fallback_address)), root_spec
 
 
-def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
+def _prove_runnable_output_lossless(
+    value: Any,
+    *,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> tuple[bool, str]:
     """Positively prove one MODEL-output subtree is losslessly reconstructable (r35 I1).
 
     A runnable claim requires refuse-unless-proved: the proof establishes an exact
@@ -369,6 +425,31 @@ def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
         return False, f"unordered_container:{type(value).__qualname__}"
     if _literal_value_supported(value) or isinstance(value, torch.Size):
         return True, ""
+    # r-b4 R27-4: refuse-unless-proved makes the guard trivial -- an over-deep or
+    # self-referential subtree simply cannot be proved lossless.
+    if _in_progress is None:
+        _in_progress = set()
+    if _depth >= OUTPUT_TREE_MAX_DEPTH:
+        return False, "output_tree_depth_exceeded"
+    if id(value) in _in_progress:
+        return False, f"output_tree_cycle:{type(value).__qualname__}"
+    _in_progress.add(id(value))
+    try:
+        return _prove_runnable_output_lossless_unguarded(
+            value, _depth=_depth, _in_progress=_in_progress
+        )
+    finally:
+        _in_progress.discard(id(value))
+
+
+def _prove_runnable_output_lossless_unguarded(
+    value: Any,
+    *,
+    _depth: int,
+    _in_progress: set[int],
+) -> tuple[bool, str]:
+    """Prove one guarded output container node lossless (dispatch body)."""
+
     registered = get_registered_container(type(value))
     if registered is not None:
         if not getattr(registered, "state_complete", False):
@@ -382,13 +463,17 @@ def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
                 return False, f"registered_container_instance_state:{type(value).__qualname__}"
         children, _aux = registered.flatten(value)
         for item in children:
-            proved, reason = _prove_runnable_output_lossless(item)
+            proved, reason = _prove_runnable_output_lossless(
+                item, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
     if _is_hf_model_output(value):
         for key in value.keys():
-            proved, reason = _prove_runnable_output_lossless(value[key])
+            proved, reason = _prove_runnable_output_lossless(
+                value[key], _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
@@ -410,13 +495,17 @@ def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
             # instance ``__dict__``) stay admitted.
             return False, f"namedtuple_instance_state:{type(value).__qualname__}"
         for field_name in fields:
-            proved, reason = _prove_runnable_output_lossless(getattr(value, field_name))
+            proved, reason = _prove_runnable_output_lossless(
+                getattr(value, field_name), _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         for field in dataclasses.fields(value):
-            proved, reason = _prove_runnable_output_lossless(getattr(value, field.name))
+            proved, reason = _prove_runnable_output_lossless(
+                getattr(value, field.name), _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
@@ -431,7 +520,9 @@ def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
         for key in value.keys():
             if not isinstance(key, (str, int)):
                 return False, f"unsupported_mapping_key:{type(key).__qualname__}"
-            proved, reason = _prove_runnable_output_lossless(value[key])
+            proved, reason = _prove_runnable_output_lossless(
+                value[key], _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
@@ -443,7 +534,9 @@ def _prove_runnable_output_lossless(value: Any) -> tuple[bool, str]:
         if items is None:
             return False, f"opaque_sequence:{type(value).__qualname__}"
         for _index, item in items:
-            proved, reason = _prove_runnable_output_lossless(item)
+            proved, reason = _prove_runnable_output_lossless(
+                item, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if not proved:
                 return False, reason
         return True, ""
