@@ -17,7 +17,12 @@ from typing import Any
 
 from ._engine import JoinKey, JoinRecord, MergeDerivation, derive_merge
 from ._enums import BoundaryConsistency, MergeAlignment, MergedErrorCode, MergeValueStatus
-from ._errors import MergeConflictError, MergedFinding, MergedSurfaceUnsupportedError
+from ._errors import (
+    MergeConflictError,
+    MergedFinding,
+    MergedSurfaceUnsupportedError,
+    MergeInputError,
+)
 from ._evidence import resolve_rank_inputs
 
 __all__ = [
@@ -27,6 +32,57 @@ __all__ = [
     "merge_ranks",
     "merge_report",
 ]
+
+
+def _rank_raw_to_final_op_labels(rank: int, trace: Any) -> Mapping[str, str]:
+    """Read one rank core's DECLARED raw-to-final op-label seam, fail-closed.
+
+    ``Trace._raw_to_final_op_labels`` is a declared, ``FieldPolicy.KEEP``
+    field (``data_classes/_trace_components.py`` owns it under the ``graph``
+    component), so every finished live or loaded rank core has it. Reaching
+    for it through a string ``getattr(trace, "_raw_to_final_op_labels", {})``
+    default made a renamed or absent field degrade SILENTLY into raw-label
+    resolution -- fail-OPEN, contradicting merged/'s fail-closed ethos, and
+    invisible to SLF001 (b5 R45-2 / SF-41). The read is now a direct private
+    access: a rename breaks loudly here, and absence refuses typed.
+
+    Parameters
+    ----------
+    rank:
+        Global rank whose core is being read (diagnostic + payload field).
+    trace:
+        The rank core.
+
+    Returns
+    -------
+    Mapping[str, str]
+        The rank core's raw-to-final op-label mapping (possibly empty).
+
+    Raises
+    ------
+    MergeInputError
+        If the declared field is absent, or is not a mapping.
+    """
+
+    try:
+        mapping = trace._raw_to_final_op_labels  # noqa: SLF001 -- declared rank-core seam
+    except AttributeError as exc:
+        raise MergeInputError(
+            f"rank {rank}'s core does not carry the declared "
+            "`_raw_to_final_op_labels` seam, so its boundary ops cannot be "
+            "resolved. Merge inputs must be finished torch rank captures "
+            "(live or loaded), not partial or foreign objects.",
+            code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+            rank=rank,
+        ) from exc
+    if not isinstance(mapping, Mapping):
+        raise MergeInputError(
+            f"rank {rank}'s `_raw_to_final_op_labels` seam is "
+            f"{type(mapping).__name__}, not a mapping.",
+            code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+            rank=rank,
+        )
+    return mapping
 
 
 class _RankHandle:
@@ -356,7 +412,11 @@ class MergedTrace:
         for rank_id in self.rank_ids:
             try:
                 fan[rank_id] = self.ranks[rank_id][label]
-            except Exception:
+            except (KeyError, ValueError):
+                # Documented SPMD contract: a rank where the label does not
+                # resolve (miss) or resolves ambiguously is simply absent from
+                # the fan. Narrow on purpose (b5 R45-2) -- any OTHER failure is
+                # a defect in the rank core and must surface, not shrink the fan.
                 continue
         if not fan:
             raise KeyError(label)
@@ -365,22 +425,45 @@ class MergedTrace:
     def join_ops(self, join: CollectiveJoin) -> dict[int, tuple[Any, ...]]:
         """Resolve a join's boundary ops on every presenting rank core.
 
-        Uses each rank core's persisted raw-to-final label mapping; a
-        tensorless boundary (barrier, object collectives) has no op node and
-        yields an empty tuple for that rank.
+        Uses each rank core's DECLARED raw-to-final label seam; a tensorless
+        boundary (barrier, object collectives) records no op-label
+        back-references and yields an empty tuple for that rank.
+
+        Fail-closed (b5 R45-2): a rank core without the declared seam, and a
+        recorded back-reference that the core cannot resolve to a node, both
+        refuse typed. Silently dropping an unresolvable boundary op would
+        present a SHORTER fan than the evidence recorded -- a presence claim
+        the merge never made.
+
+        Raises
+        ------
+        MergeInputError
+            If a presenting rank core lacks the declared label seam, or does
+            not resolve one of the boundary op labels its own journal
+            recorded.
         """
 
         resolved: dict[int, tuple[Any, ...]] = {}
         for rank in join.presence:
             trace = self.ranks[rank]
-            mapping = getattr(trace, "_raw_to_final_op_labels", {}) or {}
+            mapping = _rank_raw_to_final_op_labels(rank, trace)
             ops = []
             for raw in join.op_labels_raw(rank):
                 final = mapping.get(raw, raw)
                 try:
                     ops.append(trace[final])
-                except Exception:
-                    continue
+                except (KeyError, ValueError) as exc:
+                    raise MergeInputError(
+                        f"rank {rank}'s core does not resolve boundary op "
+                        f"{final!r} (raw label {raw!r}) recorded for join "
+                        f"{join.key}. The rank core and its collective "
+                        "journal disagree; re-capture the rank rather than "
+                        "presenting a partial fan.",
+                        code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                        rank=rank,
+                        raw_label=raw,
+                        final_label=final,
+                    ) from exc
             resolved[rank] = tuple(ops)
         return resolved
 
