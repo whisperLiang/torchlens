@@ -12,6 +12,7 @@ from safetensors import SafetensorError
 from safetensors.torch import load as load_safetensors
 
 from .._io import TorchLensIOError
+from .._io._json import loads_bounded, read_bounded, read_bytes_bounded
 from .._io.manifest import Manifest, enforce_version_policy
 from .._io.paths import resolve_bundle_blob_path
 from .exceptions import BundleNotFinalizedError, RecoveryError
@@ -117,25 +118,28 @@ def _load_from_index(
 
     metadata = _read_metadata(bundle_path / "metadata.json")
     records: list[ActivationRecord] = []
-    warnings_out = list(recovery_warnings)
+    collector = _RecoveryWarningCollector(recovery_warnings)
     lines = _read_index_lines(bundle_path / "fastlog_index.jsonl")
     for line_number, raw_line in enumerate(lines, start=1):
         try:
-            data = json.loads(raw_line)
+            # Bounded parse (B8-13): a depth-bomb or oversized index line must
+            # refuse as a JSONDecodeError handled below, never escape recovery
+            # as a raw RecursionError from the stdlib decoder.
+            data = loads_bounded(raw_line)
         except json.JSONDecodeError:
             if line_number == len(lines):
-                warnings_out.append("truncated tail")
+                collector.add("truncated tail", "truncated tail")
             else:
-                warnings_out.append(f"malformed line {line_number}")
+                collector.add("malformed line", f"malformed line {line_number}")
             continue
         if not isinstance(data, dict):
-            warnings_out.append(f"malformed line {line_number}")
+            collector.add("malformed line", f"malformed line {line_number}")
             continue
         record = record_from_json(data)
         blob_recoverable, validated_payloads = _blob_is_recoverable(
             bundle_path,
             record,
-            warnings_out,
+            collector,
         )
         if not blob_recoverable:
             continue
@@ -146,6 +150,7 @@ def _load_from_index(
         if rehydrated_record is None:
             continue
         records.append(rehydrated_record)
+    warnings_out = collector.messages()
     if strict_integrity and warnings_out:
         raise TorchLensIOError(_format_strict_integrity_error(warnings_out))
     recording = _recording_from_records(
@@ -157,6 +162,66 @@ def _load_from_index(
     )
     RamStorageBackend(recording).finalize()
     return recording
+
+
+class _RecoveryWarningCollector:
+    """Deduplicating, bounded collector for recovery warnings.
+
+    A corrupt index can carry hundreds of thousands of bad lines; retaining one
+    string per problem made ``Recording.recovery_warnings`` grow without bound
+    (B8-41: a 200k-line corruption held 15+ MB of warnings whose actionable
+    content was one sentence). At most ``_MAX_PER_KIND`` messages are retained
+    per warning kind; every further problem is counted and summarized by one
+    final ``(+N more suppressed)`` entry so the total stays accurate.
+    """
+
+    _MAX_PER_KIND = 20
+
+    def __init__(self, seed: list[str] | None = None) -> None:
+        """Initialize the collector.
+
+        Parameters
+        ----------
+        seed:
+            Pre-existing warning messages to retain verbatim (uncounted).
+        """
+
+        self._messages: list[str] = list(seed) if seed else []
+        self._counts: dict[str, int] = {}
+        self._suppressed_total = 0
+
+    def add(self, kind: str, message: str) -> None:
+        """Record one recovery problem, retaining at most ``_MAX_PER_KIND`` per kind.
+
+        Parameters
+        ----------
+        kind:
+            Stable warning kind used for dedup bucketing (for example
+            ``"malformed line"`` or ``"hash mismatch"``).
+        message:
+            Full human-readable warning message.
+        """
+
+        count = self._counts.get(kind, 0) + 1
+        self._counts[kind] = count
+        if count <= self._MAX_PER_KIND:
+            self._messages.append(message)
+        else:
+            self._suppressed_total += 1
+
+    def messages(self) -> list[str]:
+        """Return the bounded warning list, with one suppression-summary tail.
+
+        Returns
+        -------
+        list[str]
+            Retained warning messages, plus a final ``(+N more suppressed)``
+            entry when any problems exceeded the per-kind retention cap.
+        """
+
+        if self._suppressed_total:
+            return [*self._messages, f"(+{self._suppressed_total} more suppressed)"]
+        return list(self._messages)
 
 
 def _format_strict_integrity_error(recovery_warnings: list[str]) -> str:
@@ -190,19 +255,33 @@ def _format_strict_integrity_error(recovery_warnings: list[str]) -> str:
 
 
 def _read_index_lines(path: Path) -> list[str]:
-    """Read index lines from a recoverable fastlog index file."""
+    """Read index lines from a recoverable fastlog index file.
+
+    The raw read is size-bounded (B8-13): ``Path.read_text()`` materialized the
+    whole attacker-sized index (plus a second full copy from ``splitlines()``)
+    before any ceiling could apply. ``read_bytes_bounded`` refuses an oversized
+    index before allocating it, and the refusal is converted into the module's
+    typed ``RecoveryError`` channel rather than escaping raw.
+    """
 
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = read_bytes_bounded(path)
+    except json.JSONDecodeError as exc:
+        raise RecoveryError("fastlog index exceeds the maximum recoverable size") from exc
     except OSError as exc:
         raise RecoveryError("no recoverable index") from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RecoveryError("fastlog index is not valid UTF-8") from exc
+    del raw
     return text.splitlines()
 
 
 def _blob_is_recoverable(
     bundle_path: Path,
     record: ActivationRecord,
-    recovery_warnings: list[str],
+    recovery_warnings: _RecoveryWarningCollector,
 ) -> tuple[bool, dict[str, Any]]:
     """Return whether a record's blob(s) are present and hash-valid.
 
@@ -241,7 +320,7 @@ def _validate_blob_metadata(
     blob_id: Any,
     relative_path: Any,
     expected_sha256: Any,
-    recovery_warnings: list[str],
+    recovery_warnings: _RecoveryWarningCollector,
 ) -> tuple[bool, Any | None]:
     """Validate a single blob entry from record metadata."""
 
@@ -253,20 +332,20 @@ def _validate_blob_metadata(
             warning_id = str(blob_id)
         elif relative_path is not None:
             warning_id = str(relative_path)
-        recovery_warnings.append(f"incomplete blob metadata {warning_id}")
+        recovery_warnings.add("incomplete blob metadata", f"incomplete blob metadata {warning_id}")
         return False, None
     try:
         blob_path = resolve_bundle_blob_path(bundle_path, str(relative_path))
     except TorchLensIOError:
-        recovery_warnings.append(f"malformed blob path {blob_id}")
+        recovery_warnings.add("malformed blob path", f"malformed blob path {blob_id}")
         return False, None
     if not blob_path.exists():
-        recovery_warnings.append(f"missing blob {blob_id}")
+        recovery_warnings.add("missing blob", f"missing blob {blob_id}")
         return False, None
     try:
         payload = _load_verified_blob_tensor(blob_path, str(expected_sha256))
     except TorchLensIOError:
-        recovery_warnings.append(f"hash mismatch {blob_id}")
+        recovery_warnings.add("hash mismatch", f"hash mismatch {blob_id}")
         return False, None
     return True, payload
 
@@ -389,12 +468,17 @@ def _recording_from_records(
 
 
 def _read_metadata(path: Path) -> dict[str, Any]:
-    """Read optional fastlog metadata JSON."""
+    """Read optional fastlog metadata JSON.
+
+    Bounded read/parse (B8-13): an oversized or depth-bomb ``metadata.json`` is
+    corruption and degrades to the same graceful empty-metadata outcome as any
+    other unreadable metadata file, instead of exhausting memory or escaping as
+    a raw ``RecursionError`` from the stdlib decoder.
+    """
 
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+        data = read_bounded(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
