@@ -386,7 +386,7 @@ def test_validation_default_threads_and_explicit_single_thread_pin_restore() -> 
 
     This is the host-independent mechanism gate for the inter-run multi-thread
     float-reduction-order fix. The drift it removes (~3e-7 ground-truth output
-    disagreement straddling ``GROUND_TRUTH_OUTPUT_RTOL=1e-6``, plus the MoE
+    disagreement straddling the fp32 ground-truth bar (8 ULP ~= 1e-6, ``_ground_truth_tolerances``), plus the MoE
     masked-gate perturbation flake) is hardware/thread-count dependent and may
     not reproduce on every host, so we assert the retry mechanism directly
     rather than relying on a host reproducing the flake:
@@ -437,7 +437,7 @@ class _SpectralGCNGroundTruthDriftModel(nn.Module):
     """A Chebyshev-spectral-conv-style model (MSTGCN / TGT-MSTGCN family) whose
     ground-truth output drifts ~3e-7 between two clean forwards under multi-threaded
     float reduction-order -- straddling the strict phase-0 ground-truth bar
-    (``GROUND_TRUTH_OUTPUT_RTOL=1e-6``) -- yet goes bit-exact under a single thread.
+    (the fp32 ground-truth bar (8 ULP ~= 1e-6, ``_ground_truth_tolerances``)) -- yet goes bit-exact under a single thread.
 
     The forward stacks many repeated sparse-aggregation reductions (the Chebyshev
     polynomial recurrence over a graph adjacency) so the parallel accumulation order
@@ -473,7 +473,7 @@ def test_validation_spectral_gcn_ground_truth_determinism() -> None:
     A Chebyshev-spectral-conv model (MSTGCN / TGT-MSTGCN family) -- the structure
     whose two clean forwards disagreed by ~3e-7 at the output under multi-threaded
     reduction order, straddling the strict phase-0 ground-truth bar
-    (``GROUND_TRUTH_OUTPUT_RTOL=1e-6``) -- validates stably True across repeats now
+    (the fp32 ground-truth bar (8 ULP ~= 1e-6, ``_ground_truth_tolerances``)) -- validates stably True across repeats now
     that the harness pins a single intra-op thread.
 
     NOTE: the underlying multi-thread reduction-order drift is hardware/thread-count
