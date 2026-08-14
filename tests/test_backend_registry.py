@@ -1061,6 +1061,15 @@ def test_fake_backend_trace_save_load_accessors_and_invariants(tmp_path: Path) -
     ("mutate", "match"),
     [
         (lambda trace: setattr(trace, "module_identity_mode", "torch_module"), "module_identity"),
+        # R74-1 killers for the three previously-unreferenced arms of
+        # _check_backend_identity_invariants: out-of-vocabulary param_source,
+        # a backend-capability violation matched on the arm's own message, and
+        # an empty Trace.backend.
+        (lambda trace: setattr(trace, "param_source", "not-a-param-source"), "param_source"),
+        (
+            lambda trace: setattr(trace, "module_identity_mode", "unsupported_identity_mode"),
+            "is not supported by backend",
+        ),
         (lambda trace: setattr(trace, "has_backward_pass", True), "has_backward_pass"),
         (lambda trace: trace.grad_fn_logs.__setitem__(1, object()), "grad_fn_logs"),
         (lambda trace: setattr(trace[0], "resolver_status", "lost"), "resolver_status"),
@@ -1082,6 +1091,25 @@ def test_fake_backend_invariant_corruptions_fail(
             check_metadata_invariants(trace)
     finally:
         unregister_backend_spec("fake")
+
+
+@pytest.mark.parametrize("bad_backend", ["", None])
+def test_backend_identity_invariant_rejects_non_string_backend(bad_backend: Any) -> None:
+    """The non-empty-string backend arm rejects '' and None directly (R74-1).
+
+    Through the public ``check_metadata_invariants`` entry an empty backend
+    already fails EARLIER, at contract selection (``UnknownBackendError``
+    from the registry lookup), so this arm is reachable only by direct call.
+    Pin the arm itself so a silent disarm (``if False:``) cannot survive.
+    """
+
+    from torchlens.validation.invariants import _check_backend_identity_invariants
+
+    class _BadBackendStub:
+        backend = bad_backend
+
+    with pytest.raises(MetadataInvariantError, match="non-empty string"):
+        _check_backend_identity_invariants(_BadBackendStub())
 
 
 def test_backend_none_ambiguity_is_deterministic() -> None:
