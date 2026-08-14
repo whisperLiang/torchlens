@@ -8,6 +8,7 @@ tensor shapes, or dtypes.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence, Set
 from hashlib import sha256
 from typing import Any
@@ -15,14 +16,23 @@ from typing import Any
 import numpy as np
 import torch
 
+from ._errors import ArgumentTypeError
+from .errors._base import TorchLensWarning, ValidationError
 from .options import CaptureOptions
 from .utils.hashing import compute_graph_shape_hash
 
 __all__ = ["StructuralHashMismatchError", "assert_unchanged", "content", "model", "trace"]
 
 
-class StructuralHashMismatchError(AssertionError):
-    """Raised when a model's provisional structural hash differs from its pin."""
+class StructuralHashMismatchError(ValidationError, AssertionError):
+    """Raised when a model's provisional structural hash differs from its pin.
+
+    Part of the typed taxonomy (catchable as ``tl.errors.ValidationError``)
+    while keeping ``AssertionError`` in the MRO so historical
+    ``except AssertionError`` handlers keep working. Structured context on
+    ``fields``: ``code`` is always ``"structural_hash_mismatch"``, ``remedy``
+    names the fix, and ``expected`` / ``actual`` carry both hashes.
+    """
 
 
 def content(value: Any) -> str:
@@ -154,9 +164,15 @@ def _update_content_digest(digest: Any, value: Any) -> None:
     if isinstance(attributes, Mapping):
         _update_content_digest(digest, attributes)
         return
-    raise TypeError(
-        f"torchlens.hash.content cannot deterministically encode {type(value).__module__}."
-        f"{type(value).__qualname__}"
+    value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+    raise ArgumentTypeError(
+        f"torchlens.hash.content cannot deterministically encode {value_type}",
+        code="hash_content_type_unsupported",
+        remedy=(
+            "pass tensors, numpy arrays, builtin scalars/containers, or objects "
+            "whose state is an inspectable __dict__"
+        ),
+        value_type=value_type,
     )
 
 
@@ -254,20 +270,38 @@ def assert_unchanged(model: Any, example_input: Any, expected: str | None) -> st
     ------
     StructuralHashMismatchError
         If ``expected`` differs from the actual hash.
-    TypeError
-        If ``expected`` is neither a string nor ``None``.
+    torchlens.errors.ArgumentTypeError
+        If ``expected`` is neither a string nor ``None`` (a ``TypeError``).
     """
 
     actual = _model_hash(model, example_input)
     if expected is None:
-        print(f"TorchLens structural hash: {actual}")
+        # Bootstrap surface: disclose the fresh pin through the warning
+        # machinery instead of an unconditional stdout write, so callers and
+        # test harnesses can capture or silence it like any other diagnostic.
+        warnings.warn(
+            f"TorchLens structural hash: {actual}",
+            TorchLensWarning,
+            stacklevel=2,
+        )
         return actual
     if not isinstance(expected, str):
-        raise TypeError("expected must be a structural hash string or None")
+        raise ArgumentTypeError(
+            "expected must be a structural hash string or None",
+            code="hash_expected_type_invalid",
+            remedy="pass the pinned hash string, or None to bootstrap a pin",
+        )
     if expected != actual:
         raise StructuralHashMismatchError(
             "TorchLens structural hash changed: "
             f"expected {expected}, got {actual}. "
-            "Inspect the captured traces to find the structural divergence."
+            "Inspect the captured traces to find the structural divergence.",
+            code="structural_hash_mismatch",
+            remedy=(
+                "inspect the captured traces to find the structural divergence, "
+                "or re-pin the hash if the change is intentional"
+            ),
+            expected=expected,
+            actual=actual,
         )
     return actual

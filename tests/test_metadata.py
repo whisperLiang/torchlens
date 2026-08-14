@@ -1073,6 +1073,48 @@ def test_rerun_refreshes_shape_derived_flops_everywhere() -> None:
     )
 
 
+def test_refresh_shape_change_emits_single_aggregated_warning() -> None:
+    """A multi-layer shape-change refresh emits ONE aggregated warning (B8-36).
+
+    Per-layer warnings with the label interpolated into the message defeated
+    Python's warning dedup: hundreds of warnings per refresh on a real CNN, and
+    ``-W error`` aborted the refresh at layer one. The refresh now aggregates to
+    one warning naming the changed-layer count.
+    """
+
+    import re
+    import warnings as warnings_module
+
+    class _TwoStage(nn.Module):
+        """Two linear stages so several layers change shape at once."""
+
+        def __init__(self) -> None:
+            """Initialize two chained projections."""
+
+            super().__init__()
+            self.linear1 = nn.Linear(4, 8)
+            self.linear2 = nn.Linear(8, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply linear -> relu -> linear."""
+
+            return self.linear2(torch.relu(self.linear1(x)))
+
+    model = _TwoStage()
+    trace = trace_fn(model, torch.randn(2, 4))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        trace.run(inputs=torch.randn(8, 4))
+
+    shape_warnings = [w for w in caught if "Tensor shape changed" in str(w.message)]
+    assert len(shape_warnings) == 1
+    message = str(shape_warnings[0].message)
+    match = re.search(r"Tensor shape changed for (\d+) layer", message)
+    assert match is not None
+    assert int(match.group(1)) >= 2
+
+
 def test_flops_pool_with_kernel():
     """Pooling should account for kernel_size."""
     input_tensor = torch.randn(1, 16, 32, 32)

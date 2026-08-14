@@ -6,6 +6,42 @@ recomputation candidates, audit saved gradients, and infer a runnable input shap
 table-returning helpers require pandas. Capture with the normal `tl.trace(...)` API, then
 pass the resulting trace to a helper.
 
+For *environment* problems (rather than trace problems), start with
+[`tl.utils.doctor()`](#tlutilsdoctor) below.
+
+## `tl.utils.doctor`
+
+`tl.utils.doctor()` runs a TorchLens startup health check and returns a structured
+`DoctorReport` — use it first when captures fail before a trace even exists (import
+errors, missing renderers, stale wrapper installs). It lives in `tl.utils`, not
+`tl.debug`, because it needs no trace.
+
+The report is a tuple of `DoctorCheck(name, status, detail)` rows, one per probe, with
+`status` one of `"PASS"`, `"FAIL"`, `"SKIP"`, or `"WARN"`:
+
+- `pytorch` — the installed torch version.
+- `runtime capabilities` — the feature-detected capability snapshot (the same named
+  `HAS_*` flags surfaced by `tl.compat.report()`; graceful degradations flip these).
+- `torch wrapper bindings` — warning-only detector for stale torch namespace
+  attributes after wrap/unwrap cycles (cannot see closure-bound local aliases).
+- `cuda` — device availability and count (`SKIP` on CPU-only hosts).
+- `graphviz` / `safetensors` / `extras` — optional-dependency probes for rendering
+  and serialization paths.
+- `model fingerprint` — a tiny end-to-end capture probe.
+
+```python
+import torchlens as tl
+
+report = tl.utils.doctor()
+print(report.show())          # text table
+bad = [c for c in report.checks if c.status == "FAIL"]
+```
+
+A `FAIL` row names the missing dependency or broken probe in `detail`; `WARN` rows are
+degraded-but-usable states. For per-model compatibility questions (unsupported tensor
+variants, distributed state, wrapper coverage), use `tl.compat.report(model, x)`
+instead — `doctor()` checks the environment, `compat.report()` checks one model.
+
 ## `bisect_nan`
 
 `tl.debug.bisect_nan(trace)` returns the first saved operation with a NaN or Inf output.

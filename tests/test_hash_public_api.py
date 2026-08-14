@@ -192,15 +192,23 @@ def test_structural_hash_is_capture_option_invariant_for_metadata_options() -> N
     assert tl.hash.model(model, _input()) == tl.hash.trace(metadata_only)
 
 
-def test_assert_unchanged_returns_hash_and_bootstraps(capsys: pytest.CaptureFixture[str]) -> None:
-    """Matching and bootstrap tripwire calls return the current hash."""
+def test_assert_unchanged_returns_hash_and_bootstraps() -> None:
+    """Matching and bootstrap tripwire calls return the current hash.
+
+    The bootstrap path discloses the fresh pin through the warning machinery
+    (not an unconditional stdout write), so the hash is capturable and
+    silenceable like any other TorchLens diagnostic.
+    """
+
+    from torchlens.errors import TorchLensWarning
 
     expected = tl.hash.model(_ResidualModel(), _input())
     assert tl.assert_unchanged(_ResidualModel(), _input(), expected) == expected
 
-    bootstrapped = tl.assert_unchanged(_ResidualModel(), _input(), None)
+    with pytest.warns(TorchLensWarning, match="TorchLens structural hash") as record:
+        bootstrapped = tl.assert_unchanged(_ResidualModel(), _input(), None)
     assert bootstrapped == expected
-    assert bootstrapped in capsys.readouterr().out
+    assert any(bootstrapped in str(warning.message) for warning in record)
 
 
 def test_assert_unchanged_reports_both_hashes_on_mismatch() -> None:
@@ -214,3 +222,53 @@ def test_assert_unchanged_reports_both_hashes_on_mismatch() -> None:
 
     assert expected in str(error.value)
     assert actual in str(error.value)
+    assert error.value.fields["code"] == "structural_hash_mismatch"
+    assert error.value.fields["expected"] == expected
+    assert error.value.fields["actual"] == actual
+    assert isinstance(error.value.fields["remedy"], str) and error.value.fields["remedy"]
+
+
+def test_structural_hash_mismatch_error_joins_the_taxonomy() -> None:
+    """The mismatch class is registered and keeps AssertionError in the MRO."""
+
+    from torchlens import errors
+
+    assert errors.StructuralHashMismatchError is tl.hash.StructuralHashMismatchError
+    assert issubclass(tl.hash.StructuralHashMismatchError, errors.ValidationError)
+    assert issubclass(tl.hash.StructuralHashMismatchError, AssertionError)
+
+    expected = tl.hash.model(_ResidualModel(), _input())
+    with pytest.raises(AssertionError):
+        tl.assert_unchanged(_SequentialModel(), _input(), expected)
+
+
+def test_assert_unchanged_expected_type_door_is_typed() -> None:
+    """A non-string, non-None pin refuses typed while staying a TypeError."""
+
+    from torchlens import errors
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        tl.assert_unchanged(_ResidualModel(), _input(), 123)  # type: ignore[arg-type]
+
+    assert isinstance(exc_info.value, TypeError)
+    assert exc_info.value.fields["code"] == "hash_expected_type_invalid"
+    assert exc_info.value.fields["remedy"]
+
+
+def test_content_hash_type_door_is_typed() -> None:
+    """An unencodable input refuses typed while staying a TypeError."""
+
+    from torchlens import errors
+
+    class _Slotted:
+        """Slots-only object with no inspectable ``__dict__``."""
+
+        __slots__ = ("value",)
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        tl.hash.content(_Slotted())
+
+    assert isinstance(exc_info.value, TypeError)
+    assert exc_info.value.fields["code"] == "hash_content_type_unsupported"
+    assert "_Slotted" in exc_info.value.fields["value_type"]
+    assert exc_info.value.fields["remedy"]

@@ -8,7 +8,10 @@ WARNING — No torchlens imports at module level:
     Every other torchlens module imports from here.  If this module imported
     back, Python's import machinery would hit a circular dependency before any
     code ran.  Type-hint-only imports are safe inside ``TYPE_CHECKING`` guards
-    because they are never evaluated at runtime.
+    because they are never evaluated at runtime.  The ONE sanctioned runtime
+    exception is ``errors._base``: it is an import leaf (typing only, no
+    torchlens imports), so pulling the taxonomy base classes from it can never
+    close a cycle.
 
 Design rationale:
     The "toggle architecture" means every torch function is wrapped once (on first
@@ -40,6 +43,10 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+
+# Sanctioned exception to the no-torchlens-imports rule (see module docstring):
+# ``errors._base`` imports nothing from torchlens, so this cannot form a cycle.
+from .errors._base import CaptureError
 
 # TYPE_CHECKING is False at runtime, so this import only exists for static
 # analysis / IDE support — it will never trigger the circular-import problem.
@@ -660,8 +667,15 @@ all module attributes."""
 # ---------------------------------------------------------------------------
 
 
-class ReentrantTraceError(RuntimeError):
-    """Raised when a TorchLens trace is started while another trace is active."""
+class ReentrantTraceError(CaptureError, RuntimeError):
+    """Raised when a TorchLens trace is started while another trace is active.
+
+    Part of the typed taxonomy (catchable as ``tl.errors.CaptureError``) while
+    keeping ``RuntimeError`` in the MRO so historical ``except RuntimeError``
+    handlers keep working. Structured context on ``fields``: ``code`` is always
+    ``"reentrant_trace"``, ``remedy`` names the fix, and ``active_model``
+    carries the label of the capture already running (``None`` when unknown).
+    """
 
 
 _capture_admission_lock = threading.Lock()
@@ -718,10 +732,12 @@ def active_logging(trace: "Trace") -> Iterator[None]:
             raise ReentrantTraceError(
                 "torchlens.trace / active_logging is not re-entrant: "
                 f"another forward pass{active_model_text} is already being logged. Nested logging "
-                "would silently corrupt the outer Trace. If you need to log a "
-                "model's forward pass from inside another trace call "
-                "(e.g., a custom activation_transform), finish the outer capture "
-                "before starting another one."
+                "would silently corrupt the outer Trace. Remedy: finish the outer "
+                "capture before starting another one (e.g. return from the custom "
+                "activation_transform or hook that called tl.trace).",
+                code="reentrant_trace",
+                remedy="finish the outer capture before starting another one",
+                active_model=active_model,
             )
         # Model log must be visible before the toggle flips — wrappers will
         # immediately read _active_trace once _logging_enabled is True.

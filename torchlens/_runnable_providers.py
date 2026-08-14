@@ -101,6 +101,10 @@ def run_loaded_sparse_trace(
             "Persisted witness_completeness does not equal the parser-derived "
             "completeness floor; the descriptor is internally contradictory.",
             code=RunnableErrorCode.CONTEXT_FIELD_INVALID.value,
+            remedy=(
+                "re-save the artifact with the current torchlens producer instead of "
+                "hand-editing witness_completeness or coverage_gaps in the descriptor"
+            ),
         )
     # r61 corr_2: ONE aggregate resource ceiling per transaction, constructed BEFORE
     # any TorchLens-owned re-materialization clone runs (input mirror, run-time state

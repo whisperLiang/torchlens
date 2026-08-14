@@ -380,6 +380,11 @@ def _reconstruct_output(
                 f"Output slot {slot.slot_id!r} has no produced source slot.",
                 code=RunnableErrorCode.SLOT_PRODUCTION_MISMATCH.value,
                 slot_id=slot.slot_id,
+                remedy=(
+                    "re-save the runnable artifact with the current torchlens "
+                    "producer so every model-output slot names a produced source "
+                    "slot; do not hand-edit producer_slot_id/version_of links"
+                ),
             )
         value = slot_values[source_id]
         slot_values_dict = cast(dict[str, torch.Tensor], slot_values)
@@ -411,6 +416,11 @@ def _reconstruct_output(
             raise RunPreconditionError(
                 f"Recorded output container could not be reconstructed: {exc}",
                 code=RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH.value,
+                remedy=(
+                    "re-capture with the output container type importable in this "
+                    "process (same library versions) and re-save the runnable "
+                    "artifact so its container spec matches the produced leaves"
+                ),
             ) from exc
     if len(values) == 1 and not values[0][0]:
         # Genuine bare-tensor model output: nothing to reconstruct.
@@ -425,6 +435,11 @@ def _reconstruct_output(
             "contract; this artifact predates (or violates) the v2 output "
             "losslessness proof and cannot be reconstructed faithfully.",
             code=RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT.value,
+            remedy=(
+                "re-capture and re-save the runnable artifact with the current "
+                "torchlens producer (v2 schema), which records the lossless "
+                "output-container contract at save time"
+            ),
         )
     return _container_from_paths(values)
 
