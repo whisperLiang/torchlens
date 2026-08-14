@@ -814,10 +814,14 @@ def _fix_buffer_layers(self: Trace) -> None:
     """
     buffer_counter: dict[str, int] = defaultdict(lambda: 1)
     buffer_hash_groups: dict[str, list[str]] = defaultdict(list)
+    # Buffer rows whose edges this step changes; their descendant cones need ancestry
+    # re-derived (see _repropagate_ancestry_after_buffer_wiring).
+    rewired_buffers: list[str] = []
 
     for layer_label in self.buffer_layers:
         layer = self[layer_label]
         if layer.buffer_source is not None:
+            rewired_buffers.append(layer._label_raw)
             if layer.buffer_source not in layer.parents:
                 layer.parents.append(layer.buffer_source)
             if layer_label not in self[layer.buffer_source].children:
@@ -866,9 +870,12 @@ def _fix_buffer_layers(self: Trace) -> None:
                     and (torch.equal(buffer.out, unique_buffer.out))
                 ):
                     _merge_buffer_entries(self, unique_buffer, buffer)
+                    rewired_buffers.append(unique_buffer._label_raw)
                     break
             else:
                 unique_buffers.append(buffer_label)
+
+    _repropagate_ancestry_after_buffer_wiring(self, rewired_buffers)
 
     # And relabel the buffer ops.
 
@@ -878,6 +885,72 @@ def _fix_buffer_layers(self: Trace) -> None:
         layer.buffer_pass = buffer_counter[address]
         self.buffer_num_calls[address] = buffer_counter[address]
         buffer_counter[address] += 1
+
+
+def _repropagate_ancestry_after_buffer_wiring(self: Trace, rewired: list[str]) -> None:
+    """Re-derive ancestry over the DESCENDANT CONE of every buffer rewired at step 6.
+
+    Step 6 inserts ``buffer -> buffer_source`` edges AFTER capture-time ancestry
+    propagation and after steps 2/4, and it only ever updated the buffer row's OWN
+    ``input_ancestors``/``root_ancestors``. Nothing revisited the descendants, so on a
+    write-then-reread buffer every op downstream of the buffer kept its pre-edge sets:
+    ``self.b[:2].copy_(x); return self.b.sum()`` produced a ``sum`` op whose parent
+    carries ``input_ancestors={'input_1'}`` while the op itself carried ``set()`` -- an
+    op that demonstrably depends on the model input reporting no input ancestry at all,
+    on the default (depths-off) path where step 4's flood does not run to paper over it.
+    Public ``op.input_ancestors`` / ``root_ancestors`` reads, reachability queries, and
+    ``receptive_field`` all consume these sets, and they are portable state that survives
+    save/load.
+
+    The re-derivation is exactly the closure the ``ancestry_closure`` invariant checks,
+    applied to the affected cone only (raw-label space, topological order):
+
+    * ``input_ancestors``            = own-if-input, else the union over parents;
+    * ``internal_source_ancestors``  = ``{self}`` if an internal source, else the union;
+    * ``internal_source_parents``    = the parents carrying internal-source ancestry;
+    * ``root_ancestors``             = ``input_ancestors | internal_source_ancestors``.
+
+    Internal-source rows keep the ``root_ancestors`` value step 6 assigned them: the
+    source-minting producers disagree about self-inclusion there (a parentless factory
+    records the empty set, a buffer source records ``{self}``), which is a field-naming
+    question, not something to silently change here.
+    """
+
+    if not rewired:
+        return
+    raw_dict = self._raw_graph_ws.raw_layer_dict
+    cone: set[str] = set()
+    frontier = [label for label in rewired if label in raw_dict]
+    while frontier:
+        current = frontier.pop()
+        if current in cone:
+            continue
+        cone.add(current)
+        frontier.extend(child for child in raw_dict[current].children if child in raw_dict)
+
+    for raw_label in self._raw_graph_ws.raw_layer_labels_list:
+        if raw_label not in cone:
+            continue
+        layer = raw_dict[raw_label]
+        parents = [raw_dict[parent] for parent in layer.parents if parent in raw_dict]
+        input_ancestors: set[str] = {raw_label} if layer.is_input else set()
+        for parent in parents:
+            input_ancestors.update(parent.input_ancestors)
+        if layer.is_internal_source:
+            internal_source_ancestors = {raw_label}
+        else:
+            internal_source_ancestors = set()
+            for parent in parents:
+                internal_source_ancestors.update(parent.internal_source_ancestors)
+        layer.input_ancestors = input_ancestors
+        layer.has_input_ancestor = bool(input_ancestors)
+        layer.internal_source_ancestors = internal_source_ancestors
+        layer.has_internal_source_ancestor = bool(internal_source_ancestors)
+        if not layer.is_internal_source:
+            layer.internal_source_parents = [
+                parent._label_raw for parent in parents if parent.has_internal_source_ancestor
+            ]
+            layer.root_ancestors = input_ancestors | internal_source_ancestors
 
 
 def _buffer_source_value_matches(source: Op, buffer_layer: Op) -> bool:

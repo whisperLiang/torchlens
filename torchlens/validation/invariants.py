@@ -218,9 +218,34 @@ _EQUIVALENT_OPS_UNAVAILABLE = object()
 # M. Graph ordering invariants
 # ---------------------------------------------------------------------------
 
-# Raw labels (e.g., "l_42") are internal identifiers assigned during capture
-# and must be replaced by human-readable labels during postprocessing.
-_RAW_LABEL_PATTERN = re.compile(r"^l_\d+$")
+# Raw labels are the internal identifiers assigned during capture; every one must be
+# replaced by its final human-readable label during postprocessing.
+#
+# The pattern used to be ``^l_\d+$``, a spelling TorchLens no longer emits: real raw
+# labels are ``{func}_{n}_{m}_raw`` (``add_1_4_raw``, ``output_1_raw``,
+# ``buffer_2_raw``), so the check could never fire on anything. A working version would
+# have caught the dangling ``buffer_source`` raw label by construction, which is exactly
+# what it does now.
+_RAW_LABEL_PATTERN = re.compile(r"_raw$")
+
+# Op fields that may hold raw labels and are therefore scanned by the survival check.
+# Label SEQUENCES/SETS and the SCALAR label field both count: scanning only
+# ``layer_labels`` left every relation and scalar label surface unguarded.
+_RAW_LABEL_BEARING_LIST_FIELDS = (
+    "parents",
+    "children",
+    "input_ancestors",
+    "output_descendants",
+    "root_ancestors",
+    "internal_source_ancestors",
+    "internal_source_parents",
+    "conditional_entry_children",
+    "conditional_then_children",
+    "conditional_else_children",
+    "equivalent_ops",
+    "recurrent_ops",
+)
+_RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call")
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +574,18 @@ _check_loop_detection_invariants = _rebind_function(
 _check_distance_invariants = _rebind_function(
     _invariants_connectivity._check_distance_invariants, globals()
 )
+_check_ancestry_closure = _rebind_function(
+    _invariants_connectivity._check_ancestry_closure, globals()
+)
+_pass_qualified_label = _rebind_function(
+    _invariants_connectivity._pass_qualified_label, globals()
+)
+_check_one_ancestry_record = _rebind_function(
+    _invariants_connectivity._check_one_ancestry_record, globals()
+)
+_check_distance_closure = _rebind_function(
+    _invariants_connectivity._check_distance_closure, globals()
+)
 _op_follows_recorded_backward_trigger = _rebind_function(
     _invariants_connectivity._op_follows_recorded_backward_trigger, globals()
 )
@@ -693,6 +730,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
     ),
     MetadataInvariantContract("distance_invariants", _check_distance_invariants, "torch"),
     MetadataInvariantContract("graph_connectivity", _check_graph_connectivity, "torch"),
+    # AFTER graph_connectivity on purpose: a dropped op leaves its consumer with no
+    # parents, which is connectivity's dangling-node finding to report. The closure
+    # check would also fire on it (the consumer's ancestry no longer matches its edges),
+    # and an invariant must not steal the owning contract's finding.
+    MetadataInvariantContract("ancestry_closure", _check_ancestry_closure, "torch"),
     MetadataInvariantContract(
         "module_containment_logic",
         _check_module_containment_logic,

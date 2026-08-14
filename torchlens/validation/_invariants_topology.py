@@ -402,7 +402,27 @@ def _check_graph_topology(ml: Trace) -> None:
     output_set = set(ml.output_layers)
 
     def label_aliases(entry: Any, fallback: str) -> set[str]:
-        """Return stored layer/op labels without invoking fragile accessors.
+        """Return the spellings that identify EXACTLY ``entry``, pass included.
+
+        The alias set exists for ONE job: an edge may store a record's
+        pass-qualified op label while the counterpart stores the bare layer
+        label, so both spellings of the SAME record must be accepted.
+
+        It must NOT fold in the whole ``recurrent_ops`` group. That widening gave
+        the bidirectionality check zero resolution inside a multi-pass layer: an
+        edge repointed from ``layer:N`` to ``layer:M`` satisfied both the forward
+        and the reverse test, and because a forward repoint creates no ordering
+        violation ``graph_ordering`` did not fire either -- so the exact
+        corruption class loop grouping and removal/collapse repointing produce
+        passed the full suite silently on every RNN/LSTM/shared-block model. The
+        identical corruption on a NON-recurrent control was caught instantly,
+        which isolated the cause to this set. Pass-metadata corruption itself is
+        owned by ``loop_detection_invariants``, which runs BEFORE this check, so
+        the pass-qualified spelling is safe to demand here.
+
+        The bare ``layer_label`` is an alias only for a SINGLE-pass record; for a
+        multi-pass record it names the group, not the record, which is precisely
+        the resolution this check needs.
 
         Parameters
         ----------
@@ -414,23 +434,31 @@ def _check_graph_topology(ml: Trace) -> None:
         Returns
         -------
         set[str]
-            Layer, lookup, and recurrence-member labels available without
-            consulting ``Layer.label``. That accessor intentionally raises when
-            pass-count metadata is corrupt, but invariant checks must report the
-            owning corruption contract rather than leak that accessor error.
+            The bare and pass-qualified spellings of ``entry`` itself.
         """
 
         aliases = {fallback}
         layer_label = getattr(entry, "layer_label", None)
+        pass_index = getattr(entry, "pass_index", None)
+        num_passes = getattr(entry, "num_passes", None)
+        single_pass = not isinstance(num_passes, int) or num_passes <= 1
         if isinstance(layer_label, str):
-            aliases.add(layer_label)
-        recurrent_ops = getattr(entry, "recurrent_ops", ()) or ()
-        aliases.update(label for label in recurrent_ops if isinstance(label, str))
+            if single_pass:
+                aliases.add(layer_label)
+            if isinstance(pass_index, int):
+                # The exact pass-qualified spelling, derived from the two stored
+                # fields rather than the ``Layer.label`` accessor (which
+                # intentionally raises on corrupt pass metadata -- an invariant
+                # check must report the owning contract, not leak that error).
+                aliases.add(f"{layer_label}:{pass_index}")
         return aliases
 
     for lpl in ml.layer_list:
-        label = lpl.layer_label
-        lpl_aliases = label_aliases(lpl, label)
+        lpl_aliases = label_aliases(lpl, lpl.layer_label)
+        # Report the PASS-QUALIFIED spelling: on a multi-pass layer the bare layer
+        # label names every pass, so a bare-label message could not tell the reader
+        # which pass's edge is corrupt.
+        label = max(lpl_aliases, key=len)
 
         # Parent-child bidirectionality
         for p in lpl.parents:

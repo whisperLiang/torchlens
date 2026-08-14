@@ -300,6 +300,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "is_module_output",
                 "is_output",
                 "is_transform",
+                # The synthetic output node RE-DERIVES this direct-parent relation
+                # instead of inheriting it from the clone source, which named labels
+                # that were not its parents at all (B3 R05 output-node ISP fix).
+                "internal_source_parents",
                 "module",
                 "module_call_stack",
                 "modules",
@@ -354,6 +358,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "children",
                 "dtype",
                 "func_name",
+                # Deriving the output node's internal_source_parents asks its parent
+                # whether it carries internal-source ancestry (B3 R05 fix).
+                "has_internal_source_ancestor",
                 "has_saved_activation",
                 "label",
                 "layer_label",
@@ -643,6 +650,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "func",
                 "func_name",
                 "has_children",
+                # The step-6 ancestry cone re-derivation keeps this flag in step with
+                # the closure it recomputes (F-R05-3: descendants of a rewired buffer
+                # kept pre-edge ancestry, so an op that demonstrably depended on the
+                # model input reported no input ancestry at all).
+                "has_internal_source_ancestor",
                 "has_input_ancestor",
                 # B2 residual closure: the buffer-source ancestry fallback
                 # (control_flow.py lines 827-828) copies the source's
@@ -703,6 +715,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "parents",
                 "recurrent_ops",
                 "root_ancestors",
+                # B3 R05: the ancestry cone re-derivation reads the role flags plus the
+                # parents' own closure sets (F-R05-3).
+                "has_internal_source_ancestor",
+                "is_input",
+                "is_internal_source",
                 "saved_args",
             )
         ),
@@ -813,6 +830,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_else_children",
                 "conditional_entry_children",
                 "conditional_then_children",
+                # B3 R05: buffer_source holds a RAW label and is renamed here with
+                # the rest of the label-bearing fields, so it no longer survives
+                # into finished traces as a dangling raw label.
+                "buffer_source",
                 "equivalent_ops",
                 "fx_call_index",
                 "fx_qualpath",
@@ -845,6 +866,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "activation_memory",
                 "args_template",
                 "atomic_module_call",
+                # B3 R05: buffer_source holds a raw label and is renamed here with
+                # the rest of the label-bearing fields.
+                "buffer_source",
                 "children",
                 "conditional_arm_children",
                 "conditional_entry_children",
