@@ -359,7 +359,9 @@ class _PayloadWatcher(weakref.ref):
         ledger_key: str,
         identity: tuple[Any, ...],
     ) -> None:
-        super().__init__(payload, _credit_payload_release)
+        # weakref.ref implements __init__ (not just __new__) and would refuse
+        # the extra coordinate arguments; forward only its own pair.
+        super().__init__(payload, _credit_payload_release)  # type: ignore[call-arg]
 
 
 @dataclass
@@ -757,15 +759,44 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
     -------
     tuple[tuple[Any, ...], int]
         Stable identity while the retained storage is live, plus physical bytes.
+
+    Notes
+    -----
+    Sparse payloads (COO and compressed layouts) have no top-level storage;
+    they are identified and charged through their physical component storages
+    (index tensor(s) AND values). The historical fallback billed them at
+    ``numel() * element_size()`` — LOGICAL dense bytes — under an id-based
+    identity, so index storage went unledgered while the values were
+    overcounted at dense shape.
     """
 
     from ._state import pause_logging
 
     with pause_logging():
         try:
+            if tensor.layout is not torch.strided:
+                from .utils.tensor_utils import sparse_component_tensors
+
+                component_ptrs: list[int] = []
+                num_bytes = 0
+                for component in sparse_component_tensors(tensor):
+                    storage = component.untyped_storage()
+                    component_ptrs.append(int(storage.data_ptr()))
+                    num_bytes += int(storage.nbytes())
+                sparse_identity: tuple[Any, ...] = (
+                    str(tensor.device),
+                    str(tensor.layout),
+                    tuple(component_ptrs),
+                    num_bytes,
+                )
+                return sparse_identity, num_bytes
             storage = tensor.untyped_storage()
             num_bytes = int(storage.nbytes())
-            identity = (str(tensor.device), int(storage.data_ptr()), num_bytes)
+            identity: tuple[Any, ...] = (
+                str(tensor.device),
+                int(storage.data_ptr()),
+                num_bytes,
+            )
             return identity, num_bytes
         except Exception:
             num_bytes = int(tensor.numel() * tensor.element_size())

@@ -674,6 +674,42 @@ def _dense_tensor_memory_amount(t: torch.Tensor) -> int:
     return int(nelement(t) * element_size(t))
 
 
+_SPARSE_COMPONENT_ACCESSORS: dict[Any, tuple[str, ...]] = {
+    torch.sparse_coo: ("_indices", "_values"),
+    torch.sparse_csr: ("crow_indices", "col_indices", "values"),
+    torch.sparse_csc: ("ccol_indices", "row_indices", "values"),
+    torch.sparse_bsr: ("crow_indices", "col_indices", "values"),
+    torch.sparse_bsc: ("ccol_indices", "row_indices", "values"),
+}
+"""Physical component tensors per sparse layout: every index tensor AND values."""
+
+
+def sparse_component_tensors(t: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Return the physical component tensors of a sparse tensor.
+
+    Parameters
+    ----------
+    t:
+        Sparse tensor (COO or any compressed layout).
+
+    Returns
+    -------
+    tuple[torch.Tensor, ...]
+        Index tensor(s) and values tensor backing ``t``.
+
+    Raises
+    ------
+    ValueError
+        For non-strided layouts without a known component decomposition
+        (callers treat that as unmeasurable, never as zero-index-bytes).
+    """
+
+    accessors = _SPARSE_COMPONENT_ACCESSORS.get(t.layout)
+    if accessors is None:
+        raise ValueError(f"no known component decomposition for layout {t.layout}")
+    return tuple(getattr(t, name)() for name in accessors)
+
+
 def get_memory_amount(t: torch.Tensor) -> int:
     """Return the memory footprint of a tensor in bytes.
 
@@ -681,8 +717,11 @@ def get_memory_amount(t: torch.Tensor) -> int:
     TorchLens has decorated them, avoiding logging recursion without toggling
     global logging state for each tensor.
 
-    Meta tensors have no storage and return 0.  Sparse tensors report only
-    the size of their non-zero values.
+    Meta tensors have no storage and return 0. Sparse tensors (COO and the
+    compressed layouts) report their physical components: index storage AND
+    values storage. Counting only values ledgered a 1-nnz float32 COO cell as
+    4 bytes when its int64 indices alone hold 8 bytes per sparse dim, and the
+    dense fallback billed compressed layouts at logical-shape bytes.
 
     Args:
         t: Tensor to measure.
@@ -694,9 +733,10 @@ def get_memory_amount(t: torch.Tensor) -> int:
     try:
         if t.device.type == "meta":
             return 0
-        if t.is_sparse:
-            # Sparse tensors: only the values storage counts.
-            return _dense_tensor_memory_amount(t._values())
+        if t.layout is not torch.strided:
+            return sum(
+                _dense_tensor_memory_amount(component) for component in sparse_component_tensors(t)
+            )
         return _dense_tensor_memory_amount(t)
     except Exception:
         return 0
@@ -728,7 +768,9 @@ def get_memory_amount_from_metadata(
     try:
         if t.device.type == "meta":
             return 0
-        if t.is_sparse:
+        if t.layout is not torch.strided:
+            # Sparse layouts (COO and compressed): physical component bytes,
+            # never logical shape * itemsize.
             return get_memory_amount(t)
         return int(prod(shape) * dtype.itemsize)
     except Exception:

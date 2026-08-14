@@ -342,8 +342,11 @@ class TestGetTensorMemory:
 
         assert get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype) == 48
 
-    def test_metadata_memory_uses_sparse_fallback(self) -> None:
-        """Sparse metadata memory should preserve non-zero-value accounting.
+    def test_metadata_memory_counts_sparse_index_storage(self) -> None:
+        """Sparse metadata memory counts index AND values storage.
+
+        The values-only figure ledgered this 3-nnz COO tensor as 12 bytes
+        while its int64 index storage alone holds 48 physical bytes.
 
         Returns
         -------
@@ -355,7 +358,65 @@ class TestGetTensorMemory:
         values = torch.tensor([3.0, 4.0, 5.0])
         sparse = torch.sparse_coo_tensor(indices, values, (2, 3))
 
-        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 12
+        # 3 float32 values (12) + 2x3 int64 indices (48).
+        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 60
+        assert get_memory_amount(sparse) == 60
+
+    def test_compressed_sparse_memory_is_physical_not_logical(self) -> None:
+        """Compressed sparse layouts bill component bytes, not shape * itemsize.
+
+        The dense fallback billed a CSR tensor at its LOGICAL shape
+        (``prod(shape) * itemsize``); the physical footprint is
+        crow_indices + col_indices + values.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        coo = torch.sparse_coo_tensor(
+            torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4)
+        ).coalesce()
+        csr = coo.to_sparse_csr()
+
+        expected = sum(
+            component.numel() * component.element_size()
+            for component in (csr.crow_indices(), csr.col_indices(), csr.values())
+        )
+        assert get_memory_amount(csr) == expected
+        assert get_memory_amount_from_metadata(csr, tuple(csr.shape), csr.dtype) == expected
+        # The logical-dense figure the bug produced.
+        assert expected != 16 * csr.dtype.itemsize
+
+    def test_save_budget_identity_charges_sparse_components(self) -> None:
+        """The budget's storage identity charges sparse index + values bytes.
+
+        The generic fallback billed sparse payloads at LOGICAL dense bytes
+        under an id-based identity: index storage unledgered, values
+        overcounted at dense shape, and no alias dedup across payloads
+        sharing the same components.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        from torchlens._save_budget import _retained_storage_identity
+
+        coo = torch.sparse_coo_tensor(torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4))
+        identity, num_bytes = _retained_storage_identity(coo)
+
+        physical = sum(
+            int(component.untyped_storage().nbytes())
+            for component in (coo._indices(), coo._values())
+        )
+        assert num_bytes == physical
+        assert num_bytes != coo.numel() * coo.element_size()  # not logical dense
+        # Identity is component-storage-based and stable across reads.
+        assert identity == _retained_storage_identity(coo)[0]
+        assert "tensor" not in identity  # never the id-based fallback
 
 
 # ---------------------------------------------------------------------------
