@@ -204,6 +204,21 @@ def test_shared_member_path_refuses_typed(tmp_path: Path) -> None:
     assert "shared by more than one rank" in str(excinfo.value)
 
 
+def test_tamper_refusal_carries_a_remedy(tmp_path: Path) -> None:
+    """Every merged tamper refusal now carries fields['remedy'] (R65)."""
+
+    art = _saved_two_rank(tmp_path)
+    # Corrupt the descriptor checksum: a checksum-mismatch tamper refusal.
+    man_path = art / "manifest.json"
+    manifest = json.loads(man_path.read_text())
+    manifest["descriptor_sha256"] = "0" * 64
+    man_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(MergedArtifactError) as excinfo:
+        load_merged(art)
+    assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+    assert excinfo.value.fields.get("remedy"), "tamper refusal must carry a remedy"
+
+
 def test_honest_two_rank_round_trip_still_loads(tmp_path: Path) -> None:
     art = _saved_two_rank(tmp_path)
     loaded = load_merged(art)

@@ -22,6 +22,7 @@ from .. import _state
 from .._input_walk import INPUT_CONTAINER_KINDS
 from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
 from ..constants import get_orig_torch_funcs
+from ..errors._base import TorchLensError
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
     LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS,
@@ -244,16 +245,26 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     return descriptor
 
 
-class ContextFieldInvalidError(ValueError):
+class ContextFieldInvalidError(TorchLensError, ValueError):
     """A persisted execution-context field failed closed-vocabulary validation (INV-4).
 
     Raised at PARSE time -- before readiness, staging, or any torch setter/callable
     can observe the attacker-controllable bytes -- and surfaced as the frozen
     ``context_field_invalid`` readiness diagnostic.
+
+    Subclasses ``TorchLensError`` (in addition to ``ValueError``) so that generic
+    ``except TorchLensError`` handling sees it and ``fields["code"]`` is
+    branchable (R65: it was a plain ``ValueError`` with no code, invisible to the
+    house error contract).
     """
 
     def __init__(self, field: str, detail: str) -> None:
-        super().__init__(f"Persisted execution-context field {field!r} is invalid: {detail}")
+        super().__init__(
+            f"Persisted execution-context field {field!r} is invalid: {detail}",
+            code="context_field_invalid",
+            field=field,
+            detail=detail,
+        )
         self.field = field
         self.detail = detail
 
@@ -1513,7 +1524,7 @@ def _callable_registry_contradiction(
     return None
 
 
-class DescriptorStructuralBoundError(ValueError):
+class DescriptorStructuralBoundError(TorchLensError, ValueError):
     """A persisted runnable-descriptor integer failed structural cross-validation (r53 free_1).
 
     Raised at PARSE time -- before readiness resolution, signature binding, state
@@ -1524,10 +1535,20 @@ class DescriptorStructuralBoundError(ValueError):
     diagnostic (frozen ``call_arity_mismatch`` / ``state_shape_mismatch`` codes)
     at detection stage ``descriptor_parse``; the load still succeeds for
     analysis and ``.run()`` refuses typed.
+
+    Subclasses ``TorchLensError`` (in addition to ``ValueError``) so that generic
+    ``except TorchLensError`` handling sees it; the ``RunnableErrorCode`` it
+    already carried on ``.code`` is now also mirrored onto ``fields["code"]``
+    (R65: it was a plain ``ValueError`` whose code never reached ``.fields``).
     """
 
     def __init__(self, code: RunnableErrorCode, field: str, detail: str) -> None:
-        super().__init__(f"Persisted runnable descriptor field {field!r} is invalid: {detail}")
+        super().__init__(
+            f"Persisted runnable descriptor field {field!r} is invalid: {detail}",
+            code=code.value,
+            field=field,
+            detail=detail,
+        )
         self.code = code
         self.field = field
         self.detail = detail

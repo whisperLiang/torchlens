@@ -927,10 +927,25 @@ def require_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
 
     descriptor = build_sparse_run_descriptor(trace)
     if not descriptor.preflight.passed:
+        diagnostics = descriptor.preflight.diagnostics
+        # Fold the first diagnostic and the total count into the message (R65):
+        # the bare "preflight failed." string hid the remediation, code, and
+        # affected labels in fields["diagnostics"] with nothing pointing there.
+        summary = ""
+        if diagnostics:
+            first = diagnostics[0]
+            labels = ", ".join(first.affected_op_labels[:3])
+            more = f" (+{len(diagnostics) - 1} more)" if len(diagnostics) > 1 else ""
+            summary = (
+                f" First of {len(diagnostics)}: {first.message}"
+                f" [{first.code.value}"
+                f"{f'; sites: {labels}' if labels else ''}]{more}."
+                " See fields['diagnostics'] for the full list."
+            )
         raise RunnablePreflightError(
-            "Sparse runnable producer preflight failed.",
+            f"Sparse runnable producer preflight failed.{summary}",
             code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
-            diagnostics=descriptor.preflight.diagnostics,
+            diagnostics=diagnostics,
         )
     return descriptor
 

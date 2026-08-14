@@ -134,22 +134,43 @@ _MEMBER_ENTRY_KEYS = frozenset({"rank", "path", "tree_sha256"})
 """Closed key set for one descriptor ``members`` entry (unknown keys refuse)."""
 
 
-def _tamper(detail: str, **payload: Any) -> MergedArtifactError:
-    """Build the typed tamper refusal (integrity failure, never a presence gap)."""
+_TAMPER_REMEDY = (
+    "The artifact's integrity records do not match its contents; it was edited "
+    "or corrupted in transit. Re-generate it from the original rank cores with "
+    "tl.merge_ranks([...]).save(path)."
+)
+_SCHEMA_REMEDY = (
+    "The artifact does not match the merged-directory schema this runtime "
+    "supports. Re-generate it with tl.merge_ranks([...]).save(path) using a "
+    "matching torchlens release."
+)
+
+
+def _tamper(detail: str, *, remedy: str = _TAMPER_REMEDY, **payload: Any) -> MergedArtifactError:
+    """Build the typed tamper refusal (integrity failure, never a presence gap).
+
+    Every merged refusal now carries a ``fields["remedy"]`` (R65: the tamper
+    refusals shipped with none, even where the correct sentence existed verbatim
+    elsewhere in this module).
+    """
 
     return MergedArtifactError(
         f"Merged artifact integrity failure: {detail}",
         code=MergedErrorCode.MERGED_DESCRIPTOR_TAMPER,
+        remedy=remedy,
         **payload,
     )
 
 
-def _schema_refusal(detail: str, **payload: Any) -> MergedArtifactError:
-    """Build the typed merged-artifact schema refusal."""
+def _schema_refusal(
+    detail: str, *, remedy: str = _SCHEMA_REMEDY, **payload: Any
+) -> MergedArtifactError:
+    """Build the typed merged-artifact schema refusal (carries a remedy, R65)."""
 
     return MergedArtifactError(
         f"Merged artifact schema refusal: {detail}",
         code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+        remedy=remedy,
         **payload,
     )
 

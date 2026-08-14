@@ -36,14 +36,13 @@ from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
 from . import (
     MIN_TLSPEC_VERSION,
-    MIN_TORCHLENS_VERSION_TEXT,
     TLSPEC_VERSION,
-    ArtifactVersionBelowFloorError,
     BlobRef,
     FieldPolicy,
     PayloadLoadHints,
     TorchLensIOError,
     _json,
+    below_floor_error,
 )
 from ._durability import fsync_dir, fsync_tree
 from ._safe_unpickle import SafeBundleUnpickler
@@ -1838,12 +1837,10 @@ def _preflight_unified_trace_manifest(
 
     raw_version = manifest.get("tlspec_version")
     if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
-        raise ArtifactVersionBelowFloorError(
-            f"Bundle manifest has tlspec_version={raw_version}, below the "
-            f"supported rehydration floor tlspec_version={MIN_TLSPEC_VERSION} "
-            f"(torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the "
-            f"artifact with a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} "
-            "that still reads it."
+        raise below_floor_error(
+            observed=f"tlspec_version={raw_version}",
+            subject="Bundle manifest",
+            path=str(bundle_path),
         )
 
     try:

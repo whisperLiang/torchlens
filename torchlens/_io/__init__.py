@@ -63,6 +63,58 @@ class ArtifactSchemaAgeWarning(TorchLensWarning):
     """
 
 
+_BELOW_FLOOR_REMEDY = (
+    "Load and re-save the artifact with a torchlens release "
+    f">= {MIN_TORCHLENS_VERSION_TEXT} that still reads it."
+)
+
+
+def below_floor_error(
+    *,
+    observed: str,
+    subject: str = "Artifact",
+    path: str | None = None,
+) -> ArtifactVersionBelowFloorError:
+    """Build the typed rehydration-floor refusal with structured fields.
+
+    Every below-floor refusal was hand-copied at its raise site with an empty
+    ``fields`` payload, and four of the six omitted the artifact path they held
+    in scope (R65). This one constructor gives all of them a stable
+    ``fields["code"]``, the ``observed`` version, the floor, a ``remedy``, and
+    the ``path`` when the caller has one.
+
+    Parameters
+    ----------
+    observed:
+        Rendered source version (``"tlspec_version=N"`` or a description of an
+        unversioned state).
+    subject:
+        Human-readable subject named in the message (e.g. ``"Bundle manifest"``).
+    path:
+        Artifact path, when the caller has it in scope.
+
+    Returns
+    -------
+    ArtifactVersionBelowFloorError
+        The typed refusal, ready to raise.
+    """
+
+    message = (
+        f"{subject} has {observed}, below the supported rehydration floor "
+        f"tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
+        f"{MIN_TORCHLENS_VERSION_TEXT}). {_BELOW_FLOOR_REMEDY}"
+    )
+    return ArtifactVersionBelowFloorError(
+        message,
+        code="artifact_version_below_floor",
+        observed=observed,
+        floor_tlspec_version=MIN_TLSPEC_VERSION,
+        floor_torchlens_version=MIN_TORCHLENS_VERSION_TEXT,
+        path=path,
+        remedy=_BELOW_FLOOR_REMEDY,
+    )
+
+
 def _raise_below_floor(cls_name: str, version_text: str) -> None:
     """Raise the typed rehydration-floor refusal for one object state.
 
@@ -75,12 +127,7 @@ def _raise_below_floor(cls_name: str, version_text: str) -> None:
         an unversioned state).
     """
 
-    raise ArtifactVersionBelowFloorError(
-        f"{cls_name} state has {version_text}, below the supported rehydration "
-        f"floor tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
-        f"{MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the artifact with a "
-        f"torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still reads it."
-    )
+    raise below_floor_error(observed=version_text, subject=f"{cls_name} state")
 
 
 @dataclass(frozen=True)
