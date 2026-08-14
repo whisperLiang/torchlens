@@ -63,6 +63,7 @@ add names to the top-level `torchlens` namespace:
 | `code_panel_model_collected` | Callable code panel needs the live model | Use a built-in code_panel mode |
 | `code_panel_option_invalid` | Code panel mode literal is unknown (`InvalidArgumentError`) | Pass a documented mode or a callable |
 | `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
+| `custom_callable_import_path_missing` | Custom function registry key lacks its `import_path` reference (`InvalidArgumentError`) | Supply `import_path='module:qualname'` on the registry key entry |
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `child_process_capture_unsupported` | Capture attempted from a non-deliberate child process | Capture from the owning process, or an initialized SPMD rank |
