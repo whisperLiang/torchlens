@@ -178,9 +178,7 @@ def test_buffer_writing_primary_refuses_the_rescue_rerun() -> None:
     runs: list[str] = []
     primary = _stub_trace(["relu"], signal=True)
     primary.ops.append(
-        types.SimpleNamespace(
-            func_name="none", buffer_write_kind="inplace", label_raw="buffer_bn1"
-        )
+        types.SimpleNamespace(func_name="none", buffer_write_kind="inplace", label_raw="buffer_bn1")
     )
 
     def run_capture() -> Any:

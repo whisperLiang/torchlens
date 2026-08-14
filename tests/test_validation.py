@@ -4385,9 +4385,7 @@ def test_deep_numeric_replay_outlier_bound_scales_with_depth() -> None:
 
     weight = torch.zeros(16, 128)
     saved_out = torch.empty(64, 3200).uniform_(0.5, 1.5)
-    layer = _make_deep_numeric_layer(
-        "linear", [torch.zeros(64, 128), weight], saved_out
-    )
+    layer = _make_deep_numeric_layer("linear", [torch.zeros(64, 128), weight], saved_out)
     assert _op_reduction_depth(layer) == 128
     assert _op_reduction_depth(layer) >= DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH
 
@@ -6718,9 +6716,7 @@ def test_raw_label_survival_roster_is_closed():
         "conditional_entry_arg_keys",
     }
     log = trace_fn(_ElifBranchModel(), torch.randn(3, 3), random_seed=42)
-    labels = {lpl.layer_label for lpl in log.layer_list} | {
-        lpl.label for lpl in log.layer_list
-    }
+    labels = {lpl.layer_label for lpl in log.layer_list} | {lpl.label for lpl in log.layer_list}
     fields = set(constants.OP_LOG_FIELD_ORDER) | set(constants.LAYER_LOG_FIELD_ORDER)
     offenders: dict[str, list[str]] = {}
     for lpl in log.layer_list:

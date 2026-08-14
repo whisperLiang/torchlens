@@ -363,6 +363,3 @@ def _direct_children(address: str, metadata: dict[str, dict[str, Any]]) -> list[
         if candidate != address and nearest_metadata_parent(candidate, metadata) == address
     ]
     return sorted(children, key=_address_sort_key)
-
-
-

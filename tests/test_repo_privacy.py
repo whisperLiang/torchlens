@@ -91,9 +91,7 @@ def test_matcher_mirrors_precommit_hook() -> None:
     """The hook config's regex and this test's matcher may never drift apart."""
 
     config = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
-    match = re.search(
-        r"id: no-internal-notes.*?files: '([^']+)'", config, flags=re.DOTALL
-    )
+    match = re.search(r"id: no-internal-notes.*?files: '([^']+)'", config, flags=re.DOTALL)
     assert match is not None, "no-internal-notes hook (or its files: regex) is gone"
     hook_regex = re.compile(match.group(1))
     probes = [
@@ -108,6 +106,6 @@ def test_matcher_mirrors_precommit_hook() -> None:
         "docs/guide.md",
     ]
     for probe in probes:
-        assert bool(hook_regex.search(probe)) == bool(
-            PRIVATE_PATH_PATTERN.search(probe)
-        ), f"hook regex and test matcher disagree on {probe!r}"
+        assert bool(hook_regex.search(probe)) == bool(PRIVATE_PATH_PATTERN.search(probe)), (
+            f"hook regex and test matcher disagree on {probe!r}"
+        )

@@ -1263,9 +1263,9 @@ def _record_backward_selector_fire(entry: NormalizedHookEntry) -> None:
     trace = _state._active_trace
     if trace is None:
         return
-    trace._tl_intervene_selector_fire_count = int(
-        getattr(trace, "_tl_intervene_selector_fire_count", 0)
-    ) + 1
+    trace._tl_intervene_selector_fire_count = (
+        int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) + 1
+    )
 
 
 def _validate_grad_tuple(

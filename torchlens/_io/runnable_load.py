@@ -3180,8 +3180,7 @@ def _verify_runtime_fingerprints(
         if key is None:
             raise ContextFieldInvalidError(
                 "calls.registry_id",
-                f"call {call.call_id!r} names unknown registry entry "
-                f"{call.registry_id!r}",
+                f"call {call.call_id!r} names unknown registry entry {call.registry_id!r}",
             )
         outputs = []
         for slot_id in call.output_slot_ids:

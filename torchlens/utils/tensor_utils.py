@@ -96,9 +96,7 @@ _DTYPE_FLOAT_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
 # facade.  They now expose the DERIVED fp32 replay row instead of the former
 # hand-picked literals (rtol 1e-4 was ~840 fp32 ULP; atol 1e-5 blessed total
 # corruption of every element below 1e-5).
-REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE = _DTYPE_FLOAT_TOLERANCES[
-    torch.float32
-]
+REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE = _DTYPE_FLOAT_TOLERANCES[torch.float32]
 
 # Gradient-validation tolerance pairs, spelled ONCE here (formerly bare
 # literals repeated across validation/backward.py, validation/consolidated.py,

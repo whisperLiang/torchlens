@@ -72,9 +72,7 @@ def _failed_partial() -> tl.partial.PartialTrace:
 
 
 def _undeclared(trace: Trace) -> list[str]:
-    return sorted(
-        set(vars(trace)) - set(type(trace).FIELD_POLICY) - _FACADE_PLUMBING_ATTRS
-    )
+    return sorted(set(vars(trace)) - set(type(trace).FIELD_POLICY) - _FACADE_PLUMBING_ATTRS)
 
 
 def test_failed_capture_trace_carries_no_undeclared_attributes() -> None:

@@ -1955,7 +1955,6 @@ def _suppress_active_monitor_marks() -> Iterator[None]:
         yield
 
 
-
 def _skip_retired_hooks(candidate: Any, predecessor_attr: str) -> Any:
     """Return the first chain link that is not a torn-down monitor's hook.
 
@@ -1975,6 +1974,7 @@ def _skip_retired_hooks(candidate: Any, predecessor_attr: str) -> Any:
             break
         candidate = getattr(owner, predecessor_attr, None)
     return candidate
+
 
 class host_nondeterminism_monitor:
     """Context manager installing the registry-driven host-nondeterminism monitor.
@@ -4453,9 +4453,7 @@ class host_nondeterminism_monitor:
             self._patch_attr(
                 bit_generator_module,
                 "randbits",
-                self._entropy_wrapper(
-                    bit_generator_module.randbits, "np_bit_generator_randbits"
-                ),
+                self._entropy_wrapper(bit_generator_module.randbits, "np_bit_generator_randbits"),
             )
 
     def _install_clock_surfaces(self) -> None:

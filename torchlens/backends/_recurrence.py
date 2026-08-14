@@ -39,6 +39,7 @@ from ..postprocess.loop_grouping_adapter import (
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
+
 def compute_preview_recurrence_assignments(
     trace: Trace,
     *,

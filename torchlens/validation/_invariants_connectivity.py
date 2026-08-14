@@ -381,7 +381,9 @@ def _check_one_ancestry_record(
     # internal_source_parents is a DIRECT-PARENT relation, so it is a subset of parents
     # whose members all carry internal-source ancestry. For a non-source node it is
     # EXACTLY those parents; a source resets the relation (see the check docstring).
-    parent_names = {record.layer_label for record in map(resolve, lpl.parents) if record is not None}
+    parent_names = {
+        record.layer_label for record in map(resolve, lpl.parents) if record is not None
+    }
     parent_names |= set(lpl.parents)
     stored_internal_parents = tuple(lpl.internal_source_parents)
     not_a_parent = [item for item in stored_internal_parents if item not in parent_names]

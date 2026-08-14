@@ -506,8 +506,7 @@ def test_builtin_lineage_golden_is_closed() -> None:
     golden = set(BUILTIN_LINEAGE_GOLDEN)
 
     assert discovered - golden == set(), (
-        "public error classes missing a builtin-lineage golden row: "
-        f"{sorted(discovered - golden)}"
+        f"public error classes missing a builtin-lineage golden row: {sorted(discovered - golden)}"
     )
     assert golden - discovered == set(), (
         f"stale builtin-lineage golden rows: {sorted(golden - discovered)}"
@@ -531,9 +530,7 @@ def test_builtin_lineage_matches_golden(
 
     cls = getattr(errors, class_name)
     actual = tuple(
-        builtin.__name__
-        for builtin in _LINEAGE_PROBE_BUILTINS
-        if issubclass(cls, builtin)
+        builtin.__name__ for builtin in _LINEAGE_PROBE_BUILTINS if issubclass(cls, builtin)
     )
 
     assert actual == expected_builtins, (
@@ -927,13 +924,19 @@ def test_predicate_type_doors_are_multiclass_by_surface() -> None:
     for kwarg in ("intervene", "halt"):
         with pytest.raises(errors.ArgumentTypeError) as trace_info:
             tl.trace(nn.Identity(), torch.randn(2), **{kwarg: 123})
-        assert trace_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert (
+            trace_info.value.fields["code"]
+            == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        )
         assert isinstance(trace_info.value, TypeError)
         assert not isinstance(trace_info.value, ValueError)
 
         with pytest.raises(errors.InvalidArgumentError) as record_info:
             RecordingOptions(**{kwarg: 123})
-        assert record_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert (
+            record_info.value.fields["code"]
+            == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        )
         assert isinstance(record_info.value, ValueError)
         assert not isinstance(record_info.value, TypeError)
 

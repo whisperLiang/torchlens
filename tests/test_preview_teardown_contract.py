@@ -112,9 +112,7 @@ def test_mlx_teardown_failure_escapes_productless(monkeypatch: pytest.MonkeyPatc
         seen["trace"] = session
         raise RuntimeError("injected teardown failure")
 
-    monkeypatch.setattr(
-        mlx_backend_mod.MLXBackend, "cleanup_model_session", _raising_cleanup
-    )
+    monkeypatch.setattr(mlx_backend_mod.MLXBackend, "cleanup_model_session", _raising_cleanup)
 
     with pytest.raises(RuntimeError, match="injected teardown failure"):
         tl.trace(lambda x: x * 2 + 1, mx.array([1.0, 2.0]), backend="mlx")

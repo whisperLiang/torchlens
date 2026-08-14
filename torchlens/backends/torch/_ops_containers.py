@@ -111,7 +111,9 @@ def _build_container_spec_unguarded(
     if registered is not None:
         children, aux_data = registered.flatten(value)
         for index, item in enumerate(children):
-            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                item, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
         module, qualname = _container_type_ref(value)
@@ -128,7 +130,9 @@ def _build_container_spec_unguarded(
         reconstructable = True
         for key in keys:
             child = value[key]
-            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                child, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((HFKey(key), child_spec))
                 if child_spec.kind == "opaque":
@@ -160,7 +164,9 @@ def _build_container_spec_unguarded(
         reconstructable = True
         for field_name in fields:
             child = getattr(value, field_name)
-            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                child, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((NamedField(field_name), child_spec))
                 if child_spec.kind == "opaque":
@@ -186,7 +192,9 @@ def _build_container_spec_unguarded(
         reconstructable = True
         for field_name in fields:
             child = getattr(value, field_name)
-            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                child, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((DataclassField(field_name), child_spec))
                 if child_spec.kind == "opaque":
@@ -214,7 +222,9 @@ def _build_container_spec_unguarded(
         reconstructable = all(isinstance(key, (str, int)) for key in keys)
         for key in keys:
             child = value[key]
-            child_spec = _try_build_container_spec(child, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                child, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((DictKey(key), child_spec))
                 if child_spec.kind == "opaque":
@@ -245,7 +255,9 @@ def _build_container_spec_unguarded(
             return None
         reconstructable = True
         for index, item in items:
-            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                item, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
                 if child_spec.kind == "opaque":
@@ -262,7 +274,9 @@ def _build_container_spec_unguarded(
             return None
         reconstructable = True
         for index, item in items:
-            child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
+            child_spec = _try_build_container_spec(
+                item, _depth=_depth + 1, _in_progress=_in_progress
+            )
             if child_spec is not None:
                 child_specs.append((TupleIndex(index), child_spec))
                 if child_spec.kind == "opaque":

@@ -149,6 +149,7 @@ def raise_input_tree_cycle_refusal(*, kind: str) -> None:
         kind=kind,
     )
 
+
 """Declared nesting bound for the input-boundary walk, mirroring the DECODE direction.
 
 ``_runnable_execution._MAX_DECODE_NESTING_DEPTH`` bounds the symmetric decode direction

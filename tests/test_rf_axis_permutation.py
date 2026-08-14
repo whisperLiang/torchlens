@@ -55,8 +55,7 @@ def true_receptive_hulls(
                 break
     assert hits, "brute-force receptive support must be non-empty"
     return {
-        axis: (min(hit[axis] for hit in hits), max(hit[axis] for hit in hits) + 1)
-        for axis in axes
+        axis: (min(hit[axis] for hit in hits), max(hit[axis] for hit in hits) + 1) for axis in axes
     }
 
 
@@ -75,8 +74,7 @@ def true_projective_hulls(
             hits.add(tuple(int(value) for value in row))
     assert hits, "brute-force projective support must be non-empty"
     return {
-        axis: (min(hit[axis] for hit in hits), max(hit[axis] for hit in hits) + 1)
-        for axis in axes
+        axis: (min(hit[axis] for hit in hits), max(hit[axis] for hit in hits) + 1) for axis in axes
     }
 
 

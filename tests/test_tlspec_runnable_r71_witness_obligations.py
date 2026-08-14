@@ -855,8 +855,7 @@ def test_r71_floor_source_scan_tripwire() -> None:
     # The ONLY raw read left in the executor is the run-preparation equality
     # re-assert (defense in depth), and staging never reads it at all.
     execution_source = "\n".join(
-        path.read_text()
-        for path in sorted(Path(execution.__file__).parent.glob("_runnable_*.py"))
+        path.read_text() for path in sorted(Path(execution.__file__).parent.glob("_runnable_*.py"))
     )
     assert execution_source.count("descriptor.witness_completeness") == 1
     assert "witness_completeness" not in inspect.getsource(state._apply_state_metadata_facts)

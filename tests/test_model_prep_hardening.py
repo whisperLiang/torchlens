@@ -29,9 +29,7 @@ class _Holder:
     """Plain model-owned helper object carrying a module reference."""
 
 
-@pytest.mark.skipif(
-    not torch.distributed.is_available(), reason="torch.distributed unavailable"
-)
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed unavailable")
 class TestNamespaceWalkSkipsDeprecationShim:
     """SF-45: the cleanup walks never touch the reduce_op deprecation singleton."""
 
@@ -93,9 +91,7 @@ class TestNamespaceWalkSkipsDeprecationShim:
 class TestBufferStampFailureIsDisclosed:
     """B1-13a: a failed buffer-provenance stamp warns instead of vanishing."""
 
-    def test_unstampable_buffer_warns_with_address(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unstampable_buffer_warns_with_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail-before: ``except Exception: pass`` hid the evidence loss."""
 
         import torchlens.backends.torch.buffer_writes as buffer_writes

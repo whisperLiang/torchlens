@@ -191,9 +191,7 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
                 # New device peak -> the forward's exact peak. No new peak ->
                 # the forward stayed under the pre-existing high-water mark
                 # and the figure honestly reads 0 (see docstring, R36-2).
-                trace.forward_peak_memory = Bytes(
-                    peak_after if peak_after > peak_before else 0
-                )
+                trace.forward_peak_memory = Bytes(peak_after if peak_after > peak_before else 0)
             trace.forward_memory_backend = backend_label
         return
 

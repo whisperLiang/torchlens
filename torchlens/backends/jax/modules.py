@@ -927,5 +927,3 @@ def _path_to_string(path: Any) -> str:
         else:
             parts.append(str(entry).strip("[]'"))
     return ".".join(parts)
-
-

@@ -920,9 +920,7 @@ class TestDecorationConsistency:
         """
 
         current_wrapper_ids = {
-            id(dec)
-            for dec in _state._orig_to_decorated.values()
-            if not isinstance(dec, property)
+            id(dec) for dec in _state._orig_to_decorated.values() if not isinstance(dec, property)
         }
         missing = current_wrapper_ids - set(_state._decorated_to_orig)
         assert not missing, "current-generation wrappers absent from the unwrap ledger"

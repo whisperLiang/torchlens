@@ -345,8 +345,6 @@ def _coverage_oracle(trace: Any) -> bool:
     return True
 
 
-
-
 def _is_tensor_marker(value: Any) -> bool:
     """Return whether a template value is a tensor leaf marker.
 

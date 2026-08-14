@@ -949,9 +949,7 @@ class _FastLiveSession:
                 detection_stage="fast_live_function_plan",
             )
         modules = dict(model.named_modules())
-        plan_addresses = tuple(
-            dict.fromkeys(plan.address_or_name for plan in self.module_plans)
-        )
+        plan_addresses = tuple(dict.fromkeys(plan.address_or_name for plan in self.module_plans))
         # Every typed refusal must fire BEFORE the unsupported-activation wipe
         # below: a refused session must never destroy the user's saved payloads.
         for address in plan_addresses:
@@ -1330,9 +1328,7 @@ class _FastLiveSession:
         # container at UNVERIFIABLE. fast=True must never improve the verdict the
         # ordinary provider would settle on the same trace.
         lossy = _container_spec_reconstruction_lossy(_output_container_spec(self.trace))
-        provisional = (
-            PathFaithfulness.UNVERIFIABLE if lossy else PathFaithfulness.VERIFIED
-        )
+        provisional = PathFaithfulness.UNVERIFIABLE if lossy else PathFaithfulness.VERIFIED
         return _finalize_provider_run(
             fork=self.trace,
             output=output,

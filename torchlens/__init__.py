@@ -197,6 +197,7 @@ _MOVED_OBJECTS = {
     "wrapped": ("torchlens.backends.torch.wrappers", "wrapped"),
 }
 
+
 class _LegacyShim(_NamedTuple):
     """One paper-era public name kept as a compatibility shim.
 

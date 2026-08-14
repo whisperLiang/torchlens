@@ -312,9 +312,7 @@ def test_recording_outcomes_stamped() -> None:
     assert complete.outcome.status is CaptureStatus.COMPLETE
     assert complete.outcome.derived is False
 
-    halted = tl.record(
-        ThreeStageModel(), x, save=lambda ctx: ctx.kind == "op", halt=halt_on_relu
-    )
+    halted = tl.record(ThreeStageModel(), x, save=lambda ctx: ctx.kind == "op", halt=halt_on_relu)
     assert halted.outcome.status is CaptureStatus.HALTED
     assert halted.outcome.derived is False
     assert halted.outcome.reason == halted.halt_reason

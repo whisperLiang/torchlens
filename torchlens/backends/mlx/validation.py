@@ -307,8 +307,6 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
     return PERTURBATION_UNPROVED
 
 
-
-
 def _saved_payload(trace: Any, ops_by_label: dict[str, Any], label_raw: str) -> Any:
     """Return the trace's saved payload for one raw label.
 

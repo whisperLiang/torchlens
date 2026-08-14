@@ -396,10 +396,14 @@ def register_rf_rule(
     """
 
     if not func_names:
-        raise ReceptiveFieldConfigurationError("register_rf_rule requires at least one function name.")
+        raise ReceptiveFieldConfigurationError(
+            "register_rf_rule requires at least one function name."
+        )
     normalized_names = tuple(_normalize_rule_name(name) for name in func_names)
     if len(set(normalized_names)) != len(normalized_names):
-        raise ReceptiveFieldConfigurationError("register_rf_rule received duplicate normalized function names.")
+        raise ReceptiveFieldConfigurationError(
+            "register_rf_rule received duplicate normalized function names."
+        )
 
     def decorator(rule: ReceptiveFieldRule) -> ReceptiveFieldRule:
         """Register one rule and return it unchanged."""
@@ -408,7 +412,9 @@ def register_rf_rule(
         duplicates = tuple(name for name in normalized_names if name in _RF_RULES)
         if duplicates and not replace:
             names = ", ".join(duplicates)
-            raise ReceptiveFieldConfigurationError(f"Receptive-field rule already registered for: {names}.")
+            raise ReceptiveFieldConfigurationError(
+                f"Receptive-field rule already registered for: {names}."
+            )
         for name in normalized_names:
             _RF_RULES[name] = rule
         _RF_RULES_EPOCH += 1
@@ -462,7 +468,9 @@ def _normalize_rule_name(func_name: str) -> str:
     """Validate and normalize one captured operation name."""
 
     if not isinstance(func_name, str) or not func_name:
-        raise ReceptiveFieldConfigurationError("Receptive-field rule names must be non-empty strings.")
+        raise ReceptiveFieldConfigurationError(
+            "Receptive-field rule names must be non-empty strings."
+        )
     return _normalize_func_name(func_name)
 
 

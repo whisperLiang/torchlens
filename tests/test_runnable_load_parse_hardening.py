@@ -73,9 +73,7 @@ def test_edited_execution_context_fails_runtime_fingerprint(
 
     loaded = tl.load(path)
     assert loaded.readiness.status is ReadinessStatus.UNAVAILABLE
-    assert any(
-        "fingerprint" in diagnostic.message for diagnostic in loaded.readiness.diagnostics
-    )
+    assert any("fingerprint" in diagnostic.message for diagnostic in loaded.readiness.diagnostics)
 
 
 def test_edited_argument_names_fail_runtime_fingerprint(

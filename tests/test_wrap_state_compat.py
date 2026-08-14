@@ -169,8 +169,7 @@ _IDENTITY_PATTERN = re.compile(
 
 def _grep_skipped(rel_path: str) -> bool:
     return any(
-        rel_path.startswith(prefix) or f"/{prefix}/" in rel_path
-        for prefix in _GREP_SKIP_PREFIXES
+        rel_path.startswith(prefix) or f"/{prefix}/" in rel_path for prefix in _GREP_SKIP_PREFIXES
     )
 
 
@@ -421,9 +420,7 @@ class TestUnwrapSafety:
         worker = threading.Thread(target=do_unwrap)
         try:
             worker.start()
-            assert not done.wait(0.3), (
-                "unwrap_torch() proceeded without the capture admission lock"
-            )
+            assert not done.wait(0.3), "unwrap_torch() proceeded without the capture admission lock"
         finally:
             _state._capture_admission_lock.release()
             worker.join(10)

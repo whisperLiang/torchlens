@@ -406,6 +406,3 @@ def _is_mlx_array(value: object) -> bool:
     except ImportError:
         return False
     return isinstance(value, mx.array)
-
-
-

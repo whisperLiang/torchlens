@@ -106,8 +106,7 @@ def test_unrolled_and_rolled_cluster_styles_agree(tmp_path: Path) -> None:
     rolled_solidity = _solidity(rolled)
     for base in set(unrolled_solidity) & set(rolled_solidity):
         assert unrolled_solidity[base] == rolled_solidity[base], (
-            f"cluster {base!r}: unrolled and rolled renders disagree about "
-            "input connectivity"
+            f"cluster {base!r}: unrolled and rolled renders disagree about input connectivity"
         )
 
 
@@ -143,9 +142,7 @@ def test_within_module_segment_label_stays_unchanged() -> None:
     deep = nn.Sequential(nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4), nn.ReLU()))
     trace = tl.trace(deep, torch.randn(1, 4))
     context = SimpleNamespace(vis_mode="unrolled")
-    labels = tuple(
-        label for label in ("linear_1_1", "relu_1_2", "linear_2_3", "relu_2_4")
-    )
+    labels = tuple(label for label in ("linear_1_1", "relu_1_2", "linear_2_3", "relu_2_4"))
     descriptor = _make_op_segment_descriptor(trace, context, labels, labels)
     assert "spans" not in descriptor.label, descriptor.label
 

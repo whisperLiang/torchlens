@@ -99,7 +99,9 @@ def invalidate_static_class_attr_cache() -> None:
     _CACHE_GENERATION += 1
 
 
-def _class_definition_fingerprint(cls: type) -> tuple[tuple[tuple[str, int, type], ...], ...] | None:
+def _class_definition_fingerprint(
+    cls: type,
+) -> tuple[tuple[tuple[str, int, type], ...], ...] | None:
     """Return a fingerprint of every ``__dict__`` a static lookup consults.
 
     Returns ``None`` for an exotic class whose MRO cannot be read, which disables
@@ -108,12 +110,7 @@ def _class_definition_fingerprint(cls: type) -> tuple[tuple[tuple[str, int, type
 
     try:
         return tuple(
-            tuple(
-                sorted(
-                    (name, id(value), type(value))
-                    for name, value in klass.__dict__.items()
-                )
-            )
+            tuple(sorted((name, id(value), type(value)) for name, value in klass.__dict__.items()))
             for klass in (*inspect.getmro(cls), *inspect.getmro(type(cls)))
         )
     except (AttributeError, TypeError):  # pragma: no cover - exotic metaclass

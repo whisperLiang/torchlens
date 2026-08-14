@@ -22,8 +22,7 @@ class UnsupportedRendererCapabilityError(_ActionableErrorMixin, ConfigurationErr
 
     code: str = "renderer_capability_unsupported"
     default_remedy: str = (
-        "render with the graphviz renderer or drop the option that requires "
-        "the missing capability"
+        "render with the graphviz renderer or drop the option that requires the missing capability"
     )
 
     def __init__(

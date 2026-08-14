@@ -29,7 +29,7 @@ def test_pyproject_version_matches_package_version() -> None:
         pyproject.read_text(encoding="utf-8"),
         flags=re.MULTILINE,
     )
-    assert match is not None, "pyproject.toml has no version = \"...\" line"
+    assert match is not None, 'pyproject.toml has no version = "..." line'
     declared = match.group(1)
     assert declared == torchlens.__version__, (
         f"pyproject.toml declares {declared} but torchlens.__version__ is "

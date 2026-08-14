@@ -165,9 +165,7 @@ class TestCausalBiasDispatch:
         k = torch.randn(1, 2, 8, 4)
         v = torch.randn(1, 2, 8, 4)
         bias = causal_lower_right(8, 8)
-        truth = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=bias._materialize(q.device)
-        )
+        truth = F.scaled_dot_product_attention(q, k, v, attn_mask=bias._materialize(q.device))
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
         # Unfixed, the identity miss silently dropped the mask AND returned a
         # broken CausalBias-typed result.

@@ -68,6 +68,7 @@ def _warn_inert_option_field(class_name: str, field_name: str) -> None:
         stacklevel=user_stacklevel(),
     )
 
+
 _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "layers_to_save",
     "transform",

@@ -487,9 +487,7 @@ class TestTwoRankSims:
             assert "allgather" in payload["op_types"]
             assert [b["kind"] for b in payload["boundaries"]] == ["all_reduce", "all_gather"]
             witness = payload["witness"]
-            assert witness["contribution_digests"] == [
-                payload["expected_contribution_digest"]
-            ]
+            assert witness["contribution_digests"] == [payload["expected_contribution_digest"]]
             assert witness["destination_digests"] == [payload["expected_destination_digest"]]
         # Correlation keys agree cross-rank per boundary: same membership
         # digest, same lifetime ordinal, same channel, same seq.

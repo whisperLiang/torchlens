@@ -372,26 +372,6 @@ class SaveBudget:
             return None
         return cls(spec=spec)
 
-    def __getstate__(self) -> dict[str, Any]:
-        """Pickle state without the live payload-watcher table.
-
-        The watchers are session-time GC hooks over LIVE payload tensors --
-        weakrefs with callbacks, unpicklable by construction and meaningless
-        in another process. Stripping them keeps every trace (success, failed
-        partial, halted) plain-picklable; a restored accountant simply stops
-        release-tracking payloads committed before the pickle, matching the
-        session-time contract (``save_budget`` never survives save/load).
-
-        Returns
-        -------
-        dict[str, Any]
-            Instance state with an empty watcher table.
-        """
-
-        state = self.__dict__.copy()
-        state["_payload_watchers"] = {}
-        return state
-
     def _ledger_for(self, device: torch.device) -> _DeviceLedger:
         """Return (creating if needed) the ledger for one device.
 
@@ -483,9 +463,7 @@ class SaveBudget:
         ledger.committed_bytes += int(num_bytes)
         ledger.num_saved += 1
         self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
-        return _BudgetReservation(
-            label=label, device=device, num_bytes=int(num_bytes), site=site
-        )
+        return _BudgetReservation(label=label, device=device, num_bytes=int(num_bytes), site=site)
 
     def commit(
         self,
@@ -635,12 +613,8 @@ class SaveBudget:
         raise SaveBudgetExceededError(
             self._message(label, device, ledger, phase=phase),
             accounted_bytes=ledger.committed_bytes,
-            committed_bytes=(
-                None if phase in _ADMISSION_PHASES else ledger.committed_bytes
-            ),
-            projected_bytes=(
-                ledger.committed_bytes if phase in _ADMISSION_PHASES else None
-            ),
+            committed_bytes=(None if phase in _ADMISSION_PHASES else ledger.committed_bytes),
+            projected_bytes=(ledger.committed_bytes if phase in _ADMISSION_PHASES else None),
             budget_bytes=limit,
             available_bytes=ledger.available_bytes,
             device=str(device),

@@ -455,12 +455,13 @@ def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float
         DEEP_NUMERIC_REPLAY_RTOL,
     )
     outlier_rel = min(
-        DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps
-        + 2.0 * storage_term,
+        DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps + 2.0 * storage_term,
         DEEP_NUMERIC_REPLAY_OUTLIER_RTOL,
     )
     mean_rel = min(base_rel, DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF)
     return base_rel, outlier_rel, mean_rel
+
+
 # Ground-truth output tolerances are DERIVED per dtype (ULP-denominated) via
 # tensor_utils.derive_float_tolerances, replacing the former dtype-blind
 # rtol=1e-6/atol=1e-8 literals: those were ~8 fp32 ULP (fine for fp32) but

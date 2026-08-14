@@ -536,9 +536,10 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
 def test_refusing_kinds_is_the_single_source_of_truth() -> None:
     """Every active distributed execution mode that omits work refuses."""
 
-    assert frozenset(
-        {"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"}
-    ) == REFUSING_KINDS
+    assert (
+        frozenset({"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"})
+        == REFUSING_KINDS
+    )
 
 
 def test_site_list_is_bounded_with_explicit_remainder() -> None:

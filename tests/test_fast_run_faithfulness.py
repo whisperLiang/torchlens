@@ -70,9 +70,7 @@ def test_fast_run_host_scalar_escape_changed_input_never_verified(tmp_path: Path
 
     original = torch.ones(4)
     changed = torch.ones(4) * 2
-    path = _runnable_artifact(
-        HostScalarEscapeModel(), original, tmp_path / "escape-fast.tlspec"
-    )
+    path = _runnable_artifact(HostScalarEscapeModel(), original, tmp_path / "escape-fast.tlspec")
 
     ordinary = tl.load(path).run(inputs=changed)
     assert ordinary.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -187,9 +185,7 @@ def test_fast_live_module_refusal_fires_before_activation_wipe() -> None:
 
     model = BufferGainModel().eval()
     captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
-    saved_before = {
-        op.label for op in captured.layer_list if op.has_saved_activation
-    }
+    saved_before = {op.label for op in captured.layer_list if op.has_saved_activation}
     assert "buffer_1:1" in saved_before
     del model.second
 

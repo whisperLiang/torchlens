@@ -108,8 +108,7 @@ def test_r67_defensive_materialization_source_scan() -> None:
     # here deliberately, and no snapshot path may silently join.
     state_source = inspect.getsource(_runnable_state)
     execution_source = "\n".join(
-        inspect.getsource(module)
-        for module in (_runnable_input_metadata, _runnable_input_aliases)
+        inspect.getsource(module) for module in (_runnable_input_metadata, _runnable_input_aliases)
     )
     state_uses = state_source.count(
         f"with _state.pause_logging(), {helper}():"

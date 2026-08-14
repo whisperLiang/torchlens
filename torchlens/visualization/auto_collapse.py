@@ -211,9 +211,9 @@ class CollapseAnalysis:
     elapsed_ms: float
 
 
-_ANALYSIS_CACHE: weakref.WeakKeyDictionary[
-    Any, tuple[tuple[object, ...], CollapseAnalysis]
-] = weakref.WeakKeyDictionary()
+_ANALYSIS_CACHE: weakref.WeakKeyDictionary[Any, tuple[tuple[object, ...], CollapseAnalysis]] = (
+    weakref.WeakKeyDictionary()
+)
 _OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[
     Any, tuple[tuple[object, ...], Mapping[str, str]]
 ] = weakref.WeakKeyDictionary()
@@ -366,9 +366,7 @@ def analyze_collapse(trace: Trace) -> CollapseAnalysis:
     signals_without_peers = _compute_signal_skeleton(trace, revision)
     digests = _compute_structural_digests(trace, signals_without_peers)
     peer_groups = _group_structural_peers(trace, digests)
-    child_flow_graphs = _compute_child_condensed_flow_graphs(
-        trace, signals_without_peers, revision
-    )
+    child_flow_graphs = _compute_child_condensed_flow_graphs(trace, signals_without_peers, revision)
     peer_count_by_address: dict[str, int] = {}
     for group in peer_groups.values():
         for address in group:

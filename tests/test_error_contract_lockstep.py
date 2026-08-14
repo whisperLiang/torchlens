@@ -116,8 +116,7 @@ def test_every_source_code_is_documented() -> None:
         "refusal codes declared in torchlens/ but absent from "
         "docs/reference/error_refusal_contract.md: "
         + "; ".join(
-            f"{code} ({', '.join(sorted(declared[code]))})"
-            for code in sorted(undocumented)
+            f"{code} ({', '.join(sorted(declared[code]))})" for code in sorted(undocumented)
         )
     )
 

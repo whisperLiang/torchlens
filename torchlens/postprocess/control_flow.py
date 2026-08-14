@@ -1086,8 +1086,7 @@ def _finish_deferred_buffer_removals(
     if not removals:
         return
     replacement_labels = {
-        removed_label: source._label_raw
-        for removed_label, (source, _removed) in removals.items()
+        removed_label: source._label_raw for removed_label, (source, _removed) in removals.items()
     }
     removed_labels = set(removals)
     for layer in self:
@@ -1110,9 +1109,7 @@ def _finish_deferred_buffer_removals(
                 arg_positions[0] = replacement
 
     self._raw_graph_ws.raw_layer_labels_list[:] = [
-        label
-        for label in self._raw_graph_ws.raw_layer_labels_list
-        if label not in removed_labels
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label not in removed_labels
     ]
     for removed_label in removed_labels:
         self._raw_graph_ws.raw_layer_dict.pop(removed_label, None)

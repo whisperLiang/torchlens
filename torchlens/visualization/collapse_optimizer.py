@@ -342,9 +342,7 @@ def select_collapse_plan(
     revision = _collapse_graph_revision(trace)
     cache_entry = _RESULT_CACHE.get(trace)
     if cache_entry is None or cache_entry[0] != revision:
-        cached_by_context: dict[
-            tuple[RenderContext, str, OptimizerWeights], OptimizerResult
-        ] = {}
+        cached_by_context: dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult] = {}
         _RESULT_CACHE[trace] = (revision, cached_by_context)
     else:
         cached_by_context = cache_entry[1]

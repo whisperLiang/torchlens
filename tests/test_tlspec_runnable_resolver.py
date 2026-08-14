@@ -48,9 +48,7 @@ def _restamp_runtime_fingerprints(run: dict) -> None:
 
     from hashlib import sha256
 
-    keys_by_registry_id = {
-        entry["registry_id"]: entry["key"] for entry in run["callable_registry"]
-    }
+    keys_by_registry_id = {entry["registry_id"]: entry["key"] for entry in run["callable_registry"]}
     slots_by_id = {slot["slot_id"]: slot for slot in run["tensor_slots"]}
     for call in run["calls"]:
         key = keys_by_registry_id[call["registry_id"]]

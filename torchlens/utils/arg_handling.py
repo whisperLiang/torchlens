@@ -448,9 +448,7 @@ def _alias_candidate_pairs(
                     continue
                 for _, _, left_index in by_device_key[left_key]:
                     for _, _, right_index in by_device_key[right_key]:
-                        candidates.add(
-                            (min(left_index, right_index), max(left_index, right_index))
-                        )
+                        candidates.add((min(left_index, right_index), max(left_index, right_index)))
 
     # Interval sweep inside one exact device key: only pairs whose absolute
     # byte spans overlap survive (disjoint spans are the ladder's own verdict).

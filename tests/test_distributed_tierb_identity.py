@@ -118,9 +118,10 @@ class TestRefusalParity:
     """Arming relaxes nothing: every tier-(a) refusal still fires armed."""
 
     def test_refusing_kinds_unchanged(self):
-        assert frozenset(
-            {"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"}
-        ) == REFUSING_KINDS
+        assert (
+            frozenset({"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"})
+            == REFUSING_KINDS
+        )
 
     def test_dtensor_capture_still_refuses_when_armed(self, single_rank_mesh):
         from torch.distributed.tensor import Shard, distribute_tensor

@@ -134,9 +134,7 @@ def test_every_public_python_fence_compiles_and_torchlens_imports_resolve() -> N
         )
     ],
 )
-def test_performance_python_fence_runs(
-    block_index: int, code: str, tmp_path: Path
-) -> None:
+def test_performance_python_fence_runs(block_index: int, code: str, tmp_path: Path) -> None:
     """Execute every performance-guide example without broad import skips.
 
     Parameters

@@ -244,4 +244,3 @@ def theme_edge_attrs(theme: VisualizationTheme, *, font_size: int | None = None)
     if font_size is not None:
         attrs["fontsize"] = str(font_size)
     return attrs
-

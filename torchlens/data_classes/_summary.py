@@ -57,8 +57,7 @@ def format_call_arg(value: Any, _depth: int = 0, _in_progress: set[int] | None =
             return (
                 "{"
                 + ", ".join(
-                    f"{k}: {format_call_arg(v, _depth + 1, _in_progress)}"
-                    for k, v in value.items()
+                    f"{k}: {format_call_arg(v, _depth + 1, _in_progress)}" for k, v in value.items()
                 )
                 + "}"
             )

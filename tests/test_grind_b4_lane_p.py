@@ -299,9 +299,7 @@ def test_collapse_analysis_cache_invalidates_after_equal_size_graph_edit() -> No
     second = analyze_collapse(trace)
 
     assert second is not first
-    assert any(
-        "relu_cache_probe" in signal.own_func_names for signal in second.signals.values()
-    )
+    assert any("relu_cache_probe" in signal.own_func_names for signal in second.signals.values())
 
 
 def test_collapse_analysis_fingerprints_once_per_entry(

@@ -1101,8 +1101,6 @@ def _saved_payload(op: Any) -> Any:
     return getattr(op, "out")
 
 
-
-
 def _captures_by_label(trace: Any) -> dict[str, TFOpCapture]:
     """Return TensorFlow callback captures keyed by raw labels.
 

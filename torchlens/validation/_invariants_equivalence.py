@@ -280,8 +280,7 @@ def _check_graph_ordering(ml: Trace) -> None:
                 if isinstance(item, str) and _RAW_LABEL_PATTERN.search(item):
                     raise MetadataInvariantError(
                         name,
-                        f"Raw label {item!r} survived postprocessing in "
-                        f"{lpl.layer_label}.{field}",
+                        f"Raw label {item!r} survived postprocessing in {lpl.layer_label}.{field}",
                     )
         for field in _RAW_LABEL_BEARING_SCALAR_FIELDS:
             item = getattr(lpl, field, None)

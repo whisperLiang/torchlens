@@ -231,9 +231,7 @@ def test_topk_batched_update_matches_reference_semantics() -> None:
     for chunk in chunks:
         stat.update(chunk)
     everything = torch.cat(chunks)
-    expected = sorted(
-        (float(v) for v in everything.tolist() if v == v), reverse=True
-    )[:5]
+    expected = sorted((float(v) for v in everything.tolist() if v == v), reverse=True)[:5]
     assert stat.result() == expected
 
 
