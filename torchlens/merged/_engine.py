@@ -220,12 +220,24 @@ def _role_digests(entry: dict[str, Any]) -> tuple[tuple[str, ...] | None, tuple[
     """Return ``(contribution_digests, destination_digests)`` or ``None`` each."""
 
     witness = entry["witness"]
-    contribution = witness.get("contribution_digests")
-    destination = witness.get("destination_digests")
-    return (
-        None if contribution is None else tuple(contribution),
-        None if destination is None else tuple(destination),
-    )
+    values: list[tuple[str, ...] | None] = []
+    for digest_field in ("contribution_digests", "destination_digests"):
+        digests = witness.get(digest_field)
+        if digests is None:
+            values.append(None)
+            continue
+        # Belt for internal RankEvidence constructors that bypass the parse
+        # boundary: a bare string here would char-split through ``tuple(...)``
+        # and its characters would then be compared as digests, so two cores
+        # carrying the same garbage string fabricated an ATTESTED verdict.
+        if isinstance(digests, str) or not isinstance(digests, (list, tuple)):
+            raise MergeInputError(
+                f"Boundary witness {digest_field} is not a list of digests "
+                f"(got {type(digests).__name__}).",
+                code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+            )
+        values.append(tuple(str(item) for item in digests))
+    return values[0], values[1]
 
 
 def _roles_of(entry: dict[str, Any], role_names: Iterable[str]) -> list[dict[str, Any]]:

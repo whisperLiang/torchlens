@@ -392,6 +392,112 @@ class TestScopeAndInputRefusals:
         assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
 
 
+class TestBoundaryParseValidation:
+    """Deep-hunt F2: roles and witness digest fields are validated typed at parse.
+
+    Fail-before: a role entry without ``shape`` passed extraction and escaped
+    ``derive_merge`` as a raw ``KeyError('shape')`` from both ``merge_ranks``
+    and load rederivation; a bare-STRING digest field char-split through
+    ``tuple(...)`` and two cores carrying the same garbage string rendered a
+    fabricated ``attested_complete``.
+    """
+
+    def _extract(self, entry: dict) -> None:
+        extract_rank_evidence(
+            trace_for_boundaries([entry], seeded_ledger()),
+            "forged-boundary",
+        )
+
+    def _assert_refuses(self, entry: dict) -> None:
+        with pytest.raises(MergeInputError) as excinfo:
+            self._extract(entry)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_role_entry_missing_shape_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "contribution_destination", "index": 0}])
+        )
+
+    def test_role_entry_not_a_mapping_refuses_typed(self):
+        self._assert_refuses(boundary(0, 0, roles=["contribution"]))
+
+    def test_roles_not_a_list_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["roles"] = {"role": "contribution"}
+        self._assert_refuses(entry)
+
+    def test_role_name_outside_vocabulary_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "spectator", "index": 0, "shape": [2]}])
+        )
+
+    def test_role_shape_with_non_integer_dim_refuses_typed(self):
+        self._assert_refuses(
+            boundary(0, 0, roles=[{"role": "contribution", "index": 0, "shape": [2, "x"]}])
+        )
+
+    def test_string_digest_field_refuses_typed(self):
+        entry = boundary(0, 0, witness_policy="digest")
+        entry["witness"]["contribution_digests"] = "ccdd"
+        entry["witness"]["destination_digests"] = "aabb"
+        self._assert_refuses(entry)
+
+    def test_non_hex_digest_element_refuses_typed(self):
+        entry = boundary(0, 0, witness_policy="digest")
+        entry["witness"]["destination_digests"] = ["not-a-digest"]
+        self._assert_refuses(entry)
+
+    def test_non_string_op_label_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["op_labels_raw"] = ["fine", 7]
+        self._assert_refuses(entry)
+
+    def test_non_integer_my_group_rank_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["group"]["my_group_rank"] = "0"
+        self._assert_refuses(entry)
+
+    def test_non_string_backend_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["group"]["backend"] = 7
+        self._assert_refuses(entry)
+
+    def test_non_string_channel_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["correlation"]["channel"] = 0
+        self._assert_refuses(entry)
+
+    def test_negative_seq_refuses_typed(self):
+        self._assert_refuses(boundary(0, -1))
+
+    def test_valid_sha256_digest_lists_still_parse(self):
+        entry = boundary(
+            0,
+            0,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+            destination_digests=["a" * 64],
+        )
+        self._extract(entry)  # must not raise
+
+    def test_engine_belt_refuses_string_digests_typed(self):
+        """Direct-engine evidence cannot fabricate ATTESTED via char-split.
+
+        Fail-before: consistency rendered ``attested`` and the merge presented
+        ``attested_complete`` from two identical garbage strings.
+        """
+
+        def forged(rank: int) -> dict:
+            entry = boundary(rank, 0, witness_policy="digest")
+            entry["witness"]["contribution_digests"] = "ccdd"
+            entry["witness"]["destination_digests"] = "aabb"
+            return entry
+
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge({0: evidence(0, [forged(0)]), 1: evidence(1, [forged(1)])})
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+
 class TestRelationsAndCrossChecks:
     def test_kind_disagreement_at_joined_key_conflicts(self):
         d = derive_merge(
