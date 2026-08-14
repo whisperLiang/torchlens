@@ -3505,9 +3505,21 @@ class RecordingBackward:
         self._original_backward: Callable[..., Any] | None = None
         self._wrapped_backward: Callable[..., Any] | None = None
         self._warned_unmatched_backward = False
+        self._entry_depth = 0
 
     def __enter__(self) -> RecordingBackward:
         """Patch ``torch.Tensor.backward`` and return this context object."""
+        # Re-entering an already-entered context must not re-patch: a second
+        # entry would capture the first entry's wrapper as "original", so the
+        # OUTER exit could never match its own wrapper and would leave a
+        # TorchLens wrapper installed on the process-global
+        # ``torch.Tensor.backward`` permanently. Recording semantics inside
+        # the block are unchanged (the one installed wrapper already records
+        # for this trace), so nested entry is a counted no-op.
+        if self._entry_depth > 0:
+            self._entry_depth += 1
+            return self
+        self._entry_depth = 1
         self._original_backward = torch.Tensor.backward
         trace = self.trace
         original_backward = self._original_backward
@@ -3559,6 +3571,12 @@ class RecordingBackward:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         """Restore ``torch.Tensor.backward`` unless someone patched over us."""
+        if self._entry_depth > 1:
+            # Inner exit of a re-entered context: the outermost exit owns the
+            # restore and the streaming finalization.
+            self._entry_depth -= 1
+            return
+        self._entry_depth = 0
         try:
             if self._original_backward is not None:
                 if torch.Tensor.backward is self._wrapped_backward:

@@ -78,3 +78,28 @@ def test_second_backward_does_not_rewrite_recorded_grads(save_mode: str) -> None
             "pass-1 gradient record was rewritten by a second backward: "
             f"{snapshot.flatten()[:4]} -> {payload.flatten()[:4]}"
         )
+
+
+@pytest.mark.smoke
+def test_reentered_recording_backward_restores_tensor_backward() -> None:
+    """Re-entering one RecordingBackward context leaves no persistent wrapper.
+
+    A second ``__enter__`` on the same context object used to capture the
+    first entry's wrapper as the "original", so the outer exit could never
+    match its own wrapper and permanently leaked a TorchLens wrapper on the
+    process-global ``torch.Tensor.backward``.
+    """
+
+    trace = _armed_trace()
+    original_backward = torch.Tensor.backward
+    context = trace.recording_backward()
+    try:
+        with context:
+            with context:
+                _loss(trace).backward()
+    finally:
+        if torch.Tensor.backward is not original_backward:
+            torch.Tensor.backward = original_backward  # type: ignore[method-assign]
+            pytest.fail("re-entered recording_backward() leaked a wrapper on torch.Tensor.backward")
+    # The backward inside the nested block is still recorded exactly once.
+    assert trace.num_backward_passes == 1
