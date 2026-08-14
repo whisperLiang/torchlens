@@ -1,8 +1,13 @@
-"""Semantic identity goldens for the RenderIR-backed rank renderer."""
+"""Semantic identity goldens for the RenderIR-backed rank renderer.
+
+Regenerate deliberately with ``TORCHLENS_UPDATE_RANK_RENDER_IR=1`` (the
+update run reports SKIP, never green; re-run without the flag to verify).
+"""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +20,7 @@ import torchlens as tl
 pydot = pytest.importorskip("pydot")
 
 _GOLDEN = Path(__file__).parent / "golden" / "rank_render_ir_semantics.json"
+_UPDATE_ENV = "TORCHLENS_UPDATE_RANK_RENDER_IR"
 
 
 def _clean(value: str | None) -> str:
@@ -94,4 +100,10 @@ def test_rank_render_ir_semantic_golden(tmp_path: Path) -> None:
     finally:
         trace.cleanup()
     assert source is not None
+    if os.environ.get(_UPDATE_ENV) == "1":
+        # This golden previously had NO documented regen path (b10 R78-8c):
+        # hand edits were the only option. Update writes then SKIPS so a
+        # regeneration run never reports a vacuous green.
+        _GOLDEN.write_text(json.dumps(_semantic_record(source), indent=1, sort_keys=True) + "\n")
+        pytest.skip(f"updated rank-render-ir golden; re-run without {_UPDATE_ENV} to verify")
     assert _semantic_record(source) == json.loads(_GOLDEN.read_text())

@@ -1037,6 +1037,9 @@ def test_viz_render_identity_oracle(tmp_path: Path) -> None:
         _GOLDEN_PATH.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        # Never fall through to compare against the file just written: an
+        # update run reporting green is a vacuous pass (b10 R78-8d).
+        pytest.skip(f"updated render-identity golden; re-run without {_UPDATE_ENV} to verify")
     expected = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
     if __import__("os").environ.get(_BYTE_ORACLE_ENV) == "1":
         assert payload == expected

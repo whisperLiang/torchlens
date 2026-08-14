@@ -42,13 +42,45 @@ def _seed_everything() -> None:
     np.random.seed(_SEED % (2**32 - 1))
 
 
-def build_stage_snapshots(model_axis: str) -> dict[str, Any]:
+def prebuild_model_cases(model_axes: tuple[str, ...]) -> dict[str, tuple[Any, Any]]:
+    """Construct every requested model case up front, before any capture.
+
+    Ctor-time behavior is part of the frozen contract: building all models
+    before the first ``tl.trace`` wraps torch keeps every ctor on clean
+    torch even when one process generates several axes (b10 R78-1).
+
+    Parameters
+    ----------
+    model_axes:
+        Deterministic model-axis identifiers from ``MODEL_AXES``.
+
+    Returns
+    -------
+    dict[str, tuple[Any, Any]]
+        Mapping of axis to its ``(model, model_input)`` pair, each built
+        under the same per-axis seeding a solo build performs.
+    """
+
+    prebuilt: dict[str, tuple[Any, Any]] = {}
+    for model_axis in model_axes:
+        _seed_everything()
+        prebuilt[model_axis] = build_model_case(model_axis)
+    return prebuilt
+
+
+def build_stage_snapshots(
+    model_axis: str, prebuilt: tuple[Any, Any] | None = None
+) -> dict[str, Any]:
     """Capture one model and snapshot every lifecycle stage.
 
     Parameters
     ----------
     model_axis:
         Deterministic model-axis identifier from ``MODEL_AXES``.
+    prebuilt:
+        Optional ``(model, model_input)`` pair from
+        :func:`prebuild_model_cases`; when omitted the case is built here
+        under the same seeding.
 
     Returns
     -------
@@ -59,7 +91,7 @@ def build_stage_snapshots(model_axis: str) -> dict[str, Any]:
     """
 
     _seed_everything()
-    model, model_input = build_model_case(model_axis)
+    model, model_input = prebuilt if prebuilt is not None else build_model_case(model_axis)
 
     stages: dict[str, Any] = {}
     _seed_everything()

@@ -194,3 +194,8 @@ menagerie/data/verification.db*
 /FORKS.md
 /PROGRESS.md
 /*_RESULTS.md
+
+# Off-canonical oracle baselines recorded per-environment (tests/_oracle_env.py).
+# A recorded env-*/ dir is local working state: review it and `git add -f`
+# only when that environment should enforce byte identity going forward.
+tests/**/goldens/env-*/

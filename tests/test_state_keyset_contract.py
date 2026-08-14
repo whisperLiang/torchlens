@@ -29,7 +29,7 @@ from torchlens.data_classes.op import _OP_SLOT_NAMES, Op
 _GOLDEN_PATH = (
     Path(__file__).resolve().parent / "godobject_oracle" / "goldens" / "state_keysets.json"
 )
-_UPDATE_ENV = "TORCHLENS_UPDATE_SURFACE_ORACLE"
+_UPDATE_ENV = "TORCHLENS_UPDATE_STATE_KEYSET_ORACLE"
 
 
 def _capture_stage_records() -> dict[str, dict[str, list[str]]]:
@@ -75,18 +75,19 @@ def test_state_keysets_match_golden() -> None:
     """state_items key sets are frozen per class and lifecycle stage."""
 
     actual = json.dumps(_capture_stage_records(), indent=1, sort_keys=True)
-    from _oracle_env import resolve_env_golden
+    from _oracle_env import require_env_golden, resolve_env_golden, write_provenance
 
-    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name)
     if os.environ.get(_UPDATE_ENV) == "1":
+        golden_path, _ = resolve_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name)
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip("updated state-keyset golden")
-    if record_on_missing and not golden_path.exists():
-        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        write_provenance(golden_path.parent, "tests/test_state_keyset_contract.py", _UPDATE_ENV)
+        pytest.skip(f"updated state-keyset golden; re-run without {_UPDATE_ENV} to verify")
+    golden_path = require_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name, _UPDATE_ENV)
+    if not golden_path.exists():
         golden_path.write_text(actual + "\n")
+        write_provenance(golden_path.parent, "tests/test_state_keyset_contract.py", _UPDATE_ENV)
         pytest.skip(f"recorded first-run state-keyset golden for this environment: {golden_path}")
-    assert golden_path.exists(), f"missing state-keyset golden; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(

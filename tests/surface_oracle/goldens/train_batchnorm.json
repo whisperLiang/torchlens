@@ -1852,7 +1852,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_mean",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_3_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_mean",
@@ -2114,7 +2118,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_var",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_4_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_var",
@@ -11403,7 +11411,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_mean",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_3_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_mean",
@@ -11665,7 +11677,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_var",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_4_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_var",
@@ -20942,7 +20958,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_mean",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_3_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_mean",
@@ -21204,7 +21224,11 @@
     "activation_memory": "<measured>",
     "activation_transform": null,
     "address": "bn.running_var",
-    "annotations": {},
+    "annotations": {
+     "\"dedup_reference_label\"": "buffer_4_raw",
+     "\"dedup_source_id\"": "<measured>",
+     "\"dedup_source_version\"": 1
+    },
     "arg_names": [],
     "autograd_memory": "<measured>",
     "backend_address": "bn.running_var",

@@ -22,7 +22,7 @@ import torchlens as tl
 from .test_aliases import _SEED
 
 _GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
-_UPDATE_ENV = "TORCHLENS_UPDATE_SURFACE_ORACLE"
+_UPDATE_ENV = "TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE"
 
 _ANALYSIS_ARTIFACT = _GOLDEN_DIR / "legacy_baseline_cnn.tlspec"
 _RUNNABLE_ARTIFACT = _GOLDEN_DIR / "legacy_baseline_cnn_runnable.tlspec"
@@ -36,18 +36,19 @@ def test_legacy_analysis_artifact_loads_byte_identically() -> None:
     assert _ANALYSIS_ARTIFACT.exists(), "frozen legacy artifact missing"
     loaded = tl.load(str(_ANALYSIS_ARTIFACT))
     actual = canonical_dump(snapshot_trace_surface(loaded))
-    from _oracle_env import resolve_env_golden
+    from _oracle_env import require_env_golden, resolve_env_golden, write_provenance
 
-    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name)
     if os.environ.get(_UPDATE_ENV) == "1":
+        golden_path, _ = resolve_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name)
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip("updated legacy loaded-surface golden")
-    if record_on_missing and not golden_path.exists():
-        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        write_provenance(golden_path.parent, "tests/godobject_oracle legacy", _UPDATE_ENV)
+        pytest.skip(f"updated legacy loaded-surface golden; re-run without {_UPDATE_ENV} to verify")
+    golden_path = require_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name, _UPDATE_ENV)
+    if not golden_path.exists():
         golden_path.write_text(actual + "\n")
+        write_provenance(golden_path.parent, "tests/godobject_oracle legacy", _UPDATE_ENV)
         pytest.skip(f"recorded first-run loaded-surface golden for this environment: {golden_path}")
-    assert golden_path.exists(), f"missing loaded-surface golden; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(

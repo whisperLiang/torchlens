@@ -10,6 +10,8 @@ IN-PROCESS ONLY: double-render equality plus structural invariants.
 from __future__ import annotations
 
 import difflib
+import functools
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +26,7 @@ from torch import nn
 import torchlens as tl
 
 _GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
-_UPDATE_ENV = "TORCHLENS_UPDATE_SURFACE_ORACLE"
+_UPDATE_ENV = "TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE"
 _SEED = 20260812
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -113,19 +115,20 @@ def _dot(trace: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
 def _assert_matches_golden(actual: str, golden_name: str) -> None:
     """Compare DOT text to a committed golden, with the update escape hatch."""
 
-    from _oracle_env import resolve_env_golden
+    from _oracle_env import require_env_golden, resolve_env_golden, write_provenance
 
-    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_DIR, golden_name)
     actual = actual.rstrip("\n")
     if os.environ.get(_UPDATE_ENV) == "1":
+        golden_path, _ = resolve_env_golden(_GOLDEN_DIR, golden_name)
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        pytest.skip(f"updated golden {golden_name}")
-    if record_on_missing and not golden_path.exists():
-        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        write_provenance(golden_path.parent, "tests/godobject_oracle viz", _UPDATE_ENV)
+        pytest.skip(f"updated golden {golden_name}; re-run without {_UPDATE_ENV} to verify")
+    golden_path = require_env_golden(_GOLDEN_DIR, golden_name, _UPDATE_ENV)
+    if not golden_path.exists():
         golden_path.write_text(actual + "\n")
+        write_provenance(golden_path.parent, "tests/godobject_oracle viz", _UPDATE_ENV)
         pytest.skip(f"recorded first-run viz golden for this environment: {golden_path}")
-    assert golden_path.exists(), f"missing golden {golden_name}; generate with {_UPDATE_ENV}=1"
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(
@@ -142,14 +145,45 @@ def _assert_matches_golden(actual: str, golden_name: str) -> None:
         raise AssertionError(f"DOT diverged from {golden_name}:\n{diff}")
 
 
+@functools.lru_cache(maxsize=1)
+def _worker_renders() -> dict[str, str]:
+    """Generate every forward-DOT golden in one isolated subprocess.
+
+    The worker constructs both models before its first capture, so no model
+    ctor runs on wrapped torch and the goldens cannot silently freeze
+    session-dependent wrap-state artifacts (b10 R78-1).
+    """
+
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    python_paths = (str(Path(_REPO_ROOT) / "tests"), _REPO_ROOT)
+    env["PYTHONPATH"] = os.pathsep.join(
+        (*python_paths, *((existing_pythonpath,) if existing_pythonpath else ()))
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "godobject_oracle._worker"],
+        cwd=_REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AssertionError("viz worker produced no JSON")
+    renders = json.loads(lines[-1])
+    assert isinstance(renders, dict)
+    return renders
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize("model_key", ("viz_cnn", "viz_recurrent"))
 @pytest.mark.parametrize("vis_mode", ("unrolled", "rolled"))
-def test_forward_dot_matches_golden(model_key: str, vis_mode: str, tmp_path: Path) -> None:
+def test_forward_dot_matches_golden(model_key: str, vis_mode: str) -> None:
     """Forward/rolled DOT source is byte-identical to the frozen golden."""
 
-    trace = _capture(model_key)
-    source = _dot(trace, tmp_path, vis_mode=vis_mode)
+    source = _worker_renders()[f"viz_{model_key}_{vis_mode}.gv"]
     _assert_matches_golden(source, f"viz_{model_key}_{vis_mode}.gv")
 
 
