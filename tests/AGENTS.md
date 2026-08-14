@@ -73,7 +73,9 @@ small inputs, vector/2D/complex inputs, and output directories.
 primarily in `tests/example_models.py`.
 
 ## Output Directories
-All generated outputs go under `tests/generated_outputs/` (gitignored):
+All generated outputs go under pytest's private basetemp at
+`<basetemp>/torchlens-generated/` (assigned in `tests/conftest.py::pytest_configure` and
+exported as `TORCHLENS_TEST_OUTPUTS_DIR`):
 - `reports/` for coverage, aesthetics, profiling.
 - `visualizations/` for rendered graph artifacts.
 
