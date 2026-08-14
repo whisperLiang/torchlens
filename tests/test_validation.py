@@ -244,7 +244,12 @@ def test_validation_decision_recorder_counts_distinct_nodes() -> None:
 
     status = recorder.as_status()
 
-    assert status.replayed_node_count == 2
+    # Only the labeled replay-phase validation is a replayed node: the
+    # perturbation decision dedups onto the same label and the ground-truth
+    # output decision is a different phase entirely (counting it let
+    # "exemptions alone" traces pass the no_nodes_replay_validated guard --
+    # b1-fable round-2 F1).
+    assert status.replayed_node_count == 1
     assert status.state == "passed"
 
 
