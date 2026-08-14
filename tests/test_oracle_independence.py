@@ -312,3 +312,80 @@ def test_symmetric_edge_drop_is_caught_by_value_rooted_replay():
         assert failure is not None, "validation failed without recording a failure"
     finally:
         log.cleanup()
+
+
+def _loaded_edge_drop_trace(tmp_path):
+    """Return a LOADED trace with the plant applied post-load, plus outputs.
+
+    Builds the same _TwoStage capture as ``_planted_edge_drop_trace``, round
+    trips it through a real ``Trace.save`` / ``tl.load``, then applies the
+    symmetric edge drop to the LOADED trace (relation views normalize the
+    assignments; the CSR scrub is a no-op on the detached loaded core).
+
+    Parameters
+    ----------
+    tmp_path:
+        Directory for the bundle.
+
+    Returns
+    -------
+    tuple
+        ``(loaded_trace, ground_truth_outputs)``.
+    """
+
+    import torchlens as tl
+
+    log = trace_fn(_TwoStage(), torch.randn(2, 6), layers_to_save="all", save_arg_values=True)
+    outputs = [log.layer_dict_all_keys[label].out for label in log.output_layers]
+    path = tmp_path / "edge_drop_plant.tlspec"
+    log.save(path)
+    log.cleanup()
+    loaded = tl.load(path)
+    relu_label = next(op.label for op in loaded.compute_ops if op.func_name == "relu")
+    consumer = next(iter(loaded.layer_dict_all_keys[relu_label].children))
+    _drop_edge_symmetrically(loaded, consumer, relu_label)
+    return loaded, outputs
+
+
+def test_loaded_artifact_replay_validation_refuses_typed(tmp_path) -> None:
+    """Loaded torch replay validation refuses TYPED, never silently passes.
+
+    b9-sol R75-2 reality check: ``Op.func`` is ``FieldPolicy.DROP`` at every
+    save level, so a loaded torch artifact cannot run the value-rooted replay
+    sweeps at all. The honest floor pinned here is that the refusal is LOUD —
+    a ``TorchLensIOError`` naming the unresolved computational functions — so
+    a planted loaded corruption can never validate clean through a path that
+    silently skipped the work.
+    """
+
+    from torchlens._io import TorchLensIOError
+
+    loaded, outputs = _loaded_edge_drop_trace(tmp_path)
+    with pytest.raises(TorchLensIOError, match="unresolved computational functions"):
+        loaded.validate_forward_pass(outputs, validate_metadata=False)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "b9-sol R75-2 / b9-fable R75-1 known gap: the loaded half of "
+        "edge-drop detection is DARK. Op.func is FieldPolicy.DROP at every "
+        "save level so loaded torch replay refuses typed before any "
+        "value-rooted sweep runs, and the capture-time edge witness "
+        "(capture_edge_survival) is session-only so the loaded metadata tier "
+        "cannot see the plant either. This test asserts the DESIRED loaded "
+        "behavior; strict xfail flips red the day a loaded-capable replay or "
+        "witness lands, forcing the pin to become a real regression test."
+    ),
+)
+def test_symmetric_edge_drop_on_a_loaded_artifact_known_gap(tmp_path) -> None:
+    """DESIRED: a loaded artifact's validation path catches the same plant."""
+
+    loaded, outputs = _loaded_edge_drop_trace(tmp_path)
+    status = loaded.validate_forward_pass(outputs, validate_metadata=False)
+    assert not status, (
+        "a symmetric edge drop on a LOADED artifact validated clean through "
+        "the loaded-provider validation path"
+    )
+    failure = getattr(loaded, TRACE_FAILURE_ATTR, None)
+    assert failure is not None, "validation failed without recording a failure"
