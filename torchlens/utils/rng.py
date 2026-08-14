@@ -4310,46 +4310,77 @@ class host_nondeterminism_monitor:
         if self._torn_down:
             return
         self._torn_down = True
-        # Restore the PREVIOUS registry entry instead of clearing unconditionally: a
-        # nested monitor's exit used to null the slot mid-outer-window, after which
-        # TorchLens's own per-op RNG restores marked a false ``mutation`` channel and
-        # every in-window thread reclassified as foreign.
-        if _ACTIVE_MONITOR is self or _ACTIVE_MONITOR is None:
-            # Skip torn-down ancestors: a non-LIFO overlap otherwise parks a
-            # dead monitor in the module slot and every later capture flags a
-            # phantom overlap (same dead-chain class as the profile slots).
-            candidate = self._previous_active_monitor
-            seen: set[int] = set()
-            while (
-                candidate is not None
-                and id(candidate) not in seen
-                and getattr(candidate, "_torn_down", False)
-            ):
-                seen.add(id(candidate))
-                candidate = candidate._previous_active_monitor
-            _ACTIVE_MONITOR = candidate
-        else:
-            self._flag_uncertain("active_monitor_replaced")
-        self._restore_profile_hooks()
+        # grind-p3 T11.8: ``_torn_down`` latches BEFORE the unwind runs, so a
+        # BaseException escaping mid-teardown (a Ctrl-C landing in the registry
+        # or profile-hook steps, or inside one patch restore -- the per-restore
+        # guard caught only ``Exception``) used to strand the WHOLE remaining
+        # restore queue forever: the retry no-opped on the latch, ~40
+        # process-wide patches leaked, and the next window snapshotted the
+        # leaked wrappers as its own originals, stacking monotonically. Every
+        # teardown stage is now BaseException-isolated so the restore queue
+        # ALWAYS drains; the first BaseException re-raises only after the
+        # unwind completes (Ctrl-C semantics are preserved, never swallowed).
+        deferred: BaseException | None = None
+        try:
+            # Restore the PREVIOUS registry entry instead of clearing unconditionally: a
+            # nested monitor's exit used to null the slot mid-outer-window, after which
+            # TorchLens's own per-op RNG restores marked a false ``mutation`` channel and
+            # every in-window thread reclassified as foreign.
+            if _ACTIVE_MONITOR is self or _ACTIVE_MONITOR is None:
+                # Skip torn-down ancestors: a non-LIFO overlap otherwise parks a
+                # dead monitor in the module slot and every later capture flags a
+                # phantom overlap (same dead-chain class as the profile slots).
+                candidate = self._previous_active_monitor
+                seen: set[int] = set()
+                while (
+                    candidate is not None
+                    and id(candidate) not in seen
+                    and getattr(candidate, "_torn_down", False)
+                ):
+                    seen.add(id(candidate))
+                    candidate = candidate._previous_active_monitor
+                _ACTIVE_MONITOR = candidate
+            else:
+                self._flag_uncertain("active_monitor_replaced")
+        except BaseException as exc:  # noqa: BLE001 -- drain first, re-raise after
+            self._flag_uncertain("teardown_interrupted")
+            deferred = exc
+        try:
+            self._restore_profile_hooks()
+        except BaseException as exc:  # noqa: BLE001 -- drain first, re-raise after
+            self._flag_uncertain("teardown_interrupted")
+            if deferred is None:
+                deferred = exc
         self._hooks_retired = True
         for restore in reversed(self._restores):
             try:
                 restore()
             except Exception:
                 self._flag_uncertain("patch_restore_failed")
+            except BaseException as exc:  # noqa: BLE001 -- keep draining the queue
+                self._flag_uncertain("patch_restore_interrupted")
+                if deferred is None:
+                    deferred = exc
         self._restores.clear()
-        for holder, before in self._generator_states:
-            try:
-                if self._digest_rng_instance(holder) != before:
-                    self._mark("model_attribute_generator")
-            except Exception:
-                self._flag_uncertain("inventory_compare_failed")
-        for holder, before in self._deep_generator_states:
-            try:
-                if self._digest_rng_instance(holder) != before:
-                    self._mark("frame_reachable_generator")
-            except Exception:
-                self._flag_uncertain("inventory_compare_failed")
+        try:
+            for holder, before in self._generator_states:
+                try:
+                    if self._digest_rng_instance(holder) != before:
+                        self._mark("model_attribute_generator")
+                except Exception:
+                    self._flag_uncertain("inventory_compare_failed")
+            for holder, before in self._deep_generator_states:
+                try:
+                    if self._digest_rng_instance(holder) != before:
+                        self._mark("frame_reachable_generator")
+                except Exception:
+                    self._flag_uncertain("inventory_compare_failed")
+        except BaseException as exc:  # noqa: BLE001 -- unwind already complete
+            self._flag_uncertain("teardown_interrupted")
+            if deferred is None:
+                deferred = exc
+        if deferred is not None:
+            raise deferred
 
     def _restore_profile_hooks(self) -> None:
         """Hand the profile slots back, never overwriting a hook that is not ours.
