@@ -192,9 +192,13 @@ def loads_bounded(
     _prescan_depth(text, max_depth=max_depth)
 
     def _reject_constant(name: str) -> Any:
-        # The writers use ``allow_nan=False``, so NaN/Infinity in an artifact
-        # is a forgery -- and one that loads fine but makes every re-save
-        # raise (a stillborn artifact). Refuse at parse instead.
+        """Refuse the non-finite JSON constant ``name`` at parse time.
+
+        The writers use ``allow_nan=False``, so NaN/Infinity in an artifact
+        is a forgery -- and one that loads fine but makes every re-save
+        raise (a stillborn artifact). Refuse at parse instead.
+        """
+
         raise _refuse(f"manifest JSON contains the non-finite constant {name}", text)
 
     try:

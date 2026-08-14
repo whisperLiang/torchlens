@@ -337,6 +337,8 @@ def _cached_join_refs(join: Any, index: int) -> tuple[dict[str, Any], dict[int, 
     from ._engine import PerRankRef
 
     def refuse(detail: str) -> MergedArtifactError:
+        """Build the typed schema refusal for this join row, naming its index."""
+
         return _schema_refusal(f"descriptor cache join {index} {detail}")
 
     if not isinstance(join, dict):

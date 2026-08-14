@@ -43,6 +43,8 @@ class _RecoveryWarningSink(list):  # type: ignore[type-arg]
             self.append(item)
 
     def append(self, item: str) -> None:
+        """Append ``item`` unless the cap is reached; count it as suppressed then."""
+
         if len(self) >= _MAX_RECOVERY_WARNINGS:
             self.suppressed += 1
             return
