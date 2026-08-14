@@ -560,6 +560,9 @@ def _collapsed_module_should_show_remainder(
     address: str,
     op_labels: Sequence[str],
     collapse_fn: CollapseFn | None,
+    *,
+    vis_mode: str = "unrolled",
+    max_module_depth: int = 1000,
 ) -> bool:
     """Return whether a collapsed box has own-output ops surfaced by the plan.
 
@@ -573,6 +576,11 @@ def _collapsed_module_should_show_remainder(
         Pass-qualified operation labels in this module call.
     collapse_fn:
         Active collapse predicate, optionally carrying v2 plan metadata.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"``; must match the active render so the
+        plan-less separate-render check mirrors the real node emission.
+    max_module_depth:
+        Depth threshold in effect for the active render.
 
     Returns
     -------
@@ -588,7 +596,24 @@ def _collapsed_module_should_show_remainder(
     if isinstance(plan, CollapsePlan):
         visible_ops = _plan_separately_rendered_op_labels(plan)
         return any(op.layer_label in visible_ops for op in surfaced)
-    return getattr(collapse_fn, "_torchlens_v2_mode", None) == "max"
+    if getattr(collapse_fn, "_torchlens_v2_mode", None) == "max":
+        return True
+    # Plain user collapse_fn (no v2 plan): a surfaced exit op renders as a
+    # separate visible node exactly when no ancestor module absorbs it --
+    # the same _collapse_address_for_node decision the node emitter makes.
+    # Requiring v2 "max" here let every plain-collapse box double-represent
+    # its recurrence-surfaced exits (counted inside AND drawn beside it).
+    return any(
+        _collapse_address_for_node(
+            trace,
+            op,
+            vis_mode=vis_mode,
+            collapse_fn=collapse_fn,
+            max_module_depth=max_module_depth,
+        )
+        is None
+        for op in surfaced
+    )
 
 
 def _plan_separately_rendered_op_labels(plan: CollapsePlan) -> frozenset[str]:

@@ -1303,15 +1303,24 @@ def _build_collapsed_module_node(
         module_num_buffers = sum(self[layer].is_buffer for layer in module_call.ops)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in module_call.ops)
         if (
-            _collapsed_module_should_show_remainder(self, address, module_call.ops, collapse_fn)
+            _collapsed_module_should_show_remainder(
+                self,
+                address,
+                module_call.ops,
+                collapse_fn,
+                vis_mode=vis_mode,
+                max_module_depth=vis_call_depth,
+            )
             and fold is None
         ):
             remainder_stats = _collapsed_module_remainder_stats(self, address, module_call.ops)
-            module_num_tensors = remainder_stats["num_layers"]
-            module_num_buffers -= sum(
-                layer.is_buffer
-                for layer in _surfaced_own_output_ops(self, address, module_call.ops)
-            )
+            surfaced_call_ops = _surfaced_own_output_ops(self, address, module_call.ops)
+            # Per-call boxes count in per-call currency: subtract this call's
+            # surfaced ops from THIS call's op count. The module-currency
+            # remainder (num_layers over all passes) overstated every
+            # multi-call box.
+            module_num_tensors = max(0, module_num_tensors - len(surfaced_call_ops))
+            module_num_buffers -= sum(layer.is_buffer for layer in surfaced_call_ops)
             module_nparams = remainder_stats["num_params"]
             module_nparams_trainable = remainder_stats["num_params_trainable"]
             module_nparams_frozen = remainder_stats["num_params_frozen"]
@@ -1327,7 +1336,14 @@ def _build_collapsed_module_node(
         # box double-represents it (round-27). ``ml.layer_labels`` is already
         # in pass-free layer currency, matching ``ml.num_layers``.
         if (
-            _collapsed_module_should_show_remainder(self, address, ml.layer_labels, collapse_fn)
+            _collapsed_module_should_show_remainder(
+                self,
+                address,
+                ml.layer_labels,
+                collapse_fn,
+                vis_mode=vis_mode,
+                max_module_depth=vis_call_depth,
+            )
             and fold is None
         ):
             remainder_stats = _collapsed_module_remainder_stats(self, address, ml.layer_labels)
