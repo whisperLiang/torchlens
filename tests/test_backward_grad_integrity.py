@@ -243,3 +243,62 @@ def test_backward_graph_task_id_routes_through_torch_compat(
     assert tensor_tracking._current_backward_graph_task_id() == 42
     monkeypatch.setattr(tensor_tracking, "get_current_graph_task_id_fn", lambda: None)
     assert tensor_tracking._current_backward_graph_task_id() is None
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("save_mode", ["reference", "view"])
+def test_legacy_grad_slot_stores_snapshot_not_alias(save_mode: str) -> None:
+    """``Op.log_tensor_grad`` snapshots the observed gradient under all modes.
+
+    The legacy backward-hook write went through ``safe_copy(save_mode=...)``,
+    which returns a storage ALIAS under ``reference``/``view``. Output-layer
+    ops receive their grad ONLY via this legacy propagation, so the recorded
+    grad aliased the caller's seed gradient and later user mutation of the
+    seed silently rewrote the recorded value with no disclosure.
+    """
+
+    trace = _armed_trace(save_mode=save_mode)
+    out_op = trace[trace.output_layers[0]]
+    seed = torch.full_like(out_op.out, 2.0)
+    trace.log_backward(out_op.out, gradient=seed)
+
+    seed_ptr = seed.untyped_storage().data_ptr()
+    recorded: dict[str, torch.Tensor] = {}
+    for label in trace.layer_labels:
+        payload = getattr(trace[label], "grad", None)
+        if isinstance(payload, torch.Tensor):
+            recorded[label] = payload
+    assert recorded, "expected recorded gradient payloads"
+    aliased = [
+        label
+        for label, payload in recorded.items()
+        if payload.untyped_storage().data_ptr() == seed_ptr
+    ]
+    assert aliased == [], f"recorded grads alias the caller's seed gradient: {aliased}"
+
+    snapshots = {label: payload.clone() for label, payload in recorded.items()}
+    seed.mul_(1234.5)
+    rewritten = [
+        label for label, payload in recorded.items() if not torch.equal(payload, snapshots[label])
+    ]
+    assert rewritten == [], f"seed mutation rewrote recorded grads: {rewritten}"
+
+
+@pytest.mark.smoke
+def test_per_call_save_grads_false_gates_legacy_layer_slot() -> None:
+    """``log_backward(..., save_grads=False)`` disables legacy slot retention.
+
+    The legacy layer-slot write was gated on the deprecated ``save_grads``
+    trace attribute instead of the active per-call policy, so a capture armed
+    with ``save_grads="all"`` kept retaining full grad payloads on a call
+    that explicitly disabled retention.
+    """
+
+    trace = _armed_trace()
+    trace.log_backward(_loss(trace), save_grads=False)
+    retained = [
+        label
+        for label in trace.layer_labels
+        if isinstance(getattr(trace[label], "grad", None), torch.Tensor)
+    ]
+    assert retained == [], f"save_grads=False call retained legacy grad payloads: {retained}"

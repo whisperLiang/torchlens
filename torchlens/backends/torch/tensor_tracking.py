@@ -184,7 +184,12 @@ def _add_tensor_backward_hook(
                 ):
                     return
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
-            if getattr(active_trace, "save_grads", None) not in (None, False):
+            # Gate the legacy layer-slot write on the ACTIVE per-call policy,
+            # not the deprecated ``save_grads`` attribute: a per-call
+            # ``log_backward(..., save_grads=False)`` sets the policy while
+            # the attribute can stay truthy, and the attribute-keyed gate
+            # kept retaining full grad payloads the caller disabled.
+            if _active_save_grads_policy(active_trace) not in (None, False, "none", []):
                 _log_tensor_grad(active_trace, grad, tensor_label)
 
     # TorchLens bookkeeping: torch's ``register_hook`` reads ``self.grad_fn``
