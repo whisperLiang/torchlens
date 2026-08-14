@@ -3,9 +3,11 @@
 The belt membership is DERIVED per build (never hand-listed): every wrapped
 entry outside torch's override registries whose probe call fires zero
 ``TorchFunctionMode`` callbacks and touches tensors. On this build that is
-exactly ``{torch.from_numpy, torch.frombuffer, torch.Tensor.as_subclass}``;
-``torch.from_file`` measures VISIBLE here and must stay excluded (the
-build-dependent case the mechanical derivation exists to settle).
+exactly ``{torch.from_numpy, torch.from_dlpack, torch.frombuffer,
+torch.Tensor.as_subclass}`` (``from_dlpack`` joined the wrap inventory with
+the 9bea6649 inventory-gap closure); ``torch.from_file`` measures VISIBLE
+here and must stay excluded (the build-dependent case the mechanical
+derivation exists to settle).
 
 NOTE: raw originals are held in function locals throughout — module-level or
 ``__main__``-level raw references get rewritten by the (pre-deletion)
@@ -30,6 +32,7 @@ pytestmark = pytest.mark.smoke
 
 _EXPECTED_MEMBERS = {
     ("torch", "from_numpy"),
+    ("torch", "from_dlpack"),
     ("torch", "frombuffer"),
     ("torch.Tensor", "as_subclass"),
 }
