@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     _TraceMixinBase = Trace
 else:
     _TraceMixinBase = object
-from .._deprecations import MISSING, MissingType
+from .._deprecations import MISSING, MissingType, warn_deprecated_alias
 from .._errors import InvalidArgumentError
 from .._literals import (
     BufferVisibilityLiteral,
@@ -77,8 +77,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
         """
 
         vis_opt = kwargs.pop("vis_opt", None)
-        if vis_opt is not None and "vis_mode" not in kwargs:
-            kwargs["vis_mode"] = vis_opt
+        if vis_opt is not None:
+            warn_deprecated_alias("vis_opt", "view")
+            if "vis_mode" not in kwargs:
+                kwargs["vis_mode"] = vis_opt
         if kwargs.get("vis_mode") == "none":
             return None
         if method == "repr":
@@ -180,6 +182,13 @@ class TraceVisualizationMixin(_TraceMixinBase):
         from ..visualization._render_dot import draw as _impl
 
         if vis_opt is not MISSING:
+            # The oldest of three generations (vis_opt -> vis_mode -> view), and
+            # the whole chain warned nowhere until grind b4 (R48-1). This hop is
+            # announced because BOTH replacements are accepted by this very
+            # method and no caller inside torchlens passes vis_opt; the
+            # vis_mode -> view hop is forked (see the lane report), since draw()
+            # has no canonical spelling for most of the vis_* family yet.
+            warn_deprecated_alias("vis_opt", "view")
             vis_mode = cast(VisModeLiteral, vis_opt)
         if view is not MISSING:
             vis_mode = cast(VisModeLiteral, view)

@@ -17,7 +17,7 @@ import types as _types
 import warnings as _warnings
 from collections.abc import Callable as _Callable, Iterable as _Iterable, Mapping as _Mapping
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple as _NamedTuple
 
 import torch as _torch
 from torch import nn as _nn
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .data_classes.trace import Trace
     from .intervention import Bundle
 
-_REMOVED_IN = "a future 2.x release"
+from ._deprecations import REMOVED_IN as _REMOVED_IN  # noqa: E402  (single advertised window)
 
 _LAZY_ATTRS = {
     "Bundle": ("torchlens.intervention", "Bundle"),
@@ -197,16 +197,39 @@ _MOVED_OBJECTS = {
     "wrapped": ("torchlens.backends.torch.wrappers", "wrapped"),
 }
 
+class _LegacyShim(_NamedTuple):
+    """One paper-era public name kept as a compatibility shim.
+
+    The two fields were previously one positional tuple whose second slot
+    carried a canonical name for some entries and the dispatch discriminator
+    ``"class"`` for others -- so the slot's meaning depended on the row. They
+    are named and separately typed here.
+
+    Parameters
+    ----------
+    advice:
+        Complete replacement spelling as shown to the user. Must name
+        something that actually resolves: the old free-text values produced
+        advice like ``use torchlens.structure getter instead``, and
+        ``torchlens.structure`` does not exist.
+    kind:
+        Dispatch discriminator, ``"callable"`` or ``"class"``.
+    """
+
+    advice: str
+    kind: str
+
+
 _LEGACY_API_SHIMS = {
-    "log_forward_pass": ("trace", "trace"),
-    "validate_model_activations": ("validate", "validate_forward"),
-    "validate_saved_activations": ("validate", "validate_saved"),
-    "render_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "render_model_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "draw_model_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "ModelHistory": ("Trace", "class"),
-    "get_model_structure": ("structure getter", "structure"),
-    "show_model_structure": ("structure getter", "structure"),
+    "log_forward_pass": _LegacyShim("torchlens.trace", "callable"),
+    "validate_model_activations": _LegacyShim("torchlens.validate", "callable"),
+    "validate_saved_activations": _LegacyShim("torchlens.validate", "callable"),
+    "render_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "render_model_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "draw_model_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "ModelHistory": _LegacyShim("torchlens.Trace", "class"),
+    "get_model_structure": _LegacyShim("Trace.modules", "callable"),
+    "show_model_structure": _LegacyShim("Trace.modules", "callable"),
 }
 
 _LEGACY_TRACE_KWARG_ALIASES = {
@@ -377,42 +400,54 @@ def _warn_moved_name(name: str, new_module_path: str, new_attr: str) -> None:
         Canonical attribute name inside ``new_module_path``.
     """
 
+    from ._deprecations import TorchLensDeprecationWarning
+    from .utils.display import user_stacklevel
+
     _warnings.warn(
         f"torchlens.{name} is deprecated; use {new_module_path}.{new_attr} instead. "
         f"Removed in {_REMOVED_IN}.",
-        DeprecationWarning,
-        stacklevel=4,
+        TorchLensDeprecationWarning,
+        stacklevel=user_stacklevel(),
     )
 
 
-def _warn_legacy_api_name(name: str, replacement: str) -> None:
+def _warn_legacy_api_name(name: str, advice: str) -> None:
     """Emit the long-sunset warning for legacy paper-era API names.
 
     Parameters
     ----------
     name:
         Legacy top-level TorchLens name.
-    replacement:
-        Replacement API spelling.
+    advice:
+        Complete replacement spelling, already resolvable as written.
     """
 
+    from ._deprecations import TorchLensDeprecationWarning
+    from .utils.display import user_stacklevel
+
     _warnings.warn(
-        f"torchlens.{name} is deprecated; use torchlens.{replacement} instead. "
-        "The old paper-era name remains available as a compatibility shim.",
-        DeprecationWarning,
-        stacklevel=3,
+        f"torchlens.{name} is deprecated; use {advice} instead. "
+        f"The old paper-era name remains available as a compatibility shim "
+        f"and will be removed in {_REMOVED_IN}.",
+        TorchLensDeprecationWarning,
+        # Two routes reach this function -- module attribute access (via
+        # `__getattr__`, itself reached through the custom module
+        # `__getattribute__`, so one frame deeper) and a `_legacy_trace_alias`
+        # shim CALL. The former fixed `stacklevel=3` was right for neither:
+        # it landed on `__init__.py` itself for the attribute route.
+        stacklevel=user_stacklevel(),
     )
 
 
-def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
+def _legacy_trace_alias(name: str, advice: str) -> _Callable[..., Any]:
     """Build a warning wrapper for a legacy top-level callable.
 
     Parameters
     ----------
     name:
         Legacy callable name.
-    replacement:
-        Replacement public callable name.
+    advice:
+        Replacement spelling as shown to the user.
 
     Returns
     -------
@@ -423,7 +458,7 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
     def _shim(*args: Any, **kwargs: Any) -> Any:
         """Warn and delegate a legacy top-level API call."""
 
-        _warn_legacy_api_name(name, replacement)
+        _warn_legacy_api_name(name, advice)
         if name == "log_forward_pass":
             return _resolve_top_level("_trace")(*args, **_translate_legacy_trace_kwargs(kwargs))
         if name == "validate_model_activations":
@@ -444,7 +479,7 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
 
     _shim.__name__ = name
     _shim.__qualname__ = name
-    _shim.__doc__ = f"Deprecated compatibility shim for :func:`torchlens.{replacement}`."
+    _shim.__doc__ = f"Deprecated compatibility shim; use {advice} instead."
     return _shim
 
 
@@ -478,11 +513,11 @@ def __getattr__(name: str) -> Any:
         globals()[name] = value
         return value
     if name in _LEGACY_API_SHIMS:
-        replacement, shim_kind = _LEGACY_API_SHIMS[name]
-        _warn_legacy_api_name(name, replacement)
-        if shim_kind == "class":
+        shim = _LEGACY_API_SHIMS[name]
+        _warn_legacy_api_name(name, shim.advice)
+        if shim.kind == "class":
             return _resolve_top_level("Trace")
-        return _legacy_trace_alias(name, replacement)
+        return _legacy_trace_alias(name, shim.advice)
     if name in _MOVED_OBJECTS:
         new_module_path, new_attr = _MOVED_OBJECTS[name]
         _warn_moved_name(name, new_module_path, new_attr)

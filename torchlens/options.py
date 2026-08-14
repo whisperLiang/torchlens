@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import torch
 
-from ._deprecations import MISSING, MissingType, warn_deprecated_alias
+from ._deprecations import (
+    MISSING,
+    MissingType,
+    TorchLensDeprecationWarning,
+    warn_deprecated_alias,
+)
 from ._errors import (
     ArgumentConflictError,
     ArgumentTypeError,
@@ -431,12 +436,19 @@ def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
             argument="node_style",
         )
     if node_style in {"vision", "attention"}:
+        # The advice used to name examples/recipes/<style>.py and a
+        # torchlens.<style> plugin. NEITHER exists (grind b4, R48-6): the
+        # recipes directory ships five notebooks and no such file, and no
+        # plugin was ever published. torchlens.experimental.node_styles is the
+        # destination that actually resolves today.
+        from .utils.display import user_stacklevel as _user_stacklevel
+
         warnings.warn(
-            f"node_style={node_style!r} is moving out of core; use the equivalent "
-            f"recipe at examples/recipes/{node_style}.py or wait for the "
-            f"torchlens.{node_style} plugin",
-            DeprecationWarning,
-            stacklevel=3,
+            f"node_style={node_style!r} is moving out of core; use "
+            f"torchlens.experimental.node_styles.{node_style}_node_mode "
+            f"(exported today) via node_spec_fn instead",
+            TorchLensDeprecationWarning,
+            stacklevel=_user_stacklevel(),
         )
 
 
@@ -507,9 +519,16 @@ def _validate_buffer_visibility(value: BufferVisibilityLiteral | bool) -> None:
         If ``value`` is not a supported tri-state mode.
     """
 
-    if value is True:
-        return
-    if value is False:
+    if value is True or value is False:
+        # A deprecated VALUE, not a deprecated name. The docstring has called
+        # these "legacy" since the tri-state landed, but nothing warned, so the
+        # bools were on a silent removal path (grind b4, R48-1). No caller
+        # inside torchlens passes a bool, so announcing it originates no
+        # internal self-deprecation.
+        warn_deprecated_alias(
+            f"show_buffers={value!r}",
+            "show_buffers='always'" if value else "show_buffers='never'",
+        )
         return
     if value in {"never", "meaningful", "always"}:
         return
@@ -1608,7 +1627,20 @@ class VisualizationOptions:
 
     @property
     def mode(self) -> VisModeLiteral:
-        """Deprecated alias for ``view``."""
+        """Deprecated alias for ``view``.
+
+        Notes
+        -----
+        Documented as deprecated but deliberately still SILENT on read, unlike
+        its three sibling aliases below (grind b4, R48-1). ``user_funcs.py``
+        reads ``visualization.mode`` internally when validating the MLX
+        visualization mode; warning here would make TorchLens deprecate itself
+        on that path, which is the very defect R48-3 is about. The read site is
+        outside this lane's territory, so this property stays silent and is
+        recorded in the silent-deprecation ledger
+        (``tests/test_deprecation_inventory.py``) rather than being quietly
+        forgotten.
+        """
 
         return self.view
 
@@ -1616,18 +1648,21 @@ class VisualizationOptions:
     def max_module_depth(self) -> int:
         """Deprecated alias for ``depth``."""
 
+        warn_deprecated_alias("visualization.max_module_depth", "visualization.depth")
         return self.depth
 
     @property
     def layout_engine(self) -> VisNodePlacementLiteral:
         """Deprecated alias for ``layout``."""
 
+        warn_deprecated_alias("visualization.layout_engine", "visualization.layout")
         return self.layout
 
     @property
     def node_mode(self) -> VisNodeModeLiteral:
         """Deprecated alias for ``node_style``."""
 
+        warn_deprecated_alias("visualization.node_mode", "visualization.node_style")
         return self.node_style
 
     def as_dict(self) -> dict[str, Any]:
