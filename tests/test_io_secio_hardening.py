@@ -259,12 +259,32 @@ def test_git_commit_hash_is_dropped_when_source_excluded(tmp_path: Path) -> None
 
     included = tmp_path / "with_source.tlspec"
     tl.save(trace, str(included), include_source=True)
-    # When source is kept the field is populated iff git resolves a commit for cwd;
-    # either way it is unchanged from the pre-fix default behavior.
-    from torchlens._io.bundle import _git_commit_hash
+    # R21-2: when source is kept the field reflects TORCHLENS's own commit (or None
+    # for a released wheel), never the working directory's unrelated repository.
+    from torchlens._io.bundle import _git_commit_hash, _torchlens_package_dir
 
-    expected = _git_commit_hash(Path.cwd())
+    expected = _git_commit_hash(_torchlens_package_dir())
     assert _manifest_git_hash(included) == expected
+
+
+def test_git_commit_hash_is_independent_of_working_directory(tmp_path: Path, monkeypatch) -> None:
+    """R21-2: the same capture saved from two directories records the same hash.
+
+    Fail-before: the hash came from Path.cwd(), so saving from inside a different repo
+    embedded that repo's HEAD -- an ambient-environment dependence that also leaked the
+    user's unrelated repository commit.
+    """
+
+    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
+    first = tmp_path / "a.tlspec"
+    tl.save(trace, str(first), include_source=True)
+
+    other_cwd = tmp_path / "elsewhere"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    second = tmp_path / "b.tlspec"
+    tl.save(trace, str(second), include_source=True)
+    assert _manifest_git_hash(first) == _manifest_git_hash(second)
 
 
 # --------------------------------------------------------------------------- #

@@ -1415,7 +1415,6 @@ def _deserialize_value(
         # import a foreign module under the default untrusted load.
         return helper_from_serialized(
             value["__helper__"],
-            tensor_loader=lambda tensor_id: tensors[tensor_id],
             import_resolver=_trusted_import_resolver,
             value_decoder=_decode,
         )

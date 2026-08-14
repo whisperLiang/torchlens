@@ -3152,7 +3152,7 @@ def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provena
         rng_state_digests=rng_digests,
         input_hash=input_hash,
         model_structure_hash=model_structure_hash,
-        git_commit_hash=_git_commit_hash(Path.cwd()) if include_source else None,
+        git_commit_hash=_git_commit_hash(_torchlens_package_dir()) if include_source else None,
     )
 
 
@@ -3185,13 +3185,27 @@ def _json_ready_provenance_value(value: Any) -> Any:
     return str(value)
 
 
+def _torchlens_package_dir() -> Path:
+    """Return the torchlens package directory (provenance root for the git probe)."""
+
+    return Path(__file__).resolve().parent.parent
+
+
 def _git_commit_hash(cwd: Path) -> str | None:
     """Return the Git commit for ``cwd`` with a short best-effort timeout.
+
+    R21-2: the provenance git commit is resolved from the TORCHLENS package
+    directory, not ``Path.cwd()``. Stamping the working directory's repository
+    recorded the USER's unrelated repo commit (a privacy leak) and made the same
+    capture saved from two directories differ (an ambient-environment dependence in a
+    supposedly portable artifact). Resolving from the package dir yields torchlens's
+    own commit for a dev/editable install and ``None`` for a released wheel (whose
+    ``torchlens_version`` already identifies it) -- deterministic either way.
 
     Parameters
     ----------
     cwd:
-        User working directory active at save time.
+        Directory whose repository HEAD is probed (the torchlens package dir).
 
     Returns
     -------

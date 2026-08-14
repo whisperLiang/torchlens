@@ -325,11 +325,18 @@ def test_manifest_git_commit_is_absent_outside_repository(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Provenance collection should record no Git hash outside a repository."""
+    """No Git hash when the TORCHLENS package dir is not a repository (R21-2).
 
-    outside_repo = tmp_path / "outside"
-    outside_repo.mkdir()
-    monkeypatch.chdir(outside_repo)
+    The provenance git hash is resolved from the torchlens package directory, not
+    the working directory, so it is ``None`` for a released wheel (no ``.git``). The
+    working directory is deliberately irrelevant; only the package dir governs.
+    """
+
+    import torchlens._io.bundle as bundle_mod
+
+    non_repo = tmp_path / "not_a_repo"
+    non_repo.mkdir()
+    monkeypatch.setattr(bundle_mod, "_torchlens_package_dir", lambda: non_repo)
     captured = trace_fn(_InputTransformModel(), torch.ones(2, 3), layers_to_save="all")
     bundle_path = tmp_path / "outside.tlspec"
 
