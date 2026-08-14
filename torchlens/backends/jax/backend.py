@@ -18,6 +18,7 @@ from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...backends._finalize import (
     attach_function_root_module,
     mirror_param_derived_grads,
+    normalize_op_module_calls,
     numel_from_shape as _numel,
     session_callable_identity as _callable_identity,
     value_nbytes as _nbytes,
@@ -2255,7 +2256,7 @@ class JAXBackend:
         seen_addresses = set(mbd["addresses"])
 
         for op_log in trace.layer_list:
-            normalized_calls = _jax_op_module_calls(op_log.modules)
+            normalized_calls = normalize_op_module_calls(op_log.modules)
             op_log.modules = [f"{address}:{call_index}" for address, call_index in normalized_calls]
             op_log.module = op_log.modules[-1] if op_log.modules else None
             parent_call_label: str | None = None
@@ -2815,33 +2816,6 @@ def _jax_event_module_call_stack(
 
     call_by_address = dict(module_call_stack)
     return tuple((address, call_by_address.get(address, 1)) for address in module_addresses)
-
-
-def _jax_op_module_calls(modules: Sequence[Any]) -> tuple[tuple[str, int], ...]:
-    """Return ``(address, call_index)`` pairs from a materialized JAX op.
-
-    Parameters
-    ----------
-    modules
-        Raw ``Op.modules`` entries, either legacy strings or event tuples.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized module-call pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for entry in modules:
-        if isinstance(entry, str):
-            address, separator, call_index_text = entry.partition(":")
-            call_index = int(call_index_text) if separator else 1
-            calls.append((address, call_index))
-            continue
-        address = str(entry[0])
-        call_index = int(entry[1]) if len(entry) > 1 else 1
-        calls.append((address, call_index))
-    return tuple(calls)
 
 
 def _jax_module_frame(address: str, call_index: int) -> ModuleFrame:

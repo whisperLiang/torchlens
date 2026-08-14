@@ -23,6 +23,7 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    normalize_op_module_calls,
 )
 from .._options import (
     TF_EXTRA_KWARG_POLICY,
@@ -1221,7 +1222,7 @@ def _attach_tf_op_params(
         Mutates the operation log.
     """
 
-    module_calls = _tf_op_module_calls(getattr(op_log, "modules", ()))
+    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
     if not module_calls:
         return
     owner = module_calls[-1][0]
@@ -1286,38 +1287,11 @@ def _attach_object_module_logs(trace: Trace, tree: TFModuleTree) -> None:
     attach_object_module_logs(
         trace,
         tree,
-        normalize_module_calls=_tf_op_module_calls,
+        normalize_module_calls=normalize_op_module_calls,
         metadata_top_level=_tf_metadata_top_level,
         op_top_level=_tf_op_top_level,
         training_mode=_tf_training_mode,
     )
-
-
-def _tf_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's module-call records.
-
-    Parameters
-    ----------
-    value
-        Raw module-call values.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized address/call-index pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _tf_metadata_top_level(

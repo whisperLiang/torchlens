@@ -47,6 +47,7 @@ from .._finalize import (
     attach_object_module_logs,
     finalize_single_pass_trace,
     mirror_param_derived_grads,
+    normalize_op_module_calls,
     numel_from_shape as _numel,
     stable_callable_name as _callable_identity,
     value_nbytes as _nbytes,
@@ -1614,7 +1615,7 @@ class PaddleBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_paddle_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_paddle_metadata_top_level,
             op_top_level=_paddle_op_top_level,
             training_mode=_paddle_training_mode,
@@ -1747,7 +1748,7 @@ def _attach_paddle_op_params(
 ) -> None:
     """Attach Paddle module-owned parameters to a finalized op log."""
 
-    module_calls = _paddle_op_module_calls(getattr(op_log, "modules", ()))
+    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
     if not module_calls:
         return
     owner = module_calls[-1][0]
@@ -1791,22 +1792,6 @@ def _attach_paddle_op_params_for_finalize(
     """
 
     _attach_paddle_op_params(op_log, trace.param_logs, seen_param_barcodes)
-
-
-def _paddle_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list."""
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _paddle_metadata_top_level(

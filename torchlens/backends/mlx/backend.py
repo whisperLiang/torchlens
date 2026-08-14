@@ -55,6 +55,7 @@ from .._finalize import (
     attach_object_module_logs,
     finalize_single_pass_trace,
     mirror_param_derived_grads,
+    normalize_op_module_calls,
     numel_from_shape as _numel,
     session_callable_identity as _callable_identity,
     value_nbytes as _nbytes,
@@ -2249,7 +2250,7 @@ class MLXBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_mlx_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_mlx_metadata_top_level,
             op_top_level=_mlx_op_top_level,
             training_mode=_mlx_training_mode,
@@ -2386,7 +2387,7 @@ def _attach_mlx_op_params(
         Parameter fields are updated in place.
     """
 
-    module_calls = _mlx_op_module_calls(getattr(op_log, "modules", ()))
+    module_calls = normalize_op_module_calls(getattr(op_log, "modules", ()))
     if not module_calls:
         return
     owner = module_calls[-1][0]
@@ -2572,33 +2573,6 @@ def _alias_to_primary(tree: MLXModuleTree) -> dict[str, str]:
         for alias in metadata.get("all_addresses", [primary]):
             aliases[str(alias)] = primary
     return aliases
-
-
-def _mlx_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list.
-
-    Parameters
-    ----------
-    value
-        Materialized op ``modules`` field.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized ``(address, call_index)`` pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _mlx_metadata_top_level(

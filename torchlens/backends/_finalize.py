@@ -846,3 +846,55 @@ def mirror_param_derived_grads(trace: Trace, records: Any) -> None:
         param.grad_shape = tuple(getattr(record.grad, "shape", ()))
         param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
         param.gradient_memory = value_nbytes(record.grad) or 0
+
+
+def normalize_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
+    """Normalize an op's raw module-call records to ``(address, call_index)``.
+
+    The ONE five-backend normalizer (R17-6). Accepted spellings:
+    ``(address, call_index)`` tuples, single-element tuples (call index
+    defaults to ``1``), ``"address:index"`` strings, and bare address strings
+    (legacy, call index ``1``). A string with a ``":"`` whose tail is not a
+    digit is REFUSED -- module attribution is a correctness surface, and the
+    historical per-backend copies silently DROPPED such entries (four
+    backends) or crashed on multi-colon strings (jax's first-colon split).
+
+    Parameters
+    ----------
+    value:
+        Materialized op ``modules`` field entries.
+
+    Returns
+    -------
+    tuple[tuple[str, int], ...]
+        Normalized module-call pairs.
+
+    Raises
+    ------
+    ValueError
+        On an entry no accepted spelling matches (malformed capture-side
+        module attribution must fail loudly, never vanish from attribution).
+    """
+
+    calls: list[tuple[str, int]] = []
+    for item in value:
+        if isinstance(item, tuple):
+            if len(item) >= 2:
+                calls.append((str(item[0]), int(item[1])))
+                continue
+            if len(item) == 1:
+                calls.append((str(item[0]), 1))
+                continue
+            raise ValueError("module-call entry is an empty tuple")
+        text = str(item)
+        address, separator, index_text = text.rpartition(":")
+        if separator:
+            if not index_text.isdigit():
+                raise ValueError(
+                    f"unparseable module-call entry {text!r}: expected 'address:index' "
+                    "with a digit index"
+                )
+            calls.append((address, int(index_text)))
+            continue
+        calls.append((text, 1))
+    return tuple(calls)

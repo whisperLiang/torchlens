@@ -48,6 +48,7 @@ from .._finalize import (
     attach_object_module_logs,
     finalize_single_pass_trace,
     mirror_param_derived_grads,
+    normalize_op_module_calls,
     numel_from_shape as _numel,
     session_callable_identity as _callable_identity,
     value_nbytes as _nbytes,
@@ -1223,7 +1224,7 @@ class TinygradBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_tinygrad_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_tinygrad_metadata_top_level,
             op_top_level=_tinygrad_op_top_level,
             training_mode=_tinygrad_training_mode,
@@ -2338,33 +2339,6 @@ def _synthetic_stack_for_address(
             )
         )
     return tuple(frames)
-
-
-def _tinygrad_op_module_calls(value: Sequence[Any]) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list.
-
-    Parameters
-    ----------
-    value
-        Materialized op ``modules`` field.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized ``(address, call_index)`` pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _enrich_tinygrad_op(op_log: Any) -> None:
