@@ -621,7 +621,21 @@ class Recorder:
         op_events = tuple(
             self._capture_events.amended_op_records() if self._capture_events is not None else ()
         )
-        last_event = op_events[-1] if op_events else None
+        # B8-46: the exception unwind records module-exit events AFTER the
+        # failure point (a mid-forward submodule failure leaves a trailing
+        # ``boom:exit:1`` / ``root:exit:1`` run), so the raw last event names
+        # the unwind, not the failure frontier. Skip trailing module-exit
+        # events so the best-effort ``last_event_*`` metadata points at the
+        # deepest event that actually ran before the failure; if every event
+        # is a module exit, keep the raw tail rather than reporting nothing.
+        last_event = None
+        for event in reversed(op_events):
+            event_kind = getattr(getattr(event, "record_context", None), "kind", None)
+            if event_kind != "module_exit":
+                last_event = event
+                break
+        if last_event is None and op_events:
+            last_event = op_events[-1]
         last_ctx = getattr(last_event, "record_context", None)
         successful_op_labels = [
             str(getattr(event, "label_raw", getattr(event, "label", "")))
