@@ -187,9 +187,7 @@ class TestLifecycleFailureAtomicity:
         state = lifecycle._ArmedState(
             arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
             recognizer=object(),
-            identities={
-                id(group): lifecycle.GroupIdentity(M, 0, "seeded", (0, 1), "gloo")
-            },
+            identities={id(group): lifecycle.GroupIdentity(M, 0, "seeded", (0, 1), "gloo")},
         )
         lifecycle._install_lifecycle_wraps(state)
         with pytest.raises(RuntimeError, match="destroy failed"):
@@ -459,3 +457,45 @@ class TestArmingAndSeeding:
         lifecycle.disarm()
         assert dist.new_group is original
         assert not lifecycle.is_armed()
+
+
+class TestC10dGroupSeqCompatRouting:
+    """Deep-hunt F8: the private group-seq probe routes through _torch_compat.
+
+    Fail-before: ``_c10d_group_seq`` called the private
+    ``_get_sequence_number_for_group`` under a bare ``except Exception ->
+    None``, so a private-API rename silently and permanently disabled the
+    redundant correlation cross-check -- the only in-band detector in the
+    base-misalignment neighborhood -- with zero visibility in ``doctor()`` /
+    ``compat.report()``.
+    """
+
+    def test_missing_capability_short_circuits_to_none(self, monkeypatch):
+        from torchlens.backends.torch import collectives
+        from torchlens.utils import _torch_compat as tc
+
+        monkeypatch.setattr(
+            tc, "probe_c10d_capabilities", lambda **_: {"HAS_C10D_GROUP_SEQ": False}
+        )
+
+        class Recording:
+            called = False
+
+            def _get_sequence_number_for_group(self):
+                Recording.called = True
+                return 41
+
+        assert collectives._c10d_group_seq(Recording()) is None
+        assert Recording.called is False
+
+    def test_present_capability_reads_the_private_counter(self, monkeypatch):
+        from torchlens.backends.torch import collectives
+        from torchlens.utils import _torch_compat as tc
+
+        monkeypatch.setattr(tc, "probe_c10d_capabilities", lambda **_: {"HAS_C10D_GROUP_SEQ": True})
+
+        class Fake:
+            def _get_sequence_number_for_group(self):
+                return 41
+
+        assert collectives._c10d_group_seq(Fake()) == 41

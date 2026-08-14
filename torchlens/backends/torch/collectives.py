@@ -318,8 +318,19 @@ def _resolve_root(bound: dict[str, Any], group: Any, src_or_dst: str) -> int | N
 
 
 def _c10d_group_seq(group: Any) -> int | None:
-    """Best-effort read of c10d's private per-group sequence number."""
+    """Best-effort read of c10d's private per-group sequence number.
 
+    Routed through ``_torch_compat`` (``HAS_C10D_GROUP_SEQ``, r-b4 R26-2
+    shape): a private-API rename used to silently and permanently disable
+    this redundant correlation cross-check -- the only in-band detector in
+    the base-misalignment neighborhood -- with zero visibility in
+    ``doctor()`` / ``compat.report()``.
+    """
+
+    from torchlens.utils._torch_compat import probe_c10d_capabilities
+
+    if not probe_c10d_capabilities()["HAS_C10D_GROUP_SEQ"]:
+        return None
     dist = torch.distributed
     try:
         target: Any = group if group is not None else dist.group.WORLD
