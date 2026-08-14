@@ -2655,8 +2655,12 @@ class Trace(
 
         Warning
         -------
-        Portable bundles contain a pickle file. Only load bundles from trusted
-        sources. Loading an untrusted bundle can execute arbitrary code.
+        Portable bundles contain a pickle file, but the default load path
+        decodes it through a restricted, default-deny unpickler; foreign
+        ``custom`` callable modules are never imported unless explicitly
+        trusted (``trust_custom_callables=True`` /
+        ``allowed_custom_callable_modules=...``). Only grant that trust to
+        artifacts whose provenance you trust.
         """
 
         from .._io.bundle import save as save_bundle

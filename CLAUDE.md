@@ -152,8 +152,10 @@ print(tl.compat.report(model, x).to_markdown())
   `op.module_call_stack`, conditional child lists, `Layer.parents`/`Layer.children`, ...)
   are `tuple`; label sets (`input_ancestors`, `output_descendants`, `root_ancestors`,
   `internal_source_ancestors`) are `frozenset`. Reads are identity-stable, in-place
-  mutation (`op.children.append(...)`) raises, direct assignment still works (a raw
-  `list`/`set` normalizes to the view type), and equal views may be shared across
+  mutation (`op.children.append(...)`) raises, direct assignment still works on `Op`
+  records (a raw `list`/`set` normalizes to the view type) — but NOT on `Layer`:
+  `Layer.parents`/`Layer.children` are read-only properties and assignment raises
+  `AttributeError` (and `log[label]` returns a `Layer`). Equal views may be shared across
   records. Dict-shaped relation metadata (`parent_arg_positions`,
   `conditional_elif_children`, `module_entry_arg_keys`, ...) keeps its mutable dict
   type. Legacy saves load with the same immutable surface. `equivalent_ops`/
@@ -499,7 +501,7 @@ ceilings a capture). The loaded-sparse and live-refresh
 providers settle through ONE finalizer (identical verdict class): a live opaque-container output
 is `unverifiable` + poisoned (never a wrongly-blessed bare tensor), a parse-refused descriptor
 degrades EVERY payload family to analysis-only with its typed diagnostic intact, and an
-inexecutable divergent input raises `PathDivergenceError` (not `RuntimeSignatureDrift`). Structseq
+inexecutable divergent input raises `PathDivergenceError` (not `RuntimeSignatureDriftError`). Structseq
 reconstruction trust keys on the RESOLUTION AUTHORITY (`spec.type_module == "torch.return_types"` +
 identity re-resolution), never the spoofable `__module__` attribute; a namedtuple TYPE that can
 carry instance state refuses at save even with an empty instance. Persisted execution-context values validate at parse
@@ -579,9 +581,11 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost (measured 2026-08-13, instrumented `--durations=0` smoke run, 4-core devbox
-under parallel sprint load): `smoke` selects ~3.2k tests and took 1194s (~20 min) wall;
-the same tier measured ~500s on a quieter box earlier the same sprint. Smoke is NOT
+Tiers by cost: `smoke` selects ~4.4k tests (4,412/12,093 collect-only, measured 2026-08-14).
+The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
+devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
+(~500s on a quieter box earlier the same sprint); budget at least that at today's +34%
+larger selection. Smoke is NOT
 sub-minute and NOT a per-step gate — per-step verification is the targeted test files for
 the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
 the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests

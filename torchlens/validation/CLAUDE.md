@@ -9,10 +9,14 @@ metadata invariants, intervention readiness, and unified `.tlspec` manifest sche
 | File | Purpose |
 |------|---------|
 | `core.py` | Saved-out replay, perturbation checks, arg reconstruction |
-| `backends/torch/backward.py` | Backward capture implementation used by validation |
+| `backward.py` | Backward-pass grad-capture validation vs stock autograd |
 | `consolidated.py` | Public `validate(..., scope=...)` dispatcher and intervention report |
 | `invariants.py` | Metadata invariant categories and `MetadataInvariantError` |
+| `_invariants_*.py` | Per-domain invariant implementations (entry, topology, connectivity, conditionals, buffers, modules/params, payloads, equivalence, backward graph/flow/domain) |
 | `exemptions.py` | Replay/perturbation exemption registries and dynamic checks |
+| `status.py` | Replay-validation status objects |
+| `diagnostics.py` | Structured replay-failure diagnostics (add-only relative to pass/fail) |
+| `_layer_grad_report.py`, `_stock_layer_grads.py`, `_output_walk.py` | Layer-grad oracle report, stock-autograd grad collection, output-tree walking |
 | `__init__.py` | Public validation exports plus `.tlspec` manifest schema validation |
 
 ## Validation Scopes

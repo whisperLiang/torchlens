@@ -118,8 +118,9 @@ def test_dated_test_tier_claim_is_present_and_selector_is_additive() -> None:
 
     root = _repo_root()
     guide = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "measured 2026-08-14" in guide
+    assert "~4.4k tests" in guide
     assert "measured 2026-08-13" in guide
-    assert "~3.2k tests" in guide
     assert "1194s (~20 min)" in guide
     assert 'pytest tests/ -m "not rare and not slow"' in guide
 

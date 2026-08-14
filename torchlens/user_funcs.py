@@ -2112,10 +2112,12 @@ def trace(
     afterward.  Pass ``unwrap_when_done=True`` to restore the original torch
     callables after logging completes.
 
-    **Layer selection** (``layers_to_save``):
+    **Layer selection** (``save=``, the canonical spelling):
 
     - ``'all'`` (default) - save outs for every layer.
     - ``'none'`` / ``None`` / ``[]`` - save no outs (metadata only).
+    - A predicate selector, e.g. ``tl.func("relu")``, ``tl.in_module("encoder")``,
+      or combinators such as ``tl.func("conv2d") & tl.followed_by(tl.func("relu"))``.
     - A list containing any mix of:
       1. Layer name, e.g. ``'conv2d_1_1'`` (all ops).
       2. Pass-qualified label, e.g. ``'conv2d_1_1:2'`` (second pass only).
@@ -2126,7 +2128,9 @@ def trace(
     Most string and substring layer selections are absorbed into a single-pass
     predicate save. TorchLens falls back to the two-pass discovery/replay path
     only for selectors that require finalized labels, such as negative indexes,
-    identity/output labels, or gradient-specific selection.
+    identity/output labels, or gradient-specific selection. The bare
+    ``layers_to_save=`` kwarg is a deprecated alias for the same selection and
+    warns when passed.
 
     Parameters
     ----------
@@ -2136,6 +2140,12 @@ def trace(
         Positional args for ``model.forward()``; a single tensor or list.
     input_kwargs:
         Keyword args for ``model.forward()``.
+    save:
+        Which layers to save outs for; the canonical selection kwarg (see
+        **Layer selection** above). Accepts ``'all'``, ``'none'``/``None``/``[]``,
+        label/module/index/substring lists, predicate selectors
+        (``tl.func``, ``tl.in_module``, ``tl.followed_by``, ``tl.when``
+        combinators), or a grouped ``SaveOptions``.
     transform:
         Optional callable applied once to ``input_args`` before ``model.forward``.
         If it returns a mapping, TorchLens calls the model with ``**transformed``.
@@ -2146,144 +2156,208 @@ def trace(
         Raw-input batch rendering policy for visualization:
         ``"auto"`` (default), ``"all"``, ``"first"``, ``"first_n:<N>"``, or
         ``"shape_only"``.
-        output_transform: Optional callable applied once to the model output
-            after ``model.forward``. The returned value is stored as
-            ``Trace.raw_output`` and does not affect the computational graph.
-        output_style: Optional semantic output decode style.
-        output_head: Optional live-output head to decode.
-        save_raw_output: Raw output save policy for portable bundles:
-            ``"small"`` (default), ``True``, or ``False``.
-        layers_to_save: Which layers to save outs for (see above).
-        keep_orphans: If True, retain island ops -- computations unreachable from both
-            the model inputs and outputs -- in raw metadata and expose them via
-            ``trace.orphans`` instead of silently dropping them. They do not enter
-            ``layer_list``/summaries. Default False (islands pruned) until the validation
-            invariants account for retained islands.
-        output_device: Device for stored tensors: ``'same'``, ``'cpu'``, or ``'cuda'``.
-        activation_transform: Optional function applied to each out before saving. The
-            raw out remains in ``layer.tensor``/``layer.out`` by default, and
-            the transform result is stored in ``layer.transformed_out``.
-        grad_transform: Optional function applied to each grad before saving. The raw
-            grad remains in ``layer.grad`` by default, and the transform result is stored
-            in ``layer.transformed_grad``.
-        save_raw_activations: When ``False`` and ``activation_transform`` is set, do not retain
-            raw out tensors in memory; raw out metadata is still populated.
-        save_raw_gradients: When ``False`` and ``grad_transform`` is set, do not retain raw
-            grad tensors in memory; raw grad metadata is still populated.
-        save_mode: Tensor retention mode for saved activation and gradient payloads.
-            ``"copy"`` is the safe cloning default; ``"reference"`` preserves the
-            captured value through in-place handling; ``"view"`` is a live alias that
-            downstream in-place operations can mutate; and ``"cpu_async"`` clones to CPU.
-        capture_tensor_grad_hooks: If False, skip tensor-level backward hooks on
-            forward tensors while preserving grad-fn registration for ``log_backward``.
-        mark_layer_depths: Deprecated alias for
-            ``compute_input_output_distances``.
-        detach_saved_activations: If True, detach saved tensors from the autograd graph.
-        save_arg_values: Store non-tensor args for each function call (needed for
-            ``validate_forward_pass``).
-        save_grads: Capture grads during subsequent backward passes. ``True`` captures
-            all gradients, ``False``/``None`` disables capture, and selectors restrict
-            retention.
-        save_code_context: Python call-stack identity is always recorded for each
-            tensor operation. If False (default), identity fields such as ``file``,
-            ``line_number``, ``func_name``, ``code_firstlineno``,
-            ``func_qualname``, and ``col_offset`` are still captured, but the rich
-            source-text properties return their existing empty-placeholder values.
-            If True, TorchLens also captures source text on each ``FuncCallLocation``
-            (``source_context``, ``code_context``, etc.) plus module source metadata.
-            Full ``if``/``elif``/``else`` and ternary branch attribution
-            (``conditional_records``, ``conditional_arm_entry_edges``,
-            ``conditional_edge_call_indices``, etc.) works regardless of this flag because it
-            relies only on the always-captured identity fields.
-        save_rng_states: If True, capture RNG states before each operation (needed for
-            validation replay of stochastic ops like dropout). Auto-enabled when
-            ``validate_forward_pass`` is used. Default False for speed.
-        reconstruction_ready: If True, auto-enable the argument and RNG capture
-            prerequisites needed by read-only reconstructed facets such as fused
-            SDPA ``scores``, ``pattern``, and ``z``.
-        random_seed: Fixed RNG seed for reproducibility with stochastic models.
-        num_context_lines: Deprecated alias for ``source_context_lines``.
-        optimizer: Optional optimizer to annotate which params are being optimized.
-        save_outs_to: Deprecated alias for ``streaming.bundle_path``.
-        keep_outs_in_memory: Deprecated alias for
-            ``streaming.retain_in_memory``.
-        out_sink: Deprecated alias for ``streaming.out_callback``.
-        intervention_ready: If True, capture replay-template metadata and mark the
-            returned log as eligible for intervention mutators, replay, rerun, and
-            intervention spec persistence. This does not imply
-            ``save_arg_values=True``.
-        capture_container_structure: If True, persist input and output container
-            structure without enabling intervention replay metadata. Default
-            ``False`` preserves legacy bytes and graph shape.
-        hooks: Optional live forward post-hook plan. Accepts the same shapes as
-            ``Trace.attach_hooks`` and executes during this capture when supplied.
-        unwrap_when_done: If True, restore original torch callables after logging.
-            Default False - torch stays wrapped for subsequent calls.
-        verbose: If True, print timed progress messages at each major pipeline stage.
-        source_context_lines: Lines of source context to capture per function call.
-        compute_input_output_distances: Compute graph distances from inputs/outputs.
-        recurrence_detection: If True (default), run full isomorphic
-            subgraph expansion. Set this to False when the forward pass has more than
-            about 1M operations and postprocessing speed matters; the False path skips
-            the expensive expansion step and only groups operations that share the same
-            parameters.
-        lookback: Number of recent capture events queryable by predicate-window helpers.
-        intervene: Optional predicate returning an intervention decision for
-            current-op live mutation.
-        halt: Optional predicate returning ``True`` to stop after the matching
-            source, operation, or module-boundary event and return the partial trace.
-        lookback_payload_policy: Retention policy for retroactive ``followed_by`` saves.
-            ``"metadata_only"`` keeps the default metadata-only window and cannot
-            retroactively save payloads. Non-default policies retain up to ``lookback``
-            candidate payloads, for a memory cost of roughly ``lookback`` times the
-            candidate payload size.
-        storage: Shared storage routing option. ``storage=tl.to_disk(path)``
-            streams predicate-selected saves to a disk bundle during the
-            forward pass. ``None`` preserves the existing in-RAM behavior.
-        streaming: Grouped streaming-save options.
-        backward_ready: If True, validate training-compatible settings and keep saved
-            outs attached to autograd.
-        inference_only: If True, run the user forward under ``torch.no_grad()``.
-            This skips autograd graph construction and cannot be combined with
-            backward-related capture.
-        chunk_size: If supplied, split a positional tensor input into forward
-            chunks of this size along dimension 0 and append them into one
-            in-memory ``Trace``. Forward-only and torch-only.
-        chunk_paths: Optional explicit tensor leaf paths to split when multiple
-            batched tensor leaves are present.
-        name: Optional user-facing name for the returned ``Trace``. When omitted,
-            TorchLens uses a process-local counter based on the model class name after
-            stripping common HuggingFace suffixes. The counter is not thread-safe; it
-            relies on TorchLens' single active logging session guard.
-        cache: Whether to use the content-hash capture cache.
-        cache_dir: Optional cache directory.
-        module_filter: Optional predicate receiving each op log. Returning ``False`` keeps
-            metadata but skips out saving for that op.
-        stop_after: Experimental stop-early site. Unsupported for ``trace``.
-        profile: If True, explicitly marks the returned trace as profiled. Phase timings are
-            always populated on ``trace._phase_timings``.
-        recipes: Per-trace additive facet recipes captured into the immutable
-            registry snapshot for the returned trace.
-        jax_control_flow: Declared JAX control-flow policy. JAX accepts
-            ``"reject"``, default ``"unroll"``, and explicit ``"region"``.
-        jax_max_control_flow_unroll: Declared maximum number of JAX
-            control-flow body iterations to unroll when that phase lands.
-        module_identity_mode: Declared module-mode selection passthrough.
-            Current non-torch preview phases reject explicit use until module
-            adapters land.
-        payload_policy: Declared payload materialization/codec policy
-            passthrough. Current non-torch preview phases reject explicit use
-            until codec support lands.
-        save_preview: Declared flag for future ``save=`` preview semantics.
-            Current non-torch preview phases reject explicit use.
-        jax_static_argnums: JAX-only positional argument indexes passed to
-            ``jax.make_jaxpr(..., static_argnums=...)`` when
-            ``backend="jax"``. Non-default values require the explicit JAX
-            backend.
-        grad_options: Backend-specific derived-gradient options for the
-            leaf-level preview. Supported by explicit ``backend="jax"`` and
-            ``backend="tinygrad"`` only.
-        backend: Explicit backend name. ``None`` preserves legacy auto-resolution.
+    output_transform:
+        Optional callable applied once to the model output
+        after ``model.forward``. The returned value is stored as
+        ``Trace.raw_output`` and does not affect the computational graph.
+    output_style:
+        Optional semantic output decode style.
+    output_head:
+        Optional live-output head to decode.
+    save_raw_output:
+        Raw output save policy for portable bundles:
+        ``"small"`` (default), ``True``, or ``False``.
+    layers_to_save:
+        Deprecated alias for ``save=`` (warns when passed).
+    keep_orphans:
+        If True, retain island ops -- computations unreachable from both
+        the model inputs and outputs -- in raw metadata and expose them via
+        ``trace.orphans`` instead of silently dropping them. They do not enter
+        ``layer_list``/summaries. Default False (islands pruned) until the validation
+        invariants account for retained islands.
+    output_device:
+        Device for stored tensors: ``'same'``, ``'cpu'``, or ``'cuda'``.
+    activation_transform:
+        Optional function applied to each out before saving. The
+        raw out remains in ``layer.tensor``/``layer.out`` by default, and
+        the transform result is stored in ``layer.transformed_out``.
+    grad_transform:
+        Optional function applied to each grad before saving. The raw
+        grad remains in ``layer.grad`` by default, and the transform result is stored
+        in ``layer.transformed_grad``.
+    save_raw_activations:
+        When ``False`` and ``activation_transform`` is set, do not retain
+        raw out tensors in memory; raw out metadata is still populated.
+    save_raw_gradients:
+        When ``False`` and ``grad_transform`` is set, do not retain raw
+        grad tensors in memory; raw grad metadata is still populated.
+    save_mode:
+        Tensor retention mode for saved activation and gradient payloads.
+        ``"copy"`` is the safe cloning default; ``"reference"`` preserves the
+        captured value through in-place handling; ``"view"`` is a live alias that
+        downstream in-place operations can mutate; and ``"cpu_async"`` clones to CPU.
+    capture_tensor_grad_hooks:
+        If False, skip tensor-level backward hooks on
+        forward tensors while preserving grad-fn registration for ``log_backward``.
+    mark_layer_depths:
+        Deprecated alias for
+        ``compute_input_output_distances``.
+    detach_saved_activations:
+        If True, detach saved tensors from the autograd graph.
+    save_arg_values:
+        Deprecated flat alias for ``capture=CaptureOptions(save_arg_values=...)``
+        (warns when passed). Stores non-tensor args for each function call
+        (needed for ``validate_forward_pass``).
+    save_grads:
+        Deprecated flat alias for ``capture=CaptureOptions(save_grads=...)``
+        (warns when passed). ``True`` captures all gradients during subsequent
+        backward passes, ``False``/``None`` disables capture, and selectors
+        restrict retention.
+    save_code_context:
+        Python call-stack identity is always recorded for each
+        tensor operation. If False (default), identity fields such as ``file``,
+        ``line_number``, ``func_name``, ``code_firstlineno``,
+        ``func_qualname``, and ``col_offset`` are still captured, but the rich
+        source-text properties return their existing empty-placeholder values.
+        If True, TorchLens also captures source text on each ``FuncCallLocation``
+        (``source_context``, ``code_context``, etc.) plus module source metadata.
+        Full ``if``/``elif``/``else`` and ternary branch attribution
+        (``conditional_records``, ``conditional_arm_entry_edges``,
+        ``conditional_edge_call_indices``, etc.) works regardless of this flag because it
+        relies only on the always-captured identity fields.
+    save_rng_states:
+        If True, capture RNG states before each operation (needed for
+        validation replay of stochastic ops like dropout). Auto-enabled when
+        ``validate_forward_pass`` is used. Default False for speed.
+    reconstruction_ready:
+        If True, auto-enable the argument and RNG capture
+        prerequisites needed by read-only reconstructed facets such as fused
+        SDPA ``scores``, ``pattern``, and ``z``.
+    random_seed:
+        Fixed RNG seed for reproducibility with stochastic models.
+    num_context_lines:
+        Deprecated alias for ``source_context_lines``.
+    optimizer:
+        Optional optimizer to annotate which params are being optimized.
+    save_outs_to:
+        Deprecated alias for ``streaming.bundle_path``.
+    keep_outs_in_memory:
+        Deprecated alias for
+        ``streaming.retain_in_memory``.
+    out_sink:
+        Deprecated alias for ``streaming.out_callback``.
+    intervention_ready:
+        If True, capture replay-template metadata and mark the
+        returned log as eligible for intervention mutators, replay, rerun, and
+        intervention spec persistence. This does not imply
+        ``save_arg_values=True``.
+    capture_container_structure:
+        If True, persist input and output container
+        structure without enabling intervention replay metadata. Default
+        ``False`` preserves legacy bytes and graph shape.
+    hooks:
+        Optional live forward post-hook plan. Accepts the same shapes as
+        ``Trace.attach_hooks`` and executes during this capture when supplied.
+    unwrap_when_done:
+        If True, restore original torch callables after logging.
+        Default False - torch stays wrapped for subsequent calls.
+    verbose:
+        If True, print timed progress messages at each major pipeline stage.
+    source_context_lines:
+        Lines of source context to capture per function call.
+    compute_input_output_distances:
+        Compute graph distances from inputs/outputs.
+    recurrence_detection:
+        If True (default), run full isomorphic
+        subgraph expansion. Set this to False when the forward pass has more than
+        about 1M operations and postprocessing speed matters; the False path skips
+        the expensive expansion step and only groups operations that share the same
+        parameters.
+    lookback:
+        Number of recent capture events queryable by predicate-window helpers.
+    intervene:
+        Optional predicate returning an intervention decision for
+        current-op live mutation.
+    halt:
+        Optional predicate returning ``True`` to stop after the matching
+        source, operation, or module-boundary event and return the partial trace.
+    lookback_payload_policy:
+        Retention policy for retroactive ``followed_by`` saves.
+        ``"metadata_only"`` keeps the default metadata-only window and cannot
+        retroactively save payloads. Non-default policies retain up to ``lookback``
+        candidate payloads, for a memory cost of roughly ``lookback`` times the
+        candidate payload size.
+    storage:
+        Shared storage routing option. ``storage=tl.to_disk(path)``
+        streams predicate-selected saves to a disk bundle during the
+        forward pass. ``None`` preserves the existing in-RAM behavior.
+    streaming:
+        Grouped streaming-save options.
+    backward_ready:
+        If True, validate training-compatible settings and keep saved
+        outs attached to autograd.
+    inference_only:
+        If True, run the user forward under ``torch.no_grad()``.
+        This skips autograd graph construction and cannot be combined with
+        backward-related capture.
+    chunk_size:
+        If supplied, split a positional tensor input into forward
+        chunks of this size along dimension 0 and append them into one
+        in-memory ``Trace``. Forward-only and torch-only.
+    chunk_paths:
+        Optional explicit tensor leaf paths to split when multiple
+        batched tensor leaves are present.
+    name:
+        Optional user-facing name for the returned ``Trace``. When omitted,
+        TorchLens uses a process-local counter based on the model class name after
+        stripping common HuggingFace suffixes. The counter is not thread-safe; it
+        relies on TorchLens' single active logging session guard.
+    cache:
+        Whether to use the content-hash capture cache.
+    cache_dir:
+        Optional cache directory.
+    module_filter:
+        Optional predicate receiving each op log. Returning ``False`` keeps
+        metadata but skips out saving for that op.
+    stop_after:
+        Experimental stop-early site. Unsupported for ``trace``.
+    profile:
+        If True, explicitly marks the returned trace as profiled. Phase timings are
+        always populated on ``trace._phase_timings``.
+    recipes:
+        Per-trace additive facet recipes captured into the immutable
+        registry snapshot for the returned trace.
+    jax_control_flow:
+        Declared JAX control-flow policy. JAX accepts
+        ``"reject"``, default ``"unroll"``, and explicit ``"region"``.
+    jax_max_control_flow_unroll:
+        Declared maximum number of JAX
+        control-flow body iterations to unroll when that phase lands.
+    module_identity_mode:
+        Declared module-mode selection passthrough.
+        Current non-torch preview phases reject explicit use until module
+        adapters land.
+    payload_policy:
+        Declared payload materialization/codec policy
+        passthrough. Current non-torch preview phases reject explicit use
+        until codec support lands.
+    save_preview:
+        Non-torch preview backends' declared flag reserving extended ``save=``
+        semantics for a later preview phase. Explicit use refuses typed on
+        backends whose phase does not support it (torch refuses
+        ``save_preview=True``); the shipped torch ``save=`` kwarg is
+        independent of this flag.
+    jax_static_argnums:
+        JAX-only positional argument indexes passed to
+        ``jax.make_jaxpr(..., static_argnums=...)`` when
+        ``backend="jax"``. Non-default values require the explicit JAX
+        backend.
+    grad_options:
+        Backend-specific derived-gradient options for the
+        leaf-level preview. Supported by explicit ``backend="jax"`` and
+        ``backend="tinygrad"`` only.
+    backend:
+        Explicit backend name. ``None`` preserves legacy auto-resolution.
 
     Postfunc behavior:
         ``activation_transform`` and ``grad_transform`` both take a tensor, should return a
@@ -2299,8 +2373,8 @@ def trace(
         requires grads in ``backward_ready=True``, the same differentiability checks apply.
 
     Returns
-
     -------
+    Trace
         A ``Trace`` containing layer outs (if requested) and full metadata.
     """
     if not isinstance(model, nn.Module) and is_dynamo_compiled_callable(model):

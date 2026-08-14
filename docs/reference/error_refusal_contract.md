@@ -37,6 +37,7 @@ add names to the top-level `torchlens` namespace:
 | `artifact_kind_mismatch` | Specialized loader received another artifact kind | Use the matching loader or generic `io.load` |
 | `artifact_save_level_invalid` | `.tlspec` save level is unknown | Choose a documented save level |
 | `artifact_save_level_unsupported` | Artifact kind cannot provide the requested save level | Choose a level supported by that kind |
+| `artifact_version_below_floor` | Artifact predates the rehydration floor (`tlspec_version` < 6 / torchlens < 2.33) | Load and re-save it with a torchlens release that still reads it |
 | `ambiguous_op_lookup` | Accessor key matches multiple pass-qualified objects | Use a full address, pass label, or call index |
 | `auto_environment_unsupported` | `TORCHLENS_AUTO=1` requested implicit capture | Unset it and call `auto_capture()` |
 | `backward_capture_conflict` | `save_grads` conflicts with `backward_ready=False` | Enable or omit `backward_ready` |
@@ -76,6 +77,7 @@ add names to the top-level `torchlens` namespace:
 | `container_selector_requires_registry` | Snapshot selector on a non-registry view | Call `reconstruct()` without site/role |
 | `container_selector_unresolved` | Container selector matched zero or many records | Pass a more specific `site=`/`role=` |
 | `container_value_source_invalid` | Container value source is unknown | Pass `values='out'` or `'transformed'` |
+| `context_field_invalid` | Persisted execution-context field fails its closed-vocabulary parse | Re-export the artifact; do not hand-edit descriptor context fields |
 | `decoded_output_not_classification` | Decoded output is not a batch top-k table | Capture with classification output decoding |
 | `decoded_output_unavailable` | Logits were not retained for re-decoding | Capture with retained logits or lower `top_n` |
 | `derived_field_assignment_invalid` | Assignment to a derived compatibility field | Do not assign derived fields |

@@ -34,7 +34,9 @@ Real-time tensor operation logging during forward pass.
 - `flops.py` — Per-operation FLOPs computation (~290 ops)
 
 ### `torchlens/postprocess/` (6 files, ~3,179 lines)
-19-step pipeline. Order is critical — many steps depend on prior output.
+26-step pipeline (declared contract keys `0`..`20` plus fractional inserts `11.5`, `11.75`,
+`15.5`, `16.5`, `17.5` in `_contracts.py::POSTPROCESS_STEP_CONTRACTS`). Order is critical —
+many steps depend on prior output.
 - `graph_traversal.py` — Steps 1-4: output layers, ancestor marking, orphan removal, distance flood
 - `control_flow.py` — Steps 5-6: six-phase conditional attribution (AST indexing, bool
   classification, event materialization, backward flood, forward arm attribution, derived
@@ -87,7 +89,7 @@ log_forward_pass(model, input)
   →     torch_func_decorator     # barcode nesting → bottom-level ops logged
   →       log_function_output_tensors_exhaustive()  # builds LayerPassLog entry
   →       OR log_function_output_tensors_fast()     # reuses prior graph structure
-  → postprocess(model_log)       # 19-step pipeline
+  → postprocess(model_log)       # 26-step pipeline
   →   Steps 1-4: graph cleanup (outputs, ancestors, orphans, distances)
   →   Steps 5-6: control flow (Step 5a-5f conditional attribution, buffer dedup)
   →   Step 7: loop detection (isomorphic subgraph expansion)
@@ -220,3 +222,130 @@ Deferred:
 ### DeviceContext Bypass (decoration/torch_funcs.py)
 Python wrappers bypass C-level TorchFunctionMode dispatch. Factory functions need manual
 device kwarg injection when `torch.device('meta')` context is active (HuggingFace use case).
+
+## Top-level module inventory
+
+Complete inventory of `torchlens/` top-level entries (every root `*.py` module and every
+package directory; `schemas/` included as the one non-package data directory). Roles are
+one-liners derived from each module's docstring or a skim of its contents.
+
+### Root modules
+
+| module | role |
+| --- | --- |
+| `__init__.py` | Public package entry: lazy attribute surface (`_LAZY_ATTRS`), `__all__`, no torch side effects at import |
+| `_capture_state_helpers.py` | Internal model state, cache, and input helpers for public trace capture |
+| `_chunked_capture_helpers.py` | Internal chunked-forward helper functions for public trace capture |
+| `_chunking.py` | Input chunking helpers for forward-only chunked capture |
+| `_deprecations.py` | Shared helpers for additive public-API deprecations |
+| `_distributed.py` | Detection of distributed (DTensor / device-mesh / TP / PP) model state, shared by capture entry and compat report |
+| `_errors.py` | Shared internal exception types and actionable-message helpers built on `errors/_base` |
+| `_fast_run.py` | Explicit guarded fast paths for repeated static-model execution (`run(fast=True)`) |
+| `_input_coerce.py` | Duck-typed ergonomic input coercion for TorchLens entry points |
+| `_input_walk.py` | Single-sourced model-input boundary traversal (normative dispatch for all input-tree walkers) |
+| `_literals.py` | Shared `Literal` aliases for public option strings |
+| `_robustness.py` | Tensor-variant detection and pre-flight guards for `trace` (meta/sparse/fake refusals) |
+| `_runnable_attestation.py` | Numeric attestation and nondeterminism checks for runnable execution |
+| `_runnable_call_arguments.py` | Sparse-call argument decoding and binding |
+| `_runnable_call_outputs.py` | Sparse-call output binding and mutation checks |
+| `_runnable_execution.py` | Transactional execution providers for the unified `Trace.run` surface |
+| `_runnable_input_aliases.py` | Input alias topology and non-tensor tree contracts |
+| `_runnable_input_metadata.py` | Input structure, literal, and metadata witness helpers |
+| `_runnable_input_sites.py` | Live input sites and metadata contract checks |
+| `_runnable_output_contracts.py` | Output reconstruction and post-execution contracts |
+| `_runnable_path_faithfulness.py` | Path-faithfulness and state comparison helpers |
+| `_runnable_providers.py` | Public provider entry points and run finalization |
+| `_runnable_seam.py` | Narrow ownership seam between `Trace` and sparse runnable internals |
+| `_runnable_state.py` | Non-executing state binding and allocation for sparse runnable traces |
+| `_runnable_state_context.py` | State contracts and captured execution contexts |
+| `_runnable_transaction.py` | Loaded-sparse transaction execution and allocation checks |
+| `_runnable_verification.py` | Seed, RNG, attestation, and fork utilities for runnable runs |
+| `_runnable_witness_contracts.py` | Control, shape, and host-escape witness checks |
+| `_save_budget.py` | Running budget for retained activation bytes with typed refusal (`SaveBudgetExceededError`) |
+| `_source_links.py` | Source-location link formatting helpers |
+| `_split_rebind.py` | Compatibility helpers for behavior-preserving module decomposition |
+| `_state.py` | Global state for toggle-gated decoration; single source of truth for capture-control mutable state |
+| `_trace_selector_helpers.py` | Internal predicate and selector helpers for public trace capture |
+| `_trace_state.py` | Run-state ownership for intervention execution (deliberately outside `intervention/`) |
+| `_training_validation.py` | Shared validation helpers for training-compatible capture modes |
+| `_transport.py` | Device/layout-aware host transport for tensor digest and codec paths |
+| `_user_public_impls.py` | Private implementations backing public user-facing utility commands |
+| `captured_run.py` | Shared public base types for TorchLens captured runs |
+| `constants.py` | FIELD_ORDER tuples (canonical field sets) and torch function discovery sets |
+| `facets.py` | Lazy alias stub: self-replaces in `sys.modules` with canonical `torchlens.semantic.facets` |
+| `hash.py` | Provisional public structural-hash helpers |
+| `observers.py` | User observer helpers: taps, scalar logs, record spans |
+| `options.py` | Grouped option dataclasses (`CaptureOptions`, ...) for public TorchLens APIs |
+| `quantities.py` | Numeric quantity types with unit-aware display |
+| `runnable.py` | Frozen type contracts (enums and schema shapes) for sparse runnable `.tlspec` artifacts |
+| `types.py` | Public type aliases and rarely used data classes |
+| `user_funcs.py` | Public API entry points; contains every user-facing function |
+
+### Packages
+
+| module | role |
+| --- | --- |
+| `_io/` | Portable save/load implementation: scrubs a Trace to metadata plus safetensors blobs, writes/rehydrates directory bundles |
+| `_trace_core/` | Private per-trace semantic store substrate (numpy-backed typed columns, per-trace interning) |
+| `accessors/` | Accessor classes for TorchLens log collections |
+| `attribution/` | Input-attribution methods for TorchLens |
+| `autoroute/` | Auto-routing registries for model input and output handling (`autoroute.input`, `autoroute.output`) |
+| `backends/` | Backend Protocol, public registry exports, and per-backend adapters |
+| `bridge/` | External-tool bridge namespace (Captum, HF, SHAP, SAE Lens, LIT, profiler, ...) |
+| `bundle/` | Single `Bundle` type for intervention-ready TorchLens model logs |
+| `callbacks/` | Callback integration namespace with lazy Lightning support |
+| `capture/` | Real-time tensor operation capture: source/output tensor logging, family tracking, forward-pass orchestration |
+| `compat/` | Compatibility adapters and runtime support reports (`tl.compat.report`) |
+| `data_classes/` | Core data structures representing a logged forward pass |
+| `debug/` | Power-user debugging helpers for completed traces (`bisect_nan`, `hot_path`, ...) |
+| `distributed/` | Distributed capture opt-in: arming, group lifetime identity, and evidence |
+| `errors/` | Public TorchLens exception classes (base hierarchy, runnable errors, legacy path aliases) |
+| `examples/` | Example-loading namespace for small TorchLens artifacts |
+| `experimental/` | Experimental APIs with unstable naming and behavior |
+| `export/` | Static export helpers for TorchLens logs |
+| `fastlog/` | Lightweight predicate-recording namespace (`tl.record`) |
+| `intervention/` | Import surface for intervention selectors, hooks, reruns, and bundles |
+| `io/` | Public I/O and administrative helpers (log admin, intervention-spec save) delegating to `_io` and `user_funcs` |
+| `ir/` | Internal backend-neutral IR for capture unification (op records, events, selectors, workspaces) |
+| `merged/` | Cross-rank trace merging (rung C1): `merge_ranks`, `MergedTrace`, frozen merge vocabularies |
+| `neuro/` | Extras-gated neuroscience namespace, import-inert, no public objects yet |
+| `notebook/` | Extras-gated notebook namespace, import-inert, no public objects yet |
+| `partial/` | Partial capture helpers for failed TorchLens forward ops |
+| `postprocess/` | Postprocessing pipeline cleaning the model log after the forward pass |
+| `receptive_field/` | Lazy public namespace for receptive-field analysis |
+| `repgeom/` | Import-clean representation geometry helpers (NumPy + torch only), provisional |
+| `report/` | Reporting helpers for TorchLens observer metadata |
+| `schemas/` | JSON Schema documents for `.tlspec` manifests (v1/v2); data directory, not a Python package (no `__init__.py`) |
+| `semantic/` | Semantic facet views: canonical home of facets (registry, recipes, patching) |
+| `stats/` | Streaming statistics for out aggregation |
+| `utils/` | Focused utility modules: RNG, tensor ops, argument handling, introspection, collections, hashing, display |
+| `validation/` | Validation subpackage: saved outs, backward capture, and metadata invariants (the tripwire) |
+| `visualization/` | Computational graph visualization via Graphviz (DOT rendering, ELK layout, dagua bridge) |
+| `viz/` | Visualization convenience namespace: activation/tensor plots (montage, heatmaps, feature-map evolution) plus `bundle_diff` re-export |
+
+### Dual homes (pending adjudication)
+
+Four name pairs currently have two homes. Facts as of this writing (verified by reading);
+the SF-33 adjudication decision will be recorded here when made -- this note does not
+decide it.
+
+- `torchlens/io` + `torchlens/_io`: `_io/` implements the portable save/load path
+  (Trace scrub to metadata plus safetensors blobs, bundle write and rehydration);
+  `io/` is the public-facing helper namespace (log administration such as `list_logs`
+  and `reset_naming_counter`, intervention-spec save) that delegates to `_io` and
+  `user_funcs`.
+- `torchlens/viz` + `torchlens/visualization`: `visualization/` is the graph-rendering
+  engine (Graphviz DOT emission, ELK layout, dagua bridge) behind `draw` and
+  `show_model_graph`; `viz/` is a user-facing convenience namespace for
+  activation/tensor plotting (montage, text tables, feature-map evolution, heatmaps,
+  image scatter, line plots) and re-exports `bundle_diff` from `visualization/`.
+- `torchlens/errors/` + `torchlens/_errors.py` (+ `intervention/errors.py`): `errors/`
+  is the public exception package (`_base` hierarchy, runnable exception classes,
+  legacy exception-path aliases); `_errors.py` holds shared internal exception types
+  and actionable-message helpers built on `errors._base`; `intervention/errors.py`
+  owns the intervention error catalog (severity tags, field-formatted messages) and
+  imports from both.
+- `torchlens/facets.py` + `torchlens/semantic/`: `semantic/` is the canonical
+  implementation (`semantic/facets.py` plus `recipes` and `patching`); top-level
+  `facets.py` is a lazy import-alias stub that replaces itself in `sys.modules` with
+  `torchlens.semantic.facets` so the two module objects are identity-equal.

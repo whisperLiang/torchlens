@@ -45,13 +45,17 @@ Key entry points:
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
   `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`
-- Postprocess: `torchlens/postprocess/__init__.py` current 20-step pipeline
+- Postprocess: `torchlens/postprocess/__init__.py` current 26-step pipeline (declared
+  contract keys `0`..`20` plus fractional inserts `11.5`/`11.75`/`15.5`/`16.5`/`17.5` in
+  `postprocess/_contracts.py::POSTPROCESS_STEP_CONTRACTS`)
 - Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`
 - Intervention: `torchlens/intervention/` plus top-level selector/helper aliases. Live
-  `trace(intervene=...)`/`trace(halt=...)` run on torch and on the eager Paddle preview
+  `trace(intervene=...)` runs on torch, on the eager Paddle preview
   (`torchlens/backends/paddle/interventions.py`; forward-only, builtin helper adapters
-  `zero_ablate`/`scale`/`add`/`replace_with`, corroborated validation carve-out); the other
-  previews refuse typed.
+  `zero_ablate`/`scale`/`add`/`replace_with`, corroborated validation carve-out), and on the
+  eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
+  see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
+  refuse typed.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
@@ -148,10 +152,14 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 Every task must pass before completion unless the task explicitly narrows verification:
 
 ```bash
+ruff format .
 ruff check . --fix
 mypy torchlens/
 pytest tests/ -m smoke -x --tb=short
 ```
+
+(CI lint runs `ruff format --check` plus `ruff check` over `torchlens tests scripts tools
+benchmarks examples notebooks`; run `ruff format` locally or the format-check leg fails.)
 
 For changes touching module boundaries or public API, also run:
 
@@ -375,7 +383,7 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   path, where `data_ptr()` on a FakeTensor is a torch-flagged bug.
 - `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
   failures.
-- Fast-path module decoration skips `_handle_module_entry`; alignment state must be
+- Fast-path module decoration skips `_record_module_entry_metadata`; alignment state must be
   replicated manually.
 - `get_memory_amount()` must use `pause_logging()` because `nelement()` and
   `element_size()` are decorated.

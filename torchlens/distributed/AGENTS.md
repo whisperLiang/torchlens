@@ -1,0 +1,53 @@
+# distributed/ - Implementation Guide
+
+C0 correlation/evidence layer for merge-ranks: arming, group-lifetime identity, and
+the membership-lineage audit. Imported lazily as `tl.distributed` and deliberately
+not in the top-level `__all__` (matching `tl.debug`). Explicit `torch.distributed`
+collectives inside a traced forward become first-class boundary nodes; the boundary
+op capture itself lives in `backends/torch/collectives.py`.
+
+## _lifecycle.py
+- `arm()` is the explicit process-start opt-in: installs group-lifecycle wraps
+  (`_install_lifecycle_wraps`), verifies the recognizer fail-closed, and stamps this
+  rank's `ArmingRecord` (install epoch). REQUIRED for MPMD / spawn-rank programs.
+- `maybe_auto_arm()` is the lazy capture-entry path for already-initialized SPMD
+  processes; `disarm()` / `is_armed()` / `armed_state()` manage the singleton.
+- `resolve_group_identity(group)` mints `GroupIdentity` (membership digest +
+  lifetime ordinal); `next_seq(identity, channel)` issues the per-(uid, channel)
+  correlation counters.
+- Unprovable pre-arming group lifetime raises `AmbiguousGroupLifetimeError`
+  (code constant `AMBIGUOUS_GROUP_LIFETIME`).
+
+## _ledger.py
+- `GroupLifecycleLedger` is the per-rank lifecycle evidence, serialized under
+  `trace.annotations["distributed"]`; rows are `GroupLifecycleEvent`.
+- `LineageEntry` / `LineageVector` model per-membership create/destroy history;
+  `membership_digest_for_ranks()` is the canonical digest.
+- Parsers validate against closed vocabularies (`_require_vocabulary`); never
+  accept free-form strings.
+
+## _recognizer.py
+- `derive_collective_recognizer()` builds the five-namespace `CollectiveRecognizer`
+  (`COLLECTIVE_NAMESPACES`) at arm time and checks set-equality against the runtime
+  plus a dispatcher schema scan; any unrecognized collective raises
+  `UncapturedCollectiveOpError` (`UNCAPTURED_COLLECTIVE_OP`). Fail-closed: an
+  unknown collective refuses arming rather than passing uncaptured.
+
+## _audit.py
+- `audit_membership_lineages()` is the pure PRE-JOIN audit the C1 merge engine runs
+  over per-rank ledgers; returns `MembershipLineageVerdict`s. Conflicting evidence
+  is `GROUP_LIFETIME_EVIDENCE_CONFLICT`, a typed finding, never a silent join.
+
+## _dtensor.py
+- `dtensor_dual_geometry(value)` extracts per-site logical/local dual geometry for
+  DTensor findings (used by the tier-(a) refusal report); returns `None` for
+  non-DTensor values.
+
+## Gotchas
+- Arming relaxes NO tier-(a) refusal: DTensor/TP/FSDP2/PP capture stays refused.
+- `wildcard_recv_unsupported` (`WILDCARD_RECV_UNSUPPORTED`) is raised from
+  `backends/torch/collectives.py`, not from this package.
+- Decisions here are evidence-recording only; nothing in this package may guess an
+  unobserved completion or membership -- unknowns become typed refusals/findings.
+- Distributed rank processes are the one sanctioned exception to the
+  no-child-process capture guard; do not widen that carve-out here.

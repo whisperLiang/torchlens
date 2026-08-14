@@ -143,8 +143,13 @@ TensorFlow are technical previews behind `BackendSpec`. Paddle M3 is dygraph/eag
 payloads through the Paddle codec, and does not provide true backward capture.
 TensorFlow preview targets Keras 3 on TF>=2.16 with
 `keras.backend.backend() == "tensorflow"`; its shipped primary path is eager live capture via
-`op_callbacks` with real values/control flow/op-level records/module stacks, while graph-only
-FuncGraph fallback, interventions, true backward capture, and T1 derived gradients are deferred.
+`op_callbacks` with real values/control flow/op-level records/module stacks. The graph-only
+FuncGraph static path is implemented for compiled/SavedModel entries (opaque regions stay
+honestly unverified). Static-label `intervene=` SHIPS for eager entries (two-level writable
+layer, fail-closed site reachability), and T1 derived gradients SHIP for eager entries via
+`tl.backends.tf.GradOptions` (graph-only captures refuse `grad_options` typed; `intervene=`
+cannot combine with `grad_options=`). Deferred: `halt=`/`recipes=`, true backward capture,
+and value-dependent predicates.
 
 ## Constants as Ordering Spec
 FIELD_ORDER tuples define canonical serialized and display field sets. When adding a field,
@@ -169,7 +174,7 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
   sparse overlays, `TraceCore` with COW fork). The M5 Op seam is LIVE: `Op` is a
   `(_core, _row)` facade with one generated data descriptor per stored field; captured
   ops share the per-trace `OpRowStore` (`trace._trace_core`, `FieldPolicy.DROP`,
-  sealed after postprocess step 20), while copy/pickle/fork/preview paths use detached
+  sealed after the final postprocess step, key `20`), while copy/pickle/fork/preview paths use detached
   single-row stores. Architecture of record in
   `docs/reference/trace_core_design.md`. The declared
   record schema carries `StorageBinding` axes (`data_classes/_schema_bindings.py`,

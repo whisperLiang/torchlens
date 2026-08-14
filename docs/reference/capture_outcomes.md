@@ -16,7 +16,11 @@ the record or on the stable refusal codes below — never on exception text.
 | `UNATTESTED` | structurally finished, but no settlement evidence (legacy artifacts only) | `None` |
 | `UNKNOWN` | unprovable terminal state; the most restrictive row | `None` |
 
-`FAILED` outcomes carry a `phase` (`FORWARD` — the model forward raised;
+`phase` is FAILED-only, not FAILED-required: a `FAILED` outcome normally
+carries a `phase`, but two writers legitimately emit `FAILED` with
+`phase=None` — the fastlog recorder fallback stamp (when the runtime trace's
+settled record is unavailable or non-failed) and the legacy `partial_error`
+derivation. When present, `phase` is one of (`FORWARD` — the model forward raised;
 `FINALIZE` — the forward completed but finalize/output-extraction/cleanup
 raised; `POSTPROCESS` — the postprocess pipeline or the core freeze raised;
 `TEARDOWN` — teardown failed AFTER settlement, demoting the outcome) and a
@@ -164,6 +168,11 @@ sits inside a region whose only success exit reaches an authority stamp.
 - `TerminalState` / `RunOutcome.state` is the first-transition log; it and
   the outcome may legitimately disagree only in the demotion direction,
   disclosed by `settlement_note`.
+- Preview asymmetry (MLX/Paddle): those backends run `cleanup_model_session`
+  in a `finally` positioned after the return expression, so a post-stamp
+  cleanup failure escapes with an unreachable object still carrying an
+  undemoted `COMPLETE` stamp — net semantics equal the teardown-failure path
+  minus the demotion. Disclosed residual, not a gate hole.
 
 ## Public surface added by this design
 

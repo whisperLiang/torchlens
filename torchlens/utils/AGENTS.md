@@ -15,8 +15,13 @@ this package mostly stateless and free of high-level TorchLens business logic.
 | `introspection.py` | Recursive object search and nested getattr/assign |
 | `rng.py` | Python, NumPy, torch, CUDA, and autocast state capture/restore |
 | `tensor_utils.py` | `safe_copy`, `safe_to`, `tensor_nanequal`, tensor memory helpers |
-| `torchlens/_source_links.py` | Source link helpers for reports/rendering |
+| `_torch_compat.py` | LOCKED chokepoint for every fragile torch-private probe / cross-version signature; `HAS_*` capability flags (see root `CLAUDE.md`) |
+| `_callable_safety.py` | Security gate deciding which resolved callables are pure forward/tensor ops (untrusted `.tlspec` registry) |
+| `_multipass_access.py` | Multi-pass-safe attribute access for aggregate (recurrent) `Layer` objects |
+| `_torch_symbols.py` | Single sanctioned spelling for resolving top-level `torch` attributes on the load/decode/exec path |
 | `__init__.py` | Package marker |
+
+(Source-link helpers live at top level in `torchlens/_source_links.py`, not in this package.)
 
 ## Tensor Operations
 - `safe_copy()` clones through clean torch functions and preserves TorchLens raw-label
