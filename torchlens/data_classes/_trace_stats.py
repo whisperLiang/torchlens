@@ -475,7 +475,10 @@ class TraceStatsMixin(_TraceMixinBase):
         # Memoized on the instance, never in a module global: a global
         # weak-keyed cache value reaches this Trace through the held records
         # and would pin it forever (the R37 ``trace.run()`` fork leak).
-        cache_key = len(self.layer_list)
+        # Versioned BY VALUE (the ordered label sequence), not by bare
+        # ``len()``: an equal-length reassignment or element swap of
+        # ``layer_list`` used to serve the stale accessor.
+        cache_key = tuple(op.label for op in self.layer_list)
         cache_entry = self.__dict__.get(_TRACE_OP_ACCESSOR_ATTR)
         if cache_entry is None or cache_entry[0] != cache_key:
             accessor = TraceOpAccessor(self.layer_list, self.layer_num_calls)
@@ -647,7 +650,10 @@ class TraceStatsMixin(_TraceMixinBase):
         # Memoized on the instance, never in a module global: a global
         # weak-keyed cache value reaches this Trace through the held records
         # and would pin it forever (the R37 ``trace.run()`` fork leak).
-        cache_key = len(self.layer_logs)
+        # Versioned BY VALUE (the ordered label keys), not by bare ``len()``:
+        # an equal-length reassignment of ``layer_logs`` used to serve the
+        # stale accessor.
+        cache_key = tuple(self.layer_logs)
         cache_entry = self.__dict__.get(_TRACE_LAYER_ACCESSOR_ATTR)
         if cache_entry is None or cache_entry[0] != cache_key:
             accessor = LayerAccessor(self.layer_logs, source_trace=self)

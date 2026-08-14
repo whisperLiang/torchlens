@@ -424,3 +424,33 @@ def test_predicate_keys_cover_keyword_only_defaults() -> None:
     exec("def predicate(ctx, *, thr=0.5):\n    return ctx > thr\n", namespace_same)  # noqa: S102
     assert _predicate_cache_key(low) == _predicate_cache_key(namespace_same["predicate"])
     assert _stable_cache_fragment(low) == _stable_cache_fragment(namespace_same["predicate"])
+
+
+def test_accessor_caches_version_by_value_not_len(tmp_path: Path) -> None:
+    """Equal-length graph edits must invalidate the accessor memos (r1 row 13).
+
+    ``trace.ops`` / ``trace.layers`` memoized on ``len(...)`` alone, so a
+    user's equal-length direct reassignment (or element swap) served a stale
+    accessor built over the OLD records.
+    """
+
+    model = nn.Sequential(nn.Linear(2, 2), nn.ReLU())
+    trace = tl.trace(model, torch.ones(1, 2))
+    ops_before = trace.ops
+    first_two = list(trace.layer_list[:2])
+
+    # Equal-length in-place swap of the backing list.
+    trace.layer_list[0], trace.layer_list[1] = trace.layer_list[1], trace.layer_list[0]
+    swapped = trace.ops
+    assert swapped is not ops_before
+    assert list(swapped)[:2] == [first_two[1], first_two[0]]
+
+    layers_before = trace.layers
+    # Equal-length reassignment with a different insertion order.
+    items = list(trace.layer_logs.items())
+    trace.layer_logs = dict(reversed(items))
+    layers_after = trace.layers
+    assert layers_after is not layers_before
+    # Unchanged content still re-serves the memo (no per-access rebuilds).
+    assert trace.layers is layers_after
+    assert trace.ops is swapped
