@@ -277,6 +277,7 @@ class CaptureSession:
                         self.activation_escrow_ram_bytes -= evicted.nbytes
                     elif evicted.spill_path is not None:
                         evicted.spill_path.unlink(missing_ok=True)
+                        self.activation_escrow_spilled_bytes -= evicted.nbytes
             self._spill_activation_escrow_to_budget()
         if profile.gradient_kind is RetentionKind.GRADIENT_REFERENCE:
             self.gradient_reference_escrow[raw_index] = tensor
@@ -353,7 +354,9 @@ class CaptureSession:
         activation_selector = getattr(trace, "_deferred_retention_selector", None)
         if activation_selector is not None:
             live_output_by_raw_index: dict[int, Any] = {}
-            for output_label, output_tensor in zip(trace.output_layers, output_tensors):
+            for output_label, output_tensor in zip(
+                trace.output_layers, output_tensors, strict=True
+            ):
                 output_op = trace.layer_dict_all_keys[output_label]
                 live_output_by_raw_index[output_op.raw_index] = output_tensor
                 for parent_label in output_op.parents:
@@ -629,10 +632,15 @@ class CaptureSession:
         Raises
         ------
         RuntimeError
-            If a caller attempts a second, conflicting terminal transition.
+            If a caller attempts a second terminal transition. The guard is
+            unconditional: ``RunOutcome.output`` can hold a tensor, so an
+            equality-based "same transition" carve-out would raise the
+            ambiguous-bool ``RuntimeError`` from tensor ``__eq__`` instead.
         """
 
-        candidate = RunOutcome(
+        if self.outcome is not None:
+            raise RuntimeError("CaptureSession already reached a terminal state.")
+        self.outcome = RunOutcome(
             state=state,
             output=output,
             product=product,
@@ -640,11 +648,6 @@ class CaptureSession:
             exception=exception,
             capture_outcome=capture_outcome,
         )
-        if self.outcome is None:
-            self.outcome = candidate
-            return candidate
-        if self.outcome != candidate:
-            raise RuntimeError("CaptureSession already reached a terminal state.")
         return self.outcome
 
 
