@@ -26,6 +26,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_record_spans"),
         ("torchlens/_state.py", "_active_trace"),
         ("torchlens/_state.py", "_capture_replay_templates"),
+        # Pre-admission reservation: claimed before any capture-global side
+        # effect, released in run_and_log's outermost finally (refused-loser
+        # data-quality fix, hunt-b2 R54).
+        ("torchlens/_state.py", "_capture_reserved_by"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
         ("torchlens/_state.py", "_func_call_id_counter"),
         ("torchlens/_state.py", "_function_call_counts"),
@@ -641,6 +645,7 @@ def _capture_scope_snapshot() -> dict[str, Any]:
         "relationship_input_id": _state._relationship_input_id,
         "relationship_input_shape_hash": _state._relationship_input_shape_hash,
         "runnable_ledger_armed": _state._runnable_ledger_armed,
+        "capture_reserved_by": _state._capture_reserved_by,
         "active_label_session": torch_tl._ACTIVE_LABEL_SESSION,
         "active_witness_state": completeness_witness._ACTIVE_WITNESS_STATE,
         "rescue_active": rescue._rescue_is_active(),
@@ -1002,6 +1007,202 @@ def test_concurrent_public_capture_refuses_without_corruption() -> None:
     assert not owner.is_alive(), "owner capture did not finish after release"
     assert owner_errors == []
     assert _capture_scope_snapshot() == before
+
+
+def test_refused_concurrent_capture_leaves_winner_verified() -> None:
+    """A refused loser must not degrade the admitted winner's data quality.
+
+    The admission lock made "exactly one admitted" atomic, but a loser used to
+    run its capture-global side effects FIRST: model preparation swept and
+    replaced the winner's live label session before the loser reached the
+    typed refusal, leaving the winner with orphaned label stamps and
+    ``capture_verified=False`` (runtime-probed, hunt-b2 R54). The reservation
+    now refuses the loser BEFORE any pre-admission mutation, so the winner
+    completes verified and the loser's model is never even prepared.
+    """
+
+    tl.trace(nn.ReLU(), torch.ones(2))
+    before = _capture_scope_snapshot()
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+    owner_traces: list[Any] = []
+
+    def run_owner() -> None:
+        """Run the capture whose data quality the loser must not degrade."""
+
+        try:
+            owner_traces.append(tl.trace(_BlockingCapture(entered, release), torch.ones(2)))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    loser_model = nn.Sequential(nn.Linear(2, 2), nn.ReLU())
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            tl.trace(loser_model, torch.ones(1, 2))
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+
+    assert not owner.is_alive(), "owner capture did not finish after release"
+    assert owner_errors == []
+    assert len(owner_traces) == 1
+    winner = owner_traces[0]
+    assert winner.capture_verified is not False, (
+        "the refused loser's pre-admission side effects degraded the winner: "
+        f"capture_verified={winner.capture_verified!r}, "
+        f"reason={getattr(winner, 'capture_verification_reason', None)!r}"
+    )
+    assert any(op.func_name == "relu" for op in winner.compute_ops)
+    # The loser must have been refused BEFORE model preparation ran.
+    assert loser_model not in _state._prepared_models, (
+        "the refused loser's model was prepared: its label-session swap ran "
+        "before the admission refusal"
+    )
+    assert _capture_scope_snapshot() == before
+
+
+def test_refused_concurrent_record_never_installs_recording_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused ``tl.record`` must not touch the fastlog recording global.
+
+    The loser used to install its ``RecordingState`` (overwriting the admitted
+    recorder's) and only then reach the inner admission refusal, projecting the
+    winner's events into the loser's state for that window. The recorder-side
+    reservation refuses before the install.
+    """
+
+    from torchlens.fastlog import _recorder as recorder_module
+
+    installs: list[Any] = []
+    real_install = recorder_module.active_recording_state
+
+    def counting_install(state: Any) -> Any:
+        """Record every recording-state install before delegating."""
+
+        installs.append(state)
+        return real_install(state)
+
+    monkeypatch.setattr(recorder_module, "active_recording_state", counting_install)
+
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+
+    def run_owner() -> None:
+        """Hold a live capture open while the record() loser is refused."""
+
+        try:
+            tl.trace(_BlockingCapture(entered, release), torch.ones(2))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            tl.record(nn.ReLU(), torch.ones(2), save=tl.func("relu"))
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+
+    assert owner_errors == []
+    assert installs == [], (
+        "the refused record() installed its RecordingState before the admission refusal fired"
+    )
+
+
+def test_publish_active_trace_refuses_concurrent_and_clears_owner() -> None:
+    """Non-forward publication windows are admission-locked and owner-stamped.
+
+    tf capture and paddle derived-grad replays publish ``_active_trace``
+    without the logging toggle; a raw save/restore swap bypassed admission
+    (silent corruption of a concurrent torch capture) and could republish a
+    finished trace on restore. ``publish_active_trace`` must refuse typed
+    against a live capture, set the owner thread id for the window, and clear
+    both on exit.
+    """
+
+    sentinel = cast("Any", object())
+    with _state.publish_active_trace(sentinel):
+        assert _state._active_trace is sentinel
+        assert _state._active_owner_thread_id == threading.get_ident()
+        # A second publication (any thread) refuses while the window is open.
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            with _state.publish_active_trace(cast("Any", object())):
+                pass  # pragma: no cover - refused above
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+
+    def run_owner() -> None:
+        """Hold a live torch capture open for the publication refusal."""
+
+        try:
+            tl.trace(_BlockingCapture(entered, release), torch.ones(2))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            with _state.publish_active_trace(sentinel):
+                pass  # pragma: no cover - refused above
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+    assert owner_errors == []
+
+
+def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> None:
+    """The reservation never leaks (wedging admission) and nests same-thread.
+
+    A capture failing anywhere between the reservation claim and teardown must
+    release the slot, or every later capture refuses forever. Same-thread
+    nesting is a passthrough (the recorder reserves around the inner
+    orchestration's own reservation); a foreign thread's claim refuses typed.
+    """
+
+    with pytest.raises(RuntimeError, match="injected mid-capture failure"):
+        tl.trace(_RaiseMidCapture(RuntimeError), torch.ones(2))
+    assert _state._capture_reserved_by is None
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+    with _state.capture_reservation():
+        assert _state._capture_reserved_by == threading.get_ident()
+        with _state.capture_reservation():  # nested same-thread passthrough
+            assert _state._capture_reserved_by == threading.get_ident()
+        # The inner exit must not release the outer claim.
+        assert _state._capture_reserved_by == threading.get_ident()
+
+        foreign_error: list[BaseException] = []
+
+        def contend() -> None:
+            """Attempt a foreign-thread reservation against the live claim."""
+
+            try:
+                with _state.capture_reservation():
+                    pass  # pragma: no cover - refused above
+            except BaseException as error:
+                foreign_error.append(error)
+
+        contender = threading.Thread(target=contend)
+        contender.start()
+        contender.join(timeout=5.0)
+        assert len(foreign_error) == 1
+        assert isinstance(foreign_error[0], _state.ReentrantTraceError)
+    assert _state._capture_reserved_by is None
 
 
 def test_foreign_thread_pause_does_not_blind_the_owner_capture() -> None:
