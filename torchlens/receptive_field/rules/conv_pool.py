@@ -174,8 +174,18 @@ def adaptive_pool(context: ReceptiveFieldRuleContext) -> _RuleResult:
             axes=tuple(range(len(context.in_shapes[0]) - rank, len(context.in_shapes[0]))),
             exact=True,
         )
+    # True bin o spans floor(o*r) .. ceil((o+1)*r) - 1 for r = in/out. Both bin
+    # boundaries have denominator dividing out, so lo = r*o - 1 lower-bounds the
+    # start and hi = r*o + r - 1/out upper-bounds the end for EVERY ratio; a
+    # constant hi intercept (the historical +1) under-covers once r > 2.
     edges = tuple(
-        ((Fraction(input_size, output_size), -1), (Fraction(input_size, output_size), 1))
+        (
+            (Fraction(input_size, output_size), -1),
+            (
+                Fraction(input_size, output_size),
+                Fraction(input_size, output_size) - Fraction(1, output_size),
+            ),
+        )
         for input_size, output_size in zip(inputs, outputs, strict=True)
     )
 
