@@ -931,7 +931,8 @@ def _stock_tuplegetter_type() -> type:
     if _TUPLEGETTER_TYPE_CACHE is None:
         import collections as _collections
 
-        _TUPLEGETTER_TYPE_CACHE = type(_collections.namedtuple("_TlDescriptorProbe", "x").x)
+        _TlDescriptorProbe = _collections.namedtuple("_TlDescriptorProbe", "x")
+        _TUPLEGETTER_TYPE_CACHE = type(_TlDescriptorProbe.__dict__["x"])
     return _TUPLEGETTER_TYPE_CACHE
 
 

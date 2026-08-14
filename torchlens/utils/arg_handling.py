@@ -51,7 +51,7 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
-def rebuild_tuple_like(arg_type: type, items: list[Any]) -> Any:
+def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
     """Rebuild a ``tuple`` subclass from ``items``, or ``None`` if impossible.
 
     ``_fields`` presence is NOT proof of a namedtuple positional constructor
@@ -159,6 +159,7 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
             from .._input_walk import raise_input_tree_stack_refusal
 
             raise_input_tree_stack_refusal(exc)
+            raise  # unreachable: the refusal always raises (narrows the memo type)
     if isinstance(arg, torch.Tensor):
         # Tensors are leaves and are cloned per occurrence (never memoized), so a
         # structure that reuses the same tensor keeps its historical per-slot

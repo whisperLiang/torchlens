@@ -570,6 +570,7 @@ def _simple_leaves(
                 return _simple_leaves(value, _depth, set())
             except RecursionError as exc:
                 raise_input_tree_stack_refusal(exc)
+                raise  # unreachable: the refusal always raises (narrows the set type)
         if _depth >= INPUT_TREE_MAX_DEPTH:
             raise_input_tree_depth_refusal(depth=_depth)
         value_id = id(value)
