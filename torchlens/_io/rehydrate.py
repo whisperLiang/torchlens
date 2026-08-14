@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import types
+import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Mapping
 from io import BytesIO
@@ -47,6 +48,8 @@ _LEGACY_CAPTURE_TRACE_KEYS = {
     "_pending_live_fire_records",
 }
 _TORCH_BACKEND_NAME = "torch"
+_PORTABLE_WALK_MAX_DEPTH = 200
+_REHYDRATE_IN_PROGRESS = object()
 
 
 def rehydrate_trace(
@@ -108,7 +111,7 @@ def rehydrate_trace(
     payload_statuses: list[str] = []
     if audit_only_payloads:
         payload_statuses.append("audit_only")
-    seen: set[int] = set()
+    seen: dict[int, Any] = {}
     bundle_root = Path(bundle_path)
     canonical_blobs_dir = (
         resolve_bundle_blobs_dir(bundle_root) if resolved_blobs_dir is None else resolved_blobs_dir
@@ -342,7 +345,7 @@ _REHYDRATE_FROZENSET = 5
 _REHYDRATE_OBJECT = 6
 
 _REHYDRATE_LEAF_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)
-_REHYDRATE_KINDS: dict[type, int] = {}
+_REHYDRATE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
 
 
 def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
@@ -415,9 +418,15 @@ def _rehydrate_object(
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     audit_only_payloads: bool,
     payload_statuses: list[str],
-    seen: set[int],
+    seen: dict[int, Any],
+    depth: int = 0,
 ) -> Any:
     """Walk a rehydrated object graph and materialize blob refs in place."""
+
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable metadata exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
 
     # One cached type lookup replaces the eight-way ``isinstance`` chain this branch
     # table re-ran for every one of the ~226k nodes a ResNet load walks. The three
@@ -430,8 +439,15 @@ def _rehydrate_object(
         kind = _rehydrate_node_kind(value_type)
     if kind == _REHYDRATE_LEAF:
         return value
+    obj_id = id(value)
+    cached = seen.get(obj_id)
+    if cached is _REHYDRATE_IN_PROGRESS:
+        raise TorchLensIOError("Portable metadata contains a cycle through an immutable container.")
+    if cached is not None:
+        return cached
     if kind == _REHYDRATE_TUPLE:
-        return _rebuild_tuple_value(
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_tuple = _rebuild_tuple_value(
             value,
             (
                 _rehydrate_object(
@@ -446,11 +462,15 @@ def _rehydrate_object(
                     audit_only_payloads,
                     payload_statuses,
                     seen,
+                    depth + 1,
                 )
                 for item in value
             ),
         )
+        seen[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
     if kind == _REHYDRATE_LIST:
+        seen[obj_id] = value
         for index, item in enumerate(value):
             value[index] = _rehydrate_object(
                 item,
@@ -464,9 +484,11 @@ def _rehydrate_object(
                 audit_only_payloads,
                 payload_statuses,
                 seen,
+                depth + 1,
             )
         return value
     if kind == _REHYDRATE_MAPPING:
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_object(
                 item,
@@ -480,10 +502,13 @@ def _rehydrate_object(
                 audit_only_payloads,
                 payload_statuses,
                 seen,
+                depth + 1,
             )
         return value
     if kind == _REHYDRATE_SET:
-        return {
+        rebuilt_set: set[Any] = set()
+        seen[obj_id] = rebuilt_set
+        rebuilt_set.update(
             _rehydrate_object(
                 item,
                 manifest_index,
@@ -496,35 +521,38 @@ def _rehydrate_object(
                 audit_only_payloads,
                 payload_statuses,
                 seen,
-            )
-            for item in value
-        }
-    if kind == _REHYDRATE_FROZENSET:
-        return frozenset(
-            _rehydrate_object(
-                item,
-                manifest_index,
-                bundle_path,
-                resolved_blobs_dir,
-                lazy,
-                map_location,
-                materialize_nested,
-                payload_hints,
-                audit_only_payloads,
-                payload_statuses,
-                seen,
+                depth + 1,
             )
             for item in value
         )
+        return rebuilt_set
+    if kind == _REHYDRATE_FROZENSET:
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_frozenset = frozenset(
+            _rehydrate_object(
+                item,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+                depth + 1,
+            )
+            for item in value
+        )
+        seen[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
+
+    seen[obj_id] = value
 
     spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return value
-
-    obj_id = id(value)
-    if obj_id in seen:
-        return value
-    seen.add(obj_id)
 
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
@@ -615,6 +643,7 @@ def _rehydrate_object(
                     audit_only_payloads,
                     payload_statuses,
                     seen,
+                    depth + 1,
                 ),
             )
     return value
@@ -659,8 +688,15 @@ def _materialize_recursive_blob_refs(
     map_location: str | torch.device,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     payload_statuses: list[str],
+    active_ids: frozenset[int] = frozenset(),
+    depth: int = 0,
 ) -> Any:
     """Materialize ``BlobRef`` objects inside nested containers and portable objects."""
+
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable payload exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
 
     if isinstance(value, BlobRef):
         try:
@@ -677,103 +713,49 @@ def _materialize_recursive_blob_refs(
                 raise
             payload_statuses.append("audit_only_missing_runtime")
             return value
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        value_id = id(value)
+        if value_id in active_ids:
+            raise TorchLensIOError("Portable payload contains a cyclic container.")
+        child_active_ids = active_ids | {value_id}
+    else:
+        child_active_ids = active_ids
+
+    def recurse(item: Any) -> Any:
+        """Materialize one child at the next portable-walk depth."""
+
+        return _materialize_recursive_blob_refs(
+            item,
+            manifest_index=manifest_index,
+            bundle_path=bundle_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+            map_location=map_location,
+            payload_hints=payload_hints,
+            payload_statuses=payload_statuses,
+            active_ids=child_active_ids,
+            depth=depth + 1,
+        )
+
     if isinstance(value, list):
-        return [
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
-        ]
+        return [recurse(item) for item in value]
     if isinstance(value, tuple):
         return _rebuild_tuple_value(
             value,
-            (
-                _materialize_recursive_blob_refs(
-                    item,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    resolved_blobs_dir=resolved_blobs_dir,
-                    map_location=map_location,
-                    payload_hints=payload_hints,
-                    payload_statuses=payload_statuses,
-                )
-                for item in value
-            ),
+            (recurse(item) for item in value),
         )
     if isinstance(value, OrderedDict):
-        return OrderedDict(
-            (
-                key,
-                _materialize_recursive_blob_refs(
-                    item,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    resolved_blobs_dir=resolved_blobs_dir,
-                    map_location=map_location,
-                    payload_hints=payload_hints,
-                    payload_statuses=payload_statuses,
-                ),
-            )
-            for key, item in value.items()
-        )
+        return OrderedDict((key, recurse(item)) for key, item in value.items())
     if isinstance(value, defaultdict):
         materialized: defaultdict[Any, Any] = defaultdict(value.default_factory)
         for key, item in value.items():
-            materialized[key] = _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
+            materialized[key] = recurse(item)
         return materialized
     if isinstance(value, dict):
-        return {
-            key: _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for key, item in value.items()
-        }
+        return {key: recurse(item) for key, item in value.items()}
     if isinstance(value, set):
-        return {
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
-        }
+        return {recurse(item) for item in value}
     if isinstance(value, frozenset):
-        return frozenset(
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
-        )
+        return frozenset(recurse(item) for item in value)
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None and type(value).__name__ == "GradientRecord":
         for field_name, field_value in list(state_items(value)):
@@ -782,15 +764,7 @@ def _materialize_recursive_blob_refs(
             _assign_rehydrated_field(
                 value,
                 field_name,
-                _materialize_recursive_blob_refs(
-                    field_value,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    resolved_blobs_dir=resolved_blobs_dir,
-                    map_location=map_location,
-                    payload_hints=payload_hints,
-                    payload_statuses=payload_statuses,
-                ),
+                recurse(field_value),
             )
         return value
     return value
@@ -1223,7 +1197,7 @@ def rehydrate_nested(
         map_location=map_location,
         payload_hints=payload_hints,
         payload_statuses=payload_statuses,
-        seen=set(),
+        seen={},
     )
     module_logs = getattr(trace, "_module_logs", None)
     if module_logs is not None:
@@ -1235,7 +1209,7 @@ def rehydrate_nested(
             map_location=map_location,
             payload_hints=payload_hints,
             payload_statuses=payload_statuses,
-            seen=set(),
+            seen={},
         )
     if payload_statuses:
         _set_payload_load_status(trace, manifest_index, payload_statuses)
@@ -1250,7 +1224,8 @@ def _rehydrate_nested_object(
     map_location: str | torch.device,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     payload_statuses: list[str],
-    seen: set[int],
+    seen: dict[int, Any],
+    depth: int = 0,
 ) -> Any:
     """Walk an object graph and materialize only nested ``BlobRef`` fields.
 
@@ -1277,10 +1252,21 @@ def _rehydrate_nested_object(
         Original value, potentially with nested fields replaced in place.
     """
 
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable metadata exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
     if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)):
         return value
+    obj_id = id(value)
+    cached = seen.get(obj_id)
+    if cached is _REHYDRATE_IN_PROGRESS:
+        raise TorchLensIOError("Portable metadata contains a cycle through an immutable container.")
+    if cached is not None:
+        return cached
     if isinstance(value, tuple):
-        return _rebuild_tuple_value(
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_tuple = _rebuild_tuple_value(
             value,
             (
                 _rehydrate_nested_object(
@@ -1292,11 +1278,15 @@ def _rehydrate_nested_object(
                     payload_hints=payload_hints,
                     payload_statuses=payload_statuses,
                     seen=seen,
+                    depth=depth + 1,
                 )
                 for item in value
             ),
         )
+        seen[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
     if isinstance(value, list):
+        seen[obj_id] = value
         for index, item in enumerate(value):
             value[index] = _rehydrate_nested_object(
                 item,
@@ -1307,9 +1297,11 @@ def _rehydrate_nested_object(
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, OrderedDict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
@@ -1320,9 +1312,11 @@ def _rehydrate_nested_object(
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, defaultdict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
@@ -1333,9 +1327,11 @@ def _rehydrate_nested_object(
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, dict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
@@ -1346,10 +1342,13 @@ def _rehydrate_nested_object(
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, set):
-        return {
+        rebuilt_set: set[Any] = set()
+        seen[obj_id] = rebuilt_set
+        rebuilt_set.update(
             _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
@@ -1359,32 +1358,35 @@ def _rehydrate_nested_object(
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
-            )
-            for item in value
-        }
-    if isinstance(value, frozenset):
-        return frozenset(
-            _rehydrate_nested_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                resolved_blobs_dir=resolved_blobs_dir,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                depth=depth + 1,
             )
             for item in value
         )
+        return rebuilt_set
+    if isinstance(value, frozenset):
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_frozenset = frozenset(
+            _rehydrate_nested_object(
+                item,
+                manifest_index=manifest_index,
+                bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
+                map_location=map_location,
+                payload_hints=payload_hints,
+                payload_statuses=payload_statuses,
+                seen=seen,
+                depth=depth + 1,
+            )
+            for item in value
+        )
+        seen[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
+
+    seen[obj_id] = value
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return value
-
-    obj_id = id(value)
-    if obj_id in seen:
-        return value
-    seen.add(obj_id)
 
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
@@ -1417,6 +1419,7 @@ def _rehydrate_nested_object(
                     payload_hints=payload_hints,
                     payload_statuses=payload_statuses,
                     seen=seen,
+                    depth=depth + 1,
                 ),
             )
     return value

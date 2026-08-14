@@ -1159,8 +1159,10 @@ def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: objec
         return False
     canonical = func_name.strip("_")
     if canonical not in _SCHEMA_OPERAND_SLOTS_CACHE:
-        _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = _compute_schema_operand_slots(canonical)
-    slots = _SCHEMA_OPERAND_SLOTS_CACHE[canonical]
+        computed_slots = _compute_schema_operand_slots(canonical)
+        if computed_slots is not None:
+            _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = computed_slots
+    slots = _SCHEMA_OPERAND_SLOTS_CACHE.get(canonical)
     if slots is None or not isinstance(arg_path, tuple) or not arg_path:
         return False
     top = arg_path[0]

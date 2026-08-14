@@ -12,6 +12,8 @@ from __future__ import annotations
 import copy
 import logging
 import pickle
+import re
+import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
@@ -42,6 +44,8 @@ _RAW_CONTAINER_ITEM_LIMIT = 20
 _RAW_INPUT_IMAGE_MAX_EDGE = 256
 _RAW_INPUT_IMAGE_BYTES_LIMIT = 256_000
 _RAW_IMAGE_SENTINEL = "__torchlens_small_raw_image__"
+_PORTABLE_WALK_MAX_DEPTH = 200
+_SCRUB_IN_PROGRESS = object()
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -228,6 +232,12 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         for barcode in getattr(record, "_param_barcodes", ()) or ():
             register_barcode(barcode)
 
+    barcode_pattern = (
+        re.compile("|".join(re.escape(barcode) for barcode in sorted(barcode_map, key=len, reverse=True)))
+        if barcode_map
+        else None
+    )
+
     def remap_barcode_text(value: Any) -> Any:
         """Replace registered barcodes in a scalar identity string."""
 
@@ -235,9 +245,9 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             return value
         if value in barcode_map:
             return barcode_map[value]
-        for old, new in barcode_map.items():
-            value = value.replace(old, new)
-        return value
+        if barcode_pattern is None:
+            return value
+        return barcode_pattern.sub(lambda match: barcode_map[match.group(0)], value)
 
     equivalence_class_map: dict[str, str] = {}
     for param in params:
@@ -247,7 +257,7 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         original_group = "_".join(sorted(original_barcodes))
         remapped_barcodes = [remap_barcode_text(barcode) for barcode in original_barcodes]
         remapped_group = "_".join(sorted(remapped_barcodes))
-        record._param_barcodes = [remap_barcode_text(barcode) for barcode in original_barcodes]
+        record._param_barcodes = remapped_barcodes
         equivalence_class = getattr(record, "equivalence_class", None)
         if isinstance(equivalence_class, str) and original_group:
             record.equivalence_class = equivalence_class.replace(original_group, remapped_group)
@@ -429,7 +439,7 @@ _SCRUB_OBJECT = 7
 _SCRUB_ORDERED_DICT = 8
 _SCRUB_MAPPING = 9
 
-_SCRUB_VALUE_KINDS: dict[type, int] = {}
+_SCRUB_VALUE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
 
 
 def _scrub_value_kind(value_type: type) -> int:
@@ -505,6 +515,7 @@ def _scrub_value(
     blob_specs: list[BlobSpec],
     blob_counter: list[int],
     stringify_unknown: bool = False,
+    _depth: int = 0,
 ) -> Any:
     """Recursively scrub a value while preserving shared object identity.
 
@@ -522,6 +533,11 @@ def _scrub_value(
         the rest of the ``Trace`` object graph.
     """
 
+    if _depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable metadata exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
+
     # One cached type lookup replaces the up-to-ten ``isinstance`` chain this
     # branch table used to re-run for every one of the ~225k nodes a ResNet scrub
     # visits. :func:`_scrub_value_kind` resolves the branches in the identical
@@ -536,35 +552,109 @@ def _scrub_value(
     if kind == _SCRUB_BLOBREF:
         return value
     if kind == _SCRUB_LIST:
-        return [
-            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_list: list[Any] = []
+        memo[obj_id] = rebuilt_list
+        rebuilt_list.extend(
+            _scrub_value(
+                item,
+                options,
+                memo,
+                blob_specs,
+                blob_counter,
+                stringify_unknown,
+                _depth + 1,
+            )
             for item in value
-        ]
+        )
+        return rebuilt_list
     if kind == _SCRUB_TUPLE:
-        return _rebuild_tuple_value(
-            value,
-            (
-                _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
-                for item in value
-            ),
-        )
+        obj_id = id(value)
+        cached = memo.get(obj_id)
+        if cached is _SCRUB_IN_PROGRESS:
+            raise TorchLensIOError("Portable metadata contains a cycle through a tuple.")
+        if cached is not None:
+            return cached
+        memo[obj_id] = _SCRUB_IN_PROGRESS
+        try:
+            rebuilt_tuple = _rebuild_tuple_value(
+                value,
+                (
+                    _scrub_value(
+                        item,
+                        options,
+                        memo,
+                        blob_specs,
+                        blob_counter,
+                        stringify_unknown,
+                        _depth + 1,
+                    )
+                    for item in value
+                ),
+            )
+        except BaseException:
+            memo.pop(obj_id, None)
+            raise
+        memo[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
     if kind == _SCRUB_SET:
-        return {
-            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
-            for item in value
-        }
-    if kind == _SCRUB_FROZENSET:
-        return frozenset(
-            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_set: set[Any] = set()
+        memo[obj_id] = rebuilt_set
+        rebuilt_set.update(
+            _scrub_value(
+                item,
+                options,
+                memo,
+                blob_specs,
+                blob_counter,
+                stringify_unknown,
+                _depth + 1,
+            )
             for item in value
         )
+        return rebuilt_set
+    if kind == _SCRUB_FROZENSET:
+        obj_id = id(value)
+        cached = memo.get(obj_id)
+        if cached is _SCRUB_IN_PROGRESS:
+            raise TorchLensIOError("Portable metadata contains a cycle through a frozenset.")
+        if cached is not None:
+            return cached
+        memo[obj_id] = _SCRUB_IN_PROGRESS
+        try:
+            rebuilt_frozenset = frozenset(
+                _scrub_value(
+                    item,
+                    options,
+                    memo,
+                    blob_specs,
+                    blob_counter,
+                    stringify_unknown,
+                    _depth + 1,
+                )
+                for item in value
+            )
+        except BaseException:
+            memo.pop(obj_id, None)
+            raise
+        memo[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
     if kind >= _SCRUB_ORDERED_DICT:
         # Every mapping kind: refuse tensor-payload keys before the type-specific
         # branches rebuild the mapping so a payload cannot slip into
         # ``metadata.pkl`` unscrubbed and un-inventoried.
         _reject_payload_mapping_keys(value, options)
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
         if isinstance(value, defaultdict):
             rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+            memo[obj_id] = rebuilt
             for key, item in value.items():
                 rebuilt[key] = _scrub_value(
                     item,
@@ -573,27 +663,36 @@ def _scrub_value(
                     blob_specs,
                     blob_counter,
                     stringify_unknown,
+                    _depth + 1,
                 )
             return rebuilt
         if kind == _SCRUB_ORDERED_DICT:
-            return OrderedDict(
-                (
-                    key,
-                    _scrub_value(
-                        item,
-                        options,
-                        memo,
-                        blob_specs,
-                        blob_counter,
-                        stringify_unknown,
-                    ),
+            rebuilt_ordered: OrderedDict[Any, Any] = OrderedDict()
+            memo[obj_id] = rebuilt_ordered
+            for key, item in value.items():
+                rebuilt_ordered[key] = _scrub_value(
+                    item,
+                    options,
+                    memo,
+                    blob_specs,
+                    blob_counter,
+                    stringify_unknown,
+                    _depth + 1,
                 )
-                for key, item in value.items()
+            return rebuilt_ordered
+        rebuilt_mapping: dict[Any, Any] = {}
+        memo[obj_id] = rebuilt_mapping
+        for key, item in value.items():
+            rebuilt_mapping[key] = _scrub_value(
+                item,
+                options,
+                memo,
+                blob_specs,
+                blob_counter,
+                stringify_unknown,
+                _depth + 1,
             )
-        return {
-            key: _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
-            for key, item in value.items()
-        }
+        return rebuilt_mapping
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is None:
@@ -637,7 +736,12 @@ def _scrub_value(
             owner_is_trace and (field_name == "raw_input" or field_name == "raw_output")
         ):
             scrubbed_state[field_name] = _scrub_value(
-                field_value, options, memo, blob_specs, blob_counter
+                field_value,
+                options,
+                memo,
+                blob_specs,
+                blob_counter,
+                _depth=_depth + 1,
             )
             continue
         scrubbed_state[field_name] = _scrub_field(
@@ -649,6 +753,7 @@ def _scrub_value(
             memo=memo,
             blob_specs=blob_specs,
             blob_counter=blob_counter,
+            depth=_depth + 1,
         )
 
     if isinstance(value, Trace):
@@ -1013,6 +1118,7 @@ def _scrub_field(
     memo: dict[int, Any],
     blob_specs: list[BlobSpec],
     blob_counter: list[int],
+    depth: int,
 ) -> Any:
     """Scrub one object field according to its effective field policy.
 
@@ -1054,8 +1160,16 @@ def _scrub_field(
             memo=memo,
             blob_specs=blob_specs,
             blob_counter=blob_counter,
+            depth=depth,
         )
-    return _scrub_value(field_value, options, memo, blob_specs, blob_counter)
+    return _scrub_value(
+        field_value,
+        options,
+        memo,
+        blob_specs,
+        blob_counter,
+        _depth=depth,
+    )
 
 
 def _scrub_raw_value_for_save(
@@ -1340,8 +1454,28 @@ def _blobify_recursive_value(
     memo: dict[int, Any],
     blob_specs: list[BlobSpec],
     blob_counter: list[int],
+    depth: int = 0,
 ) -> Any:
     """Blobify tensors recursively inside nested containers."""
+
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable payload exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
+
+    def recurse(item: Any) -> Any:
+        """Blobify one child at the next portable-walk depth."""
+
+        return _blobify_recursive_value(
+            owner=owner,
+            field_name=field_name,
+            value=item,
+            options=options,
+            memo=memo,
+            blob_specs=blob_specs,
+            blob_counter=blob_counter,
+            depth=depth + 1,
+        )
 
     if isinstance(value, _SIMPLE_KEEP_TYPES):
         return value
@@ -1352,111 +1486,94 @@ def _blobify_recursive_value(
     if options.payload_codec.can_encode(value):
         return _blobify_tensor_field(owner, field_name, value, blob_specs, blob_counter, options)
     if isinstance(value, list):
-        return [
-            _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for item in value
-        ]
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_list: list[Any] = []
+        memo[obj_id] = rebuilt_list
+        rebuilt_list.extend(recurse(item) for item in value)
+        return rebuilt_list
     if isinstance(value, tuple):
-        return _rebuild_tuple_value(
-            value,
-            (
-                _blobify_recursive_value(
-                    owner=owner,
-                    field_name=field_name,
-                    value=item,
-                    options=options,
-                    memo=memo,
-                    blob_specs=blob_specs,
-                    blob_counter=blob_counter,
-                )
-                for item in value
-            ),
-        )
+        obj_id = id(value)
+        cached = memo.get(obj_id)
+        if cached is _SCRUB_IN_PROGRESS:
+            raise TorchLensIOError("Portable payload contains a cycle through a tuple.")
+        if cached is not None:
+            return cached
+        memo[obj_id] = _SCRUB_IN_PROGRESS
+        try:
+            rebuilt_tuple = _rebuild_tuple_value(value, (recurse(item) for item in value))
+        except BaseException:
+            memo.pop(obj_id, None)
+            raise
+        memo[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
     if isinstance(value, dict):
         # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload
         # keys here (the value path below blobifies tensor VALUES, so a tensor KEY
         # would otherwise bypass the blob manifest and body index entirely).
         _reject_payload_mapping_keys(value, options)
     if isinstance(value, OrderedDict):
-        return OrderedDict(
-            (
-                key,
-                _blobify_recursive_value(
-                    owner=owner,
-                    field_name=field_name,
-                    value=item,
-                    options=options,
-                    memo=memo,
-                    blob_specs=blob_specs,
-                    blob_counter=blob_counter,
-                ),
-            )
-            for key, item in value.items()
-        )
-    if isinstance(value, defaultdict):
-        rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_ordered: OrderedDict[Any, Any] = OrderedDict()
+        memo[obj_id] = rebuilt_ordered
         for key, item in value.items():
-            rebuilt[key] = _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
+            rebuilt_ordered[key] = recurse(item)
+        return rebuilt_ordered
+    if isinstance(value, defaultdict):
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        memo[obj_id] = rebuilt
+        for key, item in value.items():
+            rebuilt[key] = recurse(item)
         return rebuilt
     if isinstance(value, dict):
-        return {
-            key: _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for key, item in value.items()
-        }
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_mapping: dict[Any, Any] = {}
+        memo[obj_id] = rebuilt_mapping
+        for key, item in value.items():
+            rebuilt_mapping[key] = recurse(item)
+        return rebuilt_mapping
     if isinstance(value, set):
-        return {
-            _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for item in value
-        }
+        obj_id = id(value)
+        if obj_id in memo:
+            return memo[obj_id]
+        rebuilt_set: set[Any] = set()
+        memo[obj_id] = rebuilt_set
+        rebuilt_set.update(recurse(item) for item in value)
+        return rebuilt_set
     if isinstance(value, frozenset):
-        return frozenset(
-            _blobify_recursive_value(
-                owner=owner,
-                field_name=field_name,
-                value=item,
-                options=options,
-                memo=memo,
-                blob_specs=blob_specs,
-                blob_counter=blob_counter,
-            )
-            for item in value
-        )
+        obj_id = id(value)
+        cached = memo.get(obj_id)
+        if cached is _SCRUB_IN_PROGRESS:
+            raise TorchLensIOError("Portable payload contains a cycle through a frozenset.")
+        if cached is not None:
+            return cached
+        memo[obj_id] = _SCRUB_IN_PROGRESS
+        try:
+            rebuilt_frozenset = frozenset(recurse(item) for item in value)
+        except BaseException:
+            memo.pop(obj_id, None)
+            raise
+        memo[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None:
-        return _scrub_value(value, options, memo, blob_specs, blob_counter)
+        return _scrub_value(
+            value,
+            options,
+            memo,
+            blob_specs,
+            blob_counter,
+            _depth=depth,
+        )
     return _stringify_value(value)
 
 

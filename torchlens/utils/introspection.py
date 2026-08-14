@@ -136,18 +136,15 @@ def _get_or_build_col_offset_map(code: CodeType) -> dict[int, int | None]:
         cached_code, cached_map = cached
         if cached_code is code:
             return cached_map
-    if not _col_offset_cache_warned and len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
-        # Emit a single warning so unbounded growth in pathological workloads
-        # is visible without spamming the logs. Real-world models are well
-        # under this cap; crossing it usually points to a code-object leak.
-        warnings.warn(
-            "torchlens column-offset cache exceeded "
-            f"{_COL_OFFSET_CACHE_SIZE_CAP} entries; new entries will still be "
-            "added but this likely indicates a long-running process touching "
-            "very many unique code objects.",
-            stacklevel=2,
-        )
-        _col_offset_cache_warned = True
+    if len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
+        if not _col_offset_cache_warned:
+            warnings.warn(
+                "torchlens column-offset cache reached "
+                f"{_COL_OFFSET_CACHE_SIZE_CAP} entries; evicting oldest entries.",
+                stacklevel=2,
+            )
+            _col_offset_cache_warned = True
+        _COL_OFFSET_CACHE.pop(next(iter(_COL_OFFSET_CACHE)))
     offset_map = _build_col_offset_map(code)
     _COL_OFFSET_CACHE[code_id] = (code, offset_map)
     return offset_map
