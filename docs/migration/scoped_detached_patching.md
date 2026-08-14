@@ -45,13 +45,16 @@ repair stale bindings. Coverage is now:
   (for example an `autograd.grad` boundary is a known no-provenance source); no rescue runs.
 - Streaming saves, `out_sink` captures, and halt-predicate partials are not re-runnable; they
   report the escape and skip the rescue.
-- A rescue re-run executes the user's forward a SECOND time. When the primary forward WROTE
-  module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`, in-forward
-  buffer counters), the re-run is refused — RNG is restored between runs, module state is not —
-  and the escape stands disclosed (`skipped_reason == "buffer_writes_double_forward"`,
-  `forward_runs == 1`). On rescued (eval-mode) captures, a custom in-forward PYTHON-attribute
-  counter (not a registered buffer) still mutates twice: a declared residual of the double
-  forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
+- A rescue re-run executes the user's forward a SECOND time. When the primary forward ACTUALLY
+  WROTE module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`,
+  in-forward buffer counters), the re-run is refused — RNG is restored between runs, module state
+  is not — and the escape stands disclosed (`skipped_reason == "buffer_writes_double_forward"`,
+  `forward_runs == 1`). The refusal keys on a VALUE-CHANGING write, not on journal presence:
+  fused norm mutators are journaled unconditionally, so eval-mode BN/IN/GN captures carry
+  `buffer_value_changed == False` records and stay rescuable; an unknown change status refuses
+  fail-closed. On rescued (eval-mode) captures, a custom
+  in-forward PYTHON-attribute counter (not a registered buffer) still mutates twice: a declared
+  residual of the double forward, visible via `trace.rescue_rerun["forward_runs"] == 2`.
 - A rescue that would count as recovery must produce a strict SUPERSET of the primary's op
   multiset. Mode presence can de-fuse fused fast paths; any op LOSS keeps the mode-free primary
   authoritative, with both deltas disclosed (`recovered_ops` / `lost_ops`).

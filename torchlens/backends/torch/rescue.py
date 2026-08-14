@@ -213,7 +213,7 @@ def _disclosure(
 
 
 def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
-    """Labels of primary-forward ops that WROTE module buffer state.
+    """Labels of primary-forward ops that ACTUALLY wrote module buffer state.
 
     A rescue re-run executes the user's forward a SECOND time. When the
     primary forward wrote buffers (train-mode BatchNorm running stats and
@@ -223,13 +223,24 @@ def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
     refuse the re-run. A custom in-forward PYTHON-attribute counter (not a
     registered buffer) still mutates twice on rescued captures -- the
     documented residual (see docs/migration/scoped_detached_patching.md).
+
+    The refusal keys on an ACTUAL write, not on journal presence: fused norm
+    mutators (``batch_norm``, ``instance_norm``, ``native_group_norm``) are
+    journaled unconditionally, so every EVAL-mode BN/IN/GN capture carries
+    ``buffer_write_kind`` records whose ``buffer_value_changed`` is ``False``
+    (bytes provably unchanged; re-running is state-neutral). Only a record
+    whose value changed -- or whose change status is unknown (fail closed) --
+    refuses the re-run.
     """
 
     labels: list[str] = []
     for op in getattr(trace, "ops", ()) or ():
-        if getattr(op, "buffer_write_kind", None) is not None:
-            label = getattr(op, "label_raw", None) or getattr(op, "layer_label", None)
-            labels.append(str(label or getattr(op, "func_name", "?")))
+        if getattr(op, "buffer_write_kind", None) is None:
+            continue
+        if getattr(op, "buffer_value_changed", None) is False:
+            continue
+        label = getattr(op, "label_raw", None) or getattr(op, "layer_label", None)
+        labels.append(str(label or getattr(op, "func_name", "?")))
     return tuple(labels)
 
 

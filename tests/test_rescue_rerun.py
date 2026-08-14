@@ -219,6 +219,74 @@ def test_train_mode_batchnorm_capture_skips_rescue_end_to_end(raw_cos: Any) -> N
     assert "cos" not in [op.func_name for op in trace.ops]
 
 
+def test_provably_unchanged_buffer_journal_does_not_refuse_rescue() -> None:
+    """Journal PRESENCE alone is not a write: value_changed=False rescues.
+
+    Fused norm mutators journal unconditionally, so every EVAL-mode BN/IN/GN
+    capture carries ``buffer_write_kind`` records with
+    ``buffer_value_changed=False`` (bytes provably unchanged). Refusing on
+    presence alone permanently disabled the rescue for the most common
+    capture class; the refusal must key on an ACTUAL write.
+    """
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    runs: list[str] = []
+    primary = _stub_trace(["relu"], signal=True)
+    primary.ops.append(
+        types.SimpleNamespace(
+            func_name="none",
+            buffer_write_kind="fused",
+            buffer_value_changed=False,
+            label_raw="buffer_3",
+        )
+    )
+    rescued = _stub_trace(["relu", "cos"])
+    rescued.ops.append(
+        types.SimpleNamespace(
+            func_name="none",
+            buffer_write_kind="fused",
+            buffer_value_changed=False,
+            label_raw="buffer_3",
+        )
+    )
+
+    def run_capture() -> Any:
+        runs.append("run")
+        return primary if len(runs) == 1 else rescued
+
+    result = capture_with_rescue(run_capture)
+    assert len(runs) == 2, "a provably-unchanged buffer journal must not refuse the re-run"
+    assert result is rescued
+    assert result.capture_verification_reason == "mode_rescue_rerun"
+
+
+def test_eval_mode_batchnorm_capture_still_rescues_end_to_end(raw_cos: Any) -> None:
+    """Eval-mode BN journals fused no-op writes; the rescue must still run."""
+
+    wrap_torch()
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bn = nn.BatchNorm1d(2)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return torch.relu(raw_cos(self.bn(v)))
+
+    model = Model()
+    model.eval()
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(model, torch.randn(4, 2))
+    assert model.bn.num_batches_tracked.item() == 0, "eval-mode BN never writes its counter"
+    info = trace.rescue_rerun
+    assert info is not None
+    assert info["recovered"] is True
+    assert info["forward_runs"] == 2
+    assert "cos" in [op.func_name for op in trace.ops]
+    assert trace.capture_verification_reason == "mode_rescue_rerun"
+
+
 def test_stateless_primary_still_rescues() -> None:
     """R16-2 control: no buffer writes -> the re-run proceeds."""
 
