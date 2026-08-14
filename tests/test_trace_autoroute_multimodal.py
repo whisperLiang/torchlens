@@ -23,7 +23,7 @@ class _DictModel(nn.Module):
 
 
 def _pil_image() -> Any:
-    """Create a small RGB PIL image, skipping when PIL is unavailable.
+    """Create a small RGB PIL image (Pillow is a required dependency).
 
     Returns
     -------
@@ -31,7 +31,8 @@ def _pil_image() -> Any:
         PIL image instance.
     """
 
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     return image_module.new("RGB", (32, 32), color=(20, 130, 70))
 
 
@@ -40,7 +41,8 @@ def test_clip_style_dict_routes_via_auto_processor() -> None:
     """CLIP-style text plus image dict should use ``AutoProcessor``."""
 
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     model = transformers.CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
 
     log = tl.trace(
@@ -84,7 +86,7 @@ def test_wrong_modality_value_types_do_not_route() -> None:
 def test_model_without_auto_processor_gate_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """A multimodal-looking dict should fall through when processor resolution fails."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
 
     def fail_trace_multimodal(model: Any, input_dict: Any, **kwargs: Any) -> object:
         """Fail if multimodal bridge dispatch occurs."""
@@ -104,7 +106,7 @@ def test_dict_transform_override_skips_multimodal_autoroute(
 ) -> None:
     """Explicit ``transform=`` should bypass multimodal auto-routing."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
 
     def fail_trace_multimodal(model: Any, input_dict: Any, **kwargs: Any) -> object:
         """Fail if multimodal bridge dispatch occurs."""

@@ -120,8 +120,8 @@ def _pil_stimuli(n_items: int = 8) -> list[Any]:
         RGB PIL images with stable colors and simple index marks.
     """
 
-    image_module = pytest.importorskip("PIL.Image")
-    draw_module = pytest.importorskip("PIL.ImageDraw")
+    from PIL import Image as image_module, ImageDraw as draw_module
+
     images = []
     for index in range(n_items):
         image = image_module.new(
@@ -601,7 +601,8 @@ def test_mds_scatter_node_spec_sets_draw_time_image_for_annotated_layer() -> Non
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (420, 420)
@@ -628,7 +629,8 @@ def test_rdm_node_spec_sets_one_draw_time_heatmap_for_annotated_layer() -> None:
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (360, 360)
@@ -656,7 +658,8 @@ def test_scree_node_spec_sets_one_draw_time_image_for_annotated_layer() -> None:
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (320, 214)
@@ -869,7 +872,8 @@ def test_mds_scatter_fallback_renders_points_without_raw_images() -> None:
     assert result is not None
     assert result.image is not None
     assert Path(result.image).is_file()
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (420, 420)

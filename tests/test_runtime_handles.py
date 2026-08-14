@@ -7,7 +7,6 @@ import weakref
 from pathlib import Path
 from typing import Any
 
-import pytest
 import torch
 from torch import nn
 
@@ -134,7 +133,8 @@ def test_grad_fn_handle_returns_none_when_trace_refs_are_unavailable() -> None:
 def test_portable_round_trip_runtime_handles_are_none(tmp_path: Path) -> None:
     """Portable ``.tlspec`` loads do not restore computed runtime handles."""
 
-    pytest.importorskip("safetensors")
+    import safetensors  # noqa: F401
+
     _model, trace = _make_trace()
     path = tmp_path / "runtime_handles.tlspec"
 

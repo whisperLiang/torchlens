@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
 pd = pytest.importorskip("pandas")
-pytest.importorskip("safetensors")
 
 import torchlens as tl  # noqa: E402
 from torchlens import load, save, trace as trace_fn  # noqa: E402

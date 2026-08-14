@@ -11,10 +11,9 @@ from typing import Any
 
 import numpy as np
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
-
-pytest.importorskip("safetensors")
 
 from torchlens import Trace, load, save, trace as trace_fn
 from torchlens._io import (

@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
-
-pytest.importorskip("safetensors")
 
 import torchlens as tl
 from torchlens._io.manifest import Manifest

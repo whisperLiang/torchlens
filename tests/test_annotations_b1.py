@@ -209,7 +209,8 @@ def test_with_annotations_returns_owned_copy() -> None:
 def test_annotation_image_sets_nodespec_image_hook(tmp_path: Path) -> None:
     """Image annotations should render through the existing NodeSpec image path."""
 
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     image_path = tmp_path / "annotation.png"
     image_module.new("RGB", (8, 8), color=(10, 20, 30)).save(image_path)
     trace, _model, _x = _trace_tiny()

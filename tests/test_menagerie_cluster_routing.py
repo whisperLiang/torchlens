@@ -326,7 +326,7 @@ def test_probe_local_gpu_vram_bytes_parses_nvidia_smi_and_handles_missing() -> N
 def test_resource_routing_does_not_initialize_torch_cuda() -> None:
     """Route calculation must not initialize CUDA in the orchestrator process."""
 
-    torch = pytest.importorskip("torch")
+    import torch
     cuda_initialized = torch.cuda.is_initialized()
 
     route_resources(_row(stable_id="m-small"), ledger={}, local_gpu_vram_bytes=None)

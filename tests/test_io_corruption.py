@@ -10,13 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
 import torchlens as tl
-
-pytest.importorskip("safetensors")
-
 from torchlens import load, save
 from torchlens._io import TorchLensIOError
 from torchlens._io._safe_unpickle import SafeBundleUnpickler

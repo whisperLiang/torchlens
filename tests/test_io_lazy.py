@@ -8,10 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
-
-pytest.importorskip("safetensors")
 
 from torchlens import load, save, trace as trace_fn
 from torchlens._io import BlobRef, TorchLensIOError

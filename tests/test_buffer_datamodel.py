@@ -660,7 +660,8 @@ def test_buffer_op_accessors_partition_read_and_write_versions() -> None:
 def test_buffer_op_accessors_round_trip_through_tlspec(tmp_path: Path) -> None:
     """Derived buffer op accessors remain correct after portable ``.tlspec`` load."""
 
-    pytest.importorskip("safetensors")
+    import safetensors  # noqa: F401
+
     trace = tl.trace(DualRoleInplace(), torch.ones(2), save_arg_values=True)
     path = tmp_path / "buffer_ops.tlspec"
 
