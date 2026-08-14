@@ -2268,3 +2268,73 @@ def test_refresh_projection_with_inplace_op_keeps_one_grad_owner_per_label() -> 
     assert per_label, "backward produced no gradient observations"
     duplicated = {label: count for label, count in per_label.items() if count > 1}
     assert not duplicated, duplicated
+
+
+class _NaNGradParamModel(nn.Module):
+    """Model whose ``scale`` parameter deterministically earns a NaN gradient.
+
+    ``(scale * 0.0) * inf`` contributes NaN to ``scale``'s grad through the
+    identical graph in BOTH the stock-autograd and TorchLens-captured
+    pipelines, so the two NaN patterns agree exactly.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        nan_term = (self.scale * 0.0) * torch.tensor(float("inf"))
+        return self.lin(x) + nan_term
+
+
+def test_backward_validation_nan_bearing_grads_do_not_false_fail() -> None:
+    """A CORRECT NaN-bearing gradient must not fail backward validation.
+
+    Both pipelines compute the same NaN pattern for ``scale``; the comparison
+    follows tensor_nanequal's doctrine (identical NaN patterns are agreement,
+    ``equal_nan=True``). The bare ``torch.allclose`` this replaces returned
+    False for ANY NaN, so validation false-FAILED gradients TorchLens had
+    captured perfectly (NaN-vs-number still fails elementwise).
+    """
+
+    model = _NaNGradParamModel().eval()
+    x = torch.randn(2, 4)
+    assert backward_validation.validate_backward_pass(model, (x,), random_seed=0) is True
+
+
+def test_gradient_validation_tolerances_are_named_constants() -> None:
+    """The grad tolerance pairs are spelled ONCE and shared by every consumer.
+
+    Two backward checks of one capture used to disagree 10x via bare literals
+    in three files; the pairs now live in torchlens.utils.tensor_utils with a
+    documented error model (param grads = batch/position reductions, layer
+    grads and RF adjoint probes = elementwise comparisons).
+    """
+
+    import inspect
+
+    from torchlens.receptive_field import verify as rf_verify
+    from torchlens.utils.tensor_utils import (
+        LAYER_GRAD_VALIDATION_ATOL,
+        LAYER_GRAD_VALIDATION_RTOL,
+        PARAM_GRAD_VALIDATION_ATOL,
+        PARAM_GRAD_VALIDATION_RTOL,
+    )
+    from torchlens.validation._layer_grad_report import _compare_module_output_grads
+
+    backward_params = inspect.signature(backward_validation.validate_backward_pass).parameters
+    assert backward_params["atol"].default == PARAM_GRAD_VALIDATION_ATOL
+    assert backward_params["rtol"].default == PARAM_GRAD_VALIDATION_RTOL
+
+    layer_params = inspect.signature(_compare_module_output_grads).parameters
+    assert layer_params["atol"].default == LAYER_GRAD_VALIDATION_ATOL
+    assert layer_params["rtol"].default == LAYER_GRAD_VALIDATION_RTOL
+
+    rf_params = inspect.signature(rf_verify).parameters
+    assert rf_params["empirical_adjoint_atol"].default == LAYER_GRAD_VALIDATION_ATOL
+    assert rf_params["empirical_adjoint_rtol"].default == LAYER_GRAD_VALIDATION_RTOL
+
+    # The elementwise pair is 10x tighter than the reduction pair by design.
+    assert LAYER_GRAD_VALIDATION_RTOL == pytest.approx(PARAM_GRAD_VALIDATION_RTOL / 10)
+    assert LAYER_GRAD_VALIDATION_ATOL == pytest.approx(PARAM_GRAD_VALIDATION_ATOL / 10)

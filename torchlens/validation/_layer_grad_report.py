@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 
+from ..utils.tensor_utils import LAYER_GRAD_VALIDATION_ATOL, LAYER_GRAD_VALIDATION_RTOL
+
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from ._stock_layer_grads import ModuleOutputGradKey
@@ -84,8 +86,8 @@ def _compare_module_output_grads(
     stock_module_grads: Mapping[ModuleOutputGradKey, torch.Tensor],
     stock_identity_addresses: set[ModuleOutputGradKey],
     *,
-    atol: float = 1e-6,
-    rtol: float = 1e-5,
+    atol: float = LAYER_GRAD_VALIDATION_ATOL,
+    rtol: float = LAYER_GRAD_VALIDATION_RTOL,
 ) -> LayerGradReport:
     """Compare candidate module-call output grads to stock module-output grads.
 
@@ -98,7 +100,9 @@ def _compare_module_output_grads(
     stock_identity_addresses:
         Module-output keys whose stock output is identical to input.
     atol:
-        Absolute allclose tolerance.
+        Absolute allclose tolerance. The default is the shared elementwise
+        layer-grad pair (see the error model on the constants in
+        ``torchlens.utils.tensor_utils``).
     rtol:
         Relative allclose tolerance.
 
@@ -195,7 +199,11 @@ def _compare_module_output_grads(
             max_rel_diffs[coverage_label] = (
                 (abs_diff / stock_grad.abs().clamp(min=1e-30)).max().item()
             )
-            if torch.allclose(cand_grad, stock_grad, atol=atol, rtol=rtol):
+            # equal_nan: an identical NaN pattern in candidate and stock grads
+            # is agreement (tensor_nanequal doctrine); NaN-vs-number still
+            # fails elementwise. Without it a CORRECT NaN-bearing gradient
+            # false-FAILED this check.
+            if torch.allclose(cand_grad, stock_grad, atol=atol, rtol=rtol, equal_nan=True):
                 coverage[coverage_label] = "covered"
             else:
                 coverage[coverage_label] = "mismatched"

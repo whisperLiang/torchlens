@@ -11,6 +11,7 @@ from torch import nn
 
 from ..backends import BackendName, BackendUnsupportedError, resolve_backend_spec
 from ..options import CaptureOptions
+from ..utils.tensor_utils import PARAM_GRAD_VALIDATION_ATOL, PARAM_GRAD_VALIDATION_RTOL
 from .backward import validate_backward_pass
 
 if TYPE_CHECKING:
@@ -134,9 +135,9 @@ def _validate_scope_keywords(
         _raise_backward_only("loss_fn", scope)
     if perturb_saved_grads:
         _raise_backward_only("perturb_saved_grads", scope)
-    if atol != 1e-5:
+    if atol != PARAM_GRAD_VALIDATION_ATOL:
         _raise_backward_only("atol", scope)
-    if rtol != 1e-4:
+    if rtol != PARAM_GRAD_VALIDATION_RTOL:
         _raise_backward_only("rtol", scope)
     if validate_layer_grads is not None:
         _raise_backward_only("validate_layer_grads", scope)
@@ -306,8 +307,8 @@ def validate(
     validate_metadata: bool = True,
     loss_fn: Callable[[Any], torch.Tensor] | None = None,
     perturb_saved_grads: bool = False,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
+    atol: float = PARAM_GRAD_VALIDATION_ATOL,
+    rtol: float = PARAM_GRAD_VALIDATION_RTOL,
     validate_layer_grads: bool | None = None,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,

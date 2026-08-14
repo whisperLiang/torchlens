@@ -19,6 +19,12 @@ from ..options import CaptureOptions
 from ..utils.arg_handling import normalize_input_args
 from ..utils.display import warn_parallel
 from ..utils.rng import set_random_seed
+from ..utils.tensor_utils import (
+    LAYER_GRAD_VALIDATION_ATOL,
+    LAYER_GRAD_VALIDATION_RTOL,
+    PARAM_GRAD_VALIDATION_ATOL,
+    PARAM_GRAD_VALIDATION_RTOL,
+)
 
 
 def _sum_tensors(value: Any) -> torch.Tensor:
@@ -265,8 +271,8 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
+    atol: float = PARAM_GRAD_VALIDATION_ATOL,
+    rtol: float = PARAM_GRAD_VALIDATION_RTOL,
     validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
@@ -293,17 +299,26 @@ def validate_backward_pass(
     random_seed:
         Fixed RNG seed for stock and candidate passes. Auto-generated if None.
     atol:
-        Absolute tolerance for ``torch.allclose``.
+        Absolute tolerance for the parameter-gradient ``torch.allclose``.
+        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_ATOL`
+        (parameter grads are batch/position REDUCTIONS, so they carry
+        accumulation-order round-off; see the error model on the constants).
     rtol:
-        Relative tolerance for ``torch.allclose``.
+        Relative tolerance for the parameter-gradient ``torch.allclose``.
+        Defaults to :data:`~torchlens.utils.tensor_utils.PARAM_GRAD_VALIDATION_RTOL`.
     validate_layer_grads:
         If True (default), validate captured per-module-output gradients in
         addition to parameter gradients. False preserves the legacy
         parameter-only validation path as an explicit opt-out.
     layer_grad_atol:
-        Optional absolute tolerance for per-module-output gradients.
+        Optional absolute tolerance for per-module-output gradients. ``None``
+        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_ATOL`
+        (module-output grads are compared ELEMENTWISE with no cross-element
+        reduction, so they earn a 10x tighter pair than parameter grads;
+        they previously inherited the looser parameter pair).
     layer_grad_rtol:
-        Optional relative tolerance for per-module-output gradients.
+        Optional relative tolerance for per-module-output gradients. ``None``
+        uses :data:`~torchlens.utils.tensor_utils.LAYER_GRAD_VALIDATION_RTOL`.
 
     Returns
     -------
@@ -429,8 +444,8 @@ def validate_backward_pass(
                 trace,
                 stock_module_grads,
                 stock_identity_addresses,
-                atol=layer_grad_atol if layer_grad_atol is not None else atol,
-                rtol=layer_grad_rtol if layer_grad_rtol is not None else rtol,
+                atol=layer_grad_atol if layer_grad_atol is not None else LAYER_GRAD_VALIDATION_ATOL,
+                rtol=layer_grad_rtol if layer_grad_rtol is not None else LAYER_GRAD_VALIDATION_RTOL,
             )
             if not bool(layer_report):
                 return False
@@ -455,9 +470,16 @@ def validate_backward_pass(
             return False
         if expected_param_grads.keys() != observed_param_grads.keys():
             return False
+        # equal_nan follows tensor_nanequal's doctrine: an identical NaN
+        # pattern in candidate and stock grads is agreement, not a mismatch
+        # (NaN-vs-number still fails elementwise).
         params_passed = all(
             torch.allclose(
-                observed_param_grads[name], expected_param_grads[name], atol=atol, rtol=rtol
+                observed_param_grads[name],
+                expected_param_grads[name],
+                atol=atol,
+                rtol=rtol,
+                equal_nan=True,
             )
             for name in expected_param_grads
         )
