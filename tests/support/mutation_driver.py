@@ -52,6 +52,12 @@ MUTANTS: dict[str, tuple[str, str]] = {
     # comparison result at the callsite must be killed by the corruption
     # battery, not by a single diagnostics test.
     "M13": ("torchlens/validation/core.py", "_deep_numeric_replay_matches_saved"),
+    # The postprocess step-contract checker (b9-sol R74-1): a return-None
+    # disarm previously survived because this suite listed only validation
+    # files. Killed directly by tests/test_postprocess_contract_arming.py and
+    # through real armed captures by the test_postprocess_dag enforcement
+    # plants below.
+    "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
 }
 
 #: Bounded arming suite: the files whose job is to kill the mutants above.
@@ -63,6 +69,12 @@ SUITE = [
     "tests/test_conditional_invariants.py",
     "tests/test_loop_synthesis_ground_truth.py",
     "tests/test_r29_capval_hardening.py",
+    # M14 killers: the direct synthetic-input liveness file plus the two
+    # armed-capture enforcement plants (undeclared read, in-place write
+    # smuggle) that exercise the checker through a real postprocess run.
+    "tests/test_postprocess_contract_arming.py",
+    "tests/test_postprocess_dag.py::test_read_enforcement_trips_on_undeclared_read",
+    "tests/test_postprocess_dag.py::test_executor_seam_patched_step_executes_and_audits",
 ]
 
 #: Known baseline reds, deselected so a mutant verdict is never confounded.
