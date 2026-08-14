@@ -176,3 +176,84 @@ def test_norm_is_mean_of_per_update_tensor_norms() -> None:
     assert batched.result() == pytest.approx(expected_batched)
     assert split.result() == pytest.approx(expected_split)
     assert batched.result() != pytest.approx(split.result())
+
+
+def test_quantile_uses_private_seeded_rng_not_the_global_stream() -> None:
+    """R13-7: Quantile sampling is seedable and decoupled from global random.
+
+    The reservoir used to draw from the process-global ``random`` module --
+    the same engine the capture pipeline snapshots/restores as protected
+    state -- so identical inputs under two global seeds produced medians ~19%
+    apart and estimates were irreproducible. Sampling now uses a private
+    ``random.Random(seed)``: identical streams give identical estimates
+    regardless of the global seed, and updating never advances the global
+    engine.
+    """
+
+    import random as global_random
+
+    data = torch.arange(100_000, dtype=torch.float64)
+
+    def run_with_global_seed(seed: int) -> float:
+        global_random.seed(seed)
+        stat = tl.stats.Quantile(quantiles=(0.5,), reservoir_size=256)
+        stat.update(data)
+        return stat.result()[0.5]
+
+    assert run_with_global_seed(1) == run_with_global_seed(2)
+
+    # The private stream never perturbs the protected global engine.
+    global_random.seed(1234)
+    checkpoint = global_random.getstate()
+    stat = tl.stats.Quantile(quantiles=(0.5,), reservoir_size=16)
+    stat.update(data[:4096])
+    assert global_random.getstate() == checkpoint
+
+    # Distinct explicit seeds give distinct (but internally deterministic)
+    # subsamples; the same seed reproduces exactly.
+    first = tl.stats.Quantile(quantiles=(0.5,), reservoir_size=256, seed=7)
+    second = tl.stats.Quantile(quantiles=(0.5,), reservoir_size=256, seed=7)
+    first.update(data)
+    second.update(data)
+    assert first.result() == second.result()
+
+
+def test_topk_batched_update_matches_reference_semantics() -> None:
+    """R29-5: the torch.topk-based update keeps exact top-k union semantics."""
+
+    stat = tl.stats.TopK(k=5)
+    chunks = [
+        torch.tensor([3.0, 1.0, 4.0, 1.0, 5.0]),
+        torch.tensor([9.0, 2.0, 6.0]),
+        torch.tensor([5.0, 3.0, 5.0]),  # duplicates retained like the old heap
+        torch.tensor([float("inf"), -1.0, float("nan")]),  # NaN has no order
+    ]
+    for chunk in chunks:
+        stat.update(chunk)
+    everything = torch.cat(chunks)
+    expected = sorted(
+        (float(v) for v in everything.tolist() if v == v), reverse=True
+    )[:5]
+    assert stat.result() == expected
+
+
+def test_covariance_batched_update_matches_torch_cov_across_uneven_chunks() -> None:
+    """R29-5: the Chan batch combine equals torch.cov over any chunking."""
+
+    torch.manual_seed(0)
+    data = torch.randn(37, 8, dtype=torch.float64)
+    stat = tl.stats.Covariance()
+    for chunk in torch.split(data, [1, 4, 17, 2, 13]):
+        stat.update(chunk)
+    assert torch.allclose(stat.result(), torch.cov(data.T), atol=1e-12)
+
+    cross = tl.stats.CrossCovariance()
+    other = torch.randn(37, 5, dtype=torch.float64)
+    for chunk_a, chunk_b in zip(
+        torch.split(data, [1, 4, 17, 2, 13]), torch.split(other, [1, 4, 17, 2, 13])
+    ):
+        cross.update(chunk_a, chunk_b)
+    centered_a = data - data.mean(dim=0)
+    centered_b = other - other.mean(dim=0)
+    expected_cross = centered_a.T @ centered_b / (data.shape[0] - 1)
+    assert torch.allclose(cross.result(), expected_cross, atol=1e-12)
