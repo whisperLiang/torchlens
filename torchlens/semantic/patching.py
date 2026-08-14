@@ -240,6 +240,8 @@ def activation_patch_residual_stream(
                     _patch_position,
                     name=f"patch_{facet_name}_{layer_index}_{position}",
                     guard=guard,
+                    facet_name=facet_name,
+                    address=address,
                 )
                 try:
                     result[layer_index, pos_index] = _metric_scalar(
@@ -608,6 +610,8 @@ def _activation_patch_by_module(
             _patch_whole,
             name=f"patch_{facet_name}_{layer_index}",
             guard=guard,
+            facet_name=facet_name,
+            address=address,
         )
         try:
             result[layer_index] = _metric_scalar(metric(patched_log), like=result)
@@ -676,19 +680,155 @@ def _run_patch(
     *,
     name: str,
     guard: _CounterfactualStateGuard,
+    facet_name: str | None = None,
+    address: str | None = None,
 ) -> Any:
     """Fork the corrupted trace, attach one facet hook, and rerun.
 
     The model/RNG state is reset to the pristine snapshot before the rerun so
     the only difference between the corrupted baseline and this patched run is
     the injected clean activation.
+
+    Live hooks fire at wrapped-function and module-boundary sites only, so a
+    facet homed on a MODEL INPUT op (e.g. ``resid_pre`` of a first block) has
+    no site where a hook could ever fire. When the caller identifies the facet
+    (``facet_name`` + ``address``) and its home is a model input, the patch is
+    applied to the input tensor itself and the rerun proceeds without a hook —
+    semantically identical to a hook fire at the home site.
     """
+
+    input_ordinal = None
+    if facet_name is not None and address is not None:
+        input_ordinal = _model_input_home_ordinal(corrupted_log, facet_name, address)
+    if input_ordinal is not None:
+        patched_input = _patch_input_leaf(
+            corrupted_input,
+            input_ordinal,
+            lambda leaf: hook(leaf.detach().clone(), hook=None),
+        )
+        patched_log = corrupted_log.fork(name)
+        guard.reset()
+        patched_log.run(model, patched_input)
+        return patched_log
 
     patched_log = corrupted_log.fork(name)
     patched_log.attach_hooks(selector, hook)
     guard.reset()
     patched_log.run(model, corrupted_input)
     return patched_log
+
+
+def _model_input_home_ordinal(log: Any, facet_name: str, address: str) -> int | None:
+    """Return the input-op ordinal when a whole-tensor facet homes on a model input.
+
+    Parameters
+    ----------
+    log:
+        Trace holding the facet.
+    facet_name:
+        Facet to inspect.
+    address:
+        Module address exposing the facet.
+
+    Returns
+    -------
+    int | None
+        Position of the home op among ``log.input_ops``, or ``None`` when the
+        home is a regular op (live hooks handle it) or cannot be identified.
+
+    Raises
+    ------
+    ValueError
+        If a facet homed on a model input is not the identity view of the home
+        tensor: patching the raw input would silently write outside the facet.
+    """
+
+    try:
+        spec = log.modules[address].facets[facet_name].spec
+    except (AttributeError, KeyError, RuntimeError, ValueError):
+        return None
+    home = getattr(spec, "home", None)
+    if home is None or getattr(home, "layer_type", None) != "input":
+        return None
+    input_labels = [str(layer.label) for layer in getattr(log, "input_ops", ())]
+    home_label = str(getattr(home, "label", ""))
+    if home_label not in input_labels:
+        return None
+    if tuple(getattr(spec, "transforms", ()) or ()) or not bool(spec.write_mask().all()):
+        raise ValueError(
+            f"Facet {facet_name!r} on module {address!r} is a transformed or sliced view of "
+            f"model input {home_label!r}. Sliced input facets cannot be patched: live hooks "
+            "never fire at input sites, and whole-input replacement would write outside the "
+            "facet."
+        )
+    return input_labels.index(home_label)
+
+
+def _patch_input_leaf(
+    x: Any,
+    ordinal: int,
+    patch: Callable[[torch.Tensor], torch.Tensor],
+) -> Any:
+    """Return the input tree with its ``ordinal``-th distinct tensor leaf patched.
+
+    Leaf ordering mirrors capture-time input flattening: tensors are visited in
+    container order and repeated tensor objects count once.
+
+    Parameters
+    ----------
+    x:
+        Model input tree (tensor, sequence, or mapping).
+    ordinal:
+        Zero-based index among distinct tensor leaves.
+    patch:
+        Callable producing the replacement tensor for the selected leaf.
+
+    Returns
+    -------
+    Any
+        Rebuilt input tree with one leaf replaced.
+
+    Raises
+    ------
+    ValueError
+        If the tree has no ``ordinal``-th tensor leaf or the patched tensor
+        changes shape.
+    """
+
+    seen: set[int] = set()
+    counter = itertools.count()
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, torch.Tensor):
+            if id(node) in seen:
+                return node
+            seen.add(id(node))
+            if next(counter) != ordinal:
+                return node
+            patched = patch(node)
+            if tuple(patched.shape) != tuple(node.shape):
+                raise ValueError(
+                    f"Input patch changed the leaf shape from {tuple(node.shape)} to "
+                    f"{tuple(patched.shape)}; input patching must preserve shape."
+                )
+            return patched
+        if isinstance(node, tuple):
+            rebuilt = [_walk(item) for item in node]
+            if hasattr(node, "_fields"):
+                return type(node)(*rebuilt)
+            return tuple(rebuilt)
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        if isinstance(node, Mapping):
+            return {key: _walk(value) for key, value in node.items()}
+        return node
+
+    result = _walk(x)
+    if len(seen) <= ordinal:
+        raise ValueError(
+            f"Input tree has {len(seen)} distinct tensor leaves; cannot patch leaf {ordinal}."
+        )
+    return result
 
 
 def _modules_with_facet(log: Any, facet_name: str) -> list[str]:
