@@ -573,14 +573,8 @@ def _capture_policy_from_spec(spec: CaptureSpec) -> CapturePolicy:
     policy = _CAPTURE_POLICY_CACHE.get(key)
     if policy is None:
         policy = CapturePolicy(
-            must_keep_topology=False,
             save_payload=spec.save_out,
-            requires_isolation=False,
-            save_args=False,
-            save_code=False,
-            save_rng=False,
             save_grad=spec.keep_grad,
-            stream=False,
             save_mode=spec.save_mode,
         )
         _CAPTURE_POLICY_CACHE[key] = policy

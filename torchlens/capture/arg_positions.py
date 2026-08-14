@@ -1369,11 +1369,17 @@ FUNC_ARG_SPECS["full"] = ArgSpec(positions=(1,), tensor_kwargs=("fill_value",))
 # forward op in _COMMUTATIVE_REFLECTED_DUNDERS). Fail LOUDLY at import so this class of silent
 # dataflow corruption can never recur unnoticed.
 _BINARY_FACTORY_KEY_COLLISIONS = set(_BINARY_FUNCS) & set(_FACTORY_FUNCS)
-assert not _BINARY_FACTORY_KEY_COLLISIONS, (
-    "arg-spec key collision between binary-op and factory-func tables: "
-    f"{sorted(_BINARY_FACTORY_KEY_COLLISIONS)} -- these ops disagree on tensor-parent positions; "
-    "give them distinct normalized keys (see _COMMUTATIVE_REFLECTED_DUNDERS)."
-)
+if _BINARY_FACTORY_KEY_COLLISIONS:
+    # A real ``raise``, never ``assert`` (R24-1): ``python -O`` strips
+    # asserts, and this guard's whole promise is that the corruption "can
+    # never recur unnoticed" -- under ``-O`` a future table collision would
+    # import clean and silently mis-assign tensor parents (wrong dataflow
+    # edges in every trace).
+    raise RuntimeError(
+        "arg-spec key collision between binary-op and factory-func tables: "
+        f"{sorted(_BINARY_FACTORY_KEY_COLLISIONS)} -- these ops disagree on tensor-parent "
+        "positions; give them distinct normalized keys (see _COMMUTATIVE_REFLECTED_DUNDERS)."
+    )
 
 # Factory-from-source functions inherit shape/dtype/device from a tensor source.
 # Record that source as a topology parent, matching view/reshape-style dependencies

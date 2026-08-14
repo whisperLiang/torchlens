@@ -613,13 +613,7 @@ def _exhaustive_capture_policy(trace: "Trace", fields_dict: dict[str, Any]) -> C
     """Return the exhaustive freeze's capture policy (shared by both shapes)."""
 
     return CapturePolicy(
-        must_keep_topology=True,
         save_payload=fields_dict["has_saved_activation"],
-        requires_isolation=fields_dict["is_inplace"],
-        save_args=fields_dict["has_saved_args"],
-        save_code=bool(fields_dict["code_context"]),
-        save_rng=bool(fields_dict["func_rng_states"]),
         save_grad=fields_dict["save_grads"],
-        stream=False,
         save_mode=getattr(trace, "save_mode", "copy"),
     )
