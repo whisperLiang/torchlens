@@ -2427,6 +2427,11 @@ def stage_state_to_slot_devices(
                 with _state.pause_logging(), _guarded_defensive_materialize():
                     cached = value.to(_slot_device(slot))
             except (RuntimeError, AssertionError) as exc:
+                # R36-7a: this frame rides the refusal's traceback; drop the
+                # already-transferred device copies in place so a caller
+                # retaining the exception cannot pin those GPU allocations.
+                staged.clear()
+                moved_by_identity.clear()
                 raise RunCapabilityUnavailableError(
                     f"State slot {slot_id!r} requires device "
                     f"{slot.device_type}"

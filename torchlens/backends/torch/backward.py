@@ -2308,8 +2308,15 @@ def _memory_snapshot(device: torch.device) -> tuple[str, int]:
     return "cpu", int(psutil.Process().memory_info().rss)
 
 
-def _reset_peak_memory(device: torch.device) -> tuple[str, int]:
-    """Reset peak tracking when available and return the starting snapshot.
+def _peak_memory_baseline(device: torch.device) -> tuple[str, int]:
+    """Return the pre-pass memory baseline WITHOUT resetting peak tracking.
+
+    R36-2: this used to call ``torch.cuda.reset_peak_memory_stats`` on every
+    ``log_backward``, clobbering the caller's process-wide high-water counter.
+    The baseline is now the pre-existing ``max_memory_allocated`` snapshot:
+    a backward that pushes a new device peak reports the exact excess over
+    the prior high-water mark, and one that stays under it honestly reads
+    ``0`` (the same contract as the forward bracket and the CPU/MPS deltas).
 
     Parameters
     ----------
@@ -2321,8 +2328,6 @@ def _reset_peak_memory(device: torch.device) -> tuple[str, int]:
     tuple[str, int]
         Backend label and starting memory snapshot in bytes.
     """
-    if device.type == "cuda" and torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats(device)
     return _memory_snapshot(device)
 
 
@@ -3011,7 +3016,7 @@ def _run_backward_with_capture(
         with contextlib.suppress(BaseException):
             _materialize_backward_projections(trace)
         raise
-    backend, before = _reset_peak_memory(loss.device)
+    backend, before = _peak_memory_baseline(loss.device)
     backward_start_time = time.time()
     status = "ok"
     result = None

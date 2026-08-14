@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
-from .._errors import KeywordConflictError, InvalidArgumentError, RecordBindingError
+from .._errors import InvalidArgumentError, KeywordConflictError, RecordBindingError
 from ..options import ReplayOptions, merge_replay_options
 from ..runnable import DivergencePolicy, RunProvider, RunResult
 from .cleanup import (

@@ -90,7 +90,9 @@ class CaptureSpec:
     def __post_init__(self) -> None:
         """Normalize and validate capture save-mode settings."""
 
-        if self.save_mode not in {"copy", "reference", "view", "cpu_async"}:
+        from ..utils.tensor_utils import SAVE_MODES
+
+        if self.save_mode not in SAVE_MODES:
             raise InvalidArgumentError(
                 "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'; "
                 f"received {self.save_mode!r}",

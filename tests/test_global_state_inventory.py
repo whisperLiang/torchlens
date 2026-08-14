@@ -52,6 +52,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
         ("torchlens/utils/introspection.py", "_FUNC_CALL_LOCATION"),
         ("torchlens/utils/rng.py", "_ACTIVE_MONITOR"),
+        # Accumulate/drain fence for in-flight cpu_async D2H copies (R36-1):
+        # armed per copy on the wrapper hot path, drained at the capture
+        # finalize seam and on the failure-scrub arms.
+        ("torchlens/utils/tensor_utils.py", "_CPU_ASYNC_PENDING_EVENTS"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_BUSY"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_PENDING"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_STATE_PTRS"),

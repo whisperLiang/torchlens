@@ -32,6 +32,7 @@ or any other drop of the last live reference — credits its storage back.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import warnings
 import weakref
@@ -149,7 +150,12 @@ def available_device_bytes(device: torch.device) -> int | None:
         return _available_host_bytes()
     if device_type == "cuda":
         try:
-            free_bytes, _total = torch.cuda.mem_get_info(device)
+            # Pin the query to THIS device explicitly (R36-7b): mem_get_info
+            # resolves an index-less device to the CURRENT device, so a
+            # capture saving to cuda:1 while cuda:0 is current read the wrong
+            # card's headroom.
+            with torch.cuda.device(device):
+                free_bytes, _total = torch.cuda.mem_get_info(device)
             return int(free_bytes)
         except Exception:
             return None
@@ -378,6 +384,13 @@ class SaveBudget:
             Ledger with its limit resolved on first use.
         """
 
+        # Canonicalize the ledger identity (R36-7b): ``torch.device("cuda")``
+        # and ``torch.device("cuda:0")`` are the SAME physical device, but
+        # ``str()`` keyed them into two ledgers, each enforcing only half the
+        # footprint against a full-device limit.
+        if device.type == "cuda" and device.index is None:
+            with contextlib.suppress(Exception):
+                device = torch.device("cuda", torch.cuda.current_device())
         key = str(device)
         ledger = self.ledgers.get(key)
         if ledger is not None:

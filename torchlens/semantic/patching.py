@@ -95,19 +95,33 @@ def _stateful_tensors(model: nn.Module) -> list[torch.Tensor]:
 
 
 def _fork_rng_devices() -> list[int]:
-    """Return the CUDA device ordinals to fork RNG for (empty when CPU-only)."""
+    """Return the CUDA device ordinals to fork RNG for (empty when CPU-only).
 
-    if torch.cuda.is_available():
+    Gated on ``is_initialized()``, not ``is_available()`` (R36-4): if this
+    process never initialized CUDA, no CUDA generator fed any captured op,
+    and forking RNG for every visible device would allocate the very CUDA
+    contexts (~300-600 MB each) this path does not need -- the exact stale
+    pre-fix gate ``utils/rng.py`` documents.
+    """
+
+    from ..utils.tensor_utils import _is_cuda_initialized
+
+    if _is_cuda_initialized() and torch.cuda.is_available():
         return list(range(torch.cuda.device_count()))
     return []
 
 
 def _snapshot_rng() -> dict[str, Any]:
-    """Capture the global CPU (and CUDA, when available) RNG state."""
+    """Capture the global CPU (and CUDA, when live) RNG state."""
+
+    from ..utils.rng import _snapshot_cuda_rng_states
 
     snapshot: dict[str, Any] = {"cpu": torch.get_rng_state()}
-    if torch.cuda.is_available():
-        snapshot["cuda"] = torch.cuda.get_rng_state_all()
+    # Initialized-CUDA-only, latch-guarded (R36-4): returns [] on a
+    # CUDA-less or never-initialized process without touching the driver.
+    cuda_states = _snapshot_cuda_rng_states()
+    if cuda_states:
+        snapshot["cuda"] = cuda_states
     return snapshot
 
 

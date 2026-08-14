@@ -299,6 +299,18 @@ def _execute_loaded_sparse_transaction(
                 raise_first_divergence_incremental()
 
             _walk_call_cone(descriptor.calls, execute_call)
+    except BaseException:
+        # R36-7: an escaping call loop (typed divergence raise, signature
+        # drift, native failure) pins this frame inside the exception
+        # traceback, so a caller retaining the exception would pin every
+        # staged device copy indefinitely. Clear the staging containers IN
+        # PLACE before propagating; the caller's rollback owns fork
+        # unregistration.
+        slot_values.clear()
+        call_outputs.clear()
+        attestation_slot_values.clear()
+        witness_source_snapshots.clear()
+        raise
     finally:
         if host_rng_saved is not None:
             restore_host_rng(host_rng_saved)
