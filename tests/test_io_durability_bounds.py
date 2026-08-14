@@ -224,3 +224,56 @@ def test_manifest_refuses_entry_count_above_ceiling(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(manifest_mod, "_MAX_MANIFEST_TENSOR_ENTRIES", len(data["tensors"]) - 1)
     with pytest.raises(TorchLensIOError, match="ceiling"):
         Manifest.from_dict(data)
+
+
+# --------------------------------------------------------------------------- #
+# MED5: include_source=False gates the loaded-provenance passthrough           #
+# --------------------------------------------------------------------------- #
+
+
+def _forged_provenance() -> manifest_mod.Provenance:
+    return manifest_mod.Provenance(
+        provenance_version=1,
+        capture_devices=["cpu"],
+        dtype_policy={"default_dtype": "torch.float32", "observed_autocast": []},
+        rng_state_digests={"forged_engine": "ab" * 32},
+        input_hash="cd" * 32,
+        model_structure_hash="ef" * 32,
+        git_commit_hash="0123456789abcdef0123456789abcdef01234567",  # pragma: allowlist secret
+    )
+
+
+def test_resave_include_source_false_does_not_reemit_loaded_provenance(
+    tmp_path: Path,
+) -> None:
+    """A loaded (possibly forged) provenance is not re-emitted verbatim.
+
+    Fail-before: ``_collect_provenance`` returned ``_source_bundle_provenance``
+    BEFORE the ``include_source`` gate, so resaving a loaded bundle with
+    ``include_source=False`` still re-emitted git_commit_hash/input_hash/
+    rng_state_digests -- propagating an attacker-authored bundle's forged
+    provenance into resaves the host appears to attest.
+    """
+
+    trace = _trace()
+    trace._source_bundle_provenance = _forged_provenance()
+    spec = tmp_path / "resave.tlspec"
+    tl.save(trace, str(spec), include_source=False)
+    provenance = json.loads((spec / "manifest.json").read_text(encoding="utf-8")).get("provenance")
+    assert provenance is not None
+    assert provenance.get("git_commit_hash") is None, "git commit leaked despite include_source"
+    assert "forged_engine" not in provenance.get("rng_state_digests", {})
+    assert provenance.get("input_hash") != "cd" * 32
+    assert provenance.get("model_structure_hash") != "ef" * 32
+
+
+def test_resave_include_source_true_keeps_loaded_provenance(tmp_path: Path) -> None:
+    """The deliberate capture-time provenance passthrough is preserved."""
+
+    trace = _trace()
+    trace._source_bundle_provenance = _forged_provenance()
+    spec = tmp_path / "resave-with-source.tlspec"
+    tl.save(trace, str(spec), include_source=True)
+    provenance = json.loads((spec / "manifest.json").read_text(encoding="utf-8")).get("provenance")
+    assert provenance is not None
+    assert "forged_engine" in provenance.get("rng_state_digests", {})

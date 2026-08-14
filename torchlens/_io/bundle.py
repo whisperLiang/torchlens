@@ -3121,8 +3121,15 @@ def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provena
 
     from .. import hash as trace_hash
 
+    # A loaded trace carries its source bundle's provenance verbatim so a
+    # plain resave preserves the CAPTURE-time certificate. That passthrough
+    # must not bypass the include_source gate: with include_source=False the
+    # fresh-save path below omits the git commit, so re-emitting a loaded
+    # certificate here both leaked it and let a hostile bundle's forged
+    # provenance propagate into resaves this host appears to attest. With
+    # include_source=False, recompute honestly from the loaded trace instead.
     source_provenance = getattr(trace, "_source_bundle_provenance", None)
-    if isinstance(source_provenance, Provenance):
+    if include_source and isinstance(source_provenance, Provenance):
         return source_provenance
 
     devices = sorted(
