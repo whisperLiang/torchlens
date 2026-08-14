@@ -10,6 +10,12 @@ import torch
 from torch import nn
 
 from ..backends import BackendName, BackendUnsupportedError, resolve_backend_spec
+from ..options import CaptureOptions
+from ..utils.tensor_utils import PARAM_GRAD_VALIDATION_ATOL, PARAM_GRAD_VALIDATION_RTOL
+from .backward import validate_backward_pass
+
+if TYPE_CHECKING:
+    from ..receptive_field._types import ReceptiveFieldValidation
 
 
 def _rss_high_water_bytes() -> int | None:
@@ -26,17 +32,10 @@ def _rss_high_water_bytes() -> int | None:
         import resource
     except ImportError:
         return None
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     import sys as _sys
 
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(peak) if _sys.platform == "darwin" else int(peak) * 1024
-
-from ..options import CaptureOptions
-from ..utils.tensor_utils import PARAM_GRAD_VALIDATION_ATOL, PARAM_GRAD_VALIDATION_RTOL
-from .backward import validate_backward_pass
-
-if TYPE_CHECKING:
-    from ..receptive_field._types import ReceptiveFieldValidation
 
 
 @dataclass(frozen=True)
