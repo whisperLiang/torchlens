@@ -13,6 +13,7 @@ import copy
 import logging
 import pickle
 import re
+import warnings
 import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping
@@ -126,6 +127,10 @@ class _ScrubOptions:
     payload_materialization: bool = True
     payload_codec: PayloadCodec = field(default_factory=lambda: get_payload_codec("torch"))
     unsupported_tensor_records: list[dict[str, str]] = field(default_factory=list)
+    # Once-per-type ledger of save-side container downgrades (foreign tuple
+    # subclasses flattened, foreign defaultdict factories dropped), keyed by
+    # qualified type name so a metadata tree full of one type warns once.
+    container_portability_disclosures: dict[str, str] = field(default_factory=dict)
 
 
 def scrub_for_save(
@@ -585,8 +590,57 @@ def _scrub_value_kind(value_type: type) -> int:
     return kind
 
 
-def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
-    """Rebuild a tuple-like container without erasing its public type.
+# Type roots whose classes the default-deny safe unpickler can resolve at load
+# time. Anything OUTSIDE these roots pickles by module reference at save but is
+# REFUSED (or booby-trapped) by ``SafeBundleUnpickler`` at load -- a
+# save-succeeds/load-refuses trap the scrub must close on the save side.
+_PORTABLE_TYPE_ROOTS = ("torch", "torchlens")
+
+
+def _type_is_load_reconstructible(value_type: type) -> bool:
+    """Return whether the safe unpickler can rebuild instances of this type."""
+
+    module = getattr(value_type, "__module__", "") or ""
+    root = module.split(".", 1)[0]
+    return root in _PORTABLE_TYPE_ROOTS
+
+
+def _disclose_container_downgrade(
+    options: _ScrubOptions | None,
+    subject: Any,
+    message: str,
+) -> None:
+    """Warn ONCE per downgraded container/factory type per scrub pass."""
+
+    module = getattr(subject, "__module__", "") or type(subject).__module__
+    qualname = getattr(subject, "__qualname__", None) or type(subject).__qualname__
+    key = f"{module}.{qualname}"
+    if options is not None:
+        if key in options.container_portability_disclosures:
+            return
+        options.container_portability_disclosures[key] = message
+    warnings.warn(
+        f"{message.format(name=key)} The saved bundle stays loadable; only the "
+        "container's original type is not preserved.",
+        UserWarning,
+        stacklevel=2,
+    )
+
+
+def _rebuild_tuple_value(
+    value: tuple[Any, ...],
+    items: Iterable[Any],
+    options: _ScrubOptions | None = None,
+) -> tuple[Any, ...]:
+    """Rebuild a tuple-like container, preserving only load-reconstructible types.
+
+    A USER tuple subclass (e.g. a caller-module namedtuple) used to be
+    preserved by TYPE into ``metadata.pkl``; the default-deny safe unpickler
+    then refused the foreign class at load, so the bundle SAVED fine and the
+    whole bundle REFUSED to load. Foreign types are now flattened to a plain
+    tuple at save time with a disclosure warning -- and a preserved type whose
+    constructor rejects the rebuilt items is disclosed too, never silently
+    downgraded.
 
     Parameters
     ----------
@@ -594,28 +648,83 @@ def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[
         Source tuple-like container.
     items:
         Scrubbed child values.
+    options:
+        Active scrub options carrying the once-per-type disclosure ledger.
 
     Returns
     -------
     tuple[Any, ...]
-        Rebuilt tuple subclass, or a plain tuple when its constructor is not portable.
+        Rebuilt tuple of the preserved type, or a plain tuple with disclosure.
     """
 
     materialized = tuple(items)
     if isinstance(value, torch.Size):
         return torch.Size(materialized)
-    maker = getattr(type(value), "_make", None)
+    value_type = type(value)
+    if value_type is tuple:
+        return materialized
+    if not _type_is_load_reconstructible(value_type):
+        _disclose_container_downgrade(
+            options,
+            value_type,
+            "Flattening tuple subclass {name} to a plain tuple in portable "
+            "metadata: the type is not resolvable by the default-deny bundle "
+            "loader, so preserving it would make the bundle unloadable.",
+        )
+        return materialized
+    maker = getattr(value_type, "_make", None)
     if callable(maker):
         try:
             return maker(materialized)
         except (TypeError, ValueError):
+            _disclose_container_downgrade(
+                options,
+                value_type,
+                "Flattening tuple subclass {name} to a plain tuple in portable "
+                "metadata: its _make constructor rejected the scrubbed items.",
+            )
             return materialized
-    if type(value) is not tuple:
-        try:
-            return type(value)(materialized)
-        except (TypeError, ValueError):
-            return materialized
-    return materialized
+    try:
+        return value_type(materialized)
+    except (TypeError, ValueError):
+        _disclose_container_downgrade(
+            options,
+            value_type,
+            "Flattening tuple subclass {name} to a plain tuple in portable "
+            "metadata: its constructor does not accept a single iterable.",
+        )
+        return materialized
+
+
+def _portable_default_factory(
+    value: defaultdict[Any, Any],
+    options: _ScrubOptions | None,
+) -> Any:
+    """Return a load-safe ``default_factory`` for a scrubbed defaultdict.
+
+    A factory from a USER module rehydrates as an inert foreign-callable
+    placeholder under the default-deny loader, turning the first missing-key
+    read into an ``UnpicklingError`` mid-analysis. Such a factory is dropped
+    at save time with disclosure; the loaded mapping then behaves as a plain
+    dict (``KeyError`` on missing keys). Builtins and torch/torchlens-owned
+    factories stay.
+    """
+
+    factory = value.default_factory
+    if factory is None:
+        return None
+    module = getattr(factory, "__module__", "") or ""
+    root = module.split(".", 1)[0]
+    if root in _PORTABLE_TYPE_ROOTS or root == "builtins":
+        return factory
+    _disclose_container_downgrade(
+        options,
+        factory,
+        "Dropping non-portable defaultdict default_factory {name} in portable "
+        "metadata: the default-deny bundle loader would rehydrate it as a "
+        "placeholder that raises on the first missing-key read.",
+    )
+    return None
 
 
 def _scrub_value(
@@ -705,6 +814,7 @@ def _scrub_value(
                     )
                     for item in value
                 ),
+                options,
             )
         except BaseException:
             memo.pop(obj_id, None)
@@ -768,7 +878,7 @@ def _scrub_value(
             return memo[obj_id]
         _pin_in_memo(memo, value)
         if isinstance(value, defaultdict):
-            rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+            rebuilt: defaultdict[Any, Any] = defaultdict(_portable_default_factory(value, options))
             memo[obj_id] = rebuilt
             for key, item in value.items():
                 rebuilt[key] = _scrub_value(
@@ -1686,7 +1796,7 @@ def _blobify_recursive_value(
         _pin_in_memo(memo, value)
         memo[obj_id] = _SCRUB_IN_PROGRESS
         try:
-            rebuilt_tuple = _rebuild_tuple_value(value, (recurse(item) for item in value))
+            rebuilt_tuple = _rebuild_tuple_value(value, (recurse(item) for item in value), options)
         except BaseException:
             memo.pop(obj_id, None)
             raise
@@ -1711,7 +1821,7 @@ def _blobify_recursive_value(
         obj_id = id(value)
         if obj_id in memo:
             return memo[obj_id]
-        rebuilt: defaultdict[Any, Any] = defaultdict(value.default_factory)
+        rebuilt: defaultdict[Any, Any] = defaultdict(_portable_default_factory(value, options))
         _pin_in_memo(memo, value)
         memo[obj_id] = rebuilt
         for key, item in value.items():
