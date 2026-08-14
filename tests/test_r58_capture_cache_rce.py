@@ -77,7 +77,14 @@ def cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.smoke
 def test_authenticated_cache_still_hits(cache_root: Path) -> None:
-    """An entry this process wrote authenticates and is reused."""
+    """An entry this process wrote authenticates and is reused.
+
+    Rebaselined for the atomic single-record format (grind-p3 T5.2): the tag
+    is embedded in the entry's fixed header instead of a ``.hmac`` sidecar, so
+    the assertion pins the self-authenticating record rather than the pair.
+    """
+
+    from torchlens.user_funcs import _CAPTURE_CACHE_MAGIC
 
     model, inputs = _tiny_model(), torch.rand(2, 4)
     first = tl.trace(model, inputs, layers_to_save="all", cache=True)
@@ -85,7 +92,8 @@ def test_authenticated_cache_still_hits(cache_root: Path) -> None:
     second = tl.trace(model, inputs, layers_to_save="all", cache=True)
     assert second.capture_cache_hit is True
     entry = _cache_entry(cache_root)
-    assert entry.with_name(entry.name + ".hmac").is_file()
+    assert entry.read_bytes().startswith(_CAPTURE_CACHE_MAGIC)
+    assert not entry.with_name(entry.name + ".hmac").exists()
 
 
 @pytest.mark.smoke
@@ -125,22 +133,27 @@ def test_planted_code_exec_pickle_is_never_unpickled(cache_root: Path, tmp_path:
 
 
 @pytest.mark.smoke
-def test_missing_tag_is_a_miss_not_a_load(cache_root: Path, tmp_path: Path) -> None:
-    """An untagged entry (pre-upgrade cache, or a plant) is refilled, not trusted."""
+def test_headerless_entry_is_a_miss_not_a_load(cache_root: Path, tmp_path: Path) -> None:
+    """An entry without the authenticated header is refilled, not trusted.
+
+    Rebaselined for the atomic single-record format (grind-p3 T5.2): the
+    pre-upgrade-pair / bare-plant case is now a MISSING EMBEDDED HEADER
+    instead of a missing ``.hmac`` sidecar. The guarantee is unchanged: bytes
+    without an authenticating tag are never handed to ``pickle``.
+    """
 
     model, inputs = _tiny_model(), torch.rand(2, 4)
     tl.trace(model, inputs, layers_to_save="all", cache=True)
     entry = _cache_entry(cache_root)
-    entry.with_name(entry.name + ".hmac").unlink()
     marker = tmp_path / _PWN_MARKER_NAME
     entry.write_bytes(pickle.dumps(_CodeExecPayload(marker)))
 
-    with pytest.warns(UserWarning, match="no authentication tag"):
+    with pytest.warns(UserWarning, match="not a single-record authenticated"):
         refreshed = tl.trace(model, inputs, layers_to_save="all", cache=True)
 
     assert not marker.exists()
     assert refreshed.capture_cache_hit is False
-    # The rewrite re-tags the entry, so the next run is a normal hit again.
+    # The rewrite re-commits an authenticated record, so the next run hits.
     assert tl.trace(model, inputs, layers_to_save="all", cache=True).capture_cache_hit is True
 
 
@@ -151,16 +164,18 @@ def test_tag_from_a_foreign_secret_does_not_authenticate(cache_root: Path, tmp_p
     import hashlib
     import hmac
 
+    from torchlens.user_funcs import _CAPTURE_CACHE_MAGIC
+
     model, inputs = _tiny_model(), torch.rand(2, 4)
     tl.trace(model, inputs, layers_to_save="all", cache=True)
     entry = _cache_entry(cache_root)
     marker = tmp_path / _PWN_MARKER_NAME
     payload = pickle.dumps(_CodeExecPayload(marker))
-    entry.write_bytes(payload)
-    entry.with_name(entry.name + ".hmac").write_text(
-        hmac.new(b"attacker-guessed-secret", payload, hashlib.sha256).hexdigest(),
-        encoding="ascii",
-    )
+    # Rebaselined for the atomic single-record format (grind-p3 T5.2): the
+    # attacker forges a well-formed record whose embedded tag is keyed by a
+    # guessed secret. It must still refuse to authenticate.
+    forged_tag = hmac.new(b"attacker-guessed-secret", payload, hashlib.sha256).hexdigest()
+    entry.write_bytes(_CAPTURE_CACHE_MAGIC + forged_tag.encode("ascii") + b"\n" + payload)
 
     with pytest.warns(UserWarning, match="does not match its bytes"):
         tl.trace(model, inputs, layers_to_save="all", cache=True)

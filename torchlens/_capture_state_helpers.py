@@ -6,6 +6,7 @@ import collections.abc
 import copy
 import dataclasses
 import hashlib
+import inspect
 import json
 import os
 import types
@@ -1544,6 +1545,112 @@ def _fingerprint_model_content(model: nn.Module) -> str:
     return hasher.hexdigest()
 
 
+def _hash_code_object_into(hasher: Any, code: types.CodeType, depth: int = 0) -> None:
+    """Fold one code object's behavioral surface into ``hasher``.
+
+    Covers the compiled bytecode, referenced names, and constants (recursing
+    into nested code objects such as comprehensions and local closures), which
+    is what changes when a ``forward`` implementation is edited. Line-number
+    tables and file paths are deliberately excluded so moving a file or adding
+    a comment does not invalidate the cache.
+    """
+
+    if depth > 8:
+        hasher.update(b"<code-depth-ceiling>")
+        return
+    hasher.update(code.co_code)
+    hasher.update(repr(code.co_names).encode("utf-8"))
+    hasher.update(repr(code.co_varnames).encode("utf-8"))
+    hasher.update(repr(code.co_freevars).encode("utf-8"))
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            _hash_code_object_into(hasher, const, depth + 1)
+        else:
+            hasher.update(repr(const).encode("utf-8"))
+
+
+def _callable_code_digest(func: Any) -> str:
+    """Digest one callable's implementation for the capture-cache key.
+
+    Plain functions (and bound/unbound methods) hash their code object plus
+    default-argument reprs. Callables without a Python code object (C
+    builtins, scripted callables) fall back to a stable module/qualname token
+    -- NEVER ``repr(func)``, whose memory address would break cross-process
+    key stability.
+    """
+
+    hasher = hashlib.sha256()
+    target = getattr(func, "__func__", func)
+    code = getattr(target, "__code__", None)
+    if code is not None and isinstance(code, types.CodeType):
+        _hash_code_object_into(hasher, code)
+        for attribute in ("__defaults__", "__kwdefaults__"):
+            try:
+                hasher.update(repr(getattr(target, attribute, None)).encode("utf-8"))
+            except Exception:
+                hasher.update(f"<unreprable-{attribute}>".encode())
+    else:
+        module = getattr(target, "__module__", None) or type(target).__module__
+        qualname = getattr(target, "__qualname__", None) or type(target).__qualname__
+        hasher.update(f"<no-code:{module}.{qualname}>".encode())
+    return hasher.hexdigest()
+
+
+def _fingerprint_model_implementation(model: nn.Module) -> str:
+    """Fingerprint model IMPLEMENTATION for the capture cache.
+
+    ``_fingerprint_model_content`` covers tensor content (``state_dict``
+    values, training flags, non-persistent buffers) but says nothing about
+    CODE, so editing ``forward`` between runs used to silently hit the stale
+    cached trace of the old implementation. This signature folds in the module
+    tree structure (registered names in order), each module's class identity
+    (module + qualname), each distinct class's ``forward`` code digest, and
+    any instance-level ``forward`` override, so an implementation change is a
+    cache miss. Closure cell contents and mutated global state referenced by
+    ``forward`` remain outside the signature (documented heuristic boundary).
+    """
+
+    hasher = hashlib.sha256()
+    class_digests: dict[type, str] = {}
+    for name, module in model.named_modules():
+        cls = type(module)
+        digest = class_digests.get(cls)
+        if digest is None:
+            try:
+                class_forward = inspect.getattr_static(cls, "forward", None)
+                digest = _callable_code_digest(class_forward)
+            except Exception:
+                digest = "<forward-unresolvable>"
+            class_digests[cls] = digest
+        hasher.update(repr((name, f"{cls.__module__}.{cls.__qualname__}", digest)).encode("utf-8"))
+        instance_forward = module.__dict__.get("forward")
+        if instance_forward is not None and not _is_torchlens_instrumentation(instance_forward):
+            hasher.update(b"<instance-forward>")
+            hasher.update(_callable_code_digest(instance_forward).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+_TORCHLENS_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_torchlens_instrumentation(func: Any) -> bool:
+    """Return whether an instance ``forward`` is TorchLens' own prepared wrapper.
+
+    Model preparation leaves a ``functools.wraps``-decorated instance
+    ``forward`` on prepared submodules until ``release_model``. Folding that
+    wrapper into the implementation fingerprint made the SECOND capture of an
+    unchanged model miss its own first capture. The wrapper masquerades as the
+    original via ``wraps`` metadata, so the reliable identity is where its
+    code object lives: inside the torchlens package.
+    """
+
+    target = getattr(func, "__func__", func)
+    code = getattr(target, "__code__", None)
+    if not isinstance(code, types.CodeType):
+        return False
+    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR)
+
+
 def _capture_cache_dir(cache_dir: str | Path | None) -> Path:
     """Resolve the capture-cache directory.
 
@@ -1589,10 +1696,13 @@ def _capture_cache_key(
     """
 
     payload = {
-        "schema": 2,
+        # Schema 3: single-record authenticated entries plus the
+        # model-implementation signature (a changed ``forward`` must miss).
+        "schema": 3,
         "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
         "model": _fingerprint_model_content(model),
+        "model_impl": _fingerprint_model_implementation(model),
         "inputs": _hash_nested_tensor_content((input_args, input_kwargs)),
         "config": config,
     }

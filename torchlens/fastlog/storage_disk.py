@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import sys
 import warnings
@@ -44,6 +45,50 @@ _GRAD_DTYPES = {
     torch.complex128,
 }
 
+# Ceiling for the abort reason persisted to on-disk recovery debris, matching
+# the core bundle writer's length-bounding belt.
+_MAX_ABORT_REASON_CHARS = 512
+
+
+class _ScrubbedReason(str):
+    """Marker type: an abort reason already free of exception message content."""
+
+    __slots__ = ()
+
+
+def _scrubbed_abort_reason(prefix: str, exc: BaseException) -> _ScrubbedReason:
+    """Build the redacted abort reason persisted to REASON.txt.
+
+    The core bundle writer's partial sink persists only the exception TYPE
+    name: ``str(exc)`` can carry object reprs, paths, and captured values,
+    and REASON.txt is on-disk recovery debris that outlives the process. The
+    raised in-memory exception keeps its full detail; only the persisted
+    reason is scrubbed and length-bounded.
+    """
+
+    return _ScrubbedReason(f"{prefix}: {type(exc).__name__}"[:_MAX_ABORT_REASON_CHARS])
+
+
+def _tighten_bundle_tree(root: Path) -> None:
+    """Apply the core bundle writer's 0600/0700 tightening to a fastlog tree.
+
+    ``mkdir``/``open`` honor the ambient umask, so under the common umask 022
+    the fastlog bundle directory and its metadata sidecars stayed
+    world-readable even though the core ``.tlspec`` writer tightens its own
+    output. Best-effort like the shared helper: a filesystem that ignores
+    mode bits is not a save failure.
+    """
+
+    from .._io.bundle import _restrict_mode
+
+    _restrict_mode(root, 0o700)
+    for current_dir, dir_names, file_names in os.walk(root):
+        base = Path(current_dir)
+        for name in dir_names:
+            _restrict_mode(base / name, 0o700)
+        for name in file_names:
+            _restrict_mode(base / name, 0o600)
+
 
 class DiskStorageBackend:
     """Persist fastlog records to a sync directory bundle."""
@@ -71,6 +116,9 @@ class DiskStorageBackend:
         self.disk_only = not options.streaming.retain_in_memory
         self._validate_static_keep_grad()
         self.writer = BundleStreamWriter(options.streaming.bundle_path)
+        # Directories first, so mid-recording contents are already unreachable
+        # to other users; finalize() tightens the files it writes.
+        _tighten_bundle_tree(self.writer.tmp_path)
         self.index_path = self.writer.tmp_path / "fastlog_index.jsonl"
         self._ram_backend = RamStorageBackend(recording)
         self._tensor_entries: list[TensorEntry] = []
@@ -183,9 +231,10 @@ class DiskStorageBackend:
             _write_metadata(self.writer.tmp_path / "metadata.json", self.recording, self.options)
             manifest = _build_fastlog_manifest(self._tensor_entries)
             manifest.write(self.writer.tmp_path / "manifest.json")
+            _tighten_bundle_tree(self.writer.tmp_path)
             self.writer.tmp_path.rename(self.writer.final_path)
         except (OSError, TorchLensIOError, ValueError) as exc:
-            self.abort(f"Failed to finalize fastlog bundle: {exc}")
+            self.abort(_scrubbed_abort_reason("Failed to finalize fastlog bundle", exc))
             raise
         self.writer._closed = True
         self.writer._finalized = True
@@ -193,7 +242,16 @@ class DiskStorageBackend:
         object.__setattr__(self.recording, "bundle_path", self.writer.final_path)
 
     def abort(self, reason: str) -> None:
-        """Abort the underlying streaming writer.
+        """Abort the underlying streaming writer with a redacted persisted reason.
+
+        This is the single chokepoint through which every fastlog failure
+        reason reaches the on-disk ``REASON.txt`` recovery debris. Callers
+        outside this module (the streaming recorder path) pass raw
+        ``str(exc)``, whose message can carry object reprs, paths, and bound
+        values. When an exception is actively being handled and the reason is
+        not already a :class:`_ScrubbedReason`, only the active exception's
+        TYPE name is persisted -- matching the core bundle writer's contract.
+        The raised in-memory exception keeps its full detail.
 
         Parameters
         ----------
@@ -201,8 +259,13 @@ class DiskStorageBackend:
             Human-readable failure reason.
         """
 
-        if not self._finalized:
-            self.writer.abort(reason)
+        if self._finalized:
+            return
+        if not isinstance(reason, _ScrubbedReason):
+            active_exception = sys.exc_info()[1]
+            if active_exception is not None:
+                reason = f"aborted by {type(active_exception).__name__}"
+        self.writer.abort(reason[:_MAX_ABORT_REASON_CHARS])
 
     def _validate_static_keep_grad(self) -> None:
         """Reject static keep_grad defaults in disk-only mode."""
@@ -250,7 +313,7 @@ class DiskStorageBackend:
                 handle.write(line)
                 handle.write("\n")
         except OSError as exc:
-            self.abort(f"Failed to append fastlog index: {exc}")
+            self.abort(_scrubbed_abort_reason("Failed to append fastlog index", exc))
             raise TorchLensIOError(f"Failed to append fastlog index at {self.index_path}.") from exc
 
 
