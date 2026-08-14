@@ -95,6 +95,11 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/backends/torch/belt.py", "_member_map"),
         ("torchlens/backends/torch/belt.py", "_report"),
         ("torchlens/backends/torch/belt.py", "_swept_module_ids"),
+        # Sweep-epoch bookkeeping companions to _swept_module_ids (8ba75e99):
+        # a dead-weakref dirty bit and the sys.modules size at the last
+        # complete sweep, reset with the belt install state.
+        ("torchlens/backends/torch/belt.py", "_swept_modules_dirty"),
+        ("torchlens/backends/torch/belt.py", "_swept_sys_modules_size"),
         ("torchlens/backends/torch/completeness_witness.py", "_AUTHORIZED_INTERNAL_CALLER_CODE"),
         (
             "torchlens/backends/torch/completeness_witness.py",
@@ -286,6 +291,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_INPUT_STORAGE_SITES"),
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
+        # Per-module-namespace container-slot memo (8ba75e99), keyed weakly by
+        # the module object with a len(namespace)-based staleness check.
+        ("torchlens/backends/torch/model_prep.py", "_module_namespace_container_slots"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         # Implicit-backward task ordinals keyed weakly by their owning trace;
         # entries die with the trace.
@@ -765,6 +773,11 @@ class _PauseFromForeignThread(nn.Module):
 _WEAKLY_HELD = frozenset(
     {
         ("torchlens/_capture_state_helpers.py", "_VALIDATION_DEEPCOPY_WARNING_TYPES"),
+        # Kind memos re-keyed weakly by the value TYPE so dynamically created
+        # classes stay collectable; lifecycle class stays _PROCESS_CACHES (the
+        # ledger is orthogonal: weakness is a storage fact).
+        ("torchlens/_io/rehydrate.py", "_REHYDRATE_KINDS"),
+        ("torchlens/_io/scrub.py", "_SCRUB_VALUE_KINDS"),
         ("torchlens/_state.py", "_log_registry"),
         ("torchlens/_state.py", "_prepared_models"),
         ("torchlens/_state.py", "_prepared_root_by_module"),
@@ -803,6 +816,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
+        ("torchlens/backends/torch/model_prep.py", "_module_namespace_container_slots"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
