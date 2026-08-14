@@ -12,9 +12,14 @@ unmatched key of it becomes a presence gap.
 
 Correlation alignment is by counting (P3): per ``(group_uid, channel)`` each
 rank's recorded boundaries align as seq DELTAS from that rank's first recorded
-key -- absolute seq bases are rank-local facts (arm-time histories differ) and
-are never compared. Witness digests are redundant byte-exact evidence that can
-only DEMOTE a verdict, never rescue or repair one.
+key -- a SEEDED rank's absolute seq base is a rank-local fact (arm-time
+histories differ) and is never compared. Ranks armed BEFORE any group are the
+exception: their counters tick on every issue from group creation on, so the
+same collective carries the same absolute seq on every such rank, and a
+disagreement at a joined key proves the delta anchors paired non-corresponding
+collectives (a structural ``correlation_delta_mismatch``). Witness digests are
+redundant byte-exact evidence that can only DEMOTE a verdict, never rescue or
+repair one.
 """
 
 from __future__ import annotations
@@ -733,6 +738,40 @@ def derive_merge(
                         membership_digest=digest,
                         key=key,
                         ranks=tuple(sorted(c10d_deltas)),
+                    )
+                )
+
+            # Absolute-seq cross-check for ranks armed BEFORE any group: their
+            # per-(uid, channel) counters tick on EVERY issue from group
+            # creation on (captured or not), so the same collective carries the
+            # SAME absolute seq on every such rank. Delta alignment anchors at
+            # each rank's first RECORDED key; when capture windows differ, the
+            # anchors name different collectives and the join is fabricated.
+            # The c10d group-seq cross-check is structurally blind to this
+            # class (each rank's base is taken at its own delta 0, so a
+            # constant offset cancels); the absolute counters are not.
+            # Seeded ranks stay out: their arm-time histories differ, so
+            # absolute bases are legitimately rank-local facts (P3).
+            armed_seq_abs = {
+                rank: per_rank[rank].seq_abs
+                for rank in presence
+                if evidence[rank].install_epoch == "armed_before_any_group"
+            }
+            if len(set(armed_seq_abs.values())) > 1:
+                findings.append(
+                    MergedFinding(
+                        kind="correlation_delta_mismatch",
+                        detail=(
+                            f"absolute issue sequences disagree at key {key}: "
+                            f"{dict(sorted(armed_seq_abs.items()))}; every rank armed "
+                            "before any group ticks the same counter on the same "
+                            "collective, so the joined boundaries are not the same "
+                            "collective (the delta anchors name different first "
+                            "captures)."
+                        ),
+                        membership_digest=digest,
+                        key=key,
+                        ranks=tuple(sorted(armed_seq_abs)),
                     )
                 )
 

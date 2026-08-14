@@ -615,6 +615,75 @@ class TestRelationsAndCrossChecks:
         assert d.stored_alignment is MergeAlignment.CONFLICTED
         assert any(f.kind == "correlation_delta_mismatch" for f in d.findings)
 
+    def test_armed_rank_base_misalignment_is_a_correlation_conflict(self):
+        """Deep-hunt F5: differing capture windows cannot fabricate a join.
+
+        Rank 0 recorded absolute seqs {0, 1}; rank 1 recorded {1} only. Delta
+        alignment paired rank 0's seq 0 with rank 1's seq 1 -- two DIFFERENT
+        collectives presented as one honest correspondence (invisible under
+        witness "none", and the c10d cross-check cancels constant offsets).
+        Both ranks are armed before any group, so their counters tick on every
+        issue and equal-seq is provable: the disagreement must conflict.
+        """
+
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 0), boundary(0, 1)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(
+                    1,
+                    [boundary(1, 1)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.CONFLICTED
+        assert any(
+            f.kind == "correlation_delta_mismatch" and "absolute issue sequences" in f.detail
+            for f in d.findings
+        )
+
+    def test_armed_ranks_with_equal_absolute_seqs_stay_aligned(self):
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 3), boundary(0, 4)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(
+                    1,
+                    [boundary(1, 3), boundary(1, 4)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
+
+    def test_seeded_rank_base_offsets_never_compared(self):
+        # Mixed epochs: the seeded rank's absolute base is a rank-local fact
+        # (arm-time histories differ); only armed-before-any-group ranks are
+        # held to equal absolute seqs, so this stays an honest delta join.
+        d = derive_merge(
+            {
+                0: evidence(
+                    0,
+                    [boundary(0, 0)],
+                    ledger=armed_ledger(),
+                    epoch="armed_before_any_group",
+                ),
+                1: evidence(1, [boundary(1, 7)], ledger=seeded_ledger()),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
+
     def test_c10d_group_seq_absent_never_demotes(self):
         d = derive_merge(
             {
