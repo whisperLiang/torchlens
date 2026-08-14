@@ -258,6 +258,63 @@ class TestDisclosedResiduals:
             wrap_torch()
 
 
+class TestCausalBiasImportWindow:
+    # A torch module first imported WHILE wrappers are installed used to
+    # escape the shims until the NEXT capture entry re-ran
+    # install_identity_shims -- and in that window a CausalBias sdpa OUTSIDE
+    # any capture silently dropped the causal mask (wrong numbers). The
+    # import hook closes the window: the shim installs the moment the module
+    # executes.
+
+    @pytest.mark.skipif(
+        not _flag("HAS_ATTENTION_CAUSAL_BIAS"),
+        reason="torch build lacks torch.nn.attention.bias.CausalBias",
+    )
+    def test_post_wrap_import_is_shimmed_immediately(self):
+        import sys
+
+        _ensure_wrapped()
+        module_name = "torch.nn.attention.bias"
+        saved_module = sys.modules.pop(module_name, None)
+        parent = sys.modules.get("torch.nn.attention")
+        saved_attr = getattr(parent, "bias", None) if parent is not None else None
+        if parent is not None and saved_attr is not None:
+            delattr(parent, "bias")
+        try:
+            # Fresh import under wrap, with NO capture entry in between:
+            # exactly the historical coverage window.
+            import torch.nn.attention.bias as bias_module
+
+            tf_method = vars(bias_module.CausalBias).get("__torch_function__")
+            shimmed = bool(
+                getattr(
+                    getattr(tf_method, "__func__", tf_method),
+                    "_torchlens_identity_shim",
+                    False,
+                )
+            )
+            assert shimmed, "the shim must install at import time, not at the next capture"
+
+            # And the numbers must be right OUTSIDE any capture: the sdpa
+            # dispatch must apply the causal mask, matching an explicit mask.
+            torch.manual_seed(0)
+            q = torch.randn(1, 2, 6, 8)
+            k = torch.randn(1, 2, 6, 8)
+            v = torch.randn(1, 2, 6, 8)
+            bias = bias_module.causal_lower_right(q.shape[-2], k.shape[-2])
+            explicit = torch.tril(torch.ones(q.shape[-2], k.shape[-2], dtype=torch.bool))
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+            reference = F.scaled_dot_product_attention(q, k, v, attn_mask=explicit)
+            assert torch.allclose(out, reference, atol=1e-6), (
+                "CausalBias sdpa outside a capture dropped the causal mask"
+            )
+        finally:
+            if saved_module is not None:
+                sys.modules[module_name] = saved_module
+            if parent is not None and saved_attr is not None:
+                parent.bias = saved_attr
+
+
 class TestSubclassCtorUnderWitness:
     # ``TensorBase.__new__`` with a strict Tensor SUBCLASS cls crashes whenever
     # ANY python TorchDispatchMode is active (torch materializes the interior

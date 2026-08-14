@@ -32,7 +32,10 @@ uses (the call-time namespace read, or the import-time table key), then
 delegates to the original torch code, so the decision itself always runs
 upstream logic. Shims install with ``wrap_torch()`` and are removed by
 ``unwrap_torch()``; with wrappers absent every normalization is an identity
-no-op. Site availability is feature-detected in
+no-op. The one lazily-importable site (causal bias) is additionally covered
+by a meta-path import hook, so a module first imported WHILE wrappers are
+installed is shimmed the moment it executes — never left broken until the
+next capture entry. Site availability is feature-detected in
 ``torchlens.utils._torch_compat`` (``HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG``,
 ``HAS_ATTENTION_CAUSAL_BIAS``, ``HAS_EXPANDED_WEIGHTS_CONV_PICKER``) and is
 visible through the doctor/compat capability snapshot.
@@ -41,8 +44,10 @@ visible through the doctor/compat capability snapshot.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import inspect
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -62,6 +67,109 @@ _MISSING = object()
 
 # (holder, attribute name, original attribute value) for every installed shim.
 _installed: list[tuple[Any, str, Any]] = []
+
+# Live import hook covering the lazily-importable causal-bias site, or None.
+_import_hook: _CausalBiasShimImportHook | None = None
+
+_import_hook_local = threading.local()
+
+
+class _CausalBiasShimImportHook:
+    """Meta-path finder shimming CausalBias the moment its module executes.
+
+    The causal-bias site is the ONE census entry that resolves lazily through
+    ``sys.modules`` (importing it drags the dynamo tree into every wrap), so a
+    user import of ``torch.nn.attention.bias`` WHILE wrappers are installed
+    used to leave the fresh class unshimmed until the next capture entry
+    re-ran ``install_identity_shims`` — and in that window a CausalBias sdpa
+    OUTSIDE any capture silently dropped the causal mask (the C-level
+    protocol's original-``func`` identity miss). This finder wraps the
+    module's loader so the shim installs immediately after module execution,
+    closing the window; the capture-entry re-pickup stays as the belt.
+    """
+
+    _WATCHED = "torch.nn.attention.bias"
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        """Return the watched module's spec with a shim-installing loader."""
+
+        if fullname != self._WATCHED or getattr(_import_hook_local, "busy", False):
+            return None
+        # find_spec below walks sys.meta_path again (including this finder);
+        # the thread-local busy flag breaks the recursion so the real finders
+        # answer.
+        _import_hook_local.busy = True
+        try:
+            spec = importlib.util.find_spec(fullname)
+        finally:
+            _import_hook_local.busy = False
+        if spec is None or spec.loader is None:
+            return None
+        # The proxy duck-types the Loader protocol (create_module/exec_module
+        # delegate; everything else forwards via __getattr__).
+        spec.loader = _ShimOnExecLoader(spec.loader)  # type: ignore[assignment]
+        return spec
+
+
+class _ShimOnExecLoader:
+    """Loader proxy: run the real module exec, then install the shim."""
+
+    def __init__(self, loader: Any) -> None:
+        self._loader = loader
+
+    def create_module(self, spec: Any) -> Any:
+        """Delegate module creation to the real loader."""
+
+        return self._loader.create_module(spec)
+
+    def exec_module(self, module: Any) -> None:
+        """Execute the module, then shim the freshly-defined CausalBias.
+
+        Mirrors ``install_identity_shims``'s failure contract: an error while
+        shimming restores what this call patched and re-raises loudly — a
+        silently unshimmed CausalBias is exactly the wrong-numbers bug this
+        hook exists to close.
+        """
+
+        self._loader.exec_module(module)
+        if not _installed:
+            # Shims were removed between find_spec and exec (unwrap raced the
+            # import): with wrappers gone every normalization is a no-op and
+            # nothing must be left patched.
+            return
+        records: list[tuple[Any, str, Any]] = []
+        try:
+            _install_causal_bias_shim(records)
+        except Exception:
+            _restore(records)
+            raise
+        _installed.extend(records)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._loader, name)
+
+
+def _ensure_import_hook() -> None:
+    """Install the causal-bias import hook once; no-op when the site is absent."""
+
+    global _import_hook
+    if not _torch_compat.HAS_ATTENTION_CAUSAL_BIAS:
+        return
+    if _import_hook is not None and _import_hook in sys.meta_path:
+        return
+    _import_hook = _CausalBiasShimImportHook()
+    sys.meta_path.insert(0, _import_hook)
+
+
+def _remove_import_hook() -> None:
+    """Remove the causal-bias import hook if installed."""
+
+    global _import_hook
+    if _import_hook is not None:
+        with_hook = [finder for finder in sys.meta_path if finder is not _import_hook]
+        if len(with_hook) != len(sys.meta_path):
+            sys.meta_path[:] = with_hook
+        _import_hook = None
 
 
 def _resolve(fn: Any) -> Any:
@@ -109,11 +217,11 @@ def install_identity_shims() -> None:
 
     if _installed:
         # The causal-bias site resolves only through sys.modules (lazy-import
-        # belt), so a user import of torch.nn.attention.bias AFTER the first
-        # wrap is picked up here: wrap_torch() re-enters at every capture
-        # entry, shimming the late-imported site before its dispatch can be
-        # captured. The install is a no-op when the site is absent or already
-        # shimmed.
+        # belt). The import hook shims a post-wrap import the moment the
+        # module executes; this capture-entry re-pickup stays as the belt for
+        # any import the hook missed. The install is a no-op when the site is
+        # absent or already shimmed.
+        _ensure_import_hook()
         late_records: list[tuple[Any, str, Any]] = []
         try:
             _install_causal_bias_shim(late_records)
@@ -132,11 +240,13 @@ def install_identity_shims() -> None:
         _restore(records)
         raise
     _installed.extend(records)
+    _ensure_import_hook()
 
 
 def remove_identity_shims() -> None:
     """Remove all installed identity shims; idempotent."""
 
+    _remove_import_hook()
     _restore(_installed)
     _installed.clear()
 
