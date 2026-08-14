@@ -1431,12 +1431,12 @@ def capability_probe_snapshot() -> dict[str, object]:
         family attrs, and the lazy-import warm flag.
     """
 
-    module = sys.modules[__name__]
+    namespace = globals()
     snapshot: dict[str, object] = {"_LAZY_TORCH_IMPORTS_WARMED": _LAZY_TORCH_IMPORTS_WARMED}
     for probed_attr, family in _LAZY_PROBE_FAMILIES.items():
-        snapshot[probed_attr] = getattr(module, probed_attr)
+        snapshot[probed_attr] = namespace[probed_attr]
         for attr in family:
-            snapshot[attr] = getattr(module, attr)
+            snapshot[attr] = namespace[attr]
     return snapshot
 
 
@@ -1459,9 +1459,7 @@ def restore_capability_probes(snapshot: dict[str, object]) -> None:
         Module latch state is rebound in place.
     """
 
-    module = sys.modules[__name__]
-    for attr, value in snapshot.items():
-        setattr(module, attr, value)
+    globals().update(snapshot)
 
 
 class TorchCapabilityWarning(UserWarning):
