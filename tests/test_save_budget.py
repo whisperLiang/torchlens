@@ -419,6 +419,75 @@ def test_zero_byte_payloads_are_not_counted() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lookback / followed_by window copies are budgeted retained bytes
+# ---------------------------------------------------------------------------
+
+
+def test_lookback_window_copies_are_budgeted() -> None:
+    """A tiny budget must trip on the first window copy, not retain silently.
+
+    Before the fix, ``followed_by`` retention bypassed the accountant entirely:
+    ``save_budget=1`` retained every window copy and promotion without a trip.
+    """
+
+    model = _model()
+    x = _input()
+    with pytest.raises(SaveBudgetExceededError) as excinfo:
+        tl.trace(
+            model,
+            x,
+            save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+            lookback=4,
+            lookback_payload_policy="detached_raw",
+            capture=CaptureOptions(save_budget=1),
+        )
+    assert excinfo.value.fields["accounting_phase"] == "lookback_window_admission"
+    assert excinfo.value.fields["projected_bytes"] == excinfo.value.fields["accounted_bytes"]
+    # The remedy list names the knob that actually caused the retention.
+    assert "lookback" in str(excinfo.value)
+
+
+def test_lookback_promotions_stay_charged_after_capture() -> None:
+    """Promoted and still-windowed payloads are live retained bytes at the end."""
+
+    trace = tl.trace(
+        _model(),
+        _input(),
+        save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+        lookback=4,
+        lookback_payload_policy="detached_raw",
+        capture=CaptureOptions(save_budget=10_000_000),
+    )
+    ledger = trace._save_budget_accountant.ledgers["cpu"]
+    # linear_1 is promoted (2 KB) and linear_2's candidate is still in the
+    # bounded window (2 KB): both are genuinely retained, so both stay charged.
+    assert trace.num_saved_ops == 1
+    assert int(trace.saved_activation_memory) == 2048
+    assert ledger.committed_bytes == 4096
+
+
+def test_lookback_window_eviction_credits_the_charge_back() -> None:
+    """An evicted window copy is released storage and must be credited."""
+
+    model = nn.Sequential(nn.Linear(64, 64), nn.Linear(64, 64), nn.ReLU())
+    trace = tl.trace(
+        model,
+        _input(),
+        save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+        lookback=1,
+        lookback_payload_policy="detached_raw",
+        capture=CaptureOptions(save_budget=10_000_000),
+    )
+    ledger = trace._save_budget_accountant.ledgers["cpu"]
+    # linear_1's window copy (2 KB) was charged, then evicted by linear_2's and
+    # credited back. The one live storage is linear_2's promoted payload, which
+    # the still-windowed candidate aliases (charged once). Without eviction
+    # crediting this would read 4096.
+    assert ledger.committed_bytes == 2048
+    assert ledger.num_saved == 1
+
+
+# ---------------------------------------------------------------------------
 # Storage identity survives pointer reuse: release credits, prune, recharge
 # ---------------------------------------------------------------------------
 

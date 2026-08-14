@@ -23,6 +23,11 @@ Budgets are per-device because saved payloads follow the tensors they copy
 capture spends host RAM. Devices whose headroom cannot be measured warn on their
 first non-empty automatic charge and remain unbudgeted unless the user supplies
 an absolute limit.
+
+Lookback / ``followed_by`` window copies are retained RAM like any other saved
+activation and are charged through the same admit/reconcile pair (site
+``"lookback_window"``); releasing a retained payload — window eviction, cleanup,
+or any other drop of the last live reference — credits its storage back.
 """
 
 from __future__ import annotations
@@ -263,6 +268,17 @@ class _DeviceLedger:
     retained_storage: dict[tuple[Any, ...], _RetainedStorageEntry] = field(default_factory=dict)
 
 
+_ADMISSION_SITES = ("primary", "lookback_window")
+"""Closed vocabulary of admission sites; each maps to one admission/reconciliation phase pair."""
+
+_SITE_PHASES = {
+    "primary": ("pre_allocation_admission", "post_transform_reconciliation"),
+    "lookback_window": ("lookback_window_admission", "lookback_window_reconciliation"),
+}
+
+_ADMISSION_PHASES = frozenset(phases[0] for phases in _SITE_PHASES.values())
+
+
 @dataclass(frozen=True)
 class _BudgetReservation:
     """One pre-allocation admission reserved against a device ledger."""
@@ -270,6 +286,7 @@ class _BudgetReservation:
     label: str
     device: torch.device
     num_bytes: int
+    site: str = "primary"
 
 
 @dataclass
@@ -363,6 +380,8 @@ class SaveBudget:
         label: str,
         device: torch.device,
         num_bytes: int,
+        *,
+        site: str = "primary",
     ) -> _BudgetReservation | None:
         """Reserve a projected retained payload before its allocation.
 
@@ -374,6 +393,10 @@ class SaveBudget:
             Projected retention device.
         num_bytes:
             Source-tensor bytes used as the pre-allocation estimate.
+        site:
+            Admission site from the closed vocabulary: ``"primary"`` for the
+            per-op retained copy, ``"lookback_window"`` for a bounded
+            retroactive-save window copy.
 
         Returns
         -------
@@ -386,13 +409,19 @@ class SaveBudget:
             If the projected footprint crosses the configured ceiling.
         """
 
+        if site not in _SITE_PHASES:
+            raise ValueError(
+                f"save-budget admission site must be one of {_ADMISSION_SITES}; got {site!r}"
+            )
         if num_bytes <= 0:
             return None
         ledger = self._ledger_for(device)
         ledger.committed_bytes += int(num_bytes)
         ledger.num_saved += 1
-        self._raise_if_over_budget(label, device, ledger, phase="pre_allocation_admission")
-        return _BudgetReservation(label=label, device=device, num_bytes=int(num_bytes))
+        self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
+        return _BudgetReservation(
+            label=label, device=device, num_bytes=int(num_bytes), site=site
+        )
 
     def commit(
         self,
@@ -448,7 +477,7 @@ class SaveBudget:
                 reservation.label,
                 payload.device,
                 ledger,
-                phase="post_transform_reconciliation",
+                phase=_SITE_PHASES[reservation.site][1],
             )
 
     def _watch_payload(
@@ -570,10 +599,10 @@ class SaveBudget:
             self._message(label, device, ledger, phase=phase),
             accounted_bytes=ledger.committed_bytes,
             committed_bytes=(
-                None if phase == "pre_allocation_admission" else ledger.committed_bytes
+                None if phase in _ADMISSION_PHASES else ledger.committed_bytes
             ),
             projected_bytes=(
-                ledger.committed_bytes if phase == "pre_allocation_admission" else None
+                ledger.committed_bytes if phase in _ADMISSION_PHASES else None
             ),
             budget_bytes=limit,
             available_bytes=ledger.available_bytes,
@@ -631,8 +660,14 @@ class SaveBudget:
         )
         footprint_label = (
             "projected retained footprint (refused before the crossing allocation)"
-            if phase == "pre_allocation_admission"
+            if phase in _ADMISSION_PHASES
             else "committed so far"
+        )
+        lookback_remedy = (
+            "    - retain fewer window payloads: shrink lookback=<N> or keep "
+            "lookback_payload_policy='metadata_only' so candidates hold no payloads\n"
+            if phase.startswith("lookback_window")
+            else ""
         )
         return (
             "torchlens stopped capture: retained activations crossed the save budget on "
@@ -644,6 +679,7 @@ class SaveBudget:
             "  This is a LOWER BOUND on the retained footprint at this point in the "
             "incomplete forward, not an extrapolated completed-capture total.\n"
             "  Remedies, cheapest first:\n"
+            f"{lookback_remedy}"
             "    - save less: save=tl.func('relu') or save=tl.in_module('encoder') "
             "instead of the default save='all'\n"
             "    - save less AND stream those selected payloads to disk: "
