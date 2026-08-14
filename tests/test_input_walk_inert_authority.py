@@ -316,3 +316,82 @@ def test_mapping_ordered_key_fact_comes_from_the_child_traversal():
     root = snapshot_input_boundary({"cfg": value})["nodes"][1]
     assert root["kind"] == "mapping"
     assert root["keys"] == ["a", "b"]
+
+
+class _EvilZeroField(tuple):
+    """Zero-field namedtuple subclass whose ``__len__`` hides a physical payload."""
+
+    _fields: tuple[str, ...] = ()
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 0
+
+
+class _EvilOneField(collections.namedtuple("_EvilOneFieldBase", ["x"])):
+    """One-field namedtuple subclass whose ``__len__`` forges the recorded arity."""
+
+    __slots__ = ()
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 1
+
+
+class _LyingLenList(list):
+    """List subclass whose ``__len__`` claims emptiness over real children."""
+
+    def __len__(self) -> int:  # noqa: D105 - hostile probe
+        return 0
+
+
+def test_hostile_len_cannot_steer_container_kind_or_forge_arity():
+    """Arity facts read the concrete builtin slot, never the instance ``__len__``.
+
+    A zero-field namedtuple subclass with ``__len__() == 0`` physically carrying
+    ``(tensor, "steer")`` classified ``empty`` and every walker dropped its
+    children (tensors included) with no refusal -- and the runtime snapshot
+    computed the SAME wrong value, so the structure tripwire passed on both
+    ends (false VERIFIED). A one-field variant physically carrying two elements
+    recorded ``size == 1`` and snapshots of different hidden payloads compared
+    equal.
+    """
+
+    from torchlens._input_walk import snapshot_input_boundary
+
+    hidden_tensor = torch.ones(2)
+    evil_zero = tuple.__new__(_EvilZeroField, (hidden_tensor, "steer"))
+    assert classify_input_container(evil_zero) == "namedtuple"
+    assert empty_input_container_kind(evil_zero) is None
+    snapshot = snapshot_input_boundary(evil_zero)
+    reasons = [refusal["reason"] for refusal in snapshot.get("refusals", [])]
+    assert "namedtuple_schema_not_total" in reasons
+
+    evil_one = tuple.__new__(_EvilOneField, (torch.ones(2), "hidden"))
+    one_snapshot = snapshot_input_boundary(evil_one)
+    one_reasons = [refusal["reason"] for refusal in one_snapshot.get("refusals", [])]
+    assert "namedtuple_schema_not_total" in one_reasons
+    named_nodes = [node for node in one_snapshot["nodes"] if node.get("kind") == "namedtuple"]
+    assert named_nodes and named_nodes[0]["size"] == 2
+
+
+def test_hostile_len_sequence_still_walks_physical_children():
+    """A lying sequence ``__len__`` cannot classify real children away."""
+
+    from torchlens._input_walk import (
+        raw_mapping_key_component,
+        snapshot_input_boundary,
+        walk_input_boundary,
+    )
+
+    lying = _LyingLenList([torch.ones(2), torch.zeros(2)])
+    assert classify_input_container(lying) == "sequence"
+    snapshot = snapshot_input_boundary(lying)
+    sizes = [node["size"] for node in snapshot["nodes"] if "size" in node]
+    assert sizes == [2]
+
+    seen: list[tuple[Any, ...]] = []
+    walk_input_boundary(
+        lying,
+        key_component=raw_mapping_key_component,
+        on_tensor=lambda _tensor, path: seen.append(tuple(path)),
+    )
+    assert len(seen) == 2

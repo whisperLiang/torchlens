@@ -59,7 +59,7 @@ only here:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -245,6 +245,50 @@ def declares_namedtuple_fields(value: Any) -> bool:
     return isinstance(value, tuple) and _raw_mro_attr(value, "_fields") is not None
 
 
+def physical_sequence_len(value: Any) -> int:
+    """Return the CONCRETE builtin arity of a tuple/list/dict-backed container.
+
+    ``len(value)`` dispatches to an overridable instance ``__len__``: hostile user
+    code could both steer the container KIND and forge the recorded physical
+    arity (a zero-field namedtuple subclass with ``__len__() == 0`` physically
+    carrying ``(tensor, "steer")`` classified ``empty`` and dropped its children
+    -- tensors included -- from every walker, with the SAME wrong value computed
+    on the capture and runtime snapshots, i.e. a false-VERIFIED shape). Arity
+    facts therefore read the concrete builtin slot, consistent with how this
+    module already resolves ``_fields``/``__dict__`` through the raw MRO.
+    Containers not backed by a builtin (custom ``Mapping`` implementations) have
+    no physical storage distinct from their methods and keep the instance
+    protocol; their hidden-state honesty is owned by the instance-state proofs.
+    """
+
+    if isinstance(value, tuple):
+        return tuple.__len__(value)
+    if isinstance(value, list):
+        return list.__len__(value)
+    if isinstance(value, dict):
+        return dict.__len__(value)
+    return len(value)
+
+
+def iter_physical_sequence(value: Any) -> Iterator[tuple[int, Any]]:
+    """Yield ``(index, child)`` through the concrete builtin slots (inert descent).
+
+    ``enumerate(value)`` dispatches to an overridable ``__iter__`` -- the same
+    forgery lane as a lying ``__len__`` -- so tuple/list-backed sequences descend
+    by concrete indexed access over :func:`physical_sequence_len`.
+    """
+
+    if isinstance(value, tuple):
+        for index in range(tuple.__len__(value)):
+            yield index, tuple.__getitem__(value, index)
+        return
+    if isinstance(value, list):
+        for index in range(list.__len__(value)):
+            yield index, list.__getitem__(value, index)
+        return
+    yield from enumerate(value)
+
+
 def empty_input_container_kind(value: Any) -> str | None:
     """Return the KIND of an EMPTY non-tensor container, else ``None`` (inert; r29-C2).
 
@@ -260,13 +304,17 @@ def empty_input_container_kind(value: Any) -> str | None:
     """
 
     if declares_namedtuple_fields(value):
-        return "namedtuple" if len(_instance_fields(value)) == 0 and len(value) == 0 else None
+        return (
+            "namedtuple"
+            if len(_instance_fields(value)) == 0 and physical_sequence_len(value) == 0
+            else None
+        )
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return "dataclass" if len(dataclasses.fields(value)) == 0 else None
     if isinstance(value, Mapping):
-        return "mapping" if len(value) == 0 else None
+        return "mapping" if physical_sequence_len(value) == 0 else None
     if isinstance(value, (list, tuple)):
-        return "sequence" if len(value) == 0 else None
+        return "sequence" if physical_sequence_len(value) == 0 else None
     return None
 
 
@@ -295,7 +343,7 @@ def namedtuple_arity_mismatch(value: Any) -> bool:
         # ``undeclared_instance_state`` returned False and the node was recorded as a
         # zero-field namedtuple with every child dropped.
         return True
-    return len(fields) != len(value)
+    return len(fields) != physical_sequence_len(value)
 
 
 def classify_input_container(value: Any) -> str:
@@ -490,7 +538,7 @@ def walk_input_boundary(
                 _descend(child, (*path, component))
             return
         if kind == "sequence":
-            for index, child in enumerate(value):
+            for index, child in iter_physical_sequence(value):
                 _descend(child, (*path, index))
             return
         if on_leaf is not None:
@@ -1220,10 +1268,11 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         if kind == "namedtuple":
             fields = _instance_fields(item)
             node["fields"] = [str(name) for name in fields]
-            # PHYSICAL arity, so a hidden positional payload cannot make two snapshots
+            # PHYSICAL arity through the concrete builtin (never the instance
+            # ``__len__``), so a hidden positional payload cannot make two snapshots
             # compare equal, and a declared schema that does not account for the whole
             # tuple refuses instead of silently dropping the extras (tensors included).
-            node["size"] = len(item)
+            node["size"] = physical_sequence_len(item)
             if namedtuple_arity_mismatch(item):
                 refusals.append({"path": list(path), "reason": "namedtuple_schema_not_total"})
             nodes.append(node)
@@ -1279,9 +1328,9 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
                     _descend(child, (*path, encode_mapping_key(key)))
             return
         if kind == "sequence":
-            node["size"] = len(item)
+            node["size"] = physical_sequence_len(item)
             nodes.append(node)
-            for index, child in enumerate(item):
+            for index, child in iter_physical_sequence(item):
                 _descend(child, (*path, index))
             return
         # Literal leaf: the VALUE is witnessed by the literal walker, but the scalar
