@@ -52,6 +52,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
         ("torchlens/utils/introspection.py", "_FUNC_CALL_LOCATION"),
         ("torchlens/utils/rng.py", "_ACTIVE_MONITOR"),
+        # Live monitor patches per (id(holder), name), spliced back on window
+        # unwind -- a survivor past monitor exit is exactly the leak class this
+        # row exists to catch (d327e3aa's non-LIFO restore bug).
+        ("torchlens/utils/rng.py", "_PATCH_STACKS"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_BUSY"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_PENDING"),
         ("torchlens/utils/tensor_utils.py", "_DEFER_STATE_PTRS"),
@@ -93,8 +97,15 @@ _INSTALL_STATE_AND_CACHES = frozenset(
             "_AUTHORIZED_INTERNAL_CALLER_CODE_IDS",
         ),
         ("torchlens/backends/torch/escape_detection.py", "_TABLES"),
+        # (holder, attribute, original) rows for every installed identity shim;
+        # popped by the shim uninstall, so it is install bookkeeping, not capture
+        # state.
+        ("torchlens/backends/torch/identity_shims.py", "_installed"),
         ("torchlens/backends/torch/wrappers.py", "_DEVICE_CONSTRUCTOR_NAMES"),
         ("torchlens/backends/torch/wrappers.py", "_DeviceContext"),
+        # One-way "decorate_all_once() ran to COMPLETION" sentinel; deliberately
+        # never reset by unwrap_torch() (partial-decoration recovery keys on it).
+        ("torchlens/backends/torch/wrappers.py", "_FULL_DECORATION_COMPLETED"),
         ("torchlens/backends/torch/wrappers.py", "_torchvision_ops_ensured"),
         ("torchlens/capture/arg_positions.py", "_schema_corrections_applied"),
         ("torchlens/distributed/_lifecycle.py", "_STATE"),
@@ -142,6 +153,13 @@ happen.
 _CAPABILITY_PROBE_STATE = frozenset(
     {
         ("torchlens/utils/_torch_compat.py", "HAS_C10D_ABORT_PG"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DISABLE_TORCH_FUNCTION"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DISPATCH_MODE_STACK_QUERY"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DTENSOR_SHARD_GEOMETRY"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FAKE_TENSOR_MODE"),
+        ("torchlens/utils/_torch_compat.py", "HAS_JIT_SCHEMA_ENUMERATION"),
+        ("torchlens/utils/_torch_compat.py", "HAS_TENSORBASE_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "HAS_VARIABLE_FUNCTIONS_CLASS"),
         ("torchlens/utils/_torch_compat.py", "HAS_C10D_GROUP_REGISTRY"),
         ("torchlens/utils/_torch_compat.py", "HAS_C10D_GROUP_SEQ"),
         ("torchlens/utils/_torch_compat.py", "HAS_DEVICE_MESH"),
@@ -155,11 +173,17 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "HAS_PIPELINING"),
         ("torchlens/utils/_torch_compat.py", "HAS_TRACING_TENSOR_TYPES"),
         ("torchlens/utils/_torch_compat.py", "_C10D_ABORT_PG_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DISABLE_TORCH_FUNCTION_CLS"),
+        ("torchlens/utils/_torch_compat.py", "_DISABLE_TORCH_FUNCTION_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DISPATCH_MODE_STACK_FN"),
+        ("torchlens/utils/_torch_compat.py", "_DISPATCH_MODE_STACK_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_C10D_GROUP_REGISTRY_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_C10D_GROUP_SEQ_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_DEVICE_MESH_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_DEVICE_MESH_TYPE"),
         ("torchlens/utils/_torch_compat.py", "_DTENSOR_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DTENSOR_SHARD_GEOMETRY_FN"),
+        ("torchlens/utils/_torch_compat.py", "_DTENSOR_SHARD_GEOMETRY_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_DTENSOR_TYPE"),
         ("torchlens/utils/_torch_compat.py", "_DYNAMO_COMPILE_COUNTERS"),
         ("torchlens/utils/_torch_compat.py", "_DYNAMO_COMPILE_COUNTERS_PROBED"),
@@ -168,15 +192,23 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_DYNAMO_OPTIMIZED_MODULE_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_DYNAMO_OPTIMIZED_MODULE_TYPE"),
         ("torchlens/utils/_torch_compat.py", "_DYNAMO_ORIG_CALLABLE_MARKER_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_FAKE_TENSOR_MODE_CLS"),
+        ("torchlens/utils/_torch_compat.py", "_FAKE_TENSOR_MODE_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES"),
         ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_FN"),
+        ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_PIPELINING_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_PIPELINING_TYPES"),
+        ("torchlens/utils/_torch_compat.py", "_TENSORBASE_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "_TENSORBASE_CLASS_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS"),
         ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES"),
         ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS_PROBED"),
         ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         ("torchlens/utils/tensor_utils.py", "_cuda_available"),
     }
@@ -243,6 +275,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
+        # Implicit-backward task ordinals keyed weakly by their owning trace;
+        # entries die with the trace.
+        ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
@@ -319,6 +354,10 @@ _PROCESS_CACHES = frozenset(
         ("torchlens/postprocess/ast_branches.py", "_file_cache"),
         ("torchlens/receptive_field/_engine.py", "_SCHEMA_OPERAND_SLOTS_CACHE"),
         ("torchlens/utils/introspection.py", "_COL_OFFSET_CACHE"),
+        # Import-time derived ULP tolerance table, lazily extended for dtypes
+        # outside _REPLAY_ULP_HEADROOM; clearing only re-derives (pure finfo
+        # arithmetic), so it is a memo, not capability state.
+        ("torchlens/utils/tensor_utils.py", "_DTYPE_FLOAT_TOLERANCES"),
     }
 )
 """Process-lifetime memos holding strong references.
@@ -755,6 +794,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
+        ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
@@ -793,6 +833,7 @@ _LIFECYCLE_CLASSES = (
 """Every lifecycle class, in declaration order. The union must be exact."""
 
 
+@pytest.mark.smoke
 def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     """Every mutable module global in the PACKAGE has exactly one lifecycle class.
 
@@ -819,6 +860,7 @@ def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     assert not stale, f"inventory rows no longer present in the package: {stale}"
 
 
+@pytest.mark.smoke
 def test_weakly_held_state_is_exactly_the_declared_ledger() -> None:
     """The weak/strong split of every inventory member is frozen and exact.
 
