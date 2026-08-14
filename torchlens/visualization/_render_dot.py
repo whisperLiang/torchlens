@@ -820,13 +820,17 @@ def _emit_and_finish_forward(
         # timeout, so a wedged ``dot`` hung the kernel indefinitely while
         # every CLI path was already bounded at ``render_timeout`` with a
         # typed error. Timeout/failure map to the same typed raises.
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".dot", delete=False
-        ) as notebook_source_file:
+        with tempfile.NamedTemporaryFile("w", suffix=".dot", delete=False) as notebook_source_file:
             notebook_source_file.write(dot.source)
             notebook_source_path = notebook_source_file.name
         try:
-            graph_svg = _render_graph_only_svg(dot.engine, notebook_source_path, render_timeout)
+            notebook_image_root = getattr(trace, "_visualizer_dir", None)
+            graph_svg = _render_graph_only_svg(
+                dot.engine,
+                notebook_source_path,
+                render_timeout,
+                Path(notebook_image_root) if notebook_image_root else None,
+            )
         except subprocess.TimeoutExpired as error:
             # The typed raise names the saved source path, so keep the file.
             _raise_graphviz_timeout(
@@ -877,6 +881,7 @@ def _emit_and_finish_forward(
     with _timed_phase(trace, "render:graphviz:forward"):
         try:
             rendered_path = f"{target.outpath}.{target.fileformat}"
+            render_image_root = Path(late_visualizer_dir) if late_visualizer_dir else None
             if compose_code_panel:
                 _write_composed_code_panel(
                     dot.engine,
@@ -885,6 +890,7 @@ def _emit_and_finish_forward(
                     rendered_path,
                     target.fileformat,
                     render_timeout,
+                    render_image_root,
                 )
             else:
                 cmd = [dot.engine, f"-T{target.fileformat}", "-o", rendered_path, source_path]
@@ -896,7 +902,7 @@ def _emit_and_finish_forward(
                     start_new_session=True,
                 )
                 if target.fileformat == "svg":
-                    _inline_svg_file_local_images(rendered_path)
+                    _inline_svg_file_local_images(rendered_path, render_image_root)
             _validate_rendered_output(rendered_path, source_path, "forward graph")
             if not target.save_only:
                 _view_rendered_file(rendered_path)
@@ -1134,7 +1140,9 @@ def _add_orphan_island_nodes(
             )
 
 
-def _render_graph_only_svg(engine: str, source_path: str, timeout: int) -> str:
+def _render_graph_only_svg(
+    engine: str, source_path: str, timeout: int, image_root: Path | None = None
+) -> str:
     """Render a saved DOT source to an SVG string (no code panel)."""
 
     completed = subprocess.run(
@@ -1144,21 +1152,24 @@ def _render_graph_only_svg(engine: str, source_path: str, timeout: int) -> str:
         capture_output=True,
         start_new_session=True,
     )
-    return _inline_svg_local_images(completed.stdout.decode("utf-8"))
+    return _inline_svg_local_images(completed.stdout.decode("utf-8"), image_root)
 
 
-def _inline_svg_file_local_images(svg_path: str) -> None:
+def _inline_svg_file_local_images(svg_path: str, image_root: Path | None = None) -> None:
     """Inline local image hrefs in a saved SVG file.
 
     Parameters
     ----------
     svg_path:
         Path to the rendered SVG file to update in place.
+    image_root:
+        Directory relative image hrefs are resolved against (the DOT
+        ``imagepath`` root).
     """
 
     with open(svg_path, encoding="utf-8") as svg_file:
         svg_text = svg_file.read()
-    inlined_svg = _inline_svg_local_images(svg_text)
+    inlined_svg = _inline_svg_local_images(svg_text, image_root)
     if inlined_svg != svg_text:
         atomic_write_text(svg_path, inlined_svg)
 
@@ -1213,13 +1224,17 @@ def _normalize_svg_root_viewbox(svg_text: str) -> str:
     )
 
 
-def _inline_svg_local_images(svg_text: str) -> str:
+def _inline_svg_local_images(svg_text: str, image_root: Path | None = None) -> str:
     """Replace local SVG image references with embedded data URIs.
 
     Parameters
     ----------
     svg_text:
         SVG text produced by Graphviz.
+    image_root:
+        Directory relative hrefs are resolved against — the graph-level
+        ``imagepath`` root the DOT source carried (r-b6 R19-6 relativizes
+        node image attrs, and Graphviz copies them into the SVG verbatim).
 
     Returns
     -------
@@ -1238,7 +1253,7 @@ def _inline_svg_local_images(svg_text: str) -> str:
         href = attrs.get(href_attr)
         if href is None or _is_non_file_svg_href(href):
             return tag
-        image_path = _resolve_svg_image_path(href)
+        image_path = _resolve_svg_image_path(href, image_root)
         try:
             payload = image_path.read_bytes()
         except OSError:
@@ -1257,6 +1272,7 @@ def _write_composed_code_panel(
     rendered_path: str,
     file_format: str,
     timeout: int,
+    image_root: Path | None = None,
 ) -> None:
     """Render the graph and code panel separately and write the joined output.
 
@@ -1266,7 +1282,9 @@ def _write_composed_code_panel(
     so vectors are preserved.
     """
 
-    graph_svg = _normalize_svg_root_viewbox(_render_graph_only_svg(engine, source_path, timeout))
+    graph_svg = _normalize_svg_root_viewbox(
+        _render_graph_only_svg(engine, source_path, timeout, image_root)
+    )
     combined_svg = _normalize_svg_root_viewbox(
         compose_graph_with_code_panel(graph_svg, source_text)
     )

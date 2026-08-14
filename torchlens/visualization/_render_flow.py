@@ -106,13 +106,19 @@ def _is_non_file_svg_href(href: str) -> bool:
     )
 
 
-def _resolve_svg_image_path(href: str) -> Path:
+def _resolve_svg_image_path(href: str, image_root: Path | None = None) -> Path:
     """Resolve an SVG href to a local path.
 
     Parameters
     ----------
     href:
         SVG image href value.
+    image_root:
+        Directory a relative href is resolved against — the graph-level
+        ``imagepath`` root Graphviz itself used (r-b6 R19-6 emits node image
+        attrs relative to the visualizer scratch dir). Falls back to the
+        working directory when the root is unset or the rooted file does not
+        exist, matching Graphviz's own search order.
 
     Returns
     -------
@@ -121,9 +127,13 @@ def _resolve_svg_image_path(href: str) -> Path:
     """
 
     candidate = Path(href).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    return candidate
+    if candidate.is_absolute():
+        return candidate
+    if image_root is not None:
+        rooted = image_root / candidate
+        if rooted.exists():
+            return rooted
+    return Path.cwd() / candidate
 
 
 def _replace_svg_attr_value(tag: str, attr_name: str, value: str) -> str:
@@ -1815,8 +1825,7 @@ def _assert_sibling_backstops(
         for target in chain.targets:
             if target not in baseline.nodes:
                 raise RuntimeError(
-                    f"sibling-order chain names {target!r}, which is not a "
-                    "baseline layout node"
+                    f"sibling-order chain names {target!r}, which is not a baseline layout node"
                 )
         for left, right in zip(chain.targets, chain.targets[1:]):
             if (left, right) in real_edges or (right, left) in real_edges:
