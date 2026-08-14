@@ -505,6 +505,12 @@ class GradientReceptiveField:
         default=ReceptiveFieldDirection.RECEPTIVE, repr=False, kw_only=True
     )
     unit_shape: tuple[int, ...] = field(default=(), repr=False, kw_only=True)
+    # SIGNED gradient values. ``grad`` holds magnitudes (the influence-set
+    # semantics every support/effective consumer wants), but the empirical
+    # adjoint identity is a SIGNED equality -- comparing absolute values lets
+    # a sign-disagreeing adjoint (the exact error class the check exists to
+    # catch) pass. ``None`` only on legacy/pickled results predating the field.
+    signed_grad: torch.Tensor | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         """Validate scalar threshold and support metadata.

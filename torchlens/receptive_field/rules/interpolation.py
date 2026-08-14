@@ -14,10 +14,26 @@ _CUBIC_A = Fraction(-3, 4)
 # Rational quantities this close to a filter zero or an integer window bound can
 # land on either side of it under ATen's float64 evaluation; such taps and
 # bounds are kept (containment) and the axis result is downgraded to inexact.
+#
+# The margin must GROW with the magnitude of the float64 quantity ATen actually
+# computes: the tap argument derives from ``center = scale * (i + 1/2)``, whose
+# rounding error is a few ULPs of ``center`` (relative, ~2^-52), not a fixed
+# absolute amount. A purely absolute 2^-40 margin is unsound once the compared
+# quantity exceeds ~2^12 (extent ~4k): real float64 rounding can then land
+# OUTSIDE the margin and the ``exact=True`` containment stamp would lie. The
+# effective margin is therefore max(2^-40, |value| * 2^-48): the historical
+# absolute floor for small quantities, 16-ULP-relative beyond it.
 _FLOAT_AMBIGUITY_MARGIN = Fraction(1, 2**40)
+_RELATIVE_AMBIGUITY_MARGIN = Fraction(1, 2**48)
 
 
-def _antialias_filter_verdict(mode: str, magnitude: Fraction) -> str:
+def _ambiguity_margin(value_scale: Fraction) -> Fraction:
+    """Return the float-ambiguity margin for a quantity of this magnitude."""
+
+    return max(_FLOAT_AMBIGUITY_MARGIN, abs(value_scale) * _RELATIVE_AMBIGUITY_MARGIN)
+
+
+def _antialias_filter_verdict(mode: str, magnitude: Fraction, margin: Fraction) -> str:
     """Classify one antialiased filter argument as zero, nonzero, or ambiguous.
 
     Parameters
@@ -26,6 +42,10 @@ def _antialias_filter_verdict(mode: str, magnitude: Fraction) -> str:
         Certified interpolation mode (``"bilinear"`` or ``"bicubic"``).
     magnitude:
         Exact non-negative filter argument ``|t|``.
+    margin:
+        Ambiguity margin scaled to the float64 quantities the filter argument
+        was derived from (``|center| * inverse_scale``-magnitude terms), so
+        large-extent axes keep a sound margin.
 
     Returns
     -------
@@ -36,26 +56,29 @@ def _antialias_filter_verdict(mode: str, magnitude: Fraction) -> str:
     """
 
     if mode == "bicubic":
-        if (
-            abs(magnitude - 1) < _FLOAT_AMBIGUITY_MARGIN
-            or abs(magnitude - 2) < _FLOAT_AMBIGUITY_MARGIN
-        ):
+        if abs(magnitude - 1) < margin or abs(magnitude - 2) < margin:
             return "ambiguous"
         # torch's cubic convolution (A=-0.75) is zero exactly at |t|=1 and
         # for |t|>=2, but nonzero on (1, 2).
         if magnitude == 1 or magnitude >= 2:
             return "zero"
         return "nonzero"
-    if abs(magnitude - 1) < _FLOAT_AMBIGUITY_MARGIN:
+    if abs(magnitude - 1) < margin:
         return "ambiguous"
     return "zero" if magnitude >= 1 else "nonzero"
 
 
 def _floor_with_margin(value: Fraction, *, prefer_low: bool) -> tuple[int, bool]:
-    """Floor a rational bound, widening when float trunc could disagree."""
+    """Floor a rational bound, widening when float trunc could disagree.
 
-    low = int(floor(value - _FLOAT_AMBIGUITY_MARGIN))
-    high = int(floor(value + _FLOAT_AMBIGUITY_MARGIN))
+    The margin scales with ``|value|`` (see ``_ambiguity_margin``): window
+    bounds grow with the output index, and float64's error on them is
+    relative, so a fixed absolute margin under-covers large extents.
+    """
+
+    margin = _ambiguity_margin(value)
+    low = int(floor(value - margin))
+    high = int(floor(value + margin))
     if low == high:
         return low, True
     return (low if prefer_low else high), False
@@ -83,10 +106,14 @@ def _antialias_output_taps(
     start = max(lower, 0)
     stop = min(upper, input_extent)
     inverse_scale = Fraction(1) / scale if scale >= 1 else Fraction(1)
+    # The float64 filter argument is computed from center-scale terms, so its
+    # rounding error is relative to |center| * inverse_scale (~ the output
+    # index), not to the O(1) argument itself.
+    filter_margin = _ambiguity_margin(center * inverse_scale)
     taps: list[int] = []
     for tap in range(start, stop):
         magnitude = abs((Fraction(tap) - center + Fraction(1, 2)) * inverse_scale)
-        verdict = _antialias_filter_verdict(mode, magnitude)
+        verdict = _antialias_filter_verdict(mode, magnitude, filter_margin)
         if verdict == "zero":
             continue
         if verdict == "ambiguous":

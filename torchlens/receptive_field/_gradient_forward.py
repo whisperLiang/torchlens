@@ -314,6 +314,7 @@ def _build_projective_result(
         io_role=key,
         unit=unit,
         grad=magnitude,
+        signed_grad=column.detach(),
         support_mask=support,
         support_ranges=_support_ranges(support),
         spatial_support_mask=_spatial_support(

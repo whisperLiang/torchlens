@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from ..utils.tensor_utils import LAYER_GRAD_VALIDATION_ATOL, LAYER_GRAD_VALIDATION_RTOL
 from ._errors import (
     AmbiguousCallError,
     AmbiguousInputError,
@@ -256,8 +257,22 @@ def _empirical_adjoint_checks(
                     )
                 )
                 continue
-            receptive_value = receptive_probe.grad[source_unit]
-            projective_value = projective.grad[target_unit]
+            # The adjoint identity is a SIGNED equality: dL/dx via the
+            # receptive probe must equal the same partial via the projective
+            # probe, sign included. ``grad`` stores magnitudes for
+            # influence-set semantics, so compare the retained signed values
+            # (falling back to magnitudes only for legacy results predating
+            # ``signed_grad``, where sign disagreements were invisible).
+            receptive_tensor = (
+                receptive_probe.signed_grad
+                if receptive_probe.signed_grad is not None
+                else receptive_probe.grad
+            )
+            projective_tensor = (
+                projective.signed_grad if projective.signed_grad is not None else projective.grad
+            )
+            receptive_value = receptive_tensor[source_unit]
+            projective_value = projective_tensor[target_unit]
             checks.append(
                 EmpiricalAdjointCheck(
                     source_label=source.label,
@@ -265,7 +280,13 @@ def _empirical_adjoint_checks(
                     source_unit=source_unit,
                     target_unit=target_unit,
                     passed=bool(
-                        torch.allclose(receptive_value, projective_value, atol=atol, rtol=rtol)
+                        torch.allclose(
+                            receptive_value,
+                            projective_value,
+                            atol=atol,
+                            rtol=rtol,
+                            equal_nan=True,
+                        )
                     ),
                     receptive_value=float(receptive_value.item()),
                     projective_value=float(projective_value.item()),
@@ -277,8 +298,8 @@ def _empirical_adjoint_checks(
 def verify(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = 1e-6,
-    empirical_adjoint_rtol: float = 1e-5,
+    empirical_adjoint_atol: float = LAYER_GRAD_VALIDATION_ATOL,
+    empirical_adjoint_rtol: float = LAYER_GRAD_VALIDATION_RTOL,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Run containment and sampled empirical-adjoint RF diagnostics.
@@ -324,8 +345,8 @@ def verify(
 def self_check(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = 1e-6,
-    empirical_adjoint_rtol: float = 1e-5,
+    empirical_adjoint_atol: float = LAYER_GRAD_VALIDATION_ATOL,
+    empirical_adjoint_rtol: float = LAYER_GRAD_VALIDATION_RTOL,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Alias :func:`verify` for interactive RF self-consistency diagnostics."""

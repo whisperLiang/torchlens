@@ -695,6 +695,7 @@ def _build_result(
         io_role=role,
         unit=unit,
         grad=magnitude,
+        signed_grad=grad.detach(),
         support_mask=support,
         support_ranges=_support_ranges(support),
         spatial_support_mask=_spatial_support(

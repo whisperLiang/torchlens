@@ -383,3 +383,66 @@ def test_torchvision_resnet18_basic_block_tripwire() -> None:
     result = target.receptive_field.check((0, 0, 4, 4), input=_input_op(trace))
 
     assert result.status is ReceptiveFieldValidationStatus.PASS
+
+
+def test_gradient_results_retain_signed_values() -> None:
+    """R13-5: gradient results carry SIGNED values alongside magnitudes.
+
+    ``grad`` keeps its influence-set magnitude semantics; ``signed_grad``
+    preserves the raw autograd values so signed consumers (the empirical
+    adjoint check) cannot be blinded to sign disagreements.
+    """
+
+    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.0)  # every true partial is NEGATIVE.
+    trace = _trace(model, torch.ones(1, 1, 5, 5, requires_grad=True))
+    result = _op(trace, "conv2d").receptive_field.gradient(
+        (0, 0, 2, 2), input=_input_op(trace)
+    )
+
+    assert result.signed_grad is not None
+    assert torch.equal(result.grad, result.signed_grad.abs())
+    supported_signed = result.signed_grad[result.support_mask]
+    assert supported_signed.numel() > 0
+    assert bool((supported_signed < 0).all())
+
+
+def test_empirical_adjoint_detects_sign_disagreement(monkeypatch) -> None:
+    """R13-5 tripwire: a sign-flipped adjoint must FAIL the empirical check.
+
+    The check used to compare ABSOLUTE values, so a projective probe
+    disagreeing with the receptive probe in sign alone -- the exact adjoint
+    error class the check exists to catch -- passed. Inject that fault and
+    require a FAIL verdict.
+    """
+
+    import dataclasses
+
+    from torchlens.receptive_field import _gradient_forward
+
+    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    trace = _trace(model, torch.ones(1, 1, 5, 5, requires_grad=True))
+    target = _op(trace, "conv2d")
+
+    real_projective = _gradient_forward.projective_gradient_for_unit
+
+    def sign_flipped(*args: object, **kwargs: object):
+        result = real_projective(*args, **kwargs)
+        assert result.signed_grad is not None
+        return dataclasses.replace(result, signed_grad=-result.signed_grad)
+
+    monkeypatch.setattr(_gradient_forward, "projective_gradient_for_unit", sign_flipped)
+
+    report = tl.receptive_field.verify(
+        trace,
+        ops=[target],
+        units=(0, 0, 2, 2),
+        inputs=_input_op(trace),
+    )
+    assert len(report.empirical_adjoint) == 1
+    assert report.empirical_adjoint[0].passed is False
+    assert report.verdict is ReceptiveFieldValidationStatus.FAIL
+    assert not report.passed
