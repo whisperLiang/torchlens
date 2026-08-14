@@ -443,16 +443,36 @@ def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
                     )
                 )
     except BaseException:
-        for swap in reversed(swaps):
-            setattr(swap.module, swap.name, swap.compiled_callable)
+        _restore_callable_swaps(swaps, only_if_bypassed=False)
         raise
 
     try:
         yield
     finally:
-        for swap in reversed(swaps):
-            if vars(swap.module).get(swap.name) is swap.bypass_callable:
-                setattr(swap.module, swap.name, swap.compiled_callable)
+        _restore_callable_swaps(swaps, only_if_bypassed=True)
+
+
+
+def _restore_callable_swaps(swaps: Any, *, only_if_bypassed: bool) -> None:
+    """Put every swapped-out compiled callable back, fencing each swap independently.
+
+    A raising user ``__setattr__`` in the reversed restore loop used to skip every
+    REMAINING swap, leaving the module tree permanently half-bypassed. Each restore is
+    fenced so one exotic module cannot strand the others; the first failure is re-raised
+    once the whole unwind is complete.
+    """
+
+    first_error: BaseException | None = None
+    for swap in reversed(swaps):
+        if only_if_bypassed and vars(swap.module).get(swap.name) is not swap.bypass_callable:
+            continue
+        try:
+            setattr(swap.module, swap.name, swap.compiled_callable)
+        except BaseException as error:  # noqa: PERF203 - per-item fence is the point
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 @contextmanager

@@ -381,7 +381,16 @@ def _ambient_execution_context_restored(ambient: Any) -> Any:
         ):
             yield
     finally:
-        apply_ambient_execution_context(saved)
+        # Fence the restore itself: this is 12 sequential process-global torch mutations,
+        # and a raise here used to skip the mode-stack tripwire below and leave the
+        # caller's globals BLENDED between the recorded and saved contexts with no
+        # diagnostic at all. The restore failure is re-raised after the tripwire runs, so
+        # neither signal is swallowed.
+        restore_error: BaseException | None = None
+        try:
+            apply_ambient_execution_context(saved)
+        except BaseException as error:  # noqa: BLE001 - re-raised below, never swallowed
+            restore_error = error
         if depth_before is not None and sys.exc_info()[0] is None:
             stack_after = get_current_function_mode_stack()
             depth_after = len(list(stack_after)) if stack_after is not None else None
@@ -392,6 +401,8 @@ def _ambient_execution_context_restored(ambient: Any) -> Any:
                     f"{depth_after}); scoped device-context restoration must be "
                     "exact on every exit path."
                 )
+        if restore_error is not None:
+            raise restore_error
 
 
 @contextmanager
@@ -461,8 +472,20 @@ def _call_execution_context_entered(context: Any) -> Any:
             raise _context_unavailable_error("grad_mode", str(exc)) from exc
         yield
     finally:
+        # Per-context fence. One raising ``__exit__`` used to skip every OUTER context,
+        # stranding the CALLER's thread inside ``no_grad`` / ``inference_mode`` / an
+        # autocast it never asked for for the rest of the process. Every context gets its
+        # chance to exit; the first failure is re-raised once the unwind is complete.
+        first_error: BaseException | None = None
         for ctx in reversed(stack):
-            ctx.__exit__(None, None, None)
+            try:
+                ctx.__exit__(None, None, None)
+            except BaseException as error:  # noqa: PERF203 - per-item fence is the point
+                if first_error is None:
+                    first_error = error
+        stack.clear()
+        if first_error is not None:
+            raise first_error
 
 
 def _is_allocator_death(exc: BaseException) -> bool:
