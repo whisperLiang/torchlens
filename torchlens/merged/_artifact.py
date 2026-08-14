@@ -296,9 +296,240 @@ def _cached_verdict(cached: dict[str, Any], key: str, enum_type: Any) -> Any:
         return enum_type(value)
     except ValueError as exc:
         raise _schema_refusal(
-            f"descriptor derivation cache {key}={value!r} is outside the "
-            "closed vocabulary"
+            f"descriptor derivation cache {key}={value!r} is outside the closed vocabulary"
         ) from exc
+
+
+def _cached_join_refs(join: Any, index: int) -> tuple[dict[str, Any], dict[int, Any]]:
+    """Typed parse of one cached join row into engine-comparable pieces.
+
+    The degraded branch is the one consumer of cache rows that exact
+    rederivation equality has not proven well-formed, so every field a
+    verdict recomputation reads is validated here (typed schema refusal,
+    never a raw KeyError/TypeError).
+    """
+
+    from ._engine import PerRankRef
+
+    def refuse(detail: str) -> MergedArtifactError:
+        return _schema_refusal(f"descriptor cache join {index} {detail}")
+
+    if not isinstance(join, dict):
+        raise refuse("is not a JSON object")
+    key = join.get("key")
+    if not isinstance(key, list) or len(key) != 4:
+        raise refuse("has a malformed key")
+    if not isinstance(join.get("kind"), str):
+        raise refuse("has no kind")
+    backend = join.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        raise refuse("backend is not a string or null")
+    for name in ("membership", "presence", "missing"):
+        value = join.get(name)
+        if not isinstance(value, list) or any(
+            isinstance(rank, bool) or not isinstance(rank, int) for rank in value
+        ):
+            raise refuse(f"{name} is not a list of integers")
+    per_rank_payload = join.get("per_rank")
+    if not isinstance(per_rank_payload, dict):
+        raise refuse("per_rank is not a JSON object")
+    per_rank: dict[int, Any] = {}
+    for rank_key, ref in per_rank_payload.items():
+        if not isinstance(rank_key, str) or not rank_key.isdigit():
+            raise refuse(f"per_rank key {rank_key!r} is not a rank string")
+        if not isinstance(ref, dict):
+            raise refuse(f"per_rank entry {rank_key} is not a JSON object")
+        digests: dict[str, tuple[str, ...] | None] = {}
+        for field in ("contribution_digests", "destination_digests"):
+            value = ref.get(field)
+            if value is not None and (
+                not isinstance(value, list) or any(not isinstance(d, str) for d in value)
+            ):
+                raise refuse(f"per_rank entry {rank_key} {field} is not a list of strings or null")
+            digests[field] = None if value is None else tuple(value)
+        for field in ("rank", "boundary_index", "seq_abs"):
+            value = ref.get(field)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise refuse(f"per_rank entry {rank_key} {field} is not an integer")
+        group_rank = ref.get("group_rank")
+        if group_rank is not None and (
+            isinstance(group_rank, bool) or not isinstance(group_rank, int)
+        ):
+            raise refuse(f"per_rank entry {rank_key} group_rank is not an integer or null")
+        for field in ("n_contribution_roles", "n_destination_roles"):
+            value = ref.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise refuse(f"per_rank entry {rank_key} {field} is not a non-negative integer")
+        op_labels = ref.get("op_labels_raw")
+        if not isinstance(op_labels, list) or any(
+            not isinstance(label, str) for label in op_labels
+        ):
+            raise refuse(f"per_rank entry {rank_key} op_labels_raw is not a list of strings")
+        c10d_group_seq = ref.get("c10d_group_seq")
+        if c10d_group_seq is not None and (
+            isinstance(c10d_group_seq, bool) or not isinstance(c10d_group_seq, int)
+        ):
+            raise refuse(f"per_rank entry {rank_key} c10d_group_seq is not an integer or null")
+        if not isinstance(ref.get("witness_policy"), str):
+            raise refuse(f"per_rank entry {rank_key} witness_policy is not a string")
+        per_rank[int(rank_key)] = PerRankRef(
+            rank=ref["rank"],
+            boundary_index=ref["boundary_index"],
+            seq_abs=ref["seq_abs"],
+            op_labels_raw=tuple(op_labels),
+            group_rank=group_rank,
+            witness_policy=ref["witness_policy"],
+            n_contribution_roles=ref["n_contribution_roles"],
+            n_destination_roles=ref["n_destination_roles"],
+            contribution_digests=digests["contribution_digests"],
+            destination_digests=digests["destination_digests"],
+            c10d_group_seq=c10d_group_seq,
+        )
+    if not set(join["presence"]).issubset(per_rank):
+        raise refuse("presence names a rank with no per_rank row")
+    return join, per_rank
+
+
+def _check_degraded_cache_coherence(cached: dict[str, Any], rederived: Any) -> None:
+    """Lower-bound the cached verdicts against what could have been derived.
+
+    Deep-hunt F1: with a member unparseable, the exact rederivation-equality
+    tamper oracle is off, and the substitute monotone checks only refused
+    structural conflicts and a DIVERGENT rederivation under a non-DIVERGENT
+    cache -- they never checked the ATTESTATION direction, so forging the
+    cached ``stored_value_status`` to ``attested_complete`` and corrupting one
+    member upgraded an honest UNWITNESSED merge to attested-at-face-value.
+
+    Three checks, all satisfied by construction for an honest cache:
+
+    1. Verdict recomputation: the cached joins' consistencies, the merge value
+       status, and the alignment are recomputed from the cached rows with the
+       same engine derivations that produced them; any disagreement means the
+       verdict fields were edited independently of the evidence rows.
+    2. Witness recomputation per join runs on the cached per-rank digest rows,
+       so an honest ``attested_*`` cache requires digests from every member of
+       every attested join -- survivors included (the sharper lower bound: a
+       cache claiming attestation over digestless survivor rows is impossible).
+    3. Survivor grounding: every join rederived from the surviving cores must
+       appear in the cache with byte-equal per-rank rows for the surviving
+       ranks (references to lost ranks stay unprovable and untouched).
+    """
+
+    from ._engine import _STRUCTURAL_KINDS, _witness_consistency
+    from ._enums import BoundaryConsistency, MergeAlignment, MergeValueStatus
+
+    cached_joins = cached.get("joins")
+    if not isinstance(cached_joins, list):
+        raise _schema_refusal("descriptor derivation cache joins table is not a list")
+    cached_findings = cached.get("findings")
+    if not isinstance(cached_findings, list):
+        raise _schema_refusal("descriptor derivation cache findings table is not a list")
+
+    stored_alignment = _cached_verdict(cached, "stored_alignment", MergeAlignment)
+    stored_value_status = _cached_verdict(cached, "stored_value_status", MergeValueStatus)
+
+    # 1 + 2. Recompute every cached join's witness consistency from its own
+    # recorded per-rank rows, then the merge-level verdicts from those.
+    joins_by_key: dict[tuple[Any, ...], tuple[dict[str, Any], dict[int, Any]]] = {}
+    consistencies: list[BoundaryConsistency] = []
+    for index, join_payload in enumerate(cached_joins):
+        join, per_rank = _cached_join_refs(join_payload, index)
+        key = tuple(join["key"])
+        if key in joins_by_key:
+            raise _schema_refusal(f"descriptor cache join key {key} is duplicated")
+        joins_by_key[key] = (join, per_rank)
+        try:
+            recorded = BoundaryConsistency(join.get("consistency"))
+        except ValueError as exc:
+            raise _schema_refusal(
+                f"descriptor cache join {index} consistency "
+                f"{join.get('consistency')!r} is outside the closed vocabulary"
+            ) from exc
+        recomputed = _witness_consistency(
+            join["kind"],
+            join["backend"],
+            tuple(join["membership"]),
+            tuple(join["presence"]),
+            per_rank,
+        )
+        if recomputed is not recorded:
+            raise _tamper(
+                f"descriptor cache join {index} records consistency "
+                f"{recorded.value!r} but its own per-rank witness rows derive "
+                f"{recomputed.value!r}; the verdict was edited independently "
+                "of the evidence rows"
+            )
+        consistencies.append(recorded)
+
+    applicable = [c for c in consistencies if c is not BoundaryConsistency.NOT_APPLICABLE]
+    attested = [c for c in applicable if c is BoundaryConsistency.ATTESTED]
+    mismatched = [c for c in applicable if c is BoundaryConsistency.MISMATCHED]
+    if mismatched:
+        recomputed_status = MergeValueStatus.DIVERGENT
+    elif applicable and len(attested) == len(applicable):
+        recomputed_status = MergeValueStatus.ATTESTED_COMPLETE
+    elif attested:
+        recomputed_status = MergeValueStatus.ATTESTED_PARTIAL
+    else:
+        recomputed_status = MergeValueStatus.UNWITNESSED
+    if recomputed_status is not stored_value_status:
+        raise _tamper(
+            f"descriptor cache claims stored_value_status "
+            f"{stored_value_status.value!r} but its own join rows derive "
+            f"{recomputed_status.value!r}; witness evidence is demote-only, so "
+            "the cache was edited"
+        )
+
+    kinds: list[str] = []
+    for index, finding in enumerate(cached_findings):
+        if not isinstance(finding, dict) or not isinstance(finding.get("kind"), str):
+            raise _schema_refusal(f"descriptor cache finding {index} has no kind")
+        kinds.append(finding["kind"])
+    if any(kind in _STRUCTURAL_KINDS for kind in kinds):
+        recomputed_alignment = MergeAlignment.CONFLICTED
+    elif any(kind == "presence_gap" for kind in kinds):
+        recomputed_alignment = MergeAlignment.PARTIAL
+    else:
+        recomputed_alignment = MergeAlignment.ALIGNED
+    if recomputed_alignment is not stored_alignment:
+        raise _tamper(
+            f"descriptor cache claims stored_alignment {stored_alignment.value!r} "
+            f"but its own findings ledger derives {recomputed_alignment.value!r}"
+        )
+
+    # 3. Survivor grounding: the cache must contain every join the surviving
+    # cores rederive, with byte-equal per-rank rows for the surviving ranks.
+    for join in rederived.joins:
+        cached_entry = joins_by_key.get(tuple(join.key))
+        if cached_entry is None:
+            raise _tamper(
+                f"the surviving rank cores rederive join {join.key} but the "
+                "descriptor cache never recorded it"
+            )
+        cached_join, cached_per_rank = cached_entry
+        if (
+            cached_join["kind"] != join.kind
+            or tuple(cached_join["membership"]) != join.membership
+            or cached_join["backend"] != join.backend
+            or cached_join.get("reduce_op") != join.reduce_op
+        ):
+            raise _tamper(
+                f"the descriptor cache disagrees with the surviving rank cores "
+                f"about join {join.key} (kind/membership/backend/reduce_op)"
+            )
+        for rank, ref in join.per_rank.items():
+            cached_ref = cached_per_rank.get(rank)
+            if cached_ref is None:
+                raise _tamper(
+                    f"surviving rank {rank} presents join {join.key} but the "
+                    "descriptor cache records no per-rank row for it"
+                )
+            if cached_ref != ref:
+                raise _tamper(
+                    f"the descriptor cache per-rank row for surviving rank {rank} "
+                    f"at join {join.key} does not equal the row rederived from "
+                    "its own core"
+                )
 
 
 def _resolve_member_path(root: Path, relative: str) -> Path:
@@ -416,9 +647,7 @@ def load_merged(path: str | Path) -> MergedTrace:
             )
         rank = entry["rank"]
         if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
-            raise _schema_refusal(
-                f"descriptor member rank {rank!r} is not a non-negative integer"
-            )
+            raise _schema_refusal(f"descriptor member rank {rank!r} is not a non-negative integer")
         if rank in validated_members:
             raise _schema_refusal(f"descriptor member rank {rank} is duplicated")
         if not isinstance(entry["path"], str):
@@ -429,9 +658,7 @@ def load_merged(path: str | Path) -> MergedTrace:
             or len(recorded) != 64
             or any(char not in "0123456789abcdef" for char in recorded)
         ):
-            raise _schema_refusal(
-                f"rank {rank} tree_sha256 is not a lowercase hex SHA-256 digest"
-            )
+            raise _schema_refusal(f"rank {rank} tree_sha256 is not a lowercase hex SHA-256 digest")
         validated_members[rank] = (entry["path"], recorded)
 
     # 1b. Integrity: every member's canonical tree hash must match BOTH records.
@@ -513,6 +740,12 @@ def load_merged(path: str | Path) -> MergedTrace:
                 f"but the descriptor cache claims {stored_value_status.value!r}; "
                 "witness evidence is demote-only, so the cache was edited"
             )
+        # Attestation lower bound (deep-hunt F1): the two checks above only
+        # guard the DIVERGENT/structural direction, so a forged cache could
+        # still upgrade an honest UNWITNESSED merge to attested_* once one
+        # member was made unparseable. Recompute the cached verdicts from the
+        # cache's own evidence rows and ground them in the surviving cores.
+        _check_degraded_cache_coherence(cached, rederived)
         derivation = replace(
             rederived,
             stored_alignment=stored_alignment,

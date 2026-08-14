@@ -368,16 +368,91 @@ class TestDegradedLoadCoherence:
         """Fail-before: a foreign cached value escaped as a raw ValueError."""
 
         art = self._degraded(tmp_path)
-        self._rewrite_cache(
-            art, lambda d: d.__setitem__("stored_value_status", "immaculate")
-        )
+        self._rewrite_cache(art, lambda d: d.__setitem__("stored_value_status", "immaculate"))
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
         assert excinfo.value.fields["code"] == "merged_schema_invalid"
 
-    def test_divergent_survivors_cannot_present_attested(
-        self, gloo_world, tmp_path, monkeypatch
-    ):
+    def _degraded_unwitnessed(self, tmp_path: Path) -> Path:
+        """Save an honest witness-\"none\" merge, then degrade one member."""
+
+        merged = tl.merge_ranks([_capture(witness="none")])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+        return _append_unparseable_member(art)
+
+    def test_forged_attestation_over_unwitnessed_survivors_refuses(self, gloo_world, tmp_path):
+        """Deep-hunt F1: a forged cache cannot upgrade UNWITNESSED to attested.
+
+        Fail-before: the degraded-branch monotone checks only guarded the
+        DIVERGENT/structural direction, so editing the cached
+        ``stored_value_status`` to ``attested_complete`` (with a re-stamped
+        root checksum) and corrupting one member loaded an artifact whose
+        evidence contains ZERO witness digests as effective attested_partial.
+        """
+
+        art = self._degraded_unwitnessed(tmp_path)
+        self._rewrite_cache(
+            art, lambda d: d.__setitem__("stored_value_status", "attested_complete")
+        )
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+    def test_forged_join_consistency_refuses(self, gloo_world, tmp_path):
+        """A cache whose join verdicts contradict their own digest rows refuses."""
+
+        def forge(derivation):
+            derivation["stored_value_status"] = "attested_complete"
+            for join in derivation["joins"]:
+                join["consistency"] = "attested"
+
+        art = self._degraded_unwitnessed(tmp_path)
+        self._rewrite_cache(art, forge)
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+    def test_forged_survivor_digest_rows_refuse(self, gloo_world, tmp_path):
+        """Fabricated per-rank digest rows for a SURVIVING rank refuse.
+
+        The survivor's own core is the authority for its rows: a cache row
+        carrying digests the surviving core never recorded is tamper even when
+        the cache is internally coherent.
+        """
+
+        def forge(derivation):
+            derivation["stored_value_status"] = "attested_complete"
+            for join in derivation["joins"]:
+                join["consistency"] = "attested"
+                for ref in join["per_rank"].values():
+                    ref["contribution_digests"] = ["c" * 64]
+                    ref["destination_digests"] = ["d" * 64]
+
+        art = self._degraded_unwitnessed(tmp_path)
+        self._rewrite_cache(art, forge)
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+    def test_honest_unwitnessed_degraded_load_still_loads(self, gloo_world, tmp_path):
+        """The coherence checks refuse forgery, never the honest degraded load."""
+
+        loaded = tl.load(self._degraded_unwitnessed(tmp_path))
+        assert loaded.load_degradations
+        assert loaded.stored_value_status.value == "unwitnessed"
+        assert loaded.alignment.value == "partial"
+
+    def test_forged_alignment_verdict_refuses(self, gloo_world, tmp_path):
+        """A stored_alignment contradicting the cached findings ledger refuses."""
+
+        art = self._degraded_unwitnessed(tmp_path)
+        self._rewrite_cache(art, lambda d: d.__setitem__("stored_alignment", "partial"))
+        with pytest.raises(MergedArtifactError) as excinfo:
+            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+
+    def test_divergent_survivors_cannot_present_attested(self, gloo_world, tmp_path, monkeypatch):
         """Monotone coherence: a cache claiming better than the survivors refuses.
 
         Fail-before: with one member unparseable, an edited cache presented
