@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -409,7 +409,7 @@ def build_bundles(
     """
 
     dist_dir.mkdir(parents=True, exist_ok=True)
-    dataset_as_of = (as_of or datetime.now(UTC).date()).isoformat()
+    dataset_as_of = (as_of or datetime.now(timezone.utc).date()).isoformat()
     tlspec_entries = [] if tlspec_dir is None else _file_entries(tlspec_dir, prefix="tlspecs")
     visual_entries = (
         []

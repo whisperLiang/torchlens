@@ -6,7 +6,7 @@ import argparse
 import csv
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import importlib
 import json
 import os
@@ -221,7 +221,7 @@ def _utc_now() -> datetime:
         Timezone-aware UTC timestamp.
     """
 
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _timestamp() -> str:
