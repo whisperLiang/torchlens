@@ -980,8 +980,19 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
     for child_layer in buffer_to_remove.children:
         if child_layer not in source_buffer.children:
             source_buffer.children.append(child_layer)
-        self[child_layer].parents.remove(buffer_to_remove._label_raw)
-        self[child_layer].parents.append(source_buffer._label_raw)
+        # Preserve edge MULTIPLICITY: ``parents`` is an edge-OCCURRENCE list (one entry
+        # per argument slot), so a child consuming the removed buffer at two slots must
+        # end with two entries naming the survivor. ``list.remove`` strips only the FIRST
+        # occurrence, so repointing one-for-one is the multiplicity-faithful move; the
+        # closing ``_remove_log_entry(..., remove_references=True)`` scrub would otherwise
+        # strip the leftovers and drop the count to 1 (DISPUTED D1 -- safe hardening,
+        # not an adjudication of reachability).
+        child_parents = self[child_layer].parents
+        repointed = 0
+        while buffer_to_remove._label_raw in child_parents:
+            child_parents.remove(buffer_to_remove._label_raw)
+            repointed += 1
+        child_parents.extend([source_buffer._label_raw] * max(1, repointed))
         if buffer_to_remove._label_raw in self[child_layer].internal_source_parents:
             self[child_layer].internal_source_parents.remove(buffer_to_remove._label_raw)
             self[child_layer].internal_source_parents.append(source_buffer._label_raw)
@@ -996,8 +1007,19 @@ def _merge_buffer_entries(self: Trace, source_buffer: Op, buffer_to_remove: Op) 
     for parent_layer in buffer_to_remove.parents:
         if parent_layer not in source_buffer.parents:
             source_buffer.parents.append(parent_layer)
-        self[parent_layer].children.remove(buffer_to_remove._label_raw)
-        self[parent_layer].children.append(source_buffer._label_raw)
+        parent_children = self[parent_layer].children
+        if buffer_to_remove._label_raw in parent_children:
+            parent_children.remove(buffer_to_remove._label_raw)
+        # Membership-guard the NEIGHBOUR side too (DISPUTED D1 -- safe hardening either
+        # way, NOT an adjudication of reachability). The survivor's own appends above are
+        # guarded, but this one was unconditional: both merged duplicates share their
+        # parent BY CONSTRUCTION (the dedup hash at the call site includes
+        # ``buffer_source``), so on any non-None-source merge the shared parent's
+        # ``children`` got the survivor appended a SECOND time -- a duplicated child edge,
+        # a shape no honest capture produces (parents may legitimately duplicate for
+        # multi-slot reuse; children never do).
+        if source_buffer._label_raw not in parent_children:
+            parent_children.append(source_buffer._label_raw)
 
     for parent_layer in buffer_to_remove.internal_source_parents:
         if parent_layer not in source_buffer.internal_source_parents:
