@@ -2456,6 +2456,39 @@ def decorate_all_once() -> None:
     _fix_tensor_sequence_slot()
 
 
+def _stamp_wrapper_provenance(
+    wrapper: Callable[..., Any], namespace_name: str, func_name: str
+) -> None:
+    """Stamp install-site ``__module__``/``__qualname__`` onto a wrapper.
+
+    ``@wraps`` copies the ORIGINAL's metadata, which for torch's C descriptors
+    names classes that are not importable attributes (``pickle.dumps(torch.cos)``
+    died on ``_VariableFunctionsClass.cos`` — B8-1a) or leaves the wrapper's
+    own torchlens module visible (``Tensor.add.__module__`` — B8-5). The
+    install site is the one basis that is both importable and truthful: a bare
+    wrapper pickles by reference to its public torch name while wrappers are
+    installed (loading as the ORIGINAL in a fresh process), and introspection
+    reports the namespace the user actually reached the callable through.
+    Shared originals keep their FIRST (public-namespace-first) stamp via the
+    dedup branch below. The ``inspect.signature`` fabrication for C builtins
+    stays a documented residual: ``__wrapped__`` must remain deleted for JIT
+    compatibility, and functions cannot raise from attribute access.
+    """
+
+    namespace_obj = get_optional_torch_namespace(namespace_name)
+    if isinstance(namespace_obj, type):
+        module_name = getattr(namespace_obj, "__module__", None) or "torch"
+        qualname = f"{namespace_obj.__qualname__}.{func_name}"
+    else:
+        module_name = namespace_name
+        qualname = func_name
+    try:
+        wrapper.__module__ = module_name
+        wrapper.__qualname__ = qualname
+    except (AttributeError, TypeError):
+        pass
+
+
 def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
     """Collect argument names, then decorate one batch of torch func targets.
 
@@ -2527,6 +2560,7 @@ def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
 
             recorded_name = _recorded_func_name(namespace_name, func_name)
             new_func = torch_func_decorator(orig_func, recorded_name)
+            _stamp_wrapper_provenance(new_func, namespace_name, func_name)
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")

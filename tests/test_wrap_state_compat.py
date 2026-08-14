@@ -286,6 +286,60 @@ class TestMetaApiSmokePostWrap:
         assert pickle.loads(payload).weight.shape == (2, 2)
 
 
+class _ActModel(nn.Module):
+    """Module-level so pickle can save it by reference."""
+
+    def __init__(self):
+        super().__init__()
+        self.act = F.relu
+
+    def forward(self, x):
+        return self.act(x)
+
+
+class TestWrapperPickleLadder:
+    # B8-1: @wraps copied the original C descriptor's __qualname__
+    # (_VariableFunctionsClass.cos) onto the wrapper, so pickling a BARE
+    # wrapped callable failed on attribute lookup. Install-site stamping makes
+    # every rung pickle by reference to the public torch name while wrapped.
+
+    def test_bare_wrapped_function_pickles_while_wrapped(self):
+        _ensure_wrapped()
+        for target in (torch.cos, F.relu, torch.mean):
+            loaded = pickle.loads(pickle.dumps(target))
+            assert _resolve(loaded) is _resolve(target)
+        result = pickle.loads(pickle.dumps(torch.cos))(torch.zeros(2))
+        assert torch.equal(result, torch.ones(2))
+
+    def test_model_holding_namespace_read_pickles_while_wrapped(self):
+        _ensure_wrapped()
+        loaded = pickle.loads(pickle.dumps(_ActModel()))
+        assert torch.equal(loaded(torch.tensor([-1.0, 2.0])), torch.tensor([0.0, 2.0]))
+
+    def test_wrapper_introspection_module_fidelity(self):
+        # B8-5: wrapper metadata reports the install site, never torchlens.
+        _ensure_wrapped()
+        assert torch.cos.__module__ == "torch"
+        assert torch.cos.__qualname__ == "cos"
+        assert torch.Tensor.add.__module__ == "torch"
+        assert torch.Tensor.add.__qualname__ == "Tensor.add"
+        assert F.relu.__module__ == "torch.nn.functional"
+
+    def test_signature_fabrication_residual_shape(self):
+        # DISCLOSED RESIDUAL (B8-5 half): inspect.signature on a wrapped C
+        # builtin reports the wrapper's (*args, **kwargs) instead of the
+        # honest ValueError -- __wrapped__ must stay deleted for JIT
+        # compatibility and a function attribute cannot raise. Pinned so a
+        # silent change gets noticed.
+        import inspect
+
+        _ensure_wrapped()
+        if id(torch.mean) not in _state._decorated_to_orig:
+            pytest.skip("torch.mean not wrapped on this build")
+        parameters = inspect.signature(torch.mean).parameters
+        assert set(parameters) == {"args", "kwargs"}
+
+
 # ---------------------------------------------------------------------------
 # 4. Override-table coherence (B8-4)
 # ---------------------------------------------------------------------------
