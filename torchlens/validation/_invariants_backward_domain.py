@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..backends import TORCH_BACKEND_NAME
-
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
     from ..data_classes.op import Op
@@ -325,6 +323,14 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
         the retained seq domain has a hole, or if the amendment lane is not a
         contiguous run anchored at 1 or the seal watermark.
     """
+
+    # Function-local import: a module-level `from ..backends import ...` here
+    # participates in a backends<->validation import cycle under some test import
+    # orders (backends init not yet past the constant when this module loads),
+    # which surfaced as a call-time NameError. Importing at call time -- when
+    # backends is fully initialized -- avoids the cycle and still routes through
+    # the canonical registry constant (satisfies the backend-literal gate).
+    from ..backends.registry import TORCH_BACKEND_NAME
 
     if getattr(trace, "backend", TORCH_BACKEND_NAME) != TORCH_BACKEND_NAME:
         return
