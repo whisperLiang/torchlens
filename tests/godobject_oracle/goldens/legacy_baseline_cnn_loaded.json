@@ -6175,7 +6175,7 @@
   "sibling_events": [],
   "state": "TraceState.PRISTINE",
   "state_history": [],
-  "tlspec_version": 7,
+  "tlspec_version": 6,
   "total_activation_memory": "<measured>",
   "total_autograd_memory": "<measured>",
   "total_backward_duration": "<measured>",
