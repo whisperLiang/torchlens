@@ -51,6 +51,31 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
+def _is_structseq_type(arg_type: type[Any]) -> bool:
+    """Return whether ``arg_type`` is a C ``PyStructSequence`` class.
+
+    Structseq classes (``torch.return_types.*``, ``os.stat_result``, ...)
+    carry the C-level ``n_fields``/``n_sequence_fields`` layout counts that
+    ordinary namedtuples and Python tuple subclasses never define. A Python
+    subclass faking these attributes merely gets the single-iterable probe
+    first; the exact-identity verification still decides correctness.
+
+    Parameters
+    ----------
+    arg_type:
+        Exact tuple subclass under reconstruction.
+
+    Returns
+    -------
+    bool
+        ``True`` when the class declares the structseq field-count layout.
+    """
+
+    return isinstance(getattr(arg_type, "n_fields", None), int) and isinstance(
+        getattr(arg_type, "n_sequence_fields", None), int
+    )
+
+
 def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
     """Rebuild a ``tuple`` subclass from ``items``, or ``None`` if impossible.
 
@@ -66,6 +91,17 @@ def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
     single-iterable constructor with one iterable item would otherwise
     silently EXPAND that item into its elements.
 
+    Structseq classes skip the positional probe entirely: the C constructor
+    shape is ``(sequence, dict)``, so ``arg_type(*items)`` on a tensor-bearing
+    structseq (``torch.return_types.sort``) put the values TENSOR in the
+    sequence slot and ITERATED it -- dispatching real ``dim``/``unbind`` calls
+    -- before raising. Under active logging that probe side effect was
+    CAPTURED as a spurious ``unbind`` op, making otherwise-identical traces
+    structurally diverge (the structseq non-reproducibility regression). The
+    probes additionally run under ``pause_logging()``: rebuilding a snapshot
+    container is TorchLens-internal bookkeeping the user's program never
+    executed, so no constructor side effect may ever enter the captured graph.
+
     Parameters
     ----------
     arg_type:
@@ -80,9 +116,16 @@ def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
         reproduces the items (callers fall back without crashing).
     """
 
-    for build in (lambda: arg_type(*items), lambda: arg_type(items)):
+    from .._state import pause_logging
+
+    if _is_structseq_type(arg_type):
+        builds: tuple[Any, ...] = (lambda: arg_type(items),)
+    else:
+        builds = (lambda: arg_type(*items), lambda: arg_type(items))
+    for build in builds:
         try:
-            candidate = build()
+            with pause_logging():
+                candidate = build()
         except Exception:
             continue
         if type(candidate) is not arg_type:
