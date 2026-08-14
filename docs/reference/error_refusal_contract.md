@@ -96,6 +96,8 @@ add names to the top-level `torchlens` namespace:
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
+| `hash_content_type_unsupported` | `tl.hash.content` value cannot be deterministically encoded (`ArgumentTypeError`, `TypeError` lineage) | Pass tensors, arrays, builtin scalars/containers, or `__dict__`-inspectable objects |
+| `hash_expected_type_invalid` | `tl.assert_unchanged` pin is neither a string nor `None` (`ArgumentTypeError`, `TypeError` lineage) | Pass the pinned hash string, or `None` to bootstrap a pin |
 | `input_tree_cycle` | Model-input tree contains a self-referential container (`InvalidArgumentError`) | Remove the container reference cycle from the model input |
 | `input_tree_depth_exceeded` | Model-input tree nesting exceeds the input-boundary depth ceiling (`InvalidArgumentError`) | Flatten the nested input containers before tracing |
 | `intervention_predicate_type_invalid` | `intervene` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass `tl.when(...)`, another predicate, or `None` |
@@ -165,6 +167,7 @@ add names to the top-level `torchlens` namespace:
 | `stack_selector_no_match` | `trace.stack` selector matched no sites | Pass a selector matching saved ops |
 | `stack_shape_mismatch` | Stacked outputs have different shapes | Select ops with identical output shapes |
 | `storage_argument_conflict` | `storage` and `streaming` were both supplied | Prefer `storage`, or remove it |
+| `structural_hash_mismatch` | Model structural hash differs from the pinned value (`StructuralHashMismatchError`, `AssertionError` lineage) | Inspect the captured traces for the divergence, or re-pin if intentional |
 | `sweep_intervention_conflict` | `sweep()` received a second intervention | Express the target through `at` |
 | `sweep_names_length_mismatch` | Sweep names and values have different lengths | Pass one name per value |
 | `sweep_site_missing` | Sweep site target is missing | Pass `at` |

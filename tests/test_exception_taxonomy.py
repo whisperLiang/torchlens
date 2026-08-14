@@ -359,6 +359,8 @@ _LINEAGE_PROBE_BUILTINS: tuple[type[BaseException], ...] = (
     TypeError,
     RuntimeError,
     Warning,
+    AssertionError,
+    AttributeError,
 )
 
 BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
@@ -434,7 +436,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "PredicateError": ("RuntimeError",),
     "ReattachError": ("RuntimeError",),
     "RecordBindingError": ("RuntimeError",),
-    "RecordContextFieldError": (),
+    "RecordContextFieldError": ("AttributeError",),
     "RecorderStateError": ("RuntimeError",),
     "RecordingConfigError": ("ValueError",),
     "RecoveryError": ("RuntimeError",),
@@ -458,6 +460,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "SpliceModuleDtypeError": ("RuntimeError",),
     "StateBindingError": ("ValueError",),
     "StopSignalSwallowedError": (),
+    "StructuralHashMismatchError": ("AssertionError",),
     "TorchLensCaptureGapError": ("RuntimeError",),
     "TorchLensCaptureGapWarning": ("Warning",),
     "TorchLensError": (),
