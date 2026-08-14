@@ -560,12 +560,18 @@ def _simple_leaves(
             INPUT_TREE_MAX_DEPTH,
             raise_input_tree_cycle_refusal,
             raise_input_tree_depth_refusal,
+            raise_input_tree_stack_refusal,
         )
 
+        if _in_progress is None:
+            # Root entry: convert stack-budget exhaustion below the depth
+            # ceiling into the shared typed refusal (T11.4).
+            try:
+                return _simple_leaves(value, _depth, set())
+            except RecursionError as exc:
+                raise_input_tree_stack_refusal(exc)
         if _depth >= INPUT_TREE_MAX_DEPTH:
             raise_input_tree_depth_refusal(depth=_depth)
-        if _in_progress is None:
-            _in_progress = set()
         value_id = id(value)
         if value_id in _in_progress:
             raise_input_tree_cycle_refusal(

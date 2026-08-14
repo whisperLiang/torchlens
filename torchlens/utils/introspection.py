@@ -17,6 +17,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from .._input_walk import INPUT_TREE_MAX_DEPTH
+
 # r-b4 R26-6c: read capability flags at USE time through the module object --
 # an import-time value binding never sees mark_torch_capability_missing flips.
 from . import _torch_compat
@@ -217,8 +219,17 @@ _NON_CONTAINER_LEAF_TYPES: tuple[type, ...] = (
     torch.UntypedStorage,
 )
 
-INPUT_SEARCH_DEPTH_LIMIT = 64
-"""Maximum input-boundary search depth before callers must fail closed."""
+INPUT_SEARCH_DEPTH_LIMIT = INPUT_TREE_MAX_DEPTH + 1
+"""Maximum input-boundary search depth before callers must fail closed.
+
+Unified with the ONE shared input-boundary nesting ceiling (grind-p3 T11.4):
+this walker's private ``64`` disagreed with ``INPUT_TREE_MAX_DEPTH`` (200), so
+a legal input the boundary contract admits (nesting 65-200) passed every other
+walker and then silently dropped its tensor leaves here into a traversal gap.
+``+ 1`` converts the BFS level count (level N MATCHES depth-N items; expansion
+happens a level earlier) to the walkers' path-length semantics, so a leaf at
+exactly the ceiling depth is still enumerated.
+"""
 
 
 def get_vars_of_type_from_obj(

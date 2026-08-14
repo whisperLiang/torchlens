@@ -104,7 +104,14 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         by reference.
     """
     if _in_progress is None:
-        _in_progress = {}
+        # Root entry: convert stack-budget exhaustion below the depth ceiling
+        # into the typed refusal shared by every input-boundary walker (T11.4).
+        try:
+            return copy_arg_tree(arg, {}, _depth)
+        except RecursionError as exc:
+            from .._input_walk import raise_input_tree_stack_refusal
+
+            raise_input_tree_stack_refusal(exc)
     if isinstance(arg, torch.Tensor):
         # Tensors are leaves and are cloned per occurrence (never memoized), so a
         # structure that reuses the same tensor keeps its historical per-slot

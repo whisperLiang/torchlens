@@ -130,6 +130,38 @@ def raise_input_tree_depth_refusal(*, depth: int) -> None:
     )
 
 
+def raise_input_tree_stack_refusal(cause: BaseException | None = None) -> None:
+    """Raise the typed stack-budget input-boundary refusal (grind-p3 T11.4).
+
+    The nesting ceiling is a DEPTH bound, but the actual failure class is
+    STACK BUDGET: the live walkers burn ~2-3 interpreter frames per level, so
+    a LEGAL input (nesting <= the ceiling) still died in a raw
+    ``RecursionError`` whenever the caller entered capture with most of the
+    stack already consumed (deep user recursion, constrained
+    ``sys.setrecursionlimit``). Every walker entry converts that exhaustion
+    into this typed refusal instead of an untyped stdlib crash.
+
+    Parameters
+    ----------
+    cause:
+        The caught ``RecursionError``, chained as ``__cause__``.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    error = InvalidArgumentError(
+        "Walking the model-input tree exhausted the Python stack budget before "
+        f"reaching the depth ceiling ({INPUT_TREE_MAX_DEPTH}): capture was "
+        "entered with most of the interpreter stack already consumed.",
+        code="input_tree_stack_exhausted",
+        remedy=(
+            "Call the capture entry point from a shallower call stack, or raise "
+            "sys.setrecursionlimit() to leave headroom for the bounded input walk."
+        ),
+    )
+    raise error from cause
+
+
 def raise_input_tree_cycle_refusal(*, kind: str) -> None:
     """Raise the typed cyclic-container input-boundary refusal (r-b4 R27-1).
 
@@ -464,7 +496,12 @@ def walk_input_boundary(
         if on_leaf is not None:
             on_leaf(value, path)
 
-    _descend(value, path)
+    try:
+        _descend(value, path)
+    except RecursionError as exc:
+        # A legal (<= ceiling) tree can still exhaust the stack when the caller
+        # entered capture deep in its own recursion; refuse typed (T11.4).
+        raise_input_tree_stack_refusal(exc)
 
 
 # --- r67 C2: the input-boundary SNAPSHOT spine -----------------------------------------------
@@ -1298,5 +1335,9 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             return ["tuple" if isinstance(aux, tuple) else "list", [_safe_aux(i) for i in aux]]
         return ["atom", encode_mapping_key(aux)]
 
-    _descend(value, ())
+    try:
+        _descend(value, ())
+    except RecursionError as exc:
+        # Same stack-budget class as the walk direction: typed, never raw (T11.4).
+        raise_input_tree_stack_refusal(exc)
     return {"nodes": nodes, "refusals": refusals}
