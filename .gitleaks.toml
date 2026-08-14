@@ -1,0 +1,19 @@
+# gitleaks configuration for torchlens.
+#
+# Extends the bundled default ruleset (so all built-in credential detectors stay
+# active) and adds a narrow path allowlist for auto-generated TEST-FIXTURE
+# goldens. Those goldens embed deterministic high-entropy strings -- per-op
+# barcodes and dedup source-ids -- that read as "hex high entropy strings" to
+# the scanner. They are regenerated on every reviewed rebaseline and never
+# contain credentials, so they are false positives by construction. This mirrors
+# the detect-secrets / check-added-large-files generated-data exclusions in
+# .pre-commit-config.yaml.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Auto-generated oracle test-fixture goldens (deterministic barcodes/source-ids, never credentials)."
+paths = [
+  '''tests/surface_oracle/goldens/.*''',
+  '''tests/capture_oracle/goldens/.*''',
+]
