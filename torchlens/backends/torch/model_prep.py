@@ -994,6 +994,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
     unstampable: list[str] = []
 
     def _stamp(tensor: torch.Tensor, address: str) -> None:
+        """Stamp one buffer into the session registries, collecting failures."""
         # A failed stamp is EVIDENCE LOSS -- the buffer's reads may log as
         # internal sources instead of buffer versions -- so it is collected
         # and disclosed once below instead of silently swallowed (B1-13a).

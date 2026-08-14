@@ -240,6 +240,7 @@ def _make_setstate_shim(orig_setstate: Callable[..., None]) -> Callable[..., Non
 
     @functools.wraps(orig_setstate)
     def setstate_shim(self: Any, state: Any) -> None:
+        """Run the original ``__setstate__``, then de-wrap a stored activation."""
         orig_setstate(self, state)
         stored = getattr(self, "activation", None)
         if callable(stored):
@@ -404,6 +405,7 @@ def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
 
     @functools.wraps(orig_resolve)
     def resolve_name_shim(f: Any) -> Any:
+        """Resolve a wrapper to its original before asking torch for the name."""
         result = orig_resolve(f)
         if result is None:
             original = _resolve(f)
