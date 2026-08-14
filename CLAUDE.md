@@ -499,7 +499,7 @@ ceilings a capture). The loaded-sparse and live-refresh
 providers settle through ONE finalizer (identical verdict class): a live opaque-container output
 is `unverifiable` + poisoned (never a wrongly-blessed bare tensor), a parse-refused descriptor
 degrades EVERY payload family to analysis-only with its typed diagnostic intact, and an
-inexecutable divergent input raises `PathDivergenceError` (not `RuntimeSignatureDrift`). Structseq
+inexecutable divergent input raises `PathDivergenceError` (not `RuntimeSignatureDriftError`). Structseq
 reconstruction trust keys on the RESOLUTION AUTHORITY (`spec.type_module == "torch.return_types"` +
 identity re-resolution), never the spoofable `__module__` attribute; a namedtuple TYPE that can
 carry instance state refuses at save even with an empty instance. Persisted execution-context values validate at parse
