@@ -39,7 +39,7 @@ _SCOPED_CAPTURE_STATE = frozenset(
         # data-quality fix, hunt-b2 R54).
         ("torchlens/_state.py", "_capture_reserved_by"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
-        ("torchlens/_state.py", "_func_call_id_counter"),
+        ("torchlens/_state.py", "_func_call_id_iter"),
         ("torchlens/_state.py", "_function_call_counts"),
         ("torchlens/_state.py", "_function_call_models"),
         ("torchlens/_state.py", "_functorch_warning_emitted"),

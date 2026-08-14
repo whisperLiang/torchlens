@@ -35,6 +35,7 @@ Access policy (disputed-r2 b5/R45, exempt-by-declaration):
     external assignment clusters.
 """
 
+import itertools
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -120,8 +121,15 @@ This module uses a string annotation plus a ``TYPE_CHECKING`` import so
 ``torchlens._state`` never imports the intervention package at runtime.
 """
 
-_func_call_id_counter: int = 0
-"""Session-scoped monotonic function-call id counter."""
+_func_call_id_iter: "itertools.count[int]" = itertools.count(1)
+"""Session-scoped monotonic function-call id source.
+
+``next()`` on a C-level ``itertools.count`` is atomic under the GIL, so the
+autograd engine threads that stamp ids during multi-device backward (one
+engine thread per device: ``_ops_autograd.py``, ``collectives.py``) cannot
+lose updates or mint duplicate ids -- the bare ``+= 1`` read-modify-write it
+replaces could. Reset by rebinding a fresh counter at session start.
+"""
 
 _capture_replay_templates: bool = False
 """Whether the active capture should collect replay-template data.
@@ -295,7 +303,7 @@ def reset_capture_runtime_context() -> None:
         The module-level runtime context is reset in place.
     """
 
-    global _active_hook_plan, _active_intervention_spec, _func_call_id_counter
+    global _active_hook_plan, _active_intervention_spec, _func_call_id_iter
     global _capture_replay_templates
     global _relationship_model_id, _relationship_model_class
     global _relationship_weight_fingerprint, _relationship_input_id
@@ -303,7 +311,7 @@ def reset_capture_runtime_context() -> None:
 
     _active_hook_plan = None
     _active_intervention_spec = None
-    _func_call_id_counter = 0
+    _func_call_id_iter = itertools.count(1)
     _capture_replay_templates = False
     _relationship_model_id = None
     _relationship_model_class = None
@@ -371,13 +379,12 @@ def next_func_call_id() -> int:
     Returns
     -------
     int
-        Monotonic id for one decorated torch function invocation.
+        Monotonic id for one decorated torch function invocation. Atomic
+        (C-level ``next`` under the GIL), so concurrent autograd engine
+        threads never observe a lost update or a duplicate id.
     """
 
-    global _func_call_id_counter
-
-    _func_call_id_counter += 1
-    return _func_call_id_counter
+    return next(_func_call_id_iter)
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +828,7 @@ def active_logging(trace: "Trace") -> Iterator[None]:
     corrupting the outer log (overwriting ``_active_trace`` and then
     clearing it on inner exit) is worse than failing loudly.
     """
-    global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_counter
+    global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_iter
     global _dynamo_warning_emitted
     global _active_owner_thread_id
     # Admission is atomic: the refusal check and the publication of the three
@@ -836,7 +843,7 @@ def active_logging(trace: "Trace") -> Iterator[None]:
         _active_owner_thread_id = threading.get_ident()
         _functorch_warning_emitted = False
         _dynamo_warning_emitted = False
-        _func_call_id_counter = 0
+        _func_call_id_iter = itertools.count(1)
         _logging_enabled = True
     try:
         yield
