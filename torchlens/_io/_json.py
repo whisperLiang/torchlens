@@ -99,8 +99,12 @@ def _prescan_depth(text: str, *, max_depth: int) -> None:
 
     Zero recursion: a running bracket depth that never enters ``json``'s recursive
     decoder. Quote/escape aware so brackets inside string literals do not count.
-    Bails as soon as the depth ceiling is exceeded, so a nesting bomb is refused
-    after ~``max_depth`` characters rather than scanning the whole payload.
+    The scan bails as soon as the running depth exceeds the ceiling, so a nesting
+    bomb whose brackets are front-loaded is refused within the FIRST chunk rather
+    than after scanning the whole payload. Note the bail is not per-character:
+    ``findall`` first materializes the matches for the current
+    ``_PRESCAN_CHUNK_CHARS`` slice, so up to one chunk's quotes/brackets are
+    collected before the depth check can fire.
 
     The scan is the same state machine as a naive per-character loop, but the
     inert characters are skipped by the regex engine. When the payload carries no
@@ -177,7 +181,13 @@ def loads_bounded(
     the stdlib decoder as a ``json.JSONDecodeError`` belt.
     """
 
-    if len(text.encode("utf-8")) > max_bytes:
+    # ``len(text.encode("utf-8"))`` allocates a full extra copy of the payload just
+    # to measure it -- ~1.5x the 512-MiB ceiling before json even parses (B8-14).
+    # UTF-8 uses >= 1 byte per code point, so ``len(text) <= byte length`` always:
+    # a character count over the ceiling is a byte count over the ceiling (refuse
+    # without encoding), and only when the character count is within the ceiling can
+    # multibyte inflation push the byte count over, so the encode runs only there.
+    if len(text) > max_bytes or len(text.encode("utf-8")) > max_bytes:
         raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
     _prescan_depth(text, max_depth=max_depth)
     try:
