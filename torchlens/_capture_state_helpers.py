@@ -1672,6 +1672,77 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     return ("object", f"{cls.__module__}.{cls.__qualname__}")
 
 
+# Hook dicts that fire during (or around) the captured forward/backward and
+# therefore change what a capture observes. State-dict/load hooks are excluded:
+# they cannot affect the traced program. The ``*_with_kwargs`` /
+# ``*_always_called`` companions are flag dicts keyed by handle id; ids come
+# from a process-global counter and are NOT stable across processes, so only
+# their VALUES are folded, aligned by registration order.
+_HOOK_DICT_NAMES = (
+    "_forward_pre_hooks",
+    "_forward_hooks",
+    "_backward_pre_hooks",
+    "_backward_hooks",
+)
+_HOOK_FLAG_DICT_NAMES = (
+    "_forward_pre_hooks_with_kwargs",
+    "_forward_hooks_with_kwargs",
+    "_forward_hooks_always_called",
+)
+
+
+def _module_hook_signature(module: nn.Module) -> tuple[object, ...]:
+    """Return an order-preserving, address-free signature of a module's hooks.
+
+    User-registered ``nn.Module`` hooks are real model behavior that fires
+    inside the captured forward, so they must participate in the capture-cache
+    key. TorchLens' own instrumentation hooks are filtered out (they come and
+    go with capture bookkeeping and must not churn the key).
+    """
+
+    signature: list[object] = []
+    for dict_name in _HOOK_DICT_NAMES:
+        hooks = getattr(module, dict_name, None)
+        if not hooks:
+            continue
+        fragments = tuple(
+            _stable_cache_fragment(hook)
+            for hook in hooks.values()
+            if not _is_torchlens_instrumentation(hook)
+        )
+        if fragments:
+            signature.append((dict_name, fragments))
+    for dict_name in _HOOK_FLAG_DICT_NAMES:
+        flags = getattr(module, dict_name, None)
+        if flags:
+            signature.append((dict_name, tuple(bool(flag) for flag in flags.values())))
+    return tuple(signature)
+
+
+def _global_hook_signature() -> tuple[object, ...]:
+    """Signature of torch's process-global module hooks (same key rules)."""
+
+    torch_module = torch.nn.modules.module
+    signature: list[object] = []
+    for dict_name in (
+        "_global_forward_pre_hooks",
+        "_global_forward_hooks",
+        "_global_backward_pre_hooks",
+        "_global_backward_hooks",
+    ):
+        hooks = getattr(torch_module, dict_name, None)
+        if not hooks:
+            continue
+        fragments = tuple(
+            _stable_cache_fragment(hook)
+            for hook in hooks.values()
+            if not _is_torchlens_instrumentation(hook)
+        )
+        if fragments:
+            signature.append((dict_name, fragments))
+    return tuple(signature)
+
+
 def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, Any]]:
     """Yield the user-visible plain instance attributes of one module.
 
@@ -1697,10 +1768,12 @@ def _fingerprint_model_implementation(model: nn.Module) -> str:
     silently hit the stale cached trace of the old implementation. This
     signature folds in the module tree structure (registered names in order),
     each module's class identity (module + qualname), each distinct class's
-    ``forward`` code digest, any instance-level ``forward`` override, and a
+    ``forward`` code digest, any instance-level ``forward`` override, a
     bounded digest of each module's plain instance attributes (the
     ``self.num_layers`` / ``self.scale`` axis: same class, same weights,
-    different traced program). Closure cell contents, mutated global state
+    different traced program), and the user-registered module hook
+    inventories (per-module and torch-global: hooks fire inside the captured
+    forward, so a registration change must miss). Closure cell contents, mutated global state
     referenced by ``forward``, and the interior state of opaque attribute
     objects (keyed by type only; see ``_attribute_state_fragment``) remain
     outside the signature (documented heuristic boundary).
@@ -1727,6 +1800,12 @@ def _fingerprint_model_implementation(model: nn.Module) -> str:
             hasher.update(
                 repr((name, attr_name, _attribute_state_fragment(attr_value))).encode("utf-8")
             )
+        hook_signature = _module_hook_signature(module)
+        if hook_signature:
+            hasher.update(repr((name, "hooks", hook_signature)).encode("utf-8"))
+    global_hooks = _global_hook_signature()
+    if global_hooks:
+        hasher.update(repr(("<global>", "hooks", global_hooks)).encode("utf-8"))
     return hasher.hexdigest()
 
 

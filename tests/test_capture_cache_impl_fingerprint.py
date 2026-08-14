@@ -226,3 +226,70 @@ def test_attribute_fragments_are_bounded_and_address_free() -> None:
     for _ in range(10):
         nested = [nested]
     assert "<attr-depth-ceiling>" in repr(_attribute_state_fragment(nested))
+
+
+def test_registered_forward_hook_is_a_cache_miss(tmp_path) -> None:
+    """A user nn.Module hook is real model behavior: register/edit must miss.
+
+    grind-r2 b4-fable R39 finding 1: the config key's ``hooks`` entry covers
+    only the TorchLens ``hooks=`` kwarg; an ``m.register_forward_hook(...)``
+    between ``cache=True`` runs hit the pre-hook cached trace and served
+    wrong activations with no warning.
+    """
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 2)
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False, (
+            "a newly registered forward hook must not hit the hook-free cached trace"
+        )
+    finally:
+        handle.remove()
+
+    # Removing the hook restores the original inventory: the first entry re-hits.
+    third = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert third.capture_cache_hit is True
+
+
+def test_registered_forward_pre_hook_is_a_cache_miss(tmp_path) -> None:
+    """Pre-hooks mutate module inputs and must also invalidate the key."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+
+    handle = model.lin.register_forward_pre_hook(lambda mod, args: (args[0] + 1,))
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False
+    finally:
+        handle.remove()
+
+
+def test_edited_hook_implementation_is_a_cache_miss(tmp_path) -> None:
+    """Same registration slot, different hook CODE -> different key."""
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 2)
+    try:
+        first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert first.capture_cache_hit is False
+    finally:
+        handle.remove()
+
+    handle = model.register_forward_hook(lambda mod, args, out: out * 3)
+    try:
+        second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+        assert second.capture_cache_hit is False, (
+            "an edited hook implementation must not hit the old hook's cached trace"
+        )
+    finally:
+        handle.remove()
