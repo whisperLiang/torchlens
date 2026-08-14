@@ -100,10 +100,26 @@ class _MLXWrapperRegistry:
         self._wrapped = True
 
     def unwrap(self) -> None:
-        """Restore all original MLX callables."""
+        """Restore all original MLX callables.
 
+        Every restore is attempted even if one raises; the first failure
+        re-raises after the sweep so a single fallible setattr cannot leave
+        the remaining process-global wrappers installed. Slots that failed
+        to restore stay registered so a retry can restore them.
+        """
+
+        first_failure: BaseException | None = None
         for (owner, name), original in list(self._originals.items()):
-            setattr(owner, name, original)
+            try:
+                setattr(owner, name, original)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            self._originals.pop((owner, name), None)
+        if first_failure is not None:
+            self._wrapped = bool(self._originals)
+            raise first_failure
         self._originals.clear()
         self._wrapped = False
 

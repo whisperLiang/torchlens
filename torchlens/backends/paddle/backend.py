@@ -508,11 +508,20 @@ class PaddleBackend:
             if hasattr(trace, "_paddle_intervention_runtime"):
                 delattr(trace, "_paddle_intervention_runtime")
             freeze_trace_relation_views(trace)
-            stamp_backend_finalized(trace)
-            return trace
         finally:
-            cleanup_model_session(trace, prepared_model, module_tree if use_object_module else None)
-            unwrap_paddle()
+            # Independently-owned resources: a raising hook cleanup must not
+            # leave the process-global Paddle wrappers installed.
+            try:
+                cleanup_model_session(
+                    trace, prepared_model, module_tree if use_object_module else None
+                )
+            finally:
+                unwrap_paddle()
+        # Settlement is the LAST act, after ALL teardown (the path-20 stamp
+        # contract): a teardown raise escapes productless -- the object
+        # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
+        stamp_backend_finalized(trace)
+        return trace
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
         """Capture then validate a Paddle forward pass.

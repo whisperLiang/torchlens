@@ -1275,11 +1275,18 @@ class MLXBackend:
             if hasattr(trace, "_mlx_module_stack"):
                 delattr(trace, "_mlx_module_stack")
             freeze_trace_relation_views(trace)
-            stamp_backend_finalized(trace)
-            return trace
         finally:
-            self.cleanup_model_session(trace, model)
-            self.unwrap(model)
+            # Independently-owned resources: a raising session cleanup must
+            # not leave the process-global MLX wrappers installed.
+            try:
+                self.cleanup_model_session(trace, model)
+            finally:
+                self.unwrap(model)
+        # Settlement is the LAST act, after ALL teardown (the path-20 stamp
+        # contract): a teardown raise escapes productless -- the object
+        # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
+        stamp_backend_finalized(trace)
+        return trace
 
     def _restrict_halted_param_logs(self, trace: Trace) -> None:
         """Restrict a halted trace's parameter accounting to captured ops.

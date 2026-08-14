@@ -196,11 +196,21 @@ def cleanup_model_session(
     del session, prepared_model
     if tree is None:
         return
+    # Every handle is removed even if one raises; the first failure re-raises
+    # after the sweep so one fallible remove() cannot strand later hooks.
+    first_failure: BaseException | None = None
     for handle in tree.hook_handles:
         remove = getattr(handle, "remove", None)
-        if callable(remove):
+        if not callable(remove):
+            continue
+        try:
             remove()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
     tree.hook_handles.clear()
+    if first_failure is not None:
+        raise first_failure
 
 
 def _make_pre_hook(tree: PaddleModuleTree, address: str) -> Any:
