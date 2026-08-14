@@ -136,16 +136,21 @@ def walk_selector(selector: Any, *, unwrap: bool = False) -> Iterator[Any]:
         payloads of their wrapping selector, not tree children.
     """
 
-    yield selector
-    if isinstance(selector, CompositeSelector):
-        for child in selector.selectors:
-            yield from walk_selector(child, unwrap=unwrap)
-    elif isinstance(selector, NotSelector):
-        yield from walk_selector(selector.selector, unwrap=unwrap)
-    elif unwrap and not isinstance(selector, BaseSelector):
-        inner = getattr(selector, "selector", None)
-        if inner is not None:
-            yield from walk_selector(inner, unwrap=unwrap)
+    # r-b4 R27-6a: iterative pre-order walk -- a deep (nested-binary or
+    # deserialized) selector tree must never blow the interpreter stack from a
+    # diagnostic/validation walk.
+    stack: list[Any] = [selector]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, CompositeSelector):
+            stack.extend(reversed(node.selectors))
+        elif isinstance(node, NotSelector):
+            stack.append(node.selector)
+        elif unwrap and not isinstance(node, BaseSelector):
+            inner = getattr(node, "selector", None)
+            if inner is not None:
+                stack.append(inner)
 
 
 def selector_contains_kind(selector: Any, kind: str, *, unwrap: bool = False) -> bool:
@@ -212,10 +217,14 @@ def flatten_and_conjuncts(children: Sequence[Any]) -> tuple[Any, ...]:
         Conjuncts with nested ``and`` composites expanded, in evaluation order.
     """
 
+    # r-b4 R27-6a: iterative expansion (same order as the historical recursion)
+    # so a deep nested-``and`` tree cannot blow the interpreter stack here.
     flat: list[Any] = []
-    for child in children:
+    stack: list[Any] = list(reversed(children))
+    while stack:
+        child = stack.pop()
         if isinstance(child, CompositeSelector) and child.operator == "and":
-            flat.extend(flatten_and_conjuncts(child.selectors))
+            stack.extend(reversed(child.selectors))
         else:
             flat.append(child)
     return tuple(flat)

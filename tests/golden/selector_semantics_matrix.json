@@ -754,16 +754,16 @@
   "spec_kind": "and"
  },
  "spec/and_nested_three": {
-  "capture_repr": "((tl.func('relu') & tl.in_module('features')) & tl.contains('relu'))",
+  "capture_repr": "(tl.func('relu') & tl.in_module('features') & tl.contains('relu'))",
   "direction": null,
   "hooks_direction": null,
-  "hooks_repr": "((tl.func('relu') & tl.in_module('features')) & tl.contains('relu'))",
+  "hooks_repr": "(tl.func('relu') & tl.in_module('features') & tl.contains('relu'))",
   "kind": "and",
   "resolver_direction": null,
   "resolver_labels": [
    "relu_1_2"
   ],
-  "resolver_repr": "((tl.func('relu') & tl.in_module('features')) & tl.contains('relu'))",
+  "resolver_repr": "(tl.func('relu') & tl.in_module('features') & tl.contains('relu'))",
   "spec_kind": "and"
  },
  "spec/contains_lower": {

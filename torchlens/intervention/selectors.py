@@ -60,7 +60,7 @@ class BaseSelector:
         """
 
         _check_composition(self, other)
-        return CompositeSelector("and", (self, other))
+        return CompositeSelector("and", _flatten_same_operator("and", self, other))
 
     def __or__(self, other: SelectorLike) -> CompositeSelector:
         """Return a selector that matches the union of two selectors.
@@ -86,7 +86,7 @@ class BaseSelector:
                 "OR-composed followed_by selectors cannot be evaluated safely."
             )
         _check_composition(self, other)
-        return CompositeSelector("or", (self, other))
+        return CompositeSelector("or", _flatten_same_operator("or", self, other))
 
     def __invert__(self) -> NotSelector:
         """Return a selector that matches the complement of this selector.
@@ -1450,6 +1450,31 @@ def _classify_selector_direction(
     raise UnclassifiedSelectorError(
         f"{type(sel).__name__} has no direction classification; add an explicit bucket."
     )
+
+
+def _flatten_same_operator(
+    operator: str, left: SelectorLike, right: SelectorLike
+) -> tuple[SelectorLike, ...]:
+    """Merge same-operator composite operands into one flat child tuple.
+
+    r-b4 R27-6a: ``&``/``|`` used to nest one binary composite per operator, so
+    a programmatically composed predicate (``functools.reduce(operator.or_,
+    [tl.func(n) for n in names])``) built a 500-deep binary tree and blew the
+    interpreter stack at trace entry. Composites are documented n-ary with
+    identical evaluation for flat and nested shapes, so chained applications of
+    ONE operator now accumulate a flat child tuple: depth stays constant and
+    evaluation walks one level. Mixed-operator composition still nests (the
+    shape is semantic there), and existing nested trees (deserialized specs)
+    keep evaluating unchanged.
+    """
+
+    children: list[SelectorLike] = []
+    for operand in (left, right):
+        if isinstance(operand, CompositeSelector) and operand.operator == operator:
+            children.extend(operand.selectors)
+        else:
+            children.append(operand)
+    return tuple(children)
 
 
 def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
