@@ -189,6 +189,51 @@ def test_visualizer_path_inside_bundle_is_reanchored(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# R21-1: persisted equivalence-class keys are canonically ordered              #
+# --------------------------------------------------------------------------- #
+
+
+class _NestedParamModel(nn.Module):
+    """Nested module so op-level equivalence keys carry a module suffix (R21-1)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.enc = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.enc(x)
+
+
+def test_persisted_equivalence_class_keys_are_canonically_ordered(tmp_path: Path) -> None:
+    """Trace-level op_equivalence_classes keys sort their param_NNNNNN run.
+
+    Fail-before (R21-1): weight-vs-bias order in a key was a per-capture coin flip
+    (random raw barcodes). The op-level field was re-sorted at save but the
+    trace-level dict keys of a NESTED module (whose op-level string carries a module
+    suffix, so it misses the op-level remap) fell through to an order-preserving
+    remap and stayed random -- breaking byte-reproducibility across processes. Many
+    captures make the flip near-certain to appear if the canonicalization is absent.
+    """
+
+    import pickle
+    import re
+
+    param_token = re.compile(r"param_\d{6}")
+    checked = 0
+    for index in range(10):
+        trace = tl.trace(_NestedParamModel().eval(), torch.randn(2, 4), layers_to_save="all")
+        spec = tmp_path / f"nested_{index}.tlspec"
+        tl.save(trace, str(spec))
+        groups = pickle.loads((spec / "metadata.pkl").read_bytes()).get("op_equivalence_classes")
+        for key in groups or {}:
+            tokens = param_token.findall(key)
+            if len(tokens) >= 2:
+                checked += 1
+                assert tokens == sorted(tokens), f"non-canonical equivalence key persisted: {key}"
+    assert checked > 0, "no multi-param equivalence keys were exercised"
+
+
+# --------------------------------------------------------------------------- #
 # B8-19: git-commit provenance follows include_source                          #
 # --------------------------------------------------------------------------- #
 

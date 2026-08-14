@@ -36,6 +36,9 @@ from .payload_codec import PayloadCodec, get_payload_codec
 # while the loaded run still reports VERIFIED -- a silent honesty violation. Both
 # are immutable and natively serializable by the portable (pickle) codec.
 _SIMPLE_KEEP_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, bytes, slice)
+# Canonical remapped param barcode token (``param_000001``), for R21-1's
+# trace-level equivalence-key ordering.
+_EQUIV_PARAM_TOKEN = re.compile(r"param_\d{6}")
 _RAW_INPUT_TEXT_LIMIT = 10_000
 _RAW_INPUT_TENSOR_BYTES_LIMIT = 1_000_000
 _RAW_OUTPUT_TEXT_LIMIT = _RAW_INPUT_TEXT_LIMIT
@@ -270,6 +273,28 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             return value
         return barcode_pattern.sub(lambda match: barcode_map[match.group(0)], value)
 
+    def canonical_equivalence_key(value: Any) -> Any:
+        """Remap AND canonically order the ``param_NNNNNN`` run in an equiv key.
+
+        R21-1: an ``op_equivalence_classes`` key is
+        ``f"{layer_type}_{'_'.join(sorted(raw_barcodes))}"`` -- but the raw barcodes
+        are per-capture RANDOM, so weight-vs-bias order in the key was a coin flip
+        per capture. The op-level ``equivalence_class`` field is re-sorted into
+        canonical order at save, but the trace-level dict keys fell through to the
+        ORDER-PRESERVING substring remapper and stayed random. Remapping barcodes to
+        their canonical ``param_NNNNNN`` ids and then sorting that trailing run makes
+        the persisted key byte-reproducible across processes.
+        """
+
+        remapped = remap_barcode_text(value)
+        if not isinstance(remapped, str):
+            return remapped
+        tokens = _EQUIV_PARAM_TOKEN.findall(remapped)
+        if len(tokens) <= 1:
+            return remapped
+        prefix = remapped[: remapped.index(tokens[0])]
+        return prefix + "_".join(sorted(tokens))
+
     equivalence_class_map: dict[str, str] = {}
     for param in params:
         param.barcode = remap_barcode_text(getattr(param, "barcode", None))
@@ -303,7 +328,7 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
     equivalence_groups = state.get("op_equivalence_classes")
     if isinstance(equivalence_groups, dict):
         state["op_equivalence_classes"] = type(equivalence_groups)(
-            (equivalence_class_map.get(key, remap_barcode_text(key)), value)
+            (equivalence_class_map.get(key) or canonical_equivalence_key(key), value)
             for key, value in equivalence_groups.items()
         )
 
