@@ -199,3 +199,7 @@ menagerie/data/verification.db*
 # A recorded env-*/ dir is local working state: review it and `git add -f`
 # only when that environment should enforce byte identity going forward.
 tests/**/goldens/env-*/
+
+# Sprint lane result reports are INTERNAL notes (repo is public); never track them.
+# (The repo no-internal-notes hook is bypassed when a global core.hooksPath is set.)
+results/
