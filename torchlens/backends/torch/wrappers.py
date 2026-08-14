@@ -2501,28 +2501,33 @@ def _stamp_wrapper_provenance(
 
     ``@wraps`` copies the ORIGINAL's metadata, which for torch's C descriptors
     names classes that are not importable attributes (``pickle.dumps(torch.cos)``
-    died on ``_VariableFunctionsClass.cos`` — B8-1a) or leaves the wrapper's
-    own torchlens module visible (``Tensor.add.__module__`` — B8-5). The
-    install site is the one basis that is both importable and truthful: a bare
-    wrapper pickles by reference to its public torch name while wrappers are
-    installed (loading as the ORIGINAL in a fresh process), and introspection
-    reports the namespace the user actually reached the callable through.
-    Shared originals keep their FIRST (public-namespace-first) stamp via the
-    dedup branch below. The ``inspect.signature`` fabrication for C builtins
-    stays a documented residual: ``__wrapped__`` must remain deleted for JIT
-    compatibility, and functions cannot raise from attribute access.
+    died on ``_VariableFunctionsClass.cos`` — B8-1a). The install-site stamp
+    makes a bare wrapper pickle by reference to its public torch name while
+    wrappers are installed (loading as the ORIGINAL in a fresh process), and
+    introspection reports the namespace the user actually reached the callable
+    through. Shared originals keep their FIRST (public-namespace-first) stamp
+    via the dedup branch below. The ``inspect.signature`` fabrication for C
+    builtins stays a documented residual: ``__wrapped__`` must remain deleted
+    for JIT compatibility, and functions cannot raise from attribute access.
+
+    MODULE namespaces only — CLASS-namespace wrappers (tensor methods) are
+    deliberately NOT stamped. C-level tensor methods carry no ``__module__``,
+    so their wrappers keep the honest ``torchlens.backends.torch.wrappers``
+    module. Stamping them ``"torch"`` would make a wrapped storage-unsafe
+    method (``Tensor.resize_``/``set_``/``apply_``/``map_``) CLAIM torch
+    purity to every string-based safety gate — the exact spoof surface the
+    r36 smuggling defense (tests/test_r36_tensor_method_smuggling.py, LOCKED)
+    pins as denied on REAL identity with the wrappers module visible. The
+    security disclosure wins over introspection fidelity there; a bare wrapped
+    tensor method staying unpicklable-by-reference is the accepted residual.
     """
 
     namespace_obj = get_optional_torch_namespace(namespace_name)
     if isinstance(namespace_obj, type):
-        module_name = getattr(namespace_obj, "__module__", None) or "torch"
-        qualname = f"{namespace_obj.__qualname__}.{func_name}"
-    else:
-        module_name = namespace_name
-        qualname = func_name
+        return
     try:
-        wrapper.__module__ = module_name
-        wrapper.__qualname__ = qualname
+        wrapper.__module__ = namespace_name
+        wrapper.__qualname__ = func_name
     except (AttributeError, TypeError):
         pass
 

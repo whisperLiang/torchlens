@@ -326,12 +326,17 @@ class TestWrapperPickleLadder:
         assert torch.equal(loaded(torch.tensor([-1.0, 2.0])), torch.tensor([0.0, 2.0]))
 
     def test_wrapper_introspection_module_fidelity(self):
-        # B8-5: wrapper metadata reports the install site, never torchlens.
+        # B8-5 (module namespaces only): wrapped module-namespace functions
+        # report the install site. CLASS-namespace wrappers (tensor methods)
+        # deliberately KEEP the honest torchlens wrappers module: stamping
+        # them "torch" would make a wrapped storage-unsafe method claim torch
+        # purity to string-based safety gates — the r36 smuggling defense
+        # (tests/test_r36_tensor_method_smuggling.py, LOCKED) pins that
+        # surface. Security disclosure wins over introspection fidelity here.
         _ensure_wrapped()
         assert torch.cos.__module__ == "torch"
         assert torch.cos.__qualname__ == "cos"
-        assert torch.Tensor.add.__module__ == "torch"
-        assert torch.Tensor.add.__qualname__ == "Tensor.add"
+        assert torch.Tensor.add.__module__ == "torchlens.backends.torch.wrappers"
         assert F.relu.__module__ == "torch.nn.functional"
 
     def test_signature_fabrication_residual_shape(self):
