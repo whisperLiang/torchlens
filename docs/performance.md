@@ -94,7 +94,7 @@ with `tl.partial.from_failed_capture(exc)`.
 | Window payloads | `lookback_payload_policy="metadata_only"` | `tl.followed_by(...)` can select metadata without retaining raw tensors. |
 | Retroactive payloads | `lookback_payload_policy="detached_raw"` | Enables payload recovery for recent matched ops at bounded memory cost. |
 | Disk storage | `storage=tl.to_disk(path)` | Reduces RAM pressure; disk I/O becomes part of capture cost. |
-| Gradients | `save_grads=False` unless needed | Backward-ready captures preserve more state and hooks. |
+| Gradients | `capture=CaptureOptions(save_grads=False)` (the default) unless needed | Backward-ready captures preserve more state and hooks. |
 | Forward-only autograd | `inference_only=True` | Runs forward capture under `torch.no_grad()`; incompatible with backward capture. |
 | Forward chunking | `chunk_size=N` | Reduces forward-pass peak memory for single-batch tensor inputs; final saved activations are still accumulated in memory. |
 | Recurrence detection | `capture=CaptureOptions(recurrence_detection=False)` | Measured 39-42% of capture time off models with thousands of repeated ops (hand-rolled top-level loops, unrolled decodes). Repeated ops stay separate layers instead of rolling into one multi-pass layer, so a 6-iteration loop yields `relu_1_2 ... relu_6_7` (each `num_passes=1`) instead of one `relu_1_2` with `num_passes=6`. `is_recurrent` and `max_layer_op_count` are still reported. It is a TIME knob only: retained activation bytes are unchanged. |

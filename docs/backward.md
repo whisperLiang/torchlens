@@ -14,13 +14,14 @@ research.
 
 ## Capturing Gradients
 
-Use `save_grads=` to choose which operation gradients are retained:
+Use `capture=tl.options.CaptureOptions(save_grads=...)` to choose which operation gradients
+are retained (the bare `save_grads=` kwarg is a deprecated alias that warns):
 
 ```python
-trace = tl.trace(model, x, save_grads=True)
+trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=True))
 trace.log_backward(trace[trace.output_layers[0]].out.sum())
 
-relu_trace = tl.trace(model, x, save_grads=tl.func("relu"))
+relu_trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=tl.func("relu")))
 relu_trace.log_backward(relu_trace[relu_trace.output_layers[0]].out.sum())
 ```
 
@@ -49,7 +50,7 @@ be either a plain leaf tensor or an `nn.Parameter` owned by an outer optimizer:
 
 ```python
 z = torch.nn.Parameter(torch.randn(1, latent_dim))
-trace = tl.trace(generator, z, save_grads=True)
+trace = tl.trace(generator, z, capture=tl.options.CaptureOptions(save_grads=True))
 
 loss = score(trace[trace.output_layers[0]].out)
 trace.log_backward(loss)
