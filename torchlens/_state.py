@@ -38,6 +38,7 @@ Access policy (disputed-r2 b5/R45, exempt-by-declaration):
     external assignment clusters.
 """
 
+import itertools
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -140,8 +141,15 @@ This module uses a string annotation plus a ``TYPE_CHECKING`` import so
 ``torchlens._state`` never imports the intervention package at runtime.
 """
 
-_func_call_id_counter: int = 0
-"""Session-scoped monotonic function-call id counter."""
+_func_call_id_iter: "itertools.count[int]" = itertools.count(1)
+"""Session-scoped monotonic function-call id source.
+
+``next()`` on a C-level ``itertools.count`` is atomic under the GIL, so the
+autograd engine threads that stamp ids during multi-device backward (one
+engine thread per device: ``_ops_autograd.py``, ``collectives.py``) cannot
+lose updates or mint duplicate ids -- the bare ``+= 1`` read-modify-write it
+replaces could. Reset by rebinding a fresh counter at session start.
+"""
 
 _capture_replay_templates: bool = False
 """Whether the active capture should collect replay-template data.
@@ -315,7 +323,7 @@ def reset_capture_runtime_context() -> None:
         The module-level runtime context is reset in place.
     """
 
-    global _active_hook_plan, _active_intervention_spec, _func_call_id_counter
+    global _active_hook_plan, _active_intervention_spec, _func_call_id_iter
     global _capture_replay_templates
     global _relationship_model_id, _relationship_model_class
     global _relationship_weight_fingerprint, _relationship_input_id
@@ -323,7 +331,7 @@ def reset_capture_runtime_context() -> None:
 
     _active_hook_plan = None
     _active_intervention_spec = None
-    _func_call_id_counter = 0
+    _func_call_id_iter = itertools.count(1)
     _capture_replay_templates = False
     _relationship_model_id = None
     _relationship_model_class = None
@@ -391,13 +399,12 @@ def next_func_call_id() -> int:
     Returns
     -------
     int
-        Monotonic id for one decorated torch function invocation.
+        Monotonic id for one decorated torch function invocation. Atomic
+        (C-level ``next`` under the GIL), so concurrent autograd engine
+        threads never observe a lost update or a duplicate id.
     """
 
-    global _func_call_id_counter
-
-    _func_call_id_counter += 1
-    return _func_call_id_counter
+    return next(_func_call_id_iter)
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +698,22 @@ class ReentrantTraceError(CaptureError, RuntimeError):
     """
 
 
+_capture_reserved_by: int | None = None
+"""Thread ident holding the pre-admission capture RESERVATION, or ``None``.
+
+The admission lock makes ``active_logging`` publication atomic, but a capture's
+GLOBAL side effects start earlier: model preparation swaps the per-capture label
+session and ``tl.record`` installs the fastlog ``RecordingState`` BEFORE the
+forward reaches admission. A concurrent capture that is ultimately REFUSED
+therefore used to degrade the admitted winner's data quality (runtime-probed:
+orphaned label stamps, ``capture_verified=False``). ``capture_reservation()``
+moves the typed refusal in front of those side effects: the reservation is
+claimed under ``_capture_admission_lock`` before any capture-global mutation,
+``active_logging`` admits only the reserving thread (or an unreserved caller),
+and the loser's ``ReentrantTraceError`` fires before it can touch shared state.
+Written only under the admission lock; never read on the wrapper hot path.
+"""
+
 _capture_admission_lock = threading.Lock()
 """Serializes capture ADMISSION and teardown bookkeeping (never the forward).
 
@@ -712,6 +735,110 @@ admission race, not the (documented, unsupported) concurrent-capture case.
 """
 
 
+def _reentrant_refusal() -> ReentrantTraceError:
+    """Build the typed concurrent-capture refusal (call under the admission lock).
+
+    Returns
+    -------
+    ReentrantTraceError
+        Refusal naming the active model when one is identifiable.
+    """
+
+    active_model = getattr(_active_trace, "model_label", None)
+    if active_model is None:
+        active_model = getattr(_active_trace, "model_class_name", None)
+    active_model_text = f" for active model {active_model!r}" if active_model else ""
+    return ReentrantTraceError(
+        "torchlens.trace / active_logging is not re-entrant: "
+        f"another forward pass{active_model_text} is already being logged. Nested logging "
+        "would silently corrupt the outer Trace. Remedy: finish the outer "
+        "capture before starting another one (e.g. return from the custom "
+        "activation_transform or hook that called tl.trace).",
+        code="reentrant_trace",
+        remedy="finish the outer capture before starting another one",
+        active_model=active_model,
+    )
+
+
+def _capture_conflict_is_live() -> bool:
+    """Return whether a capture (or its pre-admission window) conflicts (lock held).
+
+    A live toggle, a published trace, primitive hook depth, or a reservation
+    held by ANOTHER thread all refuse; this thread's own reservation is the
+    sanctioned path into ``active_logging`` and does not conflict.
+    """
+
+    if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
+        return True
+    return _capture_reserved_by is not None and _capture_reserved_by != threading.get_ident()
+
+
+@contextmanager
+def capture_reservation() -> Iterator[None]:
+    """Reserve the capture slot BEFORE any capture-global side effect runs.
+
+    Entered at the top of a public capture (``tl.trace`` orchestration,
+    ``tl.record``'s recorder pass) so a concurrent capture is refused typed
+    BEFORE it can sweep the admitted capture's label session or overwrite the
+    fastlog ``RecordingState`` (the refused-loser data-quality corruption).
+    Nested same-thread entry is a passthrough: the recorder reserves around
+    ``active_recording_state`` and the inner orchestration re-enters here
+    before ``active_logging`` without releasing the outer claim. A genuinely
+    nested capture (inside a live forward) refuses on the same predicate as
+    ``active_logging``.
+    """
+
+    global _capture_reserved_by
+    ident = threading.get_ident()
+    with _capture_admission_lock:
+        if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
+            raise _reentrant_refusal()
+        if _capture_reserved_by is None:
+            _capture_reserved_by = ident
+            owns_reservation = True
+        elif _capture_reserved_by == ident:
+            owns_reservation = False
+        else:
+            raise _reentrant_refusal()
+    try:
+        yield
+    finally:
+        if owns_reservation:
+            with _capture_admission_lock:
+                _capture_reserved_by = None
+
+
+@contextmanager
+def publish_active_trace(trace: "Trace") -> Iterator[None]:
+    """Admission-locked ``_active_trace`` publication for a non-forward window.
+
+    The sanctioned spelling for every window that must make a trace globally
+    visible WITHOUT the logging toggle: preview-backend captures (tf), derived
+    gradient replays (paddle), and backward projection. Raw save/restore swaps
+    of ``_state._active_trace`` bypassed admission entirely -- a tf capture
+    concurrent with a torch capture silently rebound the torch wrapper's
+    target trace, and the ``finally`` restore could republish a since-finished
+    trace, wedging every later capture's admission check. This helper refuses
+    typed under the admission lock (same predicate as ``active_logging``),
+    sets ``_active_owner_thread_id`` so the r43 non-owner ``pause_logging``
+    protection covers the window, and clears to ``None`` on exit (a refused
+    entry proves there was no previous trace to restore).
+    """
+
+    global _active_trace, _active_owner_thread_id
+    with _capture_admission_lock:
+        if _capture_conflict_is_live():
+            raise _reentrant_refusal()
+        _active_trace = trace
+        _active_owner_thread_id = threading.get_ident()
+    try:
+        yield
+    finally:
+        with _capture_admission_lock:
+            _active_trace = None
+            _active_owner_thread_id = None
+
+
 @contextmanager
 def active_logging(trace: "Trace") -> Iterator[None]:
     """Activate logging for the duration of a forward pass.
@@ -730,35 +857,22 @@ def active_logging(trace: "Trace") -> Iterator[None]:
     corrupting the outer log (overwriting ``_active_trace`` and then
     clearing it on inner exit) is worse than failing loudly.
     """
-    global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_counter
+    global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_iter
     global _dynamo_warning_emitted
     global _active_owner_thread_id
     # Admission is atomic: the refusal check and the publication of the three
     # owner globals happen under one lock, so two threads entering together
     # cannot both be admitted (see ``_capture_admission_lock``).
     with _capture_admission_lock:
-        if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
-            active_model = getattr(_active_trace, "model_label", None)
-            if active_model is None:
-                active_model = getattr(_active_trace, "model_class_name", None)
-            active_model_text = f" for active model {active_model!r}" if active_model else ""
-            raise ReentrantTraceError(
-                "torchlens.trace / active_logging is not re-entrant: "
-                f"another forward pass{active_model_text} is already being logged. Nested logging "
-                "would silently corrupt the outer Trace. Remedy: finish the outer "
-                "capture before starting another one (e.g. return from the custom "
-                "activation_transform or hook that called tl.trace).",
-                code="reentrant_trace",
-                remedy="finish the outer capture before starting another one",
-                active_model=active_model,
-            )
+        if _capture_conflict_is_live():
+            raise _reentrant_refusal()
         # Model log must be visible before the toggle flips — wrappers will
         # immediately read _active_trace once _logging_enabled is True.
         _active_trace = trace
         _active_owner_thread_id = threading.get_ident()
         _functorch_warning_emitted = False
         _dynamo_warning_emitted = False
-        _func_call_id_counter = 0
+        _func_call_id_iter = itertools.count(1)
         _logging_enabled = True
     try:
         yield

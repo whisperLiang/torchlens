@@ -20,14 +20,26 @@ from torchlens.capture import projections, trace as capture_trace
 
 _SCOPED_CAPTURE_STATE = frozenset(
     {
+        # The four scalar control slots below are assigned ONLY through the
+        # module object from other modules (no ast.Global anywhere), so the
+        # pre-rebind-detector inventory could never classify them
+        # (hunt-b2-sol R54).
+        ("torchlens/_state.py", "_active_fast_run_collector"),
+        ("torchlens/_state.py", "_hook_reentrancy_depth"),
+        ("torchlens/_state.py", "_nonowner_belt_armed"),
+        ("torchlens/_state.py", "_runnable_ledger_armed"),
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
         ("torchlens/_state.py", "_active_record_spans"),
         ("torchlens/_state.py", "_active_trace"),
         ("torchlens/_state.py", "_capture_replay_templates"),
+        # Pre-admission reservation: claimed before any capture-global side
+        # effect, released in run_and_log's outermost finally (refused-loser
+        # data-quality fix, hunt-b2 R54).
+        ("torchlens/_state.py", "_capture_reserved_by"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
-        ("torchlens/_state.py", "_func_call_id_counter"),
+        ("torchlens/_state.py", "_func_call_id_iter"),
         ("torchlens/_state.py", "_function_call_counts"),
         ("torchlens/_state.py", "_function_call_models"),
         ("torchlens/_state.py", "_functorch_warning_emitted"),
@@ -76,6 +88,15 @@ pins the high-risk members against exception and interruption paths.
 
 _INSTALL_STATE_AND_CACHES = frozenset(
     {
+        # Wrapper-lifecycle slots rebound only through the module object
+        # (visible since the cross-module rebind detector, hunt-b2-sol R54).
+        ("torchlens/_state.py", "_decorated_identity"),
+        ("torchlens/_state.py", "_is_decorated"),
+        ("torchlens/_state.py", "_wrap_epoch"),
+        # Refreshed-globals seam: user_funcs rebinds the SAME function objects
+        # into the private public-impl module on every access (idempotent).
+        ("torchlens/_user_public_impls.py", "_run_model_and_save_specified_outs"),
+        ("torchlens/_user_public_impls.py", "trace"),
         ("torchlens/_state.py", "_decorated_func_mapper"),
         ("torchlens/_state.py", "_decorated_to_orig"),
         ("torchlens/_state.py", "_orig_to_decorated"),
@@ -232,6 +253,9 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS"),
         ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS_PROBED"),
+        # One-shot warm of torch's lazy torch._compile/torch._dynamo cascade,
+        # fired by the RNG monitor BEFORE its window arms (hunt-b8 F1).
+        ("torchlens/utils/_torch_compat.py", "_LAZY_TORCH_IMPORTS_WARMED"),
         ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         ("torchlens/utils/tensor_utils.py", "_cuda_available"),
     }
@@ -246,6 +270,11 @@ these flags are the sanctioned mechanism.
 
 _DIAGNOSTIC_AUDIT_STATE = frozenset(
     {
+        # Diagnostic shadow-mode toggles ("off"/"shadow"), flipped only by the
+        # detector/witness install surfaces; assigned solely through the
+        # module object (visible since the cross-module rebind detector).
+        ("torchlens/_state.py", "_completeness_witness_mode"),
+        ("torchlens/_state.py", "_escape_detector_mode"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_CLONE_READS"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_COLLECTORS"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_FINGERPRINTS"),
@@ -574,10 +603,118 @@ def _names_mutated_in_place(trees: dict[str, ast.Module]) -> set[str]:
     return mutated
 
 
+def _module_alias_targets(
+    relative: str, tree: ast.Module, module_files: frozenset[str]
+) -> dict[str, str]:
+    """Map local names bound to imported TORCHLENS modules onto their files.
+
+    Resolves both absolute (``from torchlens import _state``) and relative
+    (``from ... import _state``, ``from ..utils import rng as rng_mod``)
+    module imports, so attribute rebinds through the alias can be attributed
+    to the OWNING module.
+
+    Parameters
+    ----------
+    relative:
+        Module path relative to the repository root.
+    tree:
+        Parsed module.
+    module_files:
+        Every package Python file, as repo-relative POSIX paths.
+
+    Returns
+    -------
+    dict[str, str]
+        Local alias name -> owning module's repo-relative path.
+    """
+
+    package_parts = relative[: -len(".py")].split("/")[:-1]
+    if relative.endswith("/__init__.py"):
+        package_parts = relative[: -len("/__init__.py")].split("/")
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module is None or node.module.split(".")[0] != "torchlens":
+                    continue
+                base = node.module.split(".")
+            else:
+                keep = len(package_parts) - (node.level - 1)
+                if keep < 0:
+                    continue
+                base = package_parts[:keep]
+                if node.module:
+                    base = [*base, *node.module.split(".")]
+            for alias in node.names:
+                module_candidate = "/".join([*base, alias.name]) + ".py"
+                package_candidate = "/".join([*base, alias.name, "__init__.py"])
+                if module_candidate in module_files:
+                    aliases[alias.asname or alias.name] = module_candidate
+                elif package_candidate in module_files:
+                    aliases[alias.asname or alias.name] = package_candidate
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] != "torchlens":
+                    continue
+                module_candidate = alias.name.replace(".", "/") + ".py"
+                package_candidate = alias.name.replace(".", "/") + "/__init__.py"
+                local = alias.asname or alias.name.split(".")[0]
+                if alias.asname is None and "." in alias.name:
+                    continue  # ``import torchlens.x`` binds only ``torchlens``
+                if module_candidate in module_files:
+                    aliases[local] = module_candidate
+                elif package_candidate in module_files:
+                    aliases[local] = package_candidate
+    return aliases
+
+
+def _cross_module_attribute_rebinds(
+    trees: dict[str, ast.Module], module_files: frozenset[str]
+) -> set[tuple[str, str]]:
+    """Return module globals rebound THROUGH an imported-module attribute.
+
+    ``_declared_globals`` walks ``ast.Global`` only, so a control slot that is
+    declared in one module and assigned exclusively from OTHERS
+    (``_state._nonowner_belt_armed = True`` in ``_completeness_patches.py``)
+    could never be classified: four live per-capture guards evaded the
+    purported whole-package inventory this way (hunt-b2-sol R54). Attribute
+    rebinds through a resolved torchlens module alias are attributed to the
+    OWNING module.
+
+    Parameters
+    ----------
+    trees:
+        Relative path -> parsed module for the whole package.
+    module_files:
+        Every package Python file, as repo-relative POSIX paths.
+
+    Returns
+    -------
+    set[tuple[str, str]]
+        ``(owning module relative path, attribute name)`` rebind sites.
+    """
+
+    rebinds: set[tuple[str, str]] = set()
+    for relative, tree in trees.items():
+        aliases = _module_alias_targets(relative, tree, module_files)
+        if not aliases:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    owner = aliases.get(target.value.id)
+                    if owner is not None:
+                        rebinds.add((owner, target.attr))
+    return rebinds
+
+
 def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
     """Return every mutable module global in the package, with its initializer.
 
-    Two detectors, because either alone has a structural blind spot:
+    Three detectors, because each alone has a structural blind spot:
 
     * ``global`` declarations catch REBINDING (``_flag = True``) but can never
       see a container mutated in place -- ``_CACHE[key] = value`` needs no
@@ -586,6 +723,10 @@ def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
     * Module-level mutable bindings catch the container class, qualified by
       package-wide evidence that something actually mutates them, so frozen
       lookup tables are not dragged in.
+    * Cross-module attribute rebinds (``_state.flag = value`` from another
+      module) need no ``global`` statement in ANY module, so scalar control
+      slots assigned only through the module object were invisible to both
+      detectors above (hunt-b2-sol R54).
 
     Parameters
     ----------
@@ -614,6 +755,9 @@ def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
         for name, initializer in bindings.items():
             if name in mutated_names:
                 state[(relative, name)] = initializer
+    module_files = frozenset(trees)
+    for owner, attribute in _cross_module_attribute_rebinds(trees, module_files):
+        state.setdefault((owner, attribute), "")
     return state
 
 
@@ -641,6 +785,7 @@ def _capture_scope_snapshot() -> dict[str, Any]:
         "relationship_input_id": _state._relationship_input_id,
         "relationship_input_shape_hash": _state._relationship_input_shape_hash,
         "runnable_ledger_armed": _state._runnable_ledger_armed,
+        "capture_reserved_by": _state._capture_reserved_by,
         "active_label_session": torch_tl._ACTIVE_LABEL_SESSION,
         "active_witness_state": completeness_witness._ACTIVE_WITNESS_STATE,
         "rescue_active": rescue._rescue_is_active(),
@@ -1002,6 +1147,202 @@ def test_concurrent_public_capture_refuses_without_corruption() -> None:
     assert not owner.is_alive(), "owner capture did not finish after release"
     assert owner_errors == []
     assert _capture_scope_snapshot() == before
+
+
+def test_refused_concurrent_capture_leaves_winner_verified() -> None:
+    """A refused loser must not degrade the admitted winner's data quality.
+
+    The admission lock made "exactly one admitted" atomic, but a loser used to
+    run its capture-global side effects FIRST: model preparation swept and
+    replaced the winner's live label session before the loser reached the
+    typed refusal, leaving the winner with orphaned label stamps and
+    ``capture_verified=False`` (runtime-probed, hunt-b2 R54). The reservation
+    now refuses the loser BEFORE any pre-admission mutation, so the winner
+    completes verified and the loser's model is never even prepared.
+    """
+
+    tl.trace(nn.ReLU(), torch.ones(2))
+    before = _capture_scope_snapshot()
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+    owner_traces: list[Any] = []
+
+    def run_owner() -> None:
+        """Run the capture whose data quality the loser must not degrade."""
+
+        try:
+            owner_traces.append(tl.trace(_BlockingCapture(entered, release), torch.ones(2)))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    loser_model = nn.Sequential(nn.Linear(2, 2), nn.ReLU())
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            tl.trace(loser_model, torch.ones(1, 2))
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+
+    assert not owner.is_alive(), "owner capture did not finish after release"
+    assert owner_errors == []
+    assert len(owner_traces) == 1
+    winner = owner_traces[0]
+    assert winner.capture_verified is not False, (
+        "the refused loser's pre-admission side effects degraded the winner: "
+        f"capture_verified={winner.capture_verified!r}, "
+        f"reason={getattr(winner, 'capture_verification_reason', None)!r}"
+    )
+    assert any(op.func_name == "relu" for op in winner.compute_ops)
+    # The loser must have been refused BEFORE model preparation ran.
+    assert loser_model not in _state._prepared_models, (
+        "the refused loser's model was prepared: its label-session swap ran "
+        "before the admission refusal"
+    )
+    assert _capture_scope_snapshot() == before
+
+
+def test_refused_concurrent_record_never_installs_recording_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused ``tl.record`` must not touch the fastlog recording global.
+
+    The loser used to install its ``RecordingState`` (overwriting the admitted
+    recorder's) and only then reach the inner admission refusal, projecting the
+    winner's events into the loser's state for that window. The recorder-side
+    reservation refuses before the install.
+    """
+
+    from torchlens.fastlog import _recorder as recorder_module
+
+    installs: list[Any] = []
+    real_install = recorder_module.active_recording_state
+
+    def counting_install(state: Any) -> Any:
+        """Record every recording-state install before delegating."""
+
+        installs.append(state)
+        return real_install(state)
+
+    monkeypatch.setattr(recorder_module, "active_recording_state", counting_install)
+
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+
+    def run_owner() -> None:
+        """Hold a live capture open while the record() loser is refused."""
+
+        try:
+            tl.trace(_BlockingCapture(entered, release), torch.ones(2))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            tl.record(nn.ReLU(), torch.ones(2), save=tl.func("relu"))
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+
+    assert owner_errors == []
+    assert installs == [], (
+        "the refused record() installed its RecordingState before the admission refusal fired"
+    )
+
+
+def test_publish_active_trace_refuses_concurrent_and_clears_owner() -> None:
+    """Non-forward publication windows are admission-locked and owner-stamped.
+
+    tf capture and paddle derived-grad replays publish ``_active_trace``
+    without the logging toggle; a raw save/restore swap bypassed admission
+    (silent corruption of a concurrent torch capture) and could republish a
+    finished trace on restore. ``publish_active_trace`` must refuse typed
+    against a live capture, set the owner thread id for the window, and clear
+    both on exit.
+    """
+
+    sentinel = cast("Any", object())
+    with _state.publish_active_trace(sentinel):
+        assert _state._active_trace is sentinel
+        assert _state._active_owner_thread_id == threading.get_ident()
+        # A second publication (any thread) refuses while the window is open.
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            with _state.publish_active_trace(cast("Any", object())):
+                pass  # pragma: no cover - refused above
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+
+    entered = threading.Event()
+    release = threading.Event()
+    owner_errors: list[BaseException] = []
+
+    def run_owner() -> None:
+        """Hold a live torch capture open for the publication refusal."""
+
+        try:
+            tl.trace(_BlockingCapture(entered, release), torch.ones(2))
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            owner_errors.append(error)
+
+    owner = threading.Thread(target=run_owner)
+    owner.start()
+    assert entered.wait(timeout=5.0), "owner capture never reached its forward"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            with _state.publish_active_trace(sentinel):
+                pass  # pragma: no cover - refused above
+    finally:
+        release.set()
+        owner.join(timeout=10.0)
+    assert owner_errors == []
+
+
+def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> None:
+    """The reservation never leaks (wedging admission) and nests same-thread.
+
+    A capture failing anywhere between the reservation claim and teardown must
+    release the slot, or every later capture refuses forever. Same-thread
+    nesting is a passthrough (the recorder reserves around the inner
+    orchestration's own reservation); a foreign thread's claim refuses typed.
+    """
+
+    with pytest.raises(RuntimeError, match="injected mid-capture failure"):
+        tl.trace(_RaiseMidCapture(RuntimeError), torch.ones(2))
+    assert _state._capture_reserved_by is None
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+    with _state.capture_reservation():
+        assert _state._capture_reserved_by == threading.get_ident()
+        with _state.capture_reservation():  # nested same-thread passthrough
+            assert _state._capture_reserved_by == threading.get_ident()
+        # The inner exit must not release the outer claim.
+        assert _state._capture_reserved_by == threading.get_ident()
+
+        foreign_error: list[BaseException] = []
+
+        def contend() -> None:
+            """Attempt a foreign-thread reservation against the live claim."""
+
+            try:
+                with _state.capture_reservation():
+                    pass  # pragma: no cover - refused above
+            except BaseException as error:
+                foreign_error.append(error)
+
+        contender = threading.Thread(target=contend)
+        contender.start()
+        contender.join(timeout=5.0)
+        assert len(foreign_error) == 1
+        assert isinstance(foreign_error[0], _state.ReentrantTraceError)
+    assert _state._capture_reserved_by is None
 
 
 def test_foreign_thread_pause_does_not_blind_the_owner_capture() -> None:

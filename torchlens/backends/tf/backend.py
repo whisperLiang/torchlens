@@ -357,17 +357,18 @@ class TFBackend:
             session.module_exit_hook = _module_exit_hook
         trace.capture_events = CaptureEvents()
         trace.capture_start_time = time.time()
-        previous_active_trace = _state._active_trace
-        try:
-            _state._active_trace = trace
+        # Admission-locked publication: a raw save/restore swap here silently
+        # rebound a concurrent torch capture's _active_trace (its wrapper hot
+        # path reads the global raw) and could republish a finished trace on
+        # restore, wedging later admissions. Concurrent capture now refuses
+        # typed, matching the torch-vs-torch contract.
+        with _state.publish_active_trace(trace):
             if intervention_plan is not None:
                 with tf_intervention_wrap(tf, intervention_plan, session):
                     result = session.run()
                 audit_tf_site_reachability(intervention_plan, session)
             else:
                 result = session.run()
-        finally:
-            _state._active_trace = previous_active_trace
         trace.forward_duration = Duration(time.time() - trace.capture_start_time)
         trace.raw_output = output_transform(result.output) if callable(output_transform) else None
         trace.capture_events = result.events

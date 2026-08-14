@@ -12,6 +12,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .. import _state
 from .._deprecations import MISSING, MissingType
 from .._errors import CaptureContextError, KeywordConflictError
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
@@ -444,7 +445,12 @@ class Recorder:
         self._reset_state_for_pass(sample_id=sample_id)
         self._state.recording.start_times.append(time.time())
         try:
-            with active_recording_state(self._state):
+            # The reservation must wrap the recording-state install: a refused
+            # concurrent record() used to overwrite the admitted recorder's
+            # RecordingState for the window until its inner refusal unwound,
+            # projecting the winner's events into the loser's state. The inner
+            # orchestration re-enters the reservation same-thread (passthrough).
+            with _state.capture_reservation(), active_recording_state(self._state):
                 output = trace._run_and_log_inputs_through_model(
                     self.model,
                     input_args,

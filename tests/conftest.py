@@ -427,6 +427,28 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _restore_lazy_capability_probes() -> Iterator[None]:
+    """Restore lazy ``HAS_*`` capability latches to their pre-test state.
+
+    The lazy ``_torch_compat`` probes latch on first use, so a test that stubs
+    ``sys.modules`` (or otherwise shims the runtime) while a probe fires
+    poisons the flag for the whole process -- the recorded ``b7fe953e``
+    incident class, previously patched per-test rather than systemically.
+    Snapshotting before and restoring after every test bounds any mis-latch to
+    the test that caused it; an un-latched probe simply re-probes on its next
+    use, which is cheap and hits the real runtime.
+    """
+
+    from torchlens.utils import _torch_compat
+
+    snapshot = _torch_compat.capability_probe_snapshot()
+    try:
+        yield
+    finally:
+        _torch_compat.restore_capability_probes(snapshot)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rng_state() -> Iterator[None]:
     """Seed each test deterministically and restore all incoming RNG settings."""
 

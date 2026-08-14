@@ -36,9 +36,10 @@ import random
 import sys as _sys_module
 import threading as _threading_module
 import time as _time_module
+import uuid as _uuid_module
 import warnings as _warnings_module
 import weakref as _weakref_module
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence, Set as AbstractSet
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import (
@@ -71,6 +72,7 @@ from ._torch_compat import (
     HAS_GENERATOR_GRAPHSAFE_SET_STATE,
     autocast_get_dtype,
     autocast_is_enabled,
+    warm_lazy_torch_imports,
 )
 from .hashing import seed_barcode_rng
 from .tensor_utils import _is_cuda_available, _is_cuda_initialized
@@ -1508,6 +1510,14 @@ class _NotADigestableRng(Exception):
     """Internal sentinel: the value is not a digestable numpy/`random` generator."""
 
 
+_UNCERTAIN_DETAIL_CAP: int = 64
+"""Max DISTINCT ``uncertain_detail`` reasons retained per monitoring window.
+
+The boolean ``uncertain`` verdict is unconditional; the detail is a diagnostic.
+Past the cap one ``uncertain_detail_capped`` marker discloses the suppression.
+"""
+
+
 class HostRngMonitorResult:
     """Outcome of one capture-scoped host-nondeterminism monitoring window."""
 
@@ -1913,24 +1923,6 @@ genuine pre-monitor value.
 """
 
 
-def active_in_window_thread_idents() -> AbstractSet[int]:
-    """Return the thread idents profile-hooked during the active capture window.
-
-    The tensor->host escape belt (``completeness_witness``) consults this registry to
-    classify a non-owner escape thread as IN-WINDOW (started during the forward and
-    hooked by ``threading.setprofile`` -- registered during thread bootstrap BEFORE its
-    first user statement, so even an escape-first thread is classified) versus
-    PRE-EXISTING/foreign. Entries only ever come from hooked threads, so ident reuse
-    cannot misclassify a foreign thread as in-window. Returns an empty set when no
-    monitor window is active.
-    """
-
-    monitor = _ACTIVE_MONITOR
-    if monitor is None:
-        return frozenset()
-    return monitor._in_window_thread_idents
-
-
 @contextmanager
 def _suppress_active_monitor_marks() -> Iterator[None]:
     """Suppress channel marks for a TorchLens-OWNED RNG bookkeeping bracket (r65 Z).
@@ -2026,8 +2018,9 @@ class host_nondeterminism_monitor:
       ``threading.setprofile`` (threads STARTED in-window; measured E2: a pre-existing
       worker is unreachable). Each hook chains its own exact predecessor and is
       identity-restored on success and exception. The threading hook additionally
-      records each hooked thread's ident into the in-window registry consumed by the
-      cross-thread escape belt (r41; see :func:`active_in_window_thread_idents`).
+      records each hooked thread's ident into an in-window DIAGNOSTIC registry
+      (its r41 escape-belt 3-class consumer was deleted in r43, replaced by the
+      binary owner/non-owner check in ``_completeness_cross_thread.py``).
 
     Entropy / instance / construction / clock positives mark from any COVERED thread. A
     REALISTIC pre-existing-thread RNG use (a background worker drawing from a MODEL-HELD
@@ -2056,6 +2049,10 @@ class host_nondeterminism_monitor:
         # thread-independent digest belt) -- NOT a process-wide ``gc.get_objects()`` scan.
         self._model = model
         self.result = HostRngMonitorResult()
+        # O(1) dedupe for ``_flag_uncertain``: per-frame failure paths repeat
+        # one reason millions of times on a persistently-raising profiled
+        # object; without this set each repeat re-copied the detail tuple.
+        self._uncertain_seen: set[str] = set()
         self._restores: list[Callable[[], None]] = []
         self._owner_thread = _threading_module.get_ident()
         self._previous_sys_profile: Any = None
@@ -2110,8 +2107,10 @@ class host_nondeterminism_monitor:
         # and re-resolved dynamically on a receiver miss, so a device default
         # populated mid-forward still selects the default column.
         self._default_generator_ids: frozenset[int] = frozenset()
-        # r41 hon2_1: idents of threads hooked by the in-window threading profile hook,
-        # consumed by the escape belt's 3-class thread gate via ``_ACTIVE_MONITOR``.
+        # r41 hon2_1: idents of threads hooked by the in-window threading profile
+        # hook. DIAGNOSTIC-only since r43 deleted the escape belt's 3-class thread
+        # gate (replaced by the binary owner/non-owner check in
+        # ``_completeness_cross_thread.py``); no production verdict reads it.
         self._in_window_thread_idents: set[int] = set()
         # NumPy 2.x binds Generator/RandomState Cython callables as Python methods
         # that emit no profile ``c_call`` event. The feature-detected fallback
@@ -2216,11 +2215,30 @@ class host_nondeterminism_monitor:
         Uncertainty is never read as absence of consumption: install, chain,
         restore, and inventory failures all land here so the verdict degrades
         instead of silently blessing the capture.
+
+        Detail accumulation is DEDUPED and CAPPED: several callers fire PER
+        PROFILE EVENT (``profile_rng_state_read_failed``,
+        ``profile_classifier_error``, ...), so a persistently-raising profiled
+        object used to grow ``uncertain_detail`` by a full tuple copy per frame
+        -- measured O(N^2), turning a real forward (~1e5-1e6 profiled frames)
+        into minutes-to-hours of tuple-copy churn while the verdict was already
+        settled INCOMPLETE by the boolean. A repeated reason is dropped in
+        O(1); past the distinct-reason cap one overflow marker records that
+        further DISTINCT reasons were suppressed. The ``uncertain`` boolean --
+        the only verdict-steering output -- is stamped unconditionally first.
         """
 
         self.result.uncertain = True
-        if reason:
-            self.result.uncertain_detail = (*self.result.uncertain_detail, reason)
+        if not reason or reason in self._uncertain_seen:
+            return
+        if len(self._uncertain_seen) >= _UNCERTAIN_DETAIL_CAP:
+            overflow = "uncertain_detail_capped"
+            if overflow not in self._uncertain_seen:
+                self._uncertain_seen.add(overflow)
+                self.result.uncertain_detail = (*self.result.uncertain_detail, overflow)
+            return
+        self._uncertain_seen.add(reason)
+        self.result.uncertain_detail = (*self.result.uncertain_detail, reason)
 
     def _patch_attr(self, holder: Any, name: str, wrapper: Any) -> None:
         """Patch one module or class attribute and queue its exact restoration.
@@ -2308,6 +2326,34 @@ class host_nondeterminism_monitor:
 
             self._mark(channel)
             return original(*args, **kwargs)
+
+        return wrapper
+
+    def _raw_thread_spawn_wrapper(self, original: Any) -> Any:
+        """Build a passthrough spawn wrapper that profile-hooks the NEW thread.
+
+        ``_thread.start_new_thread`` / ``start_joinable_thread`` bootstrap the
+        target directly (no ``threading.Thread`` bootstrap, so
+        ``threading.setprofile`` never fires for them). The wrapped target
+        installs this window's threading hook on the new thread before running,
+        making an in-window raw-thread host draw witnessed exactly like a
+        ``threading.Thread`` one. Everything else passes through untouched.
+        """
+
+        monitor = self
+
+        def wrapper(function: Any, *rest: Any, **spawn_kwargs: Any) -> Any:
+            """Spawn with the target wrapped to self-install the profile hook."""
+
+            def hooked_target(*fargs: Any, **fkwargs: Any) -> Any:
+                """Install the in-window threading hook, then run the target."""
+
+                hook = monitor._threading_hook
+                if hook is not None and not monitor._torn_down:
+                    _sys_module.setprofile(hook)
+                return function(*fargs, **fkwargs)
+
+            return original(hooked_target, *rest, **spawn_kwargs)
 
         return wrapper
 
@@ -3738,6 +3784,33 @@ class host_nondeterminism_monitor:
         return snapshots
 
     @staticmethod
+    def _exact_state_repr(state: Any) -> str:
+        """Render an RNG state tree EXACTLY, independent of display options.
+
+        ``repr`` of an ndarray obeys the user-global ``np.set_printoptions``
+        ``threshold`` (commonly small in notebooks), truncating the 624-word
+        MT19937 key to head/tail -- hanging a verdict-steering digest off a
+        DISPLAY knob. Arrays render as ``(dtype, shape, tobytes)`` and
+        containers recurse, so the digest is bytes-exact and
+        printoptions-independent.
+        """
+
+        if isinstance(state, np.ndarray):
+            return f"ndarray({state.dtype!s},{state.shape!r},{state.tobytes()!r})"
+        if isinstance(state, dict):
+            rendered = ",".join(
+                f"{key!r}:{host_nondeterminism_monitor._exact_state_repr(value)}"
+                for key, value in state.items()
+            )
+            return "{" + rendered + "}"
+        if isinstance(state, (tuple, list)):
+            rendered = ",".join(
+                host_nondeterminism_monitor._exact_state_repr(item) for item in state
+            )
+            return f"{type(state).__name__}({rendered})"
+        return repr(state)
+
+    @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
         """Return a comparable state digest for one RNG holder.
 
@@ -3748,15 +3821,16 @@ class host_nondeterminism_monitor:
         undrawn stateless engine is not nondeterminism.
         """
 
+        exact = host_nondeterminism_monitor._exact_state_repr
         if isinstance(holder, np.random.Generator):
-            return repr(holder.bit_generator.state)
+            return exact(holder.bit_generator.state)
         if isinstance(holder, np.random.RandomState):
-            return repr(holder.get_state())
+            return exact(holder.get_state())
         # r41 (Sol): a BARE model-held BitGenerator (``self.bg = PCG64(...)`` drawn
         # through a wrapping Generator) advances its own ``state``; digest it directly
         # so the registry's BitGenerator claim is digest-true.
         if isinstance(holder, np.random.BitGenerator):
-            return repr(holder.state)
+            return exact(holder.state)
         if isinstance(holder, random.Random):
             try:
                 state = holder.getstate()
@@ -3774,7 +3848,7 @@ class host_nondeterminism_monitor:
                 # exception from ``getstate()`` (a genuinely broken state read)
                 # still propagates to the fail-closed inventory error path.
                 raise _NotADigestableRng from None
-            return repr(state)
+            return host_nondeterminism_monitor._exact_state_repr(state)
         raise _NotADigestableRng
 
     @staticmethod
@@ -4272,6 +4346,17 @@ class host_nondeterminism_monitor:
             # "originals", so a non-LIFO unwind cannot prove exact restoration. Degrade
             # completeness (the capture ceilings) rather than claim a clean window.
             self._flag_uncertain("monitor_overlap")
+        # BEFORE any patch installs: force torch's lazy torch._compile /
+        # torch._dynamo import cascade (first wrapped op of a selective
+        # runnable-capable capture) to draw its module-exec entropy
+        # (uuid.uuid4/getrandbits) OUTSIDE the window. In-window it marked
+        # os.urandom channels and permanently ceilinged a pure deterministic
+        # model's first runnable artifact to UNVERIFIABLE. A failed warm is
+        # benign: the in-window retry's draws are then honestly marked.
+        try:
+            warm_lazy_torch_imports()
+        except Exception:
+            pass
         try:
             for step_name, step in self._install_steps():
                 try:
@@ -4466,6 +4551,24 @@ class host_nondeterminism_monitor:
                 "_urandom",
                 self._entropy_wrapper(random._urandom, "random._urandom"),
             )
+        # entropy: uuid1's platform C funnels. On Linux ``uuid.uuid1`` resolves
+        # ``uuid._generate_time_safe`` (libuuid: wall clock + clock-seq entropy
+        # + node) and touches NO other monitored surface, so an in-window
+        # ``uuid.uuid1()`` was a clean false-VERIFIED escape; the Python
+        # fallback path IS caught through getrandbits/clocks. Windows routes
+        # through ``uuid._UuidCreate``. ``uuid.uuid1`` reads these as module
+        # globals at call time, so a pre-window ``from uuid import uuid1``
+        # alias cannot bypass the patch.
+        for uuid_funnel_name in ("_generate_time_safe", "_UuidCreate"):
+            uuid_funnel = getattr(_uuid_module, uuid_funnel_name, None)
+            if uuid_funnel is None or not callable(uuid_funnel):
+                continue
+            self._register_held_ref(uuid_funnel, "uuid.uuid1")
+            self._patch_attr(
+                _uuid_module,
+                uuid_funnel_name,
+                self._entropy_wrapper(uuid_funnel, "uuid.uuid1"),
+            )
 
     def _install_construction_surfaces(self) -> None:
         """Patch the NumPy generator factory and the unseeded-construction entropy alias."""
@@ -4583,7 +4686,8 @@ class host_nondeterminism_monitor:
         # are the r37/base mechanism (base runs them and is fast); the owner hook catches
         # owner-thread numpy Generator instance draws and the immutable ``datetime`` readers,
         # the threading hook catches an in-window helper-thread draw (hon1_1/corr2_2) and
-        # records each hooked thread's ident for the escape belt's 3-class gate (r41).
+        # records each hooked thread's ident in the diagnostic registry (the r41
+        # escape-belt 3-class consumer was deleted r43; owner/non-owner is binary now).
         self._previous_sys_profile = _sys_module.getprofile()
         self._sys_hook = self._make_profile_hook(self._previous_sys_profile)
         _sys_module.setprofile(self._sys_hook)
@@ -4596,3 +4700,20 @@ class host_nondeterminism_monitor:
         )
         _threading_module.setprofile(self._threading_hook)
         self._threading_profile_installed = True
+        # Raw ``_thread`` spawns bypass ``threading.setprofile`` entirely (that
+        # hook rides ``threading.Thread``'s bootstrap), so an in-window
+        # ``_thread.start_new_thread`` thread drawing an externally-held
+        # generator was a clean false-VERIFIED escape -- outside the documented
+        # residual, which covers only PRE-EXISTING threads. Patch the spawn
+        # entry points to install this window's hook on the new thread before
+        # the target runs; the hook self-uninstalls on its first event after
+        # teardown, so a spawned thread outliving the window sheds it.
+        # ``threading`` itself holds a pre-patch ``_start_new_thread`` ref, so
+        # Thread starts are unaffected (no double hook).
+        for spawn_name in ("start_new_thread", "start_joinable_thread"):
+            if hasattr(_c_thread_module, spawn_name):
+                self._patch_attr(
+                    _c_thread_module,
+                    spawn_name,
+                    self._raw_thread_spawn_wrapper(getattr(_c_thread_module, spawn_name)),
+                )

@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -247,11 +248,6 @@ class _SelfDepProbeModel2(nn.Module):
         return x + self.attn(x)
 
 
-@tl.facets.register(
-    class_name="_SelfDepProbeAttention",
-    target_scope="module",
-    facets=("result", "n_heads", "head"),
-)
 def _self_dep_probe_attention_recipe(module: Any) -> dict[str, Any]:
     """Expose a writable per-head result facet for ``_SelfDepProbeAttention``."""
 
@@ -263,6 +259,30 @@ def _self_dep_probe_attention_recipe(module: Any) -> dict[str, Any]:
         "n_heads": 2,
         "head": module.facets.head,
     }
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _register_self_dep_probe_recipe() -> Iterator[None]:
+    """Register the probe recipe at RUN time, restoring the registry after.
+
+    A module-level ``@tl.facets.register`` fires at pytest COLLECTION and
+    polluted the process-global registry outside any fixture's reach
+    (hunt-b2-sol R76/R77).
+    """
+
+    from torchlens.semantic import facets as _facets
+
+    saved = list(_facets._REGISTRY)
+    tl.facets.register(
+        class_name="_SelfDepProbeAttention",
+        target_scope="module",
+        facets=("result", "n_heads", "head"),
+    )(_self_dep_probe_attention_recipe)
+    try:
+        yield
+    finally:
+        _facets._REGISTRY[:] = saved
+        _facets._REGISTRY_VERSION += 1
 
 
 def _self_dep_probe_metric(log: Any) -> torch.Tensor:

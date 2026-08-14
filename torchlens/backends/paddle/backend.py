@@ -607,7 +607,6 @@ class PaddleBackend:
             if grad_options.intermediate_grads
             else None
         )
-        previous_active_trace = _state._active_trace
         previous_module_stack = list(getattr(trace, "_paddle_module_stack", ()))
         previous_call_counts = dict(module_tree.call_counts) if module_tree is not None else None
         previous_forward_args = (
@@ -620,8 +619,10 @@ class PaddleBackend:
                 module_tree.call_counts.clear()
                 module_tree.forward_args_by_call.clear()
             trace._paddle_module_stack = []
-            _state._active_trace = trace
-            with _state.pause_logging():
+            # Admission-locked publication (was a raw save/restore swap that
+            # could clobber a concurrent capture's _active_trace and republish
+            # a stale trace on restore); concurrent capture refuses typed.
+            with _state.publish_active_trace(trace), _state.pause_logging():
                 if observer is not None:
                     with paddle_tap_observer(observer):
                         replay_output = model(*args, **dict(kwargs))
@@ -672,7 +673,6 @@ class PaddleBackend:
             )
         finally:
             _restore_paddle_tensor_states(snapshots)
-            _state._active_trace = previous_active_trace
             trace._paddle_module_stack = previous_module_stack
             if module_tree is not None and previous_call_counts is not None:
                 module_tree.call_counts.clear()

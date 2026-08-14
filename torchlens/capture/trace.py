@@ -1404,12 +1404,28 @@ def run_and_log_inputs_through_model(
     compiled_unwrap_exception: tuple[
         type[BaseException] | None, BaseException | None, TracebackType | None
     ] = (None, None, None)
-    compiled_capture_context = (
-        prepare_compiled_capture(model)
-        if isinstance(model, nn.Module)
-        else contextlib.nullcontext()
-    )
-    compiled_capture_prep = compiled_capture_context.__enter__()
+    # Reserve the capture slot BEFORE any capture-global side effect (label
+    # session swap in model prep, compiled-submodule swaps, the fastlog
+    # recording state installed by the recorder around this call): a
+    # concurrent capture destined for the typed ``ReentrantTraceError`` used
+    # to run those mutations first and orphan the admitted winner's session
+    # (runtime-probed ``capture_verified=False``). Same-thread re-entry from
+    # the recorder's outer reservation passes through; the reservation is
+    # released in the outermost ``finally`` below.
+    capture_slot = _state.capture_reservation()
+    capture_slot.__enter__()
+    try:
+        compiled_capture_context = (
+            prepare_compiled_capture(model)
+            if isinstance(model, nn.Module)
+            else contextlib.nullcontext()
+        )
+        compiled_capture_prep = compiled_capture_context.__enter__()
+    except BaseException:
+        # A raise between the reservation claim and the outer ``try`` would
+        # otherwise leak the reservation and wedge every later admission.
+        capture_slot.__exit__(None, None, None)
+        raise
 
     try:
         # B8-25b: everything after ``__enter__`` runs INSIDE the try whose
@@ -1922,8 +1938,8 @@ def run_and_log_inputs_through_model(
         # tokenizer and metadata key still pinned to the escaping product.
         # Placed before the teardown ladder so a teardown double-fault cannot
         # skip it.
-        _drop_semantic_output_transients(self)
         try:
+            _drop_semantic_output_transients(self)
             try:
                 _clear_saved_activation_dedup_caches(self)
                 # Release input tensor references so GC can reclaim backend memory.
@@ -1946,3 +1962,7 @@ def run_and_log_inputs_through_model(
                 note=f"teardown failed: {type(teardown_exc).__name__}: {teardown_exc}",
             )
             raise
+        finally:
+            # Outermost: a teardown double-fault must not leak the capture
+            # reservation, or every later admission refuses forever.
+            capture_slot.__exit__(None, None, None)
