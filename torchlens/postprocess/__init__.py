@@ -718,6 +718,11 @@ def _postprocess_body(
     if _core is not None and _core.ops is not None:
         _freeze_relation_views(self)
         _core.ops.freeze()
+        # Payload-lifetime owner (fix/fork F4): when the LAST owning core
+        # (this one plus any fork cores viewing the sealed base) is
+        # garbage-collected, the store evicts tensor payload cells so a
+        # retained Op facade stops pinning every captured activation.
+        _core.ops.adopt_payload_owner(_core)
         # Adopt the trace-scoped FuncCallLocation records (cached per call
         # site in _code_context_cache) into their kind table before sealing.
         # Cache entries mix FuncCallLocation records with plain metadata, so

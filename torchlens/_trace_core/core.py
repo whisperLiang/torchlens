@@ -103,6 +103,7 @@ class TraceCore:
         "__weakref__",
         "_facade_factory",
         "_facades",
+        "_record_translator",
         "_strong_facades",
         "backward_epochs",
         "closures",
@@ -148,6 +149,10 @@ class TraceCore:
         )
         self._strong_facades: dict[tuple[str, int], Any] = {}
         self._facade_factory: Callable[[str, int], Any] | None = None
+        # Strong anchor for a fork core's record translator: the store views
+        # hold it WEAKLY (a retained fork Op must not root the fork graph
+        # through it), so the translator lives exactly as long as its core.
+        self._record_translator: Any = None
         self.backward_epochs: list[Any] = []
 
     def table(self, kind: str) -> KindTable:
@@ -259,6 +264,12 @@ class TraceCore:
             for source_table in clone._source_tables:
                 group_tables[id(source_table)] = clone
         child.ops = OpStoreView(self.ops, group_tables) if self.ops is not None else None
+        if child.ops is not None:
+            # The fork core is a co-owner of the shared sealed base: payload
+            # eviction (fix/fork F4) must wait for the LAST core -- parent or
+            # any fork -- to be garbage-collected, or a live fork's reads
+            # through the base would lose their payloads.
+            child.ops.base.adopt_payload_owner(child)
         # An unfrozen kind table (born after a rehydrated load's seal and not
         # yet sealed itself) cannot back a view; its records take the fork
         # builder's detached-duplication fallback instead.
@@ -278,6 +289,7 @@ class TraceCore:
         child._facades = weakref.WeakValueDictionary()
         child._strong_facades = {}
         child._facade_factory = self._facade_factory
+        child._record_translator = None
         child.backward_epochs = []
         return child
 

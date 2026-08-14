@@ -173,6 +173,7 @@ class _RecordTranslator:
     """
 
     __slots__ = (
+        "__weakref__",
         "_fork_ref",
         "_guards",
         "_keepalive",
@@ -623,6 +624,12 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     dict.update(memo, translator.map)
     dict.update(memo, layer_shells)
     if fork_core is not None:
+        # The views hold the translator WEAKLY (a retained fork Op reaching
+        # the fork Trace through translator-mapped shells would root the
+        # whole fork graph and disarm last-owner payload eviction); the fork
+        # core is its strong anchor, so translation lives exactly as long as
+        # the fork itself.
+        fork_core._record_translator = translator
         for view in fork_core.store_views():
             view.record_translator = translator
 
