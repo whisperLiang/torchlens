@@ -389,3 +389,120 @@ def test_fast_live_input_refresh_arity_guarded_and_poisons(monkeypatch) -> None:
     with pytest.raises(PathDivergenceError) as excinfo:
         captured.run(inputs=torch.ones(2, 3), fast=True)
     assert excinfo.value.fields["code"] == "input_tree_mismatch"
+
+
+class _LinearReluModel(nn.Module):
+    """Two-op model for fast-sparse payload refresh pins."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(3, 3)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply linear then relu."""
+
+        return torch.relu(self.lin(value))
+
+
+def _saved_all_runnable(model: nn.Module, inputs: torch.Tensor, path: Path) -> Path:
+    """Capture with all activations saved and save a weighted runnable artifact."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(
+            model,
+            inputs,
+            capture=CaptureOptions(
+                intervention_ready=True,
+                layers_to_save="all",
+                cache=False,
+            ),
+        )
+    tl.save(captured, path, level="runnable", include_weights=True)
+    return path
+
+
+def test_fast_sparse_iterations_refresh_saved_activations(tmp_path: Path) -> None:
+    """Every fast-sparse iteration re-saves activations for the CURRENT input.
+
+    The refresh gate was built from bare layer labels while descriptor calls
+    carry pass-qualified labels ('linear_1_1:1'), so the in-loop
+    ``save_activation`` never fired and every fast iteration returned
+    iteration-1 payloads on a trace labeled verified.
+    """
+
+    torch.manual_seed(0)
+    model = _LinearReluModel().eval()
+    first = torch.randn(2, 3)
+    second = torch.randn(2, 3)
+    loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
+
+    loaded.run(inputs=first, fast=True)
+    result = loaded.run(inputs=second, fast=True)
+
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with torch.no_grad():
+        expected = model.lin(second)
+    assert torch.allclose(result.trace["linear_1_1"].out, expected)
+
+
+def test_fast_sparse_output_slot_is_not_an_alias_of_run_output(tmp_path: Path) -> None:
+    """The trace's output payload never aliases ``RunResult.output``.
+
+    The fast-sparse reconstruction stored the returned object itself into the
+    output op, so caller in-place mutation of the run output silently rewrote
+    the verified trace's recorded payload.
+    """
+
+    torch.manual_seed(0)
+    model = _LinearReluModel().eval()
+    first = torch.randn(2, 3)
+    loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
+
+    loaded.run(inputs=first, fast=True)
+    result = loaded.run(inputs=torch.randn(2, 3), fast=True)
+
+    recorded = result.trace[result.trace.output_layers[0]].out
+    snapshot = recorded.clone()
+    result.output.mul_(1234.5)
+    assert torch.equal(recorded, snapshot), "RunResult.output mutation rewrote the trace payload"
+
+
+class _BranchOnActivationModel(nn.Module):
+    """Branches on a host-escaped predicate of a produced activation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(3, 3)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Take a data-dependent arm on the linear output."""
+
+        hidden = self.lin(value)
+        if bool((hidden.sum() > 0).item()):
+            return torch.relu(hidden)
+        return torch.sigmoid(hidden)
+
+
+def test_fast_sparse_mid_loop_divergence_poisons_reused_target(tmp_path: Path) -> None:
+    """A mid-loop fast-sparse divergence poisons the reused target trace.
+
+    Earlier calls in the failing iteration already refreshed their saved
+    activations, so raising without a monotonic DIVERGED mark left a
+    mixed-iteration trace that downstream faithful consumers accepted.
+    """
+
+    from torchlens.errors import PathDivergenceError
+
+    torch.manual_seed(0)
+    model = _BranchOnActivationModel().eval()
+    first = torch.ones(2, 3)
+    loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
+
+    ok = loaded.run(inputs=first, fast=True)
+    assert ok.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+    with pytest.raises(PathDivergenceError):
+        loaded.run(inputs=-torch.ones(2, 3) * 5, fast=True)
+
+    assert ok.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED

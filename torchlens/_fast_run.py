@@ -497,10 +497,15 @@ class _FastSparseSession:
             for slot in descriptor.tensor_slots
             if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
         )
+        # Key the refresh gate by EVERY lookup spelling of a saved entry:
+        # descriptor calls carry pass-qualified labels ('linear_1_1:1') while
+        # ``layer_label`` is the bare final label, so a bare-label-only set
+        # made the in-loop ``save_activation`` refresh dead code -- every fast
+        # iteration returned iteration-1 payloads on a verified trace.
         self.saved_labels = frozenset(
-            op.layer_label
-            for op in source.layer_list
-            if bool(getattr(op, "has_saved_activation", False))
+            key
+            for key, entry in source.layer_dict_all_keys.items()
+            if bool(getattr(entry, "has_saved_activation", False))
         )
         aliases: dict[str, list[str]] = {}
         for slot in descriptor.tensor_slots:
@@ -731,6 +736,8 @@ class _FastSparseSession:
         self,
         slot_values: dict[str, torch.Tensor],
         call_outputs: Mapping[str, Any],
+        *,
+        ceiling: RunResourceCeiling,
     ) -> Any:
         """Rebuild the model output without cloning every intermediate into a fork."""
 
@@ -759,7 +766,19 @@ class _FastSparseSession:
                 None,
             )
             if op is not None:
-                op._internal_set("out", value)
+                # Store a guarded CLONE, never the returned object itself: the
+                # ordinary provider clones at this seam, and an aliased slot
+                # lets caller in-place mutation of ``RunResult.output``
+                # silently rewrite the trace's "verified" output payload.
+                op._internal_set(
+                    "out",
+                    ceiling.guarded_clone(
+                        value,
+                        call_id=None,
+                        slot_id=slot.slot_id,
+                        affected_op_labels=(),
+                    ),
+                )
             values.append((slot.output_path or (), value))
         spec = next(
             (
@@ -855,11 +874,21 @@ class _FastSparseSession:
                     checks.extend(call_checks)
                     failed = next((check for check in call_checks if not check.passed), None)
                     if failed is not None:
+                        # Rollback is impossible on the REUSED fast target:
+                        # earlier calls in THIS iteration already refreshed
+                        # their saved activations, so a mid-loop divergence
+                        # leaves mixed-iteration payloads behind. Poison the
+                        # target monotonically before raising (mirror of the
+                        # fast-LIVE twin's _poison_and_raise) so downstream
+                        # faithful consumers refuse it.
+                        mark_trace_path_status(
+                            self.target, PathFaithfulness.DIVERGED, failed.diagnostic
+                        )
                         _raise_failed_contract_as_divergence(failed, fork=None)
         finally:
             if host_rng_saved is not None:
                 restore_host_rng(host_rng_saved)
-        output = self._reconstruct_output(slot_values, call_outputs)
+        output = self._reconstruct_output(slot_values, call_outputs, ceiling=ceiling)
         checks.append(
             _contract_check(
                 "fast_static_guard",
