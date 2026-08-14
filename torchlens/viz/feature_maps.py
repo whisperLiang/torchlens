@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
+from ..utils._multipass_access import get_multipass_attr
 from ..utils.display import ensure_trace_visualizer_dir
 from ..visualization.node_spec import NodeSpec, NodeSpecFn
 from .node_plots import _apply_colormap, _normalize_finite
@@ -27,6 +28,8 @@ _REDUCE_MAX = 1
 _TEXT_COLOR = (25, 28, 34)
 _LABEL_FILL = (255, 255, 255)
 _LABEL_OUTLINE = (95, 103, 117)
+#: Non-finite pixel color; matches node_plots.render_heatmap's nan_color default.
+_NONFINITE_COLOR = (235, 235, 235)
 
 
 def feature_map_evolution(
@@ -239,15 +242,23 @@ def feature_map_node_spec(
         maps = maps[:shown_rows, :shown_cols]
         stimulus_indices = stimulus_indices[:shown_rows]
         channel_ids = channel_ids[:shown_rows, :shown_cols]
-        more_count = max(0, int(counts[2].item()) - shown_rows) + max(
-            0, int(counts[3].item()) - shown_cols
-        )
+        # Disclose against the TRUE totals (counts[0]=batch size,
+        # counts[1]=channel count), never the already-capped stored counts:
+        # a 4-of-32 grid must say "4 of 32", and the storage cap hides
+        # subsetting from the display cap's arithmetic.
+        total_stimuli = int(counts[0].item())
+        mode_id = int(counts[4].item())
+        total_channels = int(counts[1].item())
+        cap_parts = []
+        if shown_rows < total_stimuli:
+            cap_parts.append(f"{shown_rows}/{total_stimuli} stim")
+        if mode_id != _MODE_AGGREGATE and shown_cols < total_channels:
+            cap_parts.append(f"{shown_cols}/{total_channels} ch")
+        cap_text = ", ".join(cap_parts) if cap_parts else None
 
         from ..repgeom import _matching_pil_image_batch
 
-        raw_images = _matching_pil_image_batch(
-            getattr(trace, "raw_input", None), int(counts[0].item())
-        )
+        raw_images = _matching_pil_image_batch(getattr(trace, "raw_input", None), total_stimuli)
         overlay_available = overlay and raw_images is not None
         grid = _render_feature_map_grid(
             maps,
@@ -258,16 +269,24 @@ def feature_map_node_spec(
             alpha=alpha,
             cmap=cmap,
             cell_size=cell_size,
-            more_count=more_count,
+            cap_text=cap_text,
+            reduce_label=_reduce_name(int(counts[5].item())),
         )
         image_path = _write_feature_map_image(trace, key, grid)
         caption = str(getattr(layer, "layer_label", None) or getattr(layer, "label", key))
-        mode_name = _mode_name(int(counts[4].item()))
-        tooltip = f"Feature maps for {key}: {mode_name}, {int(counts[2].item())} stimuli"
+        mode_name = _mode_name(mode_id)
+        if mode_id == _MODE_AGGREGATE:
+            mode_name = f"{mode_name} ({_reduce_name(int(counts[5].item()))})"
+        stimulus_clause = f"showing {shown_rows} of {total_stimuli} stimuli"
+        channel_clause = (
+            "" if mode_id == _MODE_AGGREGATE else f" x {shown_cols} of {total_channels} channels"
+        )
+        tooltip = (
+            f"Feature maps for {key}: {mode_name}, {stimulus_clause}{channel_clause}"
+            "; cells independently normalized"
+        )
         if overlay and not overlay_available:
             tooltip = f"{tooltip}; overlay unavailable"
-        if more_count > 0:
-            tooltip = f"{tooltip}; +{more_count} more"
         return spec.replace(
             lines=[caption],
             image=str(image_path),
@@ -474,24 +493,27 @@ def _select_maps(
         Maps ``[S, K, H, W]``, channel ids ``[S, K]``, and mode id.
     """
 
+    # Non-finite activations are stored AS-IS: NaN/Inf are exactly what users
+    # draw feature maps to find, and the renderer marks them with a dedicated
+    # non-finite color instead of laundering them into real values.
     selected = activations[list(stimulus_indices)]
     if channels is None:
         maps = _aggregate_channels(selected, reduce).unsqueeze(1)
         channel_ids = torch.full((selected.shape[0], 1), -1, dtype=torch.int64)
-        return torch.nan_to_num(maps).contiguous(), channel_ids, _MODE_AGGREGATE
+        return maps.contiguous(), channel_ids, _MODE_AGGREGATE
     if channels == "top":
         channel_ids = _top_channel_indices(selected, top_k=min(top_k, max_channels))
         maps = torch.stack(
             [selected[row_index, channel_ids[row_index]] for row_index in range(selected.shape[0])],
             dim=0,
         )
-        return torch.nan_to_num(maps).contiguous(), channel_ids.to(dtype=torch.int64), _MODE_TOP
+        return maps.contiguous(), channel_ids.to(dtype=torch.int64), _MODE_TOP
 
     explicit = _resolve_channels(channels, total_channels=activations.shape[1], cap=max_channels)
     explicit_tensor = torch.tensor(explicit, dtype=torch.int64)
     maps = selected[:, explicit_tensor]
     channel_ids = explicit_tensor.unsqueeze(0).expand(selected.shape[0], -1).contiguous()
-    return torch.nan_to_num(maps).contiguous(), channel_ids, _MODE_EXPLICIT
+    return maps.contiguous(), channel_ids, _MODE_EXPLICIT
 
 
 def _aggregate_channels(activations: torch.Tensor, reduce: FeatureMapReduce) -> torch.Tensor:
@@ -593,6 +615,23 @@ def _reduce_id(reduce: FeatureMapReduce) -> int:
     return _REDUCE_MEAN if reduce == "mean" else _REDUCE_MAX
 
 
+def _reduce_name(reduce_id: int) -> str:
+    """Return the display name for a stored aggregate reduction id.
+
+    Parameters
+    ----------
+    reduce_id:
+        Stored reduction id (``counts[5]``).
+
+    Returns
+    -------
+    str
+        ``"avg"`` for mean, ``"max"`` for max.
+    """
+
+    return "max" if reduce_id == _REDUCE_MAX else "avg"
+
+
 def _feature_map_payload_for_node(
     trace: Any,
     node: Any,
@@ -616,10 +655,12 @@ def _feature_map_payload_for_node(
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
@@ -662,7 +703,8 @@ def _render_feature_map_grid(
     alpha: float,
     cmap: str,
     cell_size: int,
-    more_count: int,
+    cap_text: str | None,
+    reduce_label: str = "avg",
 ) -> Image.Image:
     """Render stored maps as one bounded small-multiples image.
 
@@ -684,8 +726,11 @@ def _render_feature_map_grid(
         Colormap name.
     cell_size:
         Cell side length in pixels.
-    more_count:
-        Number of omitted row/column entries to mark.
+    cap_text:
+        Optional shown-of-total disclosure marker (e.g. ``"4/32 stim"``),
+        or ``None`` when the grid shows everything.
+    reduce_label:
+        Channel-aggregation name shown on aggregate cells (``"avg"``/``"max"``).
 
     Returns
     -------
@@ -720,9 +765,17 @@ def _render_feature_map_grid(
                 cell_size=cell_size,
                 stimulus_index=int(stimulus_indices[row_index].item()),
                 channel_id=int(channel_ids[row_index, col_index].item()),
+                reduce_label=reduce_label,
             )
-    if more_count > 0:
-        _draw_more_marker(draw, width=width, height=height, text=f"+{more_count} more")
+            _draw_constant_cell_label(
+                draw,
+                map_tensor=maps[row_index, col_index],
+                x=x,
+                y=y,
+                cell_size=cell_size,
+            )
+    if cap_text is not None:
+        _draw_more_marker(draw, width=width, height=height, text=cap_text)
     return canvas
 
 
@@ -793,9 +846,16 @@ def _map_to_heatmap_image(map_tensor: torch.Tensor, *, cmap: str, cell_size: int
         RGB heatmap image.
     """
 
-    array = torch.nan_to_num(map_tensor.detach().to(device="cpu", dtype=torch.float32)).numpy()
-    normalized = _normalize_finite(np.asarray(array, dtype=np.float64), None, None)
+    # Same non-finite contract as node_plots.render_heatmap: the scale is
+    # computed over FINITE values only (one Inf must not floor everything
+    # else) and non-finite pixels get the dedicated nan color instead of
+    # being laundered into real values.
+    array = np.asarray(
+        map_tensor.detach().to(device="cpu", dtype=torch.float32).numpy(), dtype=np.float64
+    )
+    normalized = _normalize_finite(array, None, None)
     colors = _apply_colormap(normalized, cmap)
+    colors[~np.isfinite(array)] = np.asarray(_NONFINITE_COLOR, dtype=np.uint8)
     return Image.fromarray(colors, mode="RGB").resize(
         (cell_size, cell_size), Image.Resampling.BILINEAR
     )
@@ -809,6 +869,7 @@ def _draw_cell_label(
     cell_size: int,
     stimulus_index: int,
     channel_id: int,
+    reduce_label: str = "avg",
 ) -> None:
     """Draw a compact stimulus/channel label when it fits.
 
@@ -826,9 +887,16 @@ def _draw_cell_label(
         Source stimulus index.
     channel_id:
         Channel id, or ``-1`` for aggregate.
+    reduce_label:
+        Aggregation name for aggregate cells (``channel_id < 0``); a
+        max-projection must never be captioned ``avg``.
     """
 
-    label = f"s{stimulus_index}/avg" if channel_id < 0 else f"s{stimulus_index}/c{channel_id}"
+    label = (
+        f"s{stimulus_index}/{reduce_label}"
+        if channel_id < 0
+        else f"s{stimulus_index}/c{channel_id}"
+    )
     bbox = draw.textbbox((0, 0), label)
     text_width = int(bbox[2] - bbox[0])
     text_height = int(bbox[3] - bbox[1])
@@ -837,6 +905,54 @@ def _draw_cell_label(
     rect = (x + 2, y + 2, x + text_width + 8, y + text_height + 6)
     draw.rectangle(rect, fill=_LABEL_FILL, outline=_LABEL_OUTLINE)
     draw.text((x + 5, y + 4), label, fill=_TEXT_COLOR)
+
+
+def _draw_constant_cell_label(
+    draw: ImageDraw.ImageDraw,
+    *,
+    map_tensor: torch.Tensor,
+    x: int,
+    y: int,
+    cell_size: int,
+) -> None:
+    """Label a constant cell with its value when the label fits.
+
+    Every cell is independently min-max normalized, so a constant map has no
+    scale of its own and would render byte-identically to an all-zero map.
+    The value label is the only thing distinguishing dead, saturated, and
+    genuinely zero channels.
+
+    Parameters
+    ----------
+    draw:
+        PIL drawing context.
+    map_tensor:
+        The cell's two-dimensional map tensor.
+    x:
+        Cell left coordinate.
+    y:
+        Cell top coordinate.
+    cell_size:
+        Cell side length.
+    """
+
+    finite = map_tensor[torch.isfinite(map_tensor)]
+    if finite.numel() == 0:
+        return
+    low = float(finite.min())
+    high = float(finite.max())
+    if high != low:
+        return
+    label = f"={low:.3g}"
+    bbox = draw.textbbox((0, 0), label)
+    text_width = int(bbox[2] - bbox[0])
+    text_height = int(bbox[3] - bbox[1])
+    if text_width + 8 > cell_size or 2 * (text_height + 6) > cell_size:
+        return
+    y0 = y + cell_size - text_height - 6
+    rect = (x + 2, y0, x + text_width + 8, y0 + text_height + 4)
+    draw.rectangle(rect, fill=_LABEL_FILL, outline=_LABEL_OUTLINE)
+    draw.text((x + 5, y0 + 1), label, fill=_TEXT_COLOR)
 
 
 def _draw_more_marker(draw: ImageDraw.ImageDraw, *, width: int, height: int, text: str) -> None:

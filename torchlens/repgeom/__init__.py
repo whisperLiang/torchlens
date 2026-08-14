@@ -17,6 +17,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from ..intervention.errors import MultiMatchWarning
+from ..utils._multipass_access import get_multipass_attr
 from ..utils.display import ensure_trace_visualizer_dir
 from ..viz.node_plots import render_heatmap, render_image_scatter, render_lineplot
 
@@ -1114,10 +1115,12 @@ def _scree_eigenvalues_for_node(trace: Any, node: Any) -> tuple[str | None, np.n
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
@@ -1218,10 +1221,12 @@ def _rdm_matrix_for_node(trace: Any, node: Any) -> tuple[str | None, np.ndarray 
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
@@ -1255,10 +1260,12 @@ def _mds_scatter_coords_for_node(trace: Any, node: Any) -> tuple[str | None, np.
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:

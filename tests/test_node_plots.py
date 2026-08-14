@@ -289,3 +289,29 @@ print('matplotlib' in sys.modules)
         text=True,
     )
     assert result.stdout.strip() == "False"
+
+
+def test_scatter_displacement_is_disclosed_in_image() -> None:
+    """Displaced thumbnails carry a quantified spread marker; exact ones do not.
+
+    For a scatter the position IS the datum: when overlap-avoidance moves
+    thumbnails away from their true coordinates, the image must say so.
+    """
+
+    from torchlens.viz.node_plots import _MORE_OUTLINE
+
+    thumbs = [Image.new("RGB", (24, 24), (200, 40, 40)) for _ in range(2)]
+    coincident = np.asarray([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+    displaced = render_image_scatter(coincident, images=thumbs, canvas_size=420)
+
+    # Bottom-LEFT corner region carries the spread indicator's outline.
+    corner = np.asarray(displaced)[-40:, :160]
+    outline = np.asarray(_MORE_OUTLINE, dtype=np.uint8)
+    assert (corner == outline).all(axis=-1).any(), "no spread disclosure marker drawn"
+
+    separated = np.asarray([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float64)
+    exact = render_image_scatter(separated, images=thumbs, canvas_size=420)
+    corner_exact = np.asarray(exact)[-40:, :160]
+    assert not (corner_exact == outline).all(axis=-1).any(), (
+        "spread marker must not appear when positions are exact"
+    )

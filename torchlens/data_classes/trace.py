@@ -3120,7 +3120,10 @@ class Trace(
             "_spec_revision",
             "_out_recipe_revision",
             "input_annotations",
-            "_annotation_blobs",
+            # ``_annotation_blobs`` is intentionally NOT preserved: those
+            # render-time payloads (feature maps / RDM / MDS / scree) are
+            # derived from the replaced run's activations and would render
+            # stale data over the new run's stimuli.
         )
         current_state = dict(state_items(self))
         preserved_trace_user_annotations = self._copy_user_annotations(
@@ -3350,6 +3353,10 @@ class Trace(
             "output_layers_by_pass",
             "output_layers_by_module_call",
             "_output_container_specs_by_raw_label",
+            # Fresh reruns carry no render-time annotation payloads, so this
+            # invalidates the stale feature-map/RDM/MDS/scree blobs derived
+            # from the replaced activations.
+            "_annotation_blobs",
         )
         for field_name in field_names:
             if hasattr(new_log, field_name):

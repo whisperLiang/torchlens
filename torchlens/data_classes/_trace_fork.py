@@ -310,6 +310,13 @@ def _fork_model_field(parent: Trace, field_name: str, value: Any, memo: dict[Any
         # default policy would share them); the fork rebuilds lazily.
         # ``build_fork`` pops these after restore.
         return None
+    if field_name == "_annotation_blobs":
+        # Render-time annotation payloads (feature maps / RDM / MDS / scree)
+        # are derived from the CAPTURED activations of one specific run. A
+        # fork is a mutation target: carrying them lets draw-time hooks
+        # render the parent's activations (and old-batch overlays) as if
+        # they were the fork's. Re-derive with the evolution helpers.
+        return None
     policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name)
     if policy is None:
         policy = _default_fork_policy(value)

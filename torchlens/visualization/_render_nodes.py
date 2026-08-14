@@ -626,11 +626,10 @@ def _build_layer_node(
         if raw_output_attrs is not None:
             node_args.update(raw_output_attrs)
     node_args["name"] = _render_node_label(node, vis_mode).replace(":", "pass")
-    if (
-        show_containers in {"collapsed", "auto"}
-        and collapsed_container_nodes is not None
-        and node_args["name"] in collapsed_container_nodes
-    ):
+    # Map membership is the ONE collapse predicate (the map builder owns the
+    # mode decision); the edge pass reroutes mapped leaves' edges to the
+    # summary box, so drawing a mapped leaf would orphan it.
+    if collapsed_container_nodes is not None and node_args["name"] in collapsed_container_nodes:
         return node_color
     hidden_buffer_addresses = _get_hidden_parent_buffer_addresses(self, node, show_buffer_layers)
     if hidden_buffer_addresses and not (node.is_input or node.is_output or node.is_buffer):
@@ -1040,16 +1039,25 @@ def _normalize_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Float tensor clipped or min-max normalized to ``[0, 1]``.
+        Float tensor clipped or min-max normalized to ``[0, 1]``. The scale
+        comes from FINITE values only (one NaN/Inf pixel must not black out
+        the whole tile); non-finite pixels render as 0. A constant or
+        all-non-finite image renders as uniform mid-gray, distinguishable
+        from a genuine black image.
     """
 
-    if float(tensor.min()) >= 0.0 and float(tensor.max()) <= 1.0:
-        return tensor.clamp(0.0, 1.0)
-    min_value = tensor.min()
-    max_value = tensor.max()
+    finite_mask = torch.isfinite(tensor)
+    if not bool(finite_mask.any()):
+        return torch.full_like(tensor, 0.5)
+    finite_values = tensor[finite_mask]
+    min_value = finite_values.min()
+    max_value = finite_values.max()
+    if float(min_value) >= 0.0 and float(max_value) <= 1.0:
+        return torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
     if bool(torch.isclose(max_value, min_value)):
-        return torch.zeros_like(tensor)
-    return ((tensor - min_value) / (max_value - min_value)).clamp(0.0, 1.0)
+        return torch.full_like(tensor, 0.5)
+    normalized = (tensor - min_value) / (max_value - min_value)
+    return torch.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
 
 def _render_raw_output(value: Any) -> dict[str, str] | None:

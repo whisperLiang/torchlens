@@ -263,7 +263,7 @@ def test_feature_map_node_spec_renders_one_image_and_overlay_differs_from_fallba
         alpha=0.55,
         cmap="magma",
         cell_size=72,
-        more_count=0,
+        cap_text=None,
     )
     fallback_image = _render_feature_map_grid(
         maps[:1],
@@ -274,7 +274,7 @@ def test_feature_map_node_spec_renders_one_image_and_overlay_differs_from_fallba
         alpha=0.55,
         cmap="magma",
         cell_size=72,
-        more_count=0,
+        cap_text=None,
     )
     assert ImageChops.difference(overlay_image, fallback_image).getbbox() is not None
     assert int(counts[2].item()) == 2
@@ -364,8 +364,209 @@ def test_render_grid_cap_marker_is_contained() -> None:
         alpha=0.55,
         cmap="magma",
         cell_size=32,
-        more_count=4,
+        cap_text="+4 more",
     )
 
     assert image.size == (68, 68)
     assert np.asarray(image).shape == (68, 68, 3)
+
+
+def test_stored_maps_preserve_nonfinite_values() -> None:
+    """Storage never launders NaN/Inf: users draw feature maps to FIND them."""
+
+    from torchlens.viz.feature_maps import _select_maps
+
+    activations = torch.arange(2 * 3 * 4 * 4, dtype=torch.float32).reshape(2, 3, 4, 4)
+    activations[0, 0, 1, 2] = float("nan")
+    activations[1, 1, 0, 0] = float("inf")
+
+    maps, _channel_ids, _mode = _select_maps(
+        activations,
+        stimulus_indices=[0, 1],
+        channels=[0, 1],
+        top_k=4,
+        reduce="mean",
+        max_channels=4,
+    )
+
+    assert torch.isnan(maps[0, 0, 1, 2])
+    assert torch.isinf(maps[1, 1, 0, 0])
+
+
+def test_evolution_preserves_nan_from_activations() -> None:
+    """End-to-end: a NaN activation survives into the stored annotation blob."""
+
+    poisoned = _input_batch(2)
+    poisoned[0, 0, 1, 1] = float("nan")
+    trace = tl.trace(_TinyConv().eval(), poisoned, save=tl.func("conv2d"))
+    feature_map_evolution(trace, save=tl.func("conv2d"), channels=[0])
+
+    stored = trace._annotation_blobs["featmap:layer:conv2d_1_1:maps"]
+    assert torch.isnan(stored[0, 0, 1, 1])
+
+
+def test_heatmap_cells_mark_nonfinite_and_keep_finite_scale() -> None:
+    """Non-finite pixels use the nan color; Inf never hijacks the color scale."""
+
+    from torchlens.viz.feature_maps import _map_to_heatmap_image
+    from torchlens.viz.node_plots import _apply_colormap
+
+    map_tensor = torch.tensor([[0.0, 1.0], [float("nan"), float("inf")]])
+    image = _map_to_heatmap_image(map_tensor, cmap="magma", cell_size=72)
+    pixels = np.asarray(image)
+
+    low_color = _apply_colormap(np.asarray([[0.0]], dtype=np.float64), "magma")[0, 0]
+    high_color = _apply_colormap(np.asarray([[1.0]], dtype=np.float64), "magma")[0, 0]
+    nan_color = np.asarray([235, 235, 235], dtype=np.uint8)
+
+    # Bilinear-resized corners keep the exact source-corner colors.
+    assert np.array_equal(pixels[0, 0], low_color)
+    # The finite maximum (1.0) still reaches the TOP of the colormap: if Inf
+    # entered the scale, 1.0 would normalize to ~0 and render as low_color.
+    assert np.array_equal(pixels[0, -1], high_color)
+    # NaN and Inf pixels are visibly marked, not laundered into real values.
+    assert np.array_equal(pixels[-1, 0], nan_color)
+    assert np.array_equal(pixels[-1, -1], nan_color)
+
+
+def test_node_spec_tooltip_discloses_per_cell_normalization(tmp_path: Path) -> None:
+    """Every grid cell is independently min-max scaled; the tooltip says so."""
+
+    trace = _conv_trace(n_stimuli=2)
+    feature_map_evolution(trace)
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "norm_disclosure"),
+    )
+
+    assert "cells independently normalized" in dot
+
+
+def test_constant_cells_are_labeled_and_distinct_from_zero() -> None:
+    """Constant maps carry their value; constant-5 never renders as all-zero."""
+
+    shape = (1, 1, 4, 4)
+    constant_five = torch.full(shape, 5.0)
+    all_zero = torch.zeros(shape)
+    kwargs: dict[str, Any] = {
+        "raw_images": None,
+        "overlay": False,
+        "alpha": 0.55,
+        "cmap": "magma",
+        "cell_size": 72,
+        "cap_text": None,
+    }
+    stimuli = torch.tensor([0])
+    channels = torch.tensor([[0]])
+
+    five_image = _render_feature_map_grid(constant_five, stimuli, channels, **kwargs)
+    zero_image = _render_feature_map_grid(all_zero, stimuli, channels, **kwargs)
+
+    assert ImageChops.difference(five_image, zero_image).getbbox() is not None
+
+
+def test_tooltip_reports_true_totals_not_capped_counts(tmp_path: Path) -> None:
+    """A 4-of-6 stimuli x 4-of-8 channel grid must say so, not '4 stimuli'."""
+
+    wide = nn.Sequential(nn.Conv2d(1, 8, kernel_size=1, bias=False)).eval()
+    with torch.no_grad():
+        wide[0].weight.copy_(torch.arange(1.0, 9.0).reshape(8, 1, 1, 1))
+    trace = tl.trace(wide, _input_batch(6), save=tl.func("conv2d"))
+    feature_map_evolution(trace, channels="top", top_k=8, max_stimuli=4, max_channels=4)
+
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "true_totals"),
+    )
+
+    assert "4 of 6 stimuli" in dot
+    assert "4 of 8 channels" in dot
+    # The capped count must never masquerade as the total.
+    assert "4 stimuli" not in dot
+
+
+def test_aggregate_labels_report_actual_reduction(tmp_path: Path) -> None:
+    """A max-projection is captioned max, never avg (reduce_id is honored)."""
+
+    trace = _conv_trace(n_stimuli=2)
+    feature_map_evolution(trace, reduce="max")
+    dot = trace.draw(
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "reduce_label"),
+    )
+
+    assert "aggregate (max)" in dot
+
+    maps = trace._annotation_blobs["featmap:layer:conv2d_1_1:maps"]
+    stimuli = trace._annotation_blobs["featmap:layer:conv2d_1_1:stimuli"]
+    channels = trace._annotation_blobs["featmap:layer:conv2d_1_1:channels"]
+    kwargs: dict[str, Any] = {
+        "raw_images": None,
+        "overlay": False,
+        "alpha": 0.55,
+        "cmap": "magma",
+        "cell_size": 72,
+        "cap_text": None,
+    }
+    as_max = _render_feature_map_grid(maps, stimuli, channels, reduce_label="max", **kwargs)
+    as_avg = _render_feature_map_grid(maps, stimuli, channels, reduce_label="avg", **kwargs)
+    assert ImageChops.difference(as_max, as_avg).getbbox() is not None
+
+
+class _RecurrentBlockModel(nn.Module):
+    """Stem conv (annotated) plus a block conv called twice (multi-pass)."""
+
+    def __init__(self) -> None:
+        """Initialize the stem and the reused block."""
+
+        super().__init__()
+        self.stem = nn.Conv2d(1, 3, kernel_size=1, bias=False)
+        self.block = nn.Conv2d(3, 3, kernel_size=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the stem, then the block twice (a recurrent layer)."""
+
+        h = self.stem(x)
+        h = self.block(h)
+        return self.block(h)
+
+
+def test_rolled_draw_with_annotations_survives_multipass_layers(tmp_path: Path) -> None:
+    """An UNRELATED multi-pass layer must never crash an annotated draw().
+
+    ``Layer.label`` raises the multi-pass ValueError tripwire on rolled
+    recurrent aggregates; ``getattr(node, "label", None)`` does not swallow
+    it. The annotation lookups must use the ``get_multipass_attr`` idiom.
+    """
+
+    trace = tl.trace(_RecurrentBlockModel().eval(), _input_batch(2), save=tl.in_module("stem"))
+    feature_map_evolution(trace, save=tl.in_module("stem"))
+
+    dot = trace.draw(
+        vis_mode="rolled",
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "rolled_annotated"),
+    )
+    assert "Feature maps for" in dot
+
+    from torchlens.repgeom import (
+        _mds_scatter_coords_for_node,
+        _rdm_matrix_for_node,
+        _scree_eigenvalues_for_node,
+    )
+
+    multipass_layer = trace["conv2d_2_2"]
+    trace._annotation_blobs = trace._annotation_blobs or {}
+    # Each repgeom lookup shares the same candidate-building block; a
+    # multi-pass node must skip the ambiguous op label, not raise.
+    assert _scree_eigenvalues_for_node(trace, multipass_layer) == (None, None)
+    assert _rdm_matrix_for_node(trace, multipass_layer) == (None, None)
+    assert _mds_scatter_coords_for_node(trace, multipass_layer) == (None, None)

@@ -215,3 +215,42 @@ def test_show_on_recurrent_aggregate_layer_requires_pass_selection() -> None:
     single_pass = log["linear_1_1:1"]
     fig = single_pass.show(method="heatmap")
     assert fig.axes[0].images
+
+
+def test_channel_grid_discloses_hidden_channels() -> None:
+    """A capped grid is visibly marked; it never renders as the full set."""
+
+    from PIL import ImageChops
+
+    base = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3)
+    capped_source = torch.cat([base, base + 1.0, base + 2.0], dim=0)  # 6 channels
+    visualizer = tl.viz.channel_grid(n=2, max_size=64)
+
+    capped = visualizer(capped_source)
+    complete = visualizer(base)
+
+    assert capped is not None and complete is not None
+    # Same two tiles, but the capped render must disclose the 4 hidden channels.
+    assert ImageChops.difference(capped, complete).getbbox() is not None
+
+
+def test_normalize_image_tensor_is_nonfinite_robust() -> None:
+    """One bad pixel or a constant image never blacks out the whole tile."""
+
+    from torchlens.visualization._render_nodes import _normalize_image_tensor
+
+    ramp = torch.linspace(0.0, 4.0, steps=12).reshape(1, 3, 4)
+    poisoned = ramp.clone()
+    poisoned[0, 0, 0] = float("nan")
+    poisoned[0, 2, 3] = float("inf")
+
+    normalized = _normalize_image_tensor(poisoned)
+    finite_source = torch.isfinite(poisoned)
+    # The finite pixels keep their contrast instead of collapsing to black.
+    assert float(normalized[finite_source].max()) > 0.5
+    assert float(normalized[finite_source].min()) == 0.0
+
+    constant = torch.full((1, 3, 4), 7.5)
+    uniform = _normalize_image_tensor(constant)
+    # A constant image renders as a uniform mid-gray, not pure black.
+    assert torch.allclose(uniform, torch.full_like(uniform, 0.5))

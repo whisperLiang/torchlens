@@ -31,6 +31,15 @@ class TupleOutputModel(nn.Module):
         return tuple(x + index for index in range(4))
 
 
+class WideTupleOutputModel(nn.Module):
+    """Return a 16-leaf homogeneous tuple (over the inline collapse cap)."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Run the model."""
+
+        return tuple(x + float(index) for index in range(16))
+
+
 class MixedShapeTupleModel(nn.Module):
     """Return a tuple whose leaf shapes differ."""
 
@@ -202,6 +211,48 @@ def test_show_containers_nodes_adds_midgraph_member_ties(tmp_path: Path) -> None
     assert "arrowhead=none" in source
     assert "constraint=false" in source
     assert "container_node_" in source
+
+
+def test_show_containers_nodes_homogeneous_collapse_is_coherent(tmp_path: Path) -> None:
+    """Node mode suppresses collapsed leaves instead of orphaning them.
+
+    Homogeneous-container collapse applies in ``"nodes"`` mode too
+    (``docs/containers.md``), and the edge pass already reroutes every leaf
+    edge to the summary box. The leaf-suppression gates must agree: drawing
+    the leaves anyway produces N orphaned nodes with zero inbound edges
+    beside a summary box that stole their edges.
+    """
+
+    import re
+
+    trace = tl.trace(
+        WideTupleOutputModel(),
+        torch.ones(2, 4),
+        capture_container_structure=True,
+    )
+    source = trace.draw(
+        show_containers="nodes",
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(tmp_path / "nodes_wide"),
+    )
+
+    declared = set(re.findall(r'^\s*"?([\w.:\-+@]+)"? \[', source, re.MULTILINE))
+    endpoints: set[str] = set()
+    for tail, head in re.findall(r'"?([\w.:+\-]+)"? -> "?([\w.:+\-]+)"?', source):
+        endpoints.add(tail)
+        endpoints.add(head)
+
+    # The collapse summary box is present and owns the leaf edges.
+    assert "container_final_output_0_tuple" in declared
+    assert "container_final_output_0_tuple" in endpoints
+    # The 16 collapsed output leaves are suppressed, exactly as in
+    # "collapsed"/"auto" mode -- never drawn as edgeless orphans.
+    leaf_declarations = {name for name in declared if name.startswith("output_")}
+    assert leaf_declarations == set()
+    # No declared node is an orphan (graphviz "graph"/"node" defaults aside).
+    orphan_declarations = declared - endpoints - {"graph", "node"}
+    assert orphan_declarations == set()
 
 
 def test_show_containers_nodes_draw_then_save_round_trips(tmp_path: Path) -> None:
