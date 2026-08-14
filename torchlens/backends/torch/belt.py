@@ -233,12 +233,38 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
     return report, member_map
 
 
+def _member_map_is_current() -> bool:
+    """True while every cached wrapper is still the live one for its original.
+
+    The cached derivation binds wrapper OBJECT identities. A fresh full
+    decoration pass (first-wrap retry after a partial failure) mints a new
+    wrapper generation, at which point sweeping the cached objects would
+    patch dead wrappers into user modules.
+    """
+
+    if _member_map is None:
+        return False
+    return all(
+        _state._orig_to_decorated.get(original_id) is wrapper
+        for original_id, wrapper in _member_map.items()
+    )
+
+
 def belt_report() -> BeltReport | None:
-    """Return the derivation report, deriving on first use after wrapping."""
+    """Return the derivation report, deriving on first use after wrapping.
+
+    The derivation is re-validated against the live wrapper registries: if
+    the wrapper generation changed underneath the cache, mutations made with
+    the dead generation are reversed and the belt re-derives.
+    """
 
     global _report, _member_map
     if not _state._is_decorated:
         return _report
+    if _report is not None and not _member_map_is_current():
+        restore_belt_references()
+        _report = None
+        _member_map = None
     if _report is None:
         _report, _member_map = _derive()
     return _report

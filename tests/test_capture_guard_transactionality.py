@@ -37,6 +37,15 @@ from torchlens.utils.introspection import nested_getattr
 pytestmark = pytest.mark.smoke
 
 
+# Strong refs to superseded wrapper generations. Wrapper objects minted before a
+# forced regeneration stay reachable for the whole session (other test modules'
+# import-time ``getattr`` snapshots, torch's overridable-registry lru_cache), and
+# every consumer that meets one translates it through the append-only
+# ``_state._decorated_to_orig`` ledger. The anchor keeps those objects alive so
+# their id-keyed ledger entries can never be recycled onto new objects.
+_SUPERSEDED_GENERATION_ANCHORS: list[dict[int, Any]] = []
+
+
 def _undecorated_targets() -> list[str]:
     """Return inventory targets that are resolvable but NOT currently decorated."""
 
@@ -69,10 +78,19 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
     # rest of the session (the 2026-08-14 499-failure smoke). The retry wrap
     # repopulates these same objects, so no restore is needed; the module flags
     # end True, matching the live wrapped reality.
+    #
+    # Clearing ``_orig_to_decorated`` is what forces a genuinely FRESH wrapper
+    # generation (decoration reuses existing wrappers keyed on it), so anchor
+    # the superseded generation's strong refs first. ``_decorated_to_orig`` is
+    # the session's append-only unwrap LEDGER and must NEVER be cleared: other
+    # test modules snapshot wrapped callables at import time (and torch's
+    # overridable-registry lru_cache freezes them), and wiping the ledger
+    # orphans every such object for the rest of the session — the second
+    # 2026-08-14 smoke poison (r47 dunder gate denying all forward dunders).
+    _SUPERSEDED_GENERATION_ANCHORS.append(dict(_state._orig_to_decorated))
     wrappers_module._FULL_DECORATION_COMPLETED = False
     _state._is_decorated = False
     _state._orig_to_decorated.clear()
-    _state._decorated_to_orig.clear()
     _state._arg_names.clear()
 
     original_decorate = wrappers_module._decorate_torch_func_pairs
