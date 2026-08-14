@@ -516,8 +516,12 @@ _GUARDED_CALLEES = frozenset(
     }
 )
 # 6 torch sites (raw_hook_intervention's wrapped_hook site retired by
-# 8858793e) + 6 preview promotion sites (tf x2, mlx, paddle, jax, tinygrad).
-_EXPECTED_SITE_COUNT = 12
+# 8858793e) + 2 preview rebind sites (jax, tinygrad) + the ONE shared
+# preview_output_parent_mark site in backends/_finalize.py (the tf x2 / mlx /
+# paddle per-backend mark copies were hoisted there by R46-1, 5290caa7) + the
+# tf module_exit_intervention site fire in backends/tf/interventions.py
+# (typed amendment lane, ef08d2a9).
+_EXPECTED_SITE_COUNT = 10
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -540,10 +544,12 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
         "backends/torch/backend.py",
         "postprocess/graph_traversal.py",
         "backends/tf/backend.py",
+        "backends/tf/interventions.py",
         "backends/mlx/backend.py",
         "backends/paddle/backend.py",
         "backends/jax/backend.py",
         "backends/tinygrad/backend.py",
+        "backends/_finalize.py",
     )
     sites: list[tuple[str, int]] = []
     for relative in relative_files:

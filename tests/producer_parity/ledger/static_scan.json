@@ -1620,7 +1620,7 @@
   "field": "modules",
   "file": "torchlens/backends/torch/belt.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -4780,7 +4780,7 @@
   "field": "internal_source_ancestors",
   "file": "torchlens/postprocess/control_flow.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 7,
   "via_getattr": false
  },
  {
@@ -4812,7 +4812,7 @@
   "field": "parent_arg_positions",
   "file": "torchlens/postprocess/control_flow.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 5,
   "via_getattr": false
  },
  {
@@ -4836,7 +4836,7 @@
   "field": "root_ancestors",
   "file": "torchlens/postprocess/control_flow.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 9,
   "via_getattr": false
  },
  {
@@ -5220,7 +5220,7 @@
   "field": "kind",
   "file": "torchlens/receptive_field/_query.py",
   "has_default": false,
-  "sites": 11,
+  "sites": 10,
   "via_getattr": false
  },
  {
@@ -5308,7 +5308,7 @@
   "field": "kind",
   "file": "torchlens/receptive_field/_validation.py",
   "has_default": false,
-  "sites": 16,
+  "sites": 15,
   "via_getattr": false
  },
  {
@@ -6572,7 +6572,7 @@
   "field": "modules",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 13,
+  "sites": 15,
   "via_getattr": false
  },
  {
@@ -6596,7 +6596,7 @@
   "field": "parents",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {
