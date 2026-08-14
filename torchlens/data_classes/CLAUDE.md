@@ -149,3 +149,13 @@ CYCLIC collector, not by refcounting alone: measured on a live capture, `del tra
 `gc` disabled leaves the object alive until `gc.collect()` runs, with or without a prior
 `Trace.cleanup()`. Still call `Trace.cleanup()` when retaining many logs or after
 visualization-only workflows.
+
+Retained-Op payload lifetime (fix/fork F4): an `Op` kept past its Trace's death no longer
+pins every captured activation. Each owning `TraceCore` (the capture's core plus one per
+fork core sharing the sealed base) registers a `weakref.finalize` on the op store; when
+the LAST owner is garbage-collected the store evicts top-level tensor cells (and the
+snapshot surfaces of surviving fork `OpStoreView`s), so payload reads on the retained
+facade return the payload-absent spelling while metadata stays readable. Keep the Trace
+alive (or clone the tensor) to keep payloads. Fork views hold the fork's record
+translator weakly (anchored on the fork core) so a retained fork Op cannot root the
+whole fork graph.
