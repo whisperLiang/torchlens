@@ -659,7 +659,35 @@ def test_trace_pickle_strips_process_local_release_watchers() -> None:
     assert len(accountant._payload_watchers) == n_watchers
     restored_accountant = restored.__dict__["_save_budget_accountant"]
     assert restored_accountant._payload_watchers == {}
+    assert restored_accountant._self_ref is None
     assert restored_accountant.ledgers.keys() == accountant.ledgers.keys()
     for key, ledger in accountant.ledgers.items():
         assert restored_accountant.ledgers[key].committed_bytes == ledger.committed_bytes
+    trace.cleanup()
+
+
+def test_release_watchers_share_one_budget_self_ref() -> None:
+    """Every armed release watcher rides ONE shared budget self-ref (R32).
+
+    The closure-based watchers this pins against minted a fresh
+    ``weakref.ref(budget)`` plus a closure (function object + cells) per
+    retained payload — ~7 marginal objects per op on the default capture
+    path, a measured regression on the LOCKED R32 obj/op metric. The slim
+    watcher is a single ``weakref.ref`` subclass carrying its charge
+    coordinates in slots; the budget reference is the accountant's one
+    hoisted ``_self_ref``.
+    """
+
+    from torchlens._save_budget import _PayloadWatcher
+
+    trace = tl.trace(_model(), _input())
+    accountant = trace.__dict__["_save_budget_accountant"]
+    assert accountant is not None
+    watchers = list(accountant._payload_watchers.values())
+    assert watchers, "fixture must have live payload watchers"
+    assert accountant._self_ref is not None
+    assert accountant._self_ref() is accountant
+    for watcher in watchers:
+        assert isinstance(watcher, _PayloadWatcher)
+        assert watcher.budget_ref is accountant._self_ref
     trace.cleanup()

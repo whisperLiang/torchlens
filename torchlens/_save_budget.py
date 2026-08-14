@@ -305,6 +305,63 @@ class _BudgetReservation:
     site: str = "primary"
 
 
+def _credit_payload_release(ref: _PayloadWatcher) -> None:
+    """Credit one payload release back to its budget when the payload dies.
+
+    Parameters
+    ----------
+    ref:
+        Fired release watcher carrying its charge coordinates.
+    """
+
+    budget = ref.budget_ref()
+    if budget is None:
+        return
+    budget._payload_watchers.pop(id(ref), None)
+    budget._credit_release(ref.ledger_key, ref.identity)
+
+
+class _PayloadWatcher(weakref.ref):
+    """Release watcher on one retained payload, carrying its charge coordinates.
+
+    A ``weakref.ref`` subclass so one allocation covers the watcher AND its
+    coordinates: the closure-based watcher this replaces cost a function
+    object, three cells, and a fresh budget weakref per retained payload
+    (~7 marginal objects/op on the default capture path — the R32 regression).
+    The callback is the module-level :func:`_credit_payload_release`; the
+    budget is held weakly through the accountant's one shared self-ref so the
+    accountant never keeps itself alive through its own watchers.
+    """
+
+    __slots__ = ("budget_ref", "ledger_key", "identity")
+
+    budget_ref: weakref.ref
+    ledger_key: str
+    identity: tuple[Any, ...]
+
+    def __new__(
+        cls,
+        payload: torch.Tensor,
+        budget_ref: weakref.ref,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> _PayloadWatcher:
+        self = super().__new__(cls, payload, _credit_payload_release)
+        self.budget_ref = budget_ref
+        self.ledger_key = ledger_key
+        self.identity = identity
+        return self
+
+    def __init__(
+        self,
+        payload: torch.Tensor,
+        budget_ref: weakref.ref,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> None:
+        super().__init__(payload, _credit_payload_release)
+
+
 @dataclass
 class SaveBudget:
     """Per-device running accountant for retained activation bytes.
@@ -329,6 +386,9 @@ class SaveBudget:
     _payload_watchers: dict[int, weakref.ref] = field(
         default_factory=dict, repr=False, compare=False
     )
+    # One shared weakref on self, minted lazily on the first watched payload;
+    # every _PayloadWatcher holds this instead of a fresh per-payload ref.
+    _self_ref: weakref.ref | None = field(default=None, repr=False, compare=False)
 
     def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with the process-local release watchers stripped.
@@ -350,6 +410,7 @@ class SaveBudget:
 
         state = self.__dict__.copy()
         state["_payload_watchers"] = {}
+        state["_self_ref"] = None
         return state
 
     @classmethod
@@ -546,17 +607,11 @@ class SaveBudget:
         keeps the historical permanent charge (conservative: never a zero-commit).
         """
 
-        budget_ref = weakref.ref(self)
-
-        def _on_release(ref: weakref.ref) -> None:
-            budget = budget_ref()
-            if budget is None:
-                return
-            budget._payload_watchers.pop(id(ref), None)
-            budget._credit_release(ledger_key, identity)
-
+        budget_ref = self._self_ref
+        if budget_ref is None:
+            budget_ref = self._self_ref = weakref.ref(self)
         try:
-            watcher = weakref.ref(payload, _on_release)
+            watcher = _PayloadWatcher(payload, budget_ref, ledger_key, identity)
         except TypeError:
             return
         self._payload_watchers[id(watcher)] = watcher
