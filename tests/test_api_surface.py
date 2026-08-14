@@ -10,6 +10,7 @@ import torchlens
 TARGET_ALL = [
     "trace",
     "release_model",
+    "clear_capture_cache",
     "export",
     "hash",
     "assert_unchanged",
@@ -162,6 +163,8 @@ def test_all_matches_frozen_96_name_surface() -> None:
     `grad_fn_label` (its own selector kind after the label-kind collision fix) = 94.
     Merge-ranks rung C1 adds `merge_ranks` and `merge_report` (spec'd
     top-level entry points; machinery lives in `torchlens.merged`) = 96.
+    The grind R39 cache remedy exports `clear_capture_cache` (the agreed
+    user-facing half of the capture-cache bounds fix) = 97.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

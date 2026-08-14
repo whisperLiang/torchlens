@@ -78,6 +78,13 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 : A `storage=tl.to_disk(...)` capture that writes selected payloads while capture proceeds. It is
   distinct from saving a completed in-memory Trace.
 
+**Capture cache**
+: The opt-in `cache=True` content-hash store of finished captures. A hit requires the model's
+  tensor content (including device and `requires_grad`), training flags, module tree and
+  `forward` code, plain instance attributes, user-registered module hooks, inputs, and capture
+  configuration to all match. Entries are HMAC-authenticated, bounded by entry count and bytes,
+  and `tl.clear_capture_cache()` empties the cache while preserving its secret.
+
 ## Replay and intervention
 
 **Intervention**

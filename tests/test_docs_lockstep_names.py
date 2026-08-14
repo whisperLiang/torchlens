@@ -12,7 +12,7 @@ import torchlens as tl
 
 pytestmark = pytest.mark.smoke
 
-PUBLIC_SURFACE_SIZE = 96
+PUBLIC_SURFACE_SIZE = 97
 PUBLIC_SURFACE_DOCS = (
     "CLAUDE.md",
     "torchlens/AGENTS.md",

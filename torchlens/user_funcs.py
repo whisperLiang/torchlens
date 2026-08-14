@@ -465,7 +465,8 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
-        "capture runs normally and the entry is rewritten.",
+        "capture runs normally and the entry is rewritten. "
+        "torchlens.clear_capture_cache() empties the cache.",
         UserWarning,
         stacklevel=2,
     )

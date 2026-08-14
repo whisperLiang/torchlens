@@ -379,3 +379,20 @@ def test_over_ceiling_entry_is_refused_at_store_not_wiped_at_evict(
     assert surviving == small_entries, (
         "refusing the oversized store must leave every valid entry in place"
     )
+
+
+def test_clear_capture_cache_is_public(tmp_path: Path) -> None:
+    """The round-1-agreed remedy tl.clear_capture_cache() is reachable (r2 F39-3).
+
+    user_funcs.clear_capture_cache shipped unexported: not in ``__all__`` and
+    absent from the top-level namespace, so a user hitting the entry/byte cap
+    or an oversized-entry refusal had no supported way to clear the cache.
+    """
+
+    assert "clear_capture_cache" in tl.__all__
+    x = torch.ones(1, 1)
+    model = nn.Linear(1, 1, bias=False)
+    tl.trace(model, x, cache=True, cache_dir=tmp_path)
+    assert len(list((tmp_path / "capture").glob("*.pkl"))) == 1
+    assert tl.clear_capture_cache(tmp_path) == 1
+    assert list((tmp_path / "capture").glob("*.pkl")) == []

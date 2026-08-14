@@ -892,7 +892,14 @@ class CaptureOptions:
     name:
         Optional user-facing name for the returned log.
     cache:
-        Whether to use the content-hash capture cache.
+        Whether to use the content-hash capture cache. The key covers model
+        tensor content (including per-tensor device and ``requires_grad``),
+        training flags, non-persistent buffers, module tree and ``forward``
+        code, plain instance attributes (bounded digest), user-registered
+        module hooks, inputs, and the capture configuration; closure cells,
+        globals referenced by ``forward``, and the interior state of opaque
+        attribute objects remain outside the key (documented boundary).
+        ``torchlens.clear_capture_cache()`` empties the cache.
     cache_dir:
         Optional directory for content-hash cache entries.
     module_filter:
