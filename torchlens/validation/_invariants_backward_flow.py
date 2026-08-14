@@ -507,13 +507,22 @@ def _is_func_call_id_exempt(layer: Op) -> bool:
         and op_has_genuine_replacement_evidence(layer)
     ):
         return True
+    # The bookkeeping func_name sentinels are only legitimate when the
+    # corresponding structural FLAG corroborates them -- and the flagged
+    # cases (is_input/is_output/is_buffer) already returned True above, so a
+    # bare "input"/"output"/"buffer" string reaching this point is per-op
+    # metadata corruption, not an exemption. The one remaining legitimate
+    # spelling is the functionless internal source ("none" + the
+    # is_internal_source flag + no callable func, exactly the conjunction the
+    # payloads invariant requires). A bare string set here let a traced relu
+    # with a nulled func_call_id and a rewritten func_name pass the whole
+    # suite (deephunt M2).
     func_name = str(getattr(layer, "func_name", "")).lower()
-    return func_name in {
-        "input",
-        "output",
-        "buffer",
-        "none",
-    }
+    return (
+        func_name == "none"
+        and bool(getattr(layer, "is_internal_source", False))
+        and getattr(layer, "func", None) is None
+    )
 
 
 def _plain_func_call_group_signature(layer: Op) -> tuple[object, ...]:

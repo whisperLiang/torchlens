@@ -1266,6 +1266,36 @@ def test_to_tensor_template_exemption_refuses_perturbed_data_source() -> None:
     ).exempt
 
 
+def test_func_name_none_string_cannot_launder_missing_func_call_id() -> None:
+    """The literal ``"none"`` func_name must not exempt a computational op.
+
+    ``_is_func_call_id_exempt`` ended with a bare string set
+    (``{"input","output","buffer","none"}``) with no cross-check against the
+    ``is_input``/``is_output``/``is_buffer``/``is_internal_source`` flags, so
+    a traced relu whose ``func_call_id`` was nulled and ``func_name`` rewritten
+    to ``"none"`` (func still callable, no special flags) passed the full
+    invariant suite (deephunt finding M2). The sentinel is only legitimate on
+    flagged bookkeeping ops (outputs) and functionless internal sources.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4), layers_to_save="all", save_arg_values=True)
+    check_metadata_invariants(trace)
+
+    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+    object.__setattr__(relu_op, "func_call_id", None)
+    object.__setattr__(relu_op, "func_name", "none")
+    assert callable(relu_op.func)
+    assert not relu_op.is_internal_source
+
+    with pytest.raises(MetadataInvariantError):
+        check_func_call_id_invariant(trace)
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace)
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 
