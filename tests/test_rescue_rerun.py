@@ -581,3 +581,28 @@ def test_journal_visible_buffer_writes_still_refuse_before_the_rerun(raw_cos: An
     assert trace.rescue_rerun is not None
     assert trace.rescue_rerun["skipped_reason"] == "buffer_writes_double_forward"
     assert trace.rescue_rerun["forward_runs"] == 1
+
+
+def test_minted_source_nodes_do_not_refuse_a_perfect_rescue() -> None:
+    """R16-1 follow-up: bookkeeping ``none`` nodes are outside the oracle.
+
+    When the primary minted an ``internalsource`` orphan (func_name ``none``)
+    for the escaped op's output and the rescue captured the real op instead,
+    the rescued trace read one ``none`` short -- ``lost_ops=('none',)`` -- and
+    the two-sided oracle refused a PERFECT rescue, leaving the user the broken
+    primary. Functionless source nodes must not count as losses.
+    """
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    primary = _stub_trace(["none", "linear", "relu"], signal=True)
+    rescued = _stub_trace(["cos", "linear", "relu"])
+    traces = iter([primary, rescued])
+
+    result = capture_with_rescue(lambda: next(traces))
+
+    assert result is rescued
+    assert result.capture_verification_reason == "mode_rescue_rerun"
+    assert result.rescue_rerun["recovered"] is True
+    assert result.rescue_rerun["recovered_ops"] == ("cos",)
+    assert result.rescue_rerun["lost_ops"] == ()

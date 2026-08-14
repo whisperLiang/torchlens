@@ -231,12 +231,20 @@ def _op_name_counts(trace: Trace) -> Counter[str]:
     (``__add__`` -> ``add``, the pinned stage-0 delta), so spellings are
     canonicalized by stripping underscores before diffing — otherwise every
     operator-using model would read as a false "recovery".
+
+    Bookkeeping SOURCE nodes (``func_name == "none"``: minted
+    ``internalsource`` adoptions, other functionless placeholders) are
+    excluded: they represent the ABSENCE of a captured function. A perfect
+    rescue replaces the primary's minted orphan-source with the real op, so
+    counting them made the rescued trace read one ``none`` short —
+    ``lost_ops=('none',)`` — and the two-sided oracle refused the recovery
+    (the R16-1 false negative).
     """
 
     return Counter(
         name.strip("_")
         for op in getattr(trace, "ops", ())
-        if (name := getattr(op, "func_name", None))
+        if (name := getattr(op, "func_name", None)) and name != "none"
     )
 
 
