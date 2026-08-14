@@ -212,7 +212,7 @@ fields.
 |---|---|
 | `capability` | `sparse_recorded_taken_path_v2` |
 | `backend` | string; only `torch` executes in rung 1 |
-| `call_recipe` | `non_tensor_args_tensor_slots_and_context_v2` |
+| `call_recipe` | `non_tensor_args_tensor_slots_context_and_obligations_v3` |
 | `callable_ref_schema` | integer `1` |
 | `state_binding` | `module_path_role_v1` |
 | `input_binding` | `model_site_io_role_v1` |
@@ -2797,8 +2797,11 @@ Glossary of v2 vocabulary introduced by this amendment (canonical here per the l
 
 - `sparse_recorded_taken_path_v2` -- the required capability whose context records are explicit;
   absence of a context record only ever means legacy v1 (analysis-only).
-- `non_tensor_args_tensor_slots_and_context_v2` -- the call recipe carrying the REQUIRED
-  `CallExecutionContext` per call.
+- `non_tensor_args_tensor_slots_and_context_v2` -- the call recipe introduced by this
+  amendment, carrying the REQUIRED `CallExecutionContext` per call. SUPERSEDED: the shipped
+  recipe is `non_tensor_args_tensor_slots_context_and_obligations_v3`
+  (`torchlens/runnable.py::RUNNABLE_CALL_RECIPE_VERSION`), which additionally stamps the r71
+  typed witness obligations.
 - `CallExecutionContext` / `AutocastDeviceContext` -- per-call autocast (explicit disabled) and
   grad/inference mode, entered tightly around each resolved call at replay.
 - `AmbientExecutionContext` -- the capture-scoped backend context record (defaults, matmul
