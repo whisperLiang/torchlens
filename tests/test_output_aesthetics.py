@@ -586,6 +586,7 @@ def test_generate_aesthetic_report():
         model = model_cls()
         report.write(_capture_model_outputs(name, model, x, description))
 
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(REPORT_PATH, "w") as f:
         f.write(report.getvalue())
 
@@ -1334,6 +1335,7 @@ def test_generate_pdf_report():
     # Build LaTeX source
     tex_content = _build_latex_report()
 
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(TEX_PATH, "w") as f:
         f.write(tex_content)
 
