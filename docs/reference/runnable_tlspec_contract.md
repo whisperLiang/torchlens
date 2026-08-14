@@ -1551,6 +1551,18 @@ post-run tripwire asserts CUDA initialization did not flip during a seeded run w
 excluded it. Generators this executor does not seed (MPS/XPU/other accelerators) are never
 touched by a seeded run, so no state can leak into them.
 
+Cost disclosure: the all-device fork set is a deliberate isolation-totality choice, and it is not
+free on multi-GPU hosts. When CUDA is already initialized, forking a device's generator can force
+primary-context initialization on GPUs the artifact never touches (on the order of 300-600 MB of
+device memory per visible GPU, driver/toolkit dependent), and every seeded run pays a per-device
+generator fork/restore on those unused GPUs. Pin the process to the devices you intend
+(`CUDA_VISIBLE_DEVICES`) to bound the cost. Narrowing the fork set (for example to
+descriptor-named plus current devices) is NOT a permitted maintenance edit: recipe-recorded device
+arguments such as `device="cuda"` resolve at replay time rather than being descriptor slot
+devices, so any narrowing is a later explicit design change that must carry its own sufficiency
+proof and renegotiate the pinned exact-semantics test
+(`tests/test_tlspec_runnable_r35_exact_semantics.py`) in the same change.
+
 ## 11. Honesty, divergence, poison, and exactness
 
 All checks occur inside the transaction before exposure. `verified` requires every contract and
