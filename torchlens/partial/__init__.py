@@ -10,6 +10,7 @@ from html import escape
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+from ..capture.outcome import safe_exception_str
 from ..data_classes._nonfinite import first_nonfinite_layer
 from ..data_classes.field_policy import FieldPolicy
 from ..errors import TorchLensError
@@ -249,7 +250,7 @@ class PartialTrace:
         """
 
         summary = escape(self.first_nonfinite())
-        error = escape(str(self.original_exception))
+        error = escape(safe_exception_str(self.original_exception))
         return (
             "<div><b>PartialTrace</b>"
             f"<div>raw_layers={len(self.raw_layers)}</div>"
@@ -471,7 +472,7 @@ def _failure_label(exception: BaseException) -> str:
         Failure label including the exception type and message.
     """
 
-    return f"{type(exception).__name__}: {exception}"
+    return f"{type(exception).__name__}: {safe_exception_str(exception)}"
 
 
 __all__ = ["PartialTrace", "from_failed_capture"]

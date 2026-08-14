@@ -306,6 +306,32 @@ _REFUSAL_HINTS: dict[str, str] = {
 }
 
 
+def safe_exception_str(exc: BaseException) -> str:
+    """Return ``str(exc)`` without letting a hostile ``__str__`` escape.
+
+    Exception stringification runs arbitrary user code: settlement sits in
+    ``finally`` blocks that promise a settled product and byte-identical
+    exception identity/chaining, so a ``__str__`` that itself raises must
+    degrade to the type name -- never break guaranteed settlement or mask the
+    original exception with the secondary stringification failure.
+    """
+
+    try:
+        text = str(exc)
+    except BaseException:  # noqa: BLE001 -- hostile __str__; disclosed fallback below
+        return f"<unprintable {type(exc).__name__}: __str__ raised>"
+    return text or type(exc).__name__
+
+
+def safe_exception_repr(exc: BaseException) -> str:
+    """Return ``repr(exc)`` with the same hostile-``__repr__`` guarantee."""
+
+    try:
+        return repr(exc)
+    except BaseException:  # noqa: BLE001 -- hostile __repr__; disclosed fallback below
+        return f"<unrepresentable {type(exc).__name__}: __repr__ raised>"
+
+
 def outcome_for(trace: object) -> CaptureOutcome | None:
     """Return the settled outcome sidecar attached to ``trace``, if any."""
 
@@ -985,7 +1011,7 @@ def settle_failed(
             status=CaptureStatus.FAILED,
             phase=current_capture_phase(trace),
             origin=origin,
-            reason=str(exc) or type(exc).__name__,
+            reason=safe_exception_str(exc),
             error_type=type(exc).__name__,
             n_ops_committed=n_ops_committed,
             inference_only=bool(getattr(trace, "inference_only", False)),
@@ -1174,6 +1200,8 @@ __all__ = [
     "parse_outcome_payload",
     "require_capture_capability",
     "resolve_loaded_outcome",
+    "safe_exception_repr",
+    "safe_exception_str",
     "set_capture_phase",
     "settle_completed",
     "settle_failed",

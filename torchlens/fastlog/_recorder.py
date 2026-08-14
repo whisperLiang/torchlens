@@ -17,6 +17,7 @@ from .._deprecations import MISSING, MissingType
 from .._errors import CaptureContextError, KeywordConflictError
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
 from ..capture.config import InternalCaptureConfig
+from ..capture.outcome import safe_exception_repr, safe_exception_str
 from ..capture.predicates import validate_followed_by_capability
 from ..capture.projections import (
     RecordingState,
@@ -365,7 +366,7 @@ class Recorder:
                     stamped = CaptureOutcome(status=CaptureStatus.COMPLETE)
                 stamp_recording_outcome(recording, stamped)
         else:
-            self._state.abort_storage(str(exc_value))
+            self._state.abort_storage(safe_exception_str(exc_value))
         self._entered = False
         self._exited = True
         if exc_value is None:
@@ -479,7 +480,7 @@ class Recorder:
                 self._captured_run_cores.append(captured_run_core)
             forward_disposition = stop_directive_for_trace(trace).forward_disposition(exc)
             if forward_disposition == "raise":
-                self._state.abort_storage(str(exc))
+                self._state.abort_storage(safe_exception_str(exc))
                 raise
             partial_build_failed = False
             try:
@@ -593,7 +594,7 @@ class Recorder:
 
         if self._state is None or self._capture_events is None:
             raise RecorderStateError("Recorder.log() requires an active with-block")
-        self._state.abort_storage(str(exc))
+        self._state.abort_storage(safe_exception_str(exc))
         failed_events = getattr(trace, "_failed_fastlog_capture_events", None)
         if failed_events is None:
             raise RecorderStateError(
@@ -650,7 +651,7 @@ class Recorder:
         ]
         object.__setattr__(recording, "status", "partial_error")
         object.__setattr__(recording, "failed", True)
-        object.__setattr__(recording, "error_repr", repr(exc))
+        object.__setattr__(recording, "error_repr", safe_exception_repr(exc))
         object.__setattr__(
             recording,
             "error_traceback",
@@ -709,7 +710,7 @@ class Recorder:
             stamped = CaptureOutcome(
                 status=CaptureStatus.FAILED,
                 origin=classify_failure_origin(exc),
-                reason=str(exc) or type(exc).__name__,
+                reason=safe_exception_str(exc),
                 error_type=type(exc).__name__,
                 n_ops_committed=recording.n_ops_completed,
             )

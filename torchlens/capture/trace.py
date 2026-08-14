@@ -53,6 +53,7 @@ from .outcome import (
     CapturePhase,
     count_committed_ops,
     demote_outcome,
+    safe_exception_str,
     set_capture_phase,
     settle_completed,
     settle_failed,
@@ -1912,7 +1913,8 @@ def run_and_log_inputs_through_model(
                 # outright. Attach the cleanup failure instead of raising it.
                 note = (
                     "TorchLens model-session cleanup also failed while handling "
-                    f"this interrupt: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                    f"this interrupt: {type(cleanup_exc).__name__}: "
+                    f"{safe_exception_str(cleanup_exc)}"
                 )
                 add_note = getattr(interrupt_exc, "add_note", None)
                 if add_note is not None:
@@ -1959,7 +1961,10 @@ def run_and_log_inputs_through_model(
             demote_outcome(
                 self,
                 capture_session,
-                note=f"teardown failed: {type(teardown_exc).__name__}: {teardown_exc}",
+                note=(
+                    f"teardown failed: {type(teardown_exc).__name__}: "
+                    f"{safe_exception_str(teardown_exc)}"
+                ),
             )
             raise
         finally:
