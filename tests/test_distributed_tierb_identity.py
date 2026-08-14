@@ -46,7 +46,15 @@ def single_rank_mesh():
         key: os.environ.get(key) for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
     }
     os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29581"
+    # OS-assigned ephemeral port: a hardcoded port (29581 historically)
+    # collides across parallel lanes/worktrees on one box, and the collision
+    # lands in the except-skip below -- distributed coverage silently degrades
+    # to SKIP instead of failing loudly (T14-3).
+    import socket
+
+    with socket.socket() as _probe:
+        _probe.bind(("127.0.0.1", 0))
+        os.environ["MASTER_PORT"] = str(_probe.getsockname()[1])
     try:
         dist.init_process_group(backend="gloo", rank=0, world_size=1)
     except Exception as error:  # pragma: no cover - environment dependent
