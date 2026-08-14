@@ -760,24 +760,6 @@ def _container_structure_capability(op: Op, role: Role) -> str:
     return _trace_container_capability(getattr(op, "source_trace", None), role)
 
 
-def _input_container_structure_capability(op: Op) -> str:
-    """Return the owning backend's declared input-container capability.
-
-    Parameters
-    ----------
-    op:
-        Operation whose source trace may declare a backend.
-
-    Returns
-    -------
-    str
-        ``"none"``, ``"paths_only"``, ``"full_spec"``, or ``"full_spec"``
-        when the backend cannot be resolved for legacy in-memory traces.
-    """
-
-    return _container_structure_capability(op, Role.CALL_INPUT)
-
-
 def _output_container_structure_capability(op: Op) -> str:
     """Return the owning backend's declared output-container capability.
 

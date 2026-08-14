@@ -57,17 +57,10 @@ from ._torch_symbols import torch_attr
 __all__ = [
     "AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED",
     "HAS_ACCUMULATE_GRAD_CLASS",
-    "HAS_AUTOCAST_DEVICE_TYPE_ARG",
     "HAS_C10D_ABORT_PG",
     "HAS_C10D_GROUP_REGISTRY",
     "HAS_C10D_GROUP_SEQ",
-    "HAS_CUDA_MATMUL_TF32",
-    "HAS_CUDNN_FLAGS",
-    "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
     "HAS_DYNAMO_EXPLAIN",
-    "HAS_FILL_UNINITIALIZED_MEMORY",
-    "HAS_FLOAT32_MATMUL_PRECISION",
-    "HAS_SDP_TOGGLES",
     "apply_ambient_execution_context",
     "read_fill_uninitialized_memory",
     "snapshot_ambient_execution_context",
@@ -558,7 +551,6 @@ def _probe_device_type_arg_supported() -> bool:
 
 
 AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED: bool = _probe_device_type_arg_supported()
-HAS_AUTOCAST_DEVICE_TYPE_ARG: bool = AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED
 
 
 def _nested_getattr_or_none(root: Any, path: Iterable[str]) -> Any | None:
@@ -1276,7 +1268,6 @@ _DTENSOR_SHARD_GEOMETRY_FN: Callable[..., Any] | None = None
 _DTENSOR_SHARD_GEOMETRY_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
-    "HAS_AUTOCAST_DEVICE_TYPE_ARG",
     "HAS_VARIABLE_FUNCTIONS",
     "HAS_TORCH_VF",
     "HAS_TORCH_FUNC",
@@ -1325,13 +1316,12 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG",
     "HAS_ATTENTION_CAUSAL_BIAS",
     "HAS_EXPANDED_WEIGHTS_CONV_PICKER",
-    "HAS_FLOAT32_MATMUL_PRECISION",
-    "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
-    "HAS_CUDA_MATMUL_TF32",
-    "HAS_CUDNN_FLAGS",
-    "HAS_SDP_TOGGLES",
-    "HAS_FILL_UNINITIALIZED_MEMORY",
 )
+
+
+# r-b7 R52-4: O(1) membership for mark_torch_capability_missing; the tuple above
+# stays the ORDERED iteration authority (snapshot/report key order is stable).
+_CAPABILITY_ATTR_SET: frozenset[str] = frozenset(_CAPABILITY_ATTRS)
 
 
 class TorchCapabilityWarning(UserWarning):
@@ -1394,7 +1384,7 @@ def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
         The matching module-level flag is updated in place.
     """
 
-    if capability_name not in _CAPABILITY_ATTRS:
+    if capability_name not in _CAPABILITY_ATTR_SET:
         raise ValueError(f"unknown torch capability flag: {capability_name}")
     globals()[capability_name] = False
     if os.environ.get(_CAPABILITY_WARNING_ENV):
@@ -1415,8 +1405,10 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     Returns
     -------
     TorchCapabilitySnapshot
-        Mapping from ``HAS_*`` flag name, plus the legacy
-        ``AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED`` alias, to boolean availability.
+        Mapping from ``HAS_*`` flag name, plus
+        ``AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED`` (its own canonical spelling;
+        the duplicate ``HAS_`` alias was retired in r-b7 R42-6), to boolean
+        availability.
     """
 
     # HAS_DYNAMO_OPTIMIZED_MODULE, HAS_FSDP_WRAPPER, HAS_DTENSOR,
@@ -1475,22 +1467,26 @@ def tensor_has_named_dims(value: torch.Tensor) -> bool:
 
 
 def get_variable_function_names() -> list[str]:
-    """Return torch variable-function names with a public fallback.
+    """Return torch variable-function names, or none when the table is absent.
 
     Returns
     -------
     list[str]
         Names from ``torch._C._VariableFunctions`` when available, otherwise
-        names exported by ``torch.__all__``.
+        an empty list. The historical fallback returned ``torch.__all__`` —
+        the WRONG namespace for a variable-function roster (r-b7 R42-2): had
+        it ever been taken it would have silently mis-seeded the wrapper
+        inventory. An empty roster honestly skips VF-based discovery, and the
+        flipped ``HAS_VARIABLE_FUNCTIONS`` flag keeps the degradation visible.
     """
 
     variable_functions = _nested_getattr_or_none(torch, ("_C", "_VariableFunctions"))
     if variable_functions is None:
         mark_torch_capability_missing(
             "HAS_VARIABLE_FUNCTIONS",
-            "falling back to torch.__all__ for function discovery",
+            "skipping torch._C._VariableFunctions-based function discovery",
         )
-        return list(getattr(torch, "__all__", ()))
+        return []
     return dir(variable_functions)
 
 
@@ -2890,99 +2886,32 @@ else:
 
 # --- r35 decision E: ambient execution-context snapshot/restore ------------------
 #
-# Every knob below is a fragile cross-version torch surface, so it is probed here
-# (the doctrinal home for such probes) behind named ``HAS_*`` capability flags.
-# ``None`` in a snapshot means "this runtime does not expose the control"; every
-# exposed control is recorded affirmatively, including its disabled state.
+# Every control below is a PUBLIC torch surface present since before the 2.1
+# support floor (r-b7 R42-1 retired the six HAS_* flags that used to guard
+# them: their False branches were unreachable on any supported torch, and the
+# CUDA-named ones read True even on CUDA-less wheels). Snapshots record every
+# control affirmatively; ``None`` survives only in the APPLY direction as
+# schema tolerance for artifacts recorded by older producers.
 
 
-def _probe_float32_matmul_precision() -> bool:
-    """Return whether this torch exposes the float32 matmul precision control."""
-
-    return callable(getattr(torch, "get_float32_matmul_precision", None)) and callable(
-        getattr(torch, "set_float32_matmul_precision", None)
-    )
 
 
-def _probe_deterministic_algorithms_query() -> bool:
-    """Return whether deterministic-algorithms mode is both queryable and settable."""
-
-    return (
-        callable(getattr(torch, "are_deterministic_algorithms_enabled", None))
-        and callable(getattr(torch, "is_deterministic_algorithms_warn_only_enabled", None))
-        and callable(getattr(torch, "use_deterministic_algorithms", None))
-    )
 
 
-def _probe_cuda_matmul_tf32() -> bool:
-    """Return whether the CUDA matmul TF32 flag is exposed."""
-
-    matmul = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
-    return matmul is not None and hasattr(matmul, "allow_tf32")
 
 
-def _probe_cudnn_flags() -> bool:
-    """Return whether the cuDNN backend flag set is exposed."""
-
-    cudnn = getattr(torch.backends, "cudnn", None)
-    return cudnn is not None and all(
-        hasattr(cudnn, name) for name in ("allow_tf32", "deterministic", "benchmark", "enabled")
-    )
 
 
-def _probe_sdp_toggles() -> bool:
-    """Return whether the scaled-dot-product attention backend toggles are exposed."""
-
-    cuda_backend = getattr(torch.backends, "cuda", None)
-    return cuda_backend is not None and all(
-        callable(getattr(cuda_backend, name, None))
-        for name in (
-            "flash_sdp_enabled",
-            "enable_flash_sdp",
-            "mem_efficient_sdp_enabled",
-            "enable_mem_efficient_sdp",
-            "math_sdp_enabled",
-            "enable_math_sdp",
-        )
-    )
-
-
-def _probe_fill_uninitialized_memory() -> bool:
-    """Return whether the deterministic uninit-memory fill knob is exposed.
-
-    ``torch.utils.deterministic.fill_uninitialized_memory`` (torch >= 2.1)
-    governs whether ``torch.use_deterministic_algorithms(True)`` deterministically
-    fills the ``empty`` factory family. Feature-detected for the r53 hon_1/hon_2
-    ambient wave; an absent knob records ``None`` (never a guessed boolean).
-    """
-
-    deterministic = getattr(getattr(torch, "utils", None), "deterministic", None)
-    if deterministic is None:
-        return False
-    try:
-        return isinstance(deterministic.fill_uninitialized_memory, bool)
-    except (AttributeError, RuntimeError):
-        return False
-
-
-HAS_FLOAT32_MATMUL_PRECISION: bool = _probe_float32_matmul_precision()
-HAS_DETERMINISTIC_ALGORITHMS_QUERY: bool = _probe_deterministic_algorithms_query()
-HAS_CUDA_MATMUL_TF32: bool = _probe_cuda_matmul_tf32()
-HAS_CUDNN_FLAGS: bool = _probe_cudnn_flags()
-HAS_SDP_TOGGLES: bool = _probe_sdp_toggles()
-HAS_FILL_UNINITIALIZED_MEMORY: bool = _probe_fill_uninitialized_memory()
 
 
 def read_fill_uninitialized_memory() -> bool | None:
-    """Return the deterministic uninit-memory fill flag, or ``None`` when absent.
+    """Return the deterministic uninit-memory fill flag.
 
     THE one sanctioned read of ``torch.utils.deterministic.fill_uninitialized_memory``
     (a module-``__getattr__`` property invisible to static typing): the ambient
     snapshot and the producer-side determinism refinement both route here.
     """
 
-    if not HAS_FILL_UNINITIALIZED_MEMORY:
-        return None
     return bool(torch.utils.deterministic.fill_uninitialized_memory)  # type: ignore[attr-defined]
 
 
@@ -3026,37 +2955,19 @@ def snapshot_ambient_execution_context() -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "default_dtype": str(torch.get_default_dtype()),
         "default_device": str(getattr(torch, "get_default_device", lambda: "cpu")()),
-        "float32_matmul_precision": (
-            str(torch.get_float32_matmul_precision()) if HAS_FLOAT32_MATMUL_PRECISION else None
+        "float32_matmul_precision": str(torch.get_float32_matmul_precision()),
+        "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
+        "deterministic_algorithms_warn_only": bool(
+            torch.is_deterministic_algorithms_warn_only_enabled()
         ),
-        "deterministic_algorithms": (
-            bool(torch.are_deterministic_algorithms_enabled())
-            if HAS_DETERMINISTIC_ALGORITHMS_QUERY
-            else None
-        ),
-        "deterministic_algorithms_warn_only": (
-            bool(torch.is_deterministic_algorithms_warn_only_enabled())
-            if HAS_DETERMINISTIC_ALGORITHMS_QUERY
-            else None
-        ),
-        "cuda_matmul_allow_tf32": (
-            bool(torch.backends.cuda.matmul.allow_tf32) if HAS_CUDA_MATMUL_TF32 else None
-        ),
-        "cudnn_allow_tf32": bool(torch.backends.cudnn.allow_tf32) if HAS_CUDNN_FLAGS else None,
-        "cudnn_deterministic": (
-            bool(torch.backends.cudnn.deterministic) if HAS_CUDNN_FLAGS else None
-        ),
-        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark) if HAS_CUDNN_FLAGS else None,
-        "cudnn_enabled": bool(torch.backends.cudnn.enabled) if HAS_CUDNN_FLAGS else None,
-        "flash_sdp_enabled": (
-            bool(torch.backends.cuda.flash_sdp_enabled()) if HAS_SDP_TOGGLES else None
-        ),
-        "mem_efficient_sdp_enabled": (
-            bool(torch.backends.cuda.mem_efficient_sdp_enabled()) if HAS_SDP_TOGGLES else None
-        ),
-        "math_sdp_enabled": (
-            bool(torch.backends.cuda.math_sdp_enabled()) if HAS_SDP_TOGGLES else None
-        ),
+        "cuda_matmul_allow_tf32": bool(torch.backends.cuda.matmul.allow_tf32),
+        "cudnn_allow_tf32": bool(torch.backends.cudnn.allow_tf32),
+        "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        "cudnn_enabled": bool(torch.backends.cudnn.enabled),
+        "flash_sdp_enabled": bool(torch.backends.cuda.flash_sdp_enabled()),
+        "mem_efficient_sdp_enabled": bool(torch.backends.cuda.mem_efficient_sdp_enabled()),
+        "math_sdp_enabled": bool(torch.backends.cuda.math_sdp_enabled()),
         # r53 hon_1: the GLOBAL autograd/inference mode is a result-affecting
         # ambient control (a Python branch on ``torch.is_grad_enabled()`` /
         # ``is_inference_mode_enabled()`` is steered by it). Every supported
@@ -3083,17 +2994,10 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
     Raises
     ------
     RuntimeError
-        If a recorded (non-``None``) control cannot be applied on this runtime.
+        If a recorded default dtype is unavailable on this runtime. Every
+        other decision-E control is a public torch surface older than the 2.1
+        support floor, so recorded values apply directly (r-b7 R42-1).
     """
-
-    def _require(flag: bool, name: str) -> None:
-        """Raise when a recorded ambient control is unsupported on this runtime."""
-
-        if not flag:
-            raise RuntimeError(
-                f"Recorded ambient execution context field {name!r} is not "
-                "supported by this torch runtime."
-            )
 
     default_dtype = values.get("default_dtype")
     if default_dtype is not None:
@@ -3115,7 +3019,6 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
     # the ``default_device`` key unchanged.
     deterministic = values.get("deterministic_algorithms")
     if deterministic is not None:
-        _require(HAS_DETERMINISTIC_ALGORITHMS_QUERY, "deterministic_algorithms")
         warn_only = bool(values.get("deterministic_algorithms_warn_only") or False)
         torch.use_deterministic_algorithms(bool(deterministic), warn_only=warn_only)
     # ``torch.backends.cuda.matmul.allow_tf32`` and
@@ -3125,11 +3028,9 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
     # wins; the pair is snapshotted together, so the final state is coherent.
     cuda_tf32 = values.get("cuda_matmul_allow_tf32")
     if cuda_tf32 is not None:
-        _require(HAS_CUDA_MATMUL_TF32, "cuda_matmul_allow_tf32")
         torch.backends.cuda.matmul.allow_tf32 = bool(cuda_tf32)
     precision = values.get("float32_matmul_precision")
     if precision is not None:
-        _require(HAS_FLOAT32_MATMUL_PRECISION, "float32_matmul_precision")
         torch.set_float32_matmul_precision(str(precision))
     for field_name, attr in (
         ("cudnn_allow_tf32", "allow_tf32"),
@@ -3140,7 +3041,6 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
         recorded = values.get(field_name)
         if recorded is None:
             continue
-        _require(HAS_CUDNN_FLAGS, field_name)
         setattr(torch.backends.cudnn, attr, bool(recorded))
     for field_name, setter in (
         ("flash_sdp_enabled", "enable_flash_sdp"),
@@ -3150,13 +3050,11 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
         recorded = values.get(field_name)
         if recorded is None:
             continue
-        _require(HAS_SDP_TOGGLES, field_name)
         getattr(torch.backends.cuda, setter)(bool(recorded))
     # r53 hon_2: the deterministic uninit-memory fill knob restores through the
     # ordinary setter path (module property setter; snapshot/apply transactional).
     fill_uninitialized = values.get("fill_uninitialized_memory")
     if fill_uninitialized is not None:
-        _require(HAS_FILL_UNINITIALIZED_MEMORY, "fill_uninitialized_memory")
         write_fill_uninitialized_memory(bool(fill_uninitialized))
     # r53 hon_1: ``grad_enabled``/``inference_mode`` are deliberately NOT applied
     # here. Like ``default_device`` (r37 R4 above), they restore as SCOPED

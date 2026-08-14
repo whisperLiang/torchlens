@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import re
 import time
 import warnings
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._errors import InvalidArgumentError
 from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
+from ._render_common import strict_collapse_checks_enabled
 from .collapse_plan import RenderContext, collapse_plan_for_trace, count
 
 if TYPE_CHECKING:
@@ -2750,16 +2750,8 @@ def _assert_plan_count(
     _warn_count_mismatch_once(message)
 
 
-def _strict_count_checks_enabled() -> bool:
-    """Return whether collapse count mismatches should fail loudly.
-
-    Returns
-    -------
-    bool
-        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
-    """
-
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+# r-b7 R42-9: one shared TORCHLENS_COLLAPSE_STRICT parser (_render_common).
+_strict_count_checks_enabled = strict_collapse_checks_enabled
 
 
 def _warn_count_mismatch_once(message: str) -> None:
