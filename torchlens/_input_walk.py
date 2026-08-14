@@ -907,24 +907,41 @@ def inspect_instance_state(value: Any) -> InstanceStateInspection:
     the actual storage names only when the enumeration is inertly total.
     """
 
+    items = _inspect_instance_state_items(value)
+    if items is None:
+        return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+    return InstanceStateInspection(frozenset(items), True, None)
+
+
+def _inspect_instance_state_items(value: Any) -> dict[str, Any] | None:
+    """Inertly enumerate SET instance-state ``name -> value`` pairs, or ``None``.
+
+    The value-bearing spine under :func:`inspect_instance_state`: same inert
+    channels (raw-MRO ``__dict__`` getset invoked directly, all-MRO genuine
+    member-descriptor slots), same fail-closed rules -- ``None`` means the
+    enumeration cannot be inertly proven total (a blinded inspection is never
+    an empty mapping masquerading as "no extra state").
+    """
+
     import types as _types
 
-    names: set[str] = set()
+    items: dict[str, Any] = {}
     dict_descriptor = _raw_mro_attr(value, "__dict__")
     if dict_descriptor is not None:
         if type(dict_descriptor) is not _types.GetSetDescriptorType:
             # A property or non-standard descriptor shadows __dict__: reading it would
             # execute user code and could report attacker-chosen state. Fail closed.
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+            return None
         try:
             instance_dict = dict_descriptor.__get__(value, type(value))
         except Exception:
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
+            return None
         if type(instance_dict) is not dict:
             # A dict SUBCLASS (or non-dict) result could carry a custom __iter__ /
             # __contains__ that hides keys: not inertly trustworthy.
-            return InstanceStateInspection(frozenset(), False, "instance_state_uninspectable")
-        names.update(str(key) for key in instance_dict)
+            return None
+        for key in instance_dict:
+            items[str(key)] = instance_dict[key]
     for cls in type(value).__mro__:
         raw_slots = cls.__dict__.get("__slots__")
         if raw_slots is None:
@@ -946,11 +963,49 @@ def inspect_instance_state(value: Any) -> InstanceStateInspection:
                 # here could execute user code, so the name is skipped (inert).
                 continue
             try:
-                descriptor.__get__(value, cls)
+                slot_value = descriptor.__get__(value, cls)
             except AttributeError:
                 continue  # unset slot: absent
-            names.add(name)
-    return InstanceStateInspection(frozenset(names), True, None)
+            items[name] = slot_value
+    return items
+
+
+def _protocol_container_instance_state_fact(value: Any) -> tuple[list[list[str]], bool]:
+    """Ordered ``(name, token)`` instance-state facts for protocol-container subclasses.
+
+    The exact-type node fact catches a class SWAP but not changed fields on
+    another instance of the SAME class (r66 R1 reopened by r2-B3: a
+    ``ModeBox(dict)`` whose ``box.mode`` flipped ``'a' -> 'b'`` between capture
+    and replay walked to the same tensor-leaf structure and replayed a wrong
+    output VERIFIED). Enumerate the instance state inertly and witness each
+    attribute: a type-strict literal token where the literal grammar can carry
+    the value, else an opaque type-identity token. A changed literal-valued
+    mode flag now diverges structurally, while a well-behaved custom Mapping's
+    backing store (``self.data = {...}``) witnesses as a stable opaque ``dict``
+    token and keeps working. A same-type changed OPAQUE value remains the
+    documented residual (arbitrary object values cannot be compared inertly).
+
+    Returns ``(facts, complete)``; ``complete=False`` means the enumeration is
+    blinded and the caller must refuse (``instance_state_uninspectable``),
+    never read as "no extra state". Exact builtins carry no instance ``__dict__``
+    descriptor, so their nodes are byte-identical to the historical shape.
+    """
+
+    items = _inspect_instance_state_items(value)
+    if items is None:
+        return [], False
+    facts: list[list[str]] = []
+    for name in sorted(items):
+        item_value = items[name]
+        try:
+            token = f"lit:{encode_mapping_key(item_value)!r}"
+        except ValueError:
+            token = (
+                f"{_RESERVED_NAMESPACE_PREFIX}opaque:"
+                f"{type(item_value).__module__}:{type(item_value).__qualname__}"
+            )
+        facts.append([name, token])
+    return facts, True
 
 
 def instance_state_names(value: Any) -> frozenset[str]:
@@ -1082,15 +1137,16 @@ def undeclared_instance_state(value: Any, kind: str) -> bool:
     ``state_complete`` declaration instead (checked by the snapshot's registered
     branch).
 
-    Mapping/sequence SUBCLASSES are deliberately NOT judged here (heavy-gate F7 ruling):
-    their witnessed schema is the protocol view (ordered keys/children) plus the EXACT
-    class identity the snapshot already records and compares, and a custom Mapping
-    legitimately keeps its backing store in ``__dict__`` (``self.data = {...}``) --
-    blanket-refusing it would reject every well-behaved custom Mapping input the
-    incumbent F7 contract admits. A hidden non-protocol attribute steering control flow
-    on such a subclass remains the documented residual (attribute reads are invisible
-    to every Python-level net), never a false structural pass: the class swap itself
-    still diverges through the exact-type node fact.
+    Mapping/sequence SUBCLASSES are NOT judged here: their instance state is not
+    REFUSED (a custom Mapping legitimately keeps its backing store in ``__dict__``,
+    ``self.data = {...}``, and blanket-refusing it would reject every well-behaved
+    custom Mapping input) -- it is WITNESSED instead, by the snapshot's per-node
+    ``instance_state`` fact (:func:`_protocol_container_instance_state_fact`):
+    literal-valued attributes carry type-strict tokens and diverge structurally
+    when changed between capture and replay (the r66 R1 / r2-B3 ``box.mode``
+    class), opaque values carry a type-identity token. A same-type changed
+    OPAQUE attribute value remains the documented residual; the class swap
+    itself still diverges through the exact-type node fact.
     """
 
     import dataclasses as _dc
@@ -1263,6 +1319,12 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
         if kind == "empty":
             empty_kind = empty_input_container_kind(item)
             node["empty_kind"] = str(empty_kind)
+            if empty_kind in {"mapping", "sequence"}:
+                state_facts, state_complete = _protocol_container_instance_state_fact(item)
+                if not state_complete:
+                    refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+                elif state_facts:
+                    node["instance_state"] = state_facts
             nodes.append(node)
             return
         if kind == "namedtuple":
@@ -1297,6 +1359,14 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
                 _descend(child, (*path, field.name))
             return
         if kind == "mapping":
+            # Same-class instance state on a Mapping subclass is part of the
+            # structure witness (the exact-type fact alone cannot see changed
+            # fields on another instance of the SAME class).
+            state_facts, state_complete = _protocol_container_instance_state_fact(item)
+            if not state_complete:
+                refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+            elif state_facts:
+                node["instance_state"] = state_facts
             keys: list[Any] = []
             encodable = True
             # Derive the ordered-key fact from the SAME ``items()`` traversal that
@@ -1329,6 +1399,11 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             return
         if kind == "sequence":
             node["size"] = physical_sequence_len(item)
+            state_facts, state_complete = _protocol_container_instance_state_fact(item)
+            if not state_complete:
+                refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
+            elif state_facts:
+                node["instance_state"] = state_facts
             nodes.append(node)
             for index, child in iter_physical_sequence(item):
                 _descend(child, (*path, index))

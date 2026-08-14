@@ -395,3 +395,94 @@ def test_hostile_len_sequence_still_walks_physical_children():
         on_tensor=lambda _tensor, path: seen.append(tuple(path)),
     )
     assert len(seen) == 2
+
+
+class _ModeBox(dict):
+    """Mapping subclass whose non-protocol attribute steers forward control flow."""
+
+
+class _SideChannelList(list):
+    """List subclass carrying a literal side field."""
+
+
+class _BackingStoreMapping(dict):
+    """Well-behaved custom mapping keeping an opaque backing attribute."""
+
+    def __init__(self, data: dict) -> None:
+        super().__init__(data)
+        self.extra_store = dict(data)
+
+
+def test_same_class_instance_state_is_witnessed_on_protocol_subclasses():
+    """Changed same-class instance state diverges the structure snapshot.
+
+    The exact-type node fact catches a class swap but not changed fields on
+    another instance of the SAME class: a ``ModeBox(dict)`` whose ``mode``
+    flipped between capture and replay walked to the same tensor-leaf
+    structure, so a numerically wrong replay reported VERIFIED.
+    """
+
+    from torchlens._input_walk import snapshot_input_boundary
+
+    box_a = _ModeBox({"x": torch.ones(2)})
+    box_a.mode = "a"
+    box_b = _ModeBox({"x": torch.ones(2)})
+    box_b.mode = "b"
+    snap_a = snapshot_input_boundary(box_a)
+    snap_b = snapshot_input_boundary(box_b)
+    assert snap_a != snap_b, "same-class changed literal field must change the snapshot"
+    assert not snap_a.get("refusals")
+
+    seq_a = _SideChannelList([torch.ones(2)])
+    seq_a.flag = 1
+    seq_b = _SideChannelList([torch.ones(2)])
+    seq_b.flag = 2
+    assert snapshot_input_boundary(seq_a) != snapshot_input_boundary(seq_b)
+
+    # A well-behaved custom mapping's opaque backing store witnesses as a
+    # stable type-identity token: two same-shape instances stay comparable.
+    store_a = _BackingStoreMapping({"x": torch.ones(2)})
+    store_b = _BackingStoreMapping({"x": torch.ones(2)})
+    assert snapshot_input_boundary(store_a) == snapshot_input_boundary(store_b)
+    assert not snapshot_input_boundary(store_a).get("refusals")
+
+
+def test_mode_box_changed_field_diverges_runnable_replay(tmp_path):
+    """The r66-R1/ModeBox end-to-end repro: same class, changed field, typed refusal."""
+
+    from torchlens.errors import PathDivergenceError
+    from torchlens.runnable import PathFaithfulness
+
+    class ModeRoutedModel(nn.Module):
+        """Add a mode-selected constant to the boxed tensor."""
+
+        def forward(self, box: _ModeBox) -> torch.Tensor:
+            """Route on the box's non-protocol attribute."""
+
+            return box["x"] + (1 if box.mode == "a" else 2)
+
+    model = ModeRoutedModel().eval()
+    tensor = torch.arange(2.0)
+    box_a = _ModeBox({"x": tensor})
+    box_a.mode = "a"
+    captured = tl.trace(
+        model,
+        box_a,
+        capture=tl.options.CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "m.tlspec"
+    tl.save(captured, path, level="runnable", include_weights=True)
+
+    changed = _ModeBox({"x": tensor})
+    changed.mode = "b"
+    with pytest.raises(PathDivergenceError):
+        tl.load(path).run(inputs=changed)
+
+    same = _ModeBox({"x": tensor})
+    same.mode = "a"
+    result = tl.load(path).run(inputs=same)
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
