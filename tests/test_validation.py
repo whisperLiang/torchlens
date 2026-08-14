@@ -4886,6 +4886,34 @@ def test_validate_forward_handles_structseq_tensor_arguments() -> None:
         assert tl.validate(StructseqStackModel(), torch.randn(3, 4), scope="forward") is True
 
 
+def test_structseq_capture_is_reproducible_without_warning() -> None:
+    """Structseq-arg captures never emit ``TraceNotReproducibleWarning``.
+
+    Regression proof for the ``rebuild_tuple_like`` structseq probe: the
+    ``arg_type(*items)`` arm put the values TENSOR in the structseq C
+    constructor's sequence slot and iterated it, capturing a spurious
+    ``unbind`` op only in ``save_arg_values`` traces -- so validation's
+    re-trace diverged structurally ('unbind' vs 'stack'). Repeat the
+    validation to prove genuine reproducibility, not a masked warning.
+    """
+
+    class StructseqStackModel(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pass a torch structseq of tensors directly into ``torch.stack``."""
+
+            return torch.stack(torch.sort(x, dim=0))
+
+    for _ in range(5):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            verdict = tl.validate(StructseqStackModel(), torch.randn(3, 4), scope="forward")
+        reproducibility_warnings = [
+            entry for entry in caught if issubclass(entry.category, TraceNotReproducibleWarning)
+        ]
+        assert reproducibility_warnings == []
+        assert verdict is True
+
+
 def test_trace_save_arg_values_handles_namedtuple_tensor_arguments() -> None:
     """Child-version snapshots support namedtuple tensor arguments."""
 

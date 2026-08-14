@@ -133,3 +133,44 @@ def test_ladder_never_expands_a_lone_iterable_element():
     assert rebuilt is not None
     assert tuple.__len__(rebuilt) == 1
     assert tuple.__getitem__(rebuilt, 0) == [1, 2, 3]
+
+
+def test_structseq_rebuild_dispatches_no_torch_ops():
+    """Rebuilding a torch structseq never dispatches a torch function.
+
+    The ``arg_type(*items)`` probe on ``torch.return_types.sort`` put the
+    values TENSOR in the C constructor's ``(sequence, dict)`` sequence slot
+    and ITERATED it (``dim`` + ``unbind`` dispatch) before raising. Under
+    active logging that probe side effect was captured as a spurious
+    ``unbind`` op, so two otherwise-identical traces structurally diverged.
+    """
+
+    from torch.overrides import TorchFunctionMode
+
+    dispatched: list[str] = []
+
+    class _DispatchSpy(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            dispatched.append(getattr(func, "__name__", repr(func)))
+            return func(*args, **(kwargs or {}))
+
+    structseq = torch.sort(torch.randn(4, 3), dim=0)
+    items = list(structseq)
+    with _DispatchSpy():
+        rebuilt = rebuild_tuple_like(type(structseq), items)
+
+    assert dispatched == []
+    assert type(rebuilt) is type(structseq)
+    assert tuple.__len__(rebuilt) == len(items)
+    assert all(tuple.__getitem__(rebuilt, index) is items[index] for index in range(len(items)))
+
+
+def test_structseq_copy_arg_tree_clones_and_keeps_type():
+    """``copy_arg_tree`` on a structseq keeps the exact type and clones tensors."""
+
+    structseq = torch.sort(torch.randn(4, 3), dim=0)
+    copied = copy_arg_tree(structseq)
+    assert type(copied) is type(structseq)
+    assert torch.equal(copied.values, structseq.values)
+    assert copied.values is not structseq.values
+    assert torch.equal(copied.indices, structseq.indices)
