@@ -1207,6 +1207,14 @@ def _alias_covers_whole_storage(alias: torch.Tensor, storage_nbytes: int) -> boo
 # this threshold to keep window arming O(1) per op.
 _DEFER_PRUNE_THRESHOLD = 2048
 
+# Next-prune size: doubles away from the live population after each sweep.
+# A fixed threshold alone is quadratic on large captures: once the LIVE
+# pending population crosses it, every per-op window arming re-swept the
+# whole registry and removed nothing (measured O(n^2), the dominant term at
+# 4k ops). Doubling makes total prune work linear in total insertions while
+# a mostly-dead registry still prunes and resets the watermark back down.
+_defer_prune_watermark = _DEFER_PRUNE_THRESHOLD
+
 
 def prune_dead_deferred_entries() -> None:
     """Drop registry entries whose aliases were garbage-collected.
@@ -1230,9 +1238,10 @@ def prune_dead_deferred_entries() -> None:
 
 def arm_deferred_payload_window(state_storage_ptrs: frozenset[int]) -> None:
     """Arm the clone-on-write payload window (wrapper-managed, nestable)."""
-    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS
-    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _DEFER_PRUNE_THRESHOLD:
+    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS, _defer_prune_watermark
+    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _defer_prune_watermark:
         prune_dead_deferred_entries()
+        _defer_prune_watermark = max(_DEFER_PRUNE_THRESHOLD, 2 * len(_DEFER_PENDING))
     _DEFER_WINDOW_DEPTH += 1
     _DEFER_STATE_PTRS = state_storage_ptrs
 

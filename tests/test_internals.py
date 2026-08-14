@@ -761,3 +761,91 @@ class TestDisplayUsesLoggedShape:
             entry = log[label]
             if entry.out is not None:
                 assert tuple(entry.out.shape) == tuple(entry.shape)
+
+
+class TestDeferredRegistryPruneAmortization:
+    def test_prune_backs_off_when_registry_is_live(self) -> None:
+        """A live registry past the threshold must not re-sweep per arming.
+
+        The fixed threshold alone was quadratic on large captures: once the
+        LIVE pending population crossed 2048 keys, EVERY per-op window arming
+        swept the whole registry and removed nothing (the dominant measured
+        term at 4k ops). The watermark now doubles away from the live
+        population after each sweep, so repeated armings stop paying it.
+        """
+
+        import weakref
+        from types import SimpleNamespace
+
+        from torchlens.utils import tensor_utils as tu
+
+        class _Referent:
+            """Weak-referenceable stand-in for a pending alias."""
+
+        keepalive = [_Referent() for _ in range(3000)]
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_watermark = tu._defer_prune_watermark
+        saved_prune = tu.prune_dead_deferred_entries
+        calls = {"n": 0}
+
+        def counting_prune() -> None:
+            calls["n"] += 1
+            saved_prune()
+
+        try:
+            tu._DEFER_PENDING.clear()
+            for index, obj in enumerate(keepalive):
+                tu._DEFER_PENDING[("test", index)] = [SimpleNamespace(ref=weakref.ref(obj))]
+            tu._defer_prune_watermark = tu._DEFER_PRUNE_THRESHOLD
+            tu.prune_dead_deferred_entries = counting_prune
+            for _ in range(10):
+                tu.arm_deferred_payload_window(frozenset())
+                tu.disarm_deferred_payload_window()
+            # One sweep, then the watermark (2 * 3000 live keys) suppresses
+            # the rest. The historical behavior swept all 10 times.
+            assert calls["n"] == 1
+            assert tu._defer_prune_watermark == 6000
+            # Growth past the watermark prunes again, and a mostly-dead
+            # registry resets the watermark back to the floor.
+            keepalive.clear()
+            del obj  # the population loop variable pins the last referent
+            for index in range(3500):
+                dead = _Referent()
+                tu._DEFER_PENDING[("dead", index)] = [SimpleNamespace(ref=weakref.ref(dead))]
+                del dead
+            tu.arm_deferred_payload_window(frozenset())
+            tu.disarm_deferred_payload_window()
+            assert calls["n"] == 2
+            assert len(tu._DEFER_PENDING) == 0
+            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
+        finally:
+            tu.prune_dead_deferred_entries = saved_prune
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_prune_watermark = saved_watermark
+
+
+class TestAliasContractPositionScan:
+    def test_contract_lookup_semantics_unchanged(self) -> None:
+        """Contract coverage keys on contract positions, not a full arg scan.
+
+        The full scan cost O(fan_in) per parent — O(fan_in^2) per op for
+        variadic ops like a 4k-arg ``stack`` — with the common EMPTY contract.
+        """
+
+        from torchlens.backends.torch.aliasing import parent_label_has_alias_contract
+
+        positions = {
+            "args": {i: f"parent_{i}" for i in range(50)},
+            "kwargs": {"out": "parent_out"},
+        }
+        # Empty contract: never covered.
+        assert not parent_label_has_alias_contract("parent_3", positions, ())
+        # Covered arg position.
+        assert parent_label_has_alias_contract("parent_3", positions, (3,))
+        # Covered kwargs position.
+        assert parent_label_has_alias_contract("parent_out", positions, ("out",))
+        # Contract position exists but holds a different parent.
+        assert not parent_label_has_alias_contract("parent_3", positions, (4,))
+        # Parent present only at a non-contract position.
+        assert not parent_label_has_alias_contract("parent_7", positions, (3, "out"))

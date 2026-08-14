@@ -379,12 +379,18 @@ def parent_label_has_alias_contract(
         True when ``parent_label`` appears at a contract-covered position.
     """
 
-    contract_set = set(contract_positions)
-    for position, label in parent_arg_positions["args"].items():
-        if label == parent_label and position in contract_set:
-            return True
-    for position, label in parent_arg_positions["kwargs"].items():
-        if label == parent_label and position in contract_set:
+    # Iterate the (few) contract positions, not the (possibly huge) argument
+    # map: the old full scan cost O(fan_in) per parent — O(fan_in^2) per op
+    # for variadic ops like a 4k-arg ``stack``, with an empty contract.
+    if not contract_positions:
+        return False
+    args_positions = parent_arg_positions["args"]
+    kwargs_positions = parent_arg_positions["kwargs"]
+    for position in contract_positions:
+        if (
+            args_positions.get(position) == parent_label
+            or kwargs_positions.get(position) == parent_label
+        ):
             return True
     return False
 
