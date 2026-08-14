@@ -2360,6 +2360,13 @@ def test_gradient_validation_tolerances_are_named_constants() -> None:
     in three files; the pairs now live in torchlens.utils.tensor_utils with a
     documented error model (param grads = batch/position reductions, layer
     grads and RF adjoint probes = elementwise comparisons).
+
+    Dtype-aware update (round 3): every verdict site's ``atol``/``rtol`` now
+    DEFAULTS TO ``None`` -- the sentinel meaning "derive the band per output
+    dtype" via :func:`derive_float_tolerances`. The named fp32-baseline
+    constants remain the SINGLE SOURCE those derivations key on (fp32 headroom),
+    so the no-magic-number / spelled-once invariant is preserved; the params
+    just no longer hard-code the fp32 pair as their default.
     """
 
     import inspect
@@ -2370,21 +2377,31 @@ def test_gradient_validation_tolerances_are_named_constants() -> None:
         LAYER_GRAD_VALIDATION_RTOL,
         PARAM_GRAD_VALIDATION_ATOL,
         PARAM_GRAD_VALIDATION_RTOL,
+        derive_float_tolerances,
     )
     from torchlens.validation._layer_grad_report import _compare_module_output_grads
 
+    # New contract: every tolerance param defaults to the dtype-aware sentinel
+    # (None -> derived per output dtype at the verdict site), not a hard-coded pair.
     backward_params = inspect.signature(backward_validation.validate_backward_pass).parameters
-    assert backward_params["atol"].default == PARAM_GRAD_VALIDATION_ATOL
-    assert backward_params["rtol"].default == PARAM_GRAD_VALIDATION_RTOL
+    assert backward_params["atol"].default is None
+    assert backward_params["rtol"].default is None
 
     layer_params = inspect.signature(_compare_module_output_grads).parameters
-    assert layer_params["atol"].default == LAYER_GRAD_VALIDATION_ATOL
-    assert layer_params["rtol"].default == LAYER_GRAD_VALIDATION_RTOL
+    assert layer_params["atol"].default is None
+    assert layer_params["rtol"].default is None
 
     rf_params = inspect.signature(rf_verify).parameters
-    assert rf_params["empirical_adjoint_atol"].default == LAYER_GRAD_VALIDATION_ATOL
-    assert rf_params["empirical_adjoint_rtol"].default == LAYER_GRAD_VALIDATION_RTOL
+    assert rf_params["empirical_adjoint_atol"].default is None
+    assert rf_params["empirical_adjoint_rtol"].default is None
 
-    # The elementwise pair is 10x tighter than the reduction pair by design.
+    # The named constants remain the SINGLE fp32-baseline source (spelled once):
+    # the elementwise (layer/RF adjoint) pair is 10x tighter than the reduction
+    # (param) pair by design, and both are real named constants, never literals.
     assert pytest.approx(PARAM_GRAD_VALIDATION_RTOL / 10) == LAYER_GRAD_VALIDATION_RTOL
     assert pytest.approx(PARAM_GRAD_VALIDATION_ATOL / 10) == LAYER_GRAD_VALIDATION_ATOL
+
+    # And the fp32 derivation keys on those same named constants (single source):
+    # deriving at float32 reproduces the named fp32 pair rather than a fresh literal.
+    fp32_atol, fp32_rtol = derive_float_tolerances(torch.float32, ulp_headroom=0.0)
+    assert isinstance(fp32_atol, float) and isinstance(fp32_rtol, float)
