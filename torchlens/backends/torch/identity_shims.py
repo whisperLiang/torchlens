@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -106,9 +107,20 @@ def install_identity_shims() -> None:
     that must surface loudly.
     """
 
-    if _installed:
-        return
     records: list[tuple[Any, str, Any]] = []
+    if _installed:
+        # Top-up for the lazily probed CausalBias site: its installer reads
+        # sys.modules (never imports -- the bias module body reaches
+        # torch._dynamo on torch 2.13), so a user import AFTER the first wrap
+        # is armed here on the next wrap path. The installer's _is_shimmed
+        # check keeps this idempotent.
+        try:
+            _install_causal_bias_shim(records)
+        except Exception:
+            _restore(records)
+            raise
+        _installed.extend(records)
+        return
     try:
         _install_transformer_ctor_shims(records)
         _install_causal_bias_shim(records)
@@ -270,8 +282,14 @@ def _install_causal_bias_shim(records: list[tuple[Any, str, Any]]) -> None:
 
     if not _torch_compat.HAS_ATTENTION_CAUSAL_BIAS:
         return
-    causal_bias = _torch_compat._import_module_attr_or_none(
-        "torch.nn.attention.bias", "CausalBias"
+    # sys.modules read, NEVER an import: on torch 2.13 the bias module body
+    # reaches torch._dynamo (whose tree drags in FSDP), which would break the
+    # W21 plain-capture cold-start guarantee. A process that never imported
+    # the module cannot hold a CausalBias instance, so skipping is exact; a
+    # later user import is picked up by the next wrap's top-up re-install.
+    bias_module = sys.modules.get("torch.nn.attention.bias")
+    causal_bias = (
+        getattr(bias_module, "CausalBias", None) if bias_module is not None else None
     )
     if causal_bias is None:
         return

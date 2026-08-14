@@ -1134,19 +1134,36 @@ def _probe_transformer_activation_fastpath_flag() -> bool:
 
 
 def _probe_attention_causal_bias() -> bool:
-    """Return whether ``torch.nn.attention.bias.CausalBias`` is available.
+    """Return whether ``torch.nn.attention.bias.CausalBias`` is discoverable.
 
     Returns
     -------
     bool
-        ``True`` when the class exists and defines its own
-        ``__torch_function__`` (the identity-dispatch site the causal-bias
-        identity shim normalizes). Absent on torch builds predating the
-        ``torch.nn.attention`` namespace.
+        ``True`` when the module is already imported and the class defines its
+        own ``__torch_function__`` (the identity-dispatch site the causal-bias
+        identity shim normalizes), or when the module exists but has not been
+        imported yet (the shim installer re-reads ``sys.modules`` at each wrap).
+        Absent on torch builds predating the ``torch.nn.attention`` namespace.
+
+    Notes
+    -----
+    This probe NEVER imports ``torch.nn.attention.bias``: on torch 2.13 its
+    module body reaches ``torch._dynamo``, whose import tree also drags in
+    ``torch.distributed.fsdp`` -- breaking the W21 cold-start guarantee that a
+    plain eager capture pays neither import. ``find_spec`` imports only the
+    parent ``torch.nn.attention`` package (verified dynamo-free), and a process
+    that never imported the module cannot hold a ``CausalBias`` instance, so
+    the deferred read is exact, not heuristic.
     """
 
-    causal_bias = _import_module_attr_or_none("torch.nn.attention.bias", "CausalBias")
-    return causal_bias is not None and "__torch_function__" in vars(causal_bias)
+    module = sys.modules.get("torch.nn.attention.bias")
+    if module is not None:
+        causal_bias = getattr(module, "CausalBias", None)
+        return causal_bias is not None and "__torch_function__" in vars(causal_bias)
+    try:
+        return importlib.util.find_spec("torch.nn.attention.bias") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
 
 
 def _probe_expanded_weights_conv_picker() -> bool:
