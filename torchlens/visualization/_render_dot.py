@@ -1854,7 +1854,31 @@ def _setup_subgraphs(
     queued_rank_groups = len(top_level_rank_groups) + sum(
         len(data.get("rank_groups", [])) for data in module_edge_dict.values()
     )
-    assert queued_rank_groups == emitted_rank_groups
+    _assert_rank_group_parity(queued_rank_groups, emitted_rank_groups)
+
+
+def _assert_rank_group_parity(queued: int, emitted: int) -> None:
+    """Raise when queued sibling rank groups were not all emitted.
+
+    T9 (grind-p3): a raise, not an assert — this guard runs on the DEFAULT
+    ``draw()`` path and ``python -O`` strips asserts, which would let a
+    dropped rank group silently reorder rendered siblings.
+
+    Parameters
+    ----------
+    queued:
+        Sibling rank groups queued across the top level and every module
+        cluster.
+    emitted:
+        Sibling rank groups actually emitted into the Graphviz graph.
+    """
+
+    if queued != emitted:
+        raise RuntimeError(
+            f"sibling rank-group emission mismatch: queued {queued} != "
+            f"emitted {emitted}; a dropped rank group would silently reorder "
+            "rendered siblings"
+        )
 
 
 def _module_subtree_payload_empty(

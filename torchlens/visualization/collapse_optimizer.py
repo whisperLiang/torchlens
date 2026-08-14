@@ -200,6 +200,25 @@ class OptimizerResult:
             )
 
 
+def _assert_visible_plan(visible_count: int, origin: str) -> None:
+    """Raise when a collapse plan about to be published has no visible nodes.
+
+    T9 (grind-p3): a raise, not an assert — these guards run on the DEFAULT
+    ``draw(collapse=)`` path and ``python -O`` strips asserts, which would
+    let an empty plan render a blank graph with no diagnosis.
+
+    Parameters
+    ----------
+    visible_count:
+        Visible node count of the plan being published.
+    origin:
+        Human-readable name of the publishing path, used in the error.
+    """
+
+    if visible_count <= 0:
+        raise RuntimeError(f"{origin} produced no visible nodes")
+
+
 @dataclass(frozen=True)
 class _FrontierPoint:
     """One DP frontier point for a subtree."""
@@ -478,7 +497,7 @@ def select_collapse_plan(
             segments = {}
     else:
         segments = {}
-    assert count(plan) > 0, "v2 collapse plan produced no visible nodes"
+    _assert_visible_plan(count(plan), "v2 collapse plan")
     result = OptimizerResult(
         selected=instantiated_point.selected,
         repeat_folds=repeat_folds,
@@ -2735,7 +2754,7 @@ def _floor_fallback_selection(
         )
         if 0 < count(candidate_plan) < full_count:
             return selected, candidate_plan
-    assert full_count > 0, "collapse floor fallback produced no visible nodes"
+    _assert_visible_plan(full_count, "collapse floor fallback")
     return frozenset(), full_plan
 
 
