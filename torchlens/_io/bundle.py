@@ -317,16 +317,23 @@ def save(
             "tl.save(merged.ranks[r], path).",
             code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
         )
-    from ..runnable import refuse_poisoned_trace
-
-    refuse_poisoned_trace(trace, "export")
     # N1: the settled capture outcome gates every export. FAILED, aborted, and
     # UNKNOWN captures never produce a portable artifact (the historical
     # ungated pass-through of failed partials was the hole this closes);
-    # HALTED and legacy UNATTESTED re-export stay open.
+    # HALTED and legacy UNATTESTED re-export stay open. This runs BEFORE the
+    # poison gate because a failed PartialTrace / failed Recording has no
+    # ``_runnable`` sparse-run state, so refuse_poisoned_trace crashed with a
+    # bare AttributeError before this typed N1 refusal could fire -- the exact
+    # shape the MergedTrace typed-refusal-first check above already closed.
     from ..capture.outcome import CaptureOutcomeError, require_capture_capability
 
     require_capture_capability(trace, "save_analysis")
+    from ..runnable import refuse_poisoned_trace
+
+    # The poison gate only applies to products that carry sparse-run state; a
+    # PartialTrace / Recording has none, so there is nothing to refuse.
+    if getattr(trace, "_runnable", None) is not None:
+        refuse_poisoned_trace(trace, "export")
     save_level = coerce_tlspec_save_level(level)
     if save_level == "runnable":
         # N4: a halted capture records a PREFIX of the forward, and the sparse
