@@ -184,7 +184,6 @@ _LAYER_MIRROR_SPEC: dict[str, tuple[str, Any]] = {
             "output_device",
             "visualizer_path",
             "activation_transform",
-            "annotations",
             "intervention_replaced",
             "detach_saved_activations",
             "save_grads",
@@ -911,6 +910,11 @@ class Layer:
             "dict[tuple[tuple[int, str], ...], list[int]]", {}
         )
         self.conditional_arm_children: dict[int, dict[str, list[str]]] = {}
+        # Genuinely per-layer USER-owned state, never a mirror: the dict era
+        # initialized a fresh empty dict here rather than copying from the
+        # first pass, so layer annotations must not alias ``ops[0]``'s dict
+        # (mirroring leaked op annotations into the layer and vice versa).
+        self.annotations: dict[str, Any] = {}
 
         # Pass management
         self.ops = OpAccessor()

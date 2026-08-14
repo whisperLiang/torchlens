@@ -2731,6 +2731,12 @@ class Trace(
         state["_out_identity_cache"] = {}
         state["_out_hash_cache"] = {}
         state["_code_context_cache"] = {}
+        # Lazy per-instance accessor caches (FieldPolicy.DROP) rebuild on
+        # demand after restore; carrying them would make pickle bytes depend
+        # on which accessors were touched (access-is-pure contract).
+        state.pop("_op_accessor_cache", None)
+        state.pop("_layer_accessor_cache", None)
+        state.pop("_module_call_accessor", None)
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
         # B1-02: the semantic-output scratch never serializes. Plain pickle
