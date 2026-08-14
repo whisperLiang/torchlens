@@ -41,6 +41,7 @@ from .backends import BackendName, resolve_backend_spec
 from .data_classes.trace import Trace
 from .errors import TraceNotReproducibleWarning
 from .options import (
+    CaptureOptions,
     VisualizationOptions,
     merge_visualization_options,
     visualization_to_render_kwargs,
@@ -95,8 +96,9 @@ def log_model_metadata(
 ) -> Trace:
     """Return model metadata without saving any outs.
 
-    Equivalent to ``trace(model, input_args, input_kwargs, layers_to_save=None,
-    compute_input_output_distances=True)``.
+    Equivalent to ``trace(model, input_args, input_kwargs,
+    capture=CaptureOptions(layers_to_save=None,
+    compute_input_output_distances=True))``.
 
     Parameters
     ----------
@@ -117,8 +119,10 @@ def log_model_metadata(
         model,
         input_args,
         input_kwargs,
-        layers_to_save=None,
-        compute_input_output_distances=True,
+        capture=CaptureOptions(
+            layers_to_save=None,
+            compute_input_output_distances=True,
+        ),
     )
     return model_trace
 

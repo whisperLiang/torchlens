@@ -161,24 +161,13 @@ def test_record_to_trace_no_internal_self_deprecation() -> None:
         log.cleanup()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "grind b4 R48-3, CONFIRMED STANDING and awaiting its fix lane: the "
-        "metadata route passes the deprecated flat kwargs `layers_to_save` and "
-        "`compute_input_output_distances` to its own internals, so one canonical "
-        "tl.io.log_model_metadata call self-deprecates twice. The fix is in "
-        "torchlens/user_funcs.py, which the b4 fix-lane split assigns to the "
-        "perf/caches/IO lane, not to the deprecations lane. Recorded as a strict "
-        "xfail rather than omitted: xfail_strict=true means this test FAILS as "
-        "soon as the kwargs are made canonical, forcing this marker to be "
-        "deleted instead of quietly outliving the bug."
-    ),
-)
 def test_log_model_metadata_no_internal_self_deprecation() -> None:
     """The canonical metadata entry point fires zero internal deprecations.
 
-    Added in grind b4 (R48-3). Measured before the fix: ONE
+    Added in grind b4 (R48-3) as a strict xfail while the metadata route still
+    passed the deprecated flat kwargs to its own internals; the route now uses
+    the canonical nested ``capture=CaptureOptions(...)`` spelling, so the
+    marker is deleted per its own instructions. Measured before the fix: ONE
     ``tl.get_model_metadata`` call emitted FOUR DeprecationWarnings, two of them
     originating in torchlens frames that passed deprecated FLAT kwargs to their
     own internals -- warnings a user cannot silence by fixing their own code,
