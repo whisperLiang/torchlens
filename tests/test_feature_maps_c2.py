@@ -517,3 +517,56 @@ def test_aggregate_labels_report_actual_reduction(tmp_path: Path) -> None:
     as_max = _render_feature_map_grid(maps, stimuli, channels, reduce_label="max", **kwargs)
     as_avg = _render_feature_map_grid(maps, stimuli, channels, reduce_label="avg", **kwargs)
     assert ImageChops.difference(as_max, as_avg).getbbox() is not None
+
+
+class _RecurrentBlockModel(nn.Module):
+    """Stem conv (annotated) plus a block conv called twice (multi-pass)."""
+
+    def __init__(self) -> None:
+        """Initialize the stem and the reused block."""
+
+        super().__init__()
+        self.stem = nn.Conv2d(1, 3, kernel_size=1, bias=False)
+        self.block = nn.Conv2d(3, 3, kernel_size=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the stem, then the block twice (a recurrent layer)."""
+
+        h = self.stem(x)
+        h = self.block(h)
+        return self.block(h)
+
+
+def test_rolled_draw_with_annotations_survives_multipass_layers(tmp_path: Path) -> None:
+    """An UNRELATED multi-pass layer must never crash an annotated draw().
+
+    ``Layer.label`` raises the multi-pass ValueError tripwire on rolled
+    recurrent aggregates; ``getattr(node, "label", None)`` does not swallow
+    it. The annotation lookups must use the ``get_multipass_attr`` idiom.
+    """
+
+    trace = tl.trace(_RecurrentBlockModel().eval(), _input_batch(2), save=tl.in_module("stem"))
+    feature_map_evolution(trace, save=tl.in_module("stem"))
+
+    dot = trace.draw(
+        vis_mode="rolled",
+        node_spec_fn=feature_map_node_spec(),
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "rolled_annotated"),
+    )
+    assert "Feature maps for" in dot
+
+    from torchlens.repgeom import (
+        _mds_scatter_coords_for_node,
+        _rdm_matrix_for_node,
+        _scree_eigenvalues_for_node,
+    )
+
+    multipass_layer = trace["conv2d_2_2"]
+    trace._annotation_blobs = trace._annotation_blobs or {}
+    # Each repgeom lookup shares the same candidate-building block; a
+    # multi-pass node must skip the ambiguous op label, not raise.
+    assert _scree_eigenvalues_for_node(trace, multipass_layer) == (None, None)
+    assert _rdm_matrix_for_node(trace, multipass_layer) == (None, None)
+    assert _mds_scatter_coords_for_node(trace, multipass_layer) == (None, None)

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
+from ..utils._multipass_access import get_multipass_attr
 from ..utils.display import ensure_trace_visualizer_dir
 from ..visualization.node_spec import NodeSpec, NodeSpecFn
 from .node_plots import _apply_colormap, _normalize_finite
@@ -654,10 +655,12 @@ def _feature_map_payload_for_node(
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
