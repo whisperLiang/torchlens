@@ -344,6 +344,26 @@ class SaveBudget:
             return None
         return cls(spec=spec)
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle state without the live payload-watcher table.
+
+        The watchers are session-time GC hooks over LIVE payload tensors --
+        weakrefs with callbacks, unpicklable by construction and meaningless
+        in another process. Stripping them keeps every trace (success, failed
+        partial, halted) plain-picklable; a restored accountant simply stops
+        release-tracking payloads committed before the pickle, matching the
+        session-time contract (``save_budget`` never survives save/load).
+
+        Returns
+        -------
+        dict[str, Any]
+            Instance state with an empty watcher table.
+        """
+
+        state = self.__dict__.copy()
+        state["_payload_watchers"] = {}
+        return state
+
     def _ledger_for(self, device: torch.device) -> _DeviceLedger:
         """Return (creating if needed) the ledger for one device.
 

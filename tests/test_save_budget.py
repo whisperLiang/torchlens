@@ -631,3 +631,24 @@ def test_saved_trace_round_trips_with_the_default_budget(tmp_path: Path) -> None
     # DROP means the ceiling is not round-tripped: a loaded trace retains nothing,
     # so it is restored to the default rather than to this session's setting.
     assert loaded.save_budget == "auto"
+
+
+def test_budget_accountant_never_blocks_plain_pickle() -> None:
+    """The live watcher table (weakref callbacks) is stripped at pickle time.
+
+    Regression: the accountant's ``_payload_watchers`` weakrefs made EVERY
+    trace that retained a payload unpicklable (``TypeError: cannot pickle
+    'weakref.ReferenceType'``), on the success, halted, and failed axes alike.
+    """
+
+    import pickle
+
+    trace = tl.trace(_model(), _input())
+    accountant = trace.__dict__.get("_save_budget_accountant")
+    assert accountant is not None
+    assert accountant._payload_watchers, "fixture must have live payload watchers"
+    restored_trace = pickle.loads(pickle.dumps(trace))
+    restored = restored_trace.__dict__.get("_save_budget_accountant")
+    if restored is not None:
+        assert restored._payload_watchers == {}
+    trace.cleanup()

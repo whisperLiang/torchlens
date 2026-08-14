@@ -1118,6 +1118,49 @@ def _drop_semantic_output_transients(self: "Trace") -> None:
         self.__dict__.pop(attr_name, None)
 
 
+def _scrub_failed_capture_transients(self: "Trace") -> None:
+    """Failure-axis twin of the success arms' transient drops (R11/R32).
+
+    The success arms pop ``_output_attribution_input_tensors`` (live USER
+    INPUT tensors) and postprocess replaces the mutable ``capture_events``
+    alias with the payload-free ``_capture_events`` home. A failed or
+    interrupted forward reached neither, so the trace escaping on
+    ``exc.partial_log`` pickled the user's input tensors through an
+    undeclared attribute and retained every activation payload and grad_fn
+    handle of the failed run (GB-class on real models).
+
+    Partial diagnostics stay intact: ``PartialTrace.from_trace`` materialized
+    the raw layers during backend cleanup, strictly before this scrub, and
+    sidecar release keeps the structural event facts.
+
+    Predicate (fastlog) captures keep their event buffer untouched apart from
+    the trace-side alias pop: the buffer may be OWNED by the live Recorder
+    (a shared object accumulating prior passes), and the failed-pass snapshot
+    (``_failed_fastlog_capture_events``) already isolated the failing pass.
+
+    Parameters
+    ----------
+    self:
+        Trace settled FAILED whose capture transients should be discarded.
+
+    Returns
+    -------
+    None. Mutates ``self.__dict__``.
+    """
+
+    self.__dict__.pop("_output_attribution_input_tensors", None)
+    events = self.__dict__.pop("capture_events", None)
+    if events is None:
+        return
+    if getattr(self, "capture_mode", None) == "predicate":
+        return
+    if hasattr(events, "release_runtime_sidecars"):
+        events.release_runtime_sidecars()
+        # The trace is the sole strong owner of its (sidecar-released) event
+        # stream, mirroring the postprocess success seam.
+        self.__dict__["_capture_events"] = events
+
+
 def _extract_and_mark_outputs(
     self: "Trace",
     outputs: Any,
@@ -1730,6 +1773,7 @@ def run_and_log_inputs_through_model(
                         f"{getattr(halt_exc, 'reason', '')!r}"
                     ),
                 )
+                _scrub_failed_capture_transients(self)
                 raise
             self.__dict__.pop("_capture_producer_policy", None)
             settle_halted(
@@ -1761,6 +1805,7 @@ def run_and_log_inputs_through_model(
                     f"halted cleanup failed after halt at {getattr(halt_exc, 'reason', '')!r}"
                 ),
             )
+            _scrub_failed_capture_transients(self)
             raise
         self.__dict__.pop("_capture_producer_policy", None)
         settle_halted(
@@ -1797,8 +1842,11 @@ def run_and_log_inputs_through_model(
             # Guaranteed settlement: a cleanup double-fault still stamps the
             # terminal outcome before the (original or secondary) exception
             # escapes; exception identity/chaining is byte-identical to the
-            # pre-settlement arms.
+            # pre-settlement arms. The transient scrub runs after settlement
+            # (R11/R32: the escaping partial must not pin live input tensors
+            # or the payload-bearing event stream).
             settle_failed(self, capture_session, e, n_ops_committed=committed_ops)
+            _scrub_failed_capture_transients(self)
         raise e
 
     except BaseException as interrupt_exc:
@@ -1819,6 +1867,7 @@ def run_and_log_inputs_through_model(
                 interrupted=True,
                 n_ops_committed=committed_ops,
             )
+            _scrub_failed_capture_transients(self)
         raise
 
     finally:
