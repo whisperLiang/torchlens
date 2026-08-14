@@ -3343,8 +3343,18 @@ def _parse_input_binding(value: Mapping[str, Any]) -> InputSlotBinding:
         parsed_position = position
     else:
         raise TypeError("model_site_position must be a string, integer, or path array.")
+    # ``io_role`` is a Literal["model_input"] field; it was the one Literal-typed
+    # descriptor field parsed with a bare cast and never validated (R10-17).
+    # Refuse an out-of-vocabulary value at parse, like every other closed-vocab
+    # descriptor field.
+    io_role = _string(value, "io_role")
+    if io_role != "model_input":
+        raise ContextFieldInvalidError(
+            "tensor_slots.input_binding.io_role",
+            f"io_role {io_role!r} is outside the closed vocabulary {{'model_input'}}",
+        )
     return InputSlotBinding(
-        io_role=cast(Any, _string(value, "io_role")),
+        io_role=cast(Any, io_role),
         model_ref=_string(value, "model_ref"),
         model_site_position=parsed_position,
         container_record_id=_integer(value, "container_record_id"),
@@ -3475,6 +3485,21 @@ def _parse_activation_payload_layer(
 def _parse_diagnostic(value: Mapping[str, Any]) -> RunnableDiagnostic:
     """Parse one persisted producer diagnostic."""
 
+    # Refuse a malformed ``details`` entry rather than silently filtering it
+    # (R10-18): this was the one parse site that continued with partial state
+    # instead of failing closed like every sibling parser.
+    details: list[tuple[str, str]] = []
+    for item in _sequence(value, "details"):
+        if not (
+            isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) == 2
+        ):
+            raise ContextFieldInvalidError(
+                "preflight.diagnostics.details",
+                f"malformed diagnostic details entry {item!r}; expected a [key, value] pair",
+            )
+        details.append(
+            (_string_item(item[0], "details key"), _string_item(item[1], "details value"))
+        )
     return RunnableDiagnostic(
         code=RunnableErrorCode(_string(value, "code")),
         message=_string(value, "message"),
@@ -3487,11 +3512,7 @@ def _parse_diagnostic(value: Mapping[str, Any]) -> RunnableDiagnostic:
             value.get("resolver_provenance"), "resolver_provenance"
         ),
         analysis_load_available=_boolean(value, "analysis_load_available"),
-        details=tuple(
-            (_string_item(item[0], "details key"), _string_item(item[1], "details value"))
-            for item in _sequence(value, "details")
-            if isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) == 2
-        ),
+        details=tuple(details),
     )
 
 

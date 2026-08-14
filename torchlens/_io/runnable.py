@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import platform
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -1083,8 +1084,14 @@ _NODE_PORTABLE = 4
 # per save. The dispatch is a pure function of the type, so it is resolved once per
 # type instead of re-running an ABC ``isinstance`` chain (and ``dataclasses.fields``)
 # per node. Branch order below mirrors the original per-node chain exactly.
-_SPARSE_CORE_NODE_KINDS: dict[type, int] = {}
-_DATACLASS_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+# WEAK type keys: a notebook-cell / factory-made class used once as a node type
+# would otherwise be pinned (with its ``__globals__``) for the whole process
+# lifetime, since these memos never evict (R60-12). The equivalent scrub/rehydrate
+# caches in this package are already weak; match them.
+_SPARSE_CORE_NODE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+_DATACLASS_FIELD_NAMES: weakref.WeakKeyDictionary[type, tuple[str, ...]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _sparse_core_node_kind(node_type: type) -> int:

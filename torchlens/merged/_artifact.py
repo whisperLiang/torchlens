@@ -375,9 +375,15 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
                 # (twin of the _io/bundle.py _restore_backup disclosure).
                 import warnings
 
+                from ..errors._base import TorchLensWarning
+
+                # Categorized so operators can filter it with
+                # filterwarnings(category=TorchLensWarning); a bare UserWarning
+                # cannot be targeted (R66 F7).
                 warnings.warn(
                     f"Failed to restore the previous merged artifact after a "
                     f"failed overwrite; it remains recoverable at {backup_root}",
+                    TorchLensWarning,
                     stacklevel=2,
                 )
         raise

@@ -171,11 +171,21 @@ class LazyActivationRef:
 
         if blob_size <= _INLINE_LOAD_MAX_BYTES:
             try:
-                blob_bytes = blob_path.read_bytes()
+                # Bounded read: the stat above is advisory, so a file grown past
+                # the inline bound between stat and read would otherwise be read
+                # fully into memory (R60-5). Read at most one byte over the bound
+                # and refuse growth, mirroring _json._bounded_read_bytes.
+                with blob_path.open("rb") as handle:
+                    blob_bytes = handle.read(_INLINE_LOAD_MAX_BYTES + 1)
             except FileNotFoundError as exc:
                 raise TorchLensIOError(f"Tensor blob not found at {blob_path}.") from exc
             except OSError as exc:
                 raise TorchLensIOError(f"Failed to materialize blob at {blob_path}.") from exc
+            if len(blob_bytes) > _INLINE_LOAD_MAX_BYTES:
+                raise TorchLensIOError(
+                    f"blob at {blob_path} grew past the inline-load bound between "
+                    "its size check and read."
+                )
 
             observed_sha256 = sha256(blob_bytes).hexdigest()
             if observed_sha256 != self.expected_sha256:

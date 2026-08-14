@@ -493,6 +493,15 @@ class Manifest:
         """
 
         raw_version = data.get("tlspec_version")
+        if raw_version is None:
+            # An absent tlspec_version predates portable I/O versioning; map it to
+            # the below-floor refusal for consistency with the pickle-path
+            # counterpart (R10-10) instead of a generic missing-field error. A
+            # present-but-non-int value stays a required-field type error below.
+            raise below_floor_error(
+                observed="no tlspec_version (predates portable I/O versioning)",
+                subject="Bundle manifest",
+            )
         if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
             raise below_floor_error(
                 observed=f"tlspec_version={raw_version}", subject="Bundle manifest"
