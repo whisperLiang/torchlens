@@ -576,3 +576,79 @@ class TestWrapHistoryConstructionCorpus:
             revived = cls(d_model=8, nhead=2)
             revived.__setstate__(state)
             assert revived.activation is _resolve(F.relu), cls.__name__
+
+
+# ---------------------------------------------------------------------------
+# 6. Import-callback vs unwrap lifecycle race (R21/R55 b7 barrier probe)
+# ---------------------------------------------------------------------------
+
+
+def test_import_callback_unwrap_race_cannot_corrupt_shim_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A causal-bias import callback racing ``unwrap_torch()`` must never leave
+    a shim installed with wrappers off, and a lone late-appended record must
+    never stand in for the full shim family on the next wrap."""
+
+    import threading
+
+    from torchlens.backends.torch import identity_shims
+    from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+    from torchlens.utils import _torch_compat
+
+    if not _torch_compat.HAS_ATTENTION_CAUSAL_BIAS:
+        pytest.skip("causal-bias site absent on this torch")
+    pytest.importorskip("torch.nn.attention.bias")
+    import torch.nn.attention.bias as bias_module
+
+    unwrap_torch()
+    wrap_torch()
+    assert identity_shims.identity_shims_installed()
+
+    unwrap_started = threading.Event()
+    unwrap_done = threading.Event()
+    real_install = identity_shims._install_causal_bias_shim
+
+    def paused_install(records: list) -> None:
+        # Pause the callback tail between the lifecycle check and the install,
+        # exactly where the b7 barrier probe parked the loader. The bounded
+        # wait lets the LOCKED (fixed) tail proceed while unwrap blocks on the
+        # lifecycle lock; the UNLOCKED (buggy) tail instead lets unwrap finish
+        # first and then installs into torn-down state.
+        unwrap_started.set()
+        unwrap_done.wait(timeout=2.0)
+        real_install(records)
+
+    monkeypatch.setattr(identity_shims, "_install_causal_bias_shim", paused_install)
+
+    class _NoopLoader:
+        def exec_module(self, module: object) -> None:
+            return None
+
+    loader = identity_shims._ShimOnExecLoader(_NoopLoader())
+    callback = threading.Thread(target=loader.exec_module, args=(bias_module,))
+    callback.start()
+    assert unwrap_started.wait(timeout=5.0)
+    unwrap_torch()
+    unwrap_done.set()
+    callback.join(timeout=10.0)
+    assert not callback.is_alive()
+    monkeypatch.setattr(identity_shims, "_install_causal_bias_shim", real_install)
+
+    # Wrappers are off: no shim record may survive and CausalBias must be
+    # pristine (final-state equality, the b7 probe's failing assertion).
+    assert not identity_shims.identity_shims_installed()
+    causal_tf = vars(bias_module.CausalBias).get("__torch_function__")
+    assert not identity_shims._is_shimmed(causal_tf)
+
+    # The next wrap must perform the FULL family install: a default-built
+    # encoder layer keeps its fused-fastpath classification.
+    wrap_torch()
+    try:
+        assert identity_shims.identity_shims_installed()
+        if _torch_compat.HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG:
+            layer = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+            assert layer.activation_relu_or_gelu == 1
+    finally:
+        unwrap_torch()
+        wrap_torch()

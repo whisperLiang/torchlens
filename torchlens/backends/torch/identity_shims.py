@@ -68,6 +68,14 @@ _MISSING = object()
 # (holder, attribute name, original attribute value) for every installed shim.
 _installed: list[tuple[Any, str, Any]] = []
 
+# True ONLY between a successful FULL family install and the matching remove.
+# A non-empty ``_installed`` list must never stand in for family completeness:
+# a raced import callback could append one causal-bias record into a
+# post-teardown empty list, and the next ``install_identity_shims`` would then
+# skip the full install, leaving the transformer/expanded-weights shims absent
+# (the SF-53 fastpath bug re-created through the lifecycle seam).
+_family_installed = False
+
 # Live import hook covering the lazily-importable causal-bias site, or None.
 _import_hook: _CausalBiasShimImportHook | None = None
 
@@ -129,21 +137,32 @@ class _ShimOnExecLoader:
         shimming restores what this call patched and re-raises loudly — a
         silently unshimmed CausalBias is exactly the wrong-numbers bug this
         hook exists to close.
+
+        The shim-install tail participates in the wrapper lifecycle lock:
+        unlocked, the check-then-install sequence raced ``unwrap_torch()``
+        (remove could run between the completeness check and the append,
+        leaving one causal-bias record installed with wrappers off and the
+        next wrap short-circuiting the full family install). The lock is NOT
+        held across the real module exec — only around the shim tail — so a
+        module import cannot deadlock against a concurrent wrap/unwrap.
         """
 
         self._loader.exec_module(module)
-        if not _installed:
-            # Shims were removed between find_spec and exec (unwrap raced the
-            # import): with wrappers gone every normalization is a no-op and
-            # nothing must be left patched.
-            return
-        records: list[tuple[Any, str, Any]] = []
-        try:
-            _install_causal_bias_shim(records)
-        except Exception:
-            _restore(records)
-            raise
-        _installed.extend(records)
+        from .wrappers import _wrapper_install_lock
+
+        with _wrapper_install_lock:
+            if not _family_installed:
+                # Shims were removed between find_spec and this tail (unwrap
+                # raced the import): with wrappers gone every normalization is
+                # a no-op and nothing must be left patched.
+                return
+            records: list[tuple[Any, str, Any]] = []
+            try:
+                _install_causal_bias_shim(records)
+            except Exception:
+                _restore(records)
+                raise
+            _installed.extend(records)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._loader, name)
@@ -215,12 +234,15 @@ def install_identity_shims() -> None:
     that must surface loudly.
     """
 
-    if _installed:
+    global _family_installed
+    if _family_installed:
         # The causal-bias site resolves only through sys.modules (lazy-import
         # belt). The import hook shims a post-wrap import the moment the
         # module executes; this capture-entry re-pickup stays as the belt for
         # any import the hook missed. The install is a no-op when the site is
-        # absent or already shimmed.
+        # absent or already shimmed. Keyed on the explicit full-install flag,
+        # never on ``_installed`` being non-empty: a lone late-appended record
+        # must not stand in for the whole family.
         _ensure_import_hook()
         late_records: list[tuple[Any, str, Any]] = []
         try:
@@ -240,12 +262,21 @@ def install_identity_shims() -> None:
         _restore(records)
         raise
     _installed.extend(records)
+    _family_installed = True
     _ensure_import_hook()
 
 
 def remove_identity_shims() -> None:
-    """Remove all installed identity shims; idempotent."""
+    """Remove all installed identity shims; idempotent.
 
+    Caller holds the wrapper install lock (the import-callback tail takes the
+    same lock), so teardown can never interleave with a late causal-bias
+    append: the callback either completes first (its record is restored here)
+    or observes ``_family_installed`` False and installs nothing.
+    """
+
+    global _family_installed
+    _family_installed = False
     _remove_import_hook()
     _restore(_installed)
     _installed.clear()
