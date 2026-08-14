@@ -1,8 +1,28 @@
-"""Import-time hygiene regression tests."""
+"""Import-time hygiene regression tests.
+
+The measured import state is healthy -- TorchLens adds ~0.15 s and 30 of its own
+modules on top of torch, pulls no heavy third-party dependency, and is
+warning-clean. This file is the TRIPWIRE for that state, and grind b4 (R31-1)
+found the tripwire could not fail on any of the three ways it can regress:
+
+(a) the denylist covered torchvision and two ``torch._dynamo`` names and nothing
+    else, while the live route to a heavy dependency exists -- ``options.py``
+    executes ``visualization/__init__`` on every bare import, one hop from
+    modules doing top-level ``import graphviz`` / ``from PIL import Image``;
+(b) no module-count ceiling and no import-duration budget existed anywhere;
+(c) only a handful of the lazy facades were asserted deferred, so a new eager
+    ``from .viz import ...`` would silently pull PIL;
+(d) the whole file sat outside the smoke/PR tier, so an eager-wrap regression
+    merged green and surfaced a day later, misattributed;
+(e) no warning-on-import gate;
+(f) two guards did not pin WHICH torchlens they imported -- on a box with an
+    installed wheel they audited the wheel, not the checkout.
+"""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -11,12 +31,216 @@ from pathlib import Path
 import pytest
 import torch
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 _LAZY_MODULE_CASES = (
     ("fastlog", "record"),
     ("intervention", "func"),
     ("user_funcs", "trace"),
     ("data_classes", "Buffer"),
 )
+
+#: Third-party packages a bare ``import torchlens`` must never pull. FROZEN and
+#: grow-only: every name here is either a real one-hop risk from the eagerly
+#: imported ``torchlens.visualization`` (graphviz, PIL) or an expensive optional
+#: integration that belongs behind a lazy facade. ``numpy`` is deliberately
+#: absent -- torch imports it itself, so it is not TorchLens's to defer.
+_HEAVY_IMPORT_DENYLIST = frozenset(
+    {
+        "IPython",
+        "PIL",
+        "graphviz",
+        "matplotlib",
+        "pandas",
+        "pyarrow",
+        "scipy",
+        "sklearn",
+        "torchvision",
+        "transformers",
+        "torch._dynamo",
+        "torch._dynamo.eval_frame",
+    }
+)
+
+#: Every torchlens module a bare import is allowed to execute. SHRINK-ONLY: the
+#: test demands equality, so adding an eager module fails and must be argued for
+#: in the diff, while making one lazy fails with "delete the row" -- the same
+#: discipline tests/test_module_import_isolation.py uses for import cycles.
+_EAGER_TORCHLENS_MODULES = frozenset(
+    {
+        "torchlens",
+        "torchlens._deprecations",
+        "torchlens._errors",
+        "torchlens._io",
+        "torchlens._literals",
+        "torchlens._save_budget",
+        "torchlens._state",
+        "torchlens.captured_run",
+        "torchlens.errors",
+        "torchlens.errors._base",
+        "torchlens.errors.runnable",
+        "torchlens.ir",
+        "torchlens.ir.capture_events",
+        "torchlens.ir.container",
+        "torchlens.ir.container_registry",
+        "torchlens.ir.events",
+        "torchlens.ir.intervention",
+        "torchlens.ir.live_index",
+        "torchlens.ir.op_record",
+        "torchlens.ir.predicate",
+        "torchlens.ir.refs",
+        "torchlens.ir.semantics",
+        "torchlens.ir.workspaces",
+        "torchlens.observers",
+        "torchlens.options",
+        "torchlens.quantities",
+        "torchlens.utils",
+        "torchlens.utils._multipass_access",
+        "torchlens.visualization",
+        "torchlens.visualization.node_spec",
+    }
+)
+
+#: Lazy-facade module paths that a bare import legitimately executes anyway,
+#: with the reason. Shrink-only, like the eager set above.
+_EAGERLY_IMPORTED_LAZY_TARGETS = {
+    "torchlens._io": (
+        "the package eagerly imports torchlens._io for the error/warning classes "
+        "(ArtifactSchemaAgeWarning and friends) that the top-level surface "
+        "re-exports; the lazy _LAZY_ATTRS entries pointing here are for its "
+        "heavier members, which stay deferred inside the module"
+    ),
+}
+
+#: Non-torchlens modules a bare import may add BEYOND what torch already
+#: imported. Measured at 16 (html, packaging, sysconfig). The ceiling is
+#: deliberately loose -- it exists to catch a heavy dependency creeping in as an
+#: order-of-magnitude jump, which the denylist can only catch by name.
+_MAX_MARGINAL_NON_TORCHLENS_MODULES = 40
+
+#: Wall-clock budget for the torchlens import itself, measured with torch
+#: already imported so the number is not dominated by torch. Measured ~0.15 s on
+#: a 4-core devbox under parallel sprint load; the budget is ~6x that. This is a
+#: regression tripwire for an order-of-magnitude change (an eager heavy import),
+#: NOT a performance gate -- perf lives in tests/bench/.
+_TORCHLENS_IMPORT_BUDGET_S = 1.0
+
+
+def _import_probe_script() -> str:
+    """Build a fresh-interpreter probe emitting one JSON blob of import facts.
+
+    One subprocess serves every ceiling/denylist assertion below, so the whole
+    R31 block costs a single torch import instead of one per check.
+
+    Returns
+    -------
+    str
+        Python source printing a JSON object on its last line.
+    """
+
+    return """
+import json, sys, time
+
+before_torch = set(sys.modules)
+import torch
+after_torch = set(sys.modules)
+
+start = time.perf_counter()
+import torchlens
+elapsed = time.perf_counter() - start
+
+after = set(sys.modules)
+torchlens_modules = sorted(
+    name for name in after if name == "torchlens" or name.startswith("torchlens.")
+)
+marginal_foreign = sorted(
+    name
+    for name in after - after_torch
+    if not (name == "torchlens" or name.startswith("torchlens."))
+)
+lazy_targets = sorted({target for target, _attr in torchlens._LAZY_ATTRS.values()})
+print(json.dumps({
+    "elapsed": elapsed,
+    "file": torchlens.__file__,
+    "loaded": sorted(after),
+    "torchlens_modules": torchlens_modules,
+    "marginal_foreign": marginal_foreign,
+    "lazy_targets": lazy_targets,
+    "eager_lazy_targets": [t for t in lazy_targets if t in after],
+}))
+"""
+
+
+def _run_import_script(script: str) -> None:
+    """Run an import assertion against this checkout in a fresh interpreter.
+
+    Parameters
+    ----------
+    script:
+        Python source containing assertions for one import pattern.
+    """
+
+    _run_import_script_capturing(script)
+
+
+def _run_import_script_capturing(script: str) -> str:
+    """Run ``script`` against THIS checkout and return its stdout.
+
+    Every guard in this file routes through here so none of them can silently
+    audit an installed wheel instead of the working tree (grind b4, R31-1f): the
+    checkout goes on ``PYTHONPATH`` and the probe asserts which ``torchlens``
+    actually got imported.
+
+    Parameters
+    ----------
+    script:
+        Python source to execute.
+
+    Returns
+    -------
+    str
+        Captured stdout.
+    """
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(_REPO_ROOT)
+    prologue = (
+        "import torchlens as _tl_checkout_probe, pathlib as _pathlib\n"
+        f"_expected = _pathlib.Path({str(_REPO_ROOT)!r}).resolve()\n"
+        "_actual = _pathlib.Path(_tl_checkout_probe.__file__).resolve()\n"
+        "assert _expected in _actual.parents, (\n"
+        "    'guard imported the wrong torchlens: ' + str(_actual)\n"
+        ")\n"
+    )
+    # The checkout assertion runs AFTER the caller's script, so it cannot perturb
+    # a measurement that times the torchlens import itself.
+    completed = subprocess.run(
+        [sys.executable, "-c", script + "\n" + prologue],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 0, (
+        f"import guard subprocess failed ({completed.returncode}):\n"
+        f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+    )
+    return completed.stdout
+
+
+@pytest.fixture(scope="module")
+def import_facts() -> dict[str, object]:
+    """Return import facts measured once in a fresh interpreter.
+
+    Returns
+    -------
+    dict[str, object]
+        Parsed output of :func:`_import_probe_script`.
+    """
+
+    stdout = _run_import_script_capturing(_import_probe_script())
+    payload = [line for line in stdout.splitlines() if line.startswith("{")][-1]
+    return json.loads(payload)
 
 
 def _lazy_facade_fidelity_script() -> str:
@@ -93,6 +317,118 @@ def _run_import_script(script: str) -> None:
     subprocess.run([sys.executable, "-c", script], check=True, env=environment)
 
 
+@pytest.mark.smoke
+def test_bare_import_pulls_no_heavy_third_party_dependency(
+    import_facts: dict[str, object],
+) -> None:
+    """No package on the frozen denylist may be imported by a bare import.
+
+    R31-1a. The route is live, not hypothetical: ``options.py`` executes
+    ``visualization/__init__`` on every bare import, and sibling modules in that
+    package (``_render_common.py``, ``_render_utils.py``, ``renderers/
+    graphviz.py``) import graphviz and PIL at module level. One accidental
+    re-export away.
+    """
+
+    loaded = set(import_facts["loaded"])  # type: ignore[arg-type]
+    offenders = sorted(loaded & _HEAVY_IMPORT_DENYLIST)
+    assert not offenders, (
+        "bare `import torchlens` pulled heavy dependencies -- move the import "
+        f"behind a lazy facade or a function-local import: {offenders}"
+    )
+
+
+@pytest.mark.smoke
+def test_eager_module_set_is_exactly_the_declared_allowlist(
+    import_facts: dict[str, object],
+) -> None:
+    """The eager torchlens module set is pinned and shrink-only (R31-1b)."""
+
+    actual = set(import_facts["torchlens_modules"])  # type: ignore[arg-type]
+    added = sorted(actual - _EAGER_TORCHLENS_MODULES)
+    assert not added, (
+        "these torchlens modules became EAGER on a bare import. Defer them, or "
+        "add them to _EAGER_TORCHLENS_MODULES in the same diff with a reason: "
+        f"{added}"
+    )
+    removed = sorted(_EAGER_TORCHLENS_MODULES - actual)
+    assert not removed, f"these modules are no longer eager (good -- delete their rows): {removed}"
+
+
+@pytest.mark.smoke
+def test_bare_import_adds_few_foreign_modules(import_facts: dict[str, object]) -> None:
+    """A bare import adds few non-torchlens modules beyond torch (R31-1b).
+
+    Complements the denylist, which can only catch dependencies it knows to name.
+    """
+
+    marginal = list(import_facts["marginal_foreign"])  # type: ignore[arg-type]
+    assert len(marginal) <= _MAX_MARGINAL_NON_TORCHLENS_MODULES, (
+        f"bare import added {len(marginal)} non-torchlens modules beyond torch "
+        f"(ceiling {_MAX_MARGINAL_NON_TORCHLENS_MODULES}); a new dependency has "
+        f"probably become eager: {marginal}"
+    )
+
+
+@pytest.mark.smoke
+def test_bare_import_stays_within_its_wall_clock_budget(
+    import_facts: dict[str, object],
+) -> None:
+    """Importing torchlens over an already-imported torch stays cheap (R31-1b).
+
+    Measured with torch pre-imported so the figure is TorchLens's own marginal
+    cost rather than torch's. Budget is ~6x measured: this catches an eager heavy
+    import, not a few milliseconds of drift.
+    """
+
+    elapsed = float(import_facts["elapsed"])  # type: ignore[arg-type]
+    assert elapsed < _TORCHLENS_IMPORT_BUDGET_S, (
+        f"importing torchlens took {elapsed:.3f}s over an already-imported torch "
+        f"(budget {_TORCHLENS_IMPORT_BUDGET_S}s). Something heavy became eager."
+    )
+
+
+@pytest.mark.smoke
+def test_every_lazy_facade_target_is_actually_deferred(
+    import_facts: dict[str, object],
+) -> None:
+    """EVERY ``_LAZY_ATTRS`` target module stays unimported (R31-1c).
+
+    Derived from the shipped table inside the probe, so a facade added later is
+    covered without editing this test -- previously only a handful of the 30
+    distinct target modules were checked, and a new eager ``from .viz import ...``
+    would have pulled PIL unnoticed.
+    """
+
+    targets = list(import_facts["lazy_targets"])  # type: ignore[arg-type]
+    assert len(targets) > 20, f"only {len(targets)} lazy targets found; table misread"
+    eager = set(import_facts["eager_lazy_targets"])  # type: ignore[arg-type]
+    undeclared = sorted(eager - set(_EAGERLY_IMPORTED_LAZY_TARGETS))
+    assert not undeclared, (
+        "these lazy-facade targets were imported eagerly, defeating the facade. "
+        "Defer them, or declare them in _EAGERLY_IMPORTED_LAZY_TARGETS with the "
+        f"reason: {undeclared}"
+    )
+    healed = sorted(set(_EAGERLY_IMPORTED_LAZY_TARGETS) - eager)
+    assert not healed, f"now properly deferred (delete their rows): {healed}"
+
+
+@pytest.mark.smoke
+def test_bare_import_is_warning_clean() -> None:
+    """A bare import emits no warnings at all (R31-1e).
+
+    Import is warning-clean today; nothing enforced it. Run with ``-W error`` in
+    a fresh interpreter so any warning raised during import fails the guard.
+    """
+
+    _run_import_script_capturing(
+        "import warnings\n"
+        "warnings.simplefilter('error')\n"
+        "import torchlens\n"
+        "assert torchlens.__version__\n"
+    )
+
+
 def test_all_lazy_facades_match_direct_import_public_names() -> None:
     """Pin public-name fidelity and audit child-module collisions for every facade."""
 
@@ -125,6 +461,7 @@ def test_lazified_module_direct_import_patterns(module_name: str, member_name: s
     )
 
 
+@pytest.mark.smoke
 def test_bare_import_defers_lazified_feature_modules() -> None:
     """Bare imports must not eagerly initialize the deferred feature islands."""
 
@@ -137,6 +474,7 @@ def test_bare_import_defers_lazified_feature_modules() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_bare_import_leaves_torch_functions_undecorated() -> None:
     """Bare TorchLens import must not eagerly wrap torch operators."""
 
@@ -165,36 +503,27 @@ def test_first_trace_lazily_wraps_torch_functions() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_import_torchlens_does_not_import_torchvision_when_installed() -> None:
     """Bare TorchLens import should not import torchvision even when installed."""
 
     if importlib.util.find_spec("torchvision") is None:
         pytest.skip("torchvision is not installed")
 
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import torchlens, sys; assert 'torchvision' not in sys.modules",
-        ],
-        check=True,
-    )
+    # Routed through the helper (R31-1f): the bare subprocess.run this used to
+    # call set no PYTHONPATH, so on a box with torchlens installed as a wheel it
+    # audited the wheel and reported green about code that was never checked.
+    _run_import_script_capturing("import torchlens, sys; assert 'torchvision' not in sys.modules")
 
 
+@pytest.mark.smoke
 def test_import_torchlens_does_not_import_heavy_torch_submodules() -> None:
     """Bare TorchLens import should not force deferred torch internals."""
 
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import torchlens, sys; "
-                "assert 'torch._dynamo' not in sys.modules; "
-                "assert 'torch._dynamo.eval_frame' not in sys.modules"
-            ),
-        ],
-        check=True,
+    _run_import_script_capturing(
+        "import torchlens, sys; "
+        "assert 'torch._dynamo' not in sys.modules; "
+        "assert 'torch._dynamo.eval_frame' not in sys.modules"
     )
 
 
