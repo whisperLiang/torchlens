@@ -176,6 +176,7 @@ add names to the top-level `torchlens` namespace:
 | `trace_not_finished` | Export requested before the forward pass finished | Wait until `trace(...)` has returned |
 | `trace_reference_collected` | Owning Trace was garbage-collected | Keep the Trace alive while reading records |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |
+| `unsupported_tensor_variant` | Model/input carries meta, fake, functional, or sparse tensor variants (`UnsupportedTensorVariantError`) | Materialize dense, strided tensors with concrete shapes on a real device |
 | `visualization_intervention_mode_invalid` | Intervention rendering mode is unknown | Choose `node_mark` or `as_node` |
 | `visualization_layout_invalid` | Visualization layout is unknown | Choose `auto`, `dot`, or `rank` |
 | `visualization_direction_invalid` | Render direction is unknown | Choose `bottomup`, `topdown`, or `leftright` |

@@ -160,7 +160,9 @@ def test_fake_tensor_input_refuses_with_a_typed_explanatory_error() -> None:
     message = str(excinfo.value)
     assert "FakeTensor in input" in message
     assert "no data" in message
-    assert "LIMITATIONS.md" in message
+    # The docs pointer must cite a location that actually exists (B8-30: the
+    # old pointer named a phantom README/LIMITATIONS.md section).
+    assert "docs/reference/limitations.md" in message
 
 
 def test_fake_tensor_in_a_nested_input_container_refuses() -> None:

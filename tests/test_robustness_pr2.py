@@ -25,7 +25,10 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._robustness import (
+    _ITER_TENSORS_MAX_DEPTH,
+    _ITER_TENSORS_MAX_NODES,
     UnsupportedTensorVariantError,
+    VariantScanTruncationWarning,
     _is_meta_tensor,
     _is_sparse_tensor,
     _iter_tensors,
@@ -376,6 +379,112 @@ def test_shared_tensor_tree_walker_dedupes_and_handles_cycles() -> None:
     payload.append(payload)
 
     assert list(_iter_tensors(payload)) == [tensor]
+
+
+# ---------------------------------------------------------------------------
+# Structured refusal fields + bounded-scan honesty (fixwave-2 B8-31 / R16-8)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_refusal_carries_structured_offense_fields() -> None:
+    """Callers branch on ``fields`` instead of parsing the prose bullets."""
+
+    model = _Tiny()
+    meta_x = torch.zeros(2, 4, device="meta")
+
+    with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+        check_model_and_input_variants(model, meta_x, {})
+
+    fields = exc_info.value.fields
+    assert fields["code"] == "unsupported_tensor_variant"
+    assert isinstance(fields["remedy"], str) and fields["remedy"]
+    offenses = fields["offenses"]
+    assert isinstance(offenses, tuple) and offenses
+    assert all(set(offense) == {"name", "reason"} for offense in offenses)
+    assert any("meta tensor" in offense["name"] for offense in offenses)
+
+
+def _nest(value: object, levels: int) -> object:
+    """Wrap ``value`` in ``levels`` single-element lists.
+
+    Parameters
+    ----------
+    value:
+        Innermost payload.
+    levels:
+        Number of nesting levels to add.
+
+    Returns
+    -------
+    object
+        Nested container.
+    """
+
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_deeply_nested_unsupported_variant_gets_the_typed_refusal() -> None:
+    """A variant nested past the OLD 12-level bound is still refused typed.
+
+    Before the iterative rewrite the recursive walk silently stopped at 12
+    levels, so a FakeTensor at level 13+ evaded the entry guard and died RAW
+    mid-capture. The raised bound must catch it without any truncation
+    disclosure.
+    """
+
+    fake_tensor = pytest.importorskip("torch._subclasses.fake_tensor")
+    with fake_tensor.FakeTensorMode():
+        fake = torch.randn(2, 4)
+
+    nested = _nest(fake, 40)
+    assert 40 > 12
+    assert _ITER_TENSORS_MAX_DEPTH > 40
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+            check_model_and_input_variants(_Tiny(), nested, {})
+
+    assert exc_info.value.fields["code"] == "unsupported_tensor_variant"
+    assert any("FakeTensor" in offense["name"] for offense in exc_info.value.fields["offenses"])
+    assert not [w for w in caught if issubclass(w.category, VariantScanTruncationWarning)]
+
+
+def test_depth_truncated_scan_discloses_instead_of_silently_narrowing() -> None:
+    """Crossing the depth bound emits the one-shot truncation disclosure."""
+
+    nested = _nest(torch.randn(1), _ITER_TENSORS_MAX_DEPTH + 5)
+
+    with pytest.warns(VariantScanTruncationWarning, match="depth bound"):
+        assert list(_iter_tensors(nested)) == []
+
+
+def test_node_cap_truncated_scan_discloses_instead_of_silently_narrowing() -> None:
+    """Crossing the total-node bound emits the one-shot truncation disclosure."""
+
+    wide = [[float(i)] for i in range(_ITER_TENSORS_MAX_NODES + 10)]
+
+    with pytest.warns(VariantScanTruncationWarning, match="node bound") as record:
+        list(_iter_tensors(wide))
+
+    disclosures = [w for w in record if issubclass(w.category, VariantScanTruncationWarning)]
+    assert len(disclosures) == 1
+
+
+def test_bounded_scan_within_limits_is_silent_and_complete() -> None:
+    """A scan inside both bounds yields every tensor with no disclosure."""
+
+    tensors = [torch.randn(1) for _ in range(3)]
+    payload = {"a": tensors[0], "b": _nest(tensors[1], 30), "c": (tensors[2],)}
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        found = list(_iter_tensors(payload))
+
+    assert found == tensors
+    assert not [w for w in caught if issubclass(w.category, VariantScanTruncationWarning)]
 
 
 # ---------------------------------------------------------------------------
