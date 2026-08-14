@@ -122,6 +122,21 @@ def _check_equivalence_symmetry(ml: Trace) -> None:
     # be recycled onto a different object mid-check.
     verified_op_pairs: set[tuple[int, int]] = set()
     verified_keepalive: list[object] = []
+    # Membership index: per-op ``equivalence_class`` carries the module suffix
+    # appended at op creation (plus loop-detection ``_argsig`` splits), while
+    # the trace dict keys are pre-suffix, so a key-based lookup misses for
+    # EVERY parameterized in-module layer and the group comparison below
+    # silently skipped -- symmetric corruption of ``equivalent_ops`` on all
+    # passes of a shared in-module layer passed the whole suite. Resolving the
+    # expected group by MEMBERSHIP (the same reconciliation the recurrent-group
+    # consistency check at the bottom of this module already uses) makes the
+    # invariant actually run for suffixed classes; the key lookup stays first
+    # so a label scrubbed OUT of its group still resolves the group and fails.
+    group_by_member: dict[str, set] = {}
+    for group in ml.op_equivalence_classes.values():
+        if isinstance(group, set):
+            for member_label in group:
+                group_by_member[member_label] = group
     for op in ml.layer_list:
         equivalence_class = getattr(op, "equivalence_class", None)
         expected_group = (
@@ -129,6 +144,8 @@ def _check_equivalence_symmetry(ml: Trace) -> None:
             if isinstance(equivalence_class, str)
             else None
         )
+        if expected_group is None:
+            expected_group = group_by_member.get(op.label)
         canonical = _canonical_equivalent_ops(op)
         op_pair_key: tuple[int, int] | None = None
         if canonical is not _EQUIVALENT_OPS_UNAVAILABLE:

@@ -249,6 +249,16 @@ def _check_op_log_fields(ml: Trace) -> None:
                 raise MetadataInvariantError(name, f"Layer {label}: func is not callable")
             if not lpl.func_name:
                 raise MetadataInvariantError(name, f"Layer {label}: func_name is empty")
+            if str(lpl.func_name).lower() == "none":
+                # The functionless sentinel on an op that carries a real
+                # callable is name corruption (deephunt M2): "none" is only
+                # minted for output bookkeeping nodes and functionless
+                # internal sources, both excluded from this block above.
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {label}: computational op carries the functionless "
+                    "sentinel func_name 'none'",
+                )
 
         # Operation numbering (input/buffer/output bookkeeping layers have step_index=0)
         if not (lpl.is_input or lpl.is_buffer or lpl.is_output):

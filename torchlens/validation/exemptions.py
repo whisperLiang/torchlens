@@ -663,6 +663,8 @@ def _setitem_destination_coverage_is_total(
         return False
     if selected.numel() != destination.numel():
         return False
+    if not _index_positions_cover_destination_exactly(destination, index):
+        return False
     if isinstance(replacement, torch.Tensor):
         return tuple(selected.shape) == tuple(replacement.shape)
     return True
@@ -704,6 +706,50 @@ def _setitem_index_targets_are_unique(index: Any) -> bool:
             continue
         return False
     return True
+
+
+def _index_positions_cover_destination_exactly(
+    destination: torch.Tensor,
+    index: Any,
+) -> bool:
+    """Return whether ``destination[index]`` addresses every element exactly once.
+
+    Value-based uniqueness (``torch.unique`` on raw index values) is blind to
+    negative-index aliasing: ``0`` and ``-2`` are distinct VALUES that address
+    the SAME position on a length-2 dim, so a "fully overwritten" proof counted
+    a full overwrite while an element survived with its prior value. Indexing
+    an identity-POSITION tensor with the saved index makes torch's own indexing
+    semantics normalize negatives, slices, ellipsis, and boolean masks exactly;
+    requiring the selected positions to be unique and to number the whole
+    destination is the exact single-coverage proof.
+
+    Parameters
+    ----------
+    destination:
+        Destination tensor of the write.
+    index:
+        Saved index argument (``__setitem__`` index or ``index_put`` indices
+        tuple).
+
+    Returns
+    -------
+    bool
+        True only when the index selects each destination position exactly
+        once and selects all of them. Any indexing failure returns False so
+        callers fail closed.
+    """
+
+    try:
+        positions = torch.arange(destination.numel(), device=destination.device).reshape(
+            destination.shape
+        )
+        covered = positions[index]
+    except (IndexError, TypeError, RuntimeError):
+        return False
+    flattened = covered.reshape(-1)
+    if int(flattened.numel()) != int(destination.numel()):
+        return False
+    return int(torch.unique(flattened).numel()) == int(destination.numel())
 
 
 def _tensor_is_integer_index(tensor: torch.Tensor) -> bool:
@@ -865,7 +911,9 @@ def _index_put_destination_is_fully_overwritten(
     # count -- duplicates would match the numel without covering everything.
     if not _index_put_indices_are_unique(index):
         return False
-    return int(selected.numel()) == int(destination.numel())
+    if int(selected.numel()) != int(destination.numel()):
+        return False
+    return _index_positions_cover_destination_exactly(destination, index)
 
 
 def _index_put_indices_are_unique(index: tuple[Any, ...]) -> bool:
@@ -1565,22 +1613,30 @@ def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
 def _perturbed_parents_only_occupy_template_slot(
     layer: Op,
     layers_to_perturb: list[str],
+    template_arg_roots: tuple[int, ...] = (0,),
+    template_kwarg_names: tuple[str, ...] = ("input",),
 ) -> bool:
     """Return whether EVERY perturbed parent occupies only the template slot.
 
-    The ``*_like`` structural-template exemption is only sound for the
-    TEMPLATE argument (``args[0]`` / ``input=``): its values never flow into
-    the output, only its shape/dtype/device do. Any other parent slot -- in
-    particular a runtime ``full_like`` fill_value tensor -- is a genuine value
-    dependency, and an unchanged output there must NOT be excused as
-    structural (F2 tightening). Missing position metadata fails closed.
+    A structural-template exemption is only sound for the TEMPLATE argument:
+    its values never flow into the output, only its shape/dtype/device do.
+    For the ``*_like`` family that is ``args[0]`` / ``input=`` (the F2
+    tightening); for ``to(other)`` it is ``args[1]`` / ``other=`` (the H3
+    tightening -- the perturbed data SOURCE of a cast is a genuine value
+    dependency, and an unchanged output there is a dropped substitution, not
+    structure). Any other parent slot must NOT be excused as structural.
+    Missing position metadata fails closed.
 
     Parameters
     ----------
     layer:
-        Captured ``*_like``-family op.
+        Captured op carrying a structural template argument.
     layers_to_perturb:
         Parent labels currently being perturbed.
+    template_arg_roots:
+        Positional root indices of the template slot.
+    template_kwarg_names:
+        Keyword spellings of the template slot.
 
     Returns
     -------
@@ -1601,10 +1657,10 @@ def _perturbed_parents_only_occupy_template_slot(
             return False
         for key in arg_keys:
             root = key[0] if isinstance(key, tuple) and key else key
-            if root != 0:
+            if root not in template_arg_roots:
                 return False
         for name in kwarg_names:
-            if name != "input":
+            if name not in template_kwarg_names:
                 return False
     return True
 
@@ -1631,7 +1687,21 @@ def _posthoc_structural_output_decision(
         Exempt decision for structural cases, otherwise a non-exempt result.
     """
 
-    if layer.func_name == "to" and len(args) > 1 and isinstance(args[1], torch.Tensor):
+    if (
+        layer.func_name == "to"
+        and len(args) > 1
+        and isinstance(args[1], torch.Tensor)
+        and _perturbed_parents_only_occupy_template_slot(
+            layer,
+            layers_to_perturb,
+            template_arg_roots=(1,),
+            template_kwarg_names=("other",),
+        )
+    ):
+        # H3 tightening: only the TEMPLATE tensor (args[1] / other=) is
+        # structural -- solely its dtype/device flow into the output. A
+        # perturbed data SOURCE (args[0]) whose replay output stays unchanged
+        # is a dropped substitution and must fall through to the failure path.
         return PosthocPerturbDecision(True, "type_template_output")
     if _integer_cast_quantization_applies(layer, args):
         return PosthocPerturbDecision(
@@ -1658,6 +1728,23 @@ def _posthoc_structural_output_decision(
         return PosthocPerturbDecision(True, "structural_output_template")
     if layer.func_name == "bernoulli" and "p" in layer.saved_kwargs:
         return PosthocPerturbDecision(True, "rng_probability_template")
+    if layer.func_name == "bernoulli_" and _perturbed_parents_only_occupy_template_slot(
+        layer, layers_to_perturb
+    ):
+        # bernoulli_ overwrites EVERY destination element with fresh draws --
+        # Bernoulli(0.5) for the bare form (self's values are IGNORED;
+        # zeros.bernoulli_() produces ones) and Bernoulli(p) for the explicit
+        # form -- so only the destination's shape/dtype/device flow into the
+        # output: a template, exactly like args[0] of the *_like family. A
+        # probability edge (out-of-place bernoulli slot 0, or bernoulli_'s
+        # slot 1 / p=) is NOT exempted here: it is a genuine value dependency
+        # validated by the complement-probability perturbation (deephunt L17).
+        return PosthocPerturbDecision(
+            True,
+            "rng_probability_template",
+            "bernoulli_ overwrites every destination element with fresh draws; "
+            "only the destination's shape/dtype/device flow into the output",
+        )
     if _unique_disabled_auxiliary_output(layer):
         return PosthocPerturbDecision(
             True,

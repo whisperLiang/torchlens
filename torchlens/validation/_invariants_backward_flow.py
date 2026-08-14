@@ -358,16 +358,25 @@ def op_has_genuine_replacement_evidence(layer: Op, trace: Trace | None = None) -
     if trace is None:
         trace = getattr(layer, "source_trace", None)
     if trace is None:
-        # No trace-level authority reachable (detached op) -- preserve the
-        # legacy per-op behavior rather than failing structures we cannot
-        # cross-check.
+        # No trace-level authority reachable (detached op). A persisted
+        # save-time stamp is still per-op authority when present (a False
+        # stamp is a preserved plain-capture-placeholder verdict and must
+        # keep failing); with no stamp at all, preserve the legacy per-op
+        # behavior rather than failing structures we cannot cross-check.
+        stamp = _persisted_replacement_stamp(layer)
+        if stamp is not None:
+            return stamp
         return True
     if bool(getattr(trace, "_loaded_from_bundle", False)):
         # Journal edit records are live-capture runtime facts (never
-        # serialized); loaded artifacts keep the legacy per-op behavior.
-        # Functionless replacement ops in bundles are independently refused
-        # by ``_raise_if_portable_bundle_log`` on the replay path.
-        return True
+        # serialized), so loaded artifacts carry the save-time verdict
+        # instead: ``_stamp_replacement_evidence`` evaluates this exact
+        # corroboration while the live authority is intact and persists it in
+        # the op's ``annotations``. A missing or False stamp fails CLOSED --
+        # returning True here let a plain-capture placeholder that failed
+        # live PASS after a save/load round trip, contradicting the locked
+        # 2026-06-02 rule.
+        return _persisted_replacement_stamp(layer) is True
     from ..ir.events import InterventionAppliedEvent
 
     stream = getattr(trace, "_capture_events", None)
@@ -437,6 +446,33 @@ def op_has_genuine_replacement_evidence(layer: Op, trace: Trace | None = None) -
     return False
 
 
+def _persisted_replacement_stamp(layer: Op) -> bool | None:
+    """Return the save-time replacement-corroboration verdict, if persisted.
+
+    ``torchlens._io.scrub._stamp_replacement_evidence`` evaluates
+    :func:`op_has_genuine_replacement_evidence` at SAVE time (while the
+    journal/spec authority is live) and stores the verdict in the op's
+    portable ``annotations`` as ``replacement_evidence_v1``.
+
+    Parameters
+    ----------
+    layer:
+        Operation pass claiming to be an intervention replacement.
+
+    Returns
+    -------
+    bool | None
+        The stamped verdict, or ``None`` when no stamp is present (legacy
+        artifacts saved before the stamp existed, or live never-saved ops).
+    """
+
+    annotations = getattr(layer, "annotations", None) or {}
+    stamp = annotations.get("replacement_evidence_v1")
+    if isinstance(stamp, dict):
+        return stamp.get("corroborated") is True
+    return None
+
+
 def _is_func_call_id_exempt(layer: Op) -> bool:
     """Return whether a layer is exempt from Invariant S.
 
@@ -471,13 +507,22 @@ def _is_func_call_id_exempt(layer: Op) -> bool:
         and op_has_genuine_replacement_evidence(layer)
     ):
         return True
+    # The bookkeeping func_name sentinels are only legitimate when the
+    # corresponding structural FLAG corroborates them -- and the flagged
+    # cases (is_input/is_output/is_buffer) already returned True above, so a
+    # bare "input"/"output"/"buffer" string reaching this point is per-op
+    # metadata corruption, not an exemption. The one remaining legitimate
+    # spelling is the functionless internal source ("none" + the
+    # is_internal_source flag + no callable func, exactly the conjunction the
+    # payloads invariant requires). A bare string set here let a traced relu
+    # with a nulled func_call_id and a rewritten func_name pass the whole
+    # suite (deephunt M2).
     func_name = str(getattr(layer, "func_name", "")).lower()
-    return func_name in {
-        "input",
-        "output",
-        "buffer",
-        "none",
-    }
+    return (
+        func_name == "none"
+        and bool(getattr(layer, "is_internal_source", False))
+        and getattr(layer, "func", None) is None
+    )
 
 
 def _plain_func_call_group_signature(layer: Op) -> tuple[object, ...]:

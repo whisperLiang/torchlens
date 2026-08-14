@@ -221,9 +221,61 @@ def scrub_for_save(
         )
     else:
         scrubbed_state["_io_module_accessor_state"] = None
+    _stamp_replacement_evidence(trace, scrubbed_state)
     _scrub_nondeterministic_identities(scrubbed_state)
     detach_conditional_trace_backrefs(scrubbed_state)
     return scrubbed_state, blob_specs, options.unsupported_tensor_records
+
+
+def _stamp_replacement_evidence(trace: Trace, state: dict[str, Any]) -> None:
+    """Stamp the live replacement-corroboration verdict into persisted op state.
+
+    Journal edit records (``InterventionAppliedEvent``) are live-capture
+    runtime facts that never serialize, so a loaded artifact cannot re-derive
+    whether a ``func_name="intervention_replacement"`` op was a GENUINE
+    observed replacement or a plain-capture placeholder -- the loaded-artifact
+    validation arm used to fail OPEN, laundering placeholders through a
+    save/load round trip (the locked 2026-06-02 rule requires a plain-capture
+    placeholder to STILL fail). Save runs while the live authority is intact,
+    so the verdict is evaluated here with the full live evidence chain
+    (journal causal binding, or the push/rerun FireRecord + armed-spec
+    fallback) and stamped into the op's portable ``annotations`` under
+    ``replacement_evidence_v1``. Re-saving a loaded trace re-derives the
+    verdict from the stamp itself, so the verdict is preserved, never
+    upgraded.
+
+    Parameters
+    ----------
+    trace:
+        Live source trace being saved (full evidence authority).
+    state:
+        Scrubbed top-level trace state, mutated before it is persisted.
+    """
+
+    scrubbed_ops = [
+        op
+        for op in (state.get("layer_list") or ())
+        if getattr(op, "func_name", None) == "intervention_replacement"
+        or getattr(op, "intervention_replaced", False)
+    ]
+    if not scrubbed_ops:
+        return
+    from ..validation._invariants_backward_flow import op_has_genuine_replacement_evidence
+
+    live_ops_by_label = {
+        getattr(op, "label", None): op for op in (getattr(trace, "layer_list", None) or ())
+    }
+    for scrubbed_op in scrubbed_ops:
+        live_op = live_ops_by_label.get(getattr(scrubbed_op, "label", None))
+        corroborated = bool(
+            live_op is not None and op_has_genuine_replacement_evidence(live_op, trace)
+        )
+        annotations = dict(getattr(scrubbed_op, "annotations", None) or {})
+        annotations["replacement_evidence_v1"] = {
+            "corroborated": corroborated,
+            "origin": "live_capture_save_stamp",
+        }
+        scrubbed_op.annotations = annotations
 
 
 def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:

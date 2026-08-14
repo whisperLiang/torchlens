@@ -2057,11 +2057,22 @@ def _check_arglocs_correct_for_arg(
 
     # Case 2 exemption: in-place RNG ops (bernoulli_) mutate the tensor
     # AFTER it was logged as an arg, so the saved out no longer matches
-    # the saved_args snapshot.  This is expected and not a real mismatch.
+    # the saved_args snapshot. The legitimate mutation shape is an in-place
+    # RE-DRAW: both the child's snapshot and the parent's current out are
+    # same-shape, same-dtype 0/1 draws of the same storage. Requiring that
+    # structure keeps the genuine case exempt while arbitrary corrupted
+    # values fall through to the Case 3 failure (deephunt M1 companion: the
+    # bare func-name key validated ANY value mismatch under a bernoulli_
+    # parent).
     if (
         not parent_layer_matches_arg
         and parent_layerged_as_arg
         and parent_layer.func_name == "bernoulli_"
+        and isinstance(saved_arg_val, torch.Tensor)
+        and tuple(saved_arg_val.shape) == tuple(parent_outs.shape)
+        and saved_arg_val.dtype == parent_outs.dtype
+        and _tensor_is_binary_draw(parent_outs)
+        and _tensor_is_binary_draw(saved_arg_val)
     ):
         return ValidationCheckResult.validated("arg_logging_matched")
 
@@ -2076,6 +2087,26 @@ def _check_arglocs_correct_for_arg(
         return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
     return ValidationCheckResult.validated("arg_logging_matched")
+
+
+def _tensor_is_binary_draw(value: torch.Tensor) -> bool:
+    """Return whether a tensor holds only 0/1 values (a bernoulli draw shape).
+
+    Parameters
+    ----------
+    value:
+        Tensor to classify.
+
+    Returns
+    -------
+    bool
+        True when every element is exactly 0 or 1 (NaN/Inf elements fail the
+        comparison, so a corrupted buffer never classifies as a draw).
+    """
+
+    if value.numel() == 0:
+        return False
+    return bool(torch.all((value == 0) | (value == 1)))
 
 
 def _tensor_arg_value_is_trivial(value: torch.Tensor) -> bool:
@@ -3196,13 +3227,41 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
 
     # Forward replay failure (non-perturbed): saved outs don't match.
     if not matches_saved and not perturb:
-        # Exemption: parent is an in-place RNG op that may have mutated its
-        # tensor after the child logged it as an arg.
-        parent_has_inplace_rng = any(
-            _op_for_validation_label(self, p).func_name == "bernoulli_" for p in layer.parents
+        # Exemption candidate: a parent is an in-place RNG op that may have
+        # mutated its tensor after the child logged it as an arg. The blanket
+        # form exempted ANY mismatch here -- including one caused by a
+        # corrupted recorded func or non-tensor args on the CHILD (deephunt
+        # M1) -- so the exemption now requires a SNAPSHOT PROOF: re-replay the
+        # op keeping the child's own saved-arg snapshots (the pre-mutation
+        # values the child actually consumed) at the bernoulli-parent slots.
+        # Only when that reproduces the saved output is the mismatch proven
+        # to be the parent's post-hoc mutation; a corrupted child falls
+        # through to the failure below.
+        inplace_rng_parents = frozenset(
+            p for p in layer.parents if _op_for_validation_label(self, p).func_name == "bernoulli_"
         )
-        if parent_has_inplace_rng:
-            return ValidationCheckResult.exempted("parent_inplace_rng_bernoulli")
+        if inplace_rng_parents:
+            snapshot_args, _snapshot_reason = _prepare_input_args_for_validating_layer(
+                self,
+                layer,
+                layers_to_perturb,
+                skip_parent_swap_labels=inplace_rng_parents,
+            )
+            snapshot_output = (
+                _execute_func_with_restored_state(
+                    layer,
+                    snapshot_args,
+                    layers_to_perturb,
+                    layer_to_validate_parents_for_label,
+                    verbose,
+                )
+                if snapshot_args is not None
+                else None
+            )
+            if snapshot_output is not None and tensor_nanequal(
+                snapshot_output, saved_output, allow_tolerance=True
+            ):
+                return ValidationCheckResult.exempted("parent_inplace_rng_bernoulli")
         # Surface the computed reduction depth so a band-C miss is diagnosable:
         # depth < 64 means the op was (correctly) ineligible for the deep-numeric
         # tolerance; a large depth that still failed points at a real replay bug.
@@ -3610,6 +3669,7 @@ def _prepare_input_args_for_validating_layer(
     layer_to_validate_parents_for: Op,
     layers_to_perturb: list[str],
     perturb_strategy: str = "default",
+    skip_parent_swap_labels: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Build the input argument dict for replaying a layer's function.
 
@@ -3632,6 +3692,11 @@ def _prepare_input_args_for_validating_layer(
         ``"default"`` for the op-aware random perturbation, or
         ``"step_up"``/``"step_down"`` for minimal deterministic step
         perturbations used to retry after a perturbed execution exception.
+    skip_parent_swap_labels:
+        Parent labels whose saved outs must NOT be swapped in, keeping the
+        child's own saved-arg snapshot at those slots. Used by the
+        in-place-RNG snapshot proof: the snapshot holds the pre-mutation
+        values the child actually consumed.
 
     Returns
     -------
@@ -3658,6 +3723,8 @@ def _prepare_input_args_for_validating_layer(
             key,
             parent_layer_arg,
         ) in layer_to_validate_parents_for.parent_arg_positions[arg_type].items():
+            if parent_layer_arg in skip_parent_swap_labels:
+                continue
             parent_layer = _op_for_validation_label(self, parent_layer_arg)
             target_op_label = getattr(layer_to_validate_parents_for, "label", None)
             if target_op_label in parent_layer.out_versions_by_child:
@@ -4067,6 +4134,12 @@ def _perturb_domain_sensitive_parent_values(
         return None
     if layer.func_name in {"__mul__", "mul"} and _output_is_all_inf(layer.out):
         return _finite_fill_distinct_from(parent_values, 0.0, 1.0)
+    if layer.func_name in {"bernoulli", "bernoulli_"} and _bernoulli_probability_slot_hit(
+        layer, parent_label
+    ):
+        complement = _bernoulli_complement_probabilities(layer, parent_values)
+        if complement is not None:
+            return complement
     if not _parent_label_occupies_arg_position(layer, parent_label, 0):
         return None
     if layer.func_name == "log":
@@ -4096,6 +4169,103 @@ def _perturb_domain_sensitive_parent_values(
         )
         return candidate.to(parent_values.dtype)
     return None
+
+
+def _bernoulli_has_explicit_probability(layer: Op) -> bool:
+    """Return whether a ``bernoulli_`` call carries an explicit probability arg.
+
+    ``dest.bernoulli_(p)`` supplies probabilities at positional slot 1 or the
+    ``p`` keyword; bare ``x.bernoulli_()`` / ``torch.bernoulli(x)`` draw from
+    the slot-0 tensor's own values.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op.
+
+    Returns
+    -------
+    bool
+        True when an explicit probability argument is present.
+    """
+
+    if len(getattr(layer, "saved_args", None) or ()) > 1:
+        return True
+    return "p" in (getattr(layer, "saved_kwargs", None) or {})
+
+
+def _bernoulli_probability_slot_hit(layer: Op, parent_label: str) -> bool:
+    """Return whether the perturbed parent feeds the bernoulli PROBABILITY slot.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op being replayed.
+    parent_label:
+        Parent label selected for perturbation.
+
+    Returns
+    -------
+    bool
+        True when the parent occupies the probability argument. Out-of-place
+        ``bernoulli`` reads probabilities from slot 0; ``bernoulli_(p)`` reads
+        them from slot 1 / ``p=`` (slot 0 is the overwritten destination).
+        Bare ``x.bernoulli_()`` has NO probability edge at all: it fills every
+        element with Bernoulli(0.5) draws and IGNORES the destination's values
+        (verified empirically -- ``zeros.bernoulli_()`` produces ones), so its
+        slot-0 parent is a pure template handled by the posthoc exemption.
+    """
+
+    if layer.func_name == "bernoulli_":
+        if not _bernoulli_has_explicit_probability(layer):
+            return False
+        kwarg_positions = (getattr(layer, "parent_arg_positions", None) or {}).get("kwargs", {})
+        return _parent_label_occupies_arg_position(layer, parent_label, 1) or (
+            kwarg_positions.get("p") == parent_label
+        )
+    return _parent_label_occupies_arg_position(layer, parent_label, 0)
+
+
+def _bernoulli_complement_probabilities(
+    layer: Op,
+    parent_values: torch.Tensor,
+) -> torch.Tensor | None:
+    """Return complement probabilities that provably flip every drawn element.
+
+    A small in-domain probability perturbation under restored RNG replays
+    IDENTICAL samples (the draw only changes where the perturbation crosses
+    the resampled uniforms), so the genuine values-as-probabilities edge
+    looked ``perturbation_insensitive`` and real bernoulli models could not
+    validate (deephunt L17). Probabilities at the deterministic extremes
+    remove the RNG from the comparison entirely: ``bernoulli(1) == 1`` and
+    ``bernoulli(0) == 0`` regardless of RNG state, so feeding
+    ``1 - saved_draw`` forces the replay output to differ from the saved draw
+    at EVERY element when the edge is live. A genuinely dropped edge still
+    replays unchanged and still fails.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op being replayed.
+    parent_values:
+        Saved probability-parent tensor values.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Complement-of-saved-draw probabilities, or ``None`` when the saved
+        output is not an elementwise 0/1 draw of the same shape (broadcast
+        probabilities keep the generic perturbation).
+    """
+
+    saved_draw = getattr(layer, "out", None)
+    if not isinstance(saved_draw, torch.Tensor) or not saved_draw.is_floating_point():
+        return None
+    if tuple(saved_draw.shape) != tuple(parent_values.shape):
+        return None
+    if not _tensor_is_binary_draw(saved_draw):
+        return None
+    return (1.0 - saved_draw.detach()).to(parent_values.dtype)
 
 
 def _sign_boundary_crossing_values(parent_values: torch.Tensor) -> torch.Tensor:
