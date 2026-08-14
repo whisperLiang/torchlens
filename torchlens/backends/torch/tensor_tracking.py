@@ -513,6 +513,15 @@ def _copy_grad_payload(grad: torch.Tensor, *, save_mode: SaveMode = "copy") -> t
         Detached tensor copy suitable for storage in gradient records.
     """
 
+    # Gradient payloads are ALWAYS genuine snapshots, even under
+    # save_mode="reference"/"view": autograd's AccumulateGrad may steal the
+    # observed gradient as the leaf's ``.grad`` and accumulate into it IN
+    # PLACE on the next backward, so an aliased payload silently rewrites the
+    # recorded pass-N value (pass-1 record becomes the running sum). Unlike
+    # the forward path, no wrapped in-place op exists here to stamp and
+    # fail-close the mutation, so aliasing cannot be disclosed -- clone.
+    if save_mode in ("reference", "view"):
+        save_mode = "copy"
     copied = safe_copy(grad, detach_tensor=True, save_mode=save_mode)
     if not isinstance(copied, torch.Tensor):
         raise TypeError("safe_copy returned a non-tensor gradient payload")
