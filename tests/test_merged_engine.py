@@ -467,6 +467,14 @@ class TestBoundaryParseValidation:
         entry["correlation"]["channel"] = 0
         self._assert_refuses(entry)
 
+    def test_unhashable_list_channel_refuses_typed(self):
+        # A LIST channel used to escape the parse as a raw
+        # ``TypeError: unhashable type: 'list'`` from the rank-local
+        # correlation-key dedup set, not the promised typed refusal.
+        entry = boundary(0, 0)
+        entry["correlation"]["channel"] = ["coll"]
+        self._assert_refuses(entry)
+
     def test_negative_seq_refuses_typed(self):
         self._assert_refuses(boundary(0, -1))
 
