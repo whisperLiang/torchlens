@@ -28,6 +28,65 @@ from .field_policy import build_record_field_policy_table, portable_state_spec_f
 # to this dataclass is automatically covered instead of silently missed.
 _GRAD_FN_CALL_CONTAINER_DEFAULTS: dict[str, Any] = {}
 
+_ORDINAL_POSITIONS_CACHE: weakref.WeakKeyDictionary[Any, tuple[Any, dict[int, int]]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Per-trace ``id(call) -> position`` map for :attr:`GradFnCall.ordinal_index`.
+
+Weak-keyed on the owning Trace and validated against the trace's backward
+projection revision, so a full ordinal sweep over N calls is O(N) instead of
+the historical O(N^2) (``list(trace.grad_fn_calls).index(self)`` rebuilt the
+accessor AND ran an equality scan per access; measured exponent 2.02).
+Identity keys are sound because GradFnCall facades are identity-stable while
+referenced (the M9 weak-valued facade cache), and a stale/missing id triggers
+one rebuild rather than a wrong answer.
+"""
+
+
+def _grad_fn_payload_equal(left: Any, right: Any, _depth: int = 0) -> bool:
+    """Tensor-safe structural equality for saved gradient payloads.
+
+    ``torch.Tensor.__eq__`` is elementwise, so the dataclass-generated
+    ``GradFnCall.__eq__`` raised an untyped torch ``RuntimeError`` ("Boolean
+    value of Tensor ... is ambiguous") whenever two like-labeled calls both
+    carried saved multi-element gradients. Tensors compare by exact value via
+    ``torch.equal`` (shape/dtype mismatches are plain ``False``), containers
+    recurse, and everything else uses ordinary ``==``.
+    """
+
+    if left is right:
+        return True
+    if _depth > 50:
+        # Saved gradient payloads are shallow (tuples/dicts of tensors); an
+        # over-deep or self-referential payload compares unequal rather than
+        # recursing without bound.
+        return False
+    import torch
+
+    if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
+        if not (isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor)):
+            return False
+        try:
+            return bool(torch.equal(left, right))
+        except (RuntimeError, TypeError, ValueError):
+            return False
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        if type(left) is not type(right) or len(left) != len(right):
+            return False
+        return all(
+            _grad_fn_payload_equal(a, b, _depth + 1) for a, b in zip(left, right, strict=True)
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(
+            _grad_fn_payload_equal(item, right[key], _depth + 1) for key, item in left.items()
+        )
+    try:
+        return bool(left == right)
+    except (RuntimeError, TypeError, ValueError):
+        return False
+
 
 @dataclass
 class GradFnCall:
@@ -153,14 +212,74 @@ class GradFnCall:
 
         return self.source_trace
 
+    def __eq__(self, other: object) -> bool:
+        """Typed, tensor-safe value equality (never a torch ``RuntimeError``).
+
+        The dataclass-generated ``__eq__`` compared the raw field tuples, so
+        two like-labeled calls with saved multi-element gradients raised an
+        untyped elementwise-tensor ``RuntimeError`` (and made ``list.index``
+        unusable). Scalar identity fields compare by value, saved gradient
+        payloads compare tensor-safely, and the ``_source_trace_ref`` weakref
+        is excluded (pickle already nulls it).
+        """
+
+        if self is other:
+            return True
+        if not isinstance(other, GradFnCall):
+            return NotImplemented
+        if (
+            self.call_index,
+            self.ordinal,
+            self.backward_pass_index,
+            self.label,
+            self.timestamp,
+            self._time_started,
+            self._time_finished,
+        ) != (
+            other.call_index,
+            other.ordinal,
+            other.backward_pass_index,
+            other.label,
+            other.timestamp,
+            other._time_started,
+            other._time_finished,
+        ):
+            return False
+        return (
+            _grad_fn_payload_equal(self.grad_inputs, other.grad_inputs)
+            and _grad_fn_payload_equal(self.grad_outputs, other.grad_outputs)
+            and _grad_fn_payload_equal(self.intervention_fire_ref, other.intervention_fire_ref)
+        )
+
+    def __hash__(self) -> int:
+        """Hash on the immutable scalar identity fields (eq-consistent)."""
+
+        return hash((type(self).__name__, self.call_index, self.backward_pass_index, self.label))
+
     @property
     def ordinal_index(self) -> int:
-        """Return this GradFnCall's 0-based position in ``trace.grad_fn_calls``."""
+        """Return this GradFnCall's 0-based position in ``trace.grad_fn_calls``.
+
+        Amortized O(1) per access through a per-trace identity-position map
+        (see :data:`_ORDINAL_POSITIONS_CACHE`); a call not present in its
+        trace's projection returns ``-1`` like a trace-less call.
+        """
 
         trace = self.source_trace
         if trace is None:
             return -1
-        return list(trace.grad_fn_calls).index(self)
+        revision = getattr(trace, "_backward_projection_revision", None)
+        cached = _ORDINAL_POSITIONS_CACHE.get(trace)
+        if cached is None or cached[0] != revision or id(self) not in cached[1]:
+            calls = trace.grad_fn_calls  # syncs the lazy backward projection
+            revision = getattr(trace, "_backward_projection_revision", None)
+            positions = {id(call): index for index, call in enumerate(calls.values())}
+            cached = (revision, positions)
+            try:
+                _ORDINAL_POSITIONS_CACHE[trace] = cached
+            except TypeError:
+                pass  # non-weakref-able trace stand-ins: fall through uncached
+        return cached[1].get(id(self), -1)
 
     @property
     def call_label(self) -> str:
