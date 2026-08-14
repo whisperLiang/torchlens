@@ -2192,6 +2192,17 @@ def _load_unified_bundle(
     _reject_symlink_path(legacy_pickle_path, context="bundle metadata")
     try:
         with legacy_pickle_path.open("rb") as handle:
+            # Same coarse allocation guard as the trace metadata path (B8-16):
+            # the legacy kind=bundle branch fed the unpickler an uncapped file,
+            # so an absurd on-disk pickle was an alloc/time DoS at tl.load even
+            # though the SafeBundleUnpickler still blocked code execution.
+            metadata_size = os.fstat(handle.fileno()).st_size
+            if metadata_size > _MAX_METADATA_PKL_BYTES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {legacy_pickle_path} is {metadata_size} bytes, above "
+                    f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
+                    "structurally implausible artifact."
+                )
             bundle = _RenameAwareUnpickler(handle).load()
     except (
         pickle.UnpicklingError,

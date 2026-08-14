@@ -26,6 +26,7 @@ Each test FAILS against the pre-fix behavior:
 from __future__ import annotations
 
 import os
+import pickle
 import sys
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from torch import nn
 import torchlens as tl
 from torchlens._io import bundle as bundle_mod
 from torchlens._io.manifest import Manifest
+from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.smoke
 
@@ -153,3 +155,26 @@ def test_overwrite_save_keeps_old_bundle_at_target_until_swap(tmp_path: Path, mo
     # The overwrite itself still completed and left no backup debris.
     tl.load(str(spec))
     assert not list(tmp_path.glob("*.bak.*"))
+
+
+# --------------------------------------------------------------------------- #
+# MED3: legacy kind=bundle metadata.pkl byte ceiling                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_legacy_bundle_metadata_pkl_ceiling_refuses_oversize(tmp_path: Path, monkeypatch) -> None:
+    """The legacy bundle branch enforces the same pkl byte ceiling as traces.
+
+    Fail-before: ``_load_unified_bundle``'s ``kind=bundle`` legacy branch fed
+    ``metadata.pkl`` straight into the unpickler with no fstat cap (the trace
+    path had one), so an absurd on-disk pickle was an alloc/time DoS at
+    ``tl.load``. Pre-fix this raised the unrelated "is not a Bundle" error
+    only AFTER unpickling the whole payload.
+    """
+
+    legacy_dir = tmp_path / "legacy.tlspec"
+    legacy_dir.mkdir()
+    (legacy_dir / "metadata.pkl").write_bytes(pickle.dumps({"not": "a bundle"}))
+    monkeypatch.setattr(bundle_mod, "_MAX_METADATA_PKL_BYTES", 16)
+    with pytest.raises(TorchLensIOError, match="ceiling"):
+        bundle_mod._load_unified_bundle(legacy_dir)
