@@ -296,6 +296,87 @@ def test_classify_bool_cast_inside_if_test_reports_wrapper(tmp_path: Path) -> No
     assert classification.conditional_key is not None
 
 
+def test_line_only_arm_body_bool_cast_fails_closed(tmp_path: Path) -> None:
+    """Refuse line-only branch classification when the arm body consumes a bool.
+
+    ``if c: keep = bool(d)`` puts TWO bool consumption sites on one line: the
+    ``if`` test and the arm-body ``bool(...)`` cast. Line-only evidence cannot
+    tell which one consumed a given bool, so classifying either as the branch
+    TEST would let the arm-body bool ``d`` cross-wire into the conditional's
+    public record (deep-hunt C1). Both must fail closed to ``unknown``.
+    """
+
+    path = _write_source(
+        tmp_path,
+        "arm_body_cast.py",
+        """
+        def forward():
+            if cond_test: keep = bool(other_flag)
+            return keep
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_test")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification == BoolClassification("unknown", None, None, None)
+
+
+def test_line_only_assert_wrapping_ternary_fails_closed(tmp_path: Path) -> None:
+    """Refuse line-only classification when an ``assert`` wraps a ternary.
+
+    In ``assert left if cond else right`` the assert operand and the ternary
+    test are distinct same-line consumption sites; classifying line-only
+    evidence as the ternary TEST would wire the asserted VALUE into the
+    ternary's conditional record (deep-hunt C1).
+    """
+
+    path = _write_source(
+        tmp_path,
+        "assert_ternary.py",
+        """
+        def forward():
+            assert left_flag if cond_pick else right_flag
+            return 1
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_pick")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification == BoolClassification("unknown", None, None, None)
+
+
+def test_line_only_bool_cast_inside_test_still_classifies(tmp_path: Path) -> None:
+    """Keep line-only classification when every consumer nests in the test.
+
+    ``if bool(c):`` has a cast consumer INSIDE the test span: whichever site
+    consumed the bool, the branch classification is identical, so the C1
+    fail-close guard must not fire.
+    """
+
+    path = _write_source(
+        tmp_path,
+        "wrapped_if_line_only.py",
+        """
+        def forward():
+            if bool(cond_only):
+                return 1
+            return 0
+        """,
+    )
+    source = _load_source(path)
+    line, _col = _find_token(source, "cond_only")
+
+    classification = classify_bool(str(path), line, None)
+
+    assert classification.kind == "if_test"
+    assert classification.wrapper_kind == "bool_cast"
+    assert classification.branch_test_kind == "then"
+
+
 def test_classify_unknown_when_no_bool_consumer_contains_point(tmp_path: Path) -> None:
     """Return ``unknown`` when no indexed bool consumer contains the point."""
 

@@ -706,11 +706,10 @@ def classify_bool(filename: str, line: int, col: int | None = None) -> BoolClass
             consumers.append(consumer)
 
     if col is None:
-        distinct_branch_keys = {
-            consumer.conditional_key
-            for consumer in consumers
-            if consumer.kind in _BRANCH_CONSUMER_KINDS
-        }
+        branch_consumers = [
+            consumer for consumer in consumers if consumer.kind in _BRANCH_CONSUMER_KINDS
+        ]
+        distinct_branch_keys = {consumer.conditional_key for consumer in branch_consumers}
         if len(distinct_branch_keys) > 1:
             # Degraded line-only matching cannot tell WHICH branch test consumed
             # this bool when several distinct conditionals share the line (e.g.
@@ -718,6 +717,26 @@ def classify_bool(filename: str, line: int, col: int | None = None) -> BoolClass
             # cross-wire the outer bool into the inner conditional. Fail closed;
             # the column-carrying code-context fallback in phase 5b of
             # ``control_flow._classify_bool_layers`` disambiguates precisely.
+            return BoolClassification("unknown", None, None, None)
+        if branch_consumers and any(
+            consumer.kind not in _BRANCH_CONSUMER_KINDS
+            and not any(
+                _range_contains_range(branch_consumer.span, consumer.span)
+                for branch_consumer in branch_consumers
+            )
+            for consumer in consumers
+        ):
+            # Same guard with exactly ONE branch key on the line: a consumer
+            # span OUTSIDE the branch test span (a ``bool(...)`` cast in a
+            # single-line arm body, an ``assert`` operand wrapping a ternary)
+            # is an alternative consumption site line-only evidence cannot
+            # tell apart from the test itself. The deepest-first pick below
+            # would wire an arm-BODY bool in ``if c: keep = bool(d)`` into the
+            # conditional's public record as its TEST. Consumers nested inside
+            # the test span (``if bool(c):``) stay compatible: whichever
+            # consumed the bool, the branch classification is the same. This
+            # mirrors ``query_intervals``'s same-line test-vs-body fail-close
+            # on the arm-attribution side.
             return BoolClassification("unknown", None, None, None)
 
     consumers.sort(
@@ -1500,6 +1519,28 @@ def _range_contains_point(span: SourceRange, line: int, col: int) -> bool:
     """
 
     return (span[0], span[1]) <= (line, col) <= (span[2], span[3])
+
+
+def _range_contains_range(outer: SourceRange, inner: SourceRange) -> bool:
+    """Return whether a source range fully contains another source range.
+
+    Parameters
+    ----------
+    outer:
+        Candidate containing range ``(start_line, start_col, end_line, end_col)``.
+    inner:
+        Candidate contained range.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``inner`` lies entirely within ``outer`` (bounds
+        inclusive; equal ranges contain each other).
+    """
+
+    return (outer[0], outer[1]) <= (inner[0], inner[1]) and (
+        (inner[2], inner[3]) <= (outer[2], outer[3])
+    )
 
 
 def _range_contains_line(span: SourceRange, line: int) -> bool:

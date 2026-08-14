@@ -873,6 +873,45 @@ def test_single_line_item_scalar_if_never_false_fires() -> None:
     _assert_bool_value_never_contradicts_fired(trace)
 
 
+class SingleLineArmBodyBoolCastModel(nn.Module):
+    """Single-line ``if`` whose arm body consumes a SECOND bool via ``bool()``."""
+
+    # fmt: off
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the arm-body-bool-cast single-line conditional forward pass."""
+        gate = (x > 0).all()
+        aux = (x < 100).all()
+        if gate: keep = bool(aux)  # noqa: E701,F841
+        return x * 2
+    # fmt: on
+
+
+def test_single_line_arm_body_bool_never_becomes_the_test() -> None:
+    """An arm-body ``bool(d)`` sharing the ``if`` line never wires in as the TEST.
+
+    Deep-hunt C1: with exactly ONE branch-test span on the line, degraded
+    line-only classification used to fail OPEN — ``aux``'s ``bool(...)``
+    consumption in ``if gate: keep = bool(aux)`` classified as the ``if``
+    test and entered the conditional's public ``bool_layers``/arm records.
+    Line-only evidence cannot tell ``gate`` from ``aux`` here, so BOTH must
+    fail closed: no conditional materializes and neither bool claims
+    branch-test status (honest omission, never mis-attribution)."""
+
+    trace = _log_model(SingleLineArmBodyBoolCastModel(), torch.ones(2, 2))
+
+    all_ops = [layer for layer in trace.layer_list if layer.func_name == "all"]
+    assert len(all_ops) == 2
+    for op in all_ops:
+        assert op.is_terminal_conditional_bool is False
+        assert op.terminal_conditional_id is None
+    for event in trace.conditional_records:
+        assert not set(event.bool_layers) & {op.layer_label for op in all_ops}
+    assert list(trace.conditionals) == []
+
+    _assert_no_false_fired(trace, {"__gt__", "__lt__", "all", "mul"}, set())
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
 # ---------------------------------------------------------------------------
 # Round-24 S2: column-offset map must cover 3.11+ inline-cache regions
 # ---------------------------------------------------------------------------
