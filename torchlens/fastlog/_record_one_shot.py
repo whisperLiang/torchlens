@@ -12,6 +12,7 @@ from .._errors import KeywordConflictError
 from .._input_coerce import _coerce_input_args
 from .._robustness import check_model_and_input_variants
 from ..backends import (
+    TORCH_BACKEND_NAME,
     BackendName,
     BackendUnsupportedError,
     get_backend_spec,
@@ -120,7 +121,7 @@ def record(
     # instead of silently running the Recorder anyway.
     backend_spec = get_backend_spec(str(backend) if backend is not None else "torch")
     if not backend_spec.capabilities.fastlog:
-        if str(backend_spec.name) == "torch":
+        if str(backend_spec.name) == TORCH_BACKEND_NAME:
             raise BackendUnsupportedError(
                 "tl.record() refuses: the resolved 'torch' backend declares "
                 "capabilities.fastlog=False, and the registered capability "

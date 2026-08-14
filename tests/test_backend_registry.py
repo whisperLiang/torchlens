@@ -954,7 +954,7 @@ def test_public_trace_dispatches_through_backend_spec() -> None:
     assert "resolved_spec.name" not in source
 
 
-@pytest.mark.slow
+@pytest.mark.smoke
 def test_public_backend_literal_branches_stay_in_registry_or_backends() -> None:
     """Public code has no new hard-coded backend literal branches."""
 
@@ -981,17 +981,21 @@ def test_public_backend_literal_branches_stay_in_registry_or_backends() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare):
                 continue
-            expression = ast.get_source_segment(source, node) or ""
-            if "backend" not in expression:
-                continue
             compared_literals = {
                 item.value
                 for item in [node.left, *node.comparators]
                 if isinstance(item, ast.Constant) and isinstance(item.value, str)
             }
-            if compared_literals & backend_literals:
-                relpath = source_path.relative_to(project_root)
-                offenders.append(f"{relpath}:{node.lineno}: {expression}")
+            # Same conjunction as always, cheap set filter first: the
+            # per-node get_source_segment scan is what pushed the whole
+            # sweep to ~18s and out of the smoke-tier budget.
+            if not (compared_literals & backend_literals):
+                continue
+            expression = ast.get_source_segment(source, node) or ""
+            if "backend" not in expression:
+                continue
+            relpath = source_path.relative_to(project_root)
+            offenders.append(f"{relpath}:{node.lineno}: {expression}")
 
     assert offenders == []
 

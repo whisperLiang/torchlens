@@ -50,6 +50,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..backends import TINYGRAD_BACKEND_NAME
+
 # Construction-time I/O sink bases in tinygrad, refused unconditionally and
 # BEFORE the runtime-membership check. This is the one small hand-maintained
 # set; it is security-motivated (each entry names a base whose device *open*
@@ -128,7 +130,7 @@ def _sanitize_artifact_device_token(raw_device: Any, backend_name: str) -> str |
     match = _DEVICE_TOKEN_RE.match(inner)
     if match is None:
         return None
-    if backend_name.lower() == "tinygrad":
+    if backend_name.lower() == TINYGRAD_BACKEND_NAME:
         base = match.group(1).lower()
         # Sink exclude FIRST: a file/socket/fabric sink base must be refused
         # even though the installed runtime names it in ``Device._devices``.

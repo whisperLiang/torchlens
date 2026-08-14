@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, TypeAlias, cast
 
 from ..errors._base import ConfigurationError
 from ._protocol import CaptureBackend
@@ -16,6 +16,18 @@ The ``"fake"`` literal is reserved for tests and downstream conformance fixtures
 that register process-local specs; TorchLens intentionally does not ship a
 default fake backend.
 """
+
+TORCH_BACKEND_NAME: Final[BackendName] = "torch"
+"""Canonical registry name of the default torch backend.
+
+Public (non-``backends``) code that branches on backend identity must compare
+against this constant, never a hard-coded literal — the backend-literal gate
+in ``tests/test_backend_registry.py`` enforces it.
+"""
+
+TINYGRAD_BACKEND_NAME: Final[BackendName] = "tinygrad"
+"""Canonical registry name of the tinygrad preview backend."""
+
 CanHandleFn: TypeAlias = Callable[[object, object, dict[Any, Any] | None], bool]
 CaptureTraceFn: TypeAlias = Callable[..., Any]
 ValidateEntryFn: TypeAlias = Callable[..., bool]

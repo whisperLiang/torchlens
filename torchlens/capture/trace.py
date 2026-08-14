@@ -38,6 +38,7 @@ from .. import _state
 from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
 from .._runnable_seam import runnable_trace_state
 from ..backends import (
+    TORCH_BACKEND_NAME,
     BackendName,
     BackendUnsupportedError,
     CaptureBackend,
@@ -1521,7 +1522,7 @@ def run_and_log_inputs_through_model(
             # live lane instead of silently dropping never-forward-used buffers.
             self._runnable.persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
 
-        if str(_backend_name_for_trace(self)) == "torch":
+        if str(_backend_name_for_trace(self)) == TORCH_BACKEND_NAME:
             # The provenance manifest needs the capture-time default, never the
             # potentially different save-time default. Runnable-ready captures
             # replace this minimal snapshot below with the complete ambient record.

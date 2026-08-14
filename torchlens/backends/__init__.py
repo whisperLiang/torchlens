@@ -7,6 +7,8 @@ from . import default_specs as _default_specs  # noqa: F401
 from ._protocol import CaptureBackend
 from .registry import (
     GATED_CAPABILITY_FLAGS,
+    TINYGRAD_BACKEND_NAME,
+    TORCH_BACKEND_NAME,
     BackendAmbiguityError,
     BackendCapabilities,
     BackendCapabilityConformanceError,
@@ -41,6 +43,8 @@ __all__ = [
     "BackendUnsupportedError",
     "CaptureBackend",
     "SerializationPolicy",
+    "TINYGRAD_BACKEND_NAME",
+    "TORCH_BACKEND_NAME",
     "UnknownBackendError",
     "get_backend_spec",
     "registered_backend_specs",

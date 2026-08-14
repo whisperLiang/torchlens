@@ -21,6 +21,7 @@ import torch
 from .. import _state
 from .._input_walk import INPUT_CONTAINER_KINDS
 from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
+from ..backends import TORCH_BACKEND_NAME
 from ..constants import get_orig_torch_funcs
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
@@ -2182,7 +2183,7 @@ def preflight_sparse_run_descriptor(
             ready=False,
         )
         return report, None
-    if descriptor.backend != "torch":
+    if descriptor.backend != TORCH_BACKEND_NAME:
         diagnostic = _diagnostic(
             RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY,
             f"Sparse runnable replay is unavailable for backend {descriptor.backend!r}.",
@@ -3039,7 +3040,9 @@ def _diagnostic(
     recorded_runtime = descriptor.compatibility.backend_version if descriptor is not None else None
     current_backend = descriptor.backend if descriptor is not None else backend
     current_runtime = (
-        str(torch.__version__) if current_backend == "torch" else platform.python_version()
+        str(torch.__version__)
+        if current_backend == TORCH_BACKEND_NAME
+        else platform.python_version()
     )
     return RunnableDiagnostic(
         code=code,
