@@ -2029,9 +2029,34 @@ def _move_tensors_to_device(obj: Any, device: torch.device | str) -> Any:
     When something did move but the container cannot be rebuilt faithfully, the original
     is returned as well -- leaving a tensor on its own device is a loud, ordinary device
     error, while silently substituting a different container class is not.
+
+    r2-B3 sweep (the walker was the ONE input walker without the shared guards):
+
+    * cycle/depth bounded through the shared input-boundary ceiling -- this walker
+      runs FIRST for dataclass/non-``dict``-Mapping trees (the ``_simple_leaves``
+      entry gate descends only ``dict|tuple|list``), so a cycle closed through a
+      dataclass or a ``UserDict`` killed plain ``tl.trace`` with a raw
+      ``RecursionError`` from internals;
+    * the dataclass rebuild is INERT: ``object.__new__`` plus verbatim instance-state
+      copy, never the user's ``__init__``/``__post_init__`` (re-running them mutated
+      field values -- counters incremented, RNG drawn, derived tensors recomputed --
+      and the post-move snapshot honestly witnessed the substituted program), and
+      field presence reads through the raw-MRO channel, never ``hasattr`` (a live
+      hook the r71-C inertness contract promises never runs);
+    * registered containers -- the kind that WINS every other walker's dispatch --
+      descend through their own ``flatten``/``unflatten`` instead of silently
+      falling through unmoved;
+    * the tuple-subclass ladder routes through :func:`rebuild_tuple_like` (identity
+      verification + ``pause_logging``, the structseq-safe shared spine).
     """
 
-    moved = _move_tensors_to_device_inner(obj, device)
+    try:
+        moved = _move_tensors_to_device_inner(obj, device)
+    except RecursionError as exc:
+        from torchlens._input_walk import raise_input_tree_stack_refusal
+
+        raise_input_tree_stack_refusal(exc)
+        raise  # unreachable: the refusal always raises
     return obj if moved is _UNMOVED else moved
 
 
@@ -2039,10 +2064,37 @@ _UNMOVED = object()
 """Sentinel: this subtree holds no tensor that changed device, so keep the original."""
 
 
-def _move_tensors_to_device_inner(obj: Any, device: torch.device | str) -> Any:
-    """Return the device-moved copy of ``obj``, or :data:`_UNMOVED` if nothing moved."""
+def _move_tensors_to_device_inner(
+    obj: Any,
+    device: torch.device | str,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> Any:
+    """Return the device-moved copy of ``obj``, or :data:`_UNMOVED` if nothing moved.
+
+    Parameters
+    ----------
+    obj:
+        Subtree to move.
+    device:
+        Target device.
+    _depth:
+        Internal recursion depth (callers must not supply this).
+    _in_progress:
+        Internal path-scoped ancestor-id set (callers must not supply this).
+    """
 
     import dataclasses as _dataclasses
+
+    from torchlens._input_walk import (
+        _UNSET_FIELD,
+        INPUT_TREE_MAX_DEPTH,
+        _declared_field_value,
+        _inspect_instance_state_items,
+        raise_input_tree_cycle_refusal,
+        raise_input_tree_depth_refusal,
+    )
+    from torchlens.ir.container import get_registered_container
 
     if isinstance(obj, torch.Tensor):
         target = torch.device(device) if not isinstance(device, torch.device) else device
@@ -2050,82 +2102,134 @@ def _move_tensors_to_device_inner(obj: Any, device: torch.device | str) -> Any:
             return _UNMOVED
         return obj.to(device)
 
-    def _children(items: Any) -> tuple[list[Any], bool]:
-        """Move each child, reporting whether any of them actually changed."""
+    registration = None if isinstance(obj, type) else get_registered_container(type(obj))
+    is_dataclass_instance = _dataclasses.is_dataclass(obj) and not isinstance(obj, type)
+    is_mapping = isinstance(obj, collections.abc.Mapping)
+    is_sequence = isinstance(obj, (list, tuple))
+    if registration is None and not (is_dataclass_instance or is_mapping or is_sequence):
+        return _UNMOVED
 
-        results: list[Any] = []
-        changed = False
-        for item in items:
-            moved = _move_tensors_to_device_inner(item, device)
-            if moved is _UNMOVED:
-                results.append(item)
-            else:
-                results.append(moved)
-                changed = True
-        return results, changed
+    # The shared input-boundary guards (r-b4 R27-1): this walker runs BEFORE the
+    # guarded walkers for dataclass / non-``dict``-Mapping / registered trees, so
+    # it must refuse typed on cycles and over-depth itself.
+    if _depth >= INPUT_TREE_MAX_DEPTH:
+        raise_input_tree_depth_refusal(depth=_depth)
+    if _in_progress is None:
+        _in_progress = set()
+    obj_id = id(obj)
+    if obj_id in _in_progress:
+        raise_input_tree_cycle_refusal(kind="mapping" if is_mapping else "sequence")
+    _in_progress.add(obj_id)
+    try:
 
-    if isinstance(obj, (list, tuple)):
+        def _children(items: Any) -> tuple[list[Any], bool]:
+            """Move each child, reporting whether any of them actually changed."""
+
+            results: list[Any] = []
+            changed = False
+            for item in items:
+                moved = _move_tensors_to_device_inner(item, device, _depth + 1, _in_progress)
+                if moved is _UNMOVED:
+                    results.append(item)
+                else:
+                    results.append(moved)
+                    changed = True
+            return results, changed
+
+        # Dispatch mirrors ``classify_input_container`` (registered wins; a
+        # dataclass-decorated tuple/dict subclass is rebuilt by the SAME arm every
+        # other walker uses, not by an inverted private order).
+        if registration is not None:
+            try:
+                flat_children = list(registration.flatten(obj)[0])
+            except Exception:
+                return _UNMOVED
+            moved_values, changed = _children(flat_children)
+            if not changed:
+                return _UNMOVED
+            try:
+                aux = registration.flatten(obj)[1]
+                rebuilt = registration.unflatten(aux, moved_values)
+            except Exception:
+                return _UNMOVED
+            return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
+
+        from torchlens._input_walk import declares_namedtuple_fields
+
+        # A dataclass-decorated tuple subclass WITHOUT ``_fields`` classifies
+        # ``dataclass`` in classify_input_container; every other tuple takes the
+        # tuple arm (namedtuples declare ``_fields`` and win, matching classify).
+        if isinstance(obj, tuple) and not (
+            is_dataclass_instance and not declares_namedtuple_fields(obj)
+        ):
+            moved_sequence, changed = _children(obj)
+            if not changed:
+                return _UNMOVED
+            obj_type = type(obj)
+            if obj_type is tuple:
+                return tuple(moved_sequence)
+            # A tuple SUBCLASS (namedtuple, structseq, torch.Size, user class):
+            # the shared identity-verified ladder, probing under pause_logging so
+            # no constructor side effect can enter the captured graph.
+            from torchlens.utils.arg_handling import rebuild_tuple_like
+
+            rebuilt = rebuild_tuple_like(obj_type, moved_sequence)
+            return rebuilt if rebuilt is not None else _UNMOVED
+
+        if is_dataclass_instance:
+            fields = [
+                field
+                for field in _dataclasses.fields(obj)
+                if _declared_field_value(obj, field.name) is not _UNSET_FIELD
+            ]
+            moved_values, changed = _children(
+                _declared_field_value(obj, field.name) for field in fields
+            )
+            if not changed:
+                return _UNMOVED
+            # INERT rebuild: verbatim instance-state copy onto object.__new__,
+            # then the moved field values. Re-running the user's constructor
+            # (__init__/__post_init__) on already-initialized values executed
+            # user code a second time and handed forward() VALUE-mutated fields
+            # (incremented counters, re-drawn RNG, recomputed derived tensors)
+            # that the post-move witness then honestly recorded.
+            state_items = _inspect_instance_state_items(obj)
+            if state_items is None:
+                return _UNMOVED
+            try:
+                rebuilt = object.__new__(type(obj))
+                for name, value in state_items.items():
+                    object.__setattr__(rebuilt, name, value)
+                for field, value in zip(fields, moved_values):
+                    object.__setattr__(rebuilt, field.name, value)
+            except Exception:
+                return _UNMOVED
+            return rebuilt
+
+        if is_mapping:
+            # Handles dict, UserDict, BatchEncoding, OrderedDict, MappingProxyType, and
+            # any read-only custom Mapping (the last three used to be skipped entirely).
+            keys = list(obj.keys())
+            moved_values, changed = _children(obj[key] for key in keys)
+            if not changed:
+                return _UNMOVED
+            moved_mapping = dict(zip(keys, moved_values))
+            if type(obj) is dict:
+                return moved_mapping
+            try:
+                rebuilt = cast(Any, type(obj))(moved_mapping)
+            except Exception:
+                return _UNMOVED
+            return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
+
+        # A plain list (or list subclass); tuples were handled above.
         moved_sequence, changed = _children(obj)
         if not changed:
             return _UNMOVED
         obj_type = type(obj)
-        if not isinstance(obj, tuple):
-            try:
-                return obj_type(moved_sequence)
-            except Exception:
-                return list(moved_sequence) if obj_type is list else _UNMOVED
-        if obj_type is tuple:
-            return tuple(moved_sequence)
-        # A tuple SUBCLASS. Try the namedtuple positional constructor, then the
-        # single-iterable ``__new__`` shape structseq and torch.Size use, and only then
-        # give up -- keeping the original rather than substituting a plain ``tuple``.
-        for build in (
-            lambda: obj_type(*moved_sequence),
-            lambda: obj_type(moved_sequence),
-        ):
-            try:
-                rebuilt = build()
-            except Exception:
-                continue
-            if type(rebuilt) is obj_type:
-                return rebuilt
-        return _UNMOVED
-
-    if isinstance(obj, collections.abc.Mapping):
-        # Handles dict, UserDict, BatchEncoding, OrderedDict, MappingProxyType, and any
-        # read-only custom Mapping (the last three used to be skipped entirely).
-        keys = list(obj.keys())
-        moved_values, changed = _children(obj[key] for key in keys)
-        if not changed:
-            return _UNMOVED
-        moved_mapping = dict(zip(keys, moved_values))
-        if type(obj) is dict:
-            return moved_mapping
         try:
-            rebuilt = cast(Any, type(obj))(moved_mapping)
+            return obj_type(moved_sequence)
         except Exception:
-            return _UNMOVED
-        return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
-
-    if _dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        fields = [field for field in _dataclasses.fields(obj) if hasattr(obj, field.name)]
-        moved_values, changed = _children(getattr(obj, field.name) for field in fields)
-        if not changed:
-            return _UNMOVED
-        try:
-            rebuilt = cast(Any, type(obj))(
-                **{field.name: value for field, value in zip(fields, moved_values) if field.init}
-            )
-        except Exception:
-            return _UNMOVED
-        if type(rebuilt) is not type(obj):
-            return _UNMOVED
-        for field, value in zip(fields, moved_values):
-            if not field.init:
-                try:
-                    setattr(rebuilt, field.name, value)
-                except Exception:
-                    return _UNMOVED
-        return rebuilt
-
-    return _UNMOVED
+            return list(moved_sequence) if obj_type is list else _UNMOVED
+    finally:
+        _in_progress.discard(obj_id)
