@@ -35,7 +35,9 @@ from . import (
 )
 from ._io._torch_symbols import torch_attr
 from ._runnable_state import (
+    _INPUT_STRUCTURE_SITE_PREFIX,
     _OUTPUT_COUNT_FLOOR,
+    _STATE_METADATA_FACT_SITE_PREFIX,
     PreparedRunnableState,
     RunResourceCeiling,
     _allocation_budget_bytes,
@@ -287,19 +289,11 @@ _ALLOCATOR_SIGNATURES = (
 )
 
 
-_INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
-"""``site_label`` prefix of a persisted input-boundary structure fact (r67 C2)."""
-
-
 _UNBOUND_STATE_ESCAPE_SITE_PREFIX = "unbound_state_escape:"
 """``site_label`` prefix marking a witnessed unbound state (buffer/param) escape."""
 
 _UNBOUND_STATE_ESCAPE_FACT_KEY = "unbound_state_escape"
 """Discriminator key present in every unbound-state escape fact."""
-
-_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
-"""``site_label`` prefix marking a declared capture-time state-metadata fact (r65 F-1)."""
-
 
 # Matmul-family qualname tails whose BLAS backends pick a reduction order that
 # depends on tensor memory layout and grad/inference dispatch context. Capture

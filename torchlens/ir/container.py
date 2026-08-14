@@ -13,9 +13,9 @@ from typing import Any, ClassVar, Literal, TypeAlias, cast
 
 from .._io import FieldPolicy
 
-# ``defaultdict`` factory callables restorable on load WITHOUT importing an
-# arbitrary callable. Mirrors ``torchlens.backends.torch.ops._SAFE_DEFAULT_FACTORIES``;
-# a factory outside this allowlist is recorded opaque at capture, never here.
+# Canonical ``defaultdict`` factory callables restorable on load WITHOUT importing
+# an arbitrary callable. Capture imports this SAME mapping; a factory outside the
+# allowlist is recorded opaque and can never enter the reconstruction path.
 _SAFE_DEFAULT_FACTORIES: dict[str, Any] = {
     "list": list,
     "dict": dict,

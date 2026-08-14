@@ -119,9 +119,7 @@ construction is denied).
 from __future__ import annotations
 
 import io
-import os
 import pickle
-import sys
 import warnings
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -130,80 +128,20 @@ from typing import Any, BinaryIO
 
 import torch
 
+from ..utils._callable_safety import (
+    _ALLOWED_STDLIB_ROOTS as _CALLABLE_ALLOWED_STDLIB_ROOTS,
+    _APPLIANCE_MODULES as _CALLABLE_APPLIANCE_MODULES,
+    _DENIED_MODULES as _CALLABLE_DENIED_MODULES,
+    _STDLIB_AND_BUILTIN_TOP_LEVEL as _CALLABLE_STDLIB_AND_BUILTIN_TOP_LEVEL,
+    is_denied_stdlib_or_builtin_module,
+)
+
 __all__ = ["SafeBundleUnpickler"]
 
 
-# Known side-effecting / code-exec module identities that must NEVER resolve from
-# an untrusted bundle, regardless of trust flags. This mirrors
-# ``torchlens.utils._callable_safety._DENIED_MODULES`` (the resolver's denylist)
-# and is duplicated here -- rather than imported -- to keep this security
-# front-door free of any import-order coupling (it is imported very early during
-# ``torchlens`` startup). Serialization, code execution, imports, and process /
-# OS / filesystem I/O are all hard-denied here BEFORE the deferred-reference
-# fallback below can ever apply.
-_DENIED_FOREIGN_MODULES: frozenset[str] = frozenset(
-    {
-        # Serialization: unpickle (RCE) and arbitrary-path tensor writes.
-        "torch.serialization",
-        "torch.jit",
-        "torch.package",
-        "torch.hub",
-        "torch.storage",
-        "torch.multiprocessing",
-        "torch.distributed",
-        "torch._utils_internal",
-        "pickle",
-        "_pickle",
-        "marshal",
-        # Code execution / imports.
-        "builtins",
-        "importlib",
-        # The real import machinery behind ``importlib`` (r28, E-r28-1): under trust
-        # these expose ``_frozen_importlib:__import__``, ``_call_with_frames_removed``
-        # (a universal call gadget), and ``exec_module`` reachable via dotted walk.
-        # Prefix matching then also covers their submodules.
-        "_frozen_importlib",
-        "_frozen_importlib_external",
-        "runpy",
-        "code",
-        "codeop",
-        "ctypes",
-        # Exec / spawn / install (r26): stdlib entry points that EXECUTE
-        # arbitrary code strings/callables (debuggers, tracers, profilers,
-        # timeit), spawn processes or browsers (pydoc/webbrowser/antigravity/
-        # platform/asyncio), or install packages (pip/setuptools/venv). Denied
-        # EVEN under trust_custom_callables -- trust never authorizes these.
-        "pdb",
-        "bdb",
-        "timeit",
-        "trace",
-        "cProfile",
-        "profile",
-        "pydoc",
-        "webbrowser",
-        "antigravity",
-        "platform",
-        "asyncio",
-        "pip",
-        "setuptools",
-        "venv",
-        # Process / OS / filesystem I/O.
-        "os",
-        "posix",
-        "nt",
-        "sys",
-        "subprocess",
-        "shutil",
-        "socket",
-        "pty",
-        "signal",
-        "threading",
-        "multiprocessing",
-        "glob",
-        "tempfile",
-        "pathlib",
-    }
-)
+# The callable resolver owns the security vocabulary. This front door imports
+# the SAME frozen object so a denylist addition cannot land on only one path.
+_DENIED_FOREIGN_MODULES = _CALLABLE_DENIED_MODULES
 
 
 def _module_denied(module: str) -> bool:
@@ -214,61 +152,20 @@ def _module_denied(module: str) -> bool:
     )
 
 
-# STRUCTURAL close of the denylist-completeness class (r31). Mirrors
-# ``torchlens.utils._callable_safety`` (``_ALLOWED_STDLIB_ROOTS`` /
-# ``_STDLIB_AND_BUILTIN_TOP_LEVEL`` / ``is_denied_stdlib_or_builtin_module``) and is
-# duplicated here -- rather than imported -- to keep this early-imported security
-# front door free of import-order coupling (exactly as ``_DENIED_FOREIGN_MODULES``
-# mirrors the resolver denylist). The explicit ``_DENIED_FOREIGN_MODULES`` denylist
-# stays as belt-and-suspenders; this positive rule closes the CLASS: any FOREIGN
-# global whose real top-level module is a Python STANDARD-LIBRARY or BUILTIN module
-# is denied EVEN under trust. The pure-forward ``operator`` / ``_operator`` root is
-# carved out for parity with the resolver; non-stdlib torch / torchlens / numpy /
-# user packages are naturally allowed (not in the detector set). NOTE: this is
+# STRUCTURAL close of the denylist-completeness class (r31). The detector,
+# carve-outs, and predicate are imported from ``utils._callable_safety`` so the
+# unpickler and callable resolver make one decision from one authority. The explicit
+# ``_DENIED_FOREIGN_MODULES`` alias stays as belt-and-suspenders; this positive rule
+# closes the CLASS: any FOREIGN global whose real top-level module is a Python
+# STANDARD-LIBRARY or BUILTIN module is denied EVEN under trust. The pure-forward
+# ``operator`` / ``_operator`` root is carved out; non-stdlib torch / torchlens /
+# numpy / user packages are naturally allowed (not in the detector set). NOTE: this is
 # applied ONLY in the FOREIGN tail of ``find_class`` -- the ``torch`` / ``torchlens``
 # / preview / ``_SAFE_EXPLICIT_GLOBALS`` branches (which legitimately resolve
 # ``collections`` / ``builtins`` pure-data globals) return BEFORE the tail.
-_ALLOWED_STDLIB_ROOTS: frozenset[str] = frozenset({"operator", "_operator"})
-
-
-def _stdlib_and_builtin_top_level() -> frozenset[str]:
-    """Return the top-level Python stdlib + builtin module-name detector set."""
-
-    names: set[str] = set(sys.builtin_module_names)
-    stdlib = getattr(sys, "stdlib_module_names", None)
-    if stdlib is not None:
-        names |= set(stdlib)
-        return frozenset(names)
-    # pre-3.10 fallback: enumerate top-level names from the stdlib directory.
-    try:
-        std_dir = os.path.dirname(os.__file__ or "")
-        if std_dir:
-            for entry in os.listdir(std_dir):
-                if entry.endswith(".py"):
-                    names.add(entry[:-3])
-                elif "." not in entry and not entry.startswith("_"):
-                    names.add(entry)
-    except OSError:  # pragma: no cover - defensive; stdlib dir is always readable here.
-        pass
-    return frozenset(names)
-
-
-_STDLIB_AND_BUILTIN_TOP_LEVEL: frozenset[str] = _stdlib_and_builtin_top_level()
-
-
-def _stdlib_or_builtin_denied(module: str) -> bool:
-    """Return whether ``module``'s real top-level package is a denied stdlib/builtin.
-
-    Mirrors ``torchlens.utils._callable_safety.is_denied_stdlib_or_builtin_module``.
-    The ``operator`` / ``_operator`` pure-forward root is carved out.
-    """
-
-    if not module:
-        return False
-    top_level = module.split(".", 1)[0]
-    if top_level in _ALLOWED_STDLIB_ROOTS:
-        return False
-    return top_level in _STDLIB_AND_BUILTIN_TOP_LEVEL
+_ALLOWED_STDLIB_ROOTS = _CALLABLE_ALLOWED_STDLIB_ROOTS
+_STDLIB_AND_BUILTIN_TOP_LEVEL = _CALLABLE_STDLIB_AND_BUILTIN_TOP_LEVEL
+_stdlib_or_builtin_denied = is_denied_stdlib_or_builtin_module
 
 
 def _name_has_dunder_walk(name: str) -> bool:
@@ -905,7 +802,7 @@ def _is_torchlens_owned(obj: Any) -> bool:
 # deny-by-default / trust-opt-in / load-tolerate treatment already applied to a
 # genuinely foreign module at the tail of ``find_class`` -- never passed to
 # ``super().find_class`` (which imports the module) to make that determination.
-_TORCHLENS_APPLIANCE_MODULES: frozenset[str] = frozenset({"torchlens.neuro", "torchlens.notebook"})
+_TORCHLENS_APPLIANCE_MODULES = _CALLABLE_APPLIANCE_MODULES
 
 
 def _is_torchlens_appliance_module(module: str) -> bool:

@@ -19,6 +19,8 @@ from typing import Any, cast
 import torch
 
 from .. import _state
+from .._input_walk import INPUT_CONTAINER_KINDS
+from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
 from ..constants import get_orig_torch_funcs
 from ..intervention.types import FunctionRegistryKey
 from ..runnable import (
@@ -256,9 +258,6 @@ class ContextFieldInvalidError(ValueError):
         self.detail = detail
 
 
-_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
-"""``site_label`` prefix of a persisted declared state-metadata fact witness (r65 F-1)."""
-
 _STATE_METADATA_FACT_ALLOWED_NAMES = frozenset({"requires_grad", "grad_fn"})
 """CLOSED parse-side vocabulary of declared state-metadata fact names (r65 F-1).
 
@@ -269,12 +268,7 @@ preparation could apply an attacker-chosen bit to staged state.
 """
 
 
-_INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
-"""``site_label`` prefix of a persisted input-boundary structure fact (r67 C2)."""
-
-_INPUT_STRUCTURE_NODE_KINDS = frozenset(
-    {"tensor", "empty", "namedtuple", "dataclass", "mapping", "sequence", "registered", "leaf"}
-)
+_INPUT_STRUCTURE_NODE_KINDS = INPUT_CONTAINER_KINDS
 """Closed node-kind vocabulary accepted from a persisted input-structure fact."""
 
 
@@ -817,6 +811,509 @@ def _parse_coverage_gaps(value: Any) -> tuple[WitnessCoverageGap, ...]:
     return tuple(gaps)
 
 
+@dataclass(frozen=True, slots=True)
+class _WitnessValidationContext:
+    """Indexed descriptor state shared by witness-obligation validation phases."""
+
+    descriptor: SparseRunDescriptor
+    field: str
+    slot_by_id: Mapping[str, TensorSlotDescriptor]
+    call_by_id: Mapping[str, RunnableCallDescriptor]
+
+
+def _validate_witness_identity(context: _WitnessValidationContext) -> None:
+    """Validate witness order density and identifier consistency.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    witnesses = context.descriptor.control_witnesses
+    orders = sorted(witness.order for witness in witnesses)
+    if orders != list(range(len(witnesses))):
+        raise ContextFieldInvalidError(context.field, "witness orders are not dense from zero")
+    for witness in witnesses:
+        if witness.witness_id != f"witness:{witness.order + 1}":
+            raise ContextFieldInvalidError(
+                context.field,
+                f"witness id {witness.witness_id!r} disagrees with its order {witness.order!r}",
+            )
+
+
+def _validate_call_references(context: _WitnessValidationContext) -> None:
+    """Validate call identifiers and every call-owned reference.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    calls = context.descriptor.calls
+    slots = context.descriptor.tensor_slots
+    numbers: list[int] = []
+    for call in calls:
+        prefix, separator, suffix = call.call_id.partition(":")
+        if prefix != "call" or not separator or not suffix.isdigit():
+            raise ContextFieldInvalidError(context.field, f"malformed call id {call.call_id!r}")
+        numbers.append(int(suffix))
+    # strict=False is deliberate: this is the consecutive-pairs monotonicity
+    # window, ragged by construction (n-1 pairs from n call ids).
+    if any(later <= earlier for earlier, later in zip(numbers, numbers[1:], strict=False)):
+        raise ContextFieldInvalidError(context.field, "call ids are not strictly increasing")
+    op_label_set = {label for call in calls for label in call.op_labels}
+    slot_label_set = {
+        slot.slot_id[len("slot:") :] for slot in slots if slot.slot_id.startswith("slot:")
+    }
+    # Arm-edge endpoints are pass-free LAYER labels; op/slot labels carry the pass
+    # suffix. Referential integrity resolves both spellings, exactly like the
+    # producer's attachment and the runtime ``_op_for_label`` lookup.
+    label_aliases = set(op_label_set) | set(slot_label_set)
+    for label in list(label_aliases):
+        if ":" in label:
+            label_aliases.add(label.rsplit(":", 1)[0])
+    for call in calls:
+        call_label_aliases = set(call.op_labels) | {
+            label.rsplit(":", 1)[0] for label in call.op_labels if ":" in label
+        }
+        for parent_id in call.parent_call_ids:
+            if parent_id not in context.call_by_id:
+                raise ContextFieldInvalidError(
+                    context.field, f"call {call.call_id!r} names unknown parent {parent_id!r}"
+                )
+        for obligation in call.control_obligations:
+            if obligation.output_slot_id not in context.slot_by_id:
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"control obligation on {call.call_id!r} names unknown slot "
+                    f"{obligation.output_slot_id!r}",
+                )
+            if obligation.output_slot_id not in set(call.output_slot_ids):
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"control obligation on {call.call_id!r} names slot "
+                    f"{obligation.output_slot_id!r} outside the call's outputs",
+                )
+        for edge in call.control_dependencies:
+            if edge.child_op_label not in call_label_aliases:
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"control dependency on {call.call_id!r} names child "
+                    f"{edge.child_op_label!r} outside the call's op labels",
+                )
+            for label in (edge.parent_op_label, edge.child_op_label):
+                if label not in label_aliases:
+                    raise ContextFieldInvalidError(
+                        context.field,
+                        f"control dependency edge names unresolvable op label {label!r}",
+                    )
+
+
+def _validate_structural_witness_discharge(
+    context: _WitnessValidationContext,
+    *,
+    container_members: tuple[str, ...] | None,
+) -> None:
+    """Validate independently derived witness requirements and discharges.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    container_members:
+        Rehydrated container witness members, or ``None`` during parse.
+    """
+
+    descriptor = context.descriptor
+    structure = ReplayWitnessStructure.from_descriptor(
+        descriptor, container_members=container_members
+    )
+    required = derive_required_witness_members(structure)
+    try:
+        present = required_witness_family_members_shared(descriptor.control_witnesses)
+    except ValueError as exc:
+        raise ContextFieldInvalidError(context.field, f"malformed witness envelope: {exc}")
+    # Exact-witness families: required members == present witnesses. The mode family
+    # is a required MINIMUM (honest artifacts declare the mode without mode-sensitive
+    # ops); the container family defers to the readiness-attach anchor when the
+    # rehydrated records are out of scope.
+    for family in ("input_structure", "model_input_metadata", "state_metadata"):
+        if sorted(required[family]) != sorted(present[family]):
+            raise ContextFieldInvalidError(
+                context.field,
+                f"{family!r} witnesses do not equal the structurally derived required "
+                f"set (required {sorted(required[family])[:6]!r}, present "
+                f"{sorted(present[family])[:6]!r})",
+            )
+    if not set(required["module_training_mode"]) <= set(present["module_training_mode"]):
+        raise ContextFieldInvalidError(
+            context.field,
+            "a mode-sensitive call replays without the declared module_training_mode witness",
+        )
+    if container_members is not None and sorted(required["container"]) != sorted(
+        present["container"]
+    ):
+        raise ContextFieldInvalidError(
+            context.field,
+            f"container witnesses do not equal the rehydrated container-record "
+            f"snapshots (required {sorted(required['container'])[:6]!r}, present "
+            f"{sorted(present['container'])[:6]!r})",
+        )
+    # Witness-or-gap families: every required member is discharged by an exact witness
+    # or a typed gap; no orphan witness may lack a structural obligation.
+    for family, gap_kinds in (
+        ("scalar_bool", {WitnessGapKind.UNOBSERVED_PREDICATE}),
+        ("loop_predicate", {WitnessGapKind.UNOBSERVED_PREDICATE}),
+        ("conditional_arm_entry", {WitnessGapKind.UNANCHORABLE_ARM_EDGE}),
+        ("tensor_derived_scalar_literal", {WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE}),
+        ("unbound_state_escape", {WitnessGapKind.UNWITNESSABLE_STATE_ESCAPE}),
+    ):
+        required_set = set(required[family])
+        present_set = set(present[family])
+        if not present_set <= required_set:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"{family!r} witnesses {sorted(present_set - required_set)[:6]!r} have "
+                "no owning structural obligation",
+            )
+        gapped = {
+            gap.source_member for gap in descriptor.coverage_gaps if gap.gap_kind in gap_kinds
+        }
+        undischarged = required_set - present_set - gapped
+        if undischarged:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"{family!r} obligations {sorted(undischarged)[:6]!r} are discharged by "
+                "neither an exact witness nor a typed coverage gap",
+            )
+
+
+def _validate_terminal_slot_totality(context: _WitnessValidationContext) -> None:
+    """Validate structural claims for every terminal call-produced slot.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    descriptor = context.descriptor
+    calls = descriptor.calls
+    slots = descriptor.tensor_slots
+    produced = {slot_id for call in calls for slot_id in call.output_slot_ids}
+    consumed = {argument.slot_id for call in calls for argument in call.tensor_arguments}
+    output_bound: set[str] = set()
+    for slot in slots:
+        if slot.role is TensorSlotRole.OUTPUT:
+            output_bound.add(slot.slot_id)
+            if slot.producer_slot_id is not None:
+                output_bound.add(slot.producer_slot_id)
+        elif slot.output_path is not None:
+            output_bound.add(slot.slot_id)
+    obligation_slots = {
+        obligation.output_slot_id for call in calls for obligation in call.control_obligations
+    }
+    gap_members_by_family: dict[str, set[str]] = {}
+    for gap in descriptor.coverage_gaps:
+        gap_members_by_family.setdefault(gap.source_family, set()).add(gap.source_member)
+    terminal_gap_members = (
+        gap_members_by_family.get("scalar_bool", set())
+        | gap_members_by_family.get("loop_predicate", set())
+        | gap_members_by_family.get("tensor_derived_scalar_literal", set())
+    )
+    for slot_id in sorted(produced - consumed - output_bound):
+        terminal_slot = context.slot_by_id.get(slot_id)
+        if terminal_slot is None:
+            raise ContextFieldInvalidError(
+                context.field, f"call output names unknown slot {slot_id!r}"
+            )
+        if terminal_slot.version_of is not None:
+            continue
+        structural_claims = (
+            int(slot_id in obligation_slots)
+            + int(terminal_slot.host_escape)
+            + int(terminal_slot.inert_sink)
+        )
+        if structural_claims > 1:
+            raise ContextFieldInvalidError(
+                context.field, f"terminal slot {slot_id!r} carries conflicting claims"
+            )
+        if structural_claims == 0 and slot_id not in terminal_gap_members:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"terminal slot {slot_id!r} is claimed by no control obligation, host "
+                "escape, inert_sink claim, or typed coverage gap",
+            )
+    for slot in slots:
+        if slot.host_escape and slot.inert_sink:
+            raise ContextFieldInvalidError(
+                context.field, f"slot {slot.slot_id!r} claims both host_escape and inert_sink"
+            )
+        if slot.inert_sink and (slot.slot_id not in produced or slot.slot_id in consumed):
+            raise ContextFieldInvalidError(
+                context.field,
+                f"slot {slot.slot_id!r} claims inert_sink but is not a terminal call-produced slot",
+            )
+
+
+def _validate_conditional_predicate_pairing(context: _WitnessValidationContext) -> None:
+    """Validate that every conditional arm edge has a predicate discharge.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    descriptor = context.descriptor
+    predicate_conditionals = {
+        obligation.conditional_id
+        for call in descriptor.calls
+        for obligation in call.control_obligations
+        if obligation.conditional_id is not None
+    }
+    predicate_gap_present = any(
+        gap.source_family in {"scalar_bool", "loop_predicate"} for gap in descriptor.coverage_gaps
+    )
+    for call in descriptor.calls:
+        for edge in call.control_dependencies:
+            if edge.conditional_id in predicate_conditionals or predicate_gap_present:
+                continue
+            raise ContextFieldInvalidError(
+                context.field,
+                f"conditional {edge.conditional_id!r} enters an arm with no "
+                "same-conditional predicate witness or typed predicate gap",
+            )
+
+
+def _validate_input_boundary_metadata_agreement(context: _WitnessValidationContext) -> None:
+    """Validate boundary bindings and metadata envelopes against their owners.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    from .._runnable_execution import _decode_literal
+
+    descriptor = context.descriptor
+    boundary_tensor_sites: set[tuple[Any, Any, str]] = set()
+    for site in descriptor.input_boundary:
+        position = decode_input_site_position(site.position)
+        for tensor_site in site.tensor_sites:
+            if tensor_site.slot_id not in context.slot_by_id:
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"boundary tensor site names unknown slot {tensor_site.slot_id!r}",
+                )
+            boundary_tensor_sites.add(
+                (position, tuple(tensor_site.container_path), tensor_site.slot_id)
+            )
+    binding_tensor_sites: set[tuple[Any, Any, str]] = set()
+    for slot in descriptor.tensor_slots:
+        if (
+            slot.role is not TensorSlotRole.MODEL_INPUT
+            or slot.input_binding is None
+            or slot.version_of is not None
+        ):
+            continue
+        binding_position = slot.input_binding.model_site_position
+        if not isinstance(binding_position, tuple) or len(binding_position) != 2:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"tensor MODEL_INPUT binding position {binding_position!r} is outside "
+                "the root site grammar",
+            )
+        binding_tensor_sites.add(
+            (tuple(binding_position), tuple(slot.input_binding.container_path), slot.slot_id)
+        )
+    if boundary_tensor_sites != binding_tensor_sites:
+        raise ContextFieldInvalidError(
+            context.field,
+            "input-boundary tensor sites do not equal the MODEL_INPUT slot bindings "
+            f"(boundary-only {sorted(boundary_tensor_sites - binding_tensor_sites, key=repr)[:4]!r}, "
+            f"binding-only {sorted(binding_tensor_sites - boundary_tensor_sites, key=repr)[:4]!r})",
+        )
+    reads_by_site: dict[tuple[Any, Any], tuple[str, ...]] = {}
+    for site in descriptor.input_boundary:
+        position = decode_input_site_position(site.position)
+        for tensor_site in site.tensor_sites:
+            reads_by_site[(position, tuple(tensor_site.container_path))] = (
+                tensor_site.metadata_reads
+            )
+    for witness in descriptor.control_witnesses:
+        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
+            continue
+        if not witness.site_label.startswith("model_input_metadata:"):
+            continue
+        fact = _decode_literal(witness.observed_value)
+        if not isinstance(fact, Mapping):
+            raise ContextFieldInvalidError(context.field, "undecodable model-input metadata fact")
+        fact_position: Any = _fact_position_tuple(
+            context.field, fact.get("position"), "metadata envelope position"
+        )
+        path = _fact_path_tuple(context.field, fact.get("path", ()) or (), "metadata envelope path")
+        declared_reads = reads_by_site.get((fact_position, path))
+        if declared_reads is None:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"metadata envelope at {fact_position!r}:{list(path)!r} has no owning "
+                "input-boundary tensor site",
+            )
+        facts = fact.get("facts")
+        fact_names = (
+            tuple(sorted(str(name) for name in facts)) if isinstance(facts, Mapping) else ()
+        )
+        if fact_names != declared_reads:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"metadata envelope at {fact_position!r}:{list(path)!r} carries fact "
+                f"names {fact_names!r} but the boundary record declares {declared_reads!r}",
+            )
+
+
+def _validate_state_metadata_disposition(context: _WitnessValidationContext) -> None:
+    """Validate state-fact witnesses, bindings, and escape dispositions.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    from .._runnable_execution import _decode_literal
+
+    descriptor = context.descriptor
+    facts_by_name: dict[str, tuple[bool, bool]] = {}
+    slots_by_name: dict[str, list[TensorSlotDescriptor]] = {}
+    for slot in descriptor.tensor_slots:
+        binding = slot.state_binding
+        if binding is None:
+            continue
+        pair = (binding.captured_requires_grad, binding.captured_grad_fn)
+        existing = facts_by_name.setdefault(binding.state_dict_name, pair)
+        if existing != pair:
+            raise ContextFieldInvalidError(
+                context.field,
+                f"state name {binding.state_dict_name!r} carries disagreeing declared "
+                "metadata facts across its slots",
+            )
+        slots_by_name.setdefault(binding.state_dict_name, []).append(slot)
+    for witness in descriptor.control_witnesses:
+        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
+            continue
+        if not witness.site_label.startswith(_STATE_METADATA_FACT_SITE_PREFIX):
+            continue
+        fact = _decode_literal(witness.observed_value)
+        if not isinstance(fact, Mapping):
+            continue  # envelope shape already validated at parse
+        name = fact.get("state")
+        fact_map = fact.get("facts")
+        if not isinstance(name, str) or not isinstance(fact_map, Mapping):
+            continue
+        declared = facts_by_name.get(name)
+        if declared is None:
+            raise ContextFieldInvalidError(
+                context.field, f"state-metadata witness names undeclared state {name!r}"
+            )
+        requires_grad, grad_fn_present = declared
+        if (
+            bool(fact_map.get("requires_grad")) != requires_grad
+            or bool(fact_map.get("grad_fn")) != grad_fn_present
+        ):
+            raise ContextFieldInvalidError(
+                context.field,
+                f"state-metadata witness for {name!r} disagrees with the declared binding facts",
+            )
+    bound_slot_ids = {
+        argument.slot_id for call in descriptor.calls for argument in call.tensor_arguments
+    }
+    bound_state_names = {
+        binding.state_dict_name
+        for slot in descriptor.tensor_slots
+        if (binding := slot.state_binding) is not None and slot.slot_id in bound_slot_ids
+    }
+    for name, name_slots in slots_by_name.items():
+        for slot in name_slots:
+            binding = slot.state_binding
+            assert binding is not None  # narrowing; the real refusal is below
+            is_unbound = slot.slot_id not in bound_slot_ids and name not in bound_state_names
+            if is_unbound and binding.host_escape_disposition is None:
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"unbound state slot {slot.slot_id!r} ({name!r}) carries no "
+                    "host-escape disposition claim",
+                )
+            if binding.host_escape_disposition == "inert" and not is_unbound:
+                raise ContextFieldInvalidError(
+                    context.field,
+                    f"bound state slot {slot.slot_id!r} ({name!r}) cannot claim "
+                    "unbound_state_inert",
+                )
+
+
+def _validate_opaque_leaf_gap_anchors(context: _WitnessValidationContext) -> None:
+    """Validate that every opaque input literal has its typed coverage gap.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    from .._runnable_execution import _decode_literal
+
+    descriptor = context.descriptor
+    opaque_literal_members: set[str] = set()
+    for witness in descriptor.control_witnesses:
+        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
+            continue
+        if not witness.site_label.startswith("model_input_literal:"):
+            continue
+        fact = _decode_literal(witness.observed_value)
+        if isinstance(fact, Mapping) and fact.get("encodable") is False:
+            raw_position = fact.get("position")
+            leaf_position: Any = (
+                tuple(raw_position) if isinstance(raw_position, (list, tuple)) else raw_position
+            )
+            opaque_literal_members.add(f"{leaf_position!r}:{list(fact.get('path', ()) or ())!r}")
+    opaque_gap_members = {
+        gap.source_member
+        for gap in descriptor.coverage_gaps
+        if gap.gap_kind is WitnessGapKind.OPAQUE_INPUT_LEAF
+    }
+    unanchored_opaque = opaque_literal_members - opaque_gap_members
+    if unanchored_opaque:
+        raise ContextFieldInvalidError(
+            context.field,
+            f"opaque input leaves {sorted(unanchored_opaque)[:4]!r} carry no "
+            "OPAQUE_INPUT_LEAF coverage gap",
+        )
+
+
+def _validate_witness_completeness_floor(context: _WitnessValidationContext) -> None:
+    """Validate the persisted completeness summary against the derived floor.
+
+    Parameters
+    ----------
+    context:
+        Indexed descriptor state for the validation pass.
+    """
+
+    descriptor = context.descriptor
+    floor = derived_witness_completeness(descriptor.coverage_gaps)
+    if descriptor.witness_completeness is not floor:
+        raise ContextFieldInvalidError(
+            context.field,
+            f"persisted witness_completeness {descriptor.witness_completeness.value!r} "
+            f"does not equal the parser-derived floor {floor.value!r} (the summary is "
+            "a redundant assertion, never authority)",
+        )
+
+
 def validate_witness_obligations(
     descriptor: SparseRunDescriptor,
     *,
@@ -855,390 +1352,22 @@ def validate_witness_obligations(
     are never consulted for their own required coverage.
     """
 
-    from .._runnable_execution import _decode_literal
-
     field = "witness_obligations"
-    witnesses = descriptor.control_witnesses
-    calls = descriptor.calls
-    slots = descriptor.tensor_slots
-    slot_by_id = {slot.slot_id: slot for slot in slots}
-    call_by_id = {call.call_id: call for call in calls}
-    # ---- witness order density + id consistency ----------------------------------
-    orders = sorted(witness.order for witness in witnesses)
-    if orders != list(range(len(witnesses))):
-        raise ContextFieldInvalidError(field, "witness orders are not dense from zero")
-    for witness in witnesses:
-        if witness.witness_id != f"witness:{witness.order + 1}":
-            raise ContextFieldInvalidError(
-                field,
-                f"witness id {witness.witness_id!r} disagrees with its order {witness.order!r}",
-            )
-    # ---- call id monotonicity + uniqueness + referential closure ------------------
-    numbers: list[int] = []
-    for call in calls:
-        prefix, separator, suffix = call.call_id.partition(":")
-        if prefix != "call" or not separator or not suffix.isdigit():
-            raise ContextFieldInvalidError(field, f"malformed call id {call.call_id!r}")
-        numbers.append(int(suffix))
-    # strict=False is deliberate: this is the consecutive-pairs monotonicity
-    # window, ragged by construction (n-1 pairs from n call ids).
-    if any(later <= earlier for earlier, later in zip(numbers, numbers[1:], strict=False)):
-        raise ContextFieldInvalidError(field, "call ids are not strictly increasing")
-    op_label_set = {label for call in calls for label in call.op_labels}
-    slot_label_set = {
-        slot.slot_id[len("slot:") :] for slot in slots if slot.slot_id.startswith("slot:")
-    }
-    # Arm-edge endpoints are pass-free LAYER labels; op/slot labels carry the pass
-    # suffix. Referential integrity resolves both spellings, exactly like the
-    # producer's attachment and the runtime ``_op_for_label`` lookup.
-    label_aliases = set(op_label_set) | set(slot_label_set)
-    for label in list(label_aliases):
-        if ":" in label:
-            label_aliases.add(label.rsplit(":", 1)[0])
-    for call in calls:
-        call_label_aliases = set(call.op_labels) | {
-            label.rsplit(":", 1)[0] for label in call.op_labels if ":" in label
-        }
-        for parent_id in call.parent_call_ids:
-            if parent_id not in call_by_id:
-                raise ContextFieldInvalidError(
-                    field, f"call {call.call_id!r} names unknown parent {parent_id!r}"
-                )
-        for obligation in call.control_obligations:
-            if obligation.output_slot_id not in slot_by_id:
-                raise ContextFieldInvalidError(
-                    field,
-                    f"control obligation on {call.call_id!r} names unknown slot "
-                    f"{obligation.output_slot_id!r}",
-                )
-            if obligation.output_slot_id not in set(call.output_slot_ids):
-                raise ContextFieldInvalidError(
-                    field,
-                    f"control obligation on {call.call_id!r} names slot "
-                    f"{obligation.output_slot_id!r} outside the call's outputs",
-                )
-        for edge in call.control_dependencies:
-            if edge.child_op_label not in call_label_aliases:
-                raise ContextFieldInvalidError(
-                    field,
-                    f"control dependency on {call.call_id!r} names child "
-                    f"{edge.child_op_label!r} outside the call's op labels",
-                )
-            for label in (edge.parent_op_label, edge.child_op_label):
-                if label not in label_aliases:
-                    raise ContextFieldInvalidError(
-                        field,
-                        f"control dependency edge names unresolvable op label {label!r}",
-                    )
-    # ---- structural view + independent required derivation ------------------------
-    structure = ReplayWitnessStructure.from_descriptor(
-        descriptor, container_members=container_members
+    context = _WitnessValidationContext(
+        descriptor=descriptor,
+        field=field,
+        slot_by_id={slot.slot_id: slot for slot in descriptor.tensor_slots},
+        call_by_id={call.call_id: call for call in descriptor.calls},
     )
-    required = derive_required_witness_members(structure)
-    try:
-        present = required_witness_family_members_shared(witnesses)
-    except ValueError as exc:
-        raise ContextFieldInvalidError(field, f"malformed witness envelope: {exc}")
-    gap_members_by_family: dict[str, set[str]] = {}
-    for gap in descriptor.coverage_gaps:
-        gap_members_by_family.setdefault(gap.source_family, set()).add(gap.source_member)
-    # Exact-witness families: required members == present witnesses. The mode family
-    # is a required MINIMUM (honest artifacts declare the mode without mode-sensitive
-    # ops); the container family defers to the readiness-attach anchor when the
-    # rehydrated records are out of scope.
-    for family in ("input_structure", "model_input_metadata", "state_metadata"):
-        if sorted(required[family]) != sorted(present[family]):
-            raise ContextFieldInvalidError(
-                field,
-                f"{family!r} witnesses do not equal the structurally derived required "
-                f"set (required {sorted(required[family])[:6]!r}, present "
-                f"{sorted(present[family])[:6]!r})",
-            )
-    if not set(required["module_training_mode"]) <= set(present["module_training_mode"]):
-        raise ContextFieldInvalidError(
-            field,
-            "a mode-sensitive call replays without the declared module_training_mode witness",
-        )
-    if container_members is not None and sorted(required["container"]) != sorted(
-        present["container"]
-    ):
-        raise ContextFieldInvalidError(
-            field,
-            f"container witnesses do not equal the rehydrated container-record "
-            f"snapshots (required {sorted(required['container'])[:6]!r}, present "
-            f"{sorted(present['container'])[:6]!r})",
-        )
-    # Witness-or-gap families: every required member discharged by an exact witness
-    # or a typed gap; no orphan witness without a structural obligation.
-    for family, gap_kinds in (
-        ("scalar_bool", {WitnessGapKind.UNOBSERVED_PREDICATE}),
-        ("loop_predicate", {WitnessGapKind.UNOBSERVED_PREDICATE}),
-        ("conditional_arm_entry", {WitnessGapKind.UNANCHORABLE_ARM_EDGE}),
-        ("tensor_derived_scalar_literal", {WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE}),
-        ("unbound_state_escape", {WitnessGapKind.UNWITNESSABLE_STATE_ESCAPE}),
-    ):
-        required_set = set(required[family])
-        present_set = set(present[family])
-        if not present_set <= required_set:
-            raise ContextFieldInvalidError(
-                field,
-                f"{family!r} witnesses {sorted(present_set - required_set)[:6]!r} have "
-                "no owning structural obligation",
-            )
-        gapped = {
-            gap.source_member for gap in descriptor.coverage_gaps if gap.gap_kind in gap_kinds
-        }
-        undischarged = required_set - present_set - gapped
-        if undischarged:
-            raise ContextFieldInvalidError(
-                field,
-                f"{family!r} obligations {sorted(undischarged)[:6]!r} are discharged by "
-                "neither an exact witness nor a typed coverage gap",
-            )
-    # ---- terminal-slot totality ----------------------------------------------------
-    produced = {slot_id for call in calls for slot_id in call.output_slot_ids}
-    consumed = {argument.slot_id for call in calls for argument in call.tensor_arguments}
-    output_bound: set[str] = set()
-    for slot in slots:
-        if slot.role is TensorSlotRole.OUTPUT:
-            output_bound.add(slot.slot_id)
-            if slot.producer_slot_id is not None:
-                output_bound.add(slot.producer_slot_id)
-        elif slot.output_path is not None:
-            output_bound.add(slot.slot_id)
-    obligation_slots = {
-        obligation.output_slot_id for call in calls for obligation in call.control_obligations
-    }
-    terminal_gap_members = (
-        gap_members_by_family.get("scalar_bool", set())
-        | gap_members_by_family.get("loop_predicate", set())
-        | gap_members_by_family.get("tensor_derived_scalar_literal", set())
-    )
-    for slot_id in sorted(produced - consumed - output_bound):
-        terminal_slot = slot_by_id.get(slot_id)
-        if terminal_slot is None:
-            raise ContextFieldInvalidError(field, f"call output names unknown slot {slot_id!r}")
-        if terminal_slot.version_of is not None:
-            continue
-        structural_claims = (
-            int(slot_id in obligation_slots)
-            + int(terminal_slot.host_escape)
-            + int(terminal_slot.inert_sink)
-        )
-        if structural_claims > 1:
-            raise ContextFieldInvalidError(
-                field, f"terminal slot {slot_id!r} carries conflicting claims"
-            )
-        if structural_claims == 0 and slot_id not in terminal_gap_members:
-            raise ContextFieldInvalidError(
-                field,
-                f"terminal slot {slot_id!r} is claimed by no control obligation, host "
-                "escape, inert_sink claim, or typed coverage gap",
-            )
-    for slot in slots:
-        if slot.host_escape and slot.inert_sink:
-            raise ContextFieldInvalidError(
-                field, f"slot {slot.slot_id!r} claims both host_escape and inert_sink"
-            )
-        if slot.inert_sink and (slot.slot_id not in produced or slot.slot_id in consumed):
-            raise ContextFieldInvalidError(
-                field,
-                f"slot {slot.slot_id!r} claims inert_sink but is not a terminal call-produced slot",
-            )
-    # ---- E2 conditional <-> predicate pairing --------------------------------------
-    predicate_conditionals = {
-        obligation.conditional_id
-        for call in calls
-        for obligation in call.control_obligations
-        if obligation.conditional_id is not None
-    }
-    predicate_gap_present = any(
-        gap.source_family in {"scalar_bool", "loop_predicate"} for gap in descriptor.coverage_gaps
-    )
-    for call in calls:
-        for edge in call.control_dependencies:
-            if edge.conditional_id in predicate_conditionals or predicate_gap_present:
-                continue
-            raise ContextFieldInvalidError(
-                field,
-                f"conditional {edge.conditional_id!r} enters an arm with no "
-                "same-conditional predicate witness or typed predicate gap",
-            )
-    # ---- boundary <-> binding equality + metadata envelope/owner agreement ---------
-    boundary_tensor_sites: set[tuple[Any, Any, str]] = set()
-    for site in descriptor.input_boundary:
-        position = decode_input_site_position(site.position)
-        for tensor_site in site.tensor_sites:
-            if tensor_site.slot_id not in slot_by_id:
-                raise ContextFieldInvalidError(
-                    field,
-                    f"boundary tensor site names unknown slot {tensor_site.slot_id!r}",
-                )
-            boundary_tensor_sites.add(
-                (position, tuple(tensor_site.container_path), tensor_site.slot_id)
-            )
-    binding_tensor_sites: set[tuple[Any, Any, str]] = set()
-    for slot in slots:
-        if (
-            slot.role is not TensorSlotRole.MODEL_INPUT
-            or slot.input_binding is None
-            or slot.version_of is not None
-        ):
-            continue
-        binding_position = slot.input_binding.model_site_position
-        if not isinstance(binding_position, tuple) or len(binding_position) != 2:
-            raise ContextFieldInvalidError(
-                field,
-                f"tensor MODEL_INPUT binding position {binding_position!r} is outside "
-                "the root site grammar",
-            )
-        binding_tensor_sites.add(
-            (tuple(binding_position), tuple(slot.input_binding.container_path), slot.slot_id)
-        )
-    if boundary_tensor_sites != binding_tensor_sites:
-        raise ContextFieldInvalidError(
-            field,
-            "input-boundary tensor sites do not equal the MODEL_INPUT slot bindings "
-            f"(boundary-only {sorted(boundary_tensor_sites - binding_tensor_sites, key=repr)[:4]!r}, "
-            f"binding-only {sorted(binding_tensor_sites - boundary_tensor_sites, key=repr)[:4]!r})",
-        )
-    reads_by_site: dict[tuple[Any, Any], tuple[str, ...]] = {}
-    for site in descriptor.input_boundary:
-        position = decode_input_site_position(site.position)
-        for tensor_site in site.tensor_sites:
-            reads_by_site[(position, tuple(tensor_site.container_path))] = (
-                tensor_site.metadata_reads
-            )
-    for witness in witnesses:
-        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
-            continue
-        if not witness.site_label.startswith("model_input_metadata:"):
-            continue
-        fact = _decode_literal(witness.observed_value)
-        if not isinstance(fact, Mapping):
-            raise ContextFieldInvalidError(field, "undecodable model-input metadata fact")
-        fact_position: Any = _fact_position_tuple(
-            field, fact.get("position"), "metadata envelope position"
-        )
-        path = _fact_path_tuple(field, fact.get("path", ()) or (), "metadata envelope path")
-        declared_reads = reads_by_site.get((fact_position, path))
-        if declared_reads is None:
-            raise ContextFieldInvalidError(
-                field,
-                f"metadata envelope at {fact_position!r}:{list(path)!r} has no owning "
-                "input-boundary tensor site",
-            )
-        facts = fact.get("facts")
-        fact_names = (
-            tuple(sorted(str(name) for name in facts)) if isinstance(facts, Mapping) else ()
-        )
-        if fact_names != declared_reads:
-            raise ContextFieldInvalidError(
-                field,
-                f"metadata envelope at {fact_position!r}:{list(path)!r} carries fact "
-                f"names {fact_names!r} but the boundary record declares "
-                f"{declared_reads!r}",
-            )
-    # ---- state-fact witness/binding agreement + disposition totality ----------------
-    facts_by_name: dict[str, tuple[bool, bool]] = {}
-    slots_by_name: dict[str, list[TensorSlotDescriptor]] = {}
-    for slot in slots:
-        binding = slot.state_binding
-        if binding is None:
-            continue
-        pair = (binding.captured_requires_grad, binding.captured_grad_fn)
-        existing = facts_by_name.setdefault(binding.state_dict_name, pair)
-        if existing != pair:
-            raise ContextFieldInvalidError(
-                field,
-                f"state name {binding.state_dict_name!r} carries disagreeing declared "
-                "metadata facts across its slots",
-            )
-        slots_by_name.setdefault(binding.state_dict_name, []).append(slot)
-    for witness in witnesses:
-        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
-            continue
-        if not witness.site_label.startswith("state_metadata:"):
-            continue
-        fact = _decode_literal(witness.observed_value)
-        if not isinstance(fact, Mapping):
-            continue  # envelope shape already validated at parse
-        name = fact.get("state")
-        fact_map = fact.get("facts")
-        if not isinstance(name, str) or not isinstance(fact_map, Mapping):
-            continue
-        declared = facts_by_name.get(name)
-        if declared is None:
-            raise ContextFieldInvalidError(
-                field, f"state-metadata witness names undeclared state {name!r}"
-            )
-        requires_grad, grad_fn_present = declared
-        if (
-            bool(fact_map.get("requires_grad")) != requires_grad
-            or bool(fact_map.get("grad_fn")) != grad_fn_present
-        ):
-            raise ContextFieldInvalidError(
-                field,
-                f"state-metadata witness for {name!r} disagrees with the declared binding facts",
-            )
-    bound_slot_ids = consumed
-    bound_state_names = {
-        binding.state_dict_name
-        for slot in slots
-        if (binding := slot.state_binding) is not None and slot.slot_id in bound_slot_ids
-    }
-    for name, name_slots in slots_by_name.items():
-        for slot in name_slots:
-            binding = slot.state_binding
-            assert binding is not None  # narrowing; the real refusal is below
-            is_unbound = slot.slot_id not in bound_slot_ids and name not in bound_state_names
-            if is_unbound and binding.host_escape_disposition is None:
-                raise ContextFieldInvalidError(
-                    field,
-                    f"unbound state slot {slot.slot_id!r} ({name!r}) carries no "
-                    "host-escape disposition claim",
-                )
-            if binding.host_escape_disposition == "inert" and not is_unbound:
-                raise ContextFieldInvalidError(
-                    field,
-                    f"bound state slot {slot.slot_id!r} ({name!r}) cannot claim "
-                    "unbound_state_inert",
-                )
-    # ---- opaque-leaf gap anchoring ---------------------------------------------------
-    opaque_literal_members: set[str] = set()
-    for witness in witnesses:
-        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
-            continue
-        if not witness.site_label.startswith("model_input_literal:"):
-            continue
-        fact = _decode_literal(witness.observed_value)
-        if isinstance(fact, Mapping) and fact.get("encodable") is False:
-            raw_position = fact.get("position")
-            leaf_position: Any = (
-                tuple(raw_position) if isinstance(raw_position, (list, tuple)) else raw_position
-            )
-            opaque_literal_members.add(f"{leaf_position!r}:{list(fact.get('path', ()) or ())!r}")
-    opaque_gap_members = {
-        gap.source_member
-        for gap in descriptor.coverage_gaps
-        if gap.gap_kind is WitnessGapKind.OPAQUE_INPUT_LEAF
-    }
-    unanchored_opaque = opaque_literal_members - opaque_gap_members
-    if unanchored_opaque:
-        raise ContextFieldInvalidError(
-            field,
-            f"opaque input leaves {sorted(unanchored_opaque)[:4]!r} carry no "
-            "OPAQUE_INPUT_LEAF coverage gap",
-        )
-    # ---- parser-derived completeness FLOOR -------------------------------------------
-    floor = derived_witness_completeness(descriptor.coverage_gaps)
-    if descriptor.witness_completeness is not floor:
-        raise ContextFieldInvalidError(
-            field,
-            f"persisted witness_completeness {descriptor.witness_completeness.value!r} "
-            f"does not equal the parser-derived floor {floor.value!r} (the summary is "
-            "a redundant assertion, never authority)",
-        )
+    _validate_witness_identity(context)
+    _validate_call_references(context)
+    _validate_structural_witness_discharge(context, container_members=container_members)
+    _validate_terminal_slot_totality(context)
+    _validate_conditional_predicate_pairing(context)
+    _validate_input_boundary_metadata_agreement(context)
+    _validate_state_metadata_disposition(context)
+    _validate_opaque_leaf_gap_anchors(context)
+    _validate_witness_completeness_floor(context)
 
 
 def required_witness_family_members_shared(

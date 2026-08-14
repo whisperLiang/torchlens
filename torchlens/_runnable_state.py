@@ -34,6 +34,12 @@ from .runnable import (
 from .utils._torch_compat import tensor_has_named_dims
 from .utils._torch_symbols import torch_attr
 
+_INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
+"""Canonical site-label prefix for persisted input-boundary structure facts."""
+
+_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
+"""Canonical site-label prefix for persisted declared-state metadata facts."""
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedRunnableState:
@@ -897,9 +903,6 @@ def bind_embedded_nonpersistent_buffers(trace: Any, buffers: Mapping[str, Any]) 
         if isinstance(name, str) and isinstance(value, torch.Tensor)
     }
 
-
-_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
-"""``site_label`` prefix of a persisted DECLARED-STATE metadata fact witness (r65 F-1)."""
 
 _STATE_METADATA_FACT_KEY = "state_metadata"
 """Discriminator key present in every declared state-metadata fact."""

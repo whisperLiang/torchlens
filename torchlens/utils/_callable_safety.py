@@ -1464,7 +1464,9 @@ def is_denied_operator_gadget(func: Callable[..., Any]) -> bool:
 # Extras-gated "appliance" subpackages whose ``__init__`` imports FOREIGN
 # third-party dependencies; a callable resolved from one of these ran foreign
 # top-level code on import and must never be treated as inert first-party code.
-# Mirrors ``torchlens._io._safe_unpickle._TORCHLENS_APPLIANCE_MODULES``.
+# This is the canonical appliance-module vocabulary used by safe unpickling and
+# first-party callable classification. The intervention resolver keeps a fenced
+# import-order pin that is equality-gated in the SSOT drift suite.
 _APPLIANCE_MODULES: frozenset[str] = frozenset({"torchlens.neuro", "torchlens.notebook"})
 
 # Attribute stamped on a callable at ``@torchlens.facets.register`` time (on the
