@@ -1111,6 +1111,40 @@ def helper_from_serialized(
     opaque_arg = _first_non_executable_arg(args, kwargs)
     if opaque_arg is not None:
         return _non_executable_builtin_placeholder(name, opaque_arg, data)
+    return rebuild_builtin_helper(name, args, kwargs)
+
+
+def rebuild_builtin_helper(
+    name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> HelperSpec:
+    """Rebuild one builtin helper spec through its public constructor.
+
+    The single builtin-name registry shared by ``.tlspec`` intervention-spec
+    loads and ``HelperSpec`` pickle restore: a builtin helper's runtime hook
+    factory is a local closure (never serialized), so both restore paths
+    re-derive the whole spec from its stable ``(name, args, kwargs)``
+    identity by re-invoking the constructor.
+
+    Parameters
+    ----------
+    name:
+        Builtin helper name.
+    args:
+        Positional constructor arguments.
+    kwargs:
+        Keyword constructor arguments.
+
+    Returns
+    -------
+    HelperSpec
+        Freshly constructed builtin helper spec.
+
+    Raises
+    ------
+    InvalidArgumentError
+        If ``name`` is not a known builtin helper.
+    """
+
     constructors: dict[str, Callable[..., HelperSpec]] = {
         "zero_ablate": zero_ablate,
         "mean_ablate": mean_ablate,

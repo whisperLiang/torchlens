@@ -2751,6 +2751,16 @@ class Trace(
         state.pop("_output_head", None)
         state.pop("_output_tokenizer", None)
         state.pop("_semantic_output_metadata", None)
+        # Capture-session predicate carriers (FieldPolicy.DROP) hold LIVE USER
+        # CLOSURES when predicate capture/intervention/halt was used (a
+        # ``tl.when(...)`` conditional is a local function), so pickling a
+        # trace that ``tl.save`` accepted failed on exactly these fields.
+        # Serialize to the loaded-artifact form instead (absent / None), which
+        # every post-capture consumer already tolerates -- same belt as the
+        # semantic-output scratch above.
+        state.pop("_stop_directive", None)
+        state.pop("_capture_config", None)
+        state["_predicate_save_options"] = None
         state.pop("_raw_graph_ws", None)
         state.pop("_module_capture_ws", None)
         state.pop("_wrapper_runtime_ws", None)

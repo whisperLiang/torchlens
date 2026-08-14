@@ -227,6 +227,62 @@ class HelperSpec:
             raise TypeError(f"HelperSpec {self.helper_name!r} has no hook factory")
         return self.factory()
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Return pickle state, dropping factories pickle cannot carry.
+
+        Builtin factories are local closures derived entirely from the
+        stable ``(helper_name, args, kwargs)`` identity; ``__setstate__``
+        rebuilds them through the same builtin registry ``tl.load`` uses,
+        so plain ``pickle`` and ``tl.save`` agree on helper-carrying specs.
+        ``opaque_audit`` factories (load-time raising placeholders) drop to
+        the canonical factory-less audit-only form.
+        """
+
+        state = dict(self.__dict__)
+        if self.portability in ("builtin", "opaque_audit"):
+            state["factory"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickle state, rebuilding a dropped builtin factory.
+
+        Raises
+        ------
+        InvalidArgumentError
+            If a builtin helper name is unknown to this torchlens (same
+            typed refusal as an intervention-spec load).
+        """
+
+        if state.get("factory") is None and state.get("portability") == "builtin":
+            from .helpers import rebuild_builtin_helper
+
+            rebuilt = rebuild_builtin_helper(
+                state["helper_name"],
+                tuple(state.get("args", ())),
+                dict(state.get("kwargs", ())),
+            )
+            state = {**state, "factory": rebuilt.factory}
+        for key, value in state.items():
+            object.__setattr__(self, key, value)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> HelperSpec:
+        """Field-wise deepcopy preserving factory identity.
+
+        Explicit so ``copy.deepcopy`` keeps its pre-pickle-hook semantics
+        (functions are deepcopy-atomic, so the factory closure is shared by
+        identity) instead of routing through ``__getstate__``'s
+        factory-dropping pickle path.
+        """
+
+        import copy as _copy
+
+        cls = type(self)
+        clone = cls.__new__(cls)
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            object.__setattr__(clone, key, _copy.deepcopy(value, memo))
+        return clone
+
 
 @dataclass(frozen=True, slots=True)
 class InterventionDecision:
