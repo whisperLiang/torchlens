@@ -73,6 +73,21 @@ class InternalSourceModel(nn.Module):
         return self.lin(x) * gain
 
 
+class FactorySourceOutputModel(nn.Module):
+    """Parentless factory tensor returned directly as the final output.
+
+    The b9 R71-1 shape: the synthetic output node's DIRECT parent is a
+    parentless internal source, so step 1's ``root_ancestors`` re-derivation
+    is content-effective here (the wholesale clone would otherwise inherit
+    the factory row's empty set) and the axis keeps that write out of the
+    permanent no-op ledger.
+    """
+
+    @staticmethod
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        return torch.arange(x.shape[-1], device=x.device)
+
+
 class DoubleBufferModel(nn.Module):
     """Registered buffer read twice (buffer dedup / step-6 pressure)."""
 
@@ -270,6 +285,11 @@ def _axis_internal_source() -> Any:
     return tl.trace(InternalSourceModel(), torch.randn(2, 4))
 
 
+def _axis_factory_source_output() -> Any:
+    _seed_everything()
+    return tl.trace(FactorySourceOutputModel(), torch.randn(4, 4))
+
+
 def _axis_buffer_pressure() -> Any:
     _seed_everything()
     return tl.trace(DoubleBufferModel().train(), torch.randn(3, 4))
@@ -409,6 +429,7 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("transform", _axis_transform),
         ("container_structure", _axis_container_structure),
         ("internal_source", _axis_internal_source),
+        ("factory_source_output", _axis_factory_source_output),
         ("buffer_pressure", _axis_buffer_pressure),
         ("buffer_duplicate", _axis_buffer_duplicate),
         ("buffer_from_input", _axis_buffer_from_input),

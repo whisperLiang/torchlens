@@ -77,10 +77,11 @@ PINNED_NOOP_WRITERS = {
             "input_to_module_calls",
             "is_buffer",
             "is_input",
-            "is_internal_source",
+            # The factory_source_output axis (b9 R71-1) retired the
+            # ("1", "is_internal_source"/"non_tensor_kwargs"/"num_kwargs")
+            # rows: cloning a parentless factory source into the synthetic
+            # output node genuinely flips all three.
             "is_transform",
-            "non_tensor_kwargs",
-            "num_kwargs",
             "num_params_frozen",
             "num_passes",
             "out",

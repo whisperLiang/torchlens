@@ -350,6 +350,16 @@ def _add_output_layers(
         new_output_node.internal_source_parents = (
             [output_node._label_raw] if output_node.has_internal_source_ancestor else []
         )
+        # root_ancestors must be re-derived the same way: the output node is NOT an
+        # internal source (set above), so the armed ancestry-closure convention
+        # requires root_ancestors == input_ancestors | internal_source_ancestors.
+        # The wholesale clone inherited the DIRECT parent's root_ancestors verbatim,
+        # which is the empty set when that parent is a parentless factory source
+        # (arange/zeros/... returned straight from forward) — the one source-minting
+        # convention that leaves root_ancestors empty on the exempt source row.
+        new_output_node.root_ancestors = set(output_node.input_ancestors) | set(
+            output_node.internal_source_ancestors
+        )
         new_output_node._edge_uses = []
 
         # Clear func_config on synthetic output nodes:

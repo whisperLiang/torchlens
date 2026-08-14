@@ -331,6 +331,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "pass_index",
                 "raw_index",
                 "recurrent_ops",
+                # The synthetic output node RE-DERIVES root_ancestors as
+                # input_ancestors | internal_source_ancestors over its ONE parent
+                # (the armed ancestry-closure convention): the wholesale clone
+                # inherited the empty set when the direct parent is a parentless
+                # factory source (b9 R71-1 ancestry_closure fix).
+                "root_ancestors",
                 "saved_args",
                 "saved_kwargs",
                 "shape",
@@ -362,6 +368,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 # whether it carries internal-source ancestry (B3 R05 fix).
                 "has_internal_source_ancestor",
                 "has_saved_activation",
+                # Deriving the output node's root_ancestors reads its parent's
+                # ancestry closure sets (b9 R71-1 ancestry_closure fix).
+                "input_ancestors",
+                "internal_source_ancestors",
                 "label",
                 "layer_label",
                 "modules",
@@ -1699,6 +1709,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parent_arg_positions",
                     "parents",
                     "recurrent_ops",
+                    # b9 R71-1: step 1's output-node minting writes the
+                    # root_ancestors closure the removal scrub rebinds.
+                    "root_ancestors",
                     "token:raw_graph_ws",
                 )
             ),
@@ -1760,6 +1773,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parent_arg_positions",
                     "parents",
                     "recurrent_ops",
+                    # b9 R71-1: step 1's output-node minting writes the
+                    # root_ancestors closure step 6's rewiring re-derives.
+                    "root_ancestors",
                     "saved_args",
                     "token:raw_graph_ws",
                 )
@@ -1834,6 +1850,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parent_arg_positions",
                     "parents",
                     "recurrent_ops",
+                    # b9 R71-1: step 1's output-node minting and step 9's
+                    # scrub both write the root_ancestors closure.
+                    "root_ancestors",
                     "token:raw_graph_ws",
                     "type",
                 )
@@ -2068,6 +2087,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "pass_index",
                     "raw_index",
                     "recurrent_ops",
+                    # b9 R71-1: step 1's output-node minting now writes the
+                    # re-derived root_ancestors closure the finalize path reads.
+                    "root_ancestors",
                     "saved_args",
                     "saved_kwargs",
                     "shape",

@@ -135,7 +135,11 @@ MULTI_WRITER_GOLDEN = {
     "parents": ("1", "6", "9"),
     "pass_index": ("1", "7"),
     "recurrent_ops": ("1", "7", "9"),
-    "root_ancestors": ("6", "9"),
+    # b9 R71-1: step 1's output-node minting re-derives root_ancestors
+    # (input_ancestors | internal_source_ancestors over the ONE parent) so the
+    # non-exempt synthetic output row conforms to the armed ancestry closure
+    # even when its direct parent is a parentless factory source.
+    "root_ancestors": ("1", "6", "9"),
     "saved_args": ("1", "11.75"),
     "saved_kwargs": ("1", "11.75"),
     "shape": ("1", "11.75"),
