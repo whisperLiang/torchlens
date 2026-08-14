@@ -369,3 +369,61 @@ def test_render_grid_cap_marker_is_contained() -> None:
 
     assert image.size == (68, 68)
     assert np.asarray(image).shape == (68, 68, 3)
+
+
+def test_stored_maps_preserve_nonfinite_values() -> None:
+    """Storage never launders NaN/Inf: users draw feature maps to FIND them."""
+
+    from torchlens.viz.feature_maps import _select_maps
+
+    activations = torch.arange(2 * 3 * 4 * 4, dtype=torch.float32).reshape(2, 3, 4, 4)
+    activations[0, 0, 1, 2] = float("nan")
+    activations[1, 1, 0, 0] = float("inf")
+
+    maps, _channel_ids, _mode = _select_maps(
+        activations,
+        stimulus_indices=[0, 1],
+        channels=[0, 1],
+        top_k=4,
+        reduce="mean",
+        max_channels=4,
+    )
+
+    assert torch.isnan(maps[0, 0, 1, 2])
+    assert torch.isinf(maps[1, 1, 0, 0])
+
+
+def test_evolution_preserves_nan_from_activations() -> None:
+    """End-to-end: a NaN activation survives into the stored annotation blob."""
+
+    poisoned = _input_batch(2)
+    poisoned[0, 0, 1, 1] = float("nan")
+    trace = tl.trace(_TinyConv().eval(), poisoned, save=tl.func("conv2d"))
+    feature_map_evolution(trace, save=tl.func("conv2d"), channels=[0])
+
+    stored = trace._annotation_blobs["featmap:layer:conv2d_1_1:maps"]
+    assert torch.isnan(stored[0, 0, 1, 1])
+
+
+def test_heatmap_cells_mark_nonfinite_and_keep_finite_scale() -> None:
+    """Non-finite pixels use the nan color; Inf never hijacks the color scale."""
+
+    from torchlens.viz.feature_maps import _map_to_heatmap_image
+    from torchlens.viz.node_plots import _apply_colormap
+
+    map_tensor = torch.tensor([[0.0, 1.0], [float("nan"), float("inf")]])
+    image = _map_to_heatmap_image(map_tensor, cmap="magma", cell_size=72)
+    pixels = np.asarray(image)
+
+    low_color = _apply_colormap(np.asarray([[0.0]], dtype=np.float64), "magma")[0, 0]
+    high_color = _apply_colormap(np.asarray([[1.0]], dtype=np.float64), "magma")[0, 0]
+    nan_color = np.asarray([235, 235, 235], dtype=np.uint8)
+
+    # Bilinear-resized corners keep the exact source-corner colors.
+    assert np.array_equal(pixels[0, 0], low_color)
+    # The finite maximum (1.0) still reaches the TOP of the colormap: if Inf
+    # entered the scale, 1.0 would normalize to ~0 and render as low_color.
+    assert np.array_equal(pixels[0, -1], high_color)
+    # NaN and Inf pixels are visibly marked, not laundered into real values.
+    assert np.array_equal(pixels[-1, 0], nan_color)
+    assert np.array_equal(pixels[-1, -1], nan_color)

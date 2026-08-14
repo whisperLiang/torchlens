@@ -27,6 +27,8 @@ _REDUCE_MAX = 1
 _TEXT_COLOR = (25, 28, 34)
 _LABEL_FILL = (255, 255, 255)
 _LABEL_OUTLINE = (95, 103, 117)
+#: Non-finite pixel color; matches node_plots.render_heatmap's nan_color default.
+_NONFINITE_COLOR = (235, 235, 235)
 
 
 def feature_map_evolution(
@@ -474,24 +476,27 @@ def _select_maps(
         Maps ``[S, K, H, W]``, channel ids ``[S, K]``, and mode id.
     """
 
+    # Non-finite activations are stored AS-IS: NaN/Inf are exactly what users
+    # draw feature maps to find, and the renderer marks them with a dedicated
+    # non-finite color instead of laundering them into real values.
     selected = activations[list(stimulus_indices)]
     if channels is None:
         maps = _aggregate_channels(selected, reduce).unsqueeze(1)
         channel_ids = torch.full((selected.shape[0], 1), -1, dtype=torch.int64)
-        return torch.nan_to_num(maps).contiguous(), channel_ids, _MODE_AGGREGATE
+        return maps.contiguous(), channel_ids, _MODE_AGGREGATE
     if channels == "top":
         channel_ids = _top_channel_indices(selected, top_k=min(top_k, max_channels))
         maps = torch.stack(
             [selected[row_index, channel_ids[row_index]] for row_index in range(selected.shape[0])],
             dim=0,
         )
-        return torch.nan_to_num(maps).contiguous(), channel_ids.to(dtype=torch.int64), _MODE_TOP
+        return maps.contiguous(), channel_ids.to(dtype=torch.int64), _MODE_TOP
 
     explicit = _resolve_channels(channels, total_channels=activations.shape[1], cap=max_channels)
     explicit_tensor = torch.tensor(explicit, dtype=torch.int64)
     maps = selected[:, explicit_tensor]
     channel_ids = explicit_tensor.unsqueeze(0).expand(selected.shape[0], -1).contiguous()
-    return torch.nan_to_num(maps).contiguous(), channel_ids, _MODE_EXPLICIT
+    return maps.contiguous(), channel_ids, _MODE_EXPLICIT
 
 
 def _aggregate_channels(activations: torch.Tensor, reduce: FeatureMapReduce) -> torch.Tensor:
@@ -793,9 +798,16 @@ def _map_to_heatmap_image(map_tensor: torch.Tensor, *, cmap: str, cell_size: int
         RGB heatmap image.
     """
 
-    array = torch.nan_to_num(map_tensor.detach().to(device="cpu", dtype=torch.float32)).numpy()
-    normalized = _normalize_finite(np.asarray(array, dtype=np.float64), None, None)
+    # Same non-finite contract as node_plots.render_heatmap: the scale is
+    # computed over FINITE values only (one Inf must not floor everything
+    # else) and non-finite pixels get the dedicated nan color instead of
+    # being laundered into real values.
+    array = np.asarray(
+        map_tensor.detach().to(device="cpu", dtype=torch.float32).numpy(), dtype=np.float64
+    )
+    normalized = _normalize_finite(array, None, None)
     colors = _apply_colormap(normalized, cmap)
+    colors[~np.isfinite(array)] = np.asarray(_NONFINITE_COLOR, dtype=np.uint8)
     return Image.fromarray(colors, mode="RGB").resize(
         (cell_size, cell_size), Image.Resampling.BILINEAR
     )
