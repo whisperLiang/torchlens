@@ -56,9 +56,7 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # Zero-copy escape-target enumeration: if the private ``_to_dlpack``
     # binding disappears, the escape route it guards disappears with it
     # (fail-neutral; nothing to patch means nothing can escape through it).
-    "torchlens/backends/torch/_completeness_finalize.py": frozenset(
-        {"getattr(torch, '_C')"}
-    ),
+    "torchlens/backends/torch/_completeness_finalize.py": frozenset({"getattr(torch, '_C')"}),
     # TorchDispatchMode base class (public-by-usage, import fails the module
     # loudly at import time) and the same fail-closed torch.ops enumeration.
     "torchlens/backends/torch/completeness_witness.py": frozenset(
@@ -68,6 +66,14 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # attribution returns None (capability absent, callers degrade typed).
     "torchlens/backends/torch/tensor_tracking.py": frozenset(
         {"torch._C", "getattr(torch._C, '_current_graph_task_id')"}
+    ),
+    # Expanded-weights identity shim (SF-53 census): the conv/RNN per-sample-grad
+    # picker compares the dispatched func against torch's OWN
+    # ``_cudnn_rnn_flatten_weight`` symbol, so the shim must read that exact private
+    # binding to normalize the identity basis torch itself uses -- routing through a
+    # compat wrapper would change the object identity the comparison depends on.
+    "torchlens/backends/torch/identity_shims.py": frozenset(
+        {"getattr(torch, '_cudnn_rnn_flatten_weight')"}
     ),
 }
 
