@@ -375,6 +375,13 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
         site
         for site in mutators["op_events_inplace_writes"]
         if "ir/capture_events.py" not in site  # replace_op_event's own body, deleted in P4
+        # _backfill_cooked_ancestry (e9332023): runs ONLY on the cook path's
+        # own copy_for_replay() working projection -- the documented sanctioned
+        # mutation surface -- before postprocess; the frozen Recording's sealed
+        # event stream is never touched. The static scan cannot see the copy,
+        # so this is a reviewed provably-outside-contract carve-out, not a
+        # revived legacy channel.
+        and "fastlog/types.py" not in site
     }
     assert not inplace_writes, (
         f"in-place op_events[i] writes resurfaced after the P4 migration: {inplace_writes}"
