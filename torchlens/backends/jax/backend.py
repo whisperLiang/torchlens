@@ -10,13 +10,18 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from functools import reduce
-from operator import mul
 from typing import Any, Final, cast
 
 from ..._deprecations import MISSING, MissingType
 from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...backends._finalize import (
+    attach_function_root_module,
+    mirror_param_derived_grads,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
+)
 from ...capture.outcome import stamp_backend_finalized
 from ...data_classes._compaction import compact_op_metadata
 from ...data_classes.derived_grad import (
@@ -26,7 +31,6 @@ from ...data_classes.derived_grad import (
     IntermediateDerivedGradRecord,
 )
 from ...data_classes.layer import Layer
-from ...data_classes.module import ModuleAccessor
 from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace, _init_module_hierarchy_data
 from ...fastlog.types import CaptureSpec
@@ -46,7 +50,7 @@ from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
-from ...postprocess.finalization import _build_module_logs, _build_root_module_log
+from ...postprocess.finalization import _build_module_logs
 from ...postprocess.loop_grouping_adapter import (
     RecurrenceAssignment,
     RecurrenceGroupingGraph,
@@ -1669,7 +1673,7 @@ class JAXBackend:
                 )
             )
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
         if grad_options.intermediate_grads:
             try:
                 trace.intermediate_derived_grads = self._derive_intermediate_grads_zero_tap(
@@ -1691,35 +1695,6 @@ class JAXBackend:
                     "status": "degraded",
                     "reason": f"producer_error:{type(exc).__name__}",
                 }
-
-    def _mirror_param_derived_grads(
-        self, trace: Trace, records: Mapping[str, DerivedGradRecord]
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing pytree-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-            param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-            param.gradient_memory = _nbytes(record.grad) or 0
 
     def _derive_intermediate_grads_zero_tap(
         self,
@@ -2120,7 +2095,7 @@ class JAXBackend:
         trace.backend = cast(BackendName, self.name)
         if module_tree is None:
             trace.module_identity_mode = "function_root"
-            self._attach_function_root_module(trace)
+            attach_function_root_module(trace)
         else:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
@@ -2459,35 +2434,6 @@ class JAXBackend:
                 "_edge_uses",
                 tuple(_relabel_jax_edge_use(edge, raw_to_final) for edge in op_log._edge_uses),
             )
-
-    def _attach_function_root_module(self, trace: Trace) -> None:
-        """Attach a function-root module accessor to ``trace``.
-
-        Parameters
-        ----------
-        trace
-            Trace receiving the root module.
-
-        Returns
-        -------
-        None
-            ``trace.modules`` is populated with ``self``.
-        """
-
-        mbd = trace._module_capture_ws.module_build_data
-        mbd["top_level_modules"] = ["self"]
-        mbd["top_level_module_ops"] = ["self:1"]
-        trace._module_capture_ws.module_metadata = {
-            "self": {
-                "cls": None,
-                "class_name": trace.model_class_name,
-                "class_qualname": trace.model_class_qualname,
-                "all_addresses": ["self"],
-                "training": False,
-            }
-        }
-        root = _build_root_module_log(trace, {}, mbd)
-        trace._module_logs = ModuleAccessor({"self": root})
 
     def _normalize_input_args(self, input_args: object) -> list[Any]:
         """Normalize public input args to a positional list.
@@ -3166,25 +3112,6 @@ def _jax_config_fingerprint() -> dict[str, str]:
         "jax_default_prng_impl",
     )
     return {name: repr(getattr(jax.config, name, None)) for name in names}
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in provenance and fingerprints.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 def _is_scalar_jax_value(value: Any) -> bool:
@@ -4370,43 +4297,6 @@ def _values_close(left: Any, right: Any) -> bool:
     if jnp.issubdtype(left_array.dtype, jnp.complexfloating):
         return bool(jnp.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(jnp.array_equal(left_array, right_array))
-
-
-def _numel(shape: Sequence[int]) -> int:
-    """Return the number of elements implied by ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Shape sequence.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    if not shape:
-        return 1
-    return int(reduce(mul, shape, 1))
-
-
-def _nbytes(value: object) -> int | None:
-    """Return byte size for a JAX array-like value.
-
-    Parameters
-    ----------
-    value
-        Candidate array.
-
-    Returns
-    -------
-    int | None
-        Byte size when available.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    return None if nbytes is None else int(nbytes)
 
 
 def _path_to_string(path: Sequence[Any]) -> str:

@@ -46,6 +46,10 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mirror_param_derived_grads,
+    numel_from_shape as _numel,
+    stable_callable_name as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import (
     PADDLE_EXTRA_KWARG_POLICY,
@@ -676,7 +680,7 @@ class PaddleBackend:
         trace.derived_grads = DerivedGradAccessor(records)
         if grad_options.intermediate_grads:
             trace.intermediate_derived_grads = intermediate_accessor
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _records_for_intermediate_paddle_grads(
         self,
@@ -783,35 +787,6 @@ class PaddleBackend:
                 f"{len(records)}."
             )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self,
-        trace: Trace,
-        records: Mapping[str, DerivedGradRecord],
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing Paddle module-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
     def validate_trace(
         self,
@@ -1968,24 +1943,6 @@ def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
     return aliases
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``."""
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return Paddle tensor memory in bytes."""
-
-    try:
-        return int(value.numel()) * int(value.element_size())  # type: ignore[attr-defined]
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
 def _paddle_intervention_corroborated(trace: Trace, capture: Any, op: Any) -> bool:
     """Return whether trace-level evidence corroborates an intervened capture.
 
@@ -2798,29 +2755,6 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
     if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
         return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(func: Callable[..., Any] | None) -> str | None:
-    """Return a stable best-effort callable identity string.
-
-    Parameters
-    ----------
-    func
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Human-readable callable identity.
-    """
-
-    if func is None:
-        return None
-    module = getattr(func, "__module__", None)
-    qualname = getattr(func, "__qualname__", None)
-    if module and qualname:
-        return f"{module}.{qualname}"
-    return repr(func)
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]

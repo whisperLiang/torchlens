@@ -27,6 +27,7 @@ from ...data_classes.derived_grad import (
 )
 from ...data_classes.trace import Trace
 from ...ir.refs import DtypeRef
+from .._finalize import mirror_param_derived_grads, stable_callable_name as _callable_identity
 from ..registry import BackendUnsupportedError
 from .modules import TFModuleTree
 from .op_callback_capture import TFEagerCaptureSession, TFOpCapture
@@ -273,7 +274,7 @@ def attach_tf_derived_grads(
     trace.derived_grads = DerivedGradAccessor(records)
     if grad_options.intermediate_grads:
         trace.intermediate_derived_grads = intermediate_accessor
-    _mirror_param_derived_grads(trace, records)
+    mirror_param_derived_grads(trace, records)
 
 
 def _output_tap(
@@ -503,35 +504,6 @@ def _capture_parent_labels(capture: TFOpCapture) -> tuple[str, ...]:
         if label is not None and label not in labels:
             labels.append(label)
     return tuple(labels)
-
-
-def _mirror_param_derived_grads(
-    trace: Trace,
-    records: Mapping[str, DerivedGradRecord],
-) -> None:
-    """Mirror unambiguous param derived gradients onto param records.
-
-    Parameters
-    ----------
-    trace
-        Trace containing TensorFlow module-derived params.
-    records
-        Derived gradient records keyed by leaf path.
-
-    Returns
-    -------
-    None
-        Matching ``trace.params`` entries receive the same gradient payload.
-    """
-
-    for address, param in trace.params.items():
-        record = records.get(f"params.{address}")
-        if record is None:
-            continue
-        param._derived_grad_payload = record.grad
-        param._derived_grad_record_path = record.path
-        param.has_grad = True
-        param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
 
 def _normalize_tf_input_grad_argnums(
@@ -896,29 +868,6 @@ def _tf_values_close(left: Any, right: Any) -> bool:
     if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
         return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(func: Callable[..., Any] | None) -> str | None:
-    """Return a stable best-effort callable identity string.
-
-    Parameters
-    ----------
-    func
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Human-readable callable identity.
-    """
-
-    if func is None:
-        return None
-    module = getattr(func, "__module__", None)
-    qualname = getattr(func, "__qualname__", None)
-    if module and qualname:
-        return f"{module}.{qualname}"
-    return repr(func)
 
 
 __all__ = [

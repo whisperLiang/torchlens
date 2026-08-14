@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
+from ...backends._finalize import numel_from_shape as _numel, value_nbytes as _nbytes
 from ...data_classes.param import Param
 from ...ir.refs import DeviceRef, DtypeRef
 
@@ -1041,39 +1042,3 @@ def _path_to_string(path: Any) -> str:
     return ".".join(parts)
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return byte size for an array-like value.
-
-    Parameters
-    ----------
-    value
-        Array-like value.
-
-    Returns
-    -------
-    int | None
-        Byte size when available.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    return None if nbytes is None else int(nbytes)

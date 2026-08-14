@@ -13,6 +13,7 @@ from typing import Any
 from ...data_classes.param import Param
 from ...ir.events import ModuleFrame
 from ...ir.refs import DeviceRef, DtypeRef
+from .._finalize import numel_from_shape as _numel, value_nbytes as _nbytes
 
 
 @dataclass(frozen=True)
@@ -627,48 +628,6 @@ def _safe_address_part(value: str) -> str:
 
     cleaned = value.replace("/", ".").replace(":", "_")
     return cleaned or "module"
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return the number of elements represented by ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: Any) -> int | None:
-    """Return TensorFlow tensor memory in bytes when available.
-
-    Parameters
-    ----------
-    value
-        TensorFlow variable or tensor.
-
-    Returns
-    -------
-    int | None
-        Byte size, or ``None`` when unavailable.
-    """
-
-    shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
-    dtype = getattr(value, "dtype", None)
-    size = getattr(dtype, "size", None)
-    if size is None:
-        return None
-    return _numel(shape) * int(size)
 
 
 def monotonic_time() -> float:

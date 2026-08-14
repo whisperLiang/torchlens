@@ -47,6 +47,10 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mirror_param_derived_grads,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import (
     TINYGRAD_EXTRA_KWARG_POLICY,
@@ -1307,7 +1311,7 @@ class TinygradBackend:
         finally:
             _restore_tinygrad_grads(snapshots)
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _derive_intermediate_grads_no_realize(
         self,
@@ -1386,35 +1390,6 @@ class TinygradBackend:
             },
         )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self, trace: Trace, records: Mapping[str, DerivedGradRecord]
-    ) -> None:
-        """Mirror unambiguous tinygrad param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing optional parameter metadata.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-            param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-            param.gradient_memory = _nbytes(record.grad) or 0
 
     def _validate_uops(self, trace: Trace) -> bool:
         """Validate saved tinygrad payloads against replayed UOps.
@@ -2532,26 +2507,6 @@ def _resolve_tinygrad_module_identity_mode(
     return module_tree is not None
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
 class _observe_tensor_ops:
     """Context manager observing tinygrad Tensor API UOp results."""
 
@@ -2967,29 +2922,6 @@ def _identity(tensor: Any) -> str:
         f"obj={id(tensor)};uop={id(uop)};lineage={lineage_hash};"
         f"buffer={id(base)};view={id(view)};mutation=0"
     )
-
-
-def _nbytes(tensor: Any) -> int | None:
-    """Return tinygrad tensor byte size when available.
-
-    Parameters
-    ----------
-    tensor
-        tinygrad Tensor.
-
-    Returns
-    -------
-    int | None
-        Estimated byte size.
-    """
-
-    try:
-        return int(tensor.nbytes())
-    except Exception:
-        try:
-            return int(tensor.numel() * tensor.dtype.itemsize)
-        except Exception:
-            return None
 
 
 def _payload_list(tensor: Any) -> Any:
@@ -3513,25 +3445,6 @@ def _is_scalar_tinygrad_value(value: Any) -> bool:
     """
 
     return tuple(getattr(value, "shape", ())) == ()
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in derived-gradient provenance.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:

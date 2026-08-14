@@ -685,3 +685,164 @@ def _update_param_totals_from_layers(trace: Trace) -> None:
         trace.num_layers_with_params = len(
             {op.layer_label for op in trace.layer_list if op.uses_params}
         )
+
+
+def numel_from_shape(shape: Any) -> int:
+    """Return the number of elements implied by ``shape``.
+
+    Parameters
+    ----------
+    shape:
+        Shape sequence; empty means scalar.
+
+    Returns
+    -------
+    int
+        Product of dimensions (``1`` for a scalar shape).
+    """
+
+    result = 1
+    for dim in shape:
+        result *= int(dim)
+    return result
+
+
+def value_nbytes(value: object) -> int | None:
+    """Return byte size for any preview-backend tensor-like value.
+
+    One neutral ladder covering every preview backend's native spelling:
+    ``nbytes`` attribute (jax/mlx) or method (tinygrad), ``size * itemsize``
+    (mlx fallback), ``numel() * element_size()`` (paddle),
+    ``numel() * dtype.itemsize`` (tinygrad fallback), and
+    ``shape x dtype.size`` (tf). Each rung is guarded, so a backend value
+    settles on exactly the rung its API supports.
+
+    Parameters
+    ----------
+    value:
+        Backend tensor/array-like value.
+
+    Returns
+    -------
+    int | None
+        Byte size when any rung resolves, else ``None``.
+    """
+
+    nbytes = getattr(value, "nbytes", None)
+    if nbytes is not None:
+        try:
+            return int(nbytes() if callable(nbytes) else nbytes)
+        except Exception:
+            pass
+    size = getattr(value, "size", None)
+    itemsize = getattr(value, "itemsize", None)
+    if size is not None and itemsize is not None and not callable(size):
+        try:
+            return int(size) * int(itemsize)
+        except (TypeError, ValueError):
+            pass
+    numel = getattr(value, "numel", None)
+    if callable(numel):
+        element_size = getattr(value, "element_size", None)
+        if callable(element_size):
+            try:
+                return int(numel()) * int(element_size())
+            except (AttributeError, TypeError, ValueError):
+                pass
+        dtype_itemsize = getattr(getattr(value, "dtype", None), "itemsize", None)
+        if dtype_itemsize is not None:
+            try:
+                return int(numel()) * int(dtype_itemsize)
+            except (TypeError, ValueError):
+                pass
+    dtype_size = getattr(getattr(value, "dtype", None), "size", None)
+    if dtype_size is not None:
+        try:
+            shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
+        except (TypeError, ValueError):
+            return None
+        return numel_from_shape(shape) * int(dtype_size)
+    return None
+
+
+def session_callable_identity(fn: Callable[..., Any] | None) -> str | None:
+    """Return a session-unique best-effort callable identity.
+
+    Includes ``id(fn)``, so the string distinguishes two callables with equal
+    qualified names within one process but is NOT stable across sessions.
+    Use :func:`stable_callable_name` for persisted provenance.
+
+    Parameters
+    ----------
+    fn:
+        Callable or ``None``.
+
+    Returns
+    -------
+    str | None
+        Identity string used in fingerprints and session provenance.
+    """
+
+    if fn is None:
+        return None
+    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
+
+
+def stable_callable_name(fn: Callable[..., Any] | None) -> str | None:
+    """Return a stable human-readable callable name.
+
+    No ``id()`` component: equal across sessions for importable callables,
+    which is what persisted provenance needs.
+
+    Parameters
+    ----------
+    fn:
+        Callable or ``None``.
+
+    Returns
+    -------
+    str | None
+        Qualified name, or ``repr`` when module/qualname are unavailable.
+    """
+
+    if fn is None:
+        return None
+    module = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if module and qualname:
+        return f"{module}.{qualname}"
+    return repr(fn)
+
+
+def mirror_param_derived_grads(trace: Trace, records: Any) -> None:
+    """Mirror unambiguous param derived gradients onto param records.
+
+    The ONE five-backend implementation (R17-3): every backend records the
+    full superset metadata -- payload, record path, ``has_grad``,
+    ``grad_shape``, ``grad_dtype``, and ``gradient_memory``. (mlx/paddle/tf
+    historically stopped at ``grad_shape``; that drift is exactly why this
+    body is hoisted.)
+
+    Parameters
+    ----------
+    trace:
+        Trace containing backend-derived params.
+    records:
+        Derived gradient records keyed by leaf path (``params.<address>``).
+
+    Returns
+    -------
+    None
+        Matching ``trace.params`` entries receive the same gradient payload.
+    """
+
+    for address, param in trace.params.items():
+        record = records.get(f"params.{address}")
+        if record is None:
+            continue
+        param._derived_grad_payload = record.grad
+        param._derived_grad_record_path = record.path
+        param.has_grad = True
+        param.grad_shape = tuple(getattr(record.grad, "shape", ()))
+        param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
+        param.gradient_memory = value_nbytes(record.grad) or 0

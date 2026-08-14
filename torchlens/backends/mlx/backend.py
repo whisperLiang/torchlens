@@ -54,6 +54,10 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    mirror_param_derived_grads,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
 )
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
@@ -1471,7 +1475,7 @@ class MLXBackend:
                 if callable(update):
                     update(original_params)
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _records_for_intermediate_mlx_grads(
         self,
@@ -1573,35 +1577,6 @@ class MLXBackend:
                 },
             )
         return IntermediateDerivedGradAccessor(records)
-
-    def _mirror_param_derived_grads(
-        self,
-        trace: Trace,
-        records: Mapping[str, DerivedGradRecord],
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing MLX module-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
         """Capture then validate an MLX forward pass.
@@ -2765,50 +2740,6 @@ def _join_module_address(parent: str, child_name: str) -> str:
     return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return MLX array memory in bytes.
-
-    Parameters
-    ----------
-    value
-        MLX array-like value.
-
-    Returns
-    -------
-    int | None
-        Memory in bytes, if known.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    if nbytes is not None:
-        return int(nbytes)
-    size = getattr(value, "size", None)
-    itemsize = getattr(value, "itemsize", None)
-    if size is not None and itemsize is not None:
-        return int(size) * int(itemsize)
-    return None
-
-
 def _normalize_mlx_input_grad_argnums(
     input_grad_argnums: Sequence[int],
     num_args: int,
@@ -3369,25 +3300,6 @@ def _mlx_values_close(left: Any, right: Any) -> bool:
     ):
         return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in derived-gradient provenance.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 __all__ = ["GradOptions", "MLXBackend"]
