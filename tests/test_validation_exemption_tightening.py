@@ -636,3 +636,178 @@ def test_new_from_tensor_full_validation_still_passes() -> None:
     """Public-path regression: an honest new(tensor) model validates green."""
 
     assert _quiet_validate(_NewFromTensorModel(), [torch.tensor([9.0]), torch.tensor([1.0, 2.0])])
+
+
+# ---------------------------------------------------------------------------
+# R08-2 (b1-sol round-2, KNOWN b1:D2 re-filed): meshgrid/broadcast_tensors
+# outputs DO carry input values, but the whole-op perturbation skip (and the
+# posthoc structural_output_template blanket) exempted EVERY parent -- so a
+# dropped or misattributed value edge on these zipped multi-output ops was
+# never perturbation-proved. Per-output parent projection: output j must be
+# sensitive to input j; only cross-member siblings are structural.
+# ---------------------------------------------------------------------------
+
+
+class _MeshgridModel(nn.Module):
+    """Two-input meshgrid whose outputs feed a value-mixing sum."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return the summed meshgrid expansion of both inputs.
+
+        Parameters
+        ----------
+        a:
+            First 1-D input.
+        b:
+            Second 1-D input.
+
+        Returns
+        -------
+        torch.Tensor
+            Sum of both expanded grids.
+        """
+
+        grid_a, grid_b = torch.meshgrid(a, b, indexing="ij")
+        return grid_a.sum() + grid_b.sum()
+
+
+class _BroadcastModel(nn.Module):
+    """Two-input broadcast_tensors whose outputs feed a value-mixing sum."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return the summed broadcast expansion of both inputs.
+
+        Parameters
+        ----------
+        a:
+            First input.
+        b:
+            Second input (unsqueezed to force a real broadcast).
+
+        Returns
+        -------
+        torch.Tensor
+            Sum of both broadcast tensors.
+        """
+
+        expanded_a, expanded_b = torch.broadcast_tensors(a, b.unsqueeze(1))
+        return expanded_a.sum() + expanded_b.sum()
+
+
+def _zipped_op_for_index(trace: Any, func_names: tuple[str, ...], index: int) -> Any:
+    """Return the zipped multi-output op with ``multi_output_index == index``."""
+
+    return next(
+        op
+        for op in trace.layer_list
+        if op.func_name in func_names and op.multi_output_index == index
+    )
+
+
+def test_meshgrid_own_value_edge_is_perturbation_tested() -> None:
+    """Output j must be perturbation-SENSITIVE to its own input j.
+
+    Red-capable: pre-narrowing the whole-op skip / posthoc blanket recorded
+    this edge 'exempted' without ever proving the value dependency.
+    """
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    for index in (0, 1):
+        op = _zipped_op_for_index(trace, ("meshgrid",), index)
+        own_parent = op.parent_arg_positions["args"][(0, index)]
+        result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[own_parent]
+        )
+        assert result.decision == "validated", (index, result.decision, result.reason)
+
+
+def test_meshgrid_dead_own_edge_now_fails_perturbation() -> None:
+    """A provably dead own-value edge must FAIL, never launder structural.
+
+    Red-capable: freezing the op's replay (the dropped-dependency simulation
+    used across this file) was blessed 'structural_output_template' by the
+    posthoc blanket pre-narrowing.
+    """
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    op = _zipped_op_for_index(trace, ("meshgrid",), 0)
+    own_parent = op.parent_arg_positions["args"][(0, 0)]
+    _freeze_op_replay(op)
+    _assert_edge_now_fails(trace, op, own_parent)
+
+
+def test_meshgrid_cross_member_perturbation_stays_exempt() -> None:
+    """Cross-member zipped siblings remain provably structural (no false-fail)."""
+
+    trace = _capture(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    op = _zipped_op_for_index(trace, ("meshgrid",), 0)
+    sibling_parent = op.parent_arg_positions["args"][(0, 1)]
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, op.label, perturb=True, layers_to_perturb=[sibling_parent]
+    )
+    assert result.decision == "exempted", (result.decision, result.reason)
+
+
+def test_broadcast_tensors_own_value_edge_is_perturbation_tested() -> None:
+    """The canonical 'broadcasttensors' spelling gets the same projection.
+
+    Doubly red-capable: besides the whole-op-skip class, the old registry
+    row was keyed 'broadcast_tensors' while capture canonicalizes to
+    'broadcasttensors' -- a silently dead row.
+    """
+
+    trace = _capture(_BroadcastModel(), [torch.randn(3), torch.randn(4)])
+    for index in (0, 1):
+        op = _zipped_op_for_index(trace, ("broadcasttensors", "broadcast_tensors"), index)
+        own_parent = op.parent_arg_positions["args"][(0, index)]
+        result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[own_parent]
+        )
+        assert result.decision == "validated", (index, result.decision, result.reason)
+        sibling_parent = op.parent_arg_positions["args"][(0, 1 - index)]
+        sibling_result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace, op.label, perturb=True, layers_to_perturb=[sibling_parent]
+        )
+        assert sibling_result.decision == "exempted", (
+            index,
+            sibling_result.decision,
+            sibling_result.reason,
+        )
+
+
+def test_zipped_models_full_validation_still_passes() -> None:
+    """Public-path regression: honest zipped-op models validate green."""
+
+    assert _quiet_validate(_MeshgridModel(), [torch.randn(3), torch.randn(4)])
+    assert _quiet_validate(_BroadcastModel(), [torch.randn(3), torch.randn(4)])
+
+
+def test_meshgrid_perturbation_decisions_are_real_not_whole_op_skipped() -> None:
+    """The BFS records REAL perturbation decisions for zipped ops.
+
+    Red-capable: pre-narrowing the whole-op registry skip recorded every
+    meshgrid parent edge as 'skip_perturbation_entirely:meshgrid' without
+    running the check.
+    """
+
+    from torchlens.validation import core as validation_core
+
+    model = _MeshgridModel()
+    inputs = [torch.randn(3), torch.randn(4)]
+    with torch.no_grad():
+        ground_truth = model(*inputs)
+    trace = _capture(model, inputs)
+    status = validation_core.validate_saved_outs(trace, [ground_truth])
+    assert bool(status)
+    meshgrid_perturbations = [
+        decision
+        for decision in status.decisions
+        if decision["func_name"] == "meshgrid" and decision["phase"] == "perturbation"
+    ]
+    assert meshgrid_perturbations, "no perturbation decisions recorded for meshgrid"
+    assert not any(
+        str(decision["reason"]).startswith("skip_perturbation_entirely")
+        for decision in meshgrid_perturbations
+    )
+    # At least one own-value edge is genuinely perturbation-VALIDATED.
+    assert any(decision["decision"] == "validated" for decision in meshgrid_perturbations)

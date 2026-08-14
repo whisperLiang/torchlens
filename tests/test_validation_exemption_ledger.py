@@ -618,15 +618,10 @@ SKIP_PERTURBATION_JUSTIFICATIONS: dict[str, str] = {
     "ones_like": "shape/dtype/device template only; the output value is constant one",
     "rand_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
     "randn_like": "values are RNG-drawn; the parent supplies shape/dtype/device only",
-    "meshgrid": (
-        "per-call parent fields are shared across the zipped outputs, so cross-member "
-        "value perturbation is legitimately insensitive; value edges stay guarded by "
-        "replay and the orphan/identity sweeps until per-output parent projection lands"
-    ),
-    "broadcast_tensors": (
-        "same shared-zipped-parent limitation as meshgrid; retained with the same "
-        "replay-side guard and the same pending narrowing"
-    ),
+    # meshgrid/broadcast_tensors left this ledger with the R08-2 NARROWING:
+    # they now live in CUSTOM_EXEMPTION_CHECKS (_check_zipped_sibling_exempt),
+    # so each output's OWN value edge is perturbation-tested again and only
+    # provable cross-member zipped-sibling perturbations stay exempt.
     # The six torchvision PyCapsule rows left this ledger with the b1p2 D2
     # adjudicated NARROWING: they now live in STRUCTURAL_ARG_POSITIONS keyed
     # on the coordinate/offset arg only, so feature/score value edges are
@@ -1191,7 +1186,50 @@ STRUCTURAL_POSITION_LEDGER: tuple[StructuralPositionExemption, ...] = (
 )
 
 #: Per-entry audit records for ``CUSTOM_EXEMPTION_CHECKS``.
+_ZIPPED_SIBLING_JUSTIFICATION = (
+    "meshgrid/broadcast_tensors zip N inputs to N outputs: output j carries exactly "
+    "input j's values, so a perturbed parent is exempt ONLY when every recorded "
+    "position places it at a zipped index other than this output's own "
+    "multi_output_index (fail-closed on missing index, unknown position shape, or an "
+    "unmapped parent). Replaces the former whole-op skip that also exempted each "
+    "output's OWN value edge (R08-2)"
+)
+
+_ZIPPED_SIBLING_REFUSES = (
+    "the output's own zipped input (index == multi_output_index), any parent whose "
+    "recorded position cannot be proven cross-member, and every call on a trace that "
+    "did not record multi_output_index"
+)
+
 CUSTOM_CHECK_LEDGER: tuple[CustomCheckExemption, ...] = (
+    CustomCheckExemption(
+        func_name="meshgrid",
+        check="_check_zipped_sibling_exempt",
+        contract=_C2,
+        proof_kind="value_irrelevance_proved",
+        justification=_ZIPPED_SIBLING_JUSTIFICATION,
+        refuses=_ZIPPED_SIBLING_REFUSES,
+    ),
+    CustomCheckExemption(
+        func_name="broadcast_tensors",
+        check="_check_zipped_sibling_exempt",
+        contract=_C2,
+        proof_kind="value_irrelevance_proved",
+        justification=_ZIPPED_SIBLING_JUSTIFICATION,
+        refuses=_ZIPPED_SIBLING_REFUSES,
+    ),
+    CustomCheckExemption(
+        func_name="broadcasttensors",
+        check="_check_zipped_sibling_exempt",
+        contract=_C2,
+        proof_kind="value_irrelevance_proved",
+        justification=(
+            _ZIPPED_SIBLING_JUSTIFICATION
+            + "; canonicalized capture spelling -- the old snake_case-keyed skip never "
+            "matched it (a silently dead registry row)"
+        ),
+        refuses=_ZIPPED_SIBLING_REFUSES,
+    ),
     CustomCheckExemption(
         func_name="__getitem__",
         check="_check_getitem_exempt",
