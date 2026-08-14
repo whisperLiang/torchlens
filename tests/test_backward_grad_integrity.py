@@ -180,3 +180,41 @@ def test_selective_save_grads_consults_predicate_for_params() -> None:
         for record in layer.grads
     ]
     assert all(not isinstance(p, torch.Tensor) for p in op_payloads)
+
+
+@pytest.mark.smoke
+def test_backward_finalize_drains_pending_cpu_async_copies() -> None:
+    """The backward finalize seam fences pending cpu_async D2H copies.
+
+    The R36-1 drain only ran at the FORWARD finalize seam, so a cpu_async
+    grad payload recorded during log_backward stayed on the pending-event
+    list and a host read could observe partial bytes from the unfinished
+    non_blocking copy. A planted fence object stands in for an in-flight
+    CUDA copy event (CPU-only hosts record no real events).
+    """
+
+    from torchlens.utils import tensor_utils
+
+    class _FenceSpy:
+        """Pending-copy stand-in recording whether it was synchronized."""
+
+        def __init__(self) -> None:
+            self.synchronized = False
+
+        def synchronize(self) -> None:
+            """Mark the pending copy as fenced."""
+
+            self.synchronized = True
+
+    trace = _armed_trace(save_mode="cpu_async")
+    fence = _FenceSpy()
+    tensor_utils._CPU_ASYNC_PENDING_EVENTS.append(fence)
+    try:
+        trace.log_backward(_loss(trace))
+        assert fence.synchronized, (
+            "log_backward finished without draining pending cpu_async copy fences"
+        )
+        assert fence not in tensor_utils._CPU_ASYNC_PENDING_EVENTS
+    finally:
+        if fence in tensor_utils._CPU_ASYNC_PENDING_EVENTS:
+            tensor_utils._CPU_ASYNC_PENDING_EVENTS.remove(fence)

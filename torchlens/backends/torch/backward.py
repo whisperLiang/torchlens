@@ -47,6 +47,7 @@ from ...utils._torch_compat import (
 )
 from ...utils._torch_symbols import torch_attr
 from ...utils.introspection import _get_code_qualname, _get_col_offset
+from ...utils.tensor_utils import synchronize_pending_cpu_async_copies
 from ._tl import detached_saved_activation_label, get_tensor_label
 from .escape_detection import expected_original_call
 from .tensor_tracking import (
@@ -384,6 +385,10 @@ def _close_implicit_backward_pass_if_open(trace: Any) -> None:
     trace.__dict__.pop("_active_backward_pass_index", None)
     _clear_pending_accumulate_grad_records(trace)
     trace._implicit_backward_pass_open = False
+    # Fence in-flight cpu_async D2H grad copies before projections make the
+    # payloads reachable: the forward finalize seam already ran, so backward
+    # is the only remaining producer of pending non_blocking copies.
+    synchronize_pending_cpu_async_copies()
     _materialize_backward_projections(trace)
 
 
@@ -3023,6 +3028,8 @@ def _run_backward_with_capture(
         with contextlib.suppress(BaseException):
             disarm_triggers(trace)
         with contextlib.suppress(BaseException):
+            synchronize_pending_cpu_async_copies()
+        with contextlib.suppress(BaseException):
             _materialize_backward_projections(trace)
         raise
     backend, before = _peak_memory_baseline(loss.device)
@@ -3094,6 +3101,12 @@ def _run_backward_with_capture(
         trace.total_param_gradient_memory = Bytes(
             sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
         )
+        # Fence in-flight cpu_async D2H grad copies before projections make
+        # the payloads reachable (R36-1 for the backward seam): the forward
+        # finalize drain already ran at capture time, so without this drain a
+        # host read of a backward-retained cpu_async payload could observe
+        # partial bytes from an unfinished non_blocking copy.
+        synchronize_pending_cpu_async_copies()
         _materialize_backward_projections(trace)
         if status == "ok":
             _warn_zero_match_backward_interventions(trace)
