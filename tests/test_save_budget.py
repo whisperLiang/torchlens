@@ -20,6 +20,7 @@ Two properties matter as much as the refusal itself and are tested explicitly:
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._save_budget import (
+    ACCOUNTING_PHASES,
     DEFAULT_SAVE_BUDGET_FRACTION,
     SaveBudget,
     SaveBudgetExceededError,
@@ -129,9 +131,10 @@ def test_unmeasurable_device_is_unbudgeted_not_assumed_infinite() -> None:
     budget = SaveBudget.from_option("auto")
     assert budget is not None
     with pytest.warns(UserWarning, match="cannot measure.*mps"):
-        budget.charge("op", torch.device("mps"), 1)
-    assert budget.unbudgeted_devices() == ("mps",)
-    assert budget.tripped is False
+        budget.admit("op", torch.device("mps"), 1)
+    ledger = budget.ledgers["mps"]
+    assert ledger.measured is False
+    assert ledger.limit_bytes is None
 
 
 def test_host_headroom_is_measurable_on_this_platform() -> None:
@@ -368,19 +371,18 @@ def test_typed_error_is_reachable_from_public_errors_namespace() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_accountant_charges_cumulatively_and_trips_once_over() -> None:
-    """The ledger accumulates across ops and trips on the crossing charge."""
+def test_accountant_admits_cumulatively_and_trips_on_the_crossing_admission() -> None:
+    """The ledger accumulates across ops and trips on the crossing admission."""
 
     budget = SaveBudget.from_option(100)
     assert budget is not None
     cpu = torch.device("cpu")
-    budget.charge("a", cpu, 40)
-    budget.charge("b", cpu, 40)
-    assert budget.tripped is False
+    budget.admit("a", cpu, 40)
+    budget.admit("b", cpu, 40)
     with pytest.raises(SaveBudgetExceededError) as excinfo:
-        budget.charge("c", cpu, 40)
-    assert excinfo.value.fields["committed_bytes"] == 120
-    assert excinfo.value.fields["projected_bytes"] is None
+        budget.admit("c", cpu, 40)
+    assert excinfo.value.fields["projected_bytes"] == 120
+    assert excinfo.value.fields["committed_bytes"] is None
     assert excinfo.value.fields["num_saved"] == 3
     assert excinfo.value.fields["label"] == "c"
 
@@ -390,8 +392,8 @@ def test_exactly_at_the_budget_is_allowed() -> None:
 
     budget = SaveBudget.from_option(100)
     assert budget is not None
-    budget.charge("a", torch.device("cpu"), 100)
-    assert budget.tripped is False
+    budget.admit("a", torch.device("cpu"), 100)
+    assert budget.ledgers["cpu"].committed_bytes == 100
 
 
 def test_budgets_are_tracked_per_device() -> None:
@@ -401,11 +403,10 @@ def test_budgets_are_tracked_per_device() -> None:
     assert budget is not None
     # 80 bytes on each of two devices: 160 total, but neither device crosses its
     # own 100-byte ceiling, so nothing trips. A single shared ledger would.
-    budget.charge("a", torch.device("cpu"), 80)
-    budget.charge("b", torch.device("meta"), 80)
+    budget.admit("a", torch.device("cpu"), 80)
+    budget.admit("b", torch.device("meta"), 80)
     assert budget.ledgers["cpu"].committed_bytes == 80
     assert budget.ledgers["meta"].committed_bytes == 80
-    assert budget.tripped is False
 
 
 def test_zero_byte_payloads_are_not_counted() -> None:
@@ -413,8 +414,192 @@ def test_zero_byte_payloads_are_not_counted() -> None:
 
     budget = SaveBudget.from_option(1)
     assert budget is not None
-    budget.charge("a", torch.device("cpu"), 0)
+    assert budget.admit("a", torch.device("cpu"), 0) is None
     assert budget.ledgers == {}
+
+
+def test_accounting_phases_are_a_closed_vocabulary() -> None:
+    """Refusal phases come from the exported vocabulary; sites fail closed."""
+
+    assert ACCOUNTING_PHASES == (
+        "pre_allocation_admission",
+        "post_transform_reconciliation",
+        "lookback_window_admission",
+        "lookback_window_reconciliation",
+    )
+    budget = SaveBudget.from_option(100)
+    assert budget is not None
+    with pytest.raises(ValueError, match="admission site"):
+        budget.admit("a", torch.device("cpu"), 40, site="not_a_site")
+
+
+# ---------------------------------------------------------------------------
+# Lookback / followed_by window copies are budgeted retained bytes
+# ---------------------------------------------------------------------------
+
+
+def test_lookback_window_copies_are_budgeted() -> None:
+    """A tiny budget must trip on the first window copy, not retain silently.
+
+    Before the fix, ``followed_by`` retention bypassed the accountant entirely:
+    ``save_budget=1`` retained every window copy and promotion without a trip.
+    """
+
+    model = _model()
+    x = _input()
+    with pytest.raises(SaveBudgetExceededError) as excinfo:
+        tl.trace(
+            model,
+            x,
+            save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+            lookback=4,
+            lookback_payload_policy="detached_raw",
+            capture=CaptureOptions(save_budget=1),
+        )
+    assert excinfo.value.fields["accounting_phase"] == "lookback_window_admission"
+    assert excinfo.value.fields["projected_bytes"] == excinfo.value.fields["accounted_bytes"]
+    # The remedy list names the knob that actually caused the retention.
+    assert "lookback" in str(excinfo.value)
+
+
+def test_lookback_promotions_stay_charged_after_capture() -> None:
+    """Promoted and still-windowed payloads are live retained bytes at the end."""
+
+    trace = tl.trace(
+        _model(),
+        _input(),
+        save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+        lookback=4,
+        lookback_payload_policy="detached_raw",
+        capture=CaptureOptions(save_budget=10_000_000),
+    )
+    ledger = trace._save_budget_accountant.ledgers["cpu"]
+    # linear_1 is promoted (2 KB) and linear_2's candidate is still in the
+    # bounded window (2 KB): both are genuinely retained, so both stay charged.
+    assert trace.num_saved_ops == 1
+    assert int(trace.saved_activation_memory) == 2048
+    assert ledger.committed_bytes == 4096
+
+
+def test_lookback_window_eviction_credits_the_charge_back() -> None:
+    """An evicted window copy is released storage and must be credited."""
+
+    model = nn.Sequential(nn.Linear(64, 64), nn.Linear(64, 64), nn.ReLU())
+    trace = tl.trace(
+        model,
+        _input(),
+        save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+        lookback=1,
+        lookback_payload_policy="detached_raw",
+        capture=CaptureOptions(save_budget=10_000_000),
+    )
+    ledger = trace._save_budget_accountant.ledgers["cpu"]
+    # linear_1's window copy (2 KB) was charged, then evicted by linear_2's and
+    # credited back. The one live storage is linear_2's promoted payload, which
+    # the still-windowed candidate aliases (charged once). Without eviction
+    # crediting this would read 4096.
+    assert ledger.committed_bytes == 2048
+    assert ledger.num_saved == 1
+
+
+# ---------------------------------------------------------------------------
+# Storage identity survives pointer reuse: release credits, prune, recharge
+# ---------------------------------------------------------------------------
+
+
+def test_released_payload_is_credited_and_its_identity_pruned() -> None:
+    """Releasing the last retained payload refunds its charge and prunes the key.
+
+    Without pruning, a later allocation recycling the same ``data_ptr`` at the
+    same size would deduplicate against the dead key and commit ZERO bytes.
+    """
+
+    budget = SaveBudget.from_option(1000)
+    assert budget is not None
+    payload = torch.randn(100)  # 400 bytes
+    budget.commit(budget.admit("a", torch.device("cpu"), 400), (payload,))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 400
+    assert len(ledger.retained_storage) == 1
+    assert ledger.num_saved == 1
+
+    del payload
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+    assert ledger.num_saved == 0
+
+
+def test_recycled_storage_pointer_recharges_instead_of_committing_zero() -> None:
+    """A freed-then-recycled pointer is a new storage and must be charged."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    cpu = torch.device("cpu")
+    first = torch.randn(64)  # 256 bytes; small blocks are readily recycled
+    budget.commit(budget.admit("a", cpu, 256), (first,))
+    assert budget.ledgers["cpu"].committed_bytes == 256
+
+    del first
+    gc.collect()
+    second = torch.randn(64)
+    budget.commit(budget.admit("b", cpu, 256), (second,))
+    # Whether or not the allocator recycled the exact pointer, the live retained
+    # footprint is one 256-byte storage, never zero.
+    assert budget.ledgers["cpu"].committed_bytes == 256
+    assert budget.ledgers["cpu"].num_saved == 1
+
+
+def test_shared_storage_credit_waits_for_the_last_live_alias() -> None:
+    """Aliases charge once and the refund waits until every alias is released."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    cpu = torch.device("cpu")
+    base = torch.randn(64)
+    view = base[:32]
+    budget.commit(budget.admit("a", cpu, 256), (base,))
+    budget.commit(budget.admit("b", cpu, 128), (view,))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 256, "one physical storage, charged once"
+
+    del base
+    gc.collect()
+    assert ledger.committed_bytes == 256, "the view still pins the whole storage"
+
+    del view
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+
+
+def test_identity_transform_double_reference_credits_once() -> None:
+    """The same payload committed in both slots refunds exactly once at death."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    payload = torch.randn(8)  # 32 bytes
+    budget.commit(budget.admit("a", torch.device("cpu"), 32), (payload, payload))
+    ledger = budget.ledgers["cpu"]
+    assert ledger.committed_bytes == 32
+
+    del payload
+    gc.collect()
+    assert ledger.committed_bytes == 0
+    assert ledger.retained_storage == {}
+
+
+def test_dead_accountant_does_not_break_payload_release() -> None:
+    """Payloads may outlive the budget; their release callbacks must be inert."""
+
+    budget = SaveBudget.from_option(10_000)
+    assert budget is not None
+    payload = torch.randn(8)
+    budget.commit(budget.admit("a", torch.device("cpu"), 32), (payload,))
+    del budget
+    gc.collect()
+    del payload  # must not raise from a stale watcher
+    gc.collect()
 
 
 # ---------------------------------------------------------------------------

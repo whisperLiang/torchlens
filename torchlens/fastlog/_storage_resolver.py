@@ -173,18 +173,16 @@ def _resolve_storage(
         if intent.in_ram:
             if raw_ram is None:
                 raise RuntimeError("RAM mirror payload missing for disk-backed fastlog capture")
+            # The mirror consumers write their blobs synchronously before the
+            # forward advances, so the disk slot can alias the retained RAM
+            # payload instead of cloning it: the writer reads the same bytes a
+            # copy taken here would hold. A detached view keeps the disk mirror's
+            # documented detached-inspection contract (and the manifest's
+            # requires_grad=False) without a data copy.
             if keep_raw:
-                disk_payload = safe_copy(
-                    raw_ram,
-                    detach_tensor=True,
-                    save_mode=_save_mode_for_payload(spec, target="disk"),
-                )
+                disk_payload = _detached_write_alias(raw_ram)
             if transformed_ram is not None:
-                transformed_disk = safe_copy(
-                    transformed_ram,
-                    detach_tensor=True,
-                    save_mode=_save_mode_for_payload(spec, target="disk"),
-                )
+                transformed_disk = _detached_write_alias(transformed_ram)
         else:
             raw_disk = safe_copy(
                 tensor,
@@ -204,6 +202,27 @@ def _resolve_storage(
             if keep_raw:
                 disk_payload = raw_disk
     return ram_payload, disk_payload, transformed_ram, transformed_disk
+
+
+def _detached_write_alias(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a zero-copy detached handle on a RAM payload for a synchronous write.
+
+    Parameters
+    ----------
+    tensor:
+        Retained RAM payload whose bytes the blob writer will read immediately.
+
+    Returns
+    -------
+    torch.Tensor
+        The payload itself when already detached, else a detached view sharing
+        its storage (``save_mode="reference"`` through the sanctioned copy
+        primitive; only :func:`safe_copy` may detach on fastlog paths).
+    """
+
+    if not tensor.requires_grad:
+        return tensor
+    return safe_copy(tensor, detach_tensor=True, save_mode="reference")
 
 
 def _invoke_transform(

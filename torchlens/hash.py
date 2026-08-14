@@ -84,9 +84,12 @@ def _update_content_digest(digest: Any, value: Any) -> None:
         # ``input_hash`` for scalar inputs (an attestation gap). ``reshape(-1)`` on
         # a contiguous tensor is a contiguous view and is byte-identical to the
         # prior expression for every >=1-D tensor, so pinned hashes are unchanged.
-        raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-        digest.update(len(raw).to_bytes(8, "big"))
-        digest.update(raw)
+        # ``.numpy()`` shares the tensor's memory; hashing through the buffer
+        # protocol avoids materializing a whole-payload ``bytes`` copy. The
+        # digest bytes are identical to the prior ``.tobytes()`` spelling.
+        byte_view = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        digest.update(byte_view.nbytes.to_bytes(8, "big"))
+        digest.update(byte_view.data)
         return
     if isinstance(value, Mapping):
         digest.update(b"mapping\0")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, get_args
 
 from .._deprecations import MISSING, MissingType
 from .._errors import InvalidArgumentError
@@ -28,6 +28,14 @@ LookbackPayloadPolicy = Literal[
     "grad_connected",
     "disk_spilled",
 ]
+
+LOOKBACK_PAYLOAD_POLICIES: Final[tuple[str, ...]] = get_args(LookbackPayloadPolicy)
+"""Runtime authority for the lookback payload policy vocabulary.
+
+Derived from the canonical :data:`LookbackPayloadPolicy` literal so validation
+and the literal can never drift apart; consumers import this tuple rather than
+re-spelling the policy strings.
+"""
 
 _RECORDING_FIELDS: Final[tuple[str, ...]] = (
     "keep_op",
@@ -241,16 +249,11 @@ def _validate_recording_values(values: Mapping[str, Any]) -> None:
             remedy="pass an integer lookback between 0 and 1024",
             argument="lookback",
         )
-    if lookback_payload_policy not in {
-        "metadata_only",
-        "detached_raw",
-        "transformed",
-        "grad_connected",
-        "disk_spilled",
-    }:
+    if lookback_payload_policy not in LOOKBACK_PAYLOAD_POLICIES:
+        allowed = ", ".join(repr(policy) for policy in LOOKBACK_PAYLOAD_POLICIES[:-1])
         raise InvalidArgumentError(
-            "lookback_payload_policy must be one of 'metadata_only', 'detached_raw', "
-            f"'transformed', 'grad_connected', or 'disk_spilled'; "
+            f"lookback_payload_policy must be one of {allowed}, "
+            f"or {LOOKBACK_PAYLOAD_POLICIES[-1]!r}; "
             f"received {lookback_payload_policy!r}",
             code="lookback_payload_policy_invalid",
             remedy="choose a documented lookback payload policy",

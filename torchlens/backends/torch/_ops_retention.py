@@ -78,6 +78,7 @@ def _admit_save_budget(
     *,
     target_device: torch.device,
     retain_in_ram: bool,
+    site: str = "primary",
 ) -> Any:
     """Pre-admit a source-sized retained payload before any copy allocation.
 
@@ -93,6 +94,9 @@ def _admit_save_budget(
         Projected device of the retained payload.
     retain_in_ram:
         Whether this storage route keeps a RAM payload.
+    site:
+        Accountant admission site: ``"primary"`` for the per-op retained copy,
+        ``"lookback_window"`` for a bounded retroactive-save window copy.
 
     Returns
     -------
@@ -106,7 +110,7 @@ def _admit_save_budget(
     label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
     shape = tuple(tensor.shape)
     num_bytes = get_memory_amount_from_metadata(tensor, shape, tensor.dtype)
-    return budget.admit(str(label), target_device, int(num_bytes))
+    return budget.admit(str(label), target_device, int(num_bytes), site=site)
 
 
 def _commit_save_budget(
@@ -378,7 +382,14 @@ def _copy_lookback_payload(
     tensor: torch.Tensor,
     policy: str,
 ) -> _RetainedLookbackPayload:
-    """Copy a candidate tensor according to the lookback payload policy."""
+    """Copy a candidate tensor according to the lookback payload policy.
+
+    Window copies are retained RAM bytes like any other saved activation, so
+    they are admitted against the save budget before the copy allocates and
+    reconciled after; window eviction and end-of-capture cleanup release the
+    payloads, which credits the charge back through the accountant's release
+    watchers. Promoted candidates stay retained and therefore stay charged.
+    """
 
     detach = policy != "grad_connected"
     if policy == "disk_spilled":
@@ -388,6 +399,14 @@ def _copy_lookback_payload(
             RuntimeWarning,
             stacklevel=3,
         )
+    budget_reservation = _admit_save_budget(
+        trace,
+        tensor,
+        fields_dict,
+        target_device=_retention_device(tensor, fields_dict["output_device"]),
+        retain_in_ram=True,
+        site="lookback_window",
+    )
     raw_out = safe_copy(tensor, detach)
     if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
         raw_out = safe_to(raw_out, fields_dict["output_device"])
@@ -414,6 +433,11 @@ def _copy_lookback_payload(
     store_raw = policy != "transformed" or getattr(trace, "save_raw_activations", True)
     raw_shape = tuple(raw_out.shape)
     raw_dtype = raw_out.dtype
+    _commit_save_budget(
+        trace,
+        {"out": raw_out if store_raw else None, "transformed_out": transformed_out},
+        budget_reservation,
+    )
     return _RetainedLookbackPayload(
         raw_out=raw_out if store_raw else None,
         transformed_out=transformed_out,

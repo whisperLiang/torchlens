@@ -985,7 +985,9 @@ def numpy_to_transport_tensor(array: np.ndarray) -> torch.Tensor:
     """Convert an encoded NumPy array to the CPU torch transport tensor."""
 
     _raise_for_unsupported_array_dtype(array, backend_name="transport")
-    return torch.from_numpy(np.array(array, copy=True, order="C")).contiguous()
+    # np.array(copy=True, order="C") already yields a C-contiguous buffer, so
+    # from_numpy's zero-copy wrap is contiguous by construction.
+    return torch.from_numpy(np.array(array, copy=True, order="C"))
 
 
 def materialize_transport_tensor(

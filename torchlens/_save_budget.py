@@ -23,12 +23,18 @@ Budgets are per-device because saved payloads follow the tensors they copy
 capture spends host RAM. Devices whose headroom cannot be measured warn on their
 first non-empty automatic charge and remain unbudgeted unless the user supplies
 an absolute limit.
+
+Lookback / ``followed_by`` window copies are retained RAM like any other saved
+activation and are charged through the same admit/reconcile pair (site
+``"lookback_window"``); releasing a retained payload — window eviction, cleanup,
+or any other drop of the last live reference — credits its storage back.
 """
 
 from __future__ import annotations
 
 import os
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +43,7 @@ import torch
 from .errors._base import CaptureError
 
 __all__ = [
+    "ACCOUNTING_PHASES",
     "DEFAULT_SAVE_BUDGET_FRACTION",
     "SaveBudget",
     "SaveBudgetExceededError",
@@ -243,6 +250,14 @@ def resolve_save_budget(value: SaveBudgetOption) -> _BudgetSpec | None:
 
 
 @dataclass
+class _RetainedStorageEntry:
+    """One charged physical storage and the count of live retained payloads on it."""
+
+    physical_bytes: int
+    live_refs: int = 0
+
+
+@dataclass
 class _DeviceLedger:
     """Per-device running total and resolved limit."""
 
@@ -251,7 +266,27 @@ class _DeviceLedger:
     limit_bytes: int | None = None
     available_bytes: int | None = None
     measured: bool = False
-    retained_storage_keys: set[tuple[Any, ...]] = field(default_factory=set)
+    retained_storage: dict[tuple[Any, ...], _RetainedStorageEntry] = field(default_factory=dict)
+
+
+_ADMISSION_SITES = ("primary", "lookback_window")
+"""Closed vocabulary of admission sites; each maps to one admission/reconciliation phase pair."""
+
+_SITE_PHASES = {
+    "primary": ("pre_allocation_admission", "post_transform_reconciliation"),
+    "lookback_window": ("lookback_window_admission", "lookback_window_reconciliation"),
+}
+
+_ADMISSION_PHASES = frozenset(phases[0] for phases in _SITE_PHASES.values())
+
+ACCOUNTING_PHASES: tuple[str, ...] = tuple(
+    phase for phases in _SITE_PHASES.values() for phase in phases
+)
+"""Closed vocabulary of ``accounting_phase`` values on ``SaveBudgetExceededError``.
+
+Every refusal's ``fields["accounting_phase"]`` is one of these; callers branch on
+this vocabulary, never on message text.
+"""
 
 
 @dataclass(frozen=True)
@@ -261,6 +296,7 @@ class _BudgetReservation:
     label: str
     device: torch.device
     num_bytes: int
+    site: str = "primary"
 
 
 @dataclass
@@ -274,15 +310,19 @@ class SaveBudget:
 
     Notes
     -----
-    ``charge`` is on the capture hot path, once per retained payload. It is one
-    dict lookup, one integer add, and one compare in the common case; device
-    headroom is measured lazily on a device's first charge, so a capture that
-    retains nothing pays nothing.
+    ``admit`` and ``commit`` are on the capture hot path, once per retained
+    payload. Each is a few dict lookups, integer adds, and one compare in the
+    common case; device headroom is measured lazily on a device's first charge,
+    so a capture that retains nothing pays nothing.
     """
 
     spec: _BudgetSpec
     ledgers: dict[str, _DeviceLedger] = field(default_factory=dict)
-    tripped: bool = False
+    # Keyed by id(watcher): weakref containers hash/compare through the live
+    # referent, and tensor ``==`` is elementwise (and wrapped during capture).
+    _payload_watchers: dict[int, weakref.ref] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def from_option(cls, value: SaveBudgetOption) -> SaveBudget | None:
@@ -349,6 +389,8 @@ class SaveBudget:
         label: str,
         device: torch.device,
         num_bytes: int,
+        *,
+        site: str = "primary",
     ) -> _BudgetReservation | None:
         """Reserve a projected retained payload before its allocation.
 
@@ -360,6 +402,10 @@ class SaveBudget:
             Projected retention device.
         num_bytes:
             Source-tensor bytes used as the pre-allocation estimate.
+        site:
+            Admission site from the closed vocabulary: ``"primary"`` for the
+            per-op retained copy, ``"lookback_window"`` for a bounded
+            retroactive-save window copy.
 
         Returns
         -------
@@ -372,13 +418,19 @@ class SaveBudget:
             If the projected footprint crosses the configured ceiling.
         """
 
+        if site not in _SITE_PHASES:
+            raise ValueError(
+                f"save-budget admission site must be one of {_ADMISSION_SITES}; got {site!r}"
+            )
         if num_bytes <= 0:
             return None
         ledger = self._ledger_for(device)
         ledger.committed_bytes += int(num_bytes)
         ledger.num_saved += 1
-        self._raise_if_over_budget(label, device, ledger, phase="pre_allocation_admission")
-        return _BudgetReservation(label=label, device=device, num_bytes=int(num_bytes))
+        self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
+        return _BudgetReservation(
+            label=label, device=device, num_bytes=int(num_bytes), site=site
+        )
 
     def commit(
         self,
@@ -400,6 +452,11 @@ class SaveBudget:
         before user code runs. The source-sized reservation protects the first retained
         allocation; reconciliation then charges any additional transform storage. That
         transform-only delta is necessarily post-allocation and is disclosed publicly.
+
+        Each committed payload is watched with a weakref: when the last retained
+        payload on a physical storage is released, the charge is credited back and the
+        storage-identity key is pruned, so a later allocation that recycles the same
+        ``data_ptr`` at the same size is charged rather than deduplicated to zero.
         """
 
         if reservation is None:
@@ -412,44 +469,88 @@ class SaveBudget:
             if not isinstance(payload, torch.Tensor):
                 continue
             identity, physical_bytes = _retained_storage_identity(payload)
+            ledger_key = str(payload.device)
             ledger = self._ledger_for(payload.device)
-            if identity in ledger.retained_storage_keys:
+            entry = ledger.retained_storage.get(identity)
+            if entry is not None:
+                entry.live_refs += 1
+                self._watch_payload(payload, ledger_key, identity)
                 continue
-            ledger.retained_storage_keys.add(identity)
+            ledger.retained_storage[identity] = _RetainedStorageEntry(
+                physical_bytes=physical_bytes, live_refs=1
+            )
+            self._watch_payload(payload, ledger_key, identity)
             ledger.committed_bytes += physical_bytes
             ledger.num_saved += 1
             self._raise_if_over_budget(
                 reservation.label,
                 payload.device,
                 ledger,
-                phase="post_transform_reconciliation",
+                phase=_SITE_PHASES[reservation.site][1],
             )
 
-    def charge(self, label: str, device: torch.device, num_bytes: int) -> None:
-        """Charge retained payload bytes and refuse when the budget is crossed.
+    def _watch_payload(
+        self,
+        payload: torch.Tensor,
+        ledger_key: str,
+        identity: tuple[Any, ...],
+    ) -> None:
+        """Arm a release watcher that credits this payload's storage when it dies.
 
         Parameters
         ----------
-        label:
-            Layer label of the operation whose payload is being retained, used to
-            name the tripping site.
-        device:
-            Device the payload is retained on.
-        num_bytes:
-            Payload size in bytes.
+        payload:
+            Retained tensor payload just committed against ``identity``.
+        ledger_key:
+            Ledger key of the device the payload was charged on.
+        identity:
+            Storage identity the payload holds a live reference on.
 
-        Raises
-        ------
-        SaveBudgetExceededError
-            When this device's committed total crosses its budget.
+        Notes
+        -----
+        The watcher holds the budget weakly so the accountant never keeps itself
+        alive through its own callbacks. A payload that cannot be weak-referenced
+        keeps the historical permanent charge (conservative: never a zero-commit).
         """
 
-        if num_bytes <= 0:
+        budget_ref = weakref.ref(self)
+
+        def _on_release(ref: weakref.ref) -> None:
+            budget = budget_ref()
+            if budget is None:
+                return
+            budget._payload_watchers.pop(id(ref), None)
+            budget._credit_release(ledger_key, identity)
+
+        try:
+            watcher = weakref.ref(payload, _on_release)
+        except TypeError:
             return
-        ledger = self._ledger_for(device)
-        ledger.committed_bytes += int(num_bytes)
-        ledger.num_saved += 1
-        self._raise_if_over_budget(label, device, ledger, phase="running_charge")
+        self._payload_watchers[id(watcher)] = watcher
+
+    def _credit_release(self, ledger_key: str, identity: tuple[Any, ...]) -> None:
+        """Credit one payload release; prune and refund on the last release.
+
+        Parameters
+        ----------
+        ledger_key:
+            Ledger key of the device the storage was charged on.
+        identity:
+            Storage identity whose live reference count drops by one.
+        """
+
+        ledger = self.ledgers.get(ledger_key)
+        if ledger is None:
+            return
+        entry = ledger.retained_storage.get(identity)
+        if entry is None:
+            return
+        entry.live_refs -= 1
+        if entry.live_refs > 0:
+            return
+        del ledger.retained_storage[identity]
+        ledger.committed_bytes -= entry.physical_bytes
+        ledger.num_saved -= 1
 
     def _raise_if_over_budget(
         self,
@@ -476,15 +577,14 @@ class SaveBudget:
         limit = ledger.limit_bytes
         if limit is None or ledger.committed_bytes <= limit:
             return
-        self.tripped = True
         raise SaveBudgetExceededError(
             self._message(label, device, ledger, phase=phase),
             accounted_bytes=ledger.committed_bytes,
             committed_bytes=(
-                None if phase == "pre_allocation_admission" else ledger.committed_bytes
+                None if phase in _ADMISSION_PHASES else ledger.committed_bytes
             ),
             projected_bytes=(
-                ledger.committed_bytes if phase == "pre_allocation_admission" else None
+                ledger.committed_bytes if phase in _ADMISSION_PHASES else None
             ),
             budget_bytes=limit,
             available_bytes=ledger.available_bytes,
@@ -493,18 +593,6 @@ class SaveBudget:
             label=label,
             accounting_phase=phase,
         )
-
-    def unbudgeted_devices(self) -> tuple[str, ...]:
-        """Return devices that were charged but could not be budgeted.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Device strings whose headroom could not be measured, so no budget was
-            enforced for them.
-        """
-
-        return tuple(key for key, ledger in self.ledgers.items() if not ledger.measured)
 
     def _message(
         self,
@@ -542,8 +630,14 @@ class SaveBudget:
         )
         footprint_label = (
             "projected retained footprint (refused before the crossing allocation)"
-            if phase == "pre_allocation_admission"
+            if phase in _ADMISSION_PHASES
             else "committed so far"
+        )
+        lookback_remedy = (
+            "    - retain fewer window payloads: shrink lookback=<N> or keep "
+            "lookback_payload_policy='metadata_only' so candidates hold no payloads\n"
+            if phase.startswith("lookback_window")
+            else ""
         )
         return (
             "torchlens stopped capture: retained activations crossed the save budget on "
@@ -555,6 +649,7 @@ class SaveBudget:
             "  This is a LOWER BOUND on the retained footprint at this point in the "
             "incomplete forward, not an extrapolated completed-capture total.\n"
             "  Remedies, cheapest first:\n"
+            f"{lookback_remedy}"
             "    - save less: save=tl.func('relu') or save=tl.in_module('encoder') "
             "instead of the default save='all'\n"
             "    - save less AND stream those selected payloads to disk: "
