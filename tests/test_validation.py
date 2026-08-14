@@ -6530,9 +6530,10 @@ def test_corruption_distance_min_gt_max():
             lpl.min_distance_from_input = lpl.max_distance_from_input + 1
             break
     else:
-        # If no layer has distances, skip (mark_layer_depths might be False)
+        # A silent `return` here is a VACUOUS PASS that can green out a
+        # disarmed tripwire (b9 R71-3): make the missing precondition loud.
         log.cleanup()
-        return
+        pytest.skip("no layer with positive distances; distance plant has no target")
     with pytest.raises(MetadataInvariantError, match="distance_invariants"):
         check_metadata_invariants(log)
     log.cleanup()
@@ -6542,8 +6543,10 @@ def test_corruption_distance_input_nonzero():
     """Input layer with nonzero distance_from_input triggers error."""
     log = _make_clean_log()
     if not log.mark_layer_depths:
+        # Vacuous-pass conversion (b9 R71-3): a plant with no armed target
+        # must SKIP, not silently green.
         log.cleanup()
-        return
+        pytest.skip("mark_layer_depths is off; input-distance plant has no target")
     for label in log.input_layers:
         lpl = log.layer_dict_all_keys[label]
         lpl.min_distance_from_input = 5
@@ -6558,8 +6561,10 @@ def test_corruption_distance_ancestor_flag():
     """Mismatch between has_input_ancestor and input_ancestors triggers error."""
     log = _make_clean_log()
     if not log.mark_layer_depths:
+        # Vacuous-pass conversion (b9 R71-3): a plant with no armed target
+        # must SKIP, not silently green.
         log.cleanup()
-        return
+        pytest.skip("mark_layer_depths is off; ancestor-flag plant has no target")
     for lpl in log.layer_list:
         if lpl.has_input_ancestor and len(lpl.input_ancestors) > 0:
             lpl.has_input_ancestor = False
@@ -6567,6 +6572,53 @@ def test_corruption_distance_ancestor_flag():
     with pytest.raises(MetadataInvariantError, match="distance_invariants"):
         check_metadata_invariants(log)
     log.cleanup()
+
+
+# -- O2. Commit-tier canary: the tripwire fires on nothing legitimate --
+
+
+class _CanaryTupleOut(nn.Module):
+    """One-line model returning a tuple, for the plain-capture canary."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return a relu and its increment as a 2-tuple.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Two derived tensors.
+        """
+
+        y = torch.relu(x)
+        return y, y + 1
+
+
+@pytest.mark.smoke
+def test_smoke_canary_plain_captures_trip_no_invariants():
+    """Plain captures of one-line models pass every invariant and replay.
+
+    The b9 R71-2 canary: only 3/271 tests in this file were smoke-marked,
+    so a plain-capture tripwire firing on a trivial model was invisible to
+    the commit-level gate. This is the one canonical cheap case: if ANY
+    metadata invariant or replay check fires on these, capture minted bad
+    metadata -- never exempt the invariant, fix the producer.
+    """
+
+    cases = [
+        (nn.ReLU(), torch.randn(4)),
+        (nn.Linear(5, 3), torch.randn(2, 5)),
+        (_CanaryTupleOut(), torch.randn(3)),
+    ]
+    for model, x in cases:
+        log = trace_fn(model, x, random_seed=42)
+        check_metadata_invariants(log)
+        log.cleanup()
+        assert validate_forward_pass(model, [x], input_kwargs={})
 
 
 # -- P. Graph connectivity corruption --
