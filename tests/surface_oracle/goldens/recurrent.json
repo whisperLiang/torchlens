@@ -12755,7 +12755,7 @@
  "pickle": {
   "__version__": 1,
   "backward_passes": {},
-  "buffers": null,
+  "buffers": {},
   "grad_fns": {},
   "layers": {
    "input_1": {
@@ -13844,13 +13844,15 @@
     "forward_kwargs_template": null,
     "forward_pre_hook_effects": [],
     "func_calls_duration": "<measured>",
-    "grad": "<raises MultiOutputModuleError>",
-    "grads": [],
+    "grad": null,
+    "grads": [
+     null
+    ],
     "had_pre_hook_input_change": false,
-    "has_frozen_params": "<raises RecordBindingError>",
+    "has_frozen_params": false,
     "has_multiple_addresses": false,
     "has_saved_forward_args": false,
-    "has_trainable_params": "<raises RecordBindingError>",
+    "has_trainable_params": true,
     "input_layers": [
      "input_1"
     ],
@@ -13861,33 +13863,55 @@
     "inputs_before_pre_hooks": null,
     "internal_activation_memory": "<measured>",
     "internal_gradient_memory": "<measured>",
-    "internal_param_memory": "<measured raises RecordBindingError>",
+    "internal_param_memory": "<measured>",
     "max_descendant_depth": 0,
-    "module": "<raises RecordBindingError>",
+    "module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "module_call_stack": [],
     "name": "cell",
     "num_descendant_calls": 0,
-    "num_edges": 0,
+    "num_edges": 2,
     "num_forward_args_total": 1,
     "num_forward_kwargs": 0,
     "num_forward_pos_args": 1,
-    "num_input_edges": 0,
+    "num_input_edges": 1,
     "num_internal_edges": 0,
     "num_layers": 1,
     "num_ops": 1,
-    "num_output_edges": 0,
-    "num_param_tensors": "<raises RecordBindingError>",
-    "num_param_tensors_frozen": "<raises RecordBindingError>",
-    "num_param_tensors_trainable": "<raises RecordBindingError>",
+    "num_output_edges": 1,
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
     "ops": [
      "linear_1_1:1"
     ],
     "ordinal_index": 1,
-    "out": "<raises MultiOutputModuleError>",
-    "out_dtype": "<raises MultiOutputModuleError>",
-    "out_dtypes": [],
-    "out_shape": "<raises MultiOutputModuleError>",
-    "out_shapes": [],
+    "out": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "61026e4c527bd419c5cfc9252771fbd2fd43a3128870375573c6b70c3024d921",
+     "shape": [
+      2,
+      4
+     ]
+    },
+    "out_dtype": "torch.float32",
+    "out_dtypes": [
+     "torch.float32"
+    ],
+    "out_shape": [
+     2,
+     4
+    ],
+    "out_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
     "output_activation_memory": "<measured>",
     "output_gradient_memory": "<measured>",
     "output_layers": [
@@ -13900,11 +13924,25 @@
      []
     ],
     "output_structure": null,
-    "outs": [],
-    "param_memory": "<measured raises RecordBindingError>",
+    "outs": [
+     {
+      "__tensor__": true,
+      "dtype": "torch.float32",
+      "requires_grad": true,
+      "sha256": "61026e4c527bd419c5cfc9252771fbd2fd43a3128870375573c6b70c3024d921",
+      "shape": [
+       2,
+       4
+      ]
+     }
+    ],
+    "param_memory": "<measured>",
     "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
     "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
-    "trace": null
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    }
    },
    "cell:2": {
     "address": "cell",
@@ -13949,13 +13987,15 @@
     "forward_kwargs_template": null,
     "forward_pre_hook_effects": [],
     "func_calls_duration": "<measured>",
-    "grad": "<raises MultiOutputModuleError>",
-    "grads": [],
+    "grad": null,
+    "grads": [
+     null
+    ],
     "had_pre_hook_input_change": false,
-    "has_frozen_params": "<raises RecordBindingError>",
+    "has_frozen_params": false,
     "has_multiple_addresses": false,
     "has_saved_forward_args": false,
-    "has_trainable_params": "<raises RecordBindingError>",
+    "has_trainable_params": true,
     "input_layers": [
      "tanh_1_2"
     ],
@@ -13966,33 +14006,55 @@
     "inputs_before_pre_hooks": null,
     "internal_activation_memory": "<measured>",
     "internal_gradient_memory": "<measured>",
-    "internal_param_memory": "<measured raises RecordBindingError>",
+    "internal_param_memory": "<measured>",
     "max_descendant_depth": 0,
-    "module": "<raises RecordBindingError>",
+    "module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "module_call_stack": [],
     "name": "cell",
     "num_descendant_calls": 0,
-    "num_edges": 0,
+    "num_edges": 2,
     "num_forward_args_total": 1,
     "num_forward_kwargs": 0,
     "num_forward_pos_args": 1,
-    "num_input_edges": 0,
+    "num_input_edges": 1,
     "num_internal_edges": 0,
     "num_layers": 1,
     "num_ops": 1,
-    "num_output_edges": 0,
-    "num_param_tensors": "<raises RecordBindingError>",
-    "num_param_tensors_frozen": "<raises RecordBindingError>",
-    "num_param_tensors_trainable": "<raises RecordBindingError>",
+    "num_output_edges": 1,
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
     "ops": [
      "linear_1_1:2"
     ],
     "ordinal_index": 2,
-    "out": "<raises MultiOutputModuleError>",
-    "out_dtype": "<raises MultiOutputModuleError>",
-    "out_dtypes": [],
-    "out_shape": "<raises MultiOutputModuleError>",
-    "out_shapes": [],
+    "out": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "bc6d6d4e933755bf17bfc9adbce7a7b3287603749d0d8e6bc1aee7f2b72637b1",
+     "shape": [
+      2,
+      4
+     ]
+    },
+    "out_dtype": "torch.float32",
+    "out_dtypes": [
+     "torch.float32"
+    ],
+    "out_shape": [
+     2,
+     4
+    ],
+    "out_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
     "output_activation_memory": "<measured>",
     "output_gradient_memory": "<measured>",
     "output_layers": [
@@ -14005,11 +14067,25 @@
      []
     ],
     "output_structure": null,
-    "outs": [],
-    "param_memory": "<measured raises RecordBindingError>",
+    "outs": [
+     {
+      "__tensor__": true,
+      "dtype": "torch.float32",
+      "requires_grad": true,
+      "sha256": "bc6d6d4e933755bf17bfc9adbce7a7b3287603749d0d8e6bc1aee7f2b72637b1",
+      "shape": [
+       2,
+       4
+      ]
+     }
+    ],
+    "param_memory": "<measured>",
     "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
     "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
-    "trace": null
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    }
    },
    "cell:3": {
     "address": "cell",
@@ -14054,13 +14130,15 @@
     "forward_kwargs_template": null,
     "forward_pre_hook_effects": [],
     "func_calls_duration": "<measured>",
-    "grad": "<raises MultiOutputModuleError>",
-    "grads": [],
+    "grad": null,
+    "grads": [
+     null
+    ],
     "had_pre_hook_input_change": false,
-    "has_frozen_params": "<raises RecordBindingError>",
+    "has_frozen_params": false,
     "has_multiple_addresses": false,
     "has_saved_forward_args": false,
-    "has_trainable_params": "<raises RecordBindingError>",
+    "has_trainable_params": true,
     "input_layers": [
      "tanh_1_2"
     ],
@@ -14071,33 +14149,55 @@
     "inputs_before_pre_hooks": null,
     "internal_activation_memory": "<measured>",
     "internal_gradient_memory": "<measured>",
-    "internal_param_memory": "<measured raises RecordBindingError>",
+    "internal_param_memory": "<measured>",
     "max_descendant_depth": 0,
-    "module": "<raises RecordBindingError>",
+    "module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "module_call_stack": [],
     "name": "cell",
     "num_descendant_calls": 0,
-    "num_edges": 0,
+    "num_edges": 2,
     "num_forward_args_total": 1,
     "num_forward_kwargs": 0,
     "num_forward_pos_args": 1,
-    "num_input_edges": 0,
+    "num_input_edges": 1,
     "num_internal_edges": 0,
     "num_layers": 1,
     "num_ops": 1,
-    "num_output_edges": 0,
-    "num_param_tensors": "<raises RecordBindingError>",
-    "num_param_tensors_frozen": "<raises RecordBindingError>",
-    "num_param_tensors_trainable": "<raises RecordBindingError>",
+    "num_output_edges": 1,
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
     "ops": [
      "linear_1_1:3"
     ],
     "ordinal_index": 3,
-    "out": "<raises MultiOutputModuleError>",
-    "out_dtype": "<raises MultiOutputModuleError>",
-    "out_dtypes": [],
-    "out_shape": "<raises MultiOutputModuleError>",
-    "out_shapes": [],
+    "out": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "83bfe6b825aeb934cb11fe66a1ac87720680c2d2edbab7728f6a7467bf08c5cc",
+     "shape": [
+      2,
+      4
+     ]
+    },
+    "out_dtype": "torch.float32",
+    "out_dtypes": [
+     "torch.float32"
+    ],
+    "out_shape": [
+     2,
+     4
+    ],
+    "out_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
     "output_activation_memory": "<measured>",
     "output_gradient_memory": "<measured>",
     "output_layers": [
@@ -14110,11 +14210,25 @@
      []
     ],
     "output_structure": null,
-    "outs": [],
-    "param_memory": "<measured raises RecordBindingError>",
+    "outs": [
+     {
+      "__tensor__": true,
+      "dtype": "torch.float32",
+      "requires_grad": true,
+      "sha256": "83bfe6b825aeb934cb11fe66a1ac87720680c2d2edbab7728f6a7467bf08c5cc",
+      "shape": [
+       2,
+       4
+      ]
+     }
+    ],
+    "param_memory": "<measured>",
     "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
     "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
-    "trace": null
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    }
    },
    "self:1": {
     "address": "self",
@@ -14156,13 +14270,15 @@
     "forward_kwargs_template": null,
     "forward_pre_hook_effects": [],
     "func_calls_duration": "<measured>",
-    "grad": "<raises MultiOutputModuleError>",
-    "grads": [],
+    "grad": null,
+    "grads": [
+     null
+    ],
     "had_pre_hook_input_change": false,
-    "has_frozen_params": "<raises RecordBindingError>",
+    "has_frozen_params": false,
     "has_multiple_addresses": false,
     "has_saved_forward_args": false,
-    "has_trainable_params": "<raises RecordBindingError>",
+    "has_trainable_params": true,
     "input_layers": [
      "input_1"
     ],
@@ -14173,24 +14289,27 @@
     "inputs_before_pre_hooks": null,
     "internal_activation_memory": "<measured>",
     "internal_gradient_memory": "<measured>",
-    "internal_param_memory": "<measured raises RecordBindingError>",
-    "max_descendant_depth": 0,
-    "module": "<raises RecordBindingError>",
+    "internal_param_memory": "<measured>",
+    "max_descendant_depth": 1,
+    "module": {
+     "__ref__": "Module",
+     "label": "self"
+    },
     "module_call_stack": [],
     "name": "",
-    "num_descendant_calls": 0,
-    "num_edges": 0,
+    "num_descendant_calls": 3,
+    "num_edges": 7,
     "num_forward_args_total": 0,
     "num_forward_kwargs": 0,
     "num_forward_pos_args": 0,
     "num_input_edges": 0,
-    "num_internal_edges": 0,
+    "num_internal_edges": 7,
     "num_layers": 4,
     "num_ops": 4,
     "num_output_edges": 0,
-    "num_param_tensors": "<raises RecordBindingError>",
-    "num_param_tensors_frozen": "<raises RecordBindingError>",
-    "num_param_tensors_trainable": "<raises RecordBindingError>",
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
     "ops": [
      "input_1",
      "linear_1_1",
@@ -14198,11 +14317,30 @@
      "output_1"
     ],
     "ordinal_index": 0,
-    "out": "<raises MultiOutputModuleError>",
-    "out_dtype": "<raises MultiOutputModuleError>",
-    "out_dtypes": [],
-    "out_shape": "<raises MultiOutputModuleError>",
-    "out_shapes": [],
+    "out": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f9608ea44282e0450ccf493f24b31431b403b1bf43d2c961785e9ebc2ee48f22",
+     "shape": [
+      2,
+      4
+     ]
+    },
+    "out_dtype": "torch.float32",
+    "out_dtypes": [
+     "torch.float32"
+    ],
+    "out_shape": [
+     2,
+     4
+    ],
+    "out_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
     "output_activation_memory": "<measured>",
     "output_gradient_memory": "<measured>",
     "output_layers": [
@@ -14213,14 +14351,395 @@
     ],
     "output_paths": [],
     "output_structure": null,
-    "outs": [],
-    "param_memory": "<measured raises RecordBindingError>",
+    "outs": [
+     {
+      "__tensor__": true,
+      "dtype": "torch.float32",
+      "requires_grad": true,
+      "sha256": "f9608ea44282e0450ccf493f24b31431b403b1bf43d2c961785e9ebc2ee48f22",
+      "shape": [
+       2,
+       4
+      ]
+     }
+    ],
+    "param_memory": "<measured>",
     "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
     "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
-    "trace": null
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    }
    }
   },
-  "modules": {},
+  "modules": {
+   "cell": {
+    "address": "cell",
+    "address_children": [],
+    "address_depth": 1,
+    "address_parent": "self",
+    "all_addresses": [
+     "cell"
+    ],
+    "backward_duration": "<measured>",
+    "backward_hooks": [],
+    "backward_pre_hooks": [],
+    "buffer_layers": [],
+    "buffers": "<torchlens.data_classes.buffer.BufferAccessor>",
+    "call_children": [],
+    "call_children_addresses": [],
+    "call_children_modules": [],
+    "call_depth": 1,
+    "call_labels": [
+     "cell:1",
+     "cell:2",
+     "cell:3"
+    ],
+    "call_parent": "self",
+    "call_parent_address": "self",
+    "call_parent_module": {
+     "__ref__": "Module",
+     "label": "self"
+    },
+    "call_tree": "<raises AttributeError>",
+    "calls": "<torchlens.data_classes.module.ModuleCallAccessor>",
+    "class_docstring": "Applies an affine linear transformation to the incoming data: :math:`y = xA^T + b`.\n\n    This module supports :ref:`TensorFloat32<tf32_on_ampere>`.\n\n    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.\n\n    Args:\n        in_features: size of each input sample\n        out_features: size of each output sample\n        bias: If set to ``False``, the layer will not learn an additive bias.\n            Default: ``True``\n\n    Shape:\n        - Input: :math:`(*, H_\\text{in})` where :math:`*` means any number of\n          dimensions including none and :math:`H_\\text{in} = \\text{in\\_features}`.\n        - Output: :math:`(*, H_\\text{out})` where all but the last dimension\n          are the same shape as the input and :math:`H_\\text{out} = \\text{out\\_features}`.\n\n    Attributes:\n        weight: the learnable weights of the module of shape\n            :math:`(\\text{out\\_features}, \\text{in\\_features})`. The values are\n            initialized from :math:`\\mathcal{U}(-\\sqrt{k}, \\sqrt{k})`, where\n            :math:`k = \\frac{1}{\\text{in\\_features}}`\n        bias:   the learnable bias of the module of shape :math:`(\\text{out\\_features})`.\n                If :attr:`bias` is ``True``, the values are initialized from\n                :math:`\\mathcal{U}(-\\sqrt{k}, \\sqrt{k})` where\n                :math:`k = \\frac{1}{\\text{in\\_features}}`\n\n    Examples::\n\n        >>> m = nn.Linear(20, 30)\n        >>> input = torch.randn(128, 20)\n        >>> output = m(input)\n        >>> print(output.size())\n        torch.Size([128, 30])\n    ",
+    "class_name": "Linear",
+    "class_qualname": "torch.nn.modules.linear.Linear",
+    "class_source_file": null,
+    "class_source_line": null,
+    "class_source_location": null,
+    "cls": null,
+    "collapse_score": "0.0",
+    "custom_attributes": {
+     "\"in_features\"": 4,
+     "\"out_features\"": 4
+    },
+    "custom_methods": [
+     "reset_parameters"
+    ],
+    "facets": "<raises InvalidArgumentError>",
+    "forward_args": "<raises AttributeError>",
+    "forward_args_summary": "<raises AttributeError>",
+    "forward_args_template": null,
+    "forward_docstring": null,
+    "forward_duration": "<measured raises AttributeError>",
+    "forward_hooks": [],
+    "forward_kwargs": "<raises AttributeError>",
+    "forward_kwargs_summary": "<raises AttributeError>",
+    "forward_kwargs_template": null,
+    "forward_pre_hooks": [],
+    "forward_signature": null,
+    "forward_source_file": null,
+    "forward_source_line": null,
+    "forward_source_location": null,
+    "full_backward_hooks": [],
+    "full_backward_pre_hooks": [],
+    "func_calls_duration": "<measured raises AttributeError>",
+    "grad": "<raises InvalidArgumentError>",
+    "grads": "<raises InvalidArgumentError>",
+    "handle": null,
+    "has_backward_hooks": false,
+    "has_forward_hooks": false,
+    "has_frozen_params": false,
+    "has_multiple_addresses": false,
+    "has_trainable_params": true,
+    "init_docstring": null,
+    "init_signature": null,
+    "init_source_file": null,
+    "init_source_line": null,
+    "init_source_location": null,
+    "input_layers": [
+     "input_1",
+     "tanh_1_2"
+    ],
+    "input_ops": [
+     "input_1",
+     "tanh_1_2"
+    ],
+    "internal_param_memory": "<measured>",
+    "layer_labels": [
+     "linear_1_1"
+    ],
+    "layers": [
+     {
+      "__ref__": "Layer",
+      "label": "linear_1_1"
+     }
+    ],
+    "max_descendant_depth": 0,
+    "name": "cell",
+    "num_calls": 3,
+    "num_descendant_calls": 0,
+    "num_edges": 6,
+    "num_input_edges": 3,
+    "num_internal_edges": 0,
+    "num_layers": 1,
+    "num_output_edges": 3,
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
+    "num_params": 20,
+    "num_params_frozen": 0,
+    "num_params_trainable": 20,
+    "num_recursive_param_tensors": 2,
+    "num_recursive_param_tensors_frozen": 0,
+    "num_recursive_param_tensors_trainable": 2,
+    "num_recursive_params": 2,
+    "num_recursive_params_frozen": 0,
+    "num_recursive_params_trainable": 2,
+    "ops": "<torchlens.data_classes.module.ModuleCallAccessor>",
+    "out": "<raises InvalidArgumentError>",
+    "out_shape": "<raises InvalidArgumentError>",
+    "out_shapes": "<raises InvalidArgumentError>",
+    "output_layers": [
+     "linear_1_1"
+    ],
+    "output_ops": [
+     "linear_1_1:1",
+     "linear_1_1:2",
+     "linear_1_1:3"
+    ],
+    "output_structure": null,
+    "outs": "<raises InvalidArgumentError>",
+    "param_memory": "<measured>",
+    "params": "<torchlens.data_classes.param.ParamAccessor>",
+    "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
+    "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
+    "recursive_param_addresses": [
+     "cell.weight",
+     "cell.bias"
+    ],
+    "recursive_params": "<torchlens.data_classes.param.ParamAccessor>",
+    "total_autograd_memory": "<measured>",
+    "total_backward_duration": "<measured>",
+    "total_flops": 216,
+    "total_flops_backward": 144,
+    "total_flops_forward": 72,
+    "total_forward_duration": "<measured>",
+    "total_func_calls_duration": "<measured>",
+    "total_internal_activation_memory": "<measured>",
+    "total_internal_gradient_memory": "<measured>",
+    "total_macs": 108,
+    "total_macs_backward": 72,
+    "total_macs_forward": 36,
+    "total_output_activation_memory": "<measured>",
+    "total_output_gradient_memory": "<measured>",
+    "total_param_memory": "<measured>",
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "training": true
+   },
+   "self": {
+    "address": "self",
+    "address_children": [
+     "cell"
+    ],
+    "address_depth": 0,
+    "address_parent": null,
+    "all_addresses": [
+     "self"
+    ],
+    "backward_duration": "<measured>",
+    "backward_hooks": [],
+    "backward_pre_hooks": [],
+    "buffer_layers": [],
+    "buffers": "<torchlens.data_classes.buffer.BufferAccessor>",
+    "call_children": [
+     "cell"
+    ],
+    "call_children_addresses": [
+     "cell"
+    ],
+    "call_children_modules": [
+     {
+      "__ref__": "Module",
+      "label": "cell"
+     }
+    ],
+    "call_depth": 0,
+    "call_labels": [
+     "self:1"
+    ],
+    "call_parent": null,
+    "call_parent_address": null,
+    "call_parent_module": null,
+    "call_tree": {
+     "__ref__": "ModuleCall",
+     "label": "self"
+    },
+    "calls": "<torchlens.data_classes.module.ModuleCallAccessor>",
+    "class_docstring": "Tiny recurrent model that calls one module three times.",
+    "class_name": "RecurrentModel",
+    "class_qualname": "capture_oracle._models.RecurrentModel",
+    "class_source_file": null,
+    "class_source_line": null,
+    "class_source_location": null,
+    "cls": null,
+    "collapse_score": "0.0",
+    "custom_attributes": {
+     "\"forward_invocations\"": 0,
+     "\"pre_hook_invocations\"": 0
+    },
+    "custom_methods": [],
+    "facets": "<torchlens.semantic.facets.FacetView>",
+    "forward_args": null,
+    "forward_args_summary": "None",
+    "forward_args_template": null,
+    "forward_docstring": null,
+    "forward_duration": "<measured>",
+    "forward_hooks": [],
+    "forward_kwargs": null,
+    "forward_kwargs_summary": "None",
+    "forward_kwargs_template": null,
+    "forward_pre_hooks": [],
+    "forward_signature": null,
+    "forward_source_file": null,
+    "forward_source_line": null,
+    "forward_source_location": null,
+    "full_backward_hooks": [],
+    "full_backward_pre_hooks": [],
+    "func_calls_duration": "<measured>",
+    "grad": null,
+    "grads": [
+     null
+    ],
+    "handle": null,
+    "has_backward_hooks": false,
+    "has_forward_hooks": false,
+    "has_frozen_params": false,
+    "has_multiple_addresses": false,
+    "has_trainable_params": true,
+    "init_docstring": null,
+    "init_signature": null,
+    "init_source_file": null,
+    "init_source_line": null,
+    "init_source_location": null,
+    "input_layers": [
+     "input_1"
+    ],
+    "input_ops": [
+     "input_1"
+    ],
+    "internal_param_memory": "<measured>",
+    "layer_labels": [
+     "input_1",
+     "linear_1_1",
+     "tanh_1_2",
+     "output_1"
+    ],
+    "layers": [
+     {
+      "__ref__": "Layer",
+      "label": "input_1:1"
+     },
+     {
+      "__ref__": "Layer",
+      "label": "linear_1_1"
+     },
+     {
+      "__ref__": "Layer",
+      "label": "tanh_1_2"
+     },
+     {
+      "__ref__": "Layer",
+      "label": "output_1:1"
+     }
+    ],
+    "max_descendant_depth": 1,
+    "name": "",
+    "num_calls": 1,
+    "num_descendant_calls": 3,
+    "num_edges": 7,
+    "num_input_edges": 0,
+    "num_internal_edges": 7,
+    "num_layers": 4,
+    "num_output_edges": 0,
+    "num_param_tensors": 2,
+    "num_param_tensors_frozen": 0,
+    "num_param_tensors_trainable": 2,
+    "num_params": 20,
+    "num_params_frozen": 0,
+    "num_params_trainable": 20,
+    "num_recursive_param_tensors": 2,
+    "num_recursive_param_tensors_frozen": 0,
+    "num_recursive_param_tensors_trainable": 2,
+    "num_recursive_params": 2,
+    "num_recursive_params_frozen": 0,
+    "num_recursive_params_trainable": 2,
+    "ops": "<torchlens.data_classes.module.ModuleCallAccessor>",
+    "out": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f9608ea44282e0450ccf493f24b31431b403b1bf43d2c961785e9ebc2ee48f22",
+     "shape": [
+      2,
+      4
+     ]
+    },
+    "out_shape": [
+     2,
+     4
+    ],
+    "out_shapes": [
+     [
+      2,
+      4
+     ]
+    ],
+    "output_layers": [
+     "output_1"
+    ],
+    "output_ops": [
+     "output_1"
+    ],
+    "output_structure": null,
+    "outs": [
+     {
+      "__tensor__": true,
+      "dtype": "torch.float32",
+      "requires_grad": true,
+      "sha256": "f9608ea44282e0450ccf493f24b31431b403b1bf43d2c961785e9ebc2ee48f22",
+      "shape": [
+       2,
+       4
+      ]
+     }
+    ],
+    "param_memory": "<measured>",
+    "params": "<torchlens.data_classes.param.ParamAccessor>",
+    "projective_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
+    "receptive_field": "<skipped: lazy influence-geometry solver; view object, solve cost unbounded>",
+    "recursive_param_addresses": [
+     "cell.weight",
+     "cell.bias"
+    ],
+    "recursive_params": "<torchlens.data_classes.param.ParamAccessor>",
+    "total_autograd_memory": "<measured>",
+    "total_backward_duration": "<measured>",
+    "total_flops": 456,
+    "total_flops_backward": 288,
+    "total_flops_forward": 168,
+    "total_forward_duration": "<measured>",
+    "total_func_calls_duration": "<measured>",
+    "total_internal_activation_memory": "<measured>",
+    "total_internal_gradient_memory": "<measured>",
+    "total_macs": 228,
+    "total_macs_backward": 144,
+    "total_macs_forward": 84,
+    "total_output_activation_memory": "<measured>",
+    "total_output_gradient_memory": "<measured>",
+    "total_param_memory": "<measured>",
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "training": true
+   }
+  },
   "ops": {
    "input_1:1": {
     "_address_normalized": null,
@@ -14589,7 +15108,10 @@
     "args_summary": "",
     "args_template": null,
     "arithmetic_intensity": "0.5",
-    "atomic_module": null,
+    "atomic_module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "atomic_module_address": "cell",
     "atomic_module_call": "cell:1",
     "atomic_module_call_label": "cell:1",
@@ -15012,7 +15534,10 @@
     "args_summary": "",
     "args_template": null,
     "arithmetic_intensity": "0.5",
-    "atomic_module": null,
+    "atomic_module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "atomic_module_address": "cell",
     "atomic_module_call": "cell:2",
     "atomic_module_call_label": "cell:2",
@@ -15437,7 +15962,10 @@
     "args_summary": "",
     "args_template": null,
     "arithmetic_intensity": "0.5",
-    "atomic_module": null,
+    "atomic_module": {
+     "__ref__": "Module",
+     "label": "cell"
+    },
     "atomic_module_address": "cell",
     "atomic_module_call": "cell:3",
     "atomic_module_call_label": "cell:3",
@@ -17797,7 +18325,7 @@
    "buffer_num_calls": {},
    "buffer_read_ops": [],
    "buffer_write_ops": [],
-   "buffers": null,
+   "buffers": "<torchlens.data_classes.buffer.BufferAccessor>",
    "by_pass": {
     "1": [
      0,
@@ -18332,7 +18860,16 @@
    "model_object_id": "<measured>",
    "model_profile": "<torchlens.data_classes._trace_profile.ModelProfile>",
    "module_calls": "<torchlens.data_classes._trace_accessors.TraceModuleCallAccessor>",
-   "module_collapse_order": [],
+   "module_collapse_order": [
+    [
+     "cell",
+     "0.0"
+    ],
+    [
+     "self",
+     "0.0"
+    ]
+   ],
    "module_filter": null,
    "module_identity_mode": "torch_module",
    "modules": "<torchlens.data_classes.module.ModuleAccessor>",
@@ -18364,7 +18901,7 @@
    "num_layers": 4,
    "num_layers_with_params": 1,
    "num_module_calls": 4,
-   "num_modules": 0,
+   "num_modules": 2,
    "num_ops": 6,
    "num_ops_with_params": 3,
    "num_output_layers": 1,
@@ -18383,7 +18920,7 @@
    "num_saved_grad_ops": 0,
    "num_saved_layers": 4,
    "num_saved_module_calls": 3,
-   "num_saved_modules": 0,
+   "num_saved_modules": 1,
    "num_saved_ops": 8,
    "num_tensors": 8,
    "num_uncalled_modules": 0,
@@ -18463,7 +19000,10 @@
    },
    "replay_frontier": {},
    "rescue_rerun": null,
-   "root_module": "<raises KeyError>",
+   "root_module": {
+    "__ref__": "Module",
+    "label": "self"
+   },
    "root_trace": null,
    "runnable_descriptor": null,
    "save_arg_templates": false,
