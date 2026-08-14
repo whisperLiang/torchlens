@@ -432,8 +432,12 @@ def _exact_box_adjoint_violations(
     claim is wrong — and fails validation without needing autograd. This
     catches spurious-nonempty exact claims that pure gradient containment is
     structurally unable to see (an empty true support is contained in any
-    box). Reverse queries that refuse with a typed error are skipped: the
-    check only ever adds failure power.
+    box) ONLY when the two directions disagree: both engines consult the same
+    rule registry, so a rule that overclaims symmetrically in both directions
+    passes this consistency check. It is a direction-coherence oracle, not a
+    tightness oracle; tightness of the built-in rules is enforced by the
+    saturating-model slack battery in tests. Reverse queries that refuse with
+    a typed error are skipped: the check only ever adds failure power.
     """
 
     if not box.exact or box.empty:
