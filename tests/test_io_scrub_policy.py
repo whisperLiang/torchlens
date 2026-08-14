@@ -102,6 +102,75 @@ def _build_live_log() -> Trace:
     )
 
 
+@pytest.mark.parametrize("include_source", [True, False])
+def test_backward_source_fields_are_in_the_privacy_belt(include_source: bool) -> None:
+    """B8-21: GradFn backward source path/docstring are relativized or dropped.
+
+    Fail-before: the source-privacy belt covered class/init/forward only, so
+    ``backward_source_file`` (an absolute path) and ``backward_docstring`` persisted
+    verbatim for Python-inspectable custom autograd Functions.
+    """
+
+    from torchlens._io.payload_codec import get_payload_codec
+    from torchlens._io.scrub import _apply_source_metadata_policy, _ScrubOptions
+
+    scrubbed_state = {
+        "class_docstring": "cls doc",
+        "backward_source_file": "/home/someone/secret/model.py",
+        "backward_docstring": "sensitive backward doc",
+    }
+    options = _ScrubOptions(
+        include_outs=False,
+        include_grads=False,
+        include_saved_args=False,
+        include_rng_states=False,
+        include_source=include_source,
+        payload_codec=get_payload_codec("torch"),
+    )
+    _apply_source_metadata_policy(scrubbed_state, options)
+
+    if include_source:
+        assert scrubbed_state["backward_source_file"] == "model.py"
+        assert "/home/" not in (scrubbed_state["backward_source_file"] or "")
+    else:
+        assert scrubbed_state["backward_source_file"] is None
+        assert scrubbed_state["backward_docstring"] is None
+
+
+def test_partial_activation_transform_repr_does_not_leak_bound_values(tmp_path: Path) -> None:
+    """B8-20: a ``functools.partial`` transform's bound arg values are not persisted.
+
+    Fail-before: ``_activation_transform_repr = repr(fn)`` embedded a partial's bound
+    argument VALUES verbatim into ``metadata.pkl`` at every save level; a probe
+    recovered a planted token.
+    """
+
+    import functools
+
+    secret = "SENSITIVE-ACTIVATION-TOKEN"
+
+    def _identity(t: torch.Tensor, token: str | None = None) -> torch.Tensor:
+        return t
+
+    transform = functools.partial(_identity, token=secret)
+    trace = trace_fn(
+        _TinyIOModel(),
+        torch.randn(2, 4),
+        layers_to_save="all",
+        activation_transform=transform,
+    )
+    spec = tmp_path / "partial.tlspec"
+    tl.save(trace, str(spec))
+    for artifact in spec.rglob("*"):
+        if artifact.is_file():
+            assert secret.encode() not in artifact.read_bytes(), (
+                f"partial bound value leaked into {artifact.name}"
+            )
+    saved_repr = pickle.loads((spec / "metadata.pkl").read_bytes())["_activation_transform_repr"]
+    assert "<scrubbed>" in saved_repr
+    assert secret not in saved_repr
+
+
 def test_portable_state_specs_cover_every_live_attribute() -> None:
     """Each target class must map every live attribute to a scrub policy."""
 

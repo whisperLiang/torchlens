@@ -354,39 +354,6 @@ def _capture_cache_secret(cache_root: Path) -> bytes:
     return secret
 
 
-_CAPTURE_CACHE_CHUNK_BYTES = 1 << 20
-
-
-def _capture_cache_tag_of_file(secret: bytes, path: Path) -> str:
-    """Return the hex HMAC-SHA256 tag over a cache file, read in bounded chunks.
-
-    Parameters
-    ----------
-    secret
-        Secret keying the tag.
-    path
-        Cache payload file.
-
-    Returns
-    -------
-    str
-        Hex digest. Chunked so authenticating a multi-GiB cached trace costs one
-        buffer, not a second full copy of the payload.
-    """
-
-    import hashlib
-    import hmac
-
-    mac = hmac.new(secret, digestmod=hashlib.sha256)
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(_CAPTURE_CACHE_CHUNK_BYTES)
-            if not chunk:
-                break
-            mac.update(chunk)
-    return mac.hexdigest()
-
-
 class _TaggingWriter:
     """File wrapper that HMACs every byte ``pickle.dump`` streams through it."""
 
@@ -418,6 +385,7 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
         (treated as a cache miss; the caller recaptures and rewrites it).
     """
 
+    import hashlib
     import hmac
 
     tag_path = cache_path.with_name(cache_path.name + _CAPTURE_CACHE_TAG_SUFFIX)
@@ -426,17 +394,34 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     elif not tag_path.is_file():
         reason = "no authentication tag accompanies it"
     else:
+        # SINGLE read: the bytes that are authenticated MUST be the exact bytes that
+        # are unpickled. Streaming the HMAC from one ``open`` and then unpickling from
+        # a SECOND, independent ``open`` of the same path was a time-of-check/
+        # time-of-use gap -- a second principal with write access to the
+        # (attacker-writable-by-hypothesis) cache directory could swap the payload
+        # after the tag verified over the benign bytes and before the load, turning a
+        # cache hit into arbitrary code execution. Reading once binds authentication to
+        # the exact bytes consumed. The cost is one transient buffer of the serialized
+        # trace, which ``pickle`` would materialize as a live object graph regardless.
+        data: bytes | None = None
         try:
             recorded = tag_path.read_text(encoding="ascii").strip()
-            observed = _capture_cache_tag_of_file(secret, cache_path)
+            size = cache_path.stat().st_size
+            if size > _CAPTURE_CACHE_MAX_BYTES:
+                reason = (
+                    f"it is {size} bytes, above the {_CAPTURE_CACHE_MAX_BYTES}-byte "
+                    "cache-entry ceiling"
+                )
+            else:
+                data = cache_path.read_bytes()
         except (OSError, UnicodeError) as exc:
             reason = f"its authentication metadata cannot be read ({exc})"
-        else:
+        if data is not None:
+            observed = hmac.new(secret, data, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(recorded, observed):
                 reason = "its authentication tag does not match its bytes"
             else:
-                with cache_path.open("rb") as handle:
-                    return pickle.load(handle)
+                return pickle.loads(data)
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "

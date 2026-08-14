@@ -262,7 +262,6 @@ def test_helper_from_serialized_uses_full_codec_for_opaque_args() -> None:
     }
     result = helper_from_serialized(
         payload,
-        tensor_loader=lambda tid: torch.zeros(1),
         import_resolver=_resolve_import_ref,
         value_decoder=lambda item: _deserialize_value(item, {}),
     )

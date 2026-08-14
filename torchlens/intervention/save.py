@@ -287,8 +287,19 @@ def save_intervention(
         if backup_path is not None and not target_path.exists() and backup_path.exists():
             try:
                 os.rename(backup_path, target_path)
-            except OSError:
-                pass
+            except OSError as restore_exc:
+                # Double fault: the save failed AND the restore failed, so the prior
+                # spec is gone from its canonical path but still exists under the
+                # backup name. Disclose it so it is recoverable rather than silently
+                # stranded (no behavior change on the single-fault restore path).
+                warnings.warn(
+                    f"Could not restore the previous intervention spec from its backup "
+                    f"after a failed save ({restore_exc}). Your prior spec is NOT lost: "
+                    f"it remains at {backup_path}. Move it back to {target_path} to "
+                    "recover it.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         raise
 
 
@@ -1404,7 +1415,6 @@ def _deserialize_value(
         # import a foreign module under the default untrusted load.
         return helper_from_serialized(
             value["__helper__"],
-            tensor_loader=lambda tensor_id: tensors[tensor_id],
             import_resolver=_trusted_import_resolver,
             value_decoder=_decode,
         )

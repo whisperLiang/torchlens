@@ -25,7 +25,7 @@ import torch
 
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..data_classes._state_adapter import state_items, state_new, state_restore
-from ..data_classes.trace import Trace
+from ..data_classes.trace import Trace, _scrubbed_transform_repr
 from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError
 from .payload_codec import PayloadCodec, get_payload_codec
 
@@ -36,6 +36,9 @@ from .payload_codec import PayloadCodec, get_payload_codec
 # while the loaded run still reports VERIFIED -- a silent honesty violation. Both
 # are immutable and natively serializable by the portable (pickle) codec.
 _SIMPLE_KEEP_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, bytes, slice)
+# Canonical remapped param barcode token (``param_000001``), for R21-1's
+# trace-level equivalence-key ordering.
+_EQUIV_PARAM_TOKEN = re.compile(r"param_\d{6}")
 _RAW_INPUT_TEXT_LIMIT = 10_000
 _RAW_INPUT_TENSOR_BYTES_LIMIT = 1_000_000
 _RAW_OUTPUT_TEXT_LIMIT = _RAW_INPUT_TEXT_LIMIT
@@ -270,6 +273,28 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             return value
         return barcode_pattern.sub(lambda match: barcode_map[match.group(0)], value)
 
+    def canonical_equivalence_key(value: Any) -> Any:
+        """Remap AND canonically order the ``param_NNNNNN`` run in an equiv key.
+
+        R21-1: an ``op_equivalence_classes`` key is
+        ``f"{layer_type}_{'_'.join(sorted(raw_barcodes))}"`` -- but the raw barcodes
+        are per-capture RANDOM, so weight-vs-bias order in the key was a coin flip
+        per capture. The op-level ``equivalence_class`` field is re-sorted into
+        canonical order at save, but the trace-level dict keys fell through to the
+        ORDER-PRESERVING substring remapper and stayed random. Remapping barcodes to
+        their canonical ``param_NNNNNN`` ids and then sorting that trailing run makes
+        the persisted key byte-reproducible across processes.
+        """
+
+        remapped = remap_barcode_text(value)
+        if not isinstance(remapped, str):
+            return remapped
+        tokens = _EQUIV_PARAM_TOKEN.findall(remapped)
+        if len(tokens) <= 1:
+            return remapped
+        prefix = remapped[: remapped.index(tokens[0])]
+        return prefix + "_".join(sorted(tokens))
+
     equivalence_class_map: dict[str, str] = {}
     for param in params:
         param.barcode = remap_barcode_text(getattr(param, "barcode", None))
@@ -303,7 +328,7 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
     equivalence_groups = state.get("op_equivalence_classes")
     if isinstance(equivalence_groups, dict):
         state["op_equivalence_classes"] = type(equivalence_groups)(
-            (equivalence_class_map.get(key, remap_barcode_text(key)), value)
+            (equivalence_class_map.get(key) or canonical_equivalence_key(key), value)
             for key, value in equivalence_groups.items()
         )
 
@@ -784,8 +809,10 @@ def _scrub_value(
         )
 
     if isinstance(value, Trace):
-        scrubbed_state["_activation_transform_repr"] = (
-            repr(value.activation_transform) if value.activation_transform is not None else None
+        # B8-20: a functools.partial repr embeds its bound argument VALUES, so the
+        # scrubbed persistence repr redacts them.
+        scrubbed_state["_activation_transform_repr"] = _scrubbed_transform_repr(
+            value.activation_transform
         )
         scrubbed_state["tlspec_version"] = TLSPEC_VERSION
         _apply_source_metadata_policy(scrubbed_state, options)
@@ -801,6 +828,16 @@ def _scrub_value(
     # covered without an ``_io`` -> ``data_classes`` import cycle.
     elif "class_docstring" in scrubbed_state:
         _apply_source_metadata_policy(scrubbed_state, options)
+    # ``ConditionalEvent`` records (in ``conditional_records``) carry the absolute
+    # path of the user's forward-defining module in ``source_file``. Dispatch on the
+    # field signature (the ``ConditionalEvent`` name is shared with a capture-time
+    # event class) so only the persisted, spec-bearing record is relativized/dropped.
+    elif "source_file" in scrubbed_state and "branch_ranges" in scrubbed_state:
+        _apply_conditional_source_policy(scrubbed_state, options, drop_value="")
+    # ``Conditional`` records (in the public ``conditionals`` accessor) carry the
+    # same absolute path in an OPTIONAL ``source_file``; dropped to ``None``.
+    elif "source_file" in scrubbed_state and "arms" in scrubbed_state:
+        _apply_conditional_source_policy(scrubbed_state, options, drop_value=None)
 
     return state_restore(scrubbed_obj, scrubbed_state)
 
@@ -864,8 +901,23 @@ def _relativize_source_text(value: Any) -> Any:
     )
 
 
-_SOURCE_FILE_FIELDS = ("class_source_file", "init_source_file", "forward_source_file")
-_DOCSTRING_FIELDS = ("class_docstring", "init_docstring", "forward_docstring")
+# ``backward_*`` are only present on ``GradFn`` logs (for Python-inspectable custom
+# autograd Functions); Trace/Module logs lack them, and each field is guarded by an
+# ``in scrubbed_state`` check, so listing them here is inert where absent. Including
+# them closes B8-21: the backward source path/docstring were outside the belt and
+# persisted an absolute path unscrubbed.
+_SOURCE_FILE_FIELDS = (
+    "class_source_file",
+    "init_source_file",
+    "forward_source_file",
+    "backward_source_file",
+)
+_DOCSTRING_FIELDS = (
+    "class_docstring",
+    "init_docstring",
+    "forward_docstring",
+    "backward_docstring",
+)
 
 
 def _apply_source_metadata_policy(scrubbed_state: dict[str, Any], options: _ScrubOptions) -> None:
@@ -958,6 +1010,40 @@ def _apply_frame_source_policy(scrubbed_state: dict[str, Any], options: _ScrubOp
     scrubbed_state["_num_context_lines_requested"] = 0
     scrubbed_state["_func_docstring"] = None
     scrubbed_state["_frame_func_obj"] = None
+
+
+def _apply_conditional_source_policy(
+    scrubbed_state: dict[str, Any], options: _ScrubOptions, *, drop_value: Any
+) -> None:
+    """Apply the source-embedding privacy policy to a scrubbed conditional record.
+
+    Both ``ConditionalEvent.source_file`` (in ``Trace.conditional_records``) and
+    ``Conditional.source_file`` (in the public ``Trace.conditionals`` accessor) hold
+    the ABSOLUTE path of the user's forward-defining module. Like every other
+    source-file reference in a bundle each is relativized to a bare basename
+    (unconditional privacy win); with ``include_source=False`` it is cleared to
+    ``drop_value``, matching the "no embedded source" contract honored for
+    ``Trace``/``Module``/``FuncCallLocation``. The structural span/kind metadata is
+    retained either way.
+
+    Parameters
+    ----------
+    scrubbed_state:
+        Scrubbed conditional-record field state, mutated in place.
+    options:
+        Active scrub options carrying ``include_source``.
+    drop_value:
+        Value assigned to ``source_file`` when source is excluded (``""`` for the
+        non-optional ``ConditionalEvent.source_file``; ``None`` for the optional
+        ``Conditional.source_file``).
+    """
+
+    if "source_file" not in scrubbed_state:
+        return
+    if options.include_source:
+        scrubbed_state["source_file"] = _relativize_source_path(scrubbed_state["source_file"])
+    else:
+        scrubbed_state["source_file"] = drop_value
 
 
 def _state_items_for_scrub(

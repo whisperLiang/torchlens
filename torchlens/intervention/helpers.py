@@ -1040,7 +1040,6 @@ def _helper_spec(
 def helper_from_serialized(
     data: dict[str, Any],
     *,
-    tensor_loader: Callable[[str], torch.Tensor],
     import_resolver: Callable[[str], Callable[..., Any]],
     value_decoder: Callable[[Any], Any],
 ) -> HelperSpec | Callable[..., Any]:
@@ -1050,8 +1049,6 @@ def helper_from_serialized(
     ----------
     data:
         JSON-decoded helper payload.
-    tensor_loader:
-        Callable mapping tensor reference IDs to loaded tensors.
     import_resolver:
         Callable resolving ``module:qualname`` import references.
     value_decoder:

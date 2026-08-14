@@ -394,6 +394,40 @@ def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
     raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}")
 
 
+def _scrubbed_transform_repr(fn: Any) -> str | None:
+    """Return a persistence-safe repr of an activation-transform callable.
+
+    The repr is stored (``_activation_transform_repr``) at every save level. A plain
+    function repr is inert, but ``functools.partial`` reprs embed the BOUND ARGUMENT
+    VALUES (B8-20: a probe recovered a planted token from a saved artifact). Redact a
+    partial's positional and keyword arguments to ``<scrubbed>`` while keeping the
+    wrapped function's own (recursively scrubbed) repr, so the string stays useful
+    without leaking captured values.
+
+    Parameters
+    ----------
+    fn:
+        Activation-transform callable, or ``None``.
+
+    Returns
+    -------
+    str | None
+        Scrubbed repr, or ``None`` when ``fn`` is ``None``.
+    """
+
+    import functools
+
+    if fn is None:
+        return None
+    if isinstance(fn, functools.partial):
+        inner = _scrubbed_transform_repr(fn.func)
+        parts = [inner] if inner is not None else []
+        parts.extend("<scrubbed>" for _ in fn.args)
+        parts.extend(f"{key}=<scrubbed>" for key in (fn.keywords or {}))
+        return f"functools.partial({', '.join(parts)})"
+    return repr(fn)
+
+
 @dataclass
 class ResolvedPreprocessing:
     """Structured provenance for automatic input preprocessing.
@@ -499,6 +533,35 @@ def _init_module_hierarchy_data() -> dict[str, Any]:
 @dataclass
 class ConditionalEvent:
     """Structured metadata for one conditional event in user source code."""
+
+    # Declared so the scrubber walks this record field-by-field instead of
+    # persisting it verbatim: ``source_file`` is the ABSOLUTE path of the user's
+    # forward-defining module, and without a spec the source-path relativizer never
+    # ran, leaking host paths at every save level including ``include_source=False``
+    # (B8-18). The scrubber applies the source-privacy policy to ``source_file`` via
+    # ``_apply_conditional_source_policy``; every other field is portable structural
+    # metadata. Declared ``ClassVar`` so ``@dataclass`` does not treat it as a field.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "id": FieldPolicy.KEEP,
+        "kind": FieldPolicy.KEEP,
+        "source_file": FieldPolicy.KEEP,
+        "function_qualname": FieldPolicy.KEEP,
+        "function_span": FieldPolicy.KEEP,
+        "if_stmt_span": FieldPolicy.KEEP,
+        "test_span": FieldPolicy.KEEP,
+        "branch_ranges": FieldPolicy.KEEP,
+        "branch_test_spans": FieldPolicy.KEEP,
+        "call_depth": FieldPolicy.KEEP,
+        "parent_conditional_id": FieldPolicy.KEEP,
+        "parent_branch_kind": FieldPolicy.KEEP,
+        "bool_layers": FieldPolicy.KEEP,
+        # Runtime attributes stamped by phase-5c conditional attribution (not
+        # declared dataclass fields). Retained verbatim, as they were before this
+        # record gained a spec; only ``source_file`` is privacy-adjusted.
+        "_bool_layers_raw": FieldPolicy.KEEP,
+        "_arm_bool_indices": FieldPolicy.KEEP,
+        "_arm_test_structures": FieldPolicy.KEEP,
+    }
 
     id: int
     kind: Literal["if_chain", "ifexp"]
@@ -625,6 +688,18 @@ class ConditionalArm:
 class Conditional:
     """One if-chain at one source location."""
 
+    # Declared so the scrubber walks this record and applies the source-privacy
+    # policy to ``source_file`` (the absolute forward-module path) instead of
+    # persisting it verbatim (B8-18). ``ClassVar`` so ``@dataclass`` ignores it.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "id": FieldPolicy.KEEP,
+        "arms": FieldPolicy.KEEP,
+        "fired_arm_index": FieldPolicy.KEEP,
+        "fired_arm_kind": FieldPolicy.KEEP,
+        "source_file": FieldPolicy.KEEP,
+        "source_line": FieldPolicy.KEEP,
+    }
+
     id: str
     arms: list[ConditionalArm]
     fired_arm_index: int | None
@@ -677,6 +752,15 @@ class Conditional:
 
 class ConditionalAccessor:
     """Dict-like accessor for Conditional records."""
+
+    # Declared so the scrubber descends into ``_list``/``_dict`` and reaches each
+    # ``Conditional`` (whose ``source_file`` must be privacy-scrubbed) rather than
+    # persisting the whole accessor subtree verbatim (B8-18). ``_list`` and ``_dict``
+    # share the same ``Conditional`` objects, so the scrub memo keeps them identical.
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "_list": FieldPolicy.KEEP,
+        "_dict": FieldPolicy.KEEP,
+    }
 
     def __init__(self, conditionals: list[Conditional] | None = None) -> None:
         """Initialize from conditionals in trace order.
@@ -1632,9 +1716,7 @@ class Trace(
         self.save_visualizations = save_visualizations
         self._visualizer_dir: str | None = None
         self.activation_transform = activation_transform
-        self._activation_transform_repr = (
-            repr(activation_transform) if activation_transform is not None else None
-        )
+        self._activation_transform_repr = _scrubbed_transform_repr(activation_transform)
         self.save_raw_activations = save_raw_activations
         self.input_annotations: dict[str, Any] = {}
         self.grad_transform = grad_transform
@@ -2672,9 +2754,7 @@ class Trace(
         state.pop("_tl_grad_hook_owner_by_label", None)
         state["_pending_live_fire_records"] = []
         state["_last_hook_handle_ids"] = ()
-        state["_activation_transform_repr"] = (
-            repr(self.activation_transform) if self.activation_transform is not None else None
-        )
+        state["_activation_transform_repr"] = _scrubbed_transform_repr(self.activation_transform)
         # Runnable traces bind state as immutable MappingProxyType views, which
         # cannot be pickled/deepcopied. Preserve tensor identity while replacing
         # only those mapping proxies with ordinary dictionaries.

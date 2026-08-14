@@ -9,7 +9,9 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
+import glob
 import json
+import os
 import pickle
 import platform
 import shutil
@@ -74,6 +76,13 @@ if TYPE_CHECKING:
 
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"
+# Coarse anti-DoS ceiling on ``metadata.pkl`` (B8-16), for parity with the JSON
+# boundary's byte ceiling. Structural trace metadata (tensor payloads live in
+# separate safetensors blobs) never approaches this, so the cap only refuses an
+# absurd artifact; it is deliberately generous to avoid refusing a real save.
+_MAX_METADATA_PKL_BYTES = 4 * 1024**3
+# Belt bound on the persisted PARTIAL failure-reason sentinel (B8-12).
+_MAX_PARTIAL_REASON_CHARS = 200
 _BLOB_TENSOR_KEY = "data"
 _RUNNABLE_WEIGHT_KIND = "runnable_weight"
 _RUNNABLE_NONPERSISTENT_BUFFER_KIND = "runnable_nonpersistent_buffer"
@@ -408,6 +417,14 @@ def save(
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.mkdir()
         (tmp_path / "blobs").mkdir()
+        # B8-10: safetensors blobs are already 0600, but the bundle directories and
+        # the metadata.pkl / manifest.json sidecars (which carry forward source and
+        # harvested module attributes) inherited the ambient umask -- group/world
+        # readable on the common umask 002. Tighten the directories to 0700 up front
+        # so no second principal can even swap a blob file in a group-writable dir;
+        # the sidecar files are tightened to 0600 after they are written below.
+        _restrict_mode(tmp_path, 0o700)
+        _restrict_mode(tmp_path / "blobs", 0o700)
 
         scrubbed_state, blob_specs, scrub_unsupported_tensors = _scrub_trace_for_bundle(
             trace,
@@ -503,6 +520,7 @@ def save(
             trace=trace,
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
+            include_source=include_source,
         )
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
@@ -512,8 +530,10 @@ def save(
             sparse_run=sparse_run_json,
             scrubbed_state=scrubbed_state,
         )
+        _restrict_mode(tmp_path / "manifest.json", 0o600)
         with (tmp_path / "metadata.pkl").open("wb") as handle:
             pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        _restrict_mode(tmp_path / "metadata.pkl", 0o600)
 
         tmp_path.rename(bundle_path)
         if backup_path is not None:
@@ -542,7 +562,7 @@ def save(
         # the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir un-sweepable by
         # ``cleanup_tmp()``) and the backup restore (permanently losing the
         # pre-overwrite bundle under an undocumented ``.bak.<uuid>`` name).
-        _mark_partial(tmp_path, reason=str(exc))
+        _mark_partial(tmp_path, reason=type(exc).__name__)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
@@ -565,7 +585,7 @@ def save(
         # unwinding mid-write; those are re-raised unwrapped below so control
         # flow semantics are preserved, while ordinary exceptions are wrapped
         # in ``TorchLensIOError`` to match the sibling branch above.
-        _mark_partial(tmp_path, reason=str(exc))
+        _mark_partial(tmp_path, reason=type(exc).__name__)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         if isinstance(exc, Exception):
@@ -1179,6 +1199,20 @@ def _load_trace_payload(
 
         python_major_mismatch = _python_major_mismatch(manifest)
         with metadata_path.open("rb") as handle:
+            # Coarse allocation guard for parity with the JSON boundary (B8-16):
+            # every JSON read enforces a byte ceiling, but ``metadata.pkl`` had
+            # none. This bounds an absurd on-disk pickle before it is streamed into
+            # the unpickler; the SafeBundleUnpickler allowlist remains the actual
+            # code-execution defense, and pickle expansion bombs are out of scope
+            # for a file-size cap. The ceiling is generous so no real structural
+            # metadata is refused.
+            metadata_size = os.fstat(handle.fileno()).st_size
+            if metadata_size > _MAX_METADATA_PKL_BYTES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {metadata_path} is {metadata_size} bytes, above "
+                    f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
+                    "structurally implausible artifact."
+                )
             scrubbed_state = _RenameAwareUnpickler(
                 handle,
                 trust_custom_callables=trust_custom_callables,
@@ -1199,16 +1233,27 @@ def _load_trace_payload(
     except (OSError, AttributeError, ImportError, TypeError, ValueError) as exc:
         raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc
 
-    trace = rehydrate_trace(
-        scrubbed_state,
-        manifest,
-        bundle_path,
-        lazy=lazy,
-        map_location=map_location,
-        materialize_nested=materialize_nested,
-        payload_hints=payload_hints,
-        resolved_blobs_dir=resolved_blobs_dir,
-    )
+    try:
+        trace = rehydrate_trace(
+            scrubbed_state,
+            manifest,
+            bundle_path,
+            lazy=lazy,
+            map_location=map_location,
+            materialize_nested=materialize_nested,
+            payload_hints=payload_hints,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
+    except RecursionError as exc:
+        # b4:R27-3 sub-fix: a hostile scrubbed-state object graph deeply nested
+        # enough to blow the C stack during the rehydrate walk must surface as a
+        # typed artifact error, not an uncaught RecursionError that escapes
+        # ``tl.load(path)``. Pairs with the load-walk depth ceiling.
+        raise TorchLensIOError(
+            f"Failed to load bundle at {bundle_path}: metadata nesting exceeded the "
+            "interpreter recursion limit during rehydration."
+        ) from exc
+    _reanchor_visualizer_paths(trace, bundle_path)
     setattr(trace, "_loaded_from_bundle", True)
     setattr(trace, "_source_bundle_manifest_sha256", sha256_of_file(manifest_path))
     setattr(trace, "_source_bundle_path", bundle_path)
@@ -2381,7 +2426,11 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
     bundle_path = Path(path)
     _reject_symlink_path(bundle_path, context="cleanup target")
     removed: list[Path] = []
-    tmp_pattern = f"{bundle_path.name}.tmp.*"
+    # B8-11: the bundle basename is DATA, not a pattern. Escaping it stops glob
+    # metacharacters in a legal filename (e.g. ``job*``) from widening the sweep --
+    # and, crucially, the backup RESTORATION below -- to sibling bundles.
+    escaped_name = glob.escape(bundle_path.name)
+    tmp_pattern = f"{escaped_name}.tmp.*"
     for candidate in bundle_path.parent.glob(tmp_pattern):
         if candidate.is_symlink():
             raise TorchLensIOError(f"Refusing to clean symlink temp directory {candidate}.")
@@ -2397,14 +2446,14 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             stacklevel=2,
         )
 
-    bak_pattern = f"{bundle_path.name}.bak.*"
+    bak_pattern = f"{escaped_name}.bak.*"
     for candidate in bundle_path.parent.glob(bak_pattern):
         if candidate.is_symlink():
             raise TorchLensIOError(f"Refusing to clean symlink backup directory {candidate}.")
         if not candidate.is_dir():
             continue
         if not bundle_path.exists():
-            _restore_backup(candidate, bundle_path)
+            _restore_backup(candidate, bundle_path, warn_on_failure=False)
             if not candidate.exists():
                 removed.append(bundle_path)
             else:
@@ -2972,6 +3021,7 @@ def _build_manifest(
     trace: Trace,
     tensor_entries: list[TensorEntry],
     unsupported_tensors: list[dict[str, str]],
+    include_source: bool = True,
 ) -> Manifest:
     """Create a manifest instance for a finished bundle save.
 
@@ -2983,6 +3033,9 @@ def _build_manifest(
         Persisted tensor entries.
     unsupported_tensors:
         Unsupported tensor records accumulated under ``strict=False``.
+    include_source:
+        When ``False`` the environment-provenance git commit hash is omitted, so
+        ``include_source=False`` also drops the cwd repo's HEAD commit (B8-19).
 
     Returns
     -------
@@ -3015,17 +3068,23 @@ def _build_manifest(
         n_auxiliary_blobs=n_auxiliary_blobs,
         tensors=tensor_entries,
         unsupported_tensors=unsupported_tensors,
-        provenance=_collect_provenance(trace),
+        provenance=_collect_provenance(trace, include_source=include_source),
     )
 
 
-def _collect_provenance(trace: Trace) -> Provenance:
+def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provenance:
     """Collect a best-effort, bounded provenance certificate for one save.
 
     Parameters
     ----------
     trace:
         Source trace whose already-recorded capture facts should be certified.
+    include_source:
+        When ``False`` the cwd repo's HEAD commit hash is omitted (B8-19): the
+        manifest otherwise embedded the git commit of whatever repository contained
+        the working directory at save time, with no opt-out. Tying it to the
+        existing source-embedding flag lets ``include_source=False`` drop this
+        environment detail along with the source it already withholds.
 
     Returns
     -------
@@ -3093,7 +3152,7 @@ def _collect_provenance(trace: Trace) -> Provenance:
         rng_state_digests=rng_digests,
         input_hash=input_hash,
         model_structure_hash=model_structure_hash,
-        git_commit_hash=_git_commit_hash(Path.cwd()),
+        git_commit_hash=_git_commit_hash(_torchlens_package_dir()) if include_source else None,
     )
 
 
@@ -3126,13 +3185,27 @@ def _json_ready_provenance_value(value: Any) -> Any:
     return str(value)
 
 
+def _torchlens_package_dir() -> Path:
+    """Return the torchlens package directory (provenance root for the git probe)."""
+
+    return Path(__file__).resolve().parent.parent
+
+
 def _git_commit_hash(cwd: Path) -> str | None:
     """Return the Git commit for ``cwd`` with a short best-effort timeout.
+
+    R21-2: the provenance git commit is resolved from the TORCHLENS package
+    directory, not ``Path.cwd()``. Stamping the working directory's repository
+    recorded the USER's unrelated repo commit (a privacy leak) and made the same
+    capture saved from two directories differ (an ambient-environment dependence in a
+    supposedly portable artifact). Resolving from the package dir yields torchlens's
+    own commit for a dev/editable install and ``None`` for a released wheel (whose
+    ``torchlens_version`` already identifies it) -- deterministic either way.
 
     Parameters
     ----------
     cwd:
-        User working directory active at save time.
+        Directory whose repository HEAD is probed (the torchlens package dir).
 
     Returns
     -------
@@ -3649,16 +3722,94 @@ def _mark_partial(tmp_path: Path, *, reason: str | None = None) -> None:
     tmp_path:
         Temporary bundle directory path.
     reason:
-        Optional failure reason string to persist alongside the sentinel.
+        Optional failure reason string to persist alongside the sentinel. Callers
+        pass a scrubbed value (the exception TYPE name, not ``str(exc)``, whose
+        message can carry object reprs / paths / values); this sink additionally
+        length-bounds it as a belt (B8-12) so recovery debris never grows unbounded
+        or leaks a large payload.
     """
 
     try:
         if tmp_path.exists():
             (tmp_path / PARTIAL_SENTINEL).write_text("", encoding="utf-8")
             if reason is not None:
-                (tmp_path / REASON_SENTINEL).write_text(reason, encoding="utf-8")
+                bounded = reason[:_MAX_PARTIAL_REASON_CHARS]
+                (tmp_path / REASON_SENTINEL).write_text(bounded, encoding="utf-8")
     except OSError:
         return
+
+
+def _reanchor_visualizer_paths(trace: Trace, bundle_path: Path) -> None:
+    """Contain every loaded ``visualizer_path`` inside the bundle's own directory.
+
+    ``visualizer_path`` is the one bundle-file field that bypassed
+    ``resolve_bundle_blob_path`` + ``_reject_symlink_path``: it was persisted as an
+    absolute path and flowed verbatim into Graphviz ``image=`` on ``.draw()`` with
+    only a ``.png`` suffix check. A hostile bundle could therefore name ANY local
+    ``.png`` and have ``tl.load(evil).draw()`` disclose it (B8-9).
+
+    On load we discard whatever directory the bundle claimed and re-anchor to
+    ``<bundle>/visualizers/<basename>``, then containment-check that it resolves
+    inside the bundle's own ``visualizers/`` directory and is a real file. Anything
+    that escapes, is missing, or sits behind a symlinked ``visualizers/`` is dropped
+    to ``None`` -- the render then simply omits the thumbnail.
+
+    Parameters
+    ----------
+    trace:
+        Freshly rehydrated trace whose layer ``visualizer_path`` fields are untrusted.
+    bundle_path:
+        Root of the loaded bundle.
+    """
+
+    layer_list = getattr(trace, "layer_list", None)
+    if not layer_list:
+        return
+    visualizers_dir = bundle_path / "visualizers"
+    if visualizers_dir.is_symlink() or not visualizers_dir.is_dir():
+        for layer in layer_list:
+            if getattr(layer, "visualizer_path", None) is not None:
+                layer.visualizer_path = None
+        return
+    resolved_root = visualizers_dir.resolve()
+    for layer in layer_list:
+        claimed = getattr(layer, "visualizer_path", None)
+        if not isinstance(claimed, str) or not claimed:
+            continue
+        candidate = (visualizers_dir / Path(claimed).name).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            layer.visualizer_path = None
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            layer.visualizer_path = None
+            continue
+        layer.visualizer_path = str(candidate)
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a saved bundle path's permissions (POSIX only).
+
+    ``mkdir``/``open`` honor the ambient umask, so a bundle written under the common
+    umask 002 left its directories and metadata sidecars group-writable/readable even
+    though the safetensors blobs are 0600 (B8-10). This restores parity. Best-effort:
+    a filesystem that ignores mode bits is not a save failure.
+
+    Parameters
+    ----------
+    path:
+        Bundle directory or file to tighten.
+    mode:
+        Target permission bits (``0o700`` for directories, ``0o600`` for files).
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def _remove_path(path: Path) -> None:
@@ -3678,8 +3829,18 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
+def _restore_backup(
+    backup_path: Path, bundle_path: Path, *, warn_on_failure: bool = True
+) -> bool:
     """Best-effort restore an overwritten bundle after a failed replacement.
+
+    On a DOUBLE fault (the save failed AND this restore also fails -- permissions,
+    disk-full, a cross-device backup), the user's previous artifact is gone from its
+    canonical ``bundle_path`` but still exists under the ``.bak.<uuid>`` backup name.
+    Silently swallowing that left the prior artifact stranded under a hidden name the
+    error never mentioned; disclose the backup path so it is recoverable (matching the
+    save handler's stated intent). No behavior change on the single-fault path, where
+    the restore succeeds.
 
     Parameters
     ----------
@@ -3687,9 +3848,26 @@ def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
         Backup path holding the previous bundle contents.
     bundle_path:
         Final bundle path to restore.
+    warn_on_failure:
+        Emit a warning naming the stranded backup when the restore fails. Callers that
+        do their own disclosure (``cleanup_tmp``) pass ``False``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the backup was restored onto ``bundle_path``.
     """
 
     try:
         backup_path.rename(bundle_path)
-    except OSError:
-        return
+    except OSError as exc:
+        if warn_on_failure:
+            warnings.warn(
+                f"Could not restore the previous bundle from its backup after a failed "
+                f"save ({exc}). Your prior artifact is NOT lost: it remains at "
+                f"{backup_path}. Move it back to {bundle_path} to recover it.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return False
+    return True
