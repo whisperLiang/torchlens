@@ -18,6 +18,21 @@ Design rationale:
     re-wrapping / un-wrapping on every ``trace`` call.  All shared
     state lives here so wrappers never need to import heavy torchlens modules
     just to check the toggle.
+
+Access policy (disputed-r2 b5/R45, exempt-by-declaration):
+    This module is the sanctioned shared toggle substrate. Direct READS of its
+    published globals from other torchlens modules — including the bare
+    ``_state._logging_enabled`` / ``_state._active_trace`` loads on the per-op
+    wrapper hot path — are the documented design, not private-member
+    reach-ins, and are exempt from private-access lint ratchets by this
+    declaration. The exemption is pinned no-growth by
+    ``tests/test_state_access_ratchet.py``: new cross-module access sites may
+    not silently accumulate. NEW code should prefer the atomic
+    ``active_capture()`` snapshot below over paired raw reads. Multi-field
+    session-state TRANSITIONS (enable/disable, session setup/teardown) belong
+    in state-owned functions and context managers here (``active_logging``,
+    ``pause_logging``, ``reset_capture_runtime_context``, ...), not in
+    external assignment clusters.
 """
 
 import threading
@@ -787,3 +802,24 @@ def pause_logging() -> _PauseLogging:
         - ``activation_transform``: applies user post-processing without logging
     """
     return _PauseLogging()
+
+
+def active_capture() -> "tuple[Trace | None, bool]":
+    """Return one coherent ``(active trace, logging enabled)`` snapshot.
+
+    The SANCTIONED NEW-CODE spelling for reading the capture toggle pair
+    (module access policy above): reads ``_logging_enabled`` BEFORE
+    ``_active_trace``, so under the ``active_logging`` ordering invariant
+    (trace published before the toggle flips; toggle cleared before the trace)
+    an enabled snapshot always carries the live trace, never a stale or
+    ``None`` one. Existing raw reads are exempt by declaration and are not
+    migrated; hot wrapper paths may keep single-field raw loads.
+
+    Returns
+    -------
+    tuple[Trace | None, bool]
+        Active trace (or ``None``) and whether logging is currently enabled.
+    """
+
+    enabled = _logging_enabled
+    return _active_trace, enabled
