@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
-from ..utils.display import atomic_write_text
+from ..utils.display import atomic_write_text, user_stacklevel
 from ._render_common import *
 from ._render_edges import *
 from ._render_flow import *
@@ -485,7 +485,8 @@ def _resolve_forward_context(
             RANK_LAYOUT_NOTICE.format(
                 cost=layout_cost,
                 threshold=RANK_LAYOUT_COST_THRESHOLD,
-            )
+            ),
+            stacklevel=user_stacklevel(),
         )
     _vprint(
         trace,
@@ -685,7 +686,8 @@ def _finalize_forward_ir(
                     cost=context.layout_cost,
                     budget=SIBLING_ORDER_VERIFY_LAYOUT_BUDGET,
                     threshold=RANK_LAYOUT_COST_THRESHOLD,
-                )
+                ),
+                stacklevel=user_stacklevel(),
             )
             sibling_order_chains = ()
         if sibling_order_chains:

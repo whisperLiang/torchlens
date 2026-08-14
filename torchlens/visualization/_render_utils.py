@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import graphviz
 
 from .._errors import InvalidArgumentError
+from ..utils.display import user_stacklevel
 
 #: Live viewer child handles (r-b6 R40-1). Retained so every launch can reap
 #: previously-exited viewers; without this the discarded ``Popen`` handle left
@@ -400,10 +401,14 @@ def render_dot_to_file(
             or (
                 f"Graphviz render timed out ({timeout_seconds}s). "
                 f"DOT source saved to '{source_path}'."
-            )
+            ),
+            stacklevel=user_stacklevel(),
         )
     except subprocess.CalledProcessError as exc:
-        warnings.warn(f"Graphviz render failed: {exc.stderr.decode()}")
+        warnings.warn(
+            f"Graphviz render failed: {exc.stderr.decode()}",
+            stacklevel=user_stacklevel(),
+        )
     finally:
         if render_succeeded and os.path.exists(source_path):
             os.remove(source_path)

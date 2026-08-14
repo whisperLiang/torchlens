@@ -15,7 +15,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from ..._errors import InvalidArgumentError
-from ...utils.display import atomic_write_text
+from ...utils.display import atomic_write_text, user_stacklevel
 from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
@@ -749,7 +749,8 @@ def render_rank_layout(
         warnings.warn(
             f"Graph has {num_rank_nodes} nodes. PDF/PNG rendering may produce "
             f"empty output at this scale. Consider using vis_fileformat='svg' "
-            f"for large graphs; SVG files are zoomable in any browser."
+            f"for large graphs; SVG files are zoomable in any browser.",
+            stacklevel=user_stacklevel(),
         )
 
     source_path = f"{vis_outpath}.dot"
@@ -905,7 +906,8 @@ def _run_neato_with_fallbacks(
             raise
         warnings.warn(
             "neato spline routing timed out; retrying with straight-line edges "
-            "(-Gsplines=line). The graph is rendered with straight edges."
+            "(-Gsplines=line). The graph is rendered with straight edges.",
+            stacklevel=user_stacklevel(),
         )
         result = _run_neato(
             rendered_path=rendered_path,
@@ -926,7 +928,8 @@ def _run_neato_with_fallbacks(
             warnings.warn(
                 "neato layout exceeded the rtree coordinate limit; retrying with "
                 "straight-line edges and down-scaled pinned coordinates so the "
-                "canvas fits. Geometry is preserved (uniform scale)."
+                "canvas fits. Geometry is preserved (uniform scale).",
+                stacklevel=user_stacklevel(),
             )
             atomic_write_text(source_path, rescaled)
             result = _run_neato(
