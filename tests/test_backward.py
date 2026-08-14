@@ -2336,5 +2336,5 @@ def test_gradient_validation_tolerances_are_named_constants() -> None:
     assert rf_params["empirical_adjoint_rtol"].default == LAYER_GRAD_VALIDATION_RTOL
 
     # The elementwise pair is 10x tighter than the reduction pair by design.
-    assert LAYER_GRAD_VALIDATION_RTOL == pytest.approx(PARAM_GRAD_VALIDATION_RTOL / 10)
-    assert LAYER_GRAD_VALIDATION_ATOL == pytest.approx(PARAM_GRAD_VALIDATION_ATOL / 10)
+    assert pytest.approx(PARAM_GRAD_VALIDATION_RTOL / 10) == LAYER_GRAD_VALIDATION_RTOL
+    assert pytest.approx(PARAM_GRAD_VALIDATION_ATOL / 10) == LAYER_GRAD_VALIDATION_ATOL
