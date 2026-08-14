@@ -917,6 +917,148 @@ def test_backward_validation_zero_param_grads_still_runs_layer_grad_validation(
     assert calls == 1
 
 
+class _NaNLossModel(nn.Module):
+    """Model whose output is entirely NaN, making every gradient NaN."""
+
+    def __init__(self) -> None:
+        """Initialize the model."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return an all-NaN output.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            All-NaN tensor of the linear output's shape.
+        """
+
+        return self.lin(x) * float("nan")
+
+
+class _ZeroLossModel(nn.Module):
+    """Model whose output is annihilated, making every gradient exactly zero."""
+
+    def __init__(self) -> None:
+        """Initialize the model."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return an all-zero output.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            All-zero tensor of the linear output's shape.
+        """
+
+        return self.lin(x) * 0.0
+
+
+def test_backward_validation_all_nan_grads_is_not_pass() -> None:
+    """An all-NaN stock gradient census must be unverifiable, never PASS.
+
+    A NaN loss makes every stock AND candidate gradient all-NaN, so every
+    ``equal_nan=True`` comparison passes vacuously with ZERO numeric detection
+    power -- the exact degenerate-evidence shape the ABORTED_NONFINITE doctrine
+    refuses elsewhere. Before the degenerate-evidence guard this reported
+    ``True`` (deephunt finding H6).
+    """
+
+    model = _NaNLossModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+
+
+def test_backward_validation_all_zero_grads_is_not_pass() -> None:
+    """An all-zero stock gradient census must be unverifiable, never PASS.
+
+    A ``* 0.0`` loss zeroes every gradient buffer, so a capture that filled its
+    gradient records with zeros -- a classic bug shape -- is indistinguishable
+    from a correct one; the comparison has zero detection power (deephunt
+    finding M12, companion to H6).
+    """
+
+    model = _ZeroLossModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+
+
+def test_backward_validation_partial_nan_grads_still_pass() -> None:
+    """A PARTIALLY NaN census keeps its detection power and still passes.
+
+    The degenerate-evidence guard is TOTAL-degeneracy only: finite nonzero
+    gradients elsewhere in the census retain real comparison power, and the
+    NaN-pattern-agreement doctrine (``equal_nan=True``) continues to govern the
+    NaN positions. Guards the guard against over-firing (the L15 pressure that
+    historically breeds disarm-style exemptions).
+    """
+
+    class PartialNaNModel(nn.Module):
+        """Model with one NaN-gradient parameter and one healthy linear."""
+
+        def __init__(self) -> None:
+            """Initialize the model."""
+
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.scale = nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return the linear output plus a NaN-gradient term.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Linear output with a NaN contribution on ``scale`` only.
+            """
+
+            nan_term = (self.scale * 0.0) * torch.tensor(float("inf"))
+            return self.lin(x) + nan_term
+
+    model = PartialNaNModel().eval()
+    assert (
+        backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+        is True
+    )
+
+
 def test_one_hot_index_perturbation_uses_valid_alternate_class() -> None:
     """One-hot index validation should perturb within ``num_classes``."""
 
