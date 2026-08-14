@@ -8,7 +8,8 @@
 
 ## arg_positions.py
 - Main entry point: `extract_tensors_and_params(args, kwargs, func_name)`.
-- Lookup order: `FUNC_ARG_SPECS` static table -> `_DYNAMIC_SPEC_CACHE` -> BFS fallback.
+- Lookup order: `FUNC_ARG_SPECS` static table -> `_state._dynamic_arg_specs` dynamic cache
+  (uncacheable entries marked with the `DYNAMIC_SPEC_UNCACHEABLE` sentinel) -> BFS fallback.
 - `ArgSpec` stores tensor arg indexes, tensor kwarg names, param arg indexes, and param kwarg names.
 - Keep keyword handling accurate; stale entries can hide graph parents.
 

@@ -379,7 +379,7 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   path, where `data_ptr()` on a FakeTensor is a torch-flagged bug.
 - `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
   failures.
-- Fast-path module decoration skips `_handle_module_entry`; alignment state must be
+- Fast-path module decoration skips `_record_module_entry_metadata`; alignment state must be
   replicated manually.
 - `get_memory_amount()` must use `pause_logging()` because `nelement()` and
   `element_size()` are decorated.
