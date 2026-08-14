@@ -247,9 +247,7 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         original_group = "_".join(sorted(original_barcodes))
         remapped_barcodes = [remap_barcode_text(barcode) for barcode in original_barcodes]
         remapped_group = "_".join(sorted(remapped_barcodes))
-        record._param_barcodes = [
-            remap_barcode_text(barcode) for barcode in original_barcodes
-        ]
+        record._param_barcodes = [remap_barcode_text(barcode) for barcode in original_barcodes]
         equivalence_class = getattr(record, "equivalence_class", None)
         if isinstance(equivalence_class, str) and original_group:
             record.equivalence_class = equivalence_class.replace(original_group, remapped_group)
@@ -257,9 +255,16 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             record.equivalence_class = remap_barcode_text(equivalence_class)
         if isinstance(equivalence_class, str) and isinstance(record.equivalence_class, str):
             equivalence_class_map[equivalence_class] = record.equivalence_class
-        parent_param_ops = getattr(record, "parent_param_ops", None)
+        # Spec gate FIRST: Layer delegates `parent_param_ops` per pass and its
+        # multi-pass accessor raises InvalidArgumentError (a ValueError, which
+        # getattr does not swallow), so probing before the gate broke every
+        # save of a multi-pass trace. Layer's PORTABLE_STATE_SPEC has no
+        # `parent_param_ops` row; only Op-side records reach the getattr.
         record_spec = getattr(type(record), "PORTABLE_STATE_SPEC", {})
-        if isinstance(parent_param_ops, dict) and "parent_param_ops" in record_spec:
+        parent_param_ops = (
+            getattr(record, "parent_param_ops", None) if "parent_param_ops" in record_spec else None
+        )
+        if isinstance(parent_param_ops, dict):
             record.parent_param_ops = {
                 remap_barcode_text(key): value for key, value in parent_param_ops.items()
             }
@@ -310,8 +315,7 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         state["grad_fn_logs"] = remapped_logs
     state["grad_fn_order"] = [remap_grad_id(grad_id) for grad_id in grad_fn_order]
     state["backward_root_grad_fn_object_ids"] = [
-        remap_grad_id(grad_id)
-        for grad_id in (state.get("backward_root_grad_fn_object_ids") or ())
+        remap_grad_id(grad_id) for grad_id in (state.get("backward_root_grad_fn_object_ids") or ())
     ]
     for record in (*ops, *layers):
         record.grad_fn_object_id = remap_grad_id(getattr(record, "grad_fn_object_id", None))

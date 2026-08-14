@@ -364,9 +364,7 @@ def test_content_hash_is_address_and_insertion_order_independent() -> None:
     right_b = _TiedReprKey("b")
 
     assert tl.hash.content(left_a) == tl.hash.content(right_a)
-    assert tl.hash.content({left_a: 1, left_b: 2}) == tl.hash.content(
-        {right_b: 2, right_a: 1}
-    )
+    assert tl.hash.content({left_a: 1, left_b: 2}) == tl.hash.content({right_b: 2, right_a: 1})
 
 
 def test_loop_signature_sorts_sets_by_emitted_tokens() -> None:
@@ -565,3 +563,29 @@ def test_computed_record_fields_are_not_portable() -> None:
     for record_type, field_names in expected_drops.items():
         for field_name in field_names:
             assert record_type.FIELD_POLICY[field_name].portable_policy is FieldPolicy.DROP
+
+
+def test_save_succeeds_for_multi_pass_recurrent_trace(tmp_path: Path) -> None:
+    """Saving a trace with a multi-pass Layer must not trip the scrub probe.
+
+    Regression: the identity scrub probed ``record.parent_param_ops`` before
+    its PORTABLE_STATE_SPEC gate; a multi-pass Layer's per-pass delegation
+    raises InvalidArgumentError (a ValueError getattr does not swallow), so
+    EVERY ``tl.save`` of a recurrent model died at the bundle writer.
+    """
+
+    class _Recurrent(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = torch.nn.Linear(2, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for _ in range(3):
+                x = torch.relu(self.linear(x))
+            return x
+
+    trace = tl.trace(_Recurrent(), torch.ones(1, 2))
+    assert any(layer.num_passes > 1 for layer in trace.layers.values())
+    path = tmp_path / "recurrent.tlspec"
+    tl.save(trace, path)
+    assert tl.load(path).num_ops == trace.num_ops
