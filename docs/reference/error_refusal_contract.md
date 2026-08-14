@@ -97,6 +97,7 @@ add names to the top-level `torchlens` namespace:
 | `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
 | `input_tree_cycle` | Model-input tree contains a self-referential container (`InvalidArgumentError`) | Remove the container reference cycle from the model input |
 | `input_tree_depth_exceeded` | Model-input tree nesting exceeds the input-boundary depth ceiling (`InvalidArgumentError`) | Flatten the nested input containers before tracing |
+| `input_tree_stack_exhausted` | Walking the model-input tree exhausted the Python stack budget before the depth ceiling — capture was entered with most of the interpreter stack already consumed (`InvalidArgumentError`) | Enter capture from a shallower call stack or raise `sys.setrecursionlimit()` |
 | `intervention_predicate_type_invalid` | `intervene` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass `tl.when(...)`, another predicate, or `None` |
 | `intervention_action_direction_invalid` | Predicate-side intervention action names an unknown direction (`ArgumentTypeError`; historically `TypeError`, so the live capture path converts it to `PredicateError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_action_type_invalid` | Intervention action has an unsupported type | Pass a decision, helper, callable, or `None` |
@@ -133,6 +134,8 @@ add names to the top-level `torchlens` namespace:
 | `option_group_keyword_conflict` | Flat draw kwarg and `VisualizationOptions` field set the same option (`KeywordConflictError`; historically `TypeError`) | Use one option style |
 | `option_group_type_invalid` | Grouped option has the wrong object type | Pass the documented options class |
 | `output_device_invalid` | Output device policy is unknown | Choose `same`, `cpu`, or `cuda` |
+| `output_tree_cycle` | Model-output tree contains a self-referential container, so its occurrence-weighted tensor sum is undefined in `validate_backward_pass` (`InvalidArgumentError`) | Remove the container reference cycle from the model output |
+| `output_tree_depth_exceeded` | Model-output tree nesting exceeds the output-boundary depth ceiling in `validate_backward_pass` (`InvalidArgumentError`) | Flatten the nested output containers before validating |
 | `record_not_bound` | Record's owning Trace reference is gone | Keep the owning Trace alive |
 | `recording_events_not_retained` | `to_trace()` on a disk-recovered Recording | Convert the in-session Recording |
 | `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |

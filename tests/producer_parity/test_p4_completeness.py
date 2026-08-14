@@ -505,7 +505,11 @@ _GUARDED_CALLEES = frozenset(
     {
         "amend_lookback_retention",
         "amend_graph_edge_insertion",
-        "amend_raw_hook_intervention",  # retired family: must stay at ZERO sites (8858793e)
+        # Retired by 8858793e, deliberately revived at ONE site by 56f8a29e:
+        # the recontainer-hygiene skip swallowed genuine user raw-hook
+        # replacements, so genuinely-new traced replacements mint the raw-hook
+        # amendment again (evidence only; no replay exemption granted).
+        "amend_raw_hook_intervention",
         "amend_module_exit_intervention",
         "amend_module_boundary_retention",
         "amend_output_parent_promotion",
@@ -515,13 +519,14 @@ _GUARDED_CALLEES = frozenset(
         "replace_op_event",  # must stay at ZERO sites in these files
     }
 )
-# 6 torch sites (raw_hook_intervention's wrapped_hook site retired by
-# 8858793e) + 2 preview rebind sites (jax, tinygrad) + the ONE shared
-# preview_output_parent_mark site in backends/_finalize.py (the tf x2 / mlx /
-# paddle per-backend mark copies were hoisted there by R46-1, 5290caa7) + the
-# tf module_exit_intervention site fire in backends/tf/interventions.py
-# (typed amendment lane, ef08d2a9).
-_EXPECTED_SITE_COUNT = 10
+# 7 torch sites (raw_hook_intervention's wrapped_hook site retired by
+# 8858793e, then revived narrowly by 56f8a29e -- genuine user raw-hook
+# replacements mint the amendment again) + 2 preview rebind sites (jax,
+# tinygrad) + the ONE shared preview_output_parent_mark site in
+# backends/_finalize.py (the tf x2 / mlx / paddle per-backend mark copies
+# were hoisted there by R46-1, 5290caa7) + the tf module_exit_intervention
+# site fire in backends/tf/interventions.py (typed amendment lane, ef08d2a9).
+_EXPECTED_SITE_COUNT = 11
 
 
 def _call_name(node: ast.Call) -> str | None:

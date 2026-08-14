@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -69,10 +70,14 @@ def _dot(trace: tl.Trace, **kwargs: object) -> str:
 
 
 @pytest.fixture(scope="module")
-def split_trace() -> tl.Trace:
-    """Capture the split-site fixture once."""
+def split_trace() -> Iterator[tl.Trace]:
+    """Capture the split-site fixture once, releasing it at module teardown."""
 
-    return tl.trace(_SplitSiteModel().eval(), torch.randn(1, 8, 8, 8))
+    trace = tl.trace(_SplitSiteModel().eval(), torch.randn(1, 8, 8, 8))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def test_rolled_collapsed_box_excludes_surfaced_exit_layers(split_trace: tl.Trace) -> None:

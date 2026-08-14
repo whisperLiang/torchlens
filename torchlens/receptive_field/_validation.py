@@ -583,6 +583,8 @@ def _exact_box_adjoint_violations(
         return _box_membership_contains(reverse, complete_unit)
 
     def _violation(index: tuple[int, ...]) -> ReceptiveFieldViolation:
+        """Build the violation record for a corner that fails reverse membership."""
+
         return ReceptiveFieldViolation(
             io_role=descriptor.io_role,
             index=index,

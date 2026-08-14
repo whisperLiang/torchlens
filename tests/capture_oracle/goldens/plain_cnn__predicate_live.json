@@ -155,15 +155,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "populated",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -307,15 +301,9 @@
             "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
-            "policy.must_keep_topology": "populated",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "populated",
             "policy.save_grad": "defaulted_false",
             "policy.save_mode": "populated",
             "policy.save_payload": "populated",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
             "predicate_matched": "populated",
             "raw_index": "populated",
             "record_context": "unknown",
@@ -607,20 +595,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 453492,
+      "python_peak_memory_median_bytes": 486603,
       "sample_count": 3,
       "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 49.1108099995472
+      "wall_time_median_ms": 195.3135080038919
     }
   },
   "sha256_chunks": [
-    "d9322f36",
-    "7aa2bd65",
-    "e1b366d1",
-    "bd3ee529",
-    "f97b8be9",
-    "d0eafe97",
-    "cf91014a",
-    "d89a22ce"
+    "f4214723",
+    "09ea4159",
+    "c868c451",
+    "b06ed7a8",
+    "59ec9146",
+    "f806157b",
+    "5d30e473",
+    "5ae341de"
   ]
 }
