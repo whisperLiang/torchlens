@@ -25,6 +25,7 @@ Each test FAILS against the pre-fix behavior:
 
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import sys
@@ -35,7 +36,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import bundle as bundle_mod
+from torchlens._io import bundle as bundle_mod, manifest as manifest_mod
 from torchlens._io.manifest import Manifest
 from torchlens.errors import TorchLensIOError
 
@@ -178,3 +179,48 @@ def test_legacy_bundle_metadata_pkl_ceiling_refuses_oversize(tmp_path: Path, mon
     monkeypatch.setattr(bundle_mod, "_MAX_METADATA_PKL_BYTES", 16)
     with pytest.raises(TorchLensIOError, match="ceiling"):
         bundle_mod._load_unified_bundle(legacy_dir)
+
+
+# --------------------------------------------------------------------------- #
+# MED4: manifest entry-count ceiling + duplicate blob identity refusal         #
+# --------------------------------------------------------------------------- #
+
+
+def _saved_manifest_data(tmp_path: Path) -> dict:
+    spec = _save(tmp_path)
+    return json.loads((spec / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_manifest_refuses_duplicate_blob_ids(tmp_path: Path) -> None:
+    """Two tensor entries sharing one blob_id refuse at parse.
+
+    Fail-before: duplicates silently last-won in the load-side entry indexes
+    while eager verification did per-entry sha256 + safetensors decode work,
+    so a KB manifest with millions of same-blob entries bought hours of CPU.
+    """
+
+    data = _saved_manifest_data(tmp_path)
+    data["tensors"] = [*data["tensors"], dict(data["tensors"][0])]
+    with pytest.raises(TorchLensIOError, match="duplicate blob_id"):
+        Manifest.from_dict(data)
+
+
+def test_manifest_refuses_duplicate_relative_paths(tmp_path: Path) -> None:
+    """Two tensor entries pointing at one blob file refuse at parse."""
+
+    data = _saved_manifest_data(tmp_path)
+    forged = dict(data["tensors"][0])
+    forged["blob_id"] = "zzzz-forged"
+    data["tensors"] = [*data["tensors"], forged]
+    with pytest.raises(TorchLensIOError, match="duplicate relative_path"):
+        Manifest.from_dict(data)
+
+
+def test_manifest_refuses_entry_count_above_ceiling(tmp_path: Path, monkeypatch) -> None:
+    """An entry list above the structural ceiling refuses before parsing."""
+
+    data = _saved_manifest_data(tmp_path)
+    assert data["tensors"], "fixture bundle must carry at least one tensor entry"
+    monkeypatch.setattr(manifest_mod, "_MAX_MANIFEST_TENSOR_ENTRIES", len(data["tensors"]) - 1)
+    with pytest.raises(TorchLensIOError, match="ceiling"):
+        Manifest.from_dict(data)

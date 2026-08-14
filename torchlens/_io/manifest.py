@@ -37,6 +37,13 @@ LOGGER = logging.getLogger(__name__)
 
 _CODEC_METADATA_TUPLE_TAG = "__torchlens_codec_tuple_v1__"
 
+# Ceiling on manifest tensor entries. Load paths do per-entry work (sha256 of
+# the referenced blob file plus a safetensors decode under ``lazy=False``), so
+# an unbounded entry list let a KB-sized hostile manifest with millions of
+# entries sharing one blob buy hours of CPU. Generous: real bundles carry a
+# few entries per layer.
+_MAX_MANIFEST_TENSOR_ENTRIES = 1_000_000
+
 
 @dataclass(frozen=True)
 class TensorEntry:
@@ -504,7 +511,30 @@ class Manifest:
         raw_tensors = data.get("tensors")
         if not isinstance(raw_tensors, list):
             raise TorchLensIOError("Manifest field 'tensors' must be a list.")
+        if len(raw_tensors) > _MAX_MANIFEST_TENSOR_ENTRIES:
+            raise TorchLensIOError(
+                f"Manifest declares {len(raw_tensors)} tensor entries, above the "
+                f"{_MAX_MANIFEST_TENSOR_ENTRIES}-entry ceiling; refusing a "
+                "structurally implausible artifact."
+            )
         tensors = [TensorEntry.from_dict(entry) for entry in raw_tensors]
+        # The save path writes exactly one blob file per entry, so duplicate
+        # identities are forgeries: dup blob_ids silently last-win in the
+        # load-side entry indexes, and dup relative_paths amplify per-entry
+        # verification work against one file.
+        seen_blob_ids: set[str] = set()
+        seen_relative_paths: set[str] = set()
+        for entry in tensors:
+            if entry.blob_id in seen_blob_ids:
+                raise TorchLensIOError(
+                    f"Manifest tensor entries duplicate blob_id {entry.blob_id!r}."
+                )
+            if entry.relative_path in seen_relative_paths:
+                raise TorchLensIOError(
+                    f"Manifest tensor entries duplicate relative_path {entry.relative_path!r}."
+                )
+            seen_blob_ids.add(entry.blob_id)
+            seen_relative_paths.add(entry.relative_path)
 
         unsupported_tensors = _validate_unsupported_tensors(data.get("unsupported_tensors"))
         raw_provenance = data.get("provenance")
