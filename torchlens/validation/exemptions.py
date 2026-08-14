@@ -663,6 +663,8 @@ def _setitem_destination_coverage_is_total(
         return False
     if selected.numel() != destination.numel():
         return False
+    if not _index_positions_cover_destination_exactly(destination, index):
+        return False
     if isinstance(replacement, torch.Tensor):
         return tuple(selected.shape) == tuple(replacement.shape)
     return True
@@ -704,6 +706,50 @@ def _setitem_index_targets_are_unique(index: Any) -> bool:
             continue
         return False
     return True
+
+
+def _index_positions_cover_destination_exactly(
+    destination: torch.Tensor,
+    index: Any,
+) -> bool:
+    """Return whether ``destination[index]`` addresses every element exactly once.
+
+    Value-based uniqueness (``torch.unique`` on raw index values) is blind to
+    negative-index aliasing: ``0`` and ``-2`` are distinct VALUES that address
+    the SAME position on a length-2 dim, so a "fully overwritten" proof counted
+    a full overwrite while an element survived with its prior value. Indexing
+    an identity-POSITION tensor with the saved index makes torch's own indexing
+    semantics normalize negatives, slices, ellipsis, and boolean masks exactly;
+    requiring the selected positions to be unique and to number the whole
+    destination is the exact single-coverage proof.
+
+    Parameters
+    ----------
+    destination:
+        Destination tensor of the write.
+    index:
+        Saved index argument (``__setitem__`` index or ``index_put`` indices
+        tuple).
+
+    Returns
+    -------
+    bool
+        True only when the index selects each destination position exactly
+        once and selects all of them. Any indexing failure returns False so
+        callers fail closed.
+    """
+
+    try:
+        positions = torch.arange(destination.numel(), device=destination.device).reshape(
+            destination.shape
+        )
+        covered = positions[index]
+    except (IndexError, TypeError, RuntimeError):
+        return False
+    flattened = covered.reshape(-1)
+    if int(flattened.numel()) != int(destination.numel()):
+        return False
+    return int(torch.unique(flattened).numel()) == int(destination.numel())
 
 
 def _tensor_is_integer_index(tensor: torch.Tensor) -> bool:
@@ -865,7 +911,9 @@ def _index_put_destination_is_fully_overwritten(
     # count -- duplicates would match the numel without covering everything.
     if not _index_put_indices_are_unique(index):
         return False
-    return int(selected.numel()) == int(destination.numel())
+    if int(selected.numel()) != int(destination.numel()):
+        return False
+    return _index_positions_cover_destination_exactly(destination, index)
 
 
 def _index_put_indices_are_unique(index: tuple[Any, ...]) -> bool:

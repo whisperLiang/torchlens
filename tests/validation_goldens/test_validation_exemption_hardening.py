@@ -969,6 +969,60 @@ class _ZeroLossModel(nn.Module):
         return self.lin(x) * 0.0
 
 
+def test_setitem_overwrite_proof_rejects_negative_index_aliasing() -> None:
+    """Negative advanced indices must be normalized before the coverage proof.
+
+    ``dest[tensor([0, -2])] = repl`` on a length-2 dim addresses element 0
+    TWICE: raw values 0 and -2 are distinct to ``torch.unique`` but alias the
+    same position, so element 1 survives with its prior value while the proof
+    counted a full overwrite (deephunt finding H1). The positional proof
+    indexes an identity-position tensor with the saved index, so torch's own
+    indexing semantics normalize negatives, slices, and masks exactly.
+    """
+
+    from torchlens.validation.exemptions import _setitem_destination_coverage_is_total
+
+    dest = torch.tensor([10.0, 20.0])
+    aliasing = (dest, torch.tensor([0, -2]), torch.tensor([1.0, 2.0]))
+    assert not _setitem_destination_coverage_is_total(dest, aliasing)
+
+    # Positive controls: genuine full single-coverage stays exempt, including
+    # through negative spellings that cover distinct positions.
+    plain = (dest, torch.tensor([0, 1]), torch.tensor([1.0, 2.0]))
+    assert _setitem_destination_coverage_is_total(dest, plain)
+    negative_full = (dest, torch.tensor([1, -2]), torch.tensor([1.0, 2.0]))
+    assert _setitem_destination_coverage_is_total(dest, negative_full)
+
+
+def test_index_put_overwrite_proof_rejects_negative_index_aliasing() -> None:
+    """The ``index_put`` full-overwrite proof has the same negative-index hole.
+
+    ``torch.index_put(dest, (tensor([0, -2]),), values)`` on a length-2 dim
+    passes value-uniqueness and total-coverage while element 1 survives
+    (deephunt finding H2).
+    """
+
+    from torchlens.validation.exemptions import _index_put_destination_is_fully_overwritten
+
+    dest = torch.tensor([10.0, 20.0])
+    aliasing_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([0, -2]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert not _index_put_destination_is_fully_overwritten(dest, aliasing_layer)
+
+    plain_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([0, 1]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert _index_put_destination_is_fully_overwritten(dest, plain_layer)
+    negative_full_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([1, -2]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert _index_put_destination_is_fully_overwritten(dest, negative_full_layer)
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 
