@@ -592,6 +592,7 @@ def derive_merge(
     # 2. Group table from the recorded memberships (rank cores are authority).
     group_members: dict[tuple[str, int], tuple[int, ...]] = {}
     group_backend: dict[tuple[str, int], str | None] = {}
+    backend_disputed: set[tuple[str, int]] = set()
     for rank in input_ranks:
         for index, entry in enumerate(evidence[rank].boundaries):
             correlation = entry["correlation"]
@@ -612,6 +613,33 @@ def derive_merge(
                         ranks=input_ranks,
                     )
                 )
+            # Backend disagreement was silent first-writer-wins: one rank
+            # claiming "gloo" flipped an unknown-backend group into the
+            # WITNESS_VERDICT_BACKENDS set, rendering verdict-grade
+            # attestations under semantics the other ranks never recorded.
+            # Disagreement is a relation violation like the member list, and
+            # the disputed backend demotes to None so every witness verdict
+            # on the group is NOT_APPLICABLE (demote-only, P3).
+            if (
+                uid in group_backend
+                and uid not in backend_disputed
+                and group_backend[uid] != backend
+            ):
+                backend_disputed.add(uid)
+                findings.append(
+                    MergedFinding(
+                        kind="relation_violation",
+                        detail=(
+                            f"rank {rank} records group {uid} with backend "
+                            f"{backend!r} but another rank recorded "
+                            f"{group_backend[uid]!r}; a disputed backend is "
+                            "never verdict-grade."
+                        ),
+                        membership_digest=uid[0],
+                        ranks=input_ranks,
+                    )
+                )
+                group_backend[uid] = None
             group_members.setdefault(uid, members)
             group_backend.setdefault(uid, backend)
 

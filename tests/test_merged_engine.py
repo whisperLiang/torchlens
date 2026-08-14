@@ -568,6 +568,37 @@ class TestRelationsAndCrossChecks:
         )
         assert d.stored_alignment is MergeAlignment.CONFLICTED
 
+    def test_backend_disagreement_conflicts_and_demotes_witness(self):
+        """Deep-hunt F4: cross-rank backend disagreement is never silent.
+
+        Fail-before: ``group_backend.setdefault`` was first-writer-wins in
+        rank order -- rank 0 claiming "gloo" flipped the group into the
+        witness-verdict backends and the join rendered ATTESTED under gloo
+        contract semantics while rank 1 recorded an unknown backend.
+        """
+
+        d = derive_merge(
+            {
+                0: evidence(0, [boundary(0, 0, backend="gloo", **digest_kwargs())]),
+                1: evidence(1, [boundary(1, 0, backend="mystery_backend", **digest_kwargs())]),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.CONFLICTED
+        assert any(f.kind == "relation_violation" and "backend" in f.detail for f in d.findings)
+        # The disputed backend is demoted: never verdict-grade.
+        assert d.joins[0].backend is None
+        assert d.joins[0].consistency is BoundaryConsistency.NOT_APPLICABLE
+
+    def test_backend_agreement_reports_no_finding(self):
+        d = derive_merge(
+            {
+                0: evidence(0, [boundary(0, 0, **digest_kwargs())]),
+                1: evidence(1, [boundary(1, 0, **digest_kwargs())]),
+            }
+        )
+        assert d.stored_alignment is MergeAlignment.ALIGNED
+        assert d.joins[0].backend == "gloo"
+
     def test_c10d_group_seq_delta_disagreement_conflicts(self):
         d = derive_merge(
             {
