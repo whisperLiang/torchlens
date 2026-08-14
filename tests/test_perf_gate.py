@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import copy
 import cProfile
+import gc
+import statistics
+import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from pathlib import Path
@@ -158,6 +161,65 @@ class _RepeatedModuleCallModel(nn.Module):
         for _ in range(self.repeats):
             value = self.shared(value)
         return value
+
+
+class _PinnedSmallCaptureChain(nn.Module):
+    """Exact deterministic workload for the small-capture ratio gate."""
+
+    def __init__(self, depth: int) -> None:
+        """Store the number of eager ReLU calls."""
+
+        super().__init__()
+        self.depth = depth
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply the pinned number of ReLU operations."""
+
+        for _ in range(self.depth):
+            value = torch.relu(value)
+        return value
+
+
+def _median_capture_ms(model: nn.Module, value: torch.Tensor) -> float:
+    """Return a quiet median capture time for the pinned workload."""
+
+    for _ in range(3):
+        tl.trace(model, value).cleanup()
+    gc.collect()
+    samples: list[int] = []
+    for _ in range(9):
+        start = time.perf_counter_ns()
+        trace = tl.trace(model, value)
+        samples.append(time.perf_counter_ns() - start)
+        trace.cleanup()
+    return statistics.median(samples) / 1_000_000
+
+
+@pytest.mark.serial
+def test_pinned_small_capture_fixed_cost_ratio_gate() -> None:
+    """A doubled fixed capture floor cannot hide behind large-model timings."""
+
+    original_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        value = torch.ones(8)
+        one_op_ms = _median_capture_ms(_PinnedSmallCaptureChain(1), value)
+        sixteen_op_ms = _median_capture_ms(_PinnedSmallCaptureChain(16), value)
+        sixty_four_op_ms = _median_capture_ms(_PinnedSmallCaptureChain(64), value)
+    finally:
+        torch.set_num_threads(original_threads)
+
+    fixed_cost_ratio = one_op_ms / sixteen_op_ms
+    early_slope = (sixteen_op_ms - one_op_ms) / 15
+    late_slope = (sixty_four_op_ms - sixteen_op_ms) / 48
+    slope_ratio = late_slope / early_slope
+    print(
+        "pinned small-capture gate: "
+        f"1={one_op_ms:.3f}ms 16={sixteen_op_ms:.3f}ms 64={sixty_four_op_ms:.3f}ms "
+        f"fixed_ratio={fixed_cost_ratio:.3f} slope_ratio={slope_ratio:.3f}"
+    )
+    assert fixed_cost_ratio < 0.48
+    assert 0.45 < slope_ratio < 2.25
 
 
 def _fresh_module_calls(trace: Trace) -> TraceModuleCallAccessor:
