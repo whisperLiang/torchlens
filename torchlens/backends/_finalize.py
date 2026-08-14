@@ -106,6 +106,7 @@ def finalize_single_pass_trace(
 
     seen_param_barcodes: set[str] = set()
     layers_with_params_seen: set[str] = set()
+    param_usage_membership: dict[int, tuple[set[str], set[str], set[str]]] = {}
     for raw_index, (label, op_log) in enumerate(trace._raw_graph_ws.raw_layer_dict.items()):
         assignment = assignments.get(label) if assignments is not None else None
         _finalize_single_op(trace, op_log, label, raw_index, assignment)
@@ -118,7 +119,7 @@ def finalize_single_pass_trace(
         if getattr(op_log, "_param_logs", []):
             layers_with_params_seen.add(op_log.layer_label)
         if update_param_usage:
-            _attach_param_usage(trace, op_log)
+            _attach_param_usage(trace, op_log, param_usage_membership)
         layer_log = trace.layer_logs.get(op_log.layer_label)
         layer_created = layer_log is None
         if layer_log is None:
@@ -629,7 +630,11 @@ def _apply_recurrence_relabel_epilogue(
         relabel_sidecar_labels(dict(raw_to_final))
 
 
-def _attach_param_usage(trace: Trace, op_log: Any) -> None:
+def _attach_param_usage(
+    trace: Trace,
+    op_log: Any,
+    membership_by_param: dict[int, tuple[set[str], set[str], set[str]]] | None = None,
+) -> None:
     """Update parameter usage cross-links for params attached to one op.
 
     Parameters
@@ -638,6 +643,13 @@ def _attach_param_usage(trace: Trace, op_log: Any) -> None:
         Trace receiving ``layers_with_params`` entries.
     op_log:
         Finalized op log that may carry ``_param_logs``.
+    membership_by_param:
+        Per-pass membership memo shared across ops (back-port of the torch
+        path's ``finalization.py`` set-based membership). Without it, the
+        bare ``label not in param.used_by_ops`` list scans made a parameter
+        consumed by ``m`` ops cost O(m^2) on EVERY preview backend. The
+        lists stay authoritative and keep first-seen order; the sets only
+        replace the growing-list scans.
 
     Returns
     -------
@@ -645,13 +657,27 @@ def _attach_param_usage(trace: Trace, op_log: Any) -> None:
         Parameter logs are mutated in place.
     """
 
+    if membership_by_param is None:
+        membership_by_param = {}
     for param in getattr(op_log, "_param_logs", []):
-        if op_log.label not in param.used_by_ops:
+        membership = membership_by_param.get(id(param))
+        if membership is None:
+            membership = (
+                set(param.used_by_ops),
+                set(param.used_by_layers),
+                set(trace.layers_with_params[param.barcode]),
+            )
+            membership_by_param[id(param)] = membership
+        used_by_ops, used_by_layers, layer_membership = membership
+        if op_log.label not in used_by_ops:
             param.used_by_ops.append(op_log.label)
-        if op_log.layer_label not in param.used_by_layers:
+            used_by_ops.add(op_log.label)
+        if op_log.layer_label not in used_by_layers:
             param.used_by_layers.append(op_log.layer_label)
-        if op_log.layer_label not in trace.layers_with_params[param.barcode]:
+            used_by_layers.add(op_log.layer_label)
+        if op_log.layer_label not in layer_membership:
             trace.layers_with_params[param.barcode].append(op_log.layer_label)
+            layer_membership.add(op_log.layer_label)
 
 
 def _update_param_totals_from_layers(trace: Trace) -> None:

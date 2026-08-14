@@ -455,8 +455,10 @@ def _search_stack_for_tensors_and_params(
     next_stack: list[_SearchEntry] = []
     if len(current_stack) == 0:
         return current_stack
-    while len(current_stack) > 0:
-        item, address, address_full = current_stack.pop(0)
+    # Iterate rather than pop(0): each left-pop shifts the whole list, making
+    # one BFS level O(k^2) in its own width for the wide levels big module
+    # trees produce. Iteration order (and thus output order) is identical.
+    for item, address, address_full in current_stack:
         item_class = type(item)
         if (id(item) in found_ids) and not allow_repeats:
             continue
@@ -518,8 +520,10 @@ def _search_stack_for_vars_of_type(
     next_stack: list[_SearchEntry] = []
     if len(current_stack) == 0:
         return current_stack
-    while len(current_stack) > 0:
-        item, address, address_full = current_stack.pop(0)
+    # Iterate rather than pop(0): each left-pop shifts the whole list, making
+    # one BFS level O(k^2) in its own width for the wide levels big module
+    # trees produce. Iteration order (and thus output order) is identical.
+    for item, address, address_full in current_stack:
         item_class = type(item)
         # Skip excluded subclasses (e.g. nn.Parameter) and duplicates.
         if any(issubclass(item_class, subclass) for subclass in subclass_exceptions) or (
