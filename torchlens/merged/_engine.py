@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from ..distributed._audit import MembershipLineageVerdict, audit_membership_lineages
-from ..distributed._ledger import InstallEpoch
+from ..distributed._ledger import InstallEpoch, membership_digest_for_ranks
 from ._enums import (
     WITNESS_IDENTITY_KINDS,
     WITNESS_NOT_APPLICABLE_KINDS,
@@ -544,6 +544,16 @@ def derive_merge(
                     rank=rank,
                 )
             correlation = entry["correlation"]
+            # The digest is definitionally sha256(sorted(global_ranks)) and freely
+            # recomputable; an incoherent pair rebinds this boundary's joins,
+            # ordinals, and audit row to another communicator's membership.
+            if correlation["membership_digest"] != membership_digest_for_ranks(members):
+                raise MergeInputError(
+                    f"Rank {rank} presents a boundary whose membership_digest does "
+                    f"not equal the digest of its own recorded membership {members}.",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                    rank=rank,
+                )
             correlation_key = (
                 str(correlation["membership_digest"]),
                 int(correlation["lifetime_ordinal"]),

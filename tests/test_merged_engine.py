@@ -480,6 +480,31 @@ class TestBoundaryParseValidation:
         )
         self._extract(entry)  # must not raise
 
+    def test_parse_refuses_membership_digest_ranks_incoherence(self):
+        """Deep-hunt F3: the digest must equal sha256(sorted(global_ranks)).
+
+        Fail-before: two cores presenting the digest of a DIFFERENT membership
+        ([5, 6, 7]) over global_ranks [0, 1] merged ALIGNED, rebinding one
+        communicator's boundaries to another membership's digest, ordinal
+        lineage, and audit row.
+        """
+
+        fake = membership_digest_for_ranks([5, 6, 7])
+        self._assert_refuses(boundary(0, 0, digest=fake))
+
+    def test_engine_refuses_membership_digest_ranks_incoherence(self):
+        """Direct-engine evidence receives the same digest-coherence refusal."""
+
+        fake = membership_digest_for_ranks([5, 6, 7])
+        with pytest.raises(MergeInputError) as excinfo:
+            derive_merge(
+                {
+                    0: evidence(0, [boundary(0, 0, digest=fake)], ledger=seeded_ledger(fake)),
+                    1: evidence(1, [boundary(1, 0, digest=fake)], ledger=seeded_ledger(fake)),
+                }
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
     def test_engine_belt_refuses_string_digests_typed(self):
         """Direct-engine evidence cannot fabricate ATTESTED via char-split.
 

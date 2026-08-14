@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..distributed._ledger import GroupLifecycleLedger
+from ..distributed._ledger import GroupLifecycleLedger, membership_digest_for_ranks
 from ._enums import MergedErrorCode
 from ._errors import MergeInputError
 
@@ -160,6 +160,17 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
     backend = group.get("backend")
     if backend is not None and not isinstance(backend, str):
         raise _refuse(f"{where} group backend is not a string or null", source=source)
+    # The membership digest is definitionally sha256(sorted(global_ranks)) and
+    # freely recomputable. A digest bound to a DIFFERENT membership rebinds this
+    # boundary's correlation joins, lifetime ordinals, and pre-join audit row to
+    # another communicator while the presence/relation checks keep reading the
+    # rank list -- the two views are attacker-separable unless tied here.
+    if correlation["membership_digest"] != membership_digest_for_ranks(global_ranks):
+        raise _refuse(
+            f"{where} membership_digest does not equal the digest of its own "
+            f"recorded group membership {sorted(int(r) for r in global_ranks)}",
+            source=source,
+        )
     roles = entry.get("roles", [])
     if not isinstance(roles, list):
         raise _refuse(f"{where} roles is not a list", source=source)
