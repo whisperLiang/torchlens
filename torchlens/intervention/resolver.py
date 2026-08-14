@@ -103,7 +103,9 @@ def _internal_torch_builtin_key(
     # While capture wrappers are installed, ``torch.__dict__`` holds the TorchLens wrapper,
     # whose provenance stamp (B8-1a pickle fix) claims ``__module__ == "torch"`` for every
     # module-namespace wrapper -- the direct-builtin-export test must read the ORIGINAL.
-    public = _unwrap_capture_wrapper(torch_attr(name))
+    public = torch_attr(name)
+    if callable(public):
+        public = _unwrap_capture_wrapper(public)
     if internal is not func or getattr(public, "__module__", None) == "torch":
         return None
     return FunctionRegistryKey(
