@@ -4341,6 +4341,18 @@ def test_tensor_nanequal_tolerances_are_dtype_derived_boundary() -> None:
     c_rtol, _c_atol = _tolerances_for_dtype(torch.complex128)
     assert c_rtol < 1e-12
 
+    # A LOW-PRECISION out-of-table dtype must derive at the few-ULP
+    # storage-rounding headroom, not the accumulating 512-ULP one: complex32
+    # (component eps ~9.8e-4) derived rtol=0.5 -- a row that would bless 40%
+    # corruption the day torch lands the missing chalf comparison kernels.
+    # The row must sit at the same ULP budget fp16/bf16 get.
+    c32_rtol, c32_atol = _tolerances_for_dtype(torch.complex32)
+    eps_c32 = float(torch.finfo(torch.complex32).eps)
+    fp16_rtol, _ = _tolerances_for_dtype(torch.float16)
+    assert c32_rtol == pytest.approx((fp16_rtol / torch.finfo(torch.float16).eps) * eps_c32)
+    assert c32_rtol < 0.005
+    assert c32_atol <= 4.0 * float(torch.finfo(torch.complex32).tiny)
+
 
 def test_ground_truth_output_check_is_dtype_aware() -> None:
     """The GT direct-forward bar is a few ULPs of the OUTPUT dtype, both ways.

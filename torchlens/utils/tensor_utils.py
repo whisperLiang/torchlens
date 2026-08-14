@@ -309,9 +309,14 @@ def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
     Rows are derived from ``torch.finfo(dtype).eps`` (see the error model on
     ``_REPLAY_ULP_HEADROOM``).  A float or complex dtype outside the
     precomputed table (e.g. ``complex64``, or a future torch float format)
-    derives its own row at the accumulating headroom instead of inheriting
-    another dtype's literals -- inheriting fp32's decimal row is exactly how
-    float64 used to get an rtol worth 4.5e11 of its own ULPs.
+    derives its own row instead of inheriting another dtype's literals --
+    inheriting fp32's decimal row is exactly how float64 used to get an rtol
+    worth 4.5e11 of its own ULPs.  The headroom class follows the eps class,
+    mirroring ``_grad_tolerances_for_dtype``: a storage-rounding dtype
+    (``eps`` above fp32's, e.g. ``complex32`` with component eps ~9.8e-4)
+    gets the few-ULP low-precision budget -- deriving it at the accumulating
+    512-ULP headroom produced rtol 0.5, a row that would bless 40%%
+    corruption the day torch lands the missing comparison kernels.
 
     Parameters
     ----------
@@ -328,7 +333,13 @@ def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
     if cached is not None:
         return cached
     try:
-        derived = derive_float_tolerances(dtype, _ACCUMULATING_REPLAY_ULP_HEADROOM)
+        eps = float(torch.finfo(dtype).eps)
+        headroom = (
+            _LOW_PRECISION_REPLAY_ULP_HEADROOM
+            if eps > float(torch.finfo(torch.float32).eps)
+            else _ACCUMULATING_REPLAY_ULP_HEADROOM
+        )
+        derived = derive_float_tolerances(dtype, headroom)
     except (TypeError, ValueError):
         # Non-float dtype (no finfo): exact comparison paths handle these;
         # return the strictest float row so a misrouted call stays strict.
