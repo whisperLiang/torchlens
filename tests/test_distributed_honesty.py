@@ -45,8 +45,39 @@ from torchlens.backends.torch._ops_interventions import (
     _pop_tensor_live_fire_results,
     _set_tensor_live_fire_results,
 )
+from torchlens.utils import _torch_compat
 
 DISTRIBUTED_ROW_KEYS = ("dtensor", "device_mesh", "tensor_parallel", "pipeline_parallel")
+
+
+@pytest.fixture(autouse=True)
+def _restore_pipelining_probe_state() -> Iterator[None]:
+    """Restore the pipelining capability-probe cache poisoned by module stubs.
+
+    Several tests here stub ``torch.distributed.pipelining`` with an EMPTY
+    module to synthesize pipeline-parallel state. The lazy probe in
+    ``get_pipelining_module_types`` then sees the stub in ``sys.modules``,
+    finds no stage types, and caches ``HAS_PIPELINING=False`` process-globally.
+    ``monkeypatch`` restores ``sys.modules`` but not that cache, which polluted
+    every later capability snapshot in the session: the generated
+    ``docs/method_x_model_compatibility.md`` gate rendered a phantom
+    ``missing=HAS_PIPELINING`` non-pass row, and the clean-model no-warning
+    guard in ``test_robustness_pr2`` caught a stray ``TorchCapabilityWarning``
+    (the conftest warn-once reset re-arms the warning per test).
+
+    Yields
+    ------
+    None
+        Runs the test, then restores the pre-test probe state.
+    """
+
+    saved = {
+        name: getattr(_torch_compat, name)
+        for name in ("_PIPELINING_PROBED", "_PIPELINING_TYPES", "HAS_PIPELINING")
+    }
+    yield
+    for name, value in saved.items():
+        setattr(_torch_compat, name, value)
 
 
 class TinyModel(nn.Module):
@@ -536,9 +567,10 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
 def test_refusing_kinds_is_the_single_source_of_truth() -> None:
     """Every active distributed execution mode that omits work refuses."""
 
-    assert frozenset(
-        {"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"}
-    ) == REFUSING_KINDS
+    assert (
+        frozenset({"dtensor", "tensor_parallel", "pipeline_parallel", "scan_incomplete"})
+        == REFUSING_KINDS
+    )
 
 
 def test_site_list_is_bounded_with_explicit_remainder() -> None:
