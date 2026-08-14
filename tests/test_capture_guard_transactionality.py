@@ -63,11 +63,17 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
     baseline_undecorated = len(_undecorated_targets())
 
     wrappers_module.unwrap_torch()
-    monkeypatch.setattr(wrappers_module, "_FULL_DECORATION_COMPLETED", False)
-    monkeypatch.setattr(_state, "_is_decorated", False)
-    monkeypatch.setattr(_state, "_orig_to_decorated", {})
-    monkeypatch.setattr(_state, "_decorated_to_orig", {})
-    monkeypatch.setattr(_state, "_arg_names", {})
+    # Mutate the live registries IN PLACE: monkeypatch.setattr on these dicts
+    # would restore the STALE pre-test objects at teardown while torch stays
+    # wrapped with the retry's fresh wrappers, desyncing global state for the
+    # rest of the session (the 2026-08-14 499-failure smoke). The retry wrap
+    # repopulates these same objects, so no restore is needed; the module flags
+    # end True, matching the live wrapped reality.
+    wrappers_module._FULL_DECORATION_COMPLETED = False
+    _state._is_decorated = False
+    _state._orig_to_decorated.clear()
+    _state._decorated_to_orig.clear()
+    _state._arg_names.clear()
 
     original_decorate = wrappers_module._decorate_torch_func_pairs
     calls = {"n": 0}
@@ -82,8 +88,15 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
         original_decorate(func_pairs)
 
     monkeypatch.setattr(wrappers_module, "_decorate_torch_func_pairs", _fail_midway)
-    with pytest.raises(RuntimeError, match="injected mid-pass-2 failure"):
+    try:
+        with pytest.raises(RuntimeError, match="injected mid-pass-2 failure"):
+            wrappers_module.wrap_torch()
+    except BaseException:
+        # Never leave the session half-wrapped if the plant itself misfires.
+        monkeypatch.setattr(wrappers_module, "_decorate_torch_func_pairs", original_decorate)
+        wrappers_module.unwrap_torch()
         wrappers_module.wrap_torch()
+        raise
 
     # The failed pass must NOT claim completion.
     assert _state._is_decorated is False
