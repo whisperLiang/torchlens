@@ -1134,7 +1134,7 @@ def _probe_transformer_activation_fastpath_flag() -> bool:
 
 
 def _probe_attention_causal_bias() -> bool:
-    """Return whether ``torch.nn.attention.bias.CausalBias`` is available.
+    """Return whether ``torch.nn.attention.bias.CausalBias`` is discoverable.
 
     NEVER executes ``torch.nn.attention.bias`` (r45/r49 lazy-import belt): that
     module's top level calls ``torch._dynamo.allow_in_graph(...)``, dragging the
@@ -1148,9 +1148,21 @@ def _probe_attention_causal_bias() -> bool:
     Returns
     -------
     bool
-        ``True`` when the class exists (exactly, if the module is already
-        imported; by spec existence otherwise). Absent on torch builds
-        predating the ``torch.nn.attention`` namespace.
+        ``True`` when the module is already imported and the class defines its
+        own ``__torch_function__`` (the identity-dispatch site the causal-bias
+        identity shim normalizes), or when the module exists but has not been
+        imported yet (the shim installer re-reads ``sys.modules`` at each wrap).
+        Absent on torch builds predating the ``torch.nn.attention`` namespace.
+
+    Notes
+    -----
+    This probe NEVER imports ``torch.nn.attention.bias``: on torch 2.13 its
+    module body reaches ``torch._dynamo``, whose import tree also drags in
+    ``torch.distributed.fsdp`` -- breaking the W21 cold-start guarantee that a
+    plain eager capture pays neither import. ``find_spec`` imports only the
+    parent ``torch.nn.attention`` package (verified dynamo-free), and a process
+    that never imported the module cannot hold a ``CausalBias`` instance, so
+    the deferred read is exact, not heuristic.
     """
 
     module = sys.modules.get("torch.nn.attention.bias")
@@ -1219,9 +1231,7 @@ HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspec
 HAS_SAVED_TENSORS_HOOKS_PATCHABLE: bool = _probe_saved_tensors_hooks_patchable()
 HAS_CODE_POSITIONS: bool = _probe_code_positions()
 HAS_CODE_QUALNAME: bool = _probe_code_qualname()
-HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG: bool = (
-    _probe_transformer_activation_fastpath_flag()
-)
+HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG: bool = _probe_transformer_activation_fastpath_flag()
 HAS_ATTENTION_CAUSAL_BIAS: bool = _probe_attention_causal_bias()
 HAS_EXPANDED_WEIGHTS_CONV_PICKER: bool = _probe_expanded_weights_conv_picker()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
@@ -1817,7 +1827,9 @@ def get_variable_functions_class() -> Any | None:
     global _VARIABLE_FUNCTIONS_CLASS_PROBED
 
     if not _VARIABLE_FUNCTIONS_CLASS_PROBED:
-        _VARIABLE_FUNCTIONS_CLASS = _nested_getattr_or_none(torch, ("_C", "_VariableFunctionsClass"))
+        _VARIABLE_FUNCTIONS_CLASS = _nested_getattr_or_none(
+            torch, ("_C", "_VariableFunctionsClass")
+        )
         HAS_VARIABLE_FUNCTIONS_CLASS = _VARIABLE_FUNCTIONS_CLASS is not None
         _VARIABLE_FUNCTIONS_CLASS_PROBED = True
     if _VARIABLE_FUNCTIONS_CLASS is None:
@@ -2906,16 +2918,6 @@ else:
 # CUDA-named ones read True even on CUDA-less wheels). Snapshots record every
 # control affirmatively; ``None`` survives only in the APPLY direction as
 # schema tolerance for artifacts recorded by older producers.
-
-
-
-
-
-
-
-
-
-
 
 
 def read_fill_uninitialized_memory() -> bool | None:

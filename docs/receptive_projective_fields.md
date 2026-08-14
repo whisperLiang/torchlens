@@ -130,6 +130,8 @@ tri-state summary: `FAIL` reports a real violation, `INDETERMINATE` means the em
 armed (see below), and `PASS` requires every containment check to pass with no adjoint mismatch;
 `.passed` is true only for `PASS`. `cross_validate()` gives the batch sweep.
 The typed error surface is `ReceptiveFieldError`, `ReceptiveFieldUnavailableError`,
+`ReceptiveFieldConfigurationError` (invalid query or `register_rf_rule()` arguments, e.g. a
+`source=` op that does not belong to the trace, or duplicate/empty rule names),
 `ReceptiveFieldValidationError`, `AmbiguousInputError`, `AmbiguousPassError`,
 `AmbiguousCallError`, `AmbiguousTargetError`, `NoInfluencePathError`, and
 `BackendUnsupportedError`.

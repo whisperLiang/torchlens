@@ -121,7 +121,6 @@ add names to the top-level `torchlens` namespace:
 | `metric_tensor_type_invalid` | Metric operand is not a tensor | Pass tensor operands |
 | `metric_type_invalid` | Metric selector is neither a name nor callable | Pass a registered name or callable |
 | `module_call_ambiguous` | Single-call accessor on a multi-call module | Access one call via `module.calls[N]` |
-| `module_containment_engine_invalid` | Internal containment engine value is unknown | Choose a supported engine |
 | `node_label_field_invalid` | Node label field name is unknown | Pass documented label field names |
 | `node_overlay_invalid` | Node overlay name is unknown | Choose a supported overlay |
 | `op_lookup_index_out_of_range` | Integer layer index is out of range | Pass an in-range index |
@@ -183,6 +182,7 @@ add names to the top-level `torchlens` namespace:
 | `visualization_theme_invalid` | Visualization theme is unknown | Choose a supported theme |
 | `visualization_mode_invalid` | Backend visualization mode is unsupported | Choose a backend-supported mode |
 | `visualization_node_style_invalid` | Node style is unknown | Choose a documented style |
+| `wrappers_removed_before_capture` | A concurrent `unwrap_torch()` removed the torch wrappers between model preparation and capture admission | Do not call `unwrap_torch()` concurrently with capture entry; re-run `tl.trace` to re-install the wrappers |
 
 Adding or renaming a code is a public vocabulary change and must update this table and the
 corresponding typed-door test in the same change.

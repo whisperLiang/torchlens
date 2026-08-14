@@ -204,9 +204,7 @@ def _install_transformer_ctor_shims(records: list[tuple[Any, str, Any]]) -> None
             records.append((cls, "__setstate__", orig_setstate))
 
 
-def _make_ctor_shim(
-    orig_init: Callable[..., None], sig: inspect.Signature
-) -> Callable[..., None]:
+def _make_ctor_shim(orig_init: Callable[..., None], sig: inspect.Signature) -> Callable[..., None]:
     """Build the ctor shim for one transformer layer class."""
 
     activation_default = sig.parameters["activation"].default
@@ -254,6 +252,7 @@ def _make_setstate_shim(orig_setstate: Callable[..., None]) -> Callable[..., Non
 
     @functools.wraps(orig_setstate)
     def setstate_shim(self: Any, state: Any) -> None:
+        """Run the original ``__setstate__``, then de-wrap a stored activation."""
         orig_setstate(self, state)
         stored = getattr(self, "activation", None)
         if callable(stored):
@@ -340,15 +339,11 @@ def _install_expanded_weights_shims(records: list[tuple[Any, str, Any]]) -> None
     import importlib
 
     try:
-        conv_utils = importlib.import_module(
-            "torch.nn.utils._expanded_weights.conv_utils"
-        )
+        conv_utils = importlib.import_module("torch.nn.utils._expanded_weights.conv_utils")
         conv_expanded = importlib.import_module(
             "torch.nn.utils._expanded_weights.conv_expanded_weights"
         )
-        impl = importlib.import_module(
-            "torch.nn.utils._expanded_weights.expanded_weights_impl"
-        )
+        impl = importlib.import_module("torch.nn.utils._expanded_weights.expanded_weights_impl")
     except ImportError:
         return
 
@@ -424,6 +419,7 @@ def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
 
     @functools.wraps(orig_resolve)
     def resolve_name_shim(f: Any) -> Any:
+        """Resolve a wrapper to its original before asking torch for the name."""
         result = orig_resolve(f)
         if result is None:
             original = _resolve(f)

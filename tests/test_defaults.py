@@ -271,8 +271,14 @@ def test_log_model_metadata_forces_metadata_defaults(monkeypatch: pytest.MonkeyP
     result = tl.log_model_metadata(_TinyModel(), _tiny_input())
 
     assert result is dummy_log
-    assert saved_kwargs["layers_to_save"] is None
-    assert saved_kwargs["compute_input_output_distances"] is True
+    # The metadata wrapper migrated from the deprecated flat kwargs to the
+    # canonical nested capture spelling (grind b4 R48-3 fix); assert the same
+    # metadata-only contract through the nested options object.
+    capture_options = saved_kwargs["capture"]
+    assert capture_options.layers_to_save is None
+    assert capture_options.compute_input_output_distances is True
+    assert "layers_to_save" not in saved_kwargs
+    assert "compute_input_output_distances" not in saved_kwargs
 
 
 def test_summary_uses_metadata_only_defaults(

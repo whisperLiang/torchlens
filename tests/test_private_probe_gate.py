@@ -72,6 +72,8 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # ``_cudnn_rnn_flatten_weight`` symbol, so the shim must read that exact private
     # binding to normalize the identity basis torch itself uses -- routing through a
     # compat wrapper would change the object identity the comparison depends on.
+    # Guarded getattr, fail-neutral: if the symbol disappears, torch's special
+    # case disappears with it and the shim falls through to the alias-table path.
     "torchlens/backends/torch/identity_shims.py": frozenset(
         {"getattr(torch, '_cudnn_rnn_flatten_weight')"}
     ),

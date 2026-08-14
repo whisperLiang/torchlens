@@ -84,7 +84,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     "backends/paddle": 20,
     "backends/tf": 9,
     "backends/tinygrad": 5,
-    "backends/torch": 111,
+    # 111 -> 112 (2026-08-14 fixwave-2 reconcile): heavy site churn from the
+    # ops.py/completeness_witness.py file splits nets +1, dominated by the
+    # intended safetynet stage-2 rescue path (rescue.py) and backward-projection
+    # additions against removed `_layer_counter` reads.
+    "backends/torch": 112,
     "bridge": 1,
     "bundle": 1,
     "capture": 20,
@@ -95,10 +99,21 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     "ir": 2,
     "postprocess": 5,
     "report": 1,
-    "repgeom": 7,
+    # 7 -> 6 (2026-08-14 fixwave-2 reconcile): one reach-in discharged upstream.
+    "repgeom": 6,
+    # 0 -> 2 (2026-08-14 fixwave-2 reconcile, R40 viz hardening): the shared
+    # `_visualizer_dir` scratch-dir helpers moved into utils/display.py; the
+    # attribute is genuinely optional session state (absent until the first
+    # render), so the None default is the correct "no scratch dir yet" reading.
+    "utils": 2,
     "validation": 23,
-    "visualization": 20,
-    "viz": 2,
+    # 20 -> 23 (2026-08-14 fixwave-2 reconcile): intended R19/R40 rendering
+    # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
+    # consolidation into _render_dot.py) against removed `_raw_layer_dict` /
+    # _render_nodes.py sites.
+    "visualization": 23,
+    # 2 -> 1 (2026-08-14 fixwave-2 reconcile): one reach-in discharged upstream.
+    "viz": 1,
 }
 
 
