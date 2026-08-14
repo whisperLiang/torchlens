@@ -6,7 +6,6 @@ helpers are for visualization-oriented representation geometry, not inference.
 
 from __future__ import annotations
 
-import tempfile
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -18,6 +17,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from ..intervention.errors import MultiMatchWarning
+from ..utils.display import ensure_trace_visualizer_dir
 from ..viz.node_plots import render_heatmap, render_image_scatter, render_lineplot
 
 DistanceMetric: TypeAlias = Literal["euclidean", "cosine", "correlation"]
@@ -1348,11 +1348,7 @@ def _write_node_plot_image(trace: Any, namespace: str, key: str, image: Any) -> 
         Local PNG path for ``NodeSpec.image``.
     """
 
-    output_dir = getattr(trace, "_visualizer_dir", None)
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="torchlens_visualizers_")
-        trace._visualizer_dir = str(output_dir)
-    plot_dir = Path(str(output_dir)) / namespace
+    plot_dir = ensure_trace_visualizer_dir(trace) / namespace
     plot_dir.mkdir(parents=True, exist_ok=True)
     safe_key = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in key)
     image_path = plot_dir / f"{safe_key}.png"

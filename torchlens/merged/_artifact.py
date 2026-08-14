@@ -168,6 +168,11 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
     """
 
     root = Path(path)
+    if root.is_symlink():
+        raise MergedArtifactError(
+            f"Refusing symlinked merged artifact target: {root}.",
+            code=MergedErrorCode.MERGE_INPUT_INVALID,
+        )
     if root.exists() and not overwrite:
         raise MergedArtifactError(
             f"{root} already exists; pass overwrite=True to replace it.",

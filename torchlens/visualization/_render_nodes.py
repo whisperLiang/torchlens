@@ -990,11 +990,9 @@ def _raw_input_visualizer_dir(trace: "Trace") -> Path:
         Directory where image artifacts can be written.
     """
 
-    output_dir = getattr(trace, "_visualizer_dir", None)
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="torchlens_visualizers_")
-        trace._visualizer_dir = str(output_dir)
-    input_dir = Path(output_dir) / "raw_inputs"
+    from ..utils.display import ensure_trace_visualizer_dir
+
+    input_dir = ensure_trace_visualizer_dir(trace) / "raw_inputs"
     input_dir.mkdir(parents=True, exist_ok=True)
     return input_dir
 

@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from ..._errors import InvalidArgumentError
+from ...utils.display import atomic_write_text
 from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
@@ -917,15 +918,15 @@ def _run_neato_with_fallbacks(
         # coordinates themselves (uniform scale preserves the layout) so they fit,
         # and retry once with straight-line edges. -Gsize/-Gratio do NOT help here
         # because they only rescale the output viewport, not the rtree input.
-        rescaled = _rescale_dot_for_rtree(open(source_path, encoding="utf-8").read())
+        with open(source_path, encoding="utf-8") as source_file:
+            rescaled = _rescale_dot_for_rtree(source_file.read())
         if rescaled is not None:
             warnings.warn(
                 "neato layout exceeded the rtree coordinate limit; retrying with "
                 "straight-line edges and down-scaled pinned coordinates so the "
                 "canvas fits. Geometry is preserved (uniform scale)."
             )
-            with open(source_path, "w", encoding="utf-8") as f:
-                f.write(rescaled)
+            atomic_write_text(source_path, rescaled)
             result = _run_neato(
                 rendered_path=rendered_path,
                 source_path=source_path,
