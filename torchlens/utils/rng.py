@@ -1956,6 +1956,27 @@ def _suppress_active_monitor_marks() -> Iterator[None]:
         yield
 
 
+
+def _skip_retired_hooks(candidate: Any, predecessor_attr: str) -> Any:
+    """Return the first chain link that is not a torn-down monitor's hook.
+
+    A non-LIFO overlap used to restore an already-retired window's hook into a
+    profile slot; the sys slot self-heals on its next event, but the
+    ``threading`` registration only seeds NEW threads, so a dead hook parked
+    there never fires again on the main thread and taxes (and misclassifies
+    into) every later capture. Walking each candidate's owning monitor lets the
+    restore skip straight to the newest LIVE link.
+    """
+
+    seen: set[int] = set()
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        owner = getattr(candidate, "_tl_owner", None)
+        if owner is None or not getattr(owner, "_hooks_retired", False):
+            break
+        candidate = getattr(owner, predecessor_attr, None)
+    return candidate
+
 class host_nondeterminism_monitor:
     """Context manager installing the registry-driven host-nondeterminism monitor.
 
@@ -2978,6 +2999,7 @@ class host_nondeterminism_monitor:
                 except Exception:
                     self._flag_uncertain("profile_predecessor_error")
 
+        hook._tl_owner = self  # dead-chain restore walks use this (non-LIFO fix).
         return hook
 
     @staticmethod
@@ -4294,7 +4316,19 @@ class host_nondeterminism_monitor:
         # TorchLens's own per-op RNG restores marked a false ``mutation`` channel and
         # every in-window thread reclassified as foreign.
         if _ACTIVE_MONITOR is self or _ACTIVE_MONITOR is None:
-            _ACTIVE_MONITOR = self._previous_active_monitor
+            # Skip torn-down ancestors: a non-LIFO overlap otherwise parks a
+            # dead monitor in the module slot and every later capture flags a
+            # phantom overlap (same dead-chain class as the profile slots).
+            candidate = self._previous_active_monitor
+            seen: set[int] = set()
+            while (
+                candidate is not None
+                and id(candidate) not in seen
+                and getattr(candidate, "_torn_down", False)
+            ):
+                seen.add(id(candidate))
+                candidate = candidate._previous_active_monitor
+            _ACTIVE_MONITOR = candidate
         else:
             self._flag_uncertain("active_monitor_replaced")
         self._restore_profile_hooks()
@@ -4338,7 +4372,11 @@ class host_nondeterminism_monitor:
                 ):
                     self._flag_uncertain("threading_profile_replaced")
                 else:
-                    _threading_module.setprofile(self._previous_threading_profile)
+                    _threading_module.setprofile(
+                        _skip_retired_hooks(
+                            self._previous_threading_profile, "_previous_threading_profile"
+                        )
+                    )
             except Exception:
                 self._flag_uncertain("threading_profile_restore_failed")
         if self._sys_profile_installed:
@@ -4346,7 +4384,9 @@ class host_nondeterminism_monitor:
                 if _sys_module.getprofile() is not self._sys_hook:
                     self._flag_uncertain("sys_profile_replaced")
                 else:
-                    _sys_module.setprofile(self._previous_sys_profile)
+                    _sys_module.setprofile(
+                        _skip_retired_hooks(self._previous_sys_profile, "_previous_sys_profile")
+                    )
             except Exception:
                 self._flag_uncertain("sys_profile_restore_failed")
 
