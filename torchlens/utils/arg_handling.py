@@ -51,6 +51,53 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
+def rebuild_tuple_like(arg_type: type, items: list[Any]) -> Any:
+    """Rebuild a ``tuple`` subclass from ``items``, or ``None`` if impossible.
+
+    ``_fields`` presence is NOT proof of a namedtuple positional constructor
+    (T11.7): a tuple subclass exposing ``_fields`` as a list or property
+    crashed the capture entry normalizers with an untyped ``TypeError``, and
+    a subclass without ``_fields`` whose ``__new__`` is not single-iterable
+    crashed the other arm. Mirror the ``_move_tensors_to_device`` ladder --
+    try the namedtuple positional constructor, then the single-iterable
+    ``__new__`` shape (structseq / ``torch.Size``) -- and additionally verify
+    the rebuilt instance carries the EXACT item identities in order (read
+    inertly through ``tuple.__getitem__``): ``arg_type(*items)`` reaching a
+    single-iterable constructor with one iterable item would otherwise
+    silently EXPAND that item into its elements.
+
+    Parameters
+    ----------
+    arg_type:
+        Exact tuple subclass to rebuild.
+    items:
+        Child values, in physical tuple order.
+
+    Returns
+    -------
+    Any
+        Verified rebuilt instance, or ``None`` when no constructor shape
+        reproduces the items (callers fall back without crashing).
+    """
+
+    for build in (lambda: arg_type(*items), lambda: arg_type(items)):
+        try:
+            candidate = build()
+        except Exception:
+            continue
+        if type(candidate) is not arg_type:
+            continue
+        try:
+            length = tuple.__len__(candidate)
+        except Exception:
+            continue
+        if length == len(items) and all(
+            tuple.__getitem__(candidate, index) is items[index] for index in range(length)
+        ):
+            return candidate
+    return None
+
+
 def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: int = 0) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
@@ -157,10 +204,19 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         # through a tuple passes through a mutable container that is already
         # registered above, so recursing eagerly here is safe.
         items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
-        # NamedTuples have _fields and need *args construction; plain tuples
-        # take an iterable. Memoized after construction (immutable, so no cycle
-        # can pass through the tuple itself) so tuple-shaped DAGs are O(nodes).
-        copied = type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
+        # Memoized after construction (immutable, so no cycle can pass through
+        # the tuple itself) so tuple-shaped DAGs are O(nodes). Subclass
+        # reconstruction goes through the verified ladder (T11.7): _fields
+        # presence used to be taken as proof of an *args constructor, so a
+        # tuple subclass with a malformed _fields crashed the capture untyped.
+        if type(arg) is tuple:
+            copied = tuple(items)
+        else:
+            copied = rebuild_tuple_like(type(arg), items)
+            if copied is None:
+                # Unreconstructable subclass: pass by reference like other
+                # custom wrappers (pre-fix this path crashed the capture).
+                return arg
         _in_progress[arg_id] = copied
         return copied
     else:

@@ -1,0 +1,135 @@
+"""grind-p3 T11.7: _fields presence is not proof of an *args constructor.
+
+The capture-entry normalizers (``_coerce_input_args`` and
+``copy_arg_tree``) inferred a namedtuple ``*args`` constructor from the mere
+presence of ``_fields``, so a tuple subclass exposing ``_fields`` as a list
+or property -- with an ordinary single-iterable constructor -- crashed plain
+``tl.trace`` with an untyped ``TypeError`` blamed on the user's container.
+The ``_move_tensors_to_device`` rebuild ladder (try ``*args``, then the
+single-iterable shape, verify the exact type) now applies to both siblings,
+strengthened with an exact item-identity check so a single-iterable
+constructor reached via ``*items`` can never silently EXPAND a lone iterable
+element.
+"""
+
+from __future__ import annotations
+
+import collections
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._input_coerce import _coerce_input_args
+from torchlens.utils.arg_handling import copy_arg_tree, rebuild_tuple_like
+
+pytestmark = pytest.mark.smoke
+
+
+class _MalformedFields(tuple):
+    """Tuple subclass with a NON-namedtuple ``_fields`` and iterable ctor."""
+
+    _fields = ["a", "b"]
+
+
+class _PropertyFields(tuple):
+    """Tuple subclass whose ``_fields`` is a property, iterable ctor."""
+
+    @property
+    def _fields(self) -> tuple[str, ...]:
+        """Return a fake schema."""
+
+        return ("a", "b")
+
+
+class _NeedsExtraArgs(tuple):
+    """Tuple subclass whose constructor cannot be called generically."""
+
+    def __new__(cls, values: object, meta: object) -> _NeedsExtraArgs:
+        """Build from values plus a required metadata argument."""
+
+        instance = super().__new__(cls, values)  # type: ignore[arg-type]
+        instance.meta = meta  # type: ignore[attr-defined]
+        return instance
+
+
+_Point = collections.namedtuple("_Point", ["x", "y"])
+
+
+class _TakesModel(nn.Module):
+    """Model consuming the first element of a tuple-like container."""
+
+    def forward(self, box: tuple) -> torch.Tensor:
+        """Add one to the container's first element."""
+
+        return box[0] + 1
+
+
+def test_copy_arg_tree_handles_malformed_fields_subclass():
+    """The copier no longer crashes on a lying ``_fields`` (untyped TypeError)."""
+
+    box = _MalformedFields((torch.ones(2), torch.zeros(2)))
+    copied = copy_arg_tree(box)
+    assert type(copied) is _MalformedFields
+    assert torch.equal(copied[0], box[0]) and copied[0] is not box[0]
+
+
+def test_coerce_input_args_handles_malformed_fields_subclass():
+    """The coercer no longer crashes on a lying ``_fields``."""
+
+    import numpy as np
+
+    box = _MalformedFields((np.ones(2), torch.zeros(2)))
+    coerced = _coerce_input_args(nn.Identity(), box)
+    assert type(coerced) is _MalformedFields
+    assert isinstance(coerced[0], torch.Tensor)
+
+
+@pytest.mark.filterwarnings("ignore:TorchLens found tensor arguments with no graph")
+def test_property_fields_subclass_traces_end_to_end():
+    """Plain tl.trace completes on a property-``_fields`` tuple subclass.
+
+    Pre-fix this crashed with an untyped ``TypeError`` from the *args
+    constructor inference before capture even started. The tolerated
+    provenance warning is a PRE-EXISTING, unrelated gap: input tensors inside
+    ANY plain (no ``_fields``) tuple subclass are also unattributed on
+    unmodified code -- probed 2026-08-14, relayed in the lane results.
+    """
+
+    box = _PropertyFields((torch.ones(2), torch.zeros(2)))
+    log = tl.trace(_TakesModel(), box)
+    assert len(log) > 0
+
+
+def test_unreconstructable_subclass_passes_by_reference():
+    """A constructor needing extra args falls back instead of crashing."""
+
+    box = _NeedsExtraArgs((torch.ones(2),), meta="m")
+    assert copy_arg_tree(box) is box
+    assert _coerce_input_args(nn.Identity(), box) is box
+
+
+def test_namedtuple_reconstruction_unchanged():
+    """Real namedtuples keep their positional reconstruction."""
+
+    point = _Point(torch.ones(2), torch.zeros(2))
+    copied = copy_arg_tree(point)
+    assert type(copied) is _Point
+    assert copied.x is not point.x and torch.equal(copied.x, point.x)
+
+
+def test_torch_size_reconstruction_unchanged():
+    """torch.Size keeps its single-iterable reconstruction."""
+
+    copied = copy_arg_tree(torch.Size([2, 3]))
+    assert type(copied) is torch.Size and copied == (2, 3)
+
+
+def test_ladder_never_expands_a_lone_iterable_element():
+    """``*items`` reaching an iterable ctor cannot silently expand the item."""
+
+    rebuilt = rebuild_tuple_like(_MalformedFields, [[1, 2, 3]])
+    assert rebuilt is not None
+    assert tuple.__len__(rebuilt) == 1
+    assert tuple.__getitem__(rebuilt, 0) == [1, 2, 3]
