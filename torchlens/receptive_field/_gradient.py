@@ -14,7 +14,11 @@ import torch
 
 from ..backends import BackendUnsupportedError, get_backend_spec
 from . import _engine, _rules
-from ._errors import ReceptiveFieldError, ReceptiveFieldUnavailableError
+from ._errors import (
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
+    ReceptiveFieldUnavailableError,
+)
 from ._path import require_path, resolve_graph_point
 from ._types import GradientReceptiveField, GridLayout, ReceptiveFieldDirection
 
@@ -112,7 +116,7 @@ class _GradientReceptiveFieldResult(GradientReceptiveField):
         """
 
         if not 0.0 < mass <= 1.0:
-            raise ValueError("mass must be in the interval (0, 1].")
+            raise ReceptiveFieldConfigurationError("mass must be in the interval (0, 1].")
         flat_magnitude = self.grad.reshape(-1)
         flat_support = self.support_mask.reshape(-1)
         supported_indices = torch.nonzero(flat_support, as_tuple=False).reshape(-1)
@@ -757,7 +761,7 @@ def gradient_for_unit(
     """
 
     if atol < 0 or rtol < 0:
-        raise ValueError("atol and rtol must be non-negative.")
+        raise ReceptiveFieldConfigurationError("atol and rtol must be non-negative.")
     if input is not None and source is not None:
         raise TypeError("input= and source= cannot be used together.")
     trace = target.source_trace

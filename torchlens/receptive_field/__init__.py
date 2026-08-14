@@ -15,6 +15,7 @@ from ._errors import (
     AmbiguousTargetError,
     BackendUnsupportedError,
     NoInfluencePathError,
+    ReceptiveFieldConfigurationError,
     ReceptiveFieldError,
     ReceptiveFieldUnavailableError,
     ReceptiveFieldValidationError,
@@ -304,6 +305,16 @@ def verify(
 ) -> ReceptiveFieldVerification:
     """Run containment and sampled empirical-adjoint RF diagnostics.
 
+    Scope (R74/75-7): every empirical probe here — gradient containment and
+    both sides of the adjoint equality — backpropagates through the ONE
+    autograd graph built during the wrapped capture forward. The oracle is
+    therefore independent of the geometric DERIVATION (it catches TorchLens
+    indexing, sampling, and rule bugs) but shares its root with capture: a
+    hypothetical capture-time forward corruption would deceive geometry and
+    gradients alike, so PASS here does not re-attest capture fidelity. Capture
+    fidelity is owned by the ``torchlens.validation`` replay tripwire, which
+    re-executes ops against independently recomputed inputs.
+
     Parameters
     ----------
     trace:
@@ -322,7 +333,9 @@ def verify(
     """
 
     if empirical_adjoint_atol < 0 or empirical_adjoint_rtol < 0:
-        raise ValueError("empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative.")
+        raise ReceptiveFieldConfigurationError(
+            "empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative."
+        )
     containment = tuple(cross_validate(trace, **kwargs))  # type: ignore[arg-type]
     if not any(key in kwargs for key in ("direction", "inputs", "source", "target")):
         # Sweep the projective direction too: exact-box corner cross-checks
@@ -373,6 +386,7 @@ __all__ = [
     "ReceptiveFieldAxis",
     "ReceptiveFieldBox",
     "ReceptiveFieldBoxAxis",
+    "ReceptiveFieldConfigurationError",
     "ReceptiveFieldDirection",
     "ReceptiveFieldError",
     "NoInfluencePathError",

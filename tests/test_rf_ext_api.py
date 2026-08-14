@@ -83,3 +83,35 @@ def test_projective_table_keeps_receptive_default_schema() -> None:
     assert list(receptive.columns) == list(projective.columns[: len(receptive.columns)])
     assert "projective_target" in projective.columns
     assert projective.attrs["direction"] is ReceptiveFieldDirection.PROJECTIVE
+
+
+def test_configuration_errors_are_typed() -> None:
+    """SF-07: user-facing misconfiguration raises the typed RF stratum.
+
+    ``ReceptiveFieldConfigurationError`` subclasses both ``ReceptiveFieldError``
+    and ``ValueError``, so callers branching on the historical raw errors keep
+    working while typed handling becomes possible.
+    """
+
+    from torchlens.receptive_field import (
+        ReceptiveFieldConfigurationError,
+        ReceptiveFieldError,
+        verify,
+    )
+    from torchlens.receptive_field._rules import register_rf_rule
+
+    assert issubclass(ReceptiveFieldConfigurationError, ReceptiveFieldError)
+    assert issubclass(ReceptiveFieldConfigurationError, ValueError)
+
+    trace, _ = _trace()
+
+    with pytest.raises(ReceptiveFieldConfigurationError, match="must be non-negative"):
+        verify(trace, empirical_adjoint_atol=-1.0)
+    with pytest.raises(ReceptiveFieldConfigurationError, match="level must be"):
+        trace.receptive_fields(level="bogus")
+    with pytest.raises(ReceptiveFieldConfigurationError, match="at least one function name"):
+        register_rf_rule()
+    from torchlens.receptive_field._engine_forward import solve_projective
+
+    with pytest.raises(ReceptiveFieldConfigurationError, match="at least one target operation"):
+        solve_projective(trace, ())

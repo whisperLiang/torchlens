@@ -39,6 +39,7 @@ from ._engine_geometry import (
     _select_full_axes,
     _unique_notes,
 )
+from ._errors import ReceptiveFieldConfigurationError
 from ._rules import _RF_RULES, ReceptiveFieldRuleContext, _rf_rules_epoch, _RuleResult
 from ._types import (
     ReceptiveField,
@@ -168,7 +169,7 @@ def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
     """
 
     if source.source_trace is not trace or not _operation_is_live(source):
-        raise ValueError("Receptive-field source operation does not belong to the supplied trace.")
+        raise ReceptiveFieldConfigurationError("Receptive-field source operation does not belong to the supplied trace.")
 
     epoch = _rf_rules_epoch()
     graph_revision = _graph_revision(trace)

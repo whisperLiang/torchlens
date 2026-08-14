@@ -1,4 +1,14 @@
-"""Exact gradient-inside-geometric receptive-field validation."""
+"""Exact gradient-inside-geometric receptive-field validation.
+
+Oracle scope (R74/75-7): the empirical gradients probed here flow through the
+autograd graph recorded during the wrapped capture forward — the same root the
+geometric solution was derived from. The cross-check is independent of the
+geometric derivation (TL indexing/sampling/rule bugs fail it) but is
+structurally blind to capture-time forward corruption, which would shift both
+the geometry and the gradients together. Capture fidelity belongs to the
+``torchlens.validation`` replay tripwire, not to this module; see
+:func:`torchlens.receptive_field.verify` for the user-facing statement.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +22,16 @@ import torch
 from ..backends import BackendUnsupportedError
 from . import _engine
 from ._engine_forward import solve_projective
-from ._errors import ReceptiveFieldError, ReceptiveFieldUnavailableError
+from ._errors import (
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
+    ReceptiveFieldUnavailableError,
+)
 from ._forward_query import box_for_source_unit
 from ._gradient import gradient_for_unit
 from ._gradient_forward import _select_targets, projective_gradient_for_unit
 from ._path import resolve_graph_point
-from ._query import box_for_unit
+from ._query import _windowed_axes_in_unit_order, box_for_unit
 from ._types import (
     GradientReceptiveField,
     ReceptiveField,
@@ -149,10 +163,12 @@ def _box_for_descriptor(
     """
 
     assert descriptor.axes is not None
+    # Windowed unit coordinates are ordered by ascending output axis (the
+    # seed operation's own grid order), not descriptor (input-axis) order;
+    # the two differ whenever an axis permutation separates the endpoints.
     windowed = tuple(
         complete_unit[cast(int, axis.output_axis)]
-        for axis in descriptor.axes
-        if axis.kind == "windowed"
+        for axis in _windowed_axes_in_unit_order(descriptor)
     )
     if windowed:
         if direction is ReceptiveFieldDirection.RECEPTIVE:
@@ -635,7 +651,7 @@ def _check_for_unit(
     """
 
     if atol < 0 or rtol < 0:
-        raise ValueError("atol and rtol must be non-negative.")
+        raise ReceptiveFieldConfigurationError("atol and rtol must be non-negative.")
     normalized_direction = ReceptiveFieldDirection(direction)
     if normalized_direction is ReceptiveFieldDirection.RECEPTIVE and result_target is not None:
         raise TypeError("target= is only valid with direction='projective'.")
@@ -1060,7 +1076,7 @@ def validate_receptive_field_trace(
     """Run the shared receptive-field validation scope on an existing trace."""
 
     if atol < 0 or rtol < 0:
-        raise ValueError("atol and rtol must be non-negative.")
+        raise ReceptiveFieldConfigurationError("atol and rtol must be non-negative.")
     normalized_direction = ReceptiveFieldDirection(direction)
     if normalized_direction is ReceptiveFieldDirection.RECEPTIVE and target is not None:
         raise TypeError("target= is only valid with direction='projective'.")

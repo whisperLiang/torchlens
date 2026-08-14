@@ -15,6 +15,7 @@ from ._errors import AmbiguousInputError, ReceptiveFieldError
 from ._rules import _RuleResult
 from ._types import (
     ReceptiveField,
+    ReceptiveFieldAxis,
     ReceptiveFieldBox,
     ReceptiveFieldBoxAxis,
     ReceptiveFieldStatus,
@@ -207,7 +208,8 @@ def box_for_unit(
     op:
         Target operation.
     unit:
-        Coordinates over the target's derived windowed output axes.
+        Coordinates over the target's derived windowed output axes, ordered
+        by ascending output axis (the target's own grid order).
     input:
         Optional input operation or exact IO role/operation label.
     source:
@@ -289,8 +291,28 @@ def _validate_descriptor_for_query(descriptor: ReceptiveField) -> None:
         raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
 
 
+def _windowed_axes_in_unit_order(descriptor: ReceptiveField) -> tuple[ReceptiveFieldAxis, ...]:
+    """Return windowed descriptor axes in the unit's coordinate order.
+
+    A ``unit`` tuple addresses the seed operation's OWN output grid, so its
+    coordinates are ordered by ascending ``output_axis`` — the order the
+    windowed axes appear in that operation's shape. Descriptor axes are stored
+    by ascending ``input_axis`` instead, and any axis permutation between the
+    two endpoints (transpose/permute/movedim) makes those orders differ, so
+    every producer and consumer of a windowed unit tuple must route through
+    this one ordering (R20-1: zipping coordinates in descriptor order silently
+    transposed exact boxes).
+    """
+    assert descriptor.axes is not None
+    windowed = tuple(axis for axis in descriptor.axes if axis.kind == "windowed")
+    return tuple(sorted(windowed, key=lambda axis: cast(int, axis.output_axis)))
+
+
 def _normalize_unit(op: Op, descriptor: ReceptiveField, unit: Sequence[int]) -> tuple[int, ...]:
     """Validate or resolve target windowed-axis coordinates.
+
+    Coordinates are ordered by ascending output axis (the seed operation's own
+    grid order; see :func:`_windowed_axes_in_unit_order`).
 
     Geometric queries (``.at()``) require in-range non-negative coordinates:
     a coordinate ``< 0`` is rejected as out of bounds, it is NOT Python-wrapped.
@@ -300,7 +322,7 @@ def _normalize_unit(op: Op, descriptor: ReceptiveField, unit: Sequence[int]) -> 
     """
     assert descriptor.axes is not None
     output_axes = tuple(
-        cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
+        cast(int, axis.output_axis) for axis in _windowed_axes_in_unit_order(descriptor)
     )
     coordinates = tuple(unit)
     if len(coordinates) != len(output_axes):
@@ -331,9 +353,7 @@ def _initial_axis_sets(
         if len(complete_unit) != len(op.shape):
             raise ReceptiveFieldError("complete_unit rank does not match the target operation.")
         result = [_IndexSet.singleton(int(coordinate)) for coordinate in complete_unit]
-    for axis, coordinate in zip(
-        (item for item in descriptor.axes if item.kind == "windowed"), coordinates, strict=True
-    ):
+    for axis, coordinate in zip(_windowed_axes_in_unit_order(descriptor), coordinates, strict=True):
         assert axis.output_axis is not None
         existing = result[axis.output_axis]
         singleton = _IndexSet.singleton(coordinate)

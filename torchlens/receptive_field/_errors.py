@@ -10,6 +10,16 @@ class ReceptiveFieldError(TorchLensError):
     """Base class for receptive-field failures."""
 
 
+class ReceptiveFieldConfigurationError(ReceptiveFieldError, ValueError):
+    """Raised when a receptive-field call is misconfigured by its caller.
+
+    Covers invalid public arguments and rule-registration mistakes (bad
+    tolerances, unknown table levels, malformed rule names, out-of-range
+    display options). Subclasses :class:`ValueError` so existing callers
+    catching the historical raw errors keep working (SF-07 typed stratum).
+    """
+
+
 class AmbiguousInputError(ReceptiveFieldError, ValueError):
     """Raised when a query has more than one reachable model input."""
 
@@ -45,6 +55,7 @@ __all__ = [
     "AmbiguousPassError",
     "BackendUnsupportedError",
     "NoInfluencePathError",
+    "ReceptiveFieldConfigurationError",
     "ReceptiveFieldError",
     "ReceptiveFieldUnavailableError",
     "ReceptiveFieldValidationError",
