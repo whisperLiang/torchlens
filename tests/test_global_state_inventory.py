@@ -20,6 +20,14 @@ from torchlens.capture import projections, trace as capture_trace
 
 _SCOPED_CAPTURE_STATE = frozenset(
     {
+        # The four scalar control slots below are assigned ONLY through the
+        # module object from other modules (no ast.Global anywhere), so the
+        # pre-rebind-detector inventory could never classify them
+        # (hunt-b2-sol R54).
+        ("torchlens/_state.py", "_active_fast_run_collector"),
+        ("torchlens/_state.py", "_hook_reentrancy_depth"),
+        ("torchlens/_state.py", "_nonowner_belt_armed"),
+        ("torchlens/_state.py", "_runnable_ledger_armed"),
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
@@ -80,6 +88,15 @@ pins the high-risk members against exception and interruption paths.
 
 _INSTALL_STATE_AND_CACHES = frozenset(
     {
+        # Wrapper-lifecycle slots rebound only through the module object
+        # (visible since the cross-module rebind detector, hunt-b2-sol R54).
+        ("torchlens/_state.py", "_decorated_identity"),
+        ("torchlens/_state.py", "_is_decorated"),
+        ("torchlens/_state.py", "_wrap_epoch"),
+        # Refreshed-globals seam: user_funcs rebinds the SAME function objects
+        # into the private public-impl module on every access (idempotent).
+        ("torchlens/_user_public_impls.py", "_run_model_and_save_specified_outs"),
+        ("torchlens/_user_public_impls.py", "trace"),
         ("torchlens/_state.py", "_decorated_func_mapper"),
         ("torchlens/_state.py", "_decorated_to_orig"),
         ("torchlens/_state.py", "_orig_to_decorated"),
@@ -236,6 +253,9 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS"),
         ("torchlens/utils/_torch_compat.py", "_VARIABLE_FUNCTIONS_CLASS_PROBED"),
+        # One-shot warm of torch's lazy torch._compile/torch._dynamo cascade,
+        # fired by the RNG monitor BEFORE its window arms (hunt-b8 F1).
+        ("torchlens/utils/_torch_compat.py", "_LAZY_TORCH_IMPORTS_WARMED"),
         ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         ("torchlens/utils/tensor_utils.py", "_cuda_available"),
     }
@@ -250,6 +270,11 @@ these flags are the sanctioned mechanism.
 
 _DIAGNOSTIC_AUDIT_STATE = frozenset(
     {
+        # Diagnostic shadow-mode toggles ("off"/"shadow"), flipped only by the
+        # detector/witness install surfaces; assigned solely through the
+        # module object (visible since the cross-module rebind detector).
+        ("torchlens/_state.py", "_completeness_witness_mode"),
+        ("torchlens/_state.py", "_escape_detector_mode"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_CLONE_READS"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_COLLECTORS"),
         ("torchlens/_trace_core/op_store.py", "_AUDIT_FINGERPRINTS"),
@@ -578,10 +603,118 @@ def _names_mutated_in_place(trees: dict[str, ast.Module]) -> set[str]:
     return mutated
 
 
+def _module_alias_targets(
+    relative: str, tree: ast.Module, module_files: frozenset[str]
+) -> dict[str, str]:
+    """Map local names bound to imported TORCHLENS modules onto their files.
+
+    Resolves both absolute (``from torchlens import _state``) and relative
+    (``from ... import _state``, ``from ..utils import rng as rng_mod``)
+    module imports, so attribute rebinds through the alias can be attributed
+    to the OWNING module.
+
+    Parameters
+    ----------
+    relative:
+        Module path relative to the repository root.
+    tree:
+        Parsed module.
+    module_files:
+        Every package Python file, as repo-relative POSIX paths.
+
+    Returns
+    -------
+    dict[str, str]
+        Local alias name -> owning module's repo-relative path.
+    """
+
+    package_parts = relative[: -len(".py")].split("/")[:-1]
+    if relative.endswith("/__init__.py"):
+        package_parts = relative[: -len("/__init__.py")].split("/")
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module is None or node.module.split(".")[0] != "torchlens":
+                    continue
+                base = node.module.split(".")
+            else:
+                keep = len(package_parts) - (node.level - 1)
+                if keep < 0:
+                    continue
+                base = package_parts[:keep]
+                if node.module:
+                    base = [*base, *node.module.split(".")]
+            for alias in node.names:
+                module_candidate = "/".join([*base, alias.name]) + ".py"
+                package_candidate = "/".join([*base, alias.name, "__init__.py"])
+                if module_candidate in module_files:
+                    aliases[alias.asname or alias.name] = module_candidate
+                elif package_candidate in module_files:
+                    aliases[alias.asname or alias.name] = package_candidate
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] != "torchlens":
+                    continue
+                module_candidate = alias.name.replace(".", "/") + ".py"
+                package_candidate = alias.name.replace(".", "/") + "/__init__.py"
+                local = alias.asname or alias.name.split(".")[0]
+                if alias.asname is None and "." in alias.name:
+                    continue  # ``import torchlens.x`` binds only ``torchlens``
+                if module_candidate in module_files:
+                    aliases[local] = module_candidate
+                elif package_candidate in module_files:
+                    aliases[local] = package_candidate
+    return aliases
+
+
+def _cross_module_attribute_rebinds(
+    trees: dict[str, ast.Module], module_files: frozenset[str]
+) -> set[tuple[str, str]]:
+    """Return module globals rebound THROUGH an imported-module attribute.
+
+    ``_declared_globals`` walks ``ast.Global`` only, so a control slot that is
+    declared in one module and assigned exclusively from OTHERS
+    (``_state._nonowner_belt_armed = True`` in ``_completeness_patches.py``)
+    could never be classified: four live per-capture guards evaded the
+    purported whole-package inventory this way (hunt-b2-sol R54). Attribute
+    rebinds through a resolved torchlens module alias are attributed to the
+    OWNING module.
+
+    Parameters
+    ----------
+    trees:
+        Relative path -> parsed module for the whole package.
+    module_files:
+        Every package Python file, as repo-relative POSIX paths.
+
+    Returns
+    -------
+    set[tuple[str, str]]
+        ``(owning module relative path, attribute name)`` rebind sites.
+    """
+
+    rebinds: set[tuple[str, str]] = set()
+    for relative, tree in trees.items():
+        aliases = _module_alias_targets(relative, tree, module_files)
+        if not aliases:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    owner = aliases.get(target.value.id)
+                    if owner is not None:
+                        rebinds.add((owner, target.attr))
+    return rebinds
+
+
 def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
     """Return every mutable module global in the package, with its initializer.
 
-    Two detectors, because either alone has a structural blind spot:
+    Three detectors, because each alone has a structural blind spot:
 
     * ``global`` declarations catch REBINDING (``_flag = True``) but can never
       see a container mutated in place -- ``_CACHE[key] = value`` needs no
@@ -590,6 +723,10 @@ def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
     * Module-level mutable bindings catch the container class, qualified by
       package-wide evidence that something actually mutates them, so frozen
       lookup tables are not dragged in.
+    * Cross-module attribute rebinds (``_state.flag = value`` from another
+      module) need no ``global`` statement in ANY module, so scalar control
+      slots assigned only through the module object were invisible to both
+      detectors above (hunt-b2-sol R54).
 
     Parameters
     ----------
@@ -618,6 +755,9 @@ def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
         for name, initializer in bindings.items():
             if name in mutated_names:
                 state[(relative, name)] = initializer
+    module_files = frozenset(trees)
+    for owner, attribute in _cross_module_attribute_rebinds(trees, module_files):
+        state.setdefault((owner, attribute), "")
     return state
 
 
