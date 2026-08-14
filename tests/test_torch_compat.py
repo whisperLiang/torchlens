@@ -393,6 +393,17 @@ def test_torch_capability_snapshot_contract() -> None:
         # tripwire: a torch build that loses the probe must fail this test
         # loudly, not degrade silently.
         "HAS_DISPATCH_MODE_STACK_QUERY": True,
+        # r-b4 R26-2: previously-unrouted private probes, now behind named
+        # flags. The four torch._C surfaces are present across the whole
+        # supported range -- hardcoded True as tripwires. FakeTensorMode and
+        # the DTensor geometry helper are build-dependent (distributed may be
+        # absent), so mirror the live post-snapshot capability.
+        "HAS_JIT_SCHEMA_ENUMERATION": True,
+        "HAS_TENSORBASE_CLASS": True,
+        "HAS_DISABLE_TORCH_FUNCTION": True,
+        "HAS_VARIABLE_FUNCTIONS_CLASS": True,
+        "HAS_FAKE_TENSOR_MODE": tc.HAS_FAKE_TENSOR_MODE,
+        "HAS_DTENSOR_SHARD_GEOMETRY": tc.HAS_DTENSOR_SHARD_GEOMETRY,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
         # compiled callables through their original eager Python, and Dynamo's

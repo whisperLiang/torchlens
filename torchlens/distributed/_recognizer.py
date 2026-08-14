@@ -24,6 +24,7 @@ census is the version-sensitivity tripwire of last resort for those.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -224,12 +225,37 @@ def _force_registration_imports() -> None:
             continue
 
 
+def _all_dispatcher_schemas() -> list[Any]:
+    """Return every dispatcher schema, or refuse typed when unenumerable.
+
+    r-b4 R26-2: routed through the ``_torch_compat`` accessor
+    (``HAS_JIT_SCHEMA_ENUMERATION``). A private-API rename used to escape as a
+    raw ``AttributeError`` at ``tl.distributed.arm()``; an unenumerable
+    dispatcher now raises the contract's typed ``uncaptured_collective_op``
+    refusal -- the census cannot be vetted, so arming must not proceed.
+    """
+
+    from ..utils._torch_compat import get_jit_all_schemas
+
+    schemas = get_jit_all_schemas()
+    if schemas is None:
+        raise UncapturedCollectiveOpError(
+            "TorchLens cannot enumerate the torch dispatcher schemas on this build, "
+            "so the collective recognizer census cannot be vetted and distributed "
+            "arming refuses.",
+            kind=UNCAPTURED_COLLECTIVE_OP,
+            layer=0,
+            reason="jit_schema_enumeration_unavailable",
+        )
+    return schemas
+
+
 def _runtime_namespace_sets() -> dict[str, set[str]]:
     """Return the runtime dispatcher's per-namespace op sets for the five."""
 
     _force_registration_imports()
     sets: dict[str, set[str]] = {namespace: set() for namespace in COLLECTIVE_NAMESPACES}
-    for schema in torch._C._jit_get_all_schemas():
+    for schema in _all_dispatcher_schemas():
         namespace, _, op_name = schema.name.partition("::")
         if namespace in sets:
             sets[namespace].add(op_name)
@@ -240,7 +266,7 @@ def _layer2_offenders() -> list[str]:
     """Return non-enumerated-namespace ops whose schemas carry c10d classes."""
 
     offenders: list[str] = []
-    for schema in torch._C._jit_get_all_schemas():
+    for schema in _all_dispatcher_schemas():
         namespace = schema.name.partition("::")[0]
         if namespace in COLLECTIVE_NAMESPACES:
             continue

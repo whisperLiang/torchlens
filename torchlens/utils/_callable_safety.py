@@ -798,13 +798,18 @@ def _is_side_effecting_callable_name(func: Callable[..., Any]) -> bool:
 
 
 def _tensor_method_owners() -> frozenset[type]:
-    """Return the class objects that own genuine C-level tensor method descriptors."""
+    """Return the class objects that own genuine C-level tensor method descriptors.
+
+    The C tensor base resolves through the ONE ``_torch_compat`` accessor
+    (``HAS_TENSORBASE_CLASS``, r-b4 R26-2) instead of a duplicated local probe.
+    """
+
+    from ._torch_compat import get_tensorbase_class
 
     owners: set[type] = {torch.Tensor}
-    for name in ("TensorBase", "_TensorBase"):
-        candidate = getattr(torch._C, name, None)
-        if isinstance(candidate, type):
-            owners.add(candidate)
+    tensorbase = get_tensorbase_class()
+    if tensorbase is not None:
+        owners.add(tensorbase)
     return frozenset(owners)
 
 
@@ -972,7 +977,9 @@ def _iter_tensor_getset_descriptor_names() -> tuple[str, ...]:
     a new tensor property is seen by the classifier automatically.
     """
 
-    base = getattr(torch._C, "TensorBase", None) or getattr(torch._C, "_TensorBase", None)
+    from ._torch_compat import get_tensorbase_class
+
+    base = get_tensorbase_class()
     if base is None:  # pragma: no cover - torch always exposes the C tensor base here.
         return ()
     return tuple(
@@ -1004,8 +1011,14 @@ def _mode_free_probe_context() -> Iterator[None]:
     grad/inference/default-device state is untouched on exit.
     """
 
+    from ._torch_compat import get_disable_torch_function_context
+
     with ExitStack() as stack:
-        disabler = getattr(torch._C, "DisableTorchFunction", None)
+        # r-b4 R26-2: resolved through _torch_compat (HAS_DISABLE_TORCH_FUNCTION).
+        # The CPU-device fallback does NOT neutralize an ambient torch-FUNCTION
+        # mode, so its use is now disclosed by the flipped flag in doctor/compat
+        # rather than silently absorbed.
+        disabler = get_disable_torch_function_context()
         if disabler is not None:
             stack.enter_context(disabler())
         else:
