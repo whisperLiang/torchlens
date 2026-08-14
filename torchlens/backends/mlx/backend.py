@@ -54,6 +54,7 @@ from .._finalize import (
     attach_module_owned_op_params,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    join_module_address as _join_module_address,
     mark_output_label,
     mirror_param_derived_grads,
     nearest_metadata_parent,
@@ -2594,25 +2595,6 @@ def _resolve_mlx_module_identity_mode(
     if value == "function_root":
         return False
     return module_tree is not None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
 
 
 def _normalize_mlx_input_grad_argnums(

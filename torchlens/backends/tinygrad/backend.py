@@ -47,7 +47,9 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
+    join_module_address as _join_module_address,
     mirror_param_derived_grads,
+    module_source_metadata as _module_source_metadata,
     new_preview_function_trace,
     normalize_op_module_calls,
     numel_from_shape as _numel,
@@ -2010,123 +2012,6 @@ def _is_tinygrad_tensor(value: Any) -> bool:
     except ImportError:
         return False
     return isinstance(value, Tensor)
-
-
-def _module_source_metadata(module: Any) -> dict[str, Any]:
-    """Return best-effort source metadata for a tinygrad module-like object.
-
-    Parameters
-    ----------
-    module
-        Module-like object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Source metadata compatible with TorchLens module logs.
-    """
-
-    cls = type(module)
-    init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)  # noqa: B004 - fetches the __call__ object, not a callability test
-    return {
-        "class_source_file": _safe_source_file(cls),
-        "class_source_line": _source_line(cls),
-        "init_source_file": _safe_source_file(init) if init is not None else None,
-        "init_source_line": _source_line(init),
-        "forward_source_file": _safe_source_file(call) if call is not None else None,
-        "forward_source_line": _source_line(call),
-        "class_docstring": inspect.getdoc(cls),
-        "init_signature": _signature_string(init),
-        "init_docstring": inspect.getdoc(init) if init is not None else None,
-        "forward_signature": _signature_string(call),
-        "forward_docstring": inspect.getdoc(call) if call is not None else None,
-    }
-
-
-def _safe_source_file(obj: Any) -> str | None:
-    """Return the source file for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
-        a class defined without a backing source file, such as one built
-        via ``exec``/``compile`` or implemented as a builtin).
-    """
-
-    try:
-        return inspect.getsourcefile(obj)
-    except (OSError, TypeError):
-        return None
-
-
-def _source_line(obj: Any) -> int | None:
-    """Return the first source line for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    int | None
-        First source line, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return inspect.getsourcelines(obj)[1]
-    except (OSError, TypeError):
-        return None
-
-
-def _signature_string(obj: Any) -> str | None:
-    """Return ``obj``'s signature string when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Signature string, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return str(inspect.signature(obj))
-    except (TypeError, ValueError):
-        return None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child attribute name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent == "self" else f"{parent}.{child_name}"
 
 
 def _module_stack_for_uop(

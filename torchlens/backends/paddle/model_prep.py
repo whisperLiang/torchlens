@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...ir.events import ModuleFrame
-from .._finalize import nearest_metadata_parent
+from .._finalize import join_module_address as _join_module_address, nearest_metadata_parent
 
 
 @dataclass
@@ -365,29 +365,4 @@ def _direct_children(address: str, metadata: dict[str, dict[str, Any]]) -> list[
     return sorted(children, key=_address_sort_key)
 
 
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
 
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent in {"", "self"} else f"{parent}.{child_name}"
-
-
-__all__ = [
-    "PaddleModuleTree",
-    "cleanup_model_session",
-    "discover_paddle_module_tree",
-    "prepare_model_once",
-    "prepare_model_session",
-]
