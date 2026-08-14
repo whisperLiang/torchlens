@@ -6,7 +6,7 @@ import inspect
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from ..data_classes._compaction import compact_op_metadata
 from ..data_classes.layer import Layer
@@ -1099,7 +1099,7 @@ def new_preview_function_trace(
     trace.trace_label = name
     trace.backend = cast(BackendName, backend_name)
     trace.module_identity_mode = "function_root"
-    trace.param_source = param_source
+    trace.param_source = cast("Literal['native-module', 'pytree-derived', 'none']", param_source)
     trace.model_label = trace.model_class_name
     trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
     trace._pre_forward_rng_states = None
