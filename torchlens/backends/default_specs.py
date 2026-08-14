@@ -447,9 +447,23 @@ def _tf_runtime_supported(tf: object, keras: object) -> bool:
     Returns
     -------
     bool
-        True for Keras 3 on TensorFlow >= 2.16.
+        True for the Keras-3 multi-backend surface (TF >= 2.16 ships it).
+
+    Notes
+    -----
+    r-b4 R26-6b: feature-probed, not version-parsed. The historical
+    ``Version(...) >= 2.16 and >= 3`` gate returned ``False`` on
+    ``InvalidVersion``, so an odd/custom build string silently made
+    ``backend="tf"`` unavailable. ``keras.ops`` ships only in Keras 3 and the
+    multi-backend selector ``keras.backend.backend`` is the exact surface the
+    TF preview consumes; a parseable version pair is still honored as a
+    fallback signal when the structural probe is inconclusive.
     """
 
+    if hasattr(keras, "ops") and callable(
+        getattr(getattr(keras, "backend", None), "backend", None)
+    ):
+        return True
     try:
         tf_version = Version(str(getattr(tf, "__version__", "0")))
         keras_version = Version(str(getattr(keras, "__version__", "0")))

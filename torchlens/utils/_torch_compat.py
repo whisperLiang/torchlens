@@ -58,6 +58,9 @@ __all__ = [
     "AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED",
     "HAS_ACCUMULATE_GRAD_CLASS",
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
+    "HAS_C10D_ABORT_PG",
+    "HAS_C10D_GROUP_REGISTRY",
+    "HAS_C10D_GROUP_SEQ",
     "HAS_CUDA_MATMUL_TF32",
     "HAS_CUDNN_FLAGS",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
@@ -110,6 +113,7 @@ __all__ = [
     "HAS_TORCH_VF",
     "HAS_VARIABLE_FUNCTIONS",
     "TorchCapabilitySnapshot",
+    "TorchCapabilityWarning",
     "saved_tensors_default_hooks_active",
     "RunnableTorchAlias",
     "autocast_get_dtype",
@@ -1255,6 +1259,17 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
 )
 
 
+class TorchCapabilityWarning(UserWarning):
+    """Graceful torch-capability degradation warning (r-b4 R26-6d).
+
+    A dedicated subclass so CI suppression can key on the CATEGORY instead of
+    the message text (``pyproject.toml`` matched the literal message string, so
+    editing the wording would have turned every legitimate matrix degradation
+    into a suite-wide error under ``error::UserWarning:torchlens``). Subclasses
+    ``UserWarning``, so existing category filters keep matching.
+    """
+
+
 OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
     {
         # PEP 657 / 3.11 code-object surfaces: an interpreter feature, not a
@@ -1303,7 +1318,7 @@ def mark_torch_capability_missing(capability_name: str, detail: str) -> None:
     _warned_missing_capabilities.add(capability_name)
     warnings.warn(
         f"TorchLens torch capability {capability_name} is unavailable; {detail}",
-        UserWarning,
+        TorchCapabilityWarning,
         stacklevel=3,
     )
 

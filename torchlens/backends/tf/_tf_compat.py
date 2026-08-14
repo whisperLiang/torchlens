@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
+from ...utils._torch_compat import TorchCapabilityWarning
 from ..registry import BackendUnsupportedError
 
 TFCapabilitySnapshot = dict[str, bool]
@@ -70,7 +71,7 @@ def mark_tf_capability_missing(capability_name: str, detail: str) -> None:
     _warned_missing_capabilities.add(capability_name)
     warnings.warn(
         f"TorchLens TensorFlow capability {capability_name} is unavailable; {detail}",
-        UserWarning,
+        TorchCapabilityWarning,
         stacklevel=3,
     )
 

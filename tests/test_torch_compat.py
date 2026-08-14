@@ -547,3 +547,40 @@ def test_dynamo_is_compiling_raising_probe_discloses_possibly_compiling(
     with pytest.warns(UserWarning, match="HAS_DYNAMO_IS_COMPILING"):
         assert tc.dynamo_is_compiling() is True
     assert tc.HAS_DYNAMO_IS_COMPILING is False
+
+
+def test_capability_warning_category_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r-b4 R26-6d: degradation warnings carry TorchCapabilityWarning.
+
+    CI suppression can key on the CATEGORY; the subclass still isinstance-
+    matches UserWarning so existing filters keep working.
+    """
+
+    _reset_capability(monkeypatch, "HAS_TORCH_VF")
+    monkeypatch.setattr(tc, "HAS_TORCH_VF", True)
+    monkeypatch.setattr(torch, "_VF", None, raising=False)
+    with pytest.warns(tc.TorchCapabilityWarning, match="HAS_TORCH_VF"):
+        assert tc.get_torch_vf_namespace() is None
+    assert issubclass(tc.TorchCapabilityWarning, UserWarning)
+
+
+def test_tf_runtime_support_is_feature_probed() -> None:
+    """r-b4 R26-6b: an odd version string no longer disables backend='tf'."""
+
+    from torchlens.backends.default_specs import _tf_runtime_supported
+
+    class _Backend:
+        @staticmethod
+        def backend() -> str:
+            return "tensorflow"
+
+    keras3 = SimpleNamespace(ops=object(), backend=_Backend, __version__="weird+build")
+    odd_tf = SimpleNamespace(__version__="2.16.custom.oddity")
+    assert _tf_runtime_supported(odd_tf, keras3) is True
+
+    keras2 = SimpleNamespace(__version__="2.15.0")
+    old_tf = SimpleNamespace(__version__="2.12.0")
+    assert _tf_runtime_supported(old_tf, keras2) is False
+
+    unparseable_keras2 = SimpleNamespace(__version__="not-a-version")
+    assert _tf_runtime_supported(old_tf, unparseable_keras2) is False

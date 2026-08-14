@@ -17,7 +17,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from ._torch_compat import HAS_CODE_POSITIONS, HAS_CODE_QUALNAME
+# r-b4 R26-6c: read capability flags at USE time through the module object --
+# an import-time value binding never sees mark_torch_capability_missing flips.
+from . import _torch_compat
 
 # Attributes to skip when crawling an object's namespace looking for tensors.
 # Two groups, matched by EXACT name:
@@ -98,7 +100,7 @@ def _build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     ``None`` are stored with ``None`` so callers can distinguish "not in map"
     (unknown offset) from "no column information available" (positions absent).
     """
-    if not HAS_CODE_POSITIONS:
+    if not _torch_compat.HAS_CODE_POSITIONS:
         return {}
     offset_map: dict[int, int | None] = {}
     try:
@@ -171,7 +173,7 @@ def _get_code_qualname(frame: FrameType) -> str | None:
     Returns:
         Qualified code object name, or None when unavailable.
     """
-    if not HAS_CODE_QUALNAME:
+    if not _torch_compat.HAS_CODE_QUALNAME:
         return None
     return getattr(frame.f_code, "co_qualname", None)
 
@@ -185,7 +187,7 @@ def _get_col_offset(frame: FrameType) -> int | None:
     Returns:
         Column offset for the current instruction, or None when unavailable.
     """
-    if not HAS_CODE_POSITIONS:
+    if not _torch_compat.HAS_CODE_POSITIONS:
         return None
     offset_map = _get_or_build_col_offset_map(frame.f_code)
     if not offset_map:

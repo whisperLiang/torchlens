@@ -12,7 +12,10 @@ import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
 from ... import _state
-from ...utils._torch_compat import HAS_CACHED_UNTYPED_STORAGE_WRAPPER
+
+# r-b4 R26-6c: module import so the flag is read at USE time (an import-time
+# value binding never sees runtime capability flips).
+from ...utils import _torch_compat
 from ...utils._torch_symbols import torch_attr
 
 if TYPE_CHECKING:
@@ -435,7 +438,9 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     # wrap-required row downgrades the capture to INCOMPLETE (a silent skip would be a
     # silent storage-spelling witness gap). Feature-absent members on this torch are
     # skipped (classified absent, not failed).
-    state.storage_origins = _StorageOriginRegistry(weak_keys=HAS_CACHED_UNTYPED_STORAGE_WRAPPER)
+    state.storage_origins = _StorageOriginRegistry(
+        weak_keys=_torch_compat.HAS_CACHED_UNTYPED_STORAGE_WRAPPER
+    )
     storage_member_restore: list[tuple[Any, str, bool, Any]] = []
     for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
         rows = STORAGE_METADATA_ACCESSOR_DISPOSITIONS.get(storage_cls.__name__, {})
