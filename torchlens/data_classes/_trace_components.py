@@ -12,6 +12,20 @@ witness (honesty diagnostics), source_metadata (model source facts),
 totals (aggregate counts/memory/timing), runnable (RunnableTraceState),
 session (non-portable runtime, caches, append/intervention state, build
 workspaces).
+
+Second map: ``TRACE_EXTERNAL_WRITE_EXEMPTIONS`` (b5 R50-1a). Backends,
+capture, validation, viz, and I/O still ATTACH private attributes to a Trace
+from outside ``data_classes/`` without declaring them anywhere -- neither in
+``Trace.FIELD_POLICY`` nor (for most of them) in ``_io/scrub.py``'s
+runtime-only allowance. Each such attribute is a field of the god object with
+no owner, no policy, and no schema row; SF-39 was one instance fixed by hand
+and nothing stopped the next. The exemption ledger below makes the class
+CLOSED and reason-bearing: ``tests/test_trace_attr_ownership.py`` fails on any
+external private write that is neither declared here nor owned above, so a new
+undeclared attachment is a reviewed contract diff. The ledger is SHRINK-ONLY;
+the real discharge is enrollment (declare the field on ``Trace`` with a
+``FieldPolicy`` and an owner row), which lands in the ``data_classes/trace.py``
+owner lane, not here.
 """
 
 from __future__ import annotations
@@ -347,4 +361,92 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_session_buffer_inventory": "session",
     "_session_buffer_identity": "session",
     "_backward_gradfn_refs": "graph",
+}
+
+#: Private Trace attributes ATTACHED FROM OUTSIDE ``data_classes/`` that carry
+#: no declared owner above, each with the reason it is tolerated. Seeded from
+#: the b5 census (36 names / 62 write sites at 2026-08-14; only the eight noted
+#: as "scrub-declared" have a home in ANY other authority). Exact-equality
+#: ledger: a new undeclared attachment fails the gate, and enrolling one
+#: requires deleting its row here.
+TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
+    # --- Preview-backend capture scratch (mlx/paddle/tf/jax) ----------------
+    # Each is written by its own backend during capture and read back by that
+    # same backend; none is portable. The parity lanes own their relocation
+    # (into a backend-side session object, not the Trace).
+    "_mlx_module_stack": "mlx: module-stack scratch, attached/deleted around the mlx forward",
+    "_mlx_op_captures": "mlx: raw op-capture list (scrub-declared runtime-only)",
+    "_mlx_replay_inventory": "mlx: replay inventory for validation (scrub-declared runtime-only)",
+    "_mlx_halt_selector": "mlx: resolved halt selector for the live forward",
+    "_mlx_intervention_plan": "mlx: resolved intervention plan for the live forward",
+    "_mlx_perturbation_gaps": "mlx: per-op replay perturbation gaps recorded by mlx validation",
+    "_paddle_module_stack": "paddle: module-stack scratch, attached/deleted around the forward",
+    "_paddle_intervention_runtime": "paddle: live intervention runtime for the dygraph forward",
+    "_tf_static_region_labels": "tf: FuncGraph static-path region captures",
+    "_tf_static_fallback_error": "tf: FuncGraph static-path fallback diagnostic",
+    "_jax_capture_index_to_raw_op_label": (
+        "jax: capture-index to raw-label map (scrub-declared runtime-only)"
+    ),
+    "_selective_save_hidden_payloads": (
+        "previews: neutral selective-save side channel (scrub-declared runtime-only)"
+    ),
+    # --- Cross-backend validation side channels ----------------------------
+    # Written by every backend's validation epilogue and by the public
+    # validate() impl; the honest fix is a declared validation-result field.
+    "_validation_replay_status": (
+        "validation: replay status stamped by all five backends + "
+        "_user_public_impls "
+        "(12 sites; scrub-declared runtime-only, no schema row)"
+    ),
+    "_validation_pruned_dispatchable_op_count": (
+        "validation: counter written under try/except and read with a "
+        "getattr default -- a dropped write reads as zero"
+    ),
+    "_validation_buffer_write_dispatch_op_count": (
+        "validation: counter written under try/except and read with a "
+        "getattr default -- a dropped write reads as zero"
+    ),
+    # --- Torch capture-session transients ----------------------------------
+    # Live only inside one forward/backward bracket; several are the
+    # re-entrancy flags the wrapper hot path reads.
+    "_capture_producer_policy": "torch: journal producer policy (scrub-declared runtime-only)",
+    "_capture_container_structure": (
+        "torch: container-structure scratch, attached and deleted by the "
+        "capture entrypoint (scrub-declared runtime-only)"
+    ),
+    "_active_save_grads_policy": "torch: resolved save_grads policy for the active backward",
+    "_tl_active_backward_bracket": "torch: re-entrancy flag for the active backward bracket",
+    "_tl_materializing_backward_projection": (
+        "torch: re-entrancy flag while a backward projection materializes"
+    ),
+    "_tl_intervene_selector_fire_count": (
+        "torch/intervention: intervention fire counter (5 write sites)"
+    ),
+    "_installing_deferred_gradient_hooks": (
+        "capture session: re-entrancy flag while deferred grad hooks install"
+    ),
+    "_prehook_provenance_ledger": "torch: forward-pre-hook provenance ledger for one capture",
+    "_fastlog_recording": "fastlog: live Recording handle bound to the trace for the capture",
+    # --- Refresh-projection plumbing (user_funcs + capture/projectors) -----
+    # A refresh capture carries its resolution decisions on the trace so the
+    # projector can rebind them; strictly session-lifetime.
+    "_refresh_resolved_layer_nums_to_save": "refresh projection: resolved save set",
+    "_refresh_resolved_grad_layer_nums_to_save": "refresh projection: resolved grad save set",
+    "_refresh_projection_capture": "refresh projection: marks the trace as a refresh capture",
+    "_refresh_projection_target_ref": "refresh projection: weakref back to the projection target",
+    "_deferred_retention_selector": "refresh projection: deferred retention selector",
+    "_deferred_gradient_selector": "refresh projection: deferred gradient selector",
+    # --- Bundle-load provenance (set by _io/bundle via setattr) ------------
+    # `_source_bundle_path` / `_source_bundle_manifest_sha256` ARE declared;
+    # these three siblings were never enrolled with them.
+    "_loaded_from_bundle": "bundle load: marks a loaded trace (undeclared sibling of the two owned)",
+    "_source_bundle_created_at": "bundle load: manifest created_at (undeclared sibling)",
+    "_source_bundle_provenance": "bundle load: manifest provenance (undeclared sibling)",
+    # --- One-shot warning latches -----------------------------------------
+    "_warned_direct_write_propagation": "intervention: one-shot warning latch (replay + rerun)",
+    "_warned_unknown_append_helper": "intervention: one-shot warning latch (rerun)",
+    # --- Visualization scratch --------------------------------------------
+    "_last_sibling_ordering_decision": (
+        "viz: last sibling-ordering decision for diagnostics (scrub-declared runtime-only)"
+    ),
 }

@@ -1,0 +1,301 @@
+"""b5 R45-2 / SF-41: string private-attribute reach-ins are ledgered, not free.
+
+``getattr(trace, "_raw_to_final_op_labels", {})`` is a private reach-in that
+the linter cannot see: SLF001 flags ``trace._raw_to_final_op_labels`` but NOT
+its string spelling, so the measured 1771-1777 SLF001 hits UNDERCOUNT the real
+encapsulation surface by this whole class. Worse, the three-argument form is
+fail-OPEN by construction -- a renamed or dropped field silently becomes the
+default instead of an error, which is exactly how the merged presenter came to
+resolve boundary ops against a possibly-empty mapping (fixed in the same
+change as this gate).
+
+This module is two things:
+
+1. an AST ratchet over ``getattr``/``setattr``/``hasattr``/``delattr`` calls
+   whose attribute name is a private string literal and whose base is a
+   TRACE-shaped identifier -- reach-ins into TorchLens's own central object.
+   The per-package ledger is exact-equality in BOTH directions: adding one
+   fails, and fixing one requires lowering the row (shrink-only). A package
+   with NO row must stay at zero, which is how ``merged/`` (fail-closed by
+   ethos) and the clean packages are held.
+2. the regression pins for the fixed presenter seam.
+
+Whole-package context at seeding time (2026-08-14, b5 Lane B5-GOV): 678
+private string reach-ins on non-``self`` bases overall, of which 366 are on
+trace-shaped bases (ledgered below). The remainder are reach-ins into torch
+internals, records, workspaces, and modules; the torch-private subset is
+separately gated by ``tests/test_private_probe_gate.py``.
+"""
+
+from __future__ import annotations
+
+import ast
+import collections
+from functools import lru_cache
+from pathlib import Path
+
+import pytest
+
+from torchlens.merged._errors import MergeInputError
+from torchlens.merged._presenter import MergedTrace, _rank_raw_to_final_op_labels
+
+pytestmark = pytest.mark.smoke
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
+
+#: Builtins that take an attribute NAME as a string, bypassing SLF001.
+_REACHIN_BUILTINS = frozenset({"getattr", "setattr", "hasattr", "delattr"})
+
+#: Identifiers that denote a ``Trace`` in this codebase. Deliberately a closed
+#: vocabulary: `trace`/`log`/`ml` are the three historical spellings, the rest
+#: are the qualified locals the capture and refresh paths use. A new spelling
+#: for the same object should be added here, not used to dodge the gate.
+_TRACE_IDENTIFIERS = frozenset(
+    {
+        "trace",
+        "new_trace",
+        "log",
+        "model_log",
+        "ml",
+        "target_trace",
+        "source_trace",
+        "refreshed",
+    }
+)
+
+#: Packages whose reach-in count MUST stay zero. ``merged/`` is fail-closed by
+#: contract (docs/reference/merged_trace_contract.md): a rank core that cannot
+#: answer refuses typed, so no silent-default read belongs there.
+#: ``distributed/`` is the positive control the b5 hunt found clean.
+_FAIL_CLOSED_PACKAGES = frozenset({"merged", "distributed"})
+
+#: Per-package count of private string reach-ins on trace-shaped bases, seeded
+#: from the tree at b5 fixplan time. EXACT in both directions; a package
+#: without a row must stay at zero. To discharge rows, replace the reach-in
+#: with a declared seam (see ``merged/_presenter.py``'s
+#: ``_rank_raw_to_final_op_labels``: direct private read, absence typed) or
+#: with a public accessor, then lower the count here.
+_TRACE_REACHIN_LEDGER: dict[str, int] = {
+    "<root>": 14,
+    "_io": 24,
+    "autoroute": 2,
+    "backends/jax": 7,
+    "backends/mlx": 21,
+    "backends/paddle": 20,
+    "backends/tf": 9,
+    "backends/tinygrad": 5,
+    "backends/torch": 111,
+    "bridge": 1,
+    "bundle": 1,
+    "capture": 20,
+    "data_classes": 25,
+    "experimental": 1,
+    "fastlog": 2,
+    "intervention": 43,
+    "ir": 2,
+    "postprocess": 5,
+    "report": 1,
+    "repgeom": 7,
+    "validation": 23,
+    "visualization": 20,
+    "viz": 2,
+}
+
+
+def _is_private_name(name: str) -> bool:
+    """Whether a literal attribute name is single-underscore private."""
+
+    return name.startswith("_") and not name.startswith("__")
+
+
+def _package_of(path: Path) -> str:
+    """Ledger key for one module: its top-level package (backends split one deeper)."""
+
+    parts = path.relative_to(_PACKAGE_ROOT).parts
+    if len(parts) == 1:
+        return "<root>"
+    if parts[0] == "backends" and len(parts) > 2:
+        return f"backends/{parts[1]}"
+    return parts[0]
+
+
+def _trace_reachins(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """Collect ``(lineno, builtin, attr)`` string reach-ins on trace-shaped bases."""
+
+    found: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _REACHIN_BUILTINS
+            and len(node.args) >= 2
+        ):
+            continue
+        name_arg = node.args[1]
+        if not (isinstance(name_arg, ast.Constant) and isinstance(name_arg.value, str)):
+            continue
+        if not _is_private_name(name_arg.value):
+            continue
+        base = ast.unparse(node.args[0])
+        if base in {"self", "cls"}:
+            continue
+        # `a.b.trace`, `state.trace`, `handles[r].trace` all denote a Trace.
+        tail = base.split(".")[-1].split("[")[0]
+        if tail in _TRACE_IDENTIFIERS:
+            found.append((node.lineno, node.func.id, name_arg.value))
+    return found
+
+
+@lru_cache(maxsize=1)
+def _scan_package() -> dict[str, list[str]]:
+    """Package -> sorted ``file:line builtin attr`` reach-in sites."""
+
+    found: dict[str, list[str]] = collections.defaultdict(list)
+    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        rel = path.relative_to(_PACKAGE_ROOT.parent).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for lineno, builtin, attr in _trace_reachins(tree):
+            found[_package_of(path)].append(f"{rel}:{lineno} {builtin}(..., {attr!r})")
+    return {package: sorted(sites) for package, sites in found.items()}
+
+
+def test_trace_reachin_counts_match_the_ledger_exactly() -> None:
+    """Per-package trace reach-in counts equal the seeded ledger, both ways."""
+
+    found = _scan_package()
+    counts = {package: len(sites) for package, sites in found.items()}
+    grew = {
+        package: (_TRACE_REACHIN_LEDGER.get(package, 0), count)
+        for package, count in counts.items()
+        if count > _TRACE_REACHIN_LEDGER.get(package, 0)
+    }
+    assert not grew, (
+        "New private string reach-in(s) into a Trace (package: ledgered -> found): "
+        f"{grew}. `getattr(trace, '_x', default)` is invisible to SLF001 and "
+        "fail-open: a renamed field degrades silently. Read the declared "
+        "attribute directly (SLF001-visible, AttributeError on rename) or add a "
+        "typed seam like merged/_presenter.py::_rank_raw_to_final_op_labels. "
+        f"Offending sites: { {p: found[p] for p in grew} }"
+    )
+    shrank = {
+        package: (ledgered, counts.get(package, 0))
+        for package, ledgered in _TRACE_REACHIN_LEDGER.items()
+        if counts.get(package, 0) < ledgered
+    }
+    assert not shrank, (
+        f"Reach-in ledger rows are stale (package: ledgered -> found): {shrank}. "
+        "Lower the counts in this test -- the ledger is shrink-only, so a fixed "
+        "reach-in must be recorded to keep the ratchet tight."
+    )
+
+
+def test_fail_closed_packages_hold_zero_reachins() -> None:
+    """`merged/` and `distributed/` carry no silent-default Trace reads."""
+
+    found = _scan_package()
+    offenders = {
+        package: found[package] for package in sorted(_FAIL_CLOSED_PACKAGES) if package in found
+    }
+    assert not offenders, (
+        f"Fail-closed package(s) grew a private string reach-in: {offenders}. "
+        "These packages refuse typed when a rank core cannot answer; a "
+        "silent-default read contradicts that contract (b5 R45-2)."
+    )
+    assert not _FAIL_CLOSED_PACKAGES & set(_TRACE_REACHIN_LEDGER), (
+        "A fail-closed package must not have a ledger row -- it is held at zero."
+    )
+
+
+def test_gate_scanner_detects_planted_offenders() -> None:
+    """Planted positives/negatives: the scanner sees the four builtin forms only."""
+
+    planted = ast.parse(
+        "a = getattr(trace, '_raw_to_final_op_labels', {})\n"
+        "b = hasattr(log, '_runnable')\n"
+        "setattr(ml, '_validation_replay_status', 'ok')\n"
+        "delattr(state.trace, '_mlx_module_stack')\n"
+        # Negatives: own state, public name, dunder, non-trace base, non-literal.
+        "c = getattr(self, '_private', None)\n"
+        "d = getattr(trace, 'public_field', None)\n"
+        "e = getattr(trace, '__class__', None)\n"
+        "f = getattr(some_module, '_private', None)\n"
+        "g = getattr(trace, name, None)\n"
+    )
+    attrs = [attr for _, _, attr in _trace_reachins(planted)]
+    assert attrs == [
+        "_raw_to_final_op_labels",
+        "_runnable",
+        "_validation_replay_status",
+        "_mlx_module_stack",
+    ]
+
+
+class _MissingSeamTrace:
+    """A rank-core stand-in that never had the declared label seam."""
+
+
+class _WrongTypeSeamTrace:
+    _raw_to_final_op_labels = ["not", "a", "mapping"]
+
+
+class _UnresolvableTrace:
+    """Carries the seam but cannot resolve the label it maps to."""
+
+    _raw_to_final_op_labels = {"raw_1": "final_1"}
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+
+class _ResolvingTrace:
+    _raw_to_final_op_labels = {"raw_1": "final_1"}
+    sentinel = object()
+
+    def __getitem__(self, key: str) -> object:
+        assert key == "final_1"
+        return self.sentinel
+
+
+class _Join:
+    """Minimal duck-typed join; the real path is pinned by test_merged_gloo.py."""
+
+    key = ("digest", 0, "channel", 0)
+    presence = (0,)
+
+    def op_labels_raw(self, rank: int) -> tuple[str, ...]:
+        assert rank == 0
+        return ("raw_1",)
+
+
+class _Presenter:
+    """Minimal duck-typed presenter exposing only what `join_ops` reads."""
+
+    def __init__(self, trace: object) -> None:
+        self.ranks = {0: trace}
+
+
+def test_declared_seam_refuses_typed_when_absent_or_wrong_type() -> None:
+    """The raw->final seam is fail-closed: absence and wrong type both refuse."""
+
+    with pytest.raises(MergeInputError) as absent:
+        _rank_raw_to_final_op_labels(3, _MissingSeamTrace())
+    assert absent.value.fields["code"] == "merged_schema_invalid"
+    assert absent.value.fields["rank"] == 3
+
+    with pytest.raises(MergeInputError):
+        _rank_raw_to_final_op_labels(0, _WrongTypeSeamTrace())
+
+    assert _rank_raw_to_final_op_labels(0, _ResolvingTrace()) == {"raw_1": "final_1"}
+
+
+def test_join_ops_refuses_an_unresolvable_recorded_boundary_label() -> None:
+    """A recorded back-reference the core cannot resolve refuses, never drops."""
+
+    with pytest.raises(MergeInputError) as caught:
+        MergedTrace.join_ops(_Presenter(_UnresolvableTrace()), _Join())  # type: ignore[arg-type]
+    fields = caught.value.fields
+    assert fields["code"] == "merged_schema_invalid"
+    assert (fields["rank"], fields["raw_label"], fields["final_label"]) == (0, "raw_1", "final_1")
+
+    resolved = MergedTrace.join_ops(_Presenter(_ResolvingTrace()), _Join())  # type: ignore[arg-type]
+    assert resolved == {0: (_ResolvingTrace.sentinel,)}
