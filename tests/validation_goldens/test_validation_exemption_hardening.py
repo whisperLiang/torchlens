@@ -1296,6 +1296,187 @@ def test_func_name_none_string_cannot_launder_missing_func_call_id() -> None:
         check_metadata_invariants(trace)
 
 
+class _BareBernoulliModel(nn.Module):
+    """Model drawing an in-place bernoulli mask from computed probabilities."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw a mask from sigmoid probabilities and scale it.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        mask = torch.sigmoid(x).bernoulli_()
+        return mask * 2.0
+
+
+class _ExplicitPBernoulliModel(nn.Module):
+    """Model drawing into a destination with an explicit probability tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Overwrite a scratch destination with draws from sigmoid(x).
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        probabilities = torch.sigmoid(x)
+        destination = x * 0.5
+        mask = destination.bernoulli_(probabilities)
+        return mask * 2.0
+
+
+def test_bernoulli_parent_replay_exemption_requires_snapshot_proof() -> None:
+    """A replay mismatch under a bernoulli_ parent needs a snapshot proof.
+
+    ANY replay mismatch on an op with ANY ``bernoulli_`` parent was exempted
+    wholesale -- including a mismatch caused by a corrupted recorded func on
+    the CHILD (deephunt finding M1): swapping the recorded func of
+    ``mask * 2.0`` to ``torch.add`` flipped the decision from
+    ``failed:replay_mismatch`` to ``exempted:parent_inplace_rng_bernoulli``.
+    The exemption now requires re-feeding the child's own saved-arg snapshots
+    at the bernoulli-parent slots to reproduce the saved output; a corrupted
+    child func cannot pass that proof.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(
+        _BareBernoulliModel().eval(),
+        torch.randn(4, 4),
+        layers_to_save="all",
+        save_arg_values=True,
+    )
+    mul_op = next(op for op in trace.layer_list if op.func_name == "__mul__")
+    bernoulli_parents = [
+        parent for parent in mul_op.parents if trace[parent].func_name == "bernoulli_"
+    ]
+    assert bernoulli_parents, "mul must be a child of the in-place bernoulli"
+
+    mul_op.func = torch.add
+    result = core._check_whether_func_on_saved_parents_yields_saved_tensor(  # noqa: SLF001
+        trace, mul_op.label, perturb=False
+    )
+    assert result.decision == "failed"
+
+
+def test_bernoulli_arg_logging_case2_requires_binary_draw_shape() -> None:
+    """Case 2 of arg logging only excuses a genuine in-place re-draw shape.
+
+    The companion blanket validated ANY parent-logged-but-value-mismatched
+    arg whenever the parent was named ``bernoulli_`` (deephunt M1). The
+    legitimate mutation shape is an in-place RE-DRAW: both the child's
+    snapshot and the parent's current out are same-shape, same-dtype 0/1
+    draws. Arbitrary corrupted values must fall through to the Case 3
+    failure.
+    """
+
+    corrupted_parent = _fake_layer(
+        layer_label="bernoulli__1_1",
+        label="bernoulli__1_1:1",
+        func_name="bernoulli_",
+        out=torch.tensor([0.3, 0.7]),
+        out_versions_by_child={},
+    )
+    child = _fake_layer(
+        layer_label="mul_1_2",
+        label="mul_1_2:1",
+        parent_arg_positions={"args": {0: "bernoulli__1_1"}, "kwargs": {}},
+        parents=["bernoulli__1_1"],
+    )
+    trace = {"bernoulli__1_1": corrupted_parent}
+    result = core._check_arglocs_correct_for_arg(  # noqa: SLF001
+        trace,  # type: ignore[arg-type]
+        child,
+        corrupted_parent,
+        "args",
+        0,
+        torch.tensor([9.0, 9.0]),
+    )
+    assert result.decision == "failed"
+
+    genuine_parent = _fake_layer(
+        layer_label="bernoulli__1_1",
+        label="bernoulli__1_1:1",
+        func_name="bernoulli_",
+        out=torch.tensor([0.0, 1.0]),
+        out_versions_by_child={},
+    )
+    trace = {"bernoulli__1_1": genuine_parent}
+    result = core._check_arglocs_correct_for_arg(  # noqa: SLF001
+        trace,  # type: ignore[arg-type]
+        child,
+        genuine_parent,
+        "args",
+        0,
+        torch.tensor([1.0, 0.0]),
+    )
+    assert result.decision == "validated"
+
+
+class _OutOfPlaceBernoulliModel(nn.Module):
+    """Model with a genuine values-as-probabilities bernoulli edge."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw a mask from sigmoid probabilities out of place.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        return torch.bernoulli(torch.sigmoid(x)) * 2.0
+
+
+def test_bernoulli_models_pass_forward_validation() -> None:
+    """Real bernoulli models must validate end-to-end (L17 false-FAIL fix).
+
+    Any model containing a bernoulli draw failed forward validation at the
+    bernoulli op's own parent edge with ``perturbation_insensitive``
+    (deephunt L17). Two distinct root causes, both fixed:
+
+    - A genuine probability edge (out-of-place ``torch.bernoulli(x)``, or
+      ``.bernoulli_(p)``'s ``p``) replays identical samples under restored
+      RNG for small in-domain perturbations. The bernoulli-aware perturbation
+      now forces complement-of-saved-draw probabilities (the deterministic
+      extremes), which provably flip every drawn element when the edge is
+      live -- a genuinely dropped edge still replays unchanged and fails.
+    - ``bernoulli_``'s destination edge carries NO values at all: the bare
+      form fills with Bernoulli(0.5) draws IGNORING self's values (verified
+      empirically -- ``zeros.bernoulli_()`` produces ones), and the explicit
+      form overwrites with Bernoulli(p) draws. That edge is a pure
+      shape/dtype/device template and earns the posthoc template exemption.
+    """
+
+    from torchlens.validation import validate_forward_pass
+
+    torch.manual_seed(0)
+    assert validate_forward_pass(_BareBernoulliModel().eval(), torch.randn(4, 4)) is True
+    torch.manual_seed(0)
+    assert validate_forward_pass(_ExplicitPBernoulliModel().eval(), torch.randn(4, 4)) is True
+    torch.manual_seed(0)
+    assert validate_forward_pass(_OutOfPlaceBernoulliModel().eval(), torch.randn(4, 4)) is True
+
+
 def test_backward_validation_all_nan_grads_is_not_pass() -> None:
     """An all-NaN stock gradient census must be unverifiable, never PASS.
 

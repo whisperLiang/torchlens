@@ -1728,6 +1728,23 @@ def _posthoc_structural_output_decision(
         return PosthocPerturbDecision(True, "structural_output_template")
     if layer.func_name == "bernoulli" and "p" in layer.saved_kwargs:
         return PosthocPerturbDecision(True, "rng_probability_template")
+    if layer.func_name == "bernoulli_" and _perturbed_parents_only_occupy_template_slot(
+        layer, layers_to_perturb
+    ):
+        # bernoulli_ overwrites EVERY destination element with fresh draws --
+        # Bernoulli(0.5) for the bare form (self's values are IGNORED;
+        # zeros.bernoulli_() produces ones) and Bernoulli(p) for the explicit
+        # form -- so only the destination's shape/dtype/device flow into the
+        # output: a template, exactly like args[0] of the *_like family. A
+        # probability edge (out-of-place bernoulli slot 0, or bernoulli_'s
+        # slot 1 / p=) is NOT exempted here: it is a genuine value dependency
+        # validated by the complement-probability perturbation (deephunt L17).
+        return PosthocPerturbDecision(
+            True,
+            "rng_probability_template",
+            "bernoulli_ overwrites every destination element with fresh draws; "
+            "only the destination's shape/dtype/device flow into the output",
+        )
     if _unique_disabled_auxiliary_output(layer):
         return PosthocPerturbDecision(
             True,

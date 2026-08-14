@@ -161,8 +161,10 @@ EXEMPTION_LEDGER: tuple[Exemption, ...] = (
         contract="C1 replay determinism",
         proof="torchlens.validation.core:_check_whether_func_on_saved_parents_yields_saved_tensor",
         refuses=(
-            "a non-RNG in-place parent: the carve-out is keyed to in-place RNG ops "
-            "whose output is drawn, not computed from the parent value"
+            "a non-RNG in-place parent, and any mismatch the snapshot proof cannot "
+            "explain: the exemption fires only when re-replaying the op from the "
+            "child's own saved-arg snapshots reproduces the saved output, so a "
+            "corrupted child func/kwargs under a bernoulli_ parent still fails"
         ),
     ),
     # ------------------------------------------------------------------ recorder
