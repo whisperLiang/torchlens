@@ -381,6 +381,111 @@ class TestOverrideTableCoherence:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Unwrap safety: R54 admission-lock atomicity + B8-6 burial diagnostic
+# ---------------------------------------------------------------------------
+
+
+class TestUnwrapSafety:
+    def test_unwrap_holds_capture_admission_lock(self):
+        # R54: the mid-capture refusal reads state published under
+        # _capture_admission_lock; without holding it, a capture admitted
+        # between the refusal check and the uninstall was silently truncated
+        # (reproduced with a deterministic barrier). Pin the lock coverage:
+        # unwrap_torch must block while the admission lock is held elsewhere.
+        import threading
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        assert _state._capture_admission_lock.acquire(timeout=5)
+        done = threading.Event()
+
+        def do_unwrap():
+            unwrap_torch()
+            done.set()
+
+        worker = threading.Thread(target=do_unwrap)
+        try:
+            worker.start()
+            assert not done.wait(0.3), (
+                "unwrap_torch() proceeded without the capture admission lock"
+            )
+        finally:
+            _state._capture_admission_lock.release()
+            worker.join(10)
+        assert done.is_set()
+        wrap_torch()
+
+    def test_admission_epoch_check_refuses_unwrapped_process(self):
+        # R54 second half: a capture admitted AFTER a concurrent unwrap
+        # completes must refuse typed rather than run an unlogged forward.
+        from torchlens._errors import CaptureContextError
+        from torchlens.backends.torch.backend import TorchBackend
+
+        _ensure_wrapped()
+        session = tl.trace(nn.Linear(2, 2), torch.randn(1, 2))
+        saved = _state._is_decorated
+        try:
+            _state._is_decorated = False
+            with pytest.raises(CaptureContextError) as exc_info:
+                with TorchBackend().active_logging(session):
+                    pass
+            assert exc_info.value.fields["code"] == "wrappers_removed_before_capture"
+        finally:
+            _state._is_decorated = saved
+        # The refusal must have unwound admission cleanly.
+        assert _state._active_trace is None
+        assert not _state._logging_enabled
+
+    def test_unwrap_warns_on_buried_wrapper(self):
+        # B8-6: a third-party wrapper installed on top of a torchlens wrapper
+        # is (correctly) not clobbered at teardown, but the burial must be
+        # named instead of silent.
+        import functools
+        import warnings as warnings_module
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        tl_wrapper = torch.cos
+        assert id(tl_wrapper) in _state._decorated_to_orig, "torch.cos not wrapped"
+
+        @functools.wraps(tl_wrapper)
+        def foreign(*args, **kwargs):
+            return tl_wrapper(*args, **kwargs)
+
+        torch.cos = foreign
+        try:
+            with warnings_module.catch_warnings(record=True) as records:
+                warnings_module.simplefilter("always")
+                unwrap_torch()
+            buried_messages = [
+                str(record.message) for record in records if "buried" in str(record.message)
+            ]
+            assert len(buried_messages) == 1, buried_messages
+            assert "torch.cos" in buried_messages[0]
+            # Drift tolerance: the foreign wrapper is preserved, never clobbered.
+            assert torch.cos is foreign
+        finally:
+            torch.cos = _resolve(tl_wrapper)
+            wrap_torch()
+
+    def test_clean_unwrap_emits_no_burial_warning(self):
+        import warnings as warnings_module
+
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            with warnings_module.catch_warnings(record=True) as records:
+                warnings_module.simplefilter("always")
+                unwrap_torch()
+            assert not [r for r in records if "buried" in str(r.message)]
+        finally:
+            wrap_torch()
+
+
+# ---------------------------------------------------------------------------
 # 5. Wrap-history construction corpus (transformer trio + __setstate__)
 # ---------------------------------------------------------------------------
 

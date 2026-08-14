@@ -2677,11 +2677,21 @@ def unwrap_torch() -> None:
         that runs inside the traced forward.
     """
     with _wrapper_install_lock:
-        _refuse_unwrap_during_active_capture()
-        from .identity_shims import remove_identity_shims
+        # R54: the refusal reads _active_trace/_logging_enabled, which are
+        # PUBLISHED under _capture_admission_lock (a different lock domain), so
+        # a capture admitted between the refusal check and the uninstall was
+        # silently truncated (reproduced with a deterministic barrier). Holding
+        # the admission lock across refusal AND teardown makes the two domains
+        # atomic: a racing capture is either seen by the refusal or blocks
+        # until torch is fully restored (and then fails the wrapped-epoch check
+        # at admission instead of running an unlogged forward). Lock order is
+        # install -> admission only; admission never acquires the install lock.
+        with _state._capture_admission_lock:
+            _refuse_unwrap_during_active_capture()
+            from .identity_shims import remove_identity_shims
 
-        remove_identity_shims()
-        _unwrap_torch_locked()
+            remove_identity_shims()
+            _unwrap_torch_locked()
 
 
 def _refuse_unwrap_during_active_capture() -> None:
@@ -2713,6 +2723,43 @@ def _refuse_unwrap_during_active_capture() -> None:
     )
 
 
+def _buries_live_wrapper(current: Any) -> bool:
+    """Return whether a foreign callable buries a live torchlens wrapper.
+
+    ``_unwrap_torch_locked`` restores a namespace slot only when the CURRENT
+    attribute is a known torchlens wrapper; a third-party wrapper installed on
+    top of ours is (correctly) left untouched, but that leaves the torchlens
+    wrapper LIVE inside its ``__wrapped__``/closure chain with zero diagnostic
+    (B8-6). This walk detects the burial so teardown can name it. Bounded and
+    cheap: it runs only for drifted slots (rare), never on the hot path.
+    """
+
+    seen: set[int] = set()
+    stack: list[Any] = [current]
+    visited = 0
+    while stack and visited < 32:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        visited += 1
+        if obj is not current and id(obj) in _state._decorated_to_orig:
+            return True
+        wrapped = getattr(obj, "__wrapped__", None)
+        if callable(wrapped):
+            stack.append(wrapped)
+        closure = getattr(obj, "__closure__", None)
+        if closure:
+            for cell in closure:
+                try:
+                    content = cell.cell_contents
+                except ValueError:
+                    continue
+                if callable(content):
+                    stack.append(content)
+    return False
+
+
 def _unwrap_torch_locked() -> None:
     """Remove torchlens wrappers; caller holds ``_wrapper_install_lock``."""
 
@@ -2732,6 +2779,7 @@ def _unwrap_torch_locked() -> None:
         _state._is_decorated = False
         return
 
+    buried_sites: list[str] = []
     for namespace_name, func_name in get_orig_torch_funcs():
         # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
         # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,
@@ -2742,6 +2790,15 @@ def _unwrap_torch_locked() -> None:
         current = getattr(local_func_namespace, func_name)
         orig = _state._decorated_to_orig.get(id(current))
         if orig is None:
+            # B8-6: a drifted slot whose foreign wrapper chains to a live
+            # torchlens wrapper stays buried past this teardown -- collect it
+            # so the user learns unwrap did NOT fully restore that callable.
+            if (
+                id(current) not in _state._orig_to_decorated
+                and callable(current)
+                and _buries_live_wrapper(current)
+            ):
+                buried_sites.append(f"{namespace_name}.{func_name}")
             continue
         try:
             with warnings.catch_warnings():
@@ -2779,6 +2836,21 @@ def _unwrap_torch_locked() -> None:
                 setattr(local_func_namespace, func_name, orig)
         except (AttributeError, TypeError):
             pass
+
+    if buried_sites:
+        from ..._errors import TorchLensWarning
+
+        shown = ", ".join(buried_sites[:5])
+        more = f" (+{len(buried_sites) - 5} more)" if len(buried_sites) > 5 else ""
+        warnings.warn(
+            f"unwrap_torch() left {len(buried_sites)} torch callable(s) with a "
+            f"torchlens wrapper buried under a third-party wrapper: {shown}{more}. "
+            "TorchLens never clobbers foreign patches, so those slots still run "
+            "the torchlens wrapper underneath. Remove or reinstall the outer "
+            "wrapper around the restored original to fully unwrap.",
+            TorchLensWarning,
+            stacklevel=3,
+        )
 
     _state._is_decorated = False
 

@@ -382,6 +382,27 @@ class TorchBackend:
             with capture_escape_guard(trace), capture_completeness_witness(trace):
                 with capture_scalar_escape_warning(trace):
                     with _state.active_logging(trace):
+                        # R54 wrapped-epoch check: model prep wrapped torch
+                        # BEFORE admission, so a concurrent unwrap_torch()
+                        # completing in between (it now holds the admission
+                        # lock through teardown) leaves this capture admitted
+                        # into an UNWRAPPED process -- the forward would run
+                        # with zero logging and return a silently empty Trace.
+                        # Refuse loudly instead.
+                        if not _state._is_decorated:
+                            from ..._errors import CaptureContextError
+
+                            raise CaptureContextError(
+                                "torch wrappers were removed between model "
+                                "preparation and capture admission (a "
+                                "concurrent unwrap_torch() call)",
+                                code="wrappers_removed_before_capture",
+                                remedy=(
+                                    "do not call unwrap_torch() concurrently "
+                                    "with capture entry; re-run tl.trace -- "
+                                    "the next capture re-installs the wrappers"
+                                ),
+                            )
                         yield
 
         return guarded_logging()
