@@ -12,6 +12,9 @@ Four coupled defects in the input-facet patching path of
 * [MED] the Mapping branch rebuilt inputs as a bare ``dict``, dropping
   subclass container types the model's forward depends on. Container types
   are now preserved.
+* [MED] every activation-patching entry point tore down as unguarded
+  sequential statements, so a raising ``Trace.cleanup()`` skipped
+  ``guard.close()`` and stranded the caller's model state and global RNG.
 """
 
 from __future__ import annotations
@@ -27,11 +30,22 @@ from torchlens.semantic import FacetSpec
 
 
 class MixedLeafReader(nn.Module):
-    """Combine three input leaves with distinguishable weights."""
+    """Combine three input leaves with distinguishable weights.
+
+    Tracks a BatchNorm-style running counter buffer so tests can observe
+    whether the state guard restored the model after a run.
+    """
+
+    def __init__(self) -> None:
+        """Register the forward-call counter buffer."""
+
+        super().__init__()
+        self.register_buffer("calls", torch.zeros(1))
 
     def forward(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         """Weight each leaf so patched-leaf identity is visible in the output."""
 
+        self.calls.add_(1.0)
         return a + 2.0 * b + 4.0 * c
 
 
@@ -261,3 +275,34 @@ def test_mapping_input_container_type_is_preserved() -> None:
 
     # corrupted q=1 with clean k=7: 2 * (1 + 2*7) = 30.
     assert torch.isclose(scores[0], torch.tensor(30.0)), scores
+
+
+@pytest.mark.smoke
+def test_teardown_restores_state_when_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising ``Trace.cleanup()`` must not strand the caller's model state.
+
+    The forward mutates a running-counter buffer (the BatchNorm drift class);
+    if a cleanup failure skips ``guard.close()``, the last run's drift is
+    never restored and the USER's model is returned mutated. The global-RNG
+    fork must be released too.
+    """
+
+    from torchlens.data_classes.trace import Trace
+
+    model = MixedNestingModel()
+    clean, corrupted = _mixed_tree(10.0), _mixed_tree(1.0)
+
+    def _boom(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("cleanup boom")
+
+    rng_before = torch.get_rng_state()
+    monkeypatch.setattr(Trace, "cleanup", _boom)
+    with pytest.raises(RuntimeError, match="cleanup boom"):
+        tl.facets.patching.activation_patch_residual_stream(
+            model, clean, corrupted, _metric, facet_name="leaf_c", patch_positions=False
+        )
+
+    assert torch.equal(model.reader.calls, torch.zeros(1))
+    assert torch.equal(torch.get_rng_state(), rng_before)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import itertools
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from typing import Any
 
 import torch
@@ -76,6 +77,24 @@ class _CounterfactualStateGuard:
         with torch.no_grad():
             for tensor, saved in self._tensors:
                 tensor.copy_(saved)
+
+
+def _teardown(guard: _CounterfactualStateGuard, *logs: Any) -> None:
+    """Run every teardown step even when an earlier one raises.
+
+    The entry points used to tear down as bare sequential statements, so a
+    raising ``Trace.cleanup()`` skipped ``guard.close()`` and left the USER's
+    model parameters unrestored and the global RNG permanently advanced.
+    ``ExitStack`` callbacks run last-registered-first, so the guard is
+    registered first (closes LAST, after every log cleanup) and each
+    ``logs``-order cleanup still runs even if an earlier one raises.
+    """
+
+    with ExitStack() as stack:
+        stack.callback(guard.close)
+        for log in reversed(logs):
+            if log is not None:
+                stack.callback(log.cleanup)
 
 
 def _stateful_tensors(model: nn.Module) -> list[torch.Tensor]:
@@ -252,11 +271,7 @@ def activation_patch_residual_stream(
                     patched_log.cleanup()
         return result
     finally:
-        if clean_log is not None:
-            clean_log.cleanup()
-        if corrupted_log is not None:
-            corrupted_log.cleanup()
-        guard.close()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_attention_output(
@@ -313,11 +328,7 @@ def activation_patch_attention_output(
             guard=guard,
         )
     finally:
-        if clean_log is not None:
-            clean_log.cleanup()
-        if corrupted_log is not None:
-            corrupted_log.cleanup()
-        guard.close()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_attention_heads(
@@ -372,11 +383,7 @@ def activation_patch_attention_heads(
             guard=guard,
         )
     finally:
-        if clean_log is not None:
-            clean_log.cleanup()
-        if corrupted_log is not None:
-            corrupted_log.cleanup()
-        guard.close()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_mlp_output(
@@ -437,11 +444,7 @@ def activation_patch_mlp_output(
             guard=guard,
         )
     finally:
-        if clean_log is not None:
-            clean_log.cleanup()
-        if corrupted_log is not None:
-            corrupted_log.cleanup()
-        guard.close()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def attribution_patch_attention_heads(
@@ -514,11 +517,7 @@ def attribution_patch_attention_heads(
                 result[layer_index, head_index] = (grad * (clean_value - corrupted_value)).sum()
         return result
     finally:
-        if clean_log is not None:
-            clean_log.cleanup()
-        if corrupted_log is not None:
-            corrupted_log.cleanup()
-        guard.close()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def _baseline_traces(
