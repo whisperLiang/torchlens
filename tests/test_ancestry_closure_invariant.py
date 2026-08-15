@@ -294,3 +294,114 @@ def test_ancestry_closure_runs_after_graph_connectivity() -> None:
 
     names = [contract.name for contract in METADATA_INVARIANT_CONTRACTS]
     assert names.index("graph_connectivity") < names.index("ancestry_closure")
+
+
+# ---------------------------------------------------------------------------
+# Generative corruption sweep (R73, round 3): the hand plants above pin the
+# known corruption classes; this sweep GENERATES seeded random corruptions so
+# coverage does not depend on the hand-list. Its first run found the
+# fabricated-distance hole pinned below.
+# ---------------------------------------------------------------------------
+
+_ANCESTRY_SET_FIELDS = (
+    "input_ancestors",
+    "output_descendants",
+    "root_ancestors",
+    "internal_source_ancestors",
+    "internal_source_parents",
+)
+
+
+def _has_distance_populated_parent(trace: Any, record: Any) -> bool:
+    """Return whether any recorded parent carries populated input distances."""
+
+    by_label = {entry.layer_label: entry for entry in trace.layer_list}
+    return any(
+        by_label.get(parent) is not None
+        and by_label[parent].min_distance_from_input is not None
+        and by_label[parent].max_distance_from_input is not None
+        for parent in record.parents
+    )
+
+
+def test_seeded_generative_ancestry_corruptions_are_caught() -> None:
+    """Seeded random ancestry corruptions must trip the invariants.
+
+    The ONE ledgered tolerance is the fabricated-distance hole pinned by the
+    strict xfail below: a record whose parents all lack populated distances
+    hits ``_check_distance_closure``'s empty-neighbours skip, so a fabricated
+    stored distance there is currently accepted (relayed to the validation
+    lane). Every other generated corruption must raise, and the sweep must
+    demonstrably do work (a floor on the caught count guards against the
+    generator degenerating into no-op mutations).
+    """
+
+    import random
+
+    rng = random.Random(42)
+    caught = 0
+    unledgered: list[str] = []
+    for _ in range(20):
+        trace = _fresh_two_io()
+        record = rng.choice(list(trace.layer_list))
+        kind = rng.choice(["add", "remove", "clear", "bool", "dist"])
+        ledgered_hole = False
+        if kind in ("add", "remove", "clear"):
+            field = rng.choice(_ANCESTRY_SET_FIELDS)
+            old = set(getattr(record, field))
+            if kind == "add":
+                new = old | {"phantom_9_9"}
+            elif kind == "remove" and old:
+                new = set(old)
+                new.discard(sorted(new)[0])
+            else:
+                new = set()
+            if new == old:
+                continue
+            setattr(record, field, new)
+            description = f"{record.layer_label}.{field}:{kind}"
+        elif kind == "bool":
+            record.has_internal_source_ancestor = not record.has_internal_source_ancestor
+            description = f"{record.layer_label}.has_internal_source_ancestor:flip"
+        else:
+            ledgered_hole = not record.is_input and not _has_distance_populated_parent(
+                trace, record
+            )
+            record.min_distance_from_input = 77
+            record.max_distance_from_input = 77
+            description = f"{record.layer_label}.distance:77"
+        try:
+            check_metadata_invariants(trace)
+        except MetadataInvariantError:
+            caught += 1
+        else:
+            if not ledgered_hole:
+                unledgered.append(description)
+    assert not unledgered, (
+        "generated ancestry corruptions were silently accepted outside the "
+        f"ledgered fabricated-distance hole: {unledgered}"
+    )
+    assert caught >= 10, f"generative sweep degenerated: only {caught} corruptions caught"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "R73 generative-sweep find (2026-08-15, relayed to the validation "
+        "lane): _check_distance_closure skips records whose parents all lack "
+        "populated distances (empty-neighbours continue), so a FABRICATED "
+        "stored distance on a flood-unreached record (buffer-chain ops in "
+        "this fixture) is accepted. When the hole closes, remove this marker "
+        "and the ledgered_hole tolerance in the sweep above."
+    ),
+)
+def test_fabricated_distance_on_flood_unreached_record_is_caught() -> None:
+    """Pin the fabricated-distance hole so its fix is loud."""
+
+    trace = _fresh_two_io()
+    record = _entry(trace, "buffer_2")
+    assert record.min_distance_from_input is None
+    record.min_distance_from_input = 77
+    record.max_distance_from_input = 77
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace)
