@@ -171,6 +171,16 @@ torchlens = [
     "schemas/*.json",
 ]
 
+[tool.setuptools.exclude-package-data]
+# WHEEL authority for the agent-doc exclusion. MANIFEST.in excludes govern the
+# sdist only: building a wheel from the source tree collects package data
+# through include-package-data (default true for pyproject builds), which does
+# NOT re-apply MANIFEST.in exclude directives — the round-1 blanket `*.md`
+# include shipped 32 CLAUDE.md/AGENTS.md agent docs (~135 kB, private sprint
+# IDs) into every `pip install torchlens` (grind r3, R84 regression-by-fix).
+# Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
+"*" = ["CLAUDE.md", "AGENTS.md"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
