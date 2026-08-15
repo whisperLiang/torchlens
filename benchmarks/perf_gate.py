@@ -25,8 +25,14 @@ Metric policy (b6-sol R28, T14-6). Rows are judged on PROCESS-CPU time
 (``cpu_median_ms`` / ``cpu_iqr_ms``) whenever both sides carry it: wall clock
 on a loaded box charges run-queue pressure to the code under test, which the
 process-time samples do not. Rows where either side predates the CPU metrics
-fall back to wall clock, disclosed per row via ``"metric"``; the committed
-wall-only baselines keep comparing until the next REVIEWED rebaseline.
+fall back to wall clock, disclosed per row via ``"metric"`` -- and that
+fallback is NOT AUTHORITATIVE for TorchLens-owned rows (b6-sol R28 round 4:
+a stale 196-row baseline with zero ``cpu_median_ms`` judged the ENTIRE run
+on wall clock and the gate warned but PASSED, so the process-CPU ceiling was
+unenforceable). By default a TorchLens-owned row judged on wall clock FAILS
+the gate with instructions to regenerate the baseline; ``--allow-wall-clock-
+only`` (``require_cpu_metrics=False``) is the explicit, disclosed opt-out
+for legacy-baseline comparisons.
 """
 
 from __future__ import annotations
@@ -112,6 +118,7 @@ def compare_gate_payloads(
     rel_tolerance: float = DEFAULT_REL_TOLERANCE,
     iqr_multiplier: float = DEFAULT_IQR_MULTIPLIER,
     floor_ms: float = DEFAULT_FLOOR_MS,
+    require_cpu_metrics: bool = True,
 ) -> dict[str, Any]:
     """Compare current benchmark rows against a committed baseline.
 
@@ -127,6 +134,11 @@ def compare_gate_payloads(
         Multiplier applied to the baseline IQR term of the tolerance.
     floor_ms:
         Absolute tolerance floor in milliseconds.
+    require_cpu_metrics:
+        When True (default), a TorchLens-owned row judged on the wall-clock
+        fallback is gate-BLOCKING: the process-CPU policy cannot be enforced
+        on the noisier metric it was added to replace (b6-sol R28 round 4).
+        Pass False only for a disclosed legacy-baseline comparison.
 
     Returns
     -------
@@ -186,34 +198,53 @@ def compare_gate_payloads(
         checks.append(check)
         if not check["passed"]:
             regressions.append(check)
-    passed = (
-        not unmatched_current
-        and not missing_current
-        and not uncomparable
-        and not status_failures
-        and not regressions
-    )
     # R28: the per-row wall-clock fallback exists for pre-CPU-metric
     # payloads, but a STALE baseline with zero cpu_* rows silently judged
     # the ENTIRE run on wall clock -- the noisier metric the CPU statistics
-    # were added to replace. Disclose the degradation at the top level so a
-    # gate run on such a baseline is visibly degraded, never silent.
+    # were added to replace -- and the gate WARNED but PASSED, so the
+    # process-CPU policy was unenforceable (b6-sol R28 round 4). The
+    # fallback is now non-authoritative for TorchLens-owned rows: by
+    # default they join the blocking lists; the disclosed opt-out is
+    # ``require_cpu_metrics=False`` / ``--allow-wall-clock-only``.
     wall_clock_rows = [check for check in checks if check.get("metric") == "wall_clock"]
+    metric_fallback_blocking = [
+        check
+        for check in wall_clock_rows
+        if require_cpu_metrics and _is_torchlens_operation(check["operation"])
+    ]
     metric_degraded = bool(checks) and bool(wall_clock_rows)
     if metric_degraded:
         warnings.warn(
             f"perf gate judged {len(wall_clock_rows)}/{len(checks)} rows on WALL CLOCK "
             "because the baseline lacks process-CPU statistics (cpu_median_ms/"
             "cpu_iqr_ms). Regenerate the baseline with a current perf_suite run; "
-            "wall-clock verdicts are load-sensitive.",
+            "wall-clock verdicts are load-sensitive"
+            + (
+                " and BLOCK this gate (pass --allow-wall-clock-only for a "
+                "disclosed legacy comparison)."
+                if metric_fallback_blocking
+                else "."
+            ),
             UserWarning,
             stacklevel=2,
         )
+    passed = (
+        not unmatched_current
+        and not missing_current
+        and not uncomparable
+        and not status_failures
+        and not regressions
+        and not metric_fallback_blocking
+    )
     return {
         "schema": SCHEMA,
         "passed": passed,
         "metric_degraded_to_wall_clock": metric_degraded,
         "wall_clock_row_count": len(wall_clock_rows),
+        "wall_clock_fallback_blocking_rows": [
+            _key_dict((check["model"], check["device"], check["operation"]))
+            for check in metric_fallback_blocking
+        ],
         "baseline_sha": baseline.get("source_sha")
         or baseline.get("environment", {}).get("torchlens_git_sha"),
         "current_sha": current.get("source_sha")
@@ -454,6 +485,15 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_FLOOR_MS,
         help="Absolute tolerance floor in milliseconds",
     )
+    parser.add_argument(
+        "--allow-wall-clock-only",
+        action="store_true",
+        help=(
+            "Permit TorchLens-owned rows judged on the wall-clock fallback to "
+            "pass (disclosed legacy-baseline comparison); by default they BLOCK "
+            "because the process-CPU policy cannot be enforced on wall clock"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -467,6 +507,7 @@ def main() -> None:
         rel_tolerance=args.rel_tolerance,
         iqr_multiplier=args.iqr_multiplier,
         floor_ms=args.floor_ms,
+        require_cpu_metrics=not args.allow_wall_clock_only,
     )
     if args.out is not None:
         write_comparison(args.out, comparison)
