@@ -431,6 +431,18 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             register_grad_id(next_id)
     for record in (*ops, *layers):
         register_grad_id(getattr(record, "grad_fn_object_id", None))
+    # grind-r5 b3 R21-1: the BACKWARD-PASS rows carry the same autograd
+    # identities in ``root_grad_fn_ids``; the a169e886 dense-ordinal fix never
+    # reached them, so a raw grad_fn memory address persisted verbatim into
+    # ``.tlspec`` (process-dependent artifact bytes + a dangling address in a
+    # portable file). Register + remap them through the same trace-local map.
+    backward_pass_logs = state.get("backward_pass_logs")
+    pass_records = (
+        tuple(backward_pass_logs.values()) if isinstance(backward_pass_logs, dict) else ()
+    )
+    for pass_record in pass_records:
+        for root_id in getattr(pass_record, "root_grad_fn_ids", None) or ():
+            register_grad_id(root_id)
 
     def remap_grad_id(value: Any) -> Any:
         """Return the trace-local ordinal for one autograd identity."""
@@ -453,6 +465,10 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
     ]
     for record in (*ops, *layers):
         record.grad_fn_object_id = remap_grad_id(getattr(record, "grad_fn_object_id", None))
+    for pass_record in pass_records:
+        root_ids = getattr(pass_record, "root_grad_fn_ids", None)
+        if root_ids:
+            pass_record.root_grad_fn_ids = [remap_grad_id(root_id) for root_id in root_ids]
 
     state["model_object_id"] = 1 if state.get("model_object_id") is not None else None
     state["input_object_id"] = 1 if state.get("input_object_id") is not None else None

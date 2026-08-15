@@ -563,6 +563,12 @@ loaded analysis and runnable traces. Three deterministic byte streams per case:
   kind per name, invalid-access exception class/args/message. Floats via `float.hex()`;
   sets sorted by canonical bytes; dicts as ordered pairs; only documented volatile
   fields masked, each into a named bucket proven against a baseline-vs-baseline run.
+  The documented volatile surface is `torchlens.constants.ARTIFACT_VOLATILE_METADATA_FIELDS`
+  (metadata.pkl: `random_seed`, capture start/end times, `_phase_timings`, the four
+  duration fields, `forward_peak_memory`) plus `ARTIFACT_VOLATILE_MANIFEST_FIELDS`
+  (manifest.json: `created_at`, `rng_state_digests`) — empirically derived from a
+  same-seed two-process control; masking anything else is a contract widening that
+  needs review.
 - **`aliases-v1.json`** — the identity/mutation-effect matrix (the load-bearing piece):
   repeated-lookup identity; weakref lifetime while the Trace lives; multi-output shared
   vs output-specific facts; payload object/storage aliases and equal-but-distinct
