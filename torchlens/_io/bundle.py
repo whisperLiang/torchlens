@@ -334,6 +334,29 @@ def save(
     from ..capture.outcome import CaptureOutcomeError, require_capture_capability
 
     require_capture_capability(trace, "save_analysis")
+    # A PartialTrace is a failed-capture inspection wrapper, never a savable
+    # product (its FIELD_POLICY declares both fields session-time DROP). Every
+    # SHIPPED wrapper settles FAILED and refuses through the gate above; this
+    # closes the hand-built wrapper-around-a-settled-trace residual, which
+    # before the b1-opus-R06-1 outcome delegation fail-closed only by ACCIDENT
+    # (the gate read the wrapper's empty ``__dict__`` as UNKNOWN) and would
+    # now otherwise crash untyped deeper in the save machinery. Same
+    # sys.modules shape as the MergedTrace refusal: a PartialTrace can only
+    # exist after its module was imported.
+    partial_module = sys.modules.get("torchlens.partial")
+    if partial_module is not None and isinstance(trace, partial_module.PartialTrace):
+        from ..capture.outcome import outcome_for
+
+        settled = outcome_for(trace)
+        raise CaptureOutcomeError(
+            "tl.save() does not support PartialTrace wrappers: a partial "
+            "capture is an inspection product with no persistable schema. "
+            "Inspect it live (draw, audit, first_nonfinite), or re-capture "
+            "successfully and save the resulting Trace.",
+            code="N1",
+            capability="save_analysis",
+            status="unknown" if settled is None else settled.status.value,
+        )
     from ..runnable import refuse_poisoned_trace
 
     # The poison gate only applies to products that carry sparse-run state; a

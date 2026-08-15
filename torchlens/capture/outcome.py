@@ -333,10 +333,30 @@ def safe_exception_repr(exc: BaseException) -> str:
 
 
 def outcome_for(trace: object) -> CaptureOutcome | None:
-    """Return the settled outcome sidecar attached to ``trace``, if any."""
+    """Return the settled outcome sidecar attached to ``trace``, if any.
+
+    A wrapper product that carries no sidecar of its own may declare ONE
+    sanctioned delegation hop via the ``_OUTCOME_DELEGATE_FIELD`` class
+    attribute naming the attribute that holds the settled inner product
+    (``PartialTrace.trace``). Without it every capability gate read the
+    WRAPPER's empty ``__dict__`` and treated a shipped FAILED partial as
+    UNKNOWN with a false hand-built-object warning, while ``p.outcome``
+    forwarded the inner trace's FAILED stamp -- two answers for one product
+    (b1-opus-R06-1). The hop is single-level by construction: the delegate is
+    read through its own ``__dict__`` only, never recursed.
+    """
 
     outcome = getattr(trace, "__dict__", {}).get("_capture_outcome")
-    return outcome if isinstance(outcome, CaptureOutcome) else None
+    if isinstance(outcome, CaptureOutcome):
+        return outcome
+    delegate_field = getattr(type(trace), "_OUTCOME_DELEGATE_FIELD", None)
+    if isinstance(delegate_field, str):
+        inner = getattr(trace, delegate_field, None)
+        if inner is not None and inner is not trace:
+            inner_outcome = getattr(inner, "__dict__", {}).get("_capture_outcome")
+            if isinstance(inner_outcome, CaptureOutcome):
+                return inner_outcome
+    return None
 
 
 def require_capture_capability(
