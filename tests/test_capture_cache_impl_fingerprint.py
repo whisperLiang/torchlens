@@ -451,3 +451,54 @@ def test_meta_tensor_attribute_keys_by_metadata() -> None:
     b = torch.empty(3, device="meta")
     assert _attribute_state_fragment(a) == _attribute_state_fragment(b)
     assert _attribute_state_fragment(a) != _attribute_state_fragment(torch.empty(4, device="meta"))
+
+
+class _UnderscoreLoop(nn.Module):
+    """Loop count held in a LEADING-UNDERSCORE attribute (r3 R39-1 probe)."""
+
+    def __init__(self, n: int) -> None:
+        super().__init__()
+        self._n = n
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self._n):
+            x = self.lin(x)
+        return x
+
+
+def test_underscore_instance_attribute_is_a_cache_miss(tmp_path) -> None:
+    """A changed ``self._n`` must miss: the traced program depends on it.
+
+    r3 b4-opus-R39-1 (REOPENED wrong-trace-on-hit): the plain-attribute
+    filter skipped every leading-underscore name, so ``_UnderscoreLoop(5)``
+    with identical weights hit ``_UnderscoreLoop(1)``'s cached trace and
+    silently returned a 1-layer graph for a 5-layer forward.
+    """
+
+    x = torch.randn(1, 4)
+    one = _UnderscoreLoop(1)
+    five = _UnderscoreLoop(5)
+    five.load_state_dict(one.state_dict())  # identical weights, different program
+
+    first = tl.trace(one, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    assert sum("linear" in op.label for op in first.ops) == 1
+
+    second = tl.trace(five, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "a changed underscore instance attribute must not hit the stale cached trace"
+    )
+    # Five passes of the (recurrently grouped) linear layer, not one.
+    assert sum("linear" in op.label for op in second.ops) == 5
+
+
+def test_underscore_attribute_unchanged_model_still_hits(tmp_path) -> None:
+    """Same underscore attrs, same weights -> the second capture still hits."""
+
+    x = torch.ones(1, 4)
+    model = _UnderscoreLoop(3)
+    first = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    second = tl.trace(model, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is True

@@ -1797,18 +1797,49 @@ def _global_hook_signature() -> tuple[object, ...]:
     return tuple(signature)
 
 
+_MODULE_BASELINE_INSTANCE_ATTRS: frozenset[str] | None = None
+
+
+def _module_baseline_instance_attrs() -> frozenset[str]:
+    """Instance attributes a bare ``nn.Module()`` owns on this torch build.
+
+    Computed once per process from a real bare module, so the exclusion list
+    tracks the running torch version instead of a hardcoded roster.
+    """
+
+    global _MODULE_BASELINE_INSTANCE_ATTRS
+    if _MODULE_BASELINE_INSTANCE_ATTRS is None:
+        _MODULE_BASELINE_INSTANCE_ATTRS = frozenset(nn.Module().__dict__)
+    return _MODULE_BASELINE_INSTANCE_ATTRS
+
+
 def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, Any]]:
     """Yield the user-visible plain instance attributes of one module.
 
-    Skips torch-internal underscore state (parameters, buffers, hook dicts --
-    hooks are fingerprinted separately), TorchLens instrumentation (``tl_*``
-    attributes survive across captures by design and must not churn the key),
-    ``training`` (already folded by the content fingerprint), and instance
-    ``forward`` overrides (folded with instrumentation filtering above).
+    Skips torch-internal state by EXACT baseline-attribute name (parameters,
+    buffers, hook dicts -- hooks are fingerprinted separately), TorchLens
+    instrumentation (``tl_*`` attributes survive across captures by design
+    and must not churn the key), ``training`` (already folded by the content
+    fingerprint), and instance ``forward`` overrides (folded with
+    instrumentation filtering above).
+
+    A blanket leading-underscore skip is WRONG here: user underscore
+    attributes (``self._num_layers``) routinely determine the traced program,
+    and skipping them served the wrong cached trace across a changed
+    ``self._n`` (r3 b4-opus-R39-1, reopened through the bfcdde2d fix's own
+    filter). Only the exact bare-``nn.Module`` baseline names are excluded;
+    class-specific torch-internal extras (RNN ``_flat_weights``,
+    MultiheadAttention ``_qkv_same_embed_dim``) participate harmlessly --
+    they are deterministic functions of state the key already covers.
     """
 
+    baseline = _module_baseline_instance_attrs()
     for attr_name in sorted(module.__dict__):
-        if attr_name.startswith(("_", "tl_")) or attr_name in ("training", "forward"):
+        if (
+            attr_name in baseline
+            or attr_name.startswith("tl_")
+            or attr_name in ("training", "forward")
+        ):
             continue
         yield attr_name, module.__dict__[attr_name]
 
