@@ -1380,9 +1380,10 @@ def _validate_forward_pass_torch(
         except CaptureContextError:
             warnings.warn(
                 "TorchLens validation could not compute a pristine-torch ground "
-                "truth because a capture is active in this process; the verdict "
-                "would depend on the wrapper installation it is meant to check. "
-                "Returning False rather than reporting unverified success.",
+                "truth (a capture is active in this process, or the unwrap "
+                "ledger is poisoned); the verdict would depend on the wrapper "
+                "installation it is meant to check. Returning False rather "
+                "than reporting unverified success.",
                 RuntimeWarning,
                 stacklevel=2,
             )

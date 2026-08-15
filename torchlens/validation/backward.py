@@ -545,10 +545,10 @@ def validate_backward_pass(
         except CaptureContextError:
             warnings.warn(
                 "validate_backward_pass could not compute pristine-torch stock "
-                "gradients because a capture is active in this process; the "
-                "verdict would depend on the wrapper installation it is meant "
-                "to check. Returning False rather than reporting unverified "
-                "success.",
+                "gradients (a capture is active in this process, or the unwrap "
+                "ledger is poisoned); the verdict would depend on the wrapper "
+                "installation it is meant to check. Returning False rather "
+                "than reporting unverified success.",
                 RuntimeWarning,
                 stacklevel=2,
             )
