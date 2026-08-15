@@ -334,6 +334,9 @@ _GOLDEN_ROOTS = (
     "backend_parity/goldens",
     "capture_oracle/goldens",
     "fixtures/exports",
+    # b10 R78-1 round 3: a 32-file corpus lived here OUTSIDE every governance
+    # scanner and self-baselined unconditionally (write-then-skip, no flag).
+    "snapshots",
 )
 
 #: relpath-glob -> (category, reason). Categories:
@@ -395,6 +398,22 @@ GOLDEN_LEDGER: dict[str, tuple[str, str]] = {
         "normalized structural export contracts (viewer schemas, torchlens "
         "label vocabulary; see tests/test_exports.py docstring)",
     ),
+    "snapshots/bundle_diff_clean_vs_zero_relu.svg": (
+        "env-governed",
+        "SVG rendered by the `dot` C BINARY (not the python wrapper); the "
+        "emitting renderer version is recorded in snapshots/ENV-graphviz-dot "
+        "and named in every divergence verdict (b10 R78-3/R78-4); pixel "
+        "similarity exonerates benign drift, never converts a regression to "
+        "a skip",
+    ),
+    "snapshots/module_containment/*.json": (
+        "env-independent",
+        "structural module-containment metadata over torchlens-owned labels; "
+        "torch-spelling variance is pinned byte-exactly per variant via the "
+        "committed TORCH_VARIANT_FIXTURES registry, and generation is "
+        "flag-gated (TORCHLENS_UPDATE_MODULE_CONTAINMENT + reason + "
+        "provenance; b10 R78-1 round 3)",
+    ),
     # --- frozen input artifacts -------------------------------------------
     "golden/io_v3_sample.tlspec/**": (
         "frozen-input",
@@ -423,7 +442,9 @@ def _discover_golden_files() -> list[str]:
                 continue
             rel = path.relative_to(_TESTS_DIR).as_posix()
             parts = path.relative_to(base).as_posix().split("/")
-            if parts[0].startswith(("ENV", "PROVENANCE")) or parts[0].startswith("env-"):
+            # Sidecar markers are excluded at ANY depth: nested golden dirs
+            # (snapshots/module_containment) grow their own PROVENANCE files.
+            if any(part.startswith(("ENV", "PROVENANCE", "env-")) for part in parts):
                 continue
             if "__pycache__" in parts:
                 continue
@@ -472,17 +493,48 @@ def test_ledger_has_no_dead_entries() -> None:
     assert not dead, f"ledger entries matching no committed golden: {dead}"
 
 
+#: Required marker FILES per env-governed directory (b10 R78-5 round 3: only
+#: the base ENV was asserted, so deleting a load-bearing family marker like
+#: ENV-pydot silently moved both viz byte families off-canonical — a CI skip
+#: with no test noticing). A new env-governed family must declare its marker
+#: set here; the reasons in GOLDEN_LEDGER name which packages key each family.
+_ENV_GOVERNED_REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
+    "golden": ("ENV", "ENV-graphviz", "ENV-pydot"),
+    "godobject_oracle/goldens": ("ENV", "ENV-graphviz"),
+    "surface_oracle/goldens": ("ENV",),
+    # The bundle-diff SVG family is keyed on the dot C BINARY, which no
+    # python-package marker can express; it carries no base ENV because it
+    # does not resolve through resolve_env_golden (its two-layer byte+pixel
+    # scheme lives in test_bundle_diff_renderer.py).
+    "snapshots": ("ENV-graphviz-dot",),
+}
+
+
 @pytest.mark.smoke
 def test_env_governed_ledger_dirs_carry_env_markers() -> None:
-    """Every dir hosting env-governed goldens has a committed ENV marker."""
+    """Every env-governed dir carries ALL of its declared marker files."""
 
     governed_dirs = {
-        (_TESTS_DIR / pattern).parent
+        (_TESTS_DIR / pattern).parent.relative_to(_TESTS_DIR).as_posix()
         for pattern, (category, _) in GOLDEN_LEDGER.items()
         if category == "env-governed"
     }
-    missing = [str(d) for d in sorted(governed_dirs) if not (d / "ENV").exists()]
-    assert not missing, f"env-governed goldens dirs without an ENV marker: {missing}"
+    undeclared = sorted(governed_dirs - set(_ENV_GOVERNED_REQUIRED_MARKERS))
+    assert not undeclared, (
+        "env-governed goldens dirs with no declared marker set — add each to "
+        f"_ENV_GOVERNED_REQUIRED_MARKERS with its family's markers: {undeclared}"
+    )
+    missing = [
+        f"{directory}/{marker}"
+        for directory, markers in sorted(_ENV_GOVERNED_REQUIRED_MARKERS.items())
+        if directory in governed_dirs
+        for marker in markers
+        if not (_TESTS_DIR / directory / marker).exists()
+    ]
+    assert not missing, (
+        "missing env-governed family markers (deleting one silently moves the "
+        f"family off-canonical — b10 R78-5): {missing}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +673,66 @@ def test_xfail_scanner_catches_reasonless_markers() -> None:
 # ---------------------------------------------------------------------------
 
 
+_GOVERNED_IDIOM_NAMES = frozenset(
+    {"flag_armed", "require_env_golden", "require_update_reason", "write_provenance"}
+)
+
+
+def find_unflagged_baseline_writes(
+    source: str, filename: str = "<snippet>", *, tree: ast.AST | None = None
+) -> list[str]:
+    """Return write-then-skip-on-missing-baseline sites outside the flag system.
+
+    b10 R78-2 (round 3): the four repo-wide governance scanners are prefiltered
+    on golden-flag tokens, so an UNFLAGGED self-baseliner — ``if not
+    path.exists(): path.write_text(...); pytest.skip(...)`` — sat outside all
+    four tripwires simultaneously (the tests/snapshots corpus). This scanner is
+    flag-INDEPENDENT: it matches the exact silent-self-baseline shape (an
+    ``if`` whose test consults ``.exists()`` and whose body both writes bytes
+    and skips) and exempts only bodies that route through the governed idioms
+    (``flag_armed`` / ``require_env_golden`` / ``require_update_reason`` /
+    ``write_provenance``).
+    """
+
+    tree = ast.parse(source) if tree is None else tree
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test_consults_exists = any(
+            isinstance(sub, ast.Attribute) and sub.attr == "exists" for sub in ast.walk(node.test)
+        )
+        if not test_consults_exists:
+            continue
+        body_nodes = [sub for statement in node.body for sub in ast.walk(statement)]
+        writes = any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr in {"write_text", "write_bytes"}
+            for sub in body_nodes
+        )
+        skips = any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "skip"
+            and isinstance(sub.func.value, ast.Name)
+            and sub.func.value.id == "pytest"
+            for sub in body_nodes
+        )
+        governed = any(
+            (isinstance(sub, ast.Name) and sub.id in _GOVERNED_IDIOM_NAMES)
+            or (isinstance(sub, ast.Attribute) and sub.attr in _GOVERNED_IDIOM_NAMES)
+            for sub in body_nodes
+        )
+        if writes and skips and not governed:
+            violations.append(
+                f"{filename}:{node.lineno}: unflagged write-then-skip self-baseline "
+                "(missing-golden branch writes bytes and skips with no update flag, "
+                "reason, or provenance — route it through _oracle_env)"
+            )
+    return violations
+
+
 @functools.lru_cache(maxsize=1)
 def _test_texts() -> tuple[tuple[str, str], ...]:
     """Return (relpath, source text) for every python file under tests/."""
@@ -687,6 +799,57 @@ def test_no_reasonless_xfails_in_tests() -> None:
 
 
 @pytest.mark.smoke
+def test_no_unflagged_baseline_writes_in_tests() -> None:
+    """No missing-golden branch may silently self-baseline (flag-independent).
+
+    Prefiltered on the write tokens themselves, NOT the flag tokens — the
+    whole point is catching sites the flag system never saw (b10 R78-2).
+    """
+
+    violations = _scan_repo(find_unflagged_baseline_writes, ("write_text", "write_bytes"))
+    assert not violations, "\n".join(violations)
+
+
+_PLANTED_UNFLAGGED_BASELINE = """
+import json
+import pytest
+
+def test_snapshot(path, actual):
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(actual))
+        pytest.skip(f"baseline snapshot generated: {path}")
+    assert json.loads(path.read_text()) == actual
+"""
+
+_GOVERNED_BASELINE = """
+import json
+import os
+import pytest
+from _oracle_env import flag_armed, require_update_reason, write_provenance
+
+def test_snapshot(path, actual):
+    if not path.exists():
+        if flag_armed(os.environ, "TORCHLENS_UPDATE_X") and not os.environ.get("CI"):
+            reason = require_update_reason("TORCHLENS_UPDATE_X")
+            path.write_text(json.dumps(actual))
+            write_provenance(path.parent, "test.py", "TORCHLENS_UPDATE_X", reason)
+            pytest.skip("baseline generated")
+        pytest.fail("missing golden")
+    assert json.loads(path.read_text()) == actual
+"""
+
+
+@pytest.mark.smoke
+def test_unflagged_baseline_scanner_is_red_capable() -> None:
+    """The exact pre-fix tests/snapshots shape is caught; the governed shape passes."""
+
+    violations = find_unflagged_baseline_writes(_PLANTED_UNFLAGGED_BASELINE)
+    assert len(violations) == 1 and "self-baseline" in violations[0]
+    assert find_unflagged_baseline_writes(_GOVERNED_BASELINE) == []
+
+
+@pytest.mark.smoke
 def test_repo_scan_prefilter_is_sound() -> None:
     """The substring prefilter can never hide a violation.
 
@@ -704,6 +867,7 @@ def test_repo_scan_prefilter_is_sound() -> None:
         (_PLANTED_BARE_IF_FLAG, _FLAG_TOKENS),
         (_PLANTED_AUTOGREEN, _FLAG_TOKENS),
         (_PLANTED_BARE_XFAIL, ("xfail",)),
+        (_PLANTED_UNFLAGGED_BASELINE, ("write_text", "write_bytes")),
     ):
         assert any(token in snippet for token in tokens)
 

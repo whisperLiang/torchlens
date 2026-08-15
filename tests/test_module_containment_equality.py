@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ import torchlens as tl
 from torchlens.backends.torch._tl import get_module_meta
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "module_containment"
+#: Update flag for the module-containment golden corpus (b10 R78-1 round 3:
+#: baselines are generated deliberately, never silently on first run).
+_UPDATE_ENV = "TORCHLENS_UPDATE_MODULE_CONTAINMENT"
 # Synthetic hook replacement is intentionally snapshotted with hook-stack semantics:
 # downstream ops stay in the dynamic call stack instead of inheriting a replaced module.
 # Hook-stack IS the only containment engine (the `_module_containment_engine` selector
@@ -184,9 +188,10 @@ def _assert_synthetic_replacement_present(actual: dict[str, Any], fixture_name: 
 def test_torch_variant_goldens_are_all_present_and_distinct() -> None:
     """Both spellings of every torch-variant fixture are pinned on disk.
 
-    ``test_module_containment_snapshot`` GENERATES a golden and skips when the file
-    is absent. A missing variant would therefore silently self-bless instead of
-    comparing, so pin that both files exist and genuinely differ.
+    A missing variant golden would fail closed at comparison time (the
+    generate path is flag-gated), but pinning both files exist and genuinely
+    differ keeps the variant registry honest: an identical pair means the
+    variant is pointless and its registry row is stale.
     """
 
     for fixture_name, suffix in TORCH_VARIANT_FIXTURES.items():
@@ -218,12 +223,31 @@ def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
 
     snapshot_path = _snapshot_path(fixture_name)
     if not snapshot_path.exists():
-        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot_path.write_text(json.dumps(actual, indent=2, sort_keys=True, default=str))
-        pytest.skip(f"baseline snapshot generated: {snapshot_path}")
+        # FLAG-GATED baseline generation (b10 R78-1 round 3): the historical
+        # unconditional write-then-skip was the exact silent self-baselining
+        # require_env_golden was written to eliminate — a fresh clone would
+        # bless whatever the current build produced, no flag, no provenance,
+        # no review trail.
+        from _oracle_env import flag_armed, require_update_reason, write_provenance
+
+        if flag_armed(os.environ, _UPDATE_ENV) and not os.environ.get("CI"):
+            reason = require_update_reason(_UPDATE_ENV)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_text(json.dumps(actual, indent=2, sort_keys=True, default=str))
+            write_provenance(snapshot_path.parent, Path(__file__).name, _UPDATE_ENV, reason)
+            pytest.skip(
+                f"baseline snapshot generated: {snapshot_path}; re-run without "
+                f"{_UPDATE_ENV} to verify"
+            )
+        pytest.fail(
+            f"missing module-containment golden {snapshot_path}. Refusing to "
+            f"self-baseline: generate deliberately with {_UPDATE_ENV}=1 (plus "
+            "TORCHLENS_GOLDEN_REASON), review the diff, and commit it."
+        )
 
     expected = json.loads(snapshot_path.read_text())
     assert actual == expected, (
-        f"snapshot drift for {fixture_name}; rerun "
-        f"`rm {snapshot_path}` and re-snapshot if intentional"
+        f"snapshot drift for {fixture_name}; if intentional, delete the file and "
+        f"regenerate deliberately with {_UPDATE_ENV}=1 (plus "
+        "TORCHLENS_GOLDEN_REASON), then re-run to verify"
     )
