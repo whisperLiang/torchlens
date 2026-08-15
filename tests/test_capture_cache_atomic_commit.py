@@ -136,3 +136,45 @@ def test_committed_entry_is_self_authenticating(tmp_path) -> None:
     )
     second = tl.trace(model, x, capture=_cache_capture(tmp_path))
     assert second.capture_cache_hit is True
+
+
+def test_hard_crash_temp_debris_is_swept_age_gated(tmp_path) -> None:
+    """Orphaned mkstemp staging files are swept once stale (r3 T-CACHES).
+
+    A hard crash (SIGKILL) between ``mkstemp`` and the atomic ``os.replace``
+    strands ``.<name>.tmp.<rand>`` files that no ``*.pkl`` glob sees: they
+    were invisible to eviction accounting AND ``clear_capture_cache``,
+    accumulating without bound. Fresh temps (a possibly in-flight store)
+    must survive the sweep.
+    """
+
+    import os
+    import time as time_module
+
+    model = _CacheModel()
+    x = torch.randn(1, 4)
+    tl.trace(model, x, capture=_cache_capture(tmp_path))
+    cache_root = tmp_path / "cache" / "capture"
+    entry = _single_entry(tmp_path)
+
+    stale = cache_root / f".{entry.name}.tmp.stale123"
+    fresh = cache_root / f".{entry.name}.tmp.fresh456"
+    stale.write_bytes(b"debris")
+    fresh.write_bytes(b"in-flight")
+    two_hours_ago = time_module.time() - 7200
+    os.utime(stale, (two_hours_ago, two_hours_ago))
+
+    # A second store triggers eviction, which sweeps stale debris only.
+    tl.trace(_CacheModel(), x, capture=_cache_capture(tmp_path))
+    assert not stale.exists(), "stale mkstemp debris must be swept at eviction"
+    assert fresh.exists(), "a fresh (possibly in-flight) temp must survive"
+
+    # clear_capture_cache sweeps stale debris too (same age gate), and never
+    # touches the secret file.
+    stale.write_bytes(b"debris-again")
+    os.utime(stale, (two_hours_ago, two_hours_ago))
+    removed = tl.clear_capture_cache(tmp_path / "cache")
+    assert removed >= 1
+    assert not stale.exists()
+    assert fresh.exists()
+    assert (cache_root / ".capture_cache_secret").exists()
