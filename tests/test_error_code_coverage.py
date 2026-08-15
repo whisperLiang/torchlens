@@ -77,7 +77,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "backend_capability_conformance",
         "backend_error",
         "backward_capture_conflict",
-        "backward_graph_unavailable",
         "backward_pass_filter_invalid",
         "batch_items_invalid",
         "batch_render_invalid",
@@ -102,7 +101,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "fsdp_capture_unsupported",
         "gradient_not_saved",
         "gradient_pass_ambiguous",
-        "graphviz_render_failed",
         "intervening_cluster_invalid",
         "intervention_action_type_invalid",
         "intervention_engine_invalid",
@@ -160,9 +158,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "sweep_values_missing",
         "tensor_connection_labels_missing",
         "trace_not_finished",
-        "visualization_direction_invalid",
-        "visualization_mode_invalid",
-        "visualization_renderer_invalid",
     }
 )
 
