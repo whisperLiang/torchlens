@@ -199,3 +199,54 @@ def test_public_relative_markdown_links_resolve() -> None:
             if not (page.parent / target).resolve().exists():
                 missing.append((str(page.relative_to(root)), target))
     assert not missing
+
+
+def test_capture_outcomes_doc_vocabulary_locksteps_with_the_enums() -> None:
+    """Gate the capture-outcome doc of record against the settlement enums.
+
+    ``docs/reference/capture_outcomes.md`` is the doc of record for the
+    outcome unification (CLAUDE.md), yet it was the one enum-vocabulary
+    contract doc with ZERO automated lockstep (grind b7 R53-F1): a
+    ``CaptureStatus``/``CapturePhase``/``FailureOrigin`` or N-gate change
+    would have shipped with a silently stale doc. The status table is
+    compared bidirectionally (a phantom or missing row fails either way);
+    the FAILED-only prose vocabularies and every chokepoint gate code must
+    appear in their sections.
+    """
+
+    from torchlens.capture.outcome import (
+        _REFUSAL_HINTS,
+        CapturePhase,
+        CaptureStatus,
+        FailureOrigin,
+    )
+
+    text = (_repo_root() / "docs" / "reference" / "capture_outcomes.md").read_text(encoding="utf-8")
+
+    status_section = text.split("## The status vocabulary", 1)[1].split("\n## ", 1)[0]
+    documented_statuses = re.findall(r"^\|\s*`([A-Z_]+)`\s*\|", status_section, flags=re.M)
+    assert len(documented_statuses) == len(set(documented_statuses)), (
+        f"duplicated status rows in capture_outcomes.md: {documented_statuses}"
+    )
+    assert set(documented_statuses) == {member.name for member in CaptureStatus}, (
+        "the capture_outcomes.md status table and tl.types.CaptureStatus have "
+        f"drifted apart: doc rows {sorted(documented_statuses)} vs enum "
+        f"{sorted(member.name for member in CaptureStatus)} — update both in "
+        "the same change"
+    )
+
+    for member in CapturePhase:
+        assert f"`{member.name}`" in text, (
+            f"CapturePhase.{member.name} is not documented in capture_outcomes.md"
+        )
+    for member in FailureOrigin:
+        assert f"`{member.value}`" in text, (
+            f"FailureOrigin.{member.value} is not documented in capture_outcomes.md"
+        )
+
+    capability_section = text.split("## The capability table", 1)[1].split("\n## ", 1)[0]
+    for gate_code in _REFUSAL_HINTS:
+        assert gate_code in capability_section, (
+            f"chokepoint gate code {gate_code} is missing from the "
+            "capture_outcomes.md capability table"
+        )

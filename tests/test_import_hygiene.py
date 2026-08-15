@@ -118,12 +118,19 @@ _EAGERLY_IMPORTED_LAZY_TARGETS = {
 #: order-of-magnitude jump, which the denylist can only catch by name.
 _MAX_MARGINAL_NON_TORCHLENS_MODULES = 40
 
-#: Wall-clock budget for the torchlens import itself, measured with torch
-#: already imported so the number is not dominated by torch. Measured ~0.15 s on
-#: a 4-core devbox under parallel sprint load; the budget is ~6x that. This is a
-#: regression tripwire for an order-of-magnitude change (an eager heavy import),
-#: NOT a performance gate -- perf lives in tests/bench/.
-_TORCHLENS_IMPORT_BUDGET_S = 1.0
+#: Duration budget for the torchlens import itself, measured with torch already
+#: imported so the number is not dominated by torch. Charged on min(wall, cpu)
+#: -- the tier-budget convention (eec14a0f) -- because the pure-wall version of
+#: this guard false-failed at 1.45s under orchestrator load while five fresh
+#: control runs measured 0.32-0.78s and every structural guard stayed green
+#: (grind b4, F31-A): wall stretches with box load, CPU time does not, and an
+#: eager heavy import inflates BOTH. Measured ~0.15 s marginal CPU on the
+#: devbox; the budget is ~10x that. This is a regression tripwire for an
+#: order-of-magnitude change (an eager heavy import), NOT a performance gate --
+#: perf lives in tests/bench/. Documented residual, shared with the tier
+#: budgets: an import that only SLEEPS is no longer catchable here; the module
+#: allowlist and denylist above remain the structural authority.
+_TORCHLENS_IMPORT_BUDGET_S = 1.5
 
 
 def _import_probe_script() -> str:
@@ -145,9 +152,11 @@ before_torch = set(sys.modules)
 import torch
 after_torch = set(sys.modules)
 
-start = time.perf_counter()
+start_wall = time.perf_counter()
+start_cpu = time.process_time()
 import torchlens
-elapsed = time.perf_counter() - start
+elapsed_cpu = time.process_time() - start_cpu
+elapsed_wall = time.perf_counter() - start_wall
 
 after = set(sys.modules)
 torchlens_modules = sorted(
@@ -160,7 +169,8 @@ marginal_foreign = sorted(
 )
 lazy_targets = sorted({target for target, _attr in torchlens._LAZY_ATTRS.values()})
 print(json.dumps({
-    "elapsed": elapsed,
+    "elapsed_wall": elapsed_wall,
+    "elapsed_cpu": elapsed_cpu,
     "file": torchlens.__file__,
     "loaded": sorted(after),
     "torchlens_modules": torchlens_modules,
@@ -302,21 +312,6 @@ assert collisions == {
 """
 
 
-def _run_import_script(script: str) -> None:
-    """Run an import assertion against this checkout in a fresh interpreter.
-
-    Parameters
-    ----------
-    script:
-        Python source containing assertions for one import pattern.
-    """
-
-    project_root = Path(__file__).resolve().parents[1]
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(project_root)
-    subprocess.run([sys.executable, "-c", script], check=True, env=environment)
-
-
 @pytest.mark.smoke
 def test_bare_import_pulls_no_heavy_third_party_dependency(
     import_facts: dict[str, object],
@@ -371,20 +366,27 @@ def test_bare_import_adds_few_foreign_modules(import_facts: dict[str, object]) -
 
 
 @pytest.mark.smoke
-def test_bare_import_stays_within_its_wall_clock_budget(
+def test_bare_import_stays_within_its_duration_budget(
     import_facts: dict[str, object],
 ) -> None:
     """Importing torchlens over an already-imported torch stays cheap (R31-1b).
 
     Measured with torch pre-imported so the figure is TorchLens's own marginal
-    cost rather than torch's. Budget is ~6x measured: this catches an eager heavy
-    import, not a few milliseconds of drift.
+    cost rather than torch's; charged on min(wall, cpu) so orchestrator load
+    cannot red the commit gate (F31-A). Budget is ~10x measured: this catches an
+    eager heavy import, not a few milliseconds of drift.
     """
 
-    elapsed = float(import_facts["elapsed"])  # type: ignore[arg-type]
-    assert elapsed < _TORCHLENS_IMPORT_BUDGET_S, (
-        f"importing torchlens took {elapsed:.3f}s over an already-imported torch "
-        f"(budget {_TORCHLENS_IMPORT_BUDGET_S}s). Something heavy became eager."
+    wall = float(import_facts["elapsed_wall"])  # type: ignore[arg-type]
+    cpu = float(import_facts["elapsed_cpu"])  # type: ignore[arg-type]
+    charged = min(wall, cpu)
+    assert charged < _TORCHLENS_IMPORT_BUDGET_S, (
+        f"importing torchlens charged {charged:.3f}s (wall {wall:.3f}s, cpu "
+        f"{cpu:.3f}s) over an already-imported torch (budget "
+        f"{_TORCHLENS_IMPORT_BUDGET_S}s). Both measures are high, so this is "
+        "real import work, not box load: something heavy likely became eager. "
+        "The module allowlist/denylist guards in this file name the culprit "
+        "when it is an eager import."
     )
 
 

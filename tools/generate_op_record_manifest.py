@@ -13,6 +13,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Match the sibling generate_record_schema.py: the plain-script spelling
+# (``python tools/generate_op_record_manifest.py``) puts tools/ -- not the repo
+# root -- at sys.path[0], so without this the torchlens import below fails
+# with ModuleNotFoundError (grind b7 R53-A).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
 HEADER = '''"""GENERATED FILE — do not edit. CellSourceManifest v{version}.
 
 Regenerate with ``python -m tools.generate_op_record_manifest`` after editing
@@ -42,7 +49,7 @@ def generate() -> str:
 def main() -> int:
     """Generate (or with --check, verify) the manifest module."""
 
-    target = Path(__file__).resolve().parents[1] / "torchlens" / "ir" / "op_record_manifest.py"
+    target = _REPO_ROOT / "torchlens" / "ir" / "op_record_manifest.py"
     rendered = generate()
     if "--check" in sys.argv:
         current = target.read_text() if target.exists() else ""
