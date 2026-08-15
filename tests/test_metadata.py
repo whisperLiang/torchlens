@@ -430,6 +430,54 @@ def test_sibling_spouse_fields(small_input):
         assert isinstance(entry.co_parents, list)
 
 
+def test_layer_siblings_tolerate_orphan_relation_labels():
+    """Layer aggregates mirror the op-level orphan tolerance (r3 R05-N1).
+
+    ``Op.siblings``/``Op.co_parents`` deliberately resolve relation labels
+    through the ``orphans`` fallback on ``keep_orphans=True`` traces and may
+    APPEND orphan labels to their result; the Layer aggregates (``siblings``,
+    ``co_parents``, ``children``, ``parents``, and the per-pass dict views)
+    previously did a bare ``trace[label]`` lookup on those same labels and
+    raised from public read-only properties — the ``children`` instance even
+    fired INSIDE ``Op.siblings`` whenever a relation label resolved to a
+    Layer, outside its own fallback. No public capture constructs the state
+    today (orphans are component-disjoint by the step-3 bidirectional flood),
+    so the state is injected surgically: a mainline parent's relation list
+    gains an orphan child label, exactly the shape the op-level fallback
+    exists for.
+    """
+
+    class _WithOrphans(nn.Module):
+        def forward(self, x):
+            internal = torch.ones(3)
+            _a = internal * 2
+            _b = internal + 3
+            return x * 5
+
+    mh = trace_fn(
+        model=_WithOrphans(),
+        input_args=torch.randn(2, 3),
+        capture=torchlens.options.CaptureOptions(keep_orphans=True),
+    )
+    orphan_labels = list(mh.orphans.keys())
+    assert orphan_labels, "probe model must produce orphans"
+    orphan_sibling = next(k for k in orphan_labels if mh.orphans[k].siblings)
+
+    mainline = next(
+        mh[label] for label in mh.layer_labels if not mh[label].is_input and mh[label].parents
+    )
+    parent_op = list(mh[mainline.parents[0]].ops.values())[0]
+    # Direct assignment is the supported mutation spelling on Op records; the
+    # list normalizes to the immutable view type.
+    parent_op.children = list(parent_op.children) + [orphan_sibling]
+
+    op0 = list(mainline.ops.values())[0]
+    assert orphan_sibling in op0.siblings  # op level tolerates and appends
+    aggregated = mainline.siblings  # RED before the fix: uncaught lookup error
+    assert mh.orphans[orphan_sibling].layer_label in aggregated
+    assert isinstance(mainline.co_parents, list)
+
+
 def test_conditional_fields():
     model = example_models.ConditionalBranching()
     model_input = -torch.ones(6, 3, 224, 224)

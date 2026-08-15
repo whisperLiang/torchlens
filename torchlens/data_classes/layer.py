@@ -1550,8 +1550,8 @@ class Layer:
         seen = set()
         for pass_log in self.ops.values():
             for label in pass_log.children:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in seen:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
         return tuple(result)
@@ -1566,8 +1566,8 @@ class Layer:
         seen = set()
         for pass_log in self.ops.values():
             for label in pass_log.parents:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in seen:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
         return tuple(result)
@@ -1618,11 +1618,32 @@ class Layer:
         seen = {self.layer_label}
         for pass_log in self.ops.values():
             for label in pass_log.siblings:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in seen:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
         return result
+
+    def _relation_no_pass_label(self, label: str) -> str | None:
+        """Resolve one per-op relation label to its no-pass layer label.
+
+        Mirrors the op-level orphan tolerance (r3 b3-fable R05-N1): the
+        per-op ``siblings``/``co_parents`` properties deliberately resolve
+        relation labels through the ``orphans`` fallback on
+        ``keep_orphans=True`` traces, so the Layer aggregate must fold the
+        same labels instead of crashing on a bare mainline lookup. A label
+        resolvable through neither surface is skipped, matching the op-level
+        behavior.
+        """
+
+        trace = self.source_trace
+        try:
+            return trace[label].layer_label
+        except (KeyError, ValueError):
+            try:
+                return trace.orphans[label].layer_label
+            except KeyError:
+                return None
 
     @property
     def has_siblings(self) -> bool:
@@ -1646,8 +1667,8 @@ class Layer:
         seen = {self.layer_label}
         for pass_log in self.ops.values():
             for label in pass_log.co_parents:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in seen:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
         return result
@@ -1746,8 +1767,8 @@ class Layer:
         for call_index, pass_log in self.ops.items():
             children = []
             for label in pass_log.children:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in children:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in children:
                     children.append(no_pass)
             result[call_index] = children
         return result
@@ -1759,8 +1780,8 @@ class Layer:
         for call_index, pass_log in self.ops.items():
             parents = []
             for label in pass_log.parents:
-                no_pass = self.source_trace[label].layer_label
-                if no_pass not in parents:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and no_pass not in parents:
                     parents.append(no_pass)
             result[call_index] = parents
         return result
@@ -1773,8 +1794,8 @@ class Layer:
         result: defaultdict[str, list[int]] = defaultdict(list)
         for call_index, pass_log in self.ops.items():
             for label in pass_log.children:
-                no_pass = self.source_trace[label].layer_label
-                if call_index not in result[no_pass]:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and call_index not in result[no_pass]:
                     result[no_pass].append(call_index)
         return dict(result)
 
@@ -1786,8 +1807,8 @@ class Layer:
         result: defaultdict[str, list[int]] = defaultdict(list)
         for call_index, pass_log in self.ops.items():
             for label in pass_log.parents:
-                no_pass = self.source_trace[label].layer_label
-                if call_index not in result[no_pass]:
+                no_pass = self._relation_no_pass_label(label)
+                if no_pass is not None and call_index not in result[no_pass]:
                     result[no_pass].append(call_index)
         return dict(result)
 
