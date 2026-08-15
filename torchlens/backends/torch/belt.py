@@ -28,8 +28,8 @@ The belt membership is DERIVED MECHANICALLY per build, never hand-listed:
    tensor-source family and honestly discloses the rest.
 
 On this torch build the derived set is ``{torch.from_numpy, torch.from_dlpack,
-torch.frombuffer, torch.Tensor.as_subclass}`` (pinned in
-``tests/test_mechanical_belt.py``).
+torch.frombuffer, torch.Tensor.as_subclass, torch.Tensor._make_subclass}``
+(pinned in ``tests/test_mechanical_belt.py``).
 """
 
 from __future__ import annotations
@@ -39,7 +39,8 @@ import sys
 import tempfile
 import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -129,8 +130,39 @@ PROBE_RECIPES: dict[tuple[str, str], Callable[[], tuple[tuple[Any, ...], dict[st
         (torch.tensor([0.25, 0.5]), _ProbeSubTensor),
         {},
     ),
+    # Exact sibling of ``as_subclass``: builds a subclass VIEW from raw
+    # storage below the override protocol, so a stale pre-wrap
+    # ``_make_subclass`` reference loses the op with zero signal. Without a
+    # recipe the pair sat disclosed-but-unprobed forever (b6-fable carried).
+    ("torch.Tensor", "_make_subclass"): lambda: (
+        (_ProbeSubTensor, torch.tensor([0.25, 0.5])),
+        {},
+    ),
     ("torch", "manual_seed"): lambda: ((7,), {}),
 }
+
+
+@contextmanager
+def _probe_rng_bracket() -> Iterator[None]:
+    """Snapshot/restore the global torch RNG around one probe evaluation.
+
+    The probe framework executes candidate ORIGINALS with synthesized
+    arguments at first wrap, inside the user's first capture. The candidate
+    inventory is build-derived, so a state-mutating factory row entering it
+    (``manual_seed`` already has a recipe that would call ``manual_seed(7)``;
+    it is merely dead on current builds) would silently clobber the user's
+    global seed. The bracket makes probe evaluation RNG-neutral by
+    construction (b8-fable R56 latent-reseed hardening).
+    """
+
+    cpu_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        yield
+    finally:
+        torch.random.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 
 
 @dataclass(frozen=True)
@@ -218,7 +250,7 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
         mode = _CountingMode()
         cleanup_path: str | None = None
         try:
-            with _state.pause_logging():
+            with _state.pause_logging(), _probe_rng_bracket():
                 args, kwargs = recipe()
                 if (namespace_name, func_name) == ("torch", "from_file"):
                     cleanup_path = str(args[0])

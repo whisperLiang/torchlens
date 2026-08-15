@@ -4,10 +4,11 @@ The belt membership is DERIVED per build (never hand-listed): every wrapped
 entry outside torch's override registries whose probe call fires zero
 ``TorchFunctionMode`` callbacks and touches tensors. On this build that is
 exactly ``{torch.from_numpy, torch.from_dlpack, torch.frombuffer,
-torch.Tensor.as_subclass}`` (``from_dlpack`` joined the wrap inventory with
-the 9bea6649 inventory-gap closure); ``torch.from_file`` measures VISIBLE
-here and must stay excluded (the build-dependent case the mechanical
-derivation exists to settle).
+torch.Tensor.as_subclass, torch.Tensor._make_subclass}`` (``from_dlpack``
+joined the wrap inventory with the 9bea6649 inventory-gap closure;
+``_make_subclass`` got its probe recipe with the round-3 b6-fable carried
+fix); ``torch.from_file`` measures VISIBLE here and must stay excluded (the
+build-dependent case the mechanical derivation exists to settle).
 
 NOTE: raw originals are held in function locals throughout — module-level or
 ``__main__``-level raw references get rewritten by the (pre-deletion)
@@ -35,6 +36,7 @@ _EXPECTED_MEMBERS = {
     ("torch", "from_dlpack"),
     ("torch", "frombuffer"),
     ("torch.Tensor", "as_subclass"),
+    ("torch.Tensor", "_make_subclass"),
 }
 
 
@@ -133,3 +135,33 @@ def test_belt_sweep_is_epoch_incremental() -> None:
     finally:
         sys.modules.pop(late.__name__, None)
         belt.restore_belt_references()
+
+
+def test_probe_rng_bracket_restores_global_seed() -> None:
+    """The probe framework is RNG-neutral by construction (b8-fable R56).
+
+    The candidate inventory is build-derived, so a state-mutating factory
+    row entering it (``manual_seed`` already has a recipe that would call
+    ``manual_seed(7)``) would silently clobber the user's global torch seed
+    at first wrap inside the user's first capture. The bracket must restore
+    the exact pre-probe state even when the probed call reseeds and draws.
+    """
+
+    torch.manual_seed(1234)
+    before = torch.random.get_rng_state().clone()
+    with belt._probe_rng_bracket():
+        torch.manual_seed(7)
+        torch.rand(4)
+    assert torch.equal(torch.random.get_rng_state(), before), (
+        "probe bracket leaked RNG state: a state-mutating probe recipe would "
+        "clobber the user's global seed"
+    )
+
+
+def test_belt_derivation_is_rng_neutral() -> None:
+    """End-to-end: a full ``_derive()`` pass leaves the global RNG untouched."""
+
+    torch.manual_seed(1234)
+    before = torch.random.get_rng_state().clone()
+    belt._derive()
+    assert torch.equal(torch.random.get_rng_state(), before)
