@@ -344,15 +344,17 @@ jobs:
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      - name: Build wheel
-        # PIN AUTHORITY: build== must equal the pin inside pyproject.toml's
-        # [tool.semantic_release] build_command -- the nightly gate below only
-        # attests reproducibility for the builder the release actually uses.
-        # The dirty-tree guard makes the packaging provenance explicit: a
-        # wheel must only ever attest the COMMITTED tree (grind r3, R84 LOW),
-        # and any stale build/ dir is removed because bdist_wheel silently
-        # reuses build/lib and can resurrect files pruned since the last
-        # build.
+      - name: Build wheel and sdist with the release's exact builder
+        # SINGLE PIN AUTHORITY (grind r4): the build== pin is PARSED out of
+        # pyproject.toml's [tool.semantic_release] build_command instead of
+        # being repeated here, so this gate can never silently attest a
+        # different builder than the release uses (the old lockstep was
+        # comment-only). A parse miss exits non-zero.
+        # The dirty-tree guard makes the packaging provenance explicit: an
+        # artifact must only ever attest the COMMITTED tree (grind r3, R84
+        # LOW), and any stale build/ dir is removed because bdist_wheel
+        # silently reuses build/lib and can resurrect files pruned since the
+        # last build.
         run: |
           if ! git diff --quiet || ! git diff --cached --quiet; then
             echo "refusing to package a dirty tree"
@@ -360,27 +362,48 @@ jobs:
             exit 1
           fi
           rm -rf build
-          uv pip install --system "build==1.5.0"
-          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --wheel --outdir "${{ runner.temp }}/dist"
+          BUILD_PIN="$(python - <<'PY'
+          import re
+          import tomllib
 
-      - name: Fail on a non-reproducible wheel (double-build gate)
-        # Same commit + same SOURCE_DATE_EPOCH must give a byte-identical
-        # wheel (grind r3, R86: six dist-info timestamps used to differ on
-        # every rebuild, so no artifact could be independently verified).
-        # The stale local build/ tree is removed first: bdist_wheel silently
-        # reuses build/lib and can resurrect files pruned since the last
-        # build. The sdist stays out of this gate -- its gzip envelope is not
-        # yet reproducible under setuptools (disclosed residual).
+          with open("pyproject.toml", "rb") as fh:
+              build_command = tomllib.load(fh)["tool"]["semantic_release"]["build_command"]
+          match = re.search(r"build==[0-9][0-9a-zA-Z.]*", build_command)
+          assert match, f"no build== pin found in build_command: {build_command!r}"
+          print(match.group(0))
+          PY
+          )"
+          echo "release builder: $BUILD_PIN"
+          uv pip install --system "$BUILD_PIN"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --outdir "${{ runner.temp }}/dist"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist/torchlens-*.tar.gz
+
+      - name: Fail on a non-reproducible wheel or sdist (double-build gate)
+        # Same commit + same SOURCE_DATE_EPOCH must give byte-identical
+        # artifacts (grind r3, R86: six dist-info timestamps used to differ
+        # on every wheel rebuild). The sdist joined the gate in grind r4:
+        # its two non-determinism root causes (gzip header wall-clock mtime,
+        # builder uid/gid in tar members) are normalized by
+        # scripts/normalize_sdist.py exactly as in the release build_command,
+        # so the former "gzip envelope not reproducible" residual is closed
+        # and enforced here. The stale local build/ tree is removed first:
+        # bdist_wheel silently reuses build/lib and can resurrect files
+        # pruned since the last build.
         run: |
           rm -rf build
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --wheel --outdir "${{ runner.temp }}/dist-rebuild"
-          first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.whl | cut -d' ' -f1)"
-          second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl | cut -d' ' -f1)"
-          echo "build 1: $first"
-          echo "build 2: $second"
-          test "$first" = "$second"
+            python -m build --outdir "${{ runner.temp }}/dist-rebuild"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz
+          for kind in whl tar.gz; do
+            first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.$kind | cut -d' ' -f1)"
+            second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.$kind | cut -d' ' -f1)"
+            echo "$kind build 1: $first"
+            echo "$kind build 2: $second"
+            test "$first" = "$second"
+          done
 
       - name: Install wheel in a clean venv
         run: |

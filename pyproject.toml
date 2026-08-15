@@ -533,11 +533,28 @@ version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
 # build== is PINNED (the old unpinned install resolved arbitrary code while
-# the release App token sat on disk from checkout) and SOURCE_DATE_EPOCH is
-# set from the released commit so the shipped wheel is bit-reproducible from
-# its tag (grind r3, R86). PIN AUTHORITY: keep equal to the nightly wheel
-# job's `build==` pin, whose double-build gate attests exactly this builder.
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build"
+# the release App token sat on disk from checkout). PIN AUTHORITY: the nightly
+# wheel job PARSES this build_command for its own build== install, so its
+# double-build gate always attests exactly the builder the release uses.
+#
+# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel deterministic, and
+# scripts/normalize_sdist.py makes the sdist deterministic too (grind r4,
+# R86-1 root causes: gzip header wall-clock mtime + builder uid/gid/uname/
+# gname in the tar members). The nightly double-build gate attests BOTH
+# artifacts byte-identical.
+#
+# REPRODUCE FROM A TAG (grind r4 recipe correction): python-semantic-release
+# runs this build_command AFTER bumping the version files but BEFORE creating
+# the release commit and tag, so at build time `git log -1` resolves to the
+# PARENT of the future tag. The old recipe ("check out the tag and use its
+# own commit timestamp") was off by one commit and could never reproduce the
+# published bytes. Correct recipe:
+#   git checkout vX.Y.Z
+#   pip install 'build==1.5.0'
+#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
+#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
+#       python scripts/normalize_sdist.py dist/*.tar.gz
+build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
