@@ -1083,6 +1083,33 @@ def test_dilated_max_pool_exact_box_matches_bruteforce() -> None:
     assert checked.n_violations == 0
 
 
+def test_dilated_box_axes_disclose_sparse_possible() -> None:
+    """The box view must carry the axis view's ``sparse_possible`` disclosure.
+
+    A dilated kernel keeps the hull exact while provably skipping interior
+    positions; the axis view disclosed that, but the box axes did not, so
+    ``rf.at(unit)`` presented a dense window under an unqualified
+    ``exact=True`` (b6 R20).
+    """
+
+    model = nn.Conv2d(1, 1, 3, dilation=3, bias=False).eval()
+    inputs = torch.randn(1, 1, 14, 14)
+    trace = capture(model, inputs)
+    box = op_named(trace, "conv2d").receptive_field.at((2, 2))
+    assert box.exact
+    windowed = [axis for axis in box.axes if axis.kind == "windowed"]
+    assert windowed, "expected windowed spatial axes on a conv box"
+    assert all(axis.sparse_possible for axis in windowed)
+    assert box.sparse_possible
+
+    dense = nn.Conv2d(1, 1, 3, bias=False).eval()
+    dense_trace = capture(dense, inputs)
+    dense_box = op_named(dense_trace, "conv2d").receptive_field.at((2, 2))
+    assert dense_box.exact
+    assert not dense_box.sparse_possible
+    assert all(not axis.sparse_possible for axis in dense_box.axes)
+
+
 def test_batch_mean_mix_claims_full_batch_axis() -> None:
     """Batch-axis units: batch mixing must surface as a full batch axis."""
 

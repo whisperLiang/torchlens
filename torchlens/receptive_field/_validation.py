@@ -199,6 +199,7 @@ def _box_for_descriptor(
             index_stop=axis.input_extent if axis.kind == "full" else None,
             clipped_start=0 if axis.kind == "full" else None,
             clipped_stop=axis.input_extent if axis.kind == "full" else None,
+            sparse_possible=axis.sparse_possible,
         )
         for axis in descriptor.axes
     )
