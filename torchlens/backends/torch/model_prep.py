@@ -623,6 +623,12 @@ def _prepare_model_session(
     if trace.capture_mode != "predicate":
         _create_session_param_logs(trace, model, optimizer)
     prepare_buffer_tensors(trace, model)
+    # Pre-forward ownership snapshot for the R16 module-entry adoption
+    # disclosure: tensors reachable NOW (nested caches, forward globals) are
+    # model-owned known sources; anything first seen mid-forward is not.
+    trace._module_capture_ws.module_build_data["model_owned_tensor_ids_at_entry"] = (
+        _collect_model_owned_tensor_ids(model)
+    )
     if trace.capture_mode == "exhaustive":
         from .buffer_writes import install_buffer_write_tracker
 
@@ -1223,10 +1229,19 @@ def _record_module_entry_metadata(
             # warning, no rescue, consumption-order-dependent disclosure).
             # Record the adoption so postprocess raises the same provenance
             # warning and escape signal the function path raises.
+            # A tensor in the PRE-FORWARD ownership snapshot is a model-owned
+            # known source (a nested cache or forward-global whose stale
+            # labels the previous session legitimately cleared) -- adopting it
+            # is not an escape. Only tensors first appearing MID-forward keep
+            # the disclosure.
+            owned_at_entry = trace._module_capture_ws.module_build_data.get(
+                "model_owned_tensor_ids_at_entry"
+            )
             if (
                 label is not None
                 and not getattr(trace, "_raw_transform_escape_detected", False)
                 and not getattr(trace, "_raw_dynamo_region_detected", False)
+                and id(t) not in (owned_at_entry or ())
             ):
                 trace.__dict__.setdefault("_module_entry_adoptions", []).append(
                     (str(label), str(module_address))
@@ -2691,7 +2706,12 @@ def _is_isinstance_hostile_deprecation_shim(value: Any) -> bool:
     )
 
 
-def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -> None:
+def _clear_session_tensor_metadata(
+    value: Any,
+    seen: set[int],
+    depth: int = 0,
+    visit: Callable[[torch.Tensor], None] | None = None,
+) -> None:
     """Clear TorchLens tensor metadata from a model-owned object graph.
 
     Parameters
@@ -2703,13 +2723,21 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
     depth
         Current recursion depth, used to bound traversal through arbitrary
         third-party helper objects.
+    visit
+        Optional action applied to each reachable non-Parameter tensor instead
+        of the default ``clear_meta`` -- the pre-forward ownership snapshot
+        (:func:`_collect_model_owned_tensor_ids`) reuses this exact traversal
+        so the "model-owned" surfaces of the snapshot and the session-end
+        clear can never drift apart.
 
     Returns
     -------
     None
-        Mutates reachable tensors in place by removing TorchLens metadata.
+        Mutates reachable tensors in place by removing TorchLens metadata
+        (or applies ``visit`` when given).
     """
 
+    action = clear_meta if visit is None else visit
     if value is None or _is_isinstance_hostile_deprecation_shim(value):
         return
     if isinstance(value, (str, bytes, int, float, bool)):
@@ -2751,13 +2779,13 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
             for name in slot_names:
                 item = namespace.get(name)
                 if isinstance(item, torch.Tensor) and not isinstance(item, torch.nn.Parameter):
-                    clear_meta(item)
+                    action(item)
                 elif isinstance(item, (dict, list, tuple, set, frozenset, deque)):
-                    _clear_container_tree_tensor_metadata(item, seen, depth + 1)
+                    _clear_container_tree_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
-            clear_meta(value)
+            action(value)
         return
     obj_id = id(value)
     if obj_id in seen or depth >= 12:
@@ -2765,12 +2793,12 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
     seen.add(obj_id)
     if isinstance(value, dict):
         for key, item in value.items():
-            _clear_session_tensor_metadata(key, seen, depth + 1)
-            _clear_session_tensor_metadata(item, seen, depth + 1)
+            _clear_session_tensor_metadata(key, seen, depth + 1, visit)
+            _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, (list, tuple, set, frozenset, deque)):
         for item in value:
-            _clear_session_tensor_metadata(item, seen, depth + 1)
+            _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, nn.Module):
         return
@@ -2778,10 +2806,15 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
     if namespace is None:
         return
     for item in namespace.values():
-        _clear_session_tensor_metadata(item, seen, depth + 1)
+        _clear_session_tensor_metadata(item, seen, depth + 1, visit)
 
 
-def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int) -> None:
+def _clear_container_tree_tensor_metadata(
+    value: Any,
+    seen: set[int],
+    depth: int,
+    visit: Callable[[torch.Tensor], None] | None = None,
+) -> None:
     """Clear tensor metadata from a pure container tree (no object descent).
 
     Restricted companion to ``_clear_session_tensor_metadata`` for
@@ -2809,7 +2842,7 @@ def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int
         return
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
-            clear_meta(value)
+            (clear_meta if visit is None else visit)(value)
         return
     if not isinstance(value, (dict, list, tuple, set, frozenset, deque)):
         return
@@ -2823,10 +2856,14 @@ def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int
     else:
         items = list(value)
     for item in items:
-        _clear_container_tree_tensor_metadata(item, seen, depth + 1)
+        _clear_container_tree_tensor_metadata(item, seen, depth + 1, visit)
 
 
-def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -> None:
+def _clear_callable_session_tensor_metadata(
+    callable_obj: Any,
+    seen: set[int],
+    visit: Callable[[torch.Tensor], None] | None = None,
+) -> None:
     """Clear TorchLens tensor metadata captured by a callable object.
 
     The globals scan targets the callable that actually runs USER code, so
@@ -2871,16 +2908,16 @@ def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -
 
     for link in chain:
         defaults = getattr(link, "__defaults__", None) or ()
-        _clear_session_tensor_metadata(defaults, seen)
+        _clear_session_tensor_metadata(defaults, seen, visit=visit)
         kwdefaults = getattr(link, "__kwdefaults__", None) or {}
-        _clear_session_tensor_metadata(kwdefaults, seen)
+        _clear_session_tensor_metadata(kwdefaults, seen, visit=visit)
         closure = getattr(link, "__closure__", None) or ()
         for cell in closure:
             try:
                 cell_value = cell.cell_contents
             except ValueError:
                 continue
-            _clear_session_tensor_metadata(cell_value, seen)
+            _clear_session_tensor_metadata(cell_value, seen, visit=visit)
 
     user_callable = chain[-1]
     globals_dict = getattr(user_callable, "__globals__", None)
@@ -2891,7 +2928,49 @@ def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -
         return
     for name in code.co_names:
         if name in globals_dict:
-            _clear_session_tensor_metadata(globals_dict[name], seen)
+            _clear_session_tensor_metadata(globals_dict[name], seen, visit=visit)
+
+
+def _collect_model_owned_tensor_ids(model: nn.Module) -> set[int]:
+    """Snapshot ids of tensors reachable from the model's PRE-FORWARD state.
+
+    Walks exactly the surfaces the session-end clear walks -- submodule
+    ``__dict__`` object graphs plus each forward callable's defaults, keyword
+    defaults, closure cells, and referenced globals -- via the shared ``visit``
+    traversal, so a tensor the previous session's cleanup could reach (a
+    nested model-owned cache, a forward-global mask) is recognized as
+    model-owned by the next capture. The R16 module-entry adoption disclosure
+    consults this snapshot: a pre-forward model-owned tensor is a KNOWN
+    internal source (its stale labels were legitimately cleared between
+    sessions), while a tensor first appearing MID-forward is absent from the
+    snapshot and keeps the escape disclosure.
+
+    Parameters
+    ----------
+    model
+        The prepared root model.
+
+    Returns
+    -------
+    set[int]
+        ``id()`` of every reachable non-Parameter tensor.
+    """
+
+    owned: set[int] = set()
+    seen: set[int] = set()
+
+    def _note(tensor: torch.Tensor) -> None:
+        """Record one reachable tensor's object id."""
+
+        owned.add(id(tensor))
+
+    for submodule in model.modules():
+        for attr_val in submodule.__dict__.values():
+            _clear_session_tensor_metadata(attr_val, seen, visit=_note)
+        _clear_callable_session_tensor_metadata(
+            getattr(submodule, "forward", None), seen, visit=_note
+        )
+    return owned
 
 
 def _undecorate_model_tensors(trace: "Trace", model: nn.Module) -> None:
