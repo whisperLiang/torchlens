@@ -355,3 +355,99 @@ def test_in_window_thread_start_does_not_trip_swap_detector() -> None:
     assert not any(
         detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
     ), sorted(result.uncertain_detail)
+
+
+@pytest.mark.smoke
+def test_generator_spawn_is_witnessed_as_consumption() -> None:
+    """``Generator.spawn()`` + child draw must not settle a clean window (R57).
+
+    ``spawn()`` advances ONLY ``seed_seq.n_children_spawned`` -- hidden
+    verdict-steering state that keys every future child's stream --
+    while ``bit_generator.state`` stays untouched, so the state-only digest
+    read ``channels=[] / uncertain=False`` and identical re-runs produced
+    different outputs: a probe-proven false VERIFIED (r5 b8-fable HIGH).
+    """
+
+    class _SpawningModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gen = np.random.default_rng(1234)
+
+    model = _SpawningModel()
+    with host_nondeterminism_monitor(model) as result:
+        child = model.gen.spawn(1)[0]
+        child.standard_normal()
+    assert "model_attribute_generator" in result.channels, (
+        "Generator.spawn() escaped the seal: "
+        f"channels={sorted(result.channels)!r} uncertain={result.uncertain}"
+    )
+
+
+@pytest.mark.smoke
+def test_bitgenerator_and_seedsequence_spawn_are_witnessed() -> None:
+    """The same-family escapes: ``BitGenerator.spawn`` and bare ``SeedSequence`` (R57)."""
+
+    class _BitGenModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bg = np.random.PCG64(7)
+
+    model = _BitGenModel()
+    with host_nondeterminism_monitor(model) as result:
+        model.bg.spawn(1)
+    assert "model_attribute_generator" in result.channels
+
+    class _SeedSeqModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ss = np.random.SeedSequence(42)
+
+    seed_model = _SeedSeqModel()
+    with host_nondeterminism_monitor(seed_model) as seed_result:
+        seed_model.ss.spawn(1)
+    assert "model_attribute_generator" in seed_result.channels
+
+    # Control: an un-drawn, un-spawned holder still settles clean.
+    clean_model = _BitGenModel()
+    with host_nondeterminism_monitor(clean_model) as clean_result:
+        pass
+    assert not clean_result.channels and not clean_result.uncertain
+
+
+@pytest.mark.smoke
+def test_held_implicit_now_converter_with_explicit_none_marks() -> None:
+    """A held ``localtime(None)`` reads the clock NOW and must mark (R57).
+
+    The held-ref decision decoded the positional argcount only, which is
+    value-blind: ``argcount 1 > time_arg_index 0`` classified the call as a
+    pure transform while the explicit ``None`` argument means "read the
+    current clock" -- channels=[] / uncertain=False, a false VERIFIED
+    (r5 b8-fable MED). Only a literal non-None time proves a transform.
+    """
+
+    from time import ctime, localtime
+
+    held_localtime = localtime
+    held_ctime = ctime
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        held_localtime(None)
+    assert "time.localtime" in result.channels
+
+    # The common wrapper idiom: a defaulted variable that IS None at runtime.
+    def fmt(ts=None):
+        return held_ctime(ts)
+
+    with host_nondeterminism_monitor(nn.Identity()) as idiom_result:
+        fmt()
+    assert "time.ctime" in idiom_result.channels
+
+    # A literal explicit time stays a pure transform (no false ceiling).
+    with host_nondeterminism_monitor(nn.Identity()) as literal_result:
+        held_localtime(1234567890)
+    assert "time.localtime" not in literal_result.channels
+
+    # The bare implicit-now spelling still marks.
+    with host_nondeterminism_monitor(nn.Identity()) as bare_result:
+        held_localtime()
+    assert "time.localtime" in bare_result.channels

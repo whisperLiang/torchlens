@@ -102,8 +102,15 @@ _NUMPY_RNG_INSTANCE_TYPES: tuple[type, ...] = (
     np.random.Generator,
     np.random.RandomState,
     np.random.BitGenerator,
+    np.random.SeedSequence,
 )
-"""Public NumPy RNG receiver types covered by the host-nondeterminism witness."""
+"""Public NumPy RNG receiver types covered by the host-nondeterminism witness.
+
+``SeedSequence`` is a first-class member (r5 b8-fable R57): ``spawn()`` on a
+model-held sequence (or on a generator's underlying sequence) advances
+``n_children_spawned`` -- verdict-steering hidden state that keys every
+future child's stream -- without touching ``bit_generator.state``.
+"""
 
 _INERT_PROFILE_C_CALL_RECEIVER_TYPES: frozenset[type] = frozenset(
     {ModuleType, dict, list, set, str}
@@ -1716,45 +1723,84 @@ cap value.
 """
 
 
-def _call_site_argcount(frame: Any) -> int | None:
-    """Decode the positional argument count of a profile-observed ``c_call`` site.
+#: Opcodes that push exactly ONE value and therefore keep positional argument
+#: slots decodable by walking back from the ``CALL`` instruction. As plain
+#: ARGUMENT loads these all push a single value on every supported CPython
+#: (``LOAD_GLOBAL``'s extra-NULL form applies only to callable loads).
+_SINGLE_PUSH_LOAD_OPNAMES = frozenset(
+    {"LOAD_CONST", "LOAD_FAST", "LOAD_NAME", "LOAD_DEREF", "LOAD_GLOBAL"}
+)
 
-    Reads the caller frame's bytecode at ``f_lasti``. A plain ``CALL`` instruction
-    on Python 3.11+ and ``CALL_FUNCTION`` (plain call) or ``CALL_METHOD``
-    (attribute-style ``obj.method(...)`` call) on Python 3.10 carry the exact
-    positional argument count in their oparg. The monitored implicit-now
-    converters reject keywords, so these opcodes fully determine arity for every
-    valid call. Omitting ``CALL_METHOD`` previously left a py3.10 held-ref alias
-    invoked as a method (e.g. a captured ``datetime`` reader) undecodable, so a
-    call passing the explicit-time argument still fail-closed-MARKED, falsely
-    ceilinging an otherwise-verifiable capture.
+
+def _call_site_explicit_time_value(frame: Any, time_arg_index: int) -> bool:
+    """Return whether a held-alias ``c_call`` site passes an explicit non-None time.
+
+    Reads the caller frame's bytecode at ``f_lasti``. A plain ``CALL``
+    (py3.11+) / ``CALL_FUNCTION`` / ``CALL_METHOD`` (py3.10) oparg carries the
+    exact positional count; the instruction that pushed the time argument is
+    then decodable when every pushed argument is a simple single-push load,
+    and its RUNTIME VALUE is resolved from the frame (constants directly;
+    names from the frame's locals/globals, still bound at ``c_call`` time).
+
+    The previous argcount-only decode was VALUE-BLIND (r5 b8-fable R57): a
+    held alias called with an explicit ``None`` (``localtime(None)``, or the
+    common idiom ``def fmt(ts=None): return ctime(ts)``) decoded as
+    "explicit time" and read the current clock unmarked -- a false VERIFIED.
+    Resolving the value keeps a genuine held ``localtime(t)`` a pure
+    transform (no over-ceiling) while a ``None`` value, a star-call, a
+    non-simple argument expression, or any decode failure marks fail-closed
+    -- over-marking, never under-marking. The module-attr wrapper path is
+    unaffected: it sees the argument value directly and stays exact.
 
     Parameters
     ----------
     frame:
         Caller frame supplied by the ``c_call`` profile event.
+    time_arg_index:
+        Position of the explicit-time argument in the converter's signature.
 
     Returns
     -------
-    int | None
-        Positional argument count for a plain ``CALL`` site; ``None`` for any other
-        opcode (``CALL_FUNCTION_EX`` star-calls) or decode failure, so callers mark
-        fail-closed (over-marking, never under-marking).
+    bool
+        ``True`` only when the time argument resolves to a non-``None``
+        value; ``False`` means the caller must mark.
     """
 
     try:
         lasti = frame.f_lasti
-        for instruction in _dis_module.get_instructions(frame.f_code):
-            if instruction.offset == lasti:
-                if (
-                    instruction.opname in {"CALL", "CALL_FUNCTION", "CALL_METHOD"}
-                    and instruction.arg is not None
-                ):
-                    return int(instruction.arg)
-                return None
-        return None
+        instructions = list(_dis_module.get_instructions(frame.f_code))
+        call_position = next(
+            (index for index, ins in enumerate(instructions) if ins.offset == lasti),
+            None,
+        )
+        if call_position is None:
+            return False
+        call = instructions[call_position]
+        if call.opname not in {"CALL", "CALL_FUNCTION", "CALL_METHOD"} or call.arg is None:
+            return False
+        argcount = int(call.arg)
+        if argcount <= time_arg_index or call_position < argcount:
+            return False
+        arg_instructions = instructions[call_position - argcount : call_position]
+        if any(ins.opname not in _SINGLE_PUSH_LOAD_OPNAMES for ins in arg_instructions):
+            return False
+        time_instruction = arg_instructions[time_arg_index]
+        if time_instruction.opname == "LOAD_CONST":
+            return time_instruction.argval is not None
+        name = time_instruction.argval
+        if time_instruction.opname in {"LOAD_FAST", "LOAD_DEREF"}:
+            frame_locals = frame.f_locals
+            if name in frame_locals:
+                return frame_locals[name] is not None
+            return False
+        # LOAD_GLOBAL / LOAD_NAME: module global (falls back through locals
+        # for class-body/exec frames first, mirroring name resolution).
+        for namespace in (frame.f_locals, frame.f_globals):
+            if name in namespace:
+                return namespace[name] is not None
+        return False
     except Exception:
-        return None
+        return False
 
 
 _ACTIVE_MONITOR: "host_nondeterminism_monitor | None" = None
@@ -1880,10 +1926,12 @@ class host_nondeterminism_monitor:
       is registered BEFORE its attribute is replaced, so a pre-window held reference
       (``from time import time`` / ``from os import urandom`` in a model or helper
       module) marks by ``c_call`` identity on the owner and every in-window hooked
-      thread. The implicit-now converters decode the call site's positional argcount
-      from the caller frame's bytecode (:func:`_call_site_argcount`), keeping a held
-      ``localtime(t)`` a pure transform; an undecodable site (star-call) marks
-      fail-closed. TorchLens's own frames are exempt by exact module-globals ownership
+      thread. The implicit-now converters decode the call site's bytecode
+      (:func:`_call_site_explicit_time_value`), keeping a held
+      ``localtime(1234)`` literal a pure transform; an explicit ``None``
+      argument, a variable (could be ``None``), or an undecodable site
+      (star-call) marks fail-closed. TorchLens's own frames are exempt by exact
+      module-globals ownership
       (its per-op clock reads route patched-attr -> wrapper -> original, emitting
       ``c_call`` for the original from the wrapper's frame).
     * **Dual chained profile hooks (belt).** ``sys.setprofile`` (owner thread) AND
@@ -2751,11 +2799,14 @@ class host_nondeterminism_monitor:
                 if time_arg_index is None:
                     self._mark(held_channel)
                 else:
-                    # Implicit-now converter: a call site providing the explicit-time
-                    # argument is a pure transform. Undecodable (star-call / unknown
-                    # opcode) marks fail-closed -- over-marking, never under-marking.
-                    argcount = _call_site_argcount(frame)
-                    if argcount is None or argcount <= time_arg_index:
+                    # Implicit-now converter: only a provable non-None literal
+                    # at the time position is a pure transform. An explicit
+                    # ``None`` argument means "read the clock NOW", so the
+                    # old argcount-only decode was value-blind and let a held
+                    # ``localtime(None)`` escape unmarked (r5 b8-fable R57).
+                    # Variables, star-calls, and decode failures mark
+                    # fail-closed -- over-marking, never under-marking.
+                    if not _call_site_explicit_time_value(frame, time_arg_index):
                         self._mark(held_channel)
         receiver = getattr(arg, "__self__", None)
         if receiver is None:
@@ -3729,6 +3780,35 @@ class host_nondeterminism_monitor:
         return self._digest_rng_instance(holder)
 
     @staticmethod
+    def _seed_sequence_fields(seed_seq: Any) -> tuple[Any, Any, Any, Any]:
+        """Return the spawn-relevant fields of one ``SeedSequence``."""
+
+        return (
+            getattr(seed_seq, "entropy", None),
+            getattr(seed_seq, "spawn_key", None),
+            getattr(seed_seq, "pool_size", None),
+            getattr(seed_seq, "n_children_spawned", None),
+        )
+
+    @staticmethod
+    def _seed_sequence_spawn_state(bit_generator: Any) -> tuple[Any, Any, Any, Any] | None:
+        """Return a bit generator's seed-sequence spawn state, or ``None``.
+
+        ``spawn()`` mutates ``seed_seq.n_children_spawned`` only; folding
+        these fields into the digest makes that hidden verdict-steering state
+        comparable. A bit generator constructed without a ``SeedSequence``
+        (raw int seeding on older numpy) digests as ``None`` -- spawn is not
+        constructible there.
+        """
+
+        seed_seq = getattr(bit_generator, "seed_seq", None)
+        if seed_seq is None:
+            seed_seq = getattr(bit_generator, "_seed_seq", None)
+        if seed_seq is None:
+            return None
+        return host_nondeterminism_monitor._seed_sequence_fields(seed_seq)
+
+    @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
         """Return a comparable state digest for one RNG holder.
 
@@ -3740,15 +3820,24 @@ class host_nondeterminism_monitor:
         """
 
         exact = host_nondeterminism_monitor._exact_state_repr
+        # r5 b8-fable R57: ``Generator.spawn()`` advances ONLY the seed
+        # sequence's ``n_children_spawned`` -- ``bit_generator.state`` is
+        # untouched, so a state-only digest read a clean window while a fresh
+        # oracle-1 run spawns a differently-keyed child (probe-proven false
+        # VERIFIED). Fold the spawn-relevant seed-sequence state into every
+        # numpy digest.
+        seed_seq_state = host_nondeterminism_monitor._seed_sequence_spawn_state
         if isinstance(holder, np.random.Generator):
-            return exact(holder.bit_generator.state)
+            return exact((holder.bit_generator.state, seed_seq_state(holder.bit_generator)))
         if isinstance(holder, np.random.RandomState):
             return exact(holder.get_state())
         # r41 (Sol): a BARE model-held BitGenerator (``self.bg = PCG64(...)`` drawn
         # through a wrapping Generator) advances its own ``state``; digest it directly
         # so the registry's BitGenerator claim is digest-true.
         if isinstance(holder, np.random.BitGenerator):
-            return exact(holder.state)
+            return exact((holder.state, seed_seq_state(holder)))
+        if isinstance(holder, np.random.SeedSequence):
+            return exact(host_nondeterminism_monitor._seed_sequence_fields(holder))
         if isinstance(holder, random.Random):
             try:
                 state = holder.getstate()
@@ -4656,7 +4745,10 @@ class host_nondeterminism_monitor:
         # the held originals above and never trip these. A pre-window
         # ``from sys import setprofile`` alias or a C-level
         # ``PyEval_SetProfile`` (cProfile.enable) bypasses the module attr;
-        # both fall in the held-ref alias residual class.
+        # both are DOCUMENTED residuals -- contract residual-tail row (vi) in
+        # docs/reference/runnable_tlspec_contract.md -- closed only by the
+        # PEP-669 port (r5 b8-sol R57: this comment previously claimed a
+        # residual class the contract did not actually name).
         self._patch_attr(
             _sys_module,
             "setprofile",

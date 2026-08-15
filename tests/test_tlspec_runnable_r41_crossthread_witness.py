@@ -79,7 +79,7 @@ from torchlens.runnable import (
 from torchlens.utils.rng import (
     HOST_NONDETERMINISM_REGISTRY,
     TORCH_RNG_SURFACE,
-    _call_site_argcount,
+    _call_site_explicit_time_value,
     _torch_rng_holder_module,
     host_nondeterminism_monitor,
 )
@@ -444,30 +444,37 @@ def test_held_implicit_now_star_call_marks_fail_closed() -> None:
 
 
 @pytest.mark.smoke
-def test_call_site_argcount_unit_pins() -> None:
-    """Pin the interpreter's CALL decode: 0-arg, 1-arg, and star-call sites.
+def test_call_site_explicit_time_unit_pins() -> None:
+    """Pin the interpreter's CALL decode: 0-arg, value-resolved, None, star-call.
 
     An interpreter bump that changes the bytecode shape turns this RED at upgrade
-    time; the monitor then over-marks (fail-closed) rather than under-marks.
+    time; the monitor then over-marks (fail-closed) rather than under-marks. The
+    decode is VALUE-resolving (r5 b8-fable R57): an explicit ``None`` argument --
+    literal or through a variable -- reads the current clock and must NOT decode
+    as a pure transform.
     """
 
-    captured: list[int | None] = []
+    captured: list[bool] = []
     target = _HELD_LOCALTIME
 
     def probe_hook(frame: Any, event: str, arg: Any) -> None:
         if event == "c_call" and arg is target:
-            captured.append(_call_site_argcount(frame))
+            captured.append(_call_site_explicit_time_value(frame, 0))
 
     star_args = (_FIXED_T,)
+    none_ts = None
     previous = sys.getprofile()
     sys.setprofile(probe_hook)
     try:
-        target()
-        target(_FIXED_T)
-        target(*star_args)
+        target()  # implicit now -> mark
+        target(_FIXED_T)  # module-global explicit time -> pure
+        target(1_000_000)  # literal explicit time -> pure
+        target(None)  # literal None IS a now-read -> mark
+        target(none_ts)  # variable None IS a now-read -> mark
+        target(*star_args)  # undecodable star-call -> mark fail-closed
     finally:
         sys.setprofile(previous)
-    assert captured == [0, 1, None]
+    assert captured == [False, True, True, False, False, False]
 
 
 @pytest.mark.smoke

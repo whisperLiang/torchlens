@@ -2041,10 +2041,19 @@ negative. Also of this class: a bare one-shot iterator attribute, which cannot b
 without consuming it -- the same class
 as the adversarial draw+`state`-restore a cooperative model does not exercise; (v) a
 held-reference module-builtin call on a PRE-EXISTING (non-hooked) thread -- the module-attr
-patched spelling stays thread-independent; and (vi) a held-reference implicit-now converter
-explicitly passed `None` (`localtime(None)`) decodes as a one-argument transform call site (the
-patched spelling catches it). `datetime.now()` / `localtime()` are NOT residual (covered above).
-Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+, interpreter-wide).
+patched spelling stays thread-independent; and (vi) a PRE-WINDOW held reference to
+`sys.setprofile` / `threading.setprofile` (or the C-level `PyEval_SetProfile`, e.g.
+`cProfile.enable`) can balance-swap the profile hook without touching the patched module
+attributes: the swap opens an unwitnessed sub-window for the profile-ONLY channel class
+(held-alias clock/entropy builtins, `torch.Generator` methods, numpy>=2 instance draws), and both
+teardown `getprofile()` identity checks pass afterwards, so the window settles CERTAIN. The
+module-attr swap spelling IS flagged as uncertainty; only the held-alias/C-level spellings are
+residual, and the PEP-669 port below is their closure. A held-reference implicit-now converter is
+NOT residual: an explicit `None` argument (`localtime(None)`), a variable argument (which could
+be `None` at runtime), and an undecodable call site all mark fail-closed -- only a literal
+non-`None` time decodes as a pure transform. `datetime.now()` / `localtime()` are NOT residual
+(covered above). Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+,
+interpreter-wide).
 
 A pruned `.data`-alias BOOL control predicate whose leaf origins resolve positively (e.g.
 `bool(self.gate.data > 0.5)` -> the gate's state digest) is witnessed by that basis: the
