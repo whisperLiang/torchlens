@@ -255,7 +255,14 @@ def test_basic_block_geometric_adjoint_battery_is_exact() -> None:
 
 
 def test_default_validation_runs_cheap_rf_metadata_without_autograd() -> None:
-    """Keep always-on RF metadata checks in ordinary forward validation."""
+    """Keep always-on RF metadata checks in ordinary forward validation.
+
+    The autograd tripwire patches the RF gradient ENTRY POINTS, not the
+    ``torch.autograd.grad`` slot: forward validation now runs its ground-truth
+    oracle on pristine torch (R75-1), and a foreign patch layered over the
+    installed torchlens autograd wrapper would trip the R56 buried-site
+    disclosure during that unwrap/rewrap cycle.
+    """
 
     model = nn.Conv2d(1, 1, 3, padding=1)
     with (
@@ -263,7 +270,14 @@ def test_default_validation_runs_cheap_rf_metadata_without_autograd() -> None:
             "torchlens.receptive_field._validation.check_geometric_metadata_invariants",
             wraps=check_geometric_metadata_invariants,
         ) as geometry_check,
-        mock.patch("torch.autograd.grad", side_effect=AssertionError("autograd invoked")),
+        mock.patch(
+            "torchlens.receptive_field._validation.gradient_for_unit",
+            side_effect=AssertionError("RF gradient autograd invoked"),
+        ),
+        mock.patch(
+            "torchlens.receptive_field._validation.projective_gradient_for_unit",
+            side_effect=AssertionError("RF projective gradient autograd invoked"),
+        ),
     ):
         result = tl.validate(model, torch.ones(1, 1, 5, 5), scope="forward")
 

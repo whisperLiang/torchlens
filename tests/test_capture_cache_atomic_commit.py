@@ -114,9 +114,14 @@ def test_crash_at_the_single_commit_preserves_the_old_generation(tmp_path, monke
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(user_funcs.os, "replace", crash_at_commit)
-    with pytest.raises(OSError, match="simulated crash"):
-        user_funcs._store_authenticated_capture_cache(fresh, entry, secret)
+    # b6 R25: a disk failure degrades to warn-and-miss instead of raising out
+    # of a capture that already succeeded; the commit must still not tear.
+    with warnings.catch_warnings(record=True) as store_warnings:
+        warnings.simplefilter("always")
+        stored = user_funcs._store_authenticated_capture_cache(fresh, entry, secret)
     monkeypatch.undo()
+    assert stored is False
+    assert any("simulated crash at the atomic commit" in str(w.message) for w in store_warnings)
 
     assert entry.read_bytes() == before
     after = tl.trace(model, x, capture=_cache_capture(tmp_path))
