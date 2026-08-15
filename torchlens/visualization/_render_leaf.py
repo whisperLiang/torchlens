@@ -598,7 +598,7 @@ def _infer_intervening_module_bfs(
         Module key for the nearest paired grad_fn_handle, if found.
     """
 
-    queue = list(start_ids)
+    queue = deque(start_ids)
     seen: set[int] = set()
     reverse_edges: dict[int, list[int]] = defaultdict(list)
     if reverse:
@@ -606,7 +606,7 @@ def _infer_intervening_module_bfs(
             for next_grad_fn_id in candidate.next_grad_fn_ids:
                 reverse_edges[next_grad_fn_id].append(candidate.grad_fn_object_id)
     while queue:
-        grad_fn_object_id = queue.pop(0)
+        grad_fn_object_id = queue.popleft()
         if grad_fn_object_id in seen or grad_fn_object_id not in trace.grad_fn_logs:
             continue
         seen.add(grad_fn_object_id)
