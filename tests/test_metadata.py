@@ -477,6 +477,23 @@ def test_layer_siblings_tolerate_orphan_relation_labels():
     assert mh.orphans[orphan_sibling].layer_label in aggregated
     assert isinstance(mainline.co_parents, list)
 
+    # b3 R05-N2: the 62aba742 tolerance stopped at label aggregates -- the
+    # OBJECT-resolving surfaces of the same relation family crashed on the
+    # fix's own output (`parent_layer.children` succeeded while
+    # `parent_layer.get_children()` raised "not found"). They now resolve
+    # orphan labels through the same fallback.
+    parent_layer = mh[mainline.parents[0]]
+    layer_children = parent_layer.get_children()
+    assert orphan_sibling in {getattr(c, "layer_label", None) for c in layer_children} or any(
+        getattr(c, "label", None) == orphan_sibling for c in layer_children
+    )
+    op_children = parent_op.get_children()
+    assert any(
+        getattr(c, "label", "").startswith(orphan_sibling.split(":")[0]) for c in op_children
+    )
+    assert isinstance(parent_op.get_parents(), list)
+    assert isinstance(parent_layer.get_parents(), list)
+
 
 def test_conditional_fields():
     model = example_models.ConditionalBranching()

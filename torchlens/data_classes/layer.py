@@ -1712,15 +1712,38 @@ class Layer:
     # ************ User-facing custom_methods ***********
     # ********************************************
 
+    def _resolve_relation_record(self, label: str) -> "Layer | None":
+        """Resolve one relation label through the mainline, then orphans.
+
+        Mirrors the op-level orphan tolerance (b3 R05-N2): the aggregates on
+        a ``keep_orphans=True`` trace include orphan relation labels, so the
+        object-resolving surfaces must fold the ``orphans`` fallback instead
+        of crashing on the bare mainline lookup. An orphan label resolves to
+        its retained orphan Op record (the only record that exists for it),
+        presented through the shared record surface.
+        """
+
+        trace = self.source_trace
+        try:
+            return cast("Layer", trace[label])
+        except (KeyError, ValueError):
+            try:
+                return cast("Layer", trace.orphans[label])
+            except KeyError:
+                return None
+
     def get_children(self) -> list["Layer"]:
         """Return child Layer objects for this layer.
 
         Returns
         -------
         list[Layer]
-            Child layers resolved through the owning model log.
+            Child layers resolved through the owning model log; orphan
+            relation labels resolve through ``trace.orphans`` (unresolvable
+            skipped).
         """
-        return [self.source_trace[child_label] for child_label in self.children]
+        resolved = (self._resolve_relation_record(label) for label in self.children)
+        return [record for record in resolved if record is not None]
 
     def get_parents(self) -> list["Layer"]:
         """Return parent Layer objects for this layer.
@@ -1728,9 +1751,12 @@ class Layer:
         Returns
         -------
         list[Layer]
-            Parent layers resolved through the owning model log.
+            Parent layers resolved through the owning model log; orphan
+            relation labels resolve through ``trace.orphans`` (unresolvable
+            skipped).
         """
-        return [self.source_trace[parent_label] for parent_label in self.parents]
+        resolved = (self._resolve_relation_record(label) for label in self.parents)
+        return [record for record in resolved if record is not None]
 
     def show(
         self,

@@ -1138,3 +1138,31 @@ def test_batch_mean_mix_claims_full_batch_axis() -> None:
     checked = target.receptive_field.check((1, 0, 2, 2))
     assert checked.status is ReceptiveFieldValidationStatus.PASS
     assert checked.n_violations == 0
+
+
+def test_check_exposes_retain_graph() -> None:
+    """``rf.check`` exposes ``retain_graph`` like its sibling ``gradient``.
+
+    b3 R14-N1 (4th round): ``check()`` hardcoded ``retain_graph=False`` and
+    disclosed nothing, so one check on an armed capture silently freed the
+    graph and a later ``gradient(..., retain_graph=True)`` surfaced torch's
+    raw second-backward RuntimeError mid-workflow.
+    """
+
+    model = nn.Conv2d(1, 1, 3).eval()
+    trace = capture(model, torch.randn(1, 1, 8, 8))
+    target = op_named(trace, "conv2d")
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    checked = target.receptive_field.check(unit, retain_graph=True)
+    assert checked.status is ReceptiveFieldValidationStatus.PASS
+    # The graph survived the check, so a later gradient works.
+    assert target.receptive_field.gradient(unit, retain_graph=True)
+
+    # The default still frees the graph (unchanged behavior, now disclosed).
+    fresh = capture(model, torch.randn(1, 1, 8, 8))
+    fresh_target = op_named(fresh, "conv2d")
+    fresh_unit = fresh_target.receptive_field.center_unit(batch_index=0)
+    fresh_target.receptive_field.check(fresh_unit)
+    with pytest.raises(RuntimeError, match="backward through the graph"):
+        fresh_target.receptive_field.gradient(fresh_unit, retain_graph=True)

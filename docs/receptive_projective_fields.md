@@ -39,7 +39,9 @@ overlay.save("resnet18_rf.png")
 element and returns its empirical support mask. `.check()` is the zero-tolerance containment
 tripwire, and `.show()` renders an input overlay; with `gradient=True`, it also overlays the
 empirical heatmap. Gradient operations require a backward-ready trace and are deliberately
-explicit because they consume autograd work.
+explicit because they consume autograd work. Both `.gradient()` and `.check()` FREE the armed
+autograd graph by default; pass `retain_graph=True` to either when a later gradient-bearing
+action must run on the same armed capture.
 
 ## Two complementary methods
 

@@ -4451,15 +4451,36 @@ class Op:
     # ************* Fetcher Functions ************
     # ********************************************
 
+    def _resolve_relation_record(self, label: str) -> "Op | None":
+        """Resolve one relation label through the mainline, then orphans.
+
+        The 62aba742 orphan tolerance stopped at the label aggregates: on a
+        ``keep_orphans=True`` trace the aggregates include an orphan's label
+        while the OBJECT-resolving surfaces crashed on the bare mainline
+        lookup (b3 R05-N2). Mirror the per-op ``siblings`` behavior: fold
+        the ``orphans`` fallback, skip what neither surface resolves.
+        """
+
+        trace = self.source_trace
+        try:
+            return cast("Op", trace[label])
+        except (KeyError, ValueError):
+            try:
+                return cast("Op", trace.orphans[label])
+            except KeyError:
+                return None
+
     def get_children(self) -> list["Op"]:
         """Return child Op objects for this pass.
 
         Returns
         -------
         list[Op]
-            Child ops resolved through the owning model log.
+            Child ops resolved through the owning model log; orphan-relation
+            labels resolve through ``trace.orphans`` (unresolvable skipped).
         """
-        return [self.source_trace[child_label] for child_label in self.children]
+        resolved = (self._resolve_relation_record(label) for label in self.children)
+        return [record for record in resolved if record is not None]
 
     def get_parents(self) -> list["Op"]:
         """Return parent Op objects for this pass.
@@ -4467,9 +4488,11 @@ class Op:
         Returns
         -------
         list[Op]
-            Parent ops resolved through the owning model log.
+            Parent ops resolved through the owning model log; orphan-relation
+            labels resolve through ``trace.orphans`` (unresolvable skipped).
         """
-        return [self.source_trace[parent_label] for parent_label in self.parents]
+        resolved = (self._resolve_relation_record(label) for label in self.parents)
+        return [record for record in resolved if record is not None]
 
     def show(
         self,
