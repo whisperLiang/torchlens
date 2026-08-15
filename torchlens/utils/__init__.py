@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import inspect
+import os
 import re
 import subprocess
 from collections import Counter
@@ -277,6 +278,12 @@ def _probe_graphviz() -> DoctorCheck:
             capture_output=True,
             text=True,
             timeout=5,
+            # r3 b6-opus R40 finding 2: subprocess.run's timeout kills only
+            # the direct child and then blocks in communicate() while any
+            # grandchild (a ``dot`` wrapper script) holds the inherited pipe.
+            # A fresh session lets the timeout actually bound this probe,
+            # matching the bounded-runner discipline every render spawn uses.
+            start_new_session=hasattr(os, "setsid"),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return DoctorCheck(
