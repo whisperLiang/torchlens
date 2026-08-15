@@ -4100,6 +4100,22 @@ def _perturbation_retry_strategies(layer: Op) -> list[str]:
     """
 
     strategies = ["step_up", "step_down", "unit_step_up", "unit_step_down"]
+    if getattr(layer, "dtype", None) == torch.bool:
+        # R08: a bool-output child is a THRESHOLD op — small steps routinely
+        # fail to cross it, which the blanket ``discrete_bool_output``
+        # exemption then excused for the entire bool universe. Before any
+        # exemption is consulted, probe the excursions that flip real bool
+        # edges: sign flips (comparisons against symmetric thresholds, eq),
+        # zeroing (truthiness for the logical_* family), NaN injection
+        # (isnan/isfinite and ordered comparisons), and the geometric
+        # magnitude ladder (any finite comparison threshold). Any flip
+        # upgrades the verdict to validated; nothing here can mask a
+        # failure.
+        strategies.extend(["negate_values", "zero_values", "nan_values"])
+        for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
+            strategies.append(f"unit_step_up:{magnitude:g}")
+            strategies.append(f"unit_step_down:{magnitude:g}")
+        return strategies
     if not _op_is_value_discretizing(layer):
         return strategies
     for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
@@ -4145,6 +4161,32 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
         Perturbed tensor of the same shape/dtype, every element guaranteed to
         differ from the original where the dtype permits it.
     """
+
+    if strategy == "negate_values":
+        # R08 bool-edge probe: crosses any sign-symmetric comparison
+        # threshold and flips eq/ne against a nonzero comparand.
+        if tensor.dtype == torch.bool:
+            return torch.logical_not(tensor)
+        if tensor.dtype == torch.uint8:
+            return _directional_step_perturb(tensor, "step_up")
+        negated = -tensor
+        if torch.equal(negated, tensor):
+            # An all-zero parent has no sign to flip; take the minimal step.
+            return _directional_step_perturb(tensor, "step_up")
+        return negated
+    if strategy == "zero_values":
+        # R08 bool-edge probe: flips truthiness for the logical_* family and
+        # any comparison whose threshold separates the values from zero.
+        zeroed = torch.zeros_like(tensor)
+        if torch.equal(zeroed, tensor):
+            return _directional_step_perturb(tensor, "step_up")
+        return zeroed
+    if strategy == "nan_values":
+        # R08 bool-edge probe: flips isnan/isfinite and every ordered
+        # comparison. Only floating parents can carry NaN.
+        if tensor.is_floating_point() or tensor.is_complex():
+            return torch.full_like(tensor, float("nan"))
+        return _directional_step_perturb(tensor, "step_up")
 
     if strategy.startswith(("unit_step_up", "unit_step_down")):
         base_strategy, _, magnitude_text = strategy.partition(":")

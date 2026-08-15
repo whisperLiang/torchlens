@@ -1697,7 +1697,7 @@ def posthoc_perturb_check(
     """
     args = layer_to_validate_parents_for.saved_args or ()
 
-    decision = _posthoc_discrete_output_decision(layer_to_validate_parents_for)
+    decision = _posthoc_discrete_output_decision(layer_to_validate_parents_for, layers_to_perturb)
     if decision.exempt:
         return decision
     decision = _posthoc_structural_output_decision(
@@ -1716,13 +1716,131 @@ def posthoc_perturb_check(
     return PosthocPerturbDecision(False, "no_posthoc_exemption")
 
 
-def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
+#: Elementwise comparison spellings whose bool outputs admit the
+#: threshold-straddle probe (R08): substituting the perturbed operand with
+#: the comparand itself and its two adjacent values MUST flip some element
+#: of any genuine two-operand comparison, so an output pinned to the saved
+#: value under all three substitutions proves the recorded parent has no
+#: value influence.
+_ELEMENTWISE_COMPARISON_FUNCS = frozenset(
+    {
+        "gt",
+        "greater",
+        "lt",
+        "less",
+        "ge",
+        "greater_equal",
+        "le",
+        "less_equal",
+        "eq",
+        "ne",
+        "not_equal",
+        "__gt__",
+        "__lt__",
+        "__ge__",
+        "__le__",
+        "__eq__",
+        "__ne__",
+    }
+)
+
+
+def _bool_comparison_straddle_probe(layer: Op, layers_to_perturb: list[str]) -> bool | None:
+    """Probe a bool comparison by straddling its comparand (R08).
+
+    Re-executes the comparison with the perturbed operand replaced by the
+    comparand itself and its two adjacent representable values. For any
+    genuine elementwise comparison these three substitutions produce at
+    least two distinct outputs, so:
+
+    * an output that DIFFERS from the saved output under any substitution
+      proves the recorded edge transmits value (the original perturbation
+      magnitude simply never crossed the threshold);
+    * an output pinned exactly to the saved value under ALL THREE proves the
+      recorded parent has no value influence on this op — the spurious-edge
+      class the blanket bool exemption used to bless.
+
+    Parameters
+    ----------
+    layer:
+        Bool-output comparison op whose unchanged perturbation is being
+        classified.
+    layers_to_perturb:
+        Parent labels currently being perturbed.
+
+    Returns
+    -------
+    bool | None
+        ``True`` (edge transmits value), ``False`` (provably no influence),
+        or ``None`` when the probe cannot run (non-comparison func, kwargs
+        or multi-slot/self-comparison operands, non-finite comparand,
+        execution failure) — the caller then falls back to the disclosed
+        heuristic exemption.
+    """
+
+    func = getattr(layer, "func", None)
+    if func is None or layer.func_name not in _ELEMENTWISE_COMPARISON_FUNCS:
+        return None
+    args: tuple[Any, ...] = tuple(layer.saved_args or ())
+    kwargs = dict(getattr(layer, "saved_kwargs", None) or {})
+    if kwargs or len(args) != 2:
+        return None
+    positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
+    if positions != {0} and positions != {1}:
+        # Multi-slot (self-comparison) or unrecoverable positions: the
+        # straddle would move both operands together and prove nothing.
+        return None
+    parent_index = next(iter(positions))
+    parent_saved = args[parent_index]
+    other = args[1 - parent_index]
+    saved_output = layer.out
+    if not isinstance(parent_saved, torch.Tensor) or not isinstance(saved_output, torch.Tensor):
+        return None
+    try:
+        with torch.no_grad():
+            if isinstance(other, torch.Tensor):
+                base = other.detach().to(dtype=parent_saved.dtype).broadcast_to(parent_saved.shape)
+            elif isinstance(other, Number):
+                base = torch.full_like(parent_saved, other)
+            else:
+                return None
+            if base.dtype == torch.bool or base.is_complex():
+                return None
+            if base.is_floating_point():
+                if not bool(torch.isfinite(base).all()):
+                    return None
+                below = torch.nextafter(base, torch.full_like(base, float("-inf")))
+                above = torch.nextafter(base, torch.full_like(base, float("inf")))
+            else:
+                one = torch.ones_like(base)
+                below = base - one
+                above = base + one
+            from ..utils.tensor_utils import tensor_nanequal
+
+            for substitute in (base, below, above):
+                probe_args = list(args)
+                probe_args[parent_index] = substitute
+                probe_output = func(*probe_args)
+                if not isinstance(probe_output, torch.Tensor):
+                    return None
+                if not tensor_nanequal(probe_output, saved_output, allow_tolerance=False):
+                    return True
+    except Exception:
+        return None
+    return False
+
+
+def _posthoc_discrete_output_decision(
+    layer: Op, layers_to_perturb: list[str]
+) -> PosthocPerturbDecision:
     """Return the explicit posthoc decision for discrete output tensors.
 
     Parameters
     ----------
     layer:
         Operation whose unchanged perturbation output is being classified.
+    layers_to_perturb:
+        Parent labels currently being perturbed.
 
     Returns
     -------
@@ -1731,6 +1849,22 @@ def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
     """
 
     if layer.dtype == torch.bool:
+        # R08: the bool exemption is no longer a blanket pass. For the
+        # elementwise-comparison family the threshold-straddle probe settles
+        # it with evidence; a probe-proven no-influence edge falls through
+        # to the perturbation_insensitive failure (the remaining posthoc
+        # excuses still get their chance).
+        probe = _bool_comparison_straddle_probe(layer, layers_to_perturb)
+        if probe is False:
+            return PosthocPerturbDecision(False, "bool_comparison_no_value_influence")
+        if probe is True:
+            return PosthocPerturbDecision(
+                True,
+                "discrete_bool_output",
+                "threshold-straddle probe flipped the output: the recorded edge "
+                "transmits value; the original perturbation magnitude did not "
+                "cross the comparison threshold",
+            )
         return PosthocPerturbDecision(True, "discrete_bool_output")
     if layer.func_name in ("topk", "sort", "max", "min") and layer.dtype in (
         torch.int,
