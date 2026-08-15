@@ -2080,7 +2080,7 @@ only the model output leaves path faithfulness `verified` (path-only) and is dec
 as unattributable (fail-closed), like raw seeded-RNG output.
 
 No `torch.Tag` marks uninitialized allocation, so the family is a closed name table in ONE
-shared predicate block (`utils/rng.py`) consumed by all three recognition layers (the load-side
+shared predicate block (`utils/_uninit_alloc.py`; `utils/rng.py` re-exports it) consumed by all three recognition layers (the load-side
 value-source classifier, the producer origin ledger, and the pruned-orphan control walk) and
 defended over BOTH spelling surfaces by drift meta-tests (r55 hon_1): the aten-namespace test
 (a new `empty*`/`resize*` aten name that is neither tabled as family nor allowlisted as

@@ -391,22 +391,25 @@ swap (benign in-pipeline: sealing happens after step 20).
 The Trace PHYSICAL component decomposition (components as storage owners
 behind 220 property forwards) is the named remaining slice: the declared
 per-field ownership map (`_trace_components.py`) partitions every field
-(header 16 / capture_config 49 / witness 30 / source_metadata 20 / totals 35
-/ session 48 / runnable 1 / graph 99 — the graph plane is absorbed by the
-core, not built as an object), the lockstep ratchet enforces the map, and
+(live counts move with re-keys — recompute from `TRACE_FIELD_OWNERSHIP` in
+`_trace_components.py`; at 2026-08-15: header 16 / capture_config 50 /
+witness 32 / source_metadata 22 / totals 35 / session 60 / runnable 1 /
+graph 99, total 315 ownership rows over the 220 forwarded fields — the
+graph plane is absorbed by the core, not built as an object), the lockstep ratchet enforces the map, and
 the physical move is mechanical against it.
 
 `Trace` (220 fields) decomposes into a presenter over lifecycle-owned components:
-`TraceHeader`, `CaptureConfigSnapshot` (~60), the owned `TraceCore` graph,
-`WitnessDiagnostics` (~23), `SourceMetadata` (~13), `Totals` (~28), and the existing
-`RunnableTraceState`. All 220 FIELD_ORDER entries keep emitting the same semantic
+`TraceHeader`, `CaptureConfigSnapshot`, the owned `TraceCore` graph,
+`WitnessDiagnostics`, `SourceMetadata`, `Totals`, and the existing
+`RunnableTraceState` (sizes per plane: the ownership map above is the
+authority; the historical approximate counts here drifted twice). All 220 FIELD_ORDER entries keep emitting the same semantic
 mapping through component-backed properties. Label/address/lookup maps move to core
 indexes; accessors become facade factories. Mixins stay as presentation organization;
 internal algorithms move to narrow component/core protocols. `Module` — the second god
 object — gets its own responsibility decomposition into narrow query/presentation
 helpers without moving public methods. `TraceBuildState` actually goes away: its 20
 transient fields dissolve into named per-phase workspaces, each owned by exactly one
-postprocess phase and documented; the 21 `POSTPROCESS_STEP_CONTRACTS` become enforced
+postprocess phase and documented; the 26 `POSTPROCESS_STEP_CONTRACTS` (25 plus step "0") become enforced
 declared column read/write sets per step. This work runs as a parallel lane from the
 compiler wave on and must never be the squeezed phase — a columnar store can still hide
 a god junction behind a smaller object.
