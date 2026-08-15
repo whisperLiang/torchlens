@@ -1955,7 +1955,18 @@ reads; (ii) ctypes / user C-extension entropy or clock reads that never cross a 
 call surface, including C-mediated indirect calls of held builtins (a
 `functools.partial(time.time)()` invoked from C emits no Python-visible call of the monitored
 builtin); (iii) legacy `RandomState()` C-level CONSTRUCTION entropy (its DRAWS stay
-digest/profile-witnessed); (iv) a generator drawn on a PRE-EXISTING
+digest/profile-witnessed); (iii-b) a BALANCED profile-slot swap performed through a PRE-WINDOW
+held reference to `sys.setprofile`/`threading.setprofile` (`from sys import setprofile` at
+model/helper import time, or any profiler/coverage library that stashed the bound C function),
+or through C-level `PyEval_SetProfile` (`cProfile.enable()`): the swap-detection wrappers live
+on the MODULE ATTRIBUTES only, so a held-ref swap opens an unwitnessed blind sub-window for the
+profile-ONLY channel class (the immutable `datetime` readers, held-ref builtin clock/entropy
+aliases, `torch.Generator` method events, numpy>=2 instance draws -- module-attr-patched
+builtins like `os.urandom` stay witnessed) and restores the monitor's own hook before the
+teardown identity checks run, so the window settles CERTAIN. No Python-level fail-closed
+spelling exists for a pre-window held slot-writer; the architectural closure is the same
+`sys.monitoring` port named below (interpreter-global, immune to profile-slot swaps);
+(iv) a generator drawn on a PRE-EXISTING
 (already-running, non-owner, non-hooked) thread -- which `threading.setprofile` cannot reach on
 Python <= 3.11 -- or, for the profile-silent numpy>=2 Cython method shape, on ANY thread, that is
 reachable from NO digest root except BY EXECUTING USER CODE (a property/descriptor `__get__`
