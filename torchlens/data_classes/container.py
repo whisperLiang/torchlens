@@ -753,8 +753,9 @@ def _container_structure_capability(op: Op, role: Role) -> str:
     Returns
     -------
     str
-        ``"none"``, ``"paths_only"``, ``"full_spec"``, or ``"full_spec"``
-        when the backend cannot be resolved for legacy in-memory traces.
+        ``"none"``, ``"paths_only"``, or ``"full_spec"``; a trace without a
+        backend field resolves the torch default, an unresolvable backend
+        fails closed to ``"none"``.
     """
 
     return _trace_container_capability(getattr(op, "source_trace", None), role)
@@ -771,8 +772,9 @@ def _output_container_structure_capability(op: Op) -> str:
     Returns
     -------
     str
-        ``"none"``, ``"paths_only"``, ``"full_spec"``, or ``"full_spec"``
-        when the backend cannot be resolved for legacy in-memory traces.
+        ``"none"``, ``"paths_only"``, or ``"full_spec"``; a trace without a
+        backend field resolves the torch default, an unresolvable backend
+        fails closed to ``"none"``.
     """
 
     return _container_structure_capability(op, Role.CALL_OUTPUT)
@@ -794,9 +796,14 @@ def _trace_container_capability(trace: Any, role: Role) -> str:
         ``"none"``, ``"paths_only"``, or ``"full_spec"``.
     """
 
-    backend = getattr(trace, "backend", None)
-    if backend is None:
-        return "full_spec"
+    # b1 R22 F2 (carried r1-F3): both fallthroughs used to return
+    # "full_spec" -- the STRONGEST capability claim (full structure plus
+    # supports_reconstruct=True) -- for a backend that never declared
+    # container structure. A trace WITHOUT a backend field predates the
+    # backend seam (a torch-era legacy artifact), so it resolves the torch
+    # default instead of a hardcoded claim; an unresolvable backend fails
+    # CLOSED to "none".
+    backend = getattr(trace, "backend", None) or "torch"
     try:
         from ..backends import get_backend_spec
 
@@ -805,7 +812,7 @@ def _trace_container_capability(trace: Any, role: Role) -> str:
             return str(capabilities.input_container_structure)
         return str(capabilities.output_container_structure)
     except Exception:
-        return "full_spec"
+        return "none"
 
 
 def reconstruct_output(trace: Any, values: Literal["out", "transformed"] = "out") -> Any:
