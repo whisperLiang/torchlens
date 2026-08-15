@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import time
 import warnings
 import weakref
@@ -976,7 +977,7 @@ def module_collapse_score(module: Module) -> float:
 
 def _module_structural_signature(
     module: Module,
-) -> tuple[int, int, int, int, tuple[tuple[str, str], ...], object]:
+) -> tuple[int, int, int, int, tuple[tuple[str, str, str], ...], object]:
     """Return a per-module structural fingerprint for fold-honesty checks.
 
     Two modules are only considered structurally interchangeable for the
@@ -999,6 +1000,12 @@ def _module_structural_signature(
     carries :func:`_module_wiring_digest`, a canonical intra-module dataflow
     component.
 
+    r4 b6-opus R19-1: ``func_config`` is the MODULE configuration, so a
+    functional/dunder op's scalar operand never entered the fingerprint —
+    ``* 1.0`` and ``* 3.0`` blocks folded behind one ``+N more``. Each row
+    therefore also carries a canonical digest of the op's captured
+    non-tensor arguments (:func:`_non_tensor_args_digest`).
+
     Parameters
     ----------
     module:
@@ -1009,15 +1016,16 @@ def _module_structural_signature(
     tuple
         ``(num_layers, num_params, num_params_trainable, num_params_frozen,
         ops_signature, wiring_digest)`` where ``ops_signature`` is a tuple of
-        ``(op_type, func_config_digest)`` rows in layer order and
-        ``wiring_digest`` canonicalizes the member's interior edges plus
-        boundary crossings.
+        ``(op_type, func_config_digest, non_tensor_args_digest)`` rows in
+        layer order and ``wiring_digest`` canonicalizes the member's
+        interior edges plus boundary crossings.
     """
 
     ops_signature = tuple(
         (
             str(getattr(layer, "func_name", None) or getattr(layer, "layer_type", "")),
             _func_config_digest(getattr(layer, "func_config", None)),
+            _non_tensor_args_digest(layer),
         )
         for layer in module.layers
     )
@@ -1031,50 +1039,102 @@ def _module_structural_signature(
     )
 
 
+def _module_wiring_walk(module: Module) -> tuple[object, tuple[tuple[str, int], ...]]:
+    """Walk one member's wiring; return ``(digest_rows, exterior_bindings)``.
+
+    ``digest_rows`` encodes, per interior op in execution order, the ordered
+    parent slots as either ``("i", position)`` — an edge from the interior op
+    at that execution position — or ``("x", k)`` — a boundary crossing from
+    the ``k``-th distinct exterior source first seen while walking this
+    member. ``exterior_bindings`` is the sorted ``(exterior_label, k)``
+    correspondence those crossings used, for the cross-member consistency
+    check (:func:`_exterior_bindings_consistent`).
+
+    Raises on unresolvable wiring; callers own the degrade policy.
+    """
+
+    trace = module.trace
+    if trace is None:
+        return "", ()
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for label in module._op_labels():
+        resolved = trace.ops[label].label
+        if resolved not in seen:
+            seen.add(resolved)
+            canonical.append(resolved)
+    position = {label: index for index, label in enumerate(canonical)}
+    exterior: dict[str, int] = {}
+    rows: list[tuple[tuple[str, int], ...]] = []
+    for label in canonical:
+        slots: list[tuple[str, int]] = []
+        for parent_label in trace.ops[label].parents:
+            parent = trace.ops[parent_label].label
+            if parent in position:
+                slots.append(("i", position[parent]))
+            else:
+                slots.append(("x", exterior.setdefault(parent, len(exterior))))
+        rows.append(tuple(slots))
+    return tuple(rows), tuple(sorted(exterior.items()))
+
+
 def _module_wiring_digest(module: Module) -> object:
     """Return a canonical intra-module dataflow digest for one fold member.
 
-    Encodes, per interior op in execution order, the ordered parent slots as
-    either ``("i", position)`` — an edge from the interior op at that
-    execution position — or ``("x", k)`` — a boundary crossing from the
-    ``k``-th distinct exterior source first seen while walking this member.
     Exterior sources are numbered per member (never by label), so two run
     members fed by different upstream blocks still compare equal when their
     interior wiring matches, while a residual skip (``x + y``) can never
     match a self-add (``y + y``): the former's add row reads
     ``(("x", 0), ("i", j))`` and the latter's ``(("i", j), ("i", j))``.
 
-    A member whose wiring cannot be resolved degrades to its exception type
-    name — coarser matching (the same degradation on every member compares
-    equal on the remaining fingerprint components), never a crash.
+    A member whose wiring cannot be resolved degrades to a UNIQUE
+    per-member sentinel, so it can never fold (r4 b6-fable R19): degrading
+    every failing member to a shared exception type name made two members
+    with genuinely different-but-unresolvable wiring compare equal, silently
+    falling back to the op-signature-only comparison the r3 HIGH proved
+    insufficient.
     """
 
-    trace = module.trace
-    if trace is None:
-        return ""
     try:
-        canonical: list[str] = []
-        seen: set[str] = set()
-        for label in module._op_labels():
-            resolved = trace.ops[label].label
-            if resolved not in seen:
-                seen.add(resolved)
-                canonical.append(resolved)
-        position = {label: index for index, label in enumerate(canonical)}
-        exterior: dict[str, int] = {}
-        rows: list[tuple[tuple[str, int], ...]] = []
-        for label in canonical:
-            slots: list[tuple[str, int]] = []
-            for parent_label in trace.ops[label].parents:
-                parent = trace.ops[parent_label].label
-                if parent in position:
-                    slots.append(("i", position[parent]))
-                else:
-                    slots.append(("x", exterior.setdefault(parent, len(exterior))))
-            rows.append(tuple(slots))
-        return tuple(rows)
-    except Exception as error:  # pragma: no cover - defensive degrade
-        return type(error).__name__
+        rows, _ = _module_wiring_walk(module)
+        return rows
+    except Exception as error:
+        return (
+            "__torchlens_wiring_unresolved__",
+            str(getattr(module, "address", "") or id(module)),
+            type(error).__name__,
+        )
+
+
+def _module_exterior_bindings(module: Module) -> tuple[tuple[str, int], ...] | None:
+    """Return one member's exterior-source binding, or ``None`` if unresolvable."""
+
+    try:
+        _, bindings = _module_wiring_walk(module)
+        return bindings
+    except Exception:
+        return None
+
+
+def _exterior_bindings_consistent(
+    merged: dict[str, int],
+    bindings: tuple[tuple[str, int], ...] | None,
+) -> bool:
+    """Merge one member's exterior binding into the fold's shared frame.
+
+    r4 b6-sol R19-1: per-member first-seen numbering alone erases the
+    cross-member source correspondence — ``sub(a, b)`` and ``sub(b, a)``
+    both canonicalize to ``(("x", 0), ("x", 1))``. When fold members SHARE
+    an exterior source, that source must occupy the SAME operand slot in
+    every member; members with disjoint exterior sets (consecutive chain
+    blocks fed by different upstream blocks) impose no constraint and keep
+    folding. Returns whether the member is consistent, updating ``merged``
+    in place on success.
+    """
+
+    if bindings is None:
+        return False
+    return all(merged.setdefault(label, index) == index for label, index in bindings)
 
 
 def _func_config_digest(func_config: Any) -> str:
@@ -1092,6 +1152,46 @@ def _func_config_digest(func_config: Any) -> str:
         return repr(sorted(func_config.items(), key=lambda item: str(item[0])))
     except Exception:
         return type(func_config).__name__
+
+
+_MEMORY_ADDRESS_PATTERN = re.compile(r"0x[0-9a-fA-F]+")
+
+
+def _non_tensor_args_digest(layer: Any) -> str:
+    """Return a canonical digest of one op's captured non-tensor arguments.
+
+    r4 b6-opus R19-1: ``func_config`` is empty for functional/dunder ops, so
+    a scalar operand (``* 3.0`` vs ``* 1.0``) never entered the fold
+    fingerprint and two models computing DIFFERENT functions folded behind
+    one ``+N more`` ellipsis. The captured positional and keyword non-tensor
+    argument values are already recorded per op; digest them canonically.
+
+    Default-object reprs embed memory addresses, which are nondeterministic
+    per process; they are masked so equal-valued members keep comparing
+    equal (coarser matching for address-only-distinct objects, matching the
+    ``_func_config_digest`` degrade discipline). An unreprable value
+    degrades to its type name — coarser matching, never a crash.
+    """
+
+    try:
+        # Multi-pass layers refuse per-pass reads at the aggregate (typed
+        # layer_pass_ambiguous, not AttributeError), so read each pass's op
+        # directly; the operand values of EVERY pass are fingerprint-relevant.
+        ops = getattr(layer, "ops", None)
+        sources = list(ops.values()) if ops is not None else [layer]
+        parts = tuple(
+            (
+                getattr(source, "non_tensor_pos_args", None),
+                getattr(source, "non_tensor_kwargs", None),
+            )
+            for source in (sources or [layer])
+        )
+        if not any(pos or kw for pos, kw in parts):
+            return ""
+        text = repr(parts)
+    except Exception as error:
+        return type(error).__name__
+    return _MEMORY_ADDRESS_PATTERN.sub("0xADDR", text)
 
 
 def _run_fold_members_uniform(trace: Trace, addresses: Sequence[str]) -> bool:
@@ -1135,7 +1235,18 @@ def _run_fold_members_uniform(trace: Trace, addresses: Sequence[str]) -> bool:
         _module_structural_signature(cast("Module", trace.modules[address]))
         for address in addresses
     }
-    return len(signatures) == 1
+    if len(signatures) != 1:
+        return False
+    # r4 b6-sol R19-1: equal per-member signatures are not enough when the
+    # members SHARE exterior sources — the shared source must occupy the
+    # same operand slot in every member (a - b vs b - a must never fold).
+    merged: dict[str, int] = {}
+    return all(
+        _exterior_bindings_consistent(
+            merged, _module_exterior_bindings(cast("Module", trace.modules[address]))
+        )
+        for address in addresses
+    )
 
 
 def _split_run_by_member_uniformity(
@@ -1189,16 +1300,33 @@ def _split_run_by_member_uniformity(
     signatures = [
         _module_structural_signature(cast("Module", trace.modules[address])) for address in run
     ]
+    bindings = [
+        _module_exterior_bindings(cast("Module", trace.modules[address])) for address in run
+    ]
     index = 0
     while index < total:
         end = index + 1
-        while end < total and signatures[end] == signatures[index]:
+        # r4 b6-sol R19-1: a window member must both share the signature AND
+        # bind any exterior source it shares with earlier window members to
+        # the same operand slot (see _exterior_bindings_consistent).
+        merged: dict[str, int] = {}
+        if not _exterior_bindings_consistent(merged, bindings[index]):
+            index = end
+            continue
+        while (
+            end < total
+            and signatures[end] == signatures[index]
+            and _exterior_bindings_consistent(merged, bindings[end])
+        ):
             end += 1
         if end - index >= RUN_FOLD_MIN_LENGTH:
             yield run[index:end]
         # Windows inside a shorter-than-minimum equal-signature block can
         # never reach the minimum length, so skipping the whole block is
-        # output-identical to the historical index += 1 rescan.
+        # NOT always output-identical to the historical index += 1 rescan
+        # once binding consistency joins the constraint: a member rejected
+        # for a binding conflict can open its own consistent window, and
+        # `end` stopped exactly at the first such member.
         index = end
 
 

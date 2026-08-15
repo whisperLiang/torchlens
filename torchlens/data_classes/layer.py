@@ -1129,10 +1129,22 @@ class Layer:
 
     @property
     def source_trace(self) -> "Trace":
-        """Back-reference to the owning Trace (stored as weakref)."""
+        """Back-reference to the owning Trace (stored as weakref).
+
+        Never returns ``None``: a Layer detached from its Trace (standalone
+        pickle strips the weakref; cleanup clears it) refuses with the same
+        typed ``RecordBindingError`` family as the collected-Trace case, so
+        no ``None`` can escape behind the ``-> Trace`` signature and crash a
+        caller untyped (r4 b7-opus R52-A).
+        """
         ref = self.__dict__.get("_source_trace_ref")
         if ref is None:
-            return None  # type: ignore[return-value]
+            raise RecordBindingError(
+                "This Layer is not bound to a Trace (standalone pickle, "
+                "cleanup, or a record never attached to a Trace)",
+                code="record_not_bound",
+                remedy="read the layer through a live Trace accessor",
+            )
         obj = ref()
         if obj is None:
             raise RecordBindingError(
@@ -1724,9 +1736,15 @@ class Layer:
 
     @property
     def _tracing_finished(self) -> bool:
-        """Return whether the owning trace has finished capture/postprocess."""
+        """Return whether the owning trace has finished capture/postprocess.
 
-        sml = self.source_trace
+        Reads the weakref slot directly: a detached or collected Layer is
+        finished by definition, and this predicate must stay readable where
+        ``source_trace`` refuses typed (repr on detached records).
+        """
+
+        ref = self.__dict__.get("_source_trace_ref")
+        sml = ref() if ref is not None else None
         if sml is None:
             return True
         return sml._tracing_finished
@@ -2101,10 +2119,26 @@ class Layer:
     # ********************************************
 
     def __str__(self) -> str:
-        """Return a human-readable layer summary."""
+        """Return a human-readable layer summary.
+
+        Data-model contract: never raises. A Layer detached from its Trace
+        (collected, standalone-pickled, or husked by cleanup) degrades to a
+        one-line placeholder instead of propagating the typed relation
+        refusal out of ``repr()``/``print()``/f-string interpolation
+        (r4 b7-opus R52-A).
+        """
 
         if not self._tracing_finished:
             return f"Layer({self.layer_label}) (pass not finished)"
+        try:
+            return self._describe_bound()
+        except RecordBindingError:
+            label = getattr(self, "layer_label", None) or "<unbound>"
+            return f"<Layer {label}: detached from its Trace>"
+
+    def _describe_bound(self) -> str:
+        """Build the full summary; relation reads require a live Trace."""
+
         s = f"Layer {self.layer_label}:"
         if self.num_passes > 1:
             s += f" ({self.num_passes} ops)"

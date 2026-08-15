@@ -1045,3 +1045,100 @@ def test_final_viewer_child_is_reaped_without_another_launch(
     # RED before the fix: the exited child stayed registered (and unreaped,
     # i.e. a zombie) until another viewer launch.
     assert _render_utils._VIEWER_PROCS == []
+
+
+def test_tooltip_reprs_mask_memory_addresses() -> None:
+    """DOT tooltip reprs must never embed live memory addresses.
+
+    r19 (b6-fable carried LOW): a default-repr object in a decoded-output
+    mapping, or a custom Sequence batch container with the default
+    ``object.__repr__``, leaked ``0x...`` addresses into the DOT bytes,
+    making otherwise-identical renders nondeterministic across processes.
+    """
+
+    import re
+
+    from torchlens.visualization import _render_nodes
+
+    address = re.compile(r"0x[0-9a-fA-F]{4,}")
+
+    class _Opaque:
+        """Object with the default address-bearing repr."""
+
+    mapping_attrs = _render_nodes._render_raw_output({"key": _Opaque()})
+    assert mapping_attrs is not None
+    assert not address.search(mapping_attrs["tooltip"])
+
+    class _StrBatch(Sequence):
+        """Sequence of strings with the default address-bearing repr."""
+
+        def __init__(self, items: list[str]) -> None:
+            self._items = items
+
+        def __getitem__(self, index: int) -> str:
+            return self._items[index]
+
+        def __len__(self) -> int:
+            return len(self._items)
+
+    trace = tl.trace(nn.Identity(), torch.randn(2, 4))
+    batch_attrs = _render_nodes._render_raw_input(
+        trace, _StrBatch(["alpha", "beta"]), batch_render="all"
+    )
+    assert batch_attrs is not None
+    assert not address.search(batch_attrs["tooltip"])
+
+
+class _TwoOutInner(nn.Module):
+    """Module returning TWO tensors, both consumed by one exterior op."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        y = self.lin(x)
+        return torch.relu(y), torch.tanh(y)
+
+
+class _TwoOutOuter(nn.Module):
+    """Consumes both inner outputs in a single exterior add."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.two = _TwoOutInner()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a, b = self.two(x)
+        return a + b
+
+
+def test_collapsed_module_boundary_edge_discloses_multiplicity(tmp_path: Path) -> None:
+    """Distinct dataflow edges merged by collapse must disclose multiplicity.
+
+    r19 (b6-fable carried LOW, 3rd round): a collapsed module returning two
+    tensors, both consumed by one exterior ``add``, rendered as ONE
+    unlabeled edge — the boundary-crossing distinct-dataflow edges were
+    visually deduped with no disclosure. The merged edge must carry an
+    ``x2`` label.
+    """
+
+    trace = tl.trace(_TwoOutOuter(), torch.randn(2, 4))
+    outpath = tmp_path / "twoout"
+    trace.draw(
+        vis_call_depth=1,
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(outpath),
+    )
+    source = (tmp_path / "twoout.dot").read_text()
+    boundary_edge_lines = [
+        index for index, line in enumerate(source.splitlines()) if "twopass1 -> add" in line
+    ]
+    assert len(boundary_edge_lines) == 1
+    lines = source.splitlines()
+    start = boundary_edge_lines[0]
+    edge_stanza = "\n".join(lines[start : start + 6])
+    assert "x2" in edge_stanza, (
+        "two distinct dataflow edges merged into one rendered edge with no multiplicity disclosure"
+    )

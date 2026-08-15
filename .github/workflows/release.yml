@@ -58,19 +58,28 @@ jobs:
           # refuses to install on (T13.7).
           python-version: "3.11"
 
-      # Installed BEFORE checkout on purpose (grind r3, R86): checkout writes
-      # the App token to disk for the rest of the job, so the unpinned
-      # transitive resolution this install performs happens while NO
-      # credential exists to exfiltrate. Everything installed after this
-      # point is exact-pinned (build== inside build_command).
-      - name: Install dependencies
-        run: pip install "python-semantic-release==9.21.1"
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           fetch-tags: true
           token: ${{ steps.app-token.outputs.token }}
+
+      # The full semantic-release stack is hash-locked (r4 b2-sol R61): the
+      # historical install-before-checkout ordering only kept the credential
+      # away from RESOLUTION time -- the resolved packages persisted in the
+      # environment and executed later with the repo-write App token, so a
+      # compromised or dependency-confused TRANSITIVE could still push with
+      # it. --require-hashes verifies every wheel against the reviewed lock
+      # (.github/workflows/release-requirements.txt) and --only-binary :all:
+      # refuses sdists, so pip executes no package code at install and the
+      # code that later runs with the token is byte-audited. The install now
+      # follows checkout because the lock file lives in the repo; that is
+      # safe under hash verification. Everything else installed later is
+      # exact-pinned (build== inside build_command).
+      - name: Install dependencies (hash-locked)
+        run: >
+          pip install --require-hashes --only-binary :all:
+          -r .github/workflows/release-requirements.txt
 
       # The version TAG push invokes git-lfs (a few .research/*.md files are
       # LFS-tracked). CI checks out with lfs disabled (pointers only, no LFS

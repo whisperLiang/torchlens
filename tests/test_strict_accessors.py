@@ -206,6 +206,7 @@ def test_ambiguous_op_lookup_error_remains_value_error_compatible() -> None:
         trace.ops["linear_1_1"]
     except ValueError as exc:
         assert isinstance(exc, AmbiguousOpLookupError)
+        assert exc.fields["code"] == "ambiguous_op_lookup"
     else:  # pragma: no cover - this branch would be a regression.
         raise AssertionError("Expected ValueError-compatible ambiguous lookup")
 

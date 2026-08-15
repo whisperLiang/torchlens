@@ -582,6 +582,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
     top_level_sibling_rank_groups: list[SiblingOrderChain] = []
     collapsed_modules: Set[str] = set()
     edges_used: Set[tuple[str, str, tuple[Any, ...]]] = set()
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] = {}
     run_fold_ellipsis_nodes: set[str] = set()
     emitted_segment_nodes: set[str] = set()
     captured_forward_edges: list[CapturedForwardEdge] = []
@@ -648,6 +649,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 if source_index == 0
                 else replace(node_record, node_calls=(), owned_node_args=()),
                 rolled_maps,
+                deduped_edge_registry,
             )
     for node_args in pending_container_collapse_nodes:
         forward_ir_builder.node(**node_args)

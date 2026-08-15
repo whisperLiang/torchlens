@@ -2,11 +2,32 @@
 
 # ruff: noqa: F403, F405
 
+import re as _re
+
 from .._errors import InvalidArgumentError
 from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 from ._render_edges import *
 from ._render_leaf import *
+
+_TOOLTIP_ADDRESS_PATTERN = _re.compile(r"0x[0-9a-fA-F]+")
+
+
+def _tooltip_repr(value: Any) -> str:
+    """Return a repr for a DOT tooltip with memory addresses masked.
+
+    r19 (b6-fable carried LOW): a default-repr object (or a custom Sequence
+    container with the default ``object.__repr__``) leaks ``0x...``
+    addresses into the DOT bytes, making otherwise-identical renders
+    nondeterministic across processes. Mask the addresses; an unreprable
+    value degrades to its type name, never a crash.
+    """
+
+    try:
+        text = repr(value)
+    except Exception:
+        return type(value).__name__
+    return _TOOLTIP_ADDRESS_PATTERN.sub("0xADDR", text)
 
 
 def _normalize_buffer_visibility(
@@ -378,6 +399,7 @@ def _add_node_to_graphviz(
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
     node_decision: Any | None = None,
     rolled_maps: "_RolledEdgeMaps | None" = None,
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -490,6 +512,7 @@ def _add_node_to_graphviz(
         segment,
         antiparallel_projected_edges,
         rolled_maps,
+        deduped_edge_registry,
     )
 
 
@@ -759,7 +782,7 @@ def _render_raw_input(
             strings = strings[:max_items]
         return {
             "label": batch_summary.text_table(strings, max_items),
-            "tooltip": repr(strings),
+            "tooltip": _tooltip_repr(strings),
         }
     if all(isinstance(item, Image.Image) for item in sequence):
         images = cast(Sequence[Image.Image], sequence)
@@ -1087,13 +1110,13 @@ def _render_raw_output(value: Any) -> dict[str, str] | None:
         lines = ["output", *[_format_label_score_row(label, score) for label, score in value]]
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     if _is_batch_topk_output(value):
         lines = _format_batch_topk_output_lines(value)
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     if isinstance(value, Mapping):
         rows = list(value.items())[:5]
@@ -1103,7 +1126,7 @@ def _render_raw_output(value: Any) -> dict[str, str] | None:
         ]
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     return None
 
