@@ -89,3 +89,73 @@ def test_nan_doctrine_is_part_of_the_self_test(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(validation_core, "tensor_nanequal", _nan_blind)
     with pytest.raises(RuntimeError, match="comparator self-test failed"):
         validation_core.validate_saved_outs(trace, ground_truth)
+
+
+class TestSignedZeroDoctrine:
+    """sol+fable r4 probes: ``torch.equal`` reads ``-0.0 == +0.0`` as True,
+    so the comparator certified a sign-flipped-zero replay as EXACT even
+    though the payloads are bit-distinct and diverge through ``1/x``. A flip
+    is now refused at the exact tier and admitted only by the tolerance
+    band; NaN sign stays out of scope (kernels legitimately differ on it)."""
+
+    def test_signed_zero_flip_is_not_exact(self) -> None:
+        from torchlens.utils.tensor_utils import tensor_nanequal
+
+        neg = torch.tensor([-0.0, 1.0])
+        pos = torch.tensor([0.0, 1.0])
+        assert not tensor_nanequal(neg, pos)
+        assert not tensor_nanequal(pos, neg)
+
+    def test_signed_zero_flip_is_within_tolerance(self) -> None:
+        from torchlens.utils.tensor_utils import tensor_nanequal
+
+        neg = torch.tensor([-0.0, 1.0])
+        pos = torch.tensor([0.0, 1.0])
+        assert tensor_nanequal(neg, pos, allow_tolerance=True)
+
+    def test_matching_negative_zeros_stay_exact(self) -> None:
+        from torchlens.utils.tensor_utils import tensor_nanequal
+
+        neg = torch.tensor([-0.0, 0.0, 1.0])
+        assert tensor_nanequal(neg, neg.clone())
+
+    def test_complex_component_signed_zero_flip_is_not_exact(self) -> None:
+        from torchlens.utils.tensor_utils import tensor_nanequal
+
+        a = torch.tensor([complex(0.0, 0.0), 1 + 2j])
+        b = torch.tensor([complex(-0.0, 0.0), 1 + 2j])
+        assert not tensor_nanequal(a, b)
+        assert tensor_nanequal(a, a.clone())
+
+    def test_nan_sign_is_out_of_scope(self) -> None:
+        from torchlens.utils.tensor_utils import tensor_nanequal
+
+        plus_nan = torch.tensor([float("nan"), 1.0])
+        minus_nan = torch.tensor([-float("nan"), 1.0])
+        assert tensor_nanequal(plus_nan, minus_nan)
+
+    def test_self_test_carries_the_signed_zero_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A regression re-blessing signed-zero flips as exact must be
+        caught at validation ENTRY by the comparator self-test."""
+
+        from torchlens.utils import tensor_utils
+
+        real = tensor_utils.tensor_nanequal
+
+        def reblessed(a: torch.Tensor, b: torch.Tensor, allow_tolerance: bool = False) -> bool:
+            if real(a, b, allow_tolerance=allow_tolerance):
+                return True
+            # Simulate the pre-fix comparator: IEEE equality certifies the
+            # flip as exact again.
+            return bool(
+                a.shape == b.shape
+                and a.dtype == b.dtype
+                and a.dtype.is_floating_point
+                and torch.equal(a, b)
+            )
+
+        monkeypatch.setattr(validation_core, "tensor_nanequal", reblessed)
+        with pytest.raises(RuntimeError, match="self-test failed"):
+            validation_core._comparator_self_test()
