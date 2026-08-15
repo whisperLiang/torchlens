@@ -60,6 +60,50 @@ def test_bounded_json_string_aware_depth() -> None:
     assert _json.loads_bounded(text, max_depth=3) == {"k": "[[[[[[[[[[ not real nesting ]]]]]]]]]]"}
 
 
+def test_bounded_json_refuses_flat_array_object_count_bomb() -> None:
+    """A shallow-but-huge flat array is refused BEFORE the decoder allocates it.
+
+    R60-1: the byte + depth ceilings do not bound the number of Python objects
+    ``json.loads`` allocates. A flat ``[0,0,0,...]`` array is depth-1 and small on
+    disk yet expands ~16x into RSS. The object-count prescan (commas as an upper
+    bound on nodes) refuses it before any allocation.
+    """
+
+    text = "[" + ",".join("0" for _ in range(1000)) + "]"
+    with pytest.raises(json.JSONDecodeError, match="node count"):
+        _json.loads_bounded(text, max_nodes=100)
+    # Under the ceiling it still parses.
+    assert _json.loads_bounded(text, max_nodes=10_000) == [0] * 1000
+
+
+def test_bounded_json_refuses_object_count_bomb_via_nested_containers() -> None:
+    """Many tiny empty containers (opens, no commas) also count as nodes."""
+
+    text = "[" + ",".join("{}" for _ in range(500)) + "]"
+    with pytest.raises(json.JSONDecodeError, match="node count"):
+        _json.loads_bounded(text, max_nodes=100)
+
+
+def test_object_count_prescan_is_string_aware() -> None:
+    """Commas inside string literals never count toward the node ceiling."""
+
+    text = json.dumps({"k": "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w"})
+    # One object + one key/value = 2 nodes; the 22 in-string commas must not count.
+    assert _json.loads_bounded(text, max_nodes=5) == json.loads(text)
+
+
+def test_read_bounded_threads_max_nodes(tmp_path: Path) -> None:
+    """The file readers enforce the object-count ceiling too (refuse-before-alloc)."""
+
+    payload = tmp_path / "bomb.json"
+    payload.write_text("[" + ",".join("0" for _ in range(1000)) + "]")
+    with pytest.raises(json.JSONDecodeError, match="node count"):
+        _json.read_bounded(payload, max_nodes=100)
+    with payload.open("r", encoding="utf-8") as handle:
+        with pytest.raises(json.JSONDecodeError, match="node count"):
+            _json.load_bounded(handle, max_nodes=100)
+
+
 # --------------------------------------------------------------------------- #
 # (b) independent literal-depth counter                                       #
 # --------------------------------------------------------------------------- #
