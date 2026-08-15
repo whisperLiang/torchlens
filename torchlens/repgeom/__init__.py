@@ -1269,7 +1269,7 @@ def _mds_scatter_coords_for_node(trace: Any, node: Any) -> tuple[str | None, np.
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
-        value = blobs.get(key)
+        value = blobs.get(f"mds:{key}")
         if value is None:
             continue
         coords = _as_numpy_array(value)
@@ -1590,9 +1590,17 @@ def _annotate_mds_coords(trace: Any, key: str, coords: np.ndarray) -> None:
     -------
     None
         The trace is mutated in place through ``_annotation_blobs``.
+
+    Notes
+    -----
+    Stored under the ``mds:`` namespace: bare ``layer:``/``op:`` keys belong
+    to USER ``annotate(data=...)`` blobs, and an unprefixed store both
+    collided with them and let a user ``[N, 2]`` payload be misread as MDS
+    coordinates by the scatter reader. Derived-prefix keys are also what the
+    rerun refresh invalidates while preserving user blobs.
     """
 
-    _store_annotation_tensor(trace, key, torch.from_numpy(coords.copy()))
+    _store_annotation_tensor(trace, f"mds:{key}", torch.from_numpy(coords.copy()))
 
 
 def _store_annotation_tensor(trace: Any, key: str, tensor: torch.Tensor) -> None:
