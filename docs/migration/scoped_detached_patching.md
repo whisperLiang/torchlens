@@ -139,7 +139,7 @@ round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `Tr
 | --- | --- |
 | Closure, dict/list, unrelated class/default, ordinary Python partial | Rescued on signal; shadow reports when Python exposes the call |
 | Saved Tensor method descriptor or Tensor-bound builtin | Rescued on signal; shadow reports via descriptor compatibility |
-| Protocol-invisible constructors (`from_numpy`, `from_dlpack`, `frombuffer`, `as_subclass`) | Mechanical belt (module-attr patching; membership derived per build) |
+| Protocol-invisible constructors (`from_numpy`, `from_dlpack`, `frombuffer`, `as_subclass`, `_make_subclass`) | Mechanical belt (module-attr patching; membership derived per build) |
 | C `functools.partial` around a C builtin | Known profile blind spot; shadow mode stays machine-readably unverified |
 | De-moded `handle_torch_function` composite interiors | Beyond any mode; disclosed `escape_rescue_unrecovered` |
 | `DataLoader(num_workers=0)` callback executed inside forward | Owner-thread domain; shadow reports visible escapes |
@@ -148,6 +148,7 @@ round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `Tr
 | OWNER-thread stale op whose result crosses to host as a scalar only (`stale_norm(x).item() > t`: no intermediate tensor op consumes it) | Declared SILENT residual on default captures. The scalar-protocol read of the untracked intermediate emits no record, and unlabeled receivers cannot be flagged without false-positives on parameter/attribute scalar reads. The armed shadow detector reports the stale call itself; default captures never claim `capture_verified=True`, so no verdict is inflated |
 | Deferred `trace.log_backward(...)` / `Recording.log_backward(...)` | Explicitly `not_armed` in this rollout |
 | `torch.func` / functorch transform internals | Existing transform boundary warning/marker remains authoritative |
+| `stacklevel`-attributed torch warnings raised inside wrapped Python functionals (e.g. `F.softmax` implicit-dim) | Declared residual while wrappers are installed: the wrapper adds one Python frame, so the warning is attributed to torch internals instead of the user call site, and Python's default-filter dedup (keyed on the attributed location) collapses DISTINCT user call sites into one warning per process. The frame is inherent to Python-level wrapping; pinned by `test_wrapped_functional_warning_attribution_residual_shape` |
 
 The thread tripwire compares `threading.active_count()` at forward entry and exit. It catches a live
 count delta cheaply, but a worker that starts and joins entirely inside the forward can evade that

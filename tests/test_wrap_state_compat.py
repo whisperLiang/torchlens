@@ -28,6 +28,7 @@ import pickle
 import re
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -353,6 +354,42 @@ class TestWrapperPickleLadder:
         assert set(parameters) == {"args", "kwargs"}
 
 
+def test_wrapped_functional_warning_attribution_residual_shape():
+    """DISCLOSED RESIDUAL (b8-sol R56-4): warning attribution under wrappers.
+
+    The wrapper adds one Python frame, so every ``warnings.warn(...,
+    stacklevel=N)`` inside a wrapped Python functional (``F.softmax``
+    implicit-dim is torch's canonical case) is attributed to torch internals
+    (``functional.py``) instead of the user's call site. Because Python's
+    default-filter ``__warningregistry__`` dedup keys on the ATTRIBUTED
+    location, distinct user call sites additionally collapse into ONE warning
+    per process while wrappers are installed. The frame is inherent to
+    Python-level wrapping (no trivial fix); the shape is pinned here and
+    documented in ``docs/migration/scoped_detached_patching.md`` so a silent
+    change in either direction gets noticed.
+    """
+
+    import warnings
+
+    _ensure_wrapped()
+    if id(F.softmax) not in _state._decorated_to_orig:
+        pytest.skip("F.softmax not wrapped on this build")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        F.softmax(torch.randn(2, 3))
+    implicit_dim = [w for w in caught if "implicit dimension" in str(w.message).lower()]
+    if not implicit_dim:
+        pytest.skip("this torch no longer warns on implicit softmax dim")
+    attributed = implicit_dim[-1].filename
+    assert attributed.endswith("functional.py"), (
+        f"implicit-dim warning attributed to {attributed}: the wrapped-epoch "
+        "stacklevel residual changed shape -- if it now points at the caller, "
+        "the residual healed; update the scoped_detached_patching.md row and "
+        "this pin together"
+    )
+    assert not attributed.endswith("test_wrap_state_compat.py")
+
+
 # ---------------------------------------------------------------------------
 # 4. Override-table coherence (B8-4)
 # ---------------------------------------------------------------------------
@@ -391,6 +428,113 @@ class TestOverrideTableCoherence:
         if report.unprobed_candidates:
             namespace_name, func_name = report.unprobed_candidates[0]
             assert isinstance(namespace_name, str) and isinstance(func_name, str)
+
+
+class TestDerivedCacheCensus:
+    """R56 derived-cache census (b8-fable/b8-opus round 3).
+
+    Torch's DERIVED caches memoize sets/maps keyed by the live callables
+    resolved from the namespace at materialization time. The attribute-identity
+    restore census structurally cannot see them: a table materialized while
+    torchlens wrappers are installed holds wrappers, misses identity tests
+    against originals, and (for tables built mid-epoch) survives
+    ``unwrap_torch()``. Every identity-keyed derived cache torchlens knows
+    about must be keyed by ORIGINALS during the wrapped epoch, or dropped at
+    unwrap so torch re-derives it from the restored originals.
+    """
+
+    def test_device_constructor_cache_keyed_by_originals(self):
+        # b8-fable-R56-1: decorate_all_once used to cache_clear+re-materialize
+        # torch's _device_constructors() AFTER installing wrappers, so the
+        # memoized set held torchlens wrappers for the whole epoch.
+        _ensure_wrapped()
+        from torch.utils._device import _device_constructors
+
+        wrapper_ids = set(_state._decorated_to_orig.keys())
+        poisoned = [
+            getattr(fn, "__name__", repr(fn))
+            for fn in _device_constructors()
+            if id(fn) in wrapper_ids
+        ]
+        assert not poisoned, (
+            f"_device_constructors() holds {len(poisoned)} torchlens wrappers "
+            f"({poisoned[:5]}...): DeviceContext.__torch_function__ receives "
+            "ORIGINALS, so C-level device injection misses for stale pre-wrap "
+            "factory references"
+        )
+
+    def test_stale_prewrap_factory_ref_gets_context_device(self):
+        # The user-visible failure: `from torch import zeros` held from before
+        # the first capture, called under `with torch.device('meta')` while
+        # wrappers are installed, must still land on meta (C-level injection).
+        _ensure_wrapped()
+        stale_zeros = _resolve(torch.zeros)
+        assert stale_zeros is not torch.zeros, "expected torch.zeros to be wrapped"
+        with torch.device("meta"):
+            out = stale_zeros(2, 2)
+        assert out.device.type == "meta", (
+            f"stale pre-wrap zeros landed on {out.device}: torch's "
+            "_device_constructors() cache is not keyed by originals"
+        )
+
+    def test_dynamo_rule_map_built_mid_epoch_does_not_survive_unwrap(self):
+        # b8-opus-R56-1: a rule map materialized while wrapped is keyed by
+        # wrappers; without the unwrap-time clear it survives unwrap_torch()
+        # and torch.compile(fullgraph=True) fails (lookup(torch.cos) degrades
+        # to SkipFunctionVariable).
+        trace_rules = pytest.importorskip("torch._dynamo.trace_rules")
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            # Simulate the user materializing the tables mid-epoch.
+            trace_rules.get_torch_obj_rule_map.cache_clear()
+            trace_rules.get_tensor_method.cache_clear()
+            wrapped_map = trace_rules.get_torch_obj_rule_map()
+            wrapped_methods = trace_rules.get_tensor_method()
+            unwrap_torch()
+            fresh_map = trace_rules.get_torch_obj_rule_map()
+            fresh_methods = trace_rules.get_tensor_method()
+            assert fresh_map is not wrapped_map, (
+                "get_torch_obj_rule_map() built during the wrapped epoch survived unwrap_torch()"
+            )
+            assert fresh_methods is not wrapped_methods, (
+                "get_tensor_method() built during the wrapped epoch survived unwrap_torch()"
+            )
+            assert torch.cos in fresh_map, (
+                "restored torch.cos missing from the re-derived dynamo rule "
+                "map: post-unwrap torch.compile(fullgraph=True) would fail"
+            )
+        finally:
+            wrap_torch()
+
+    def test_dynamo_rule_caches_prewarmed_before_wrapping(self):
+        # The other half of the fix: when dynamo is already imported at wrap
+        # time, the tables are warmed BEFORE the first wrapper setattr, so a
+        # torch.compile during the wrapped epoch reads originals-keyed rules.
+        trace_rules = pytest.importorskip("torch._dynamo.trace_rules")
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            unwrap_torch()
+            trace_rules.get_torch_obj_rule_map.cache_clear()
+            trace_rules.get_tensor_method.cache_clear()
+            wrap_torch()
+            wrapper_ids = set(_state._decorated_to_orig.keys())
+            rule_map = trace_rules.get_torch_obj_rule_map()
+            assert _resolve(torch.cos) in rule_map, (
+                "original torch.cos missing from the dynamo rule map after "
+                "wrap_torch(): the pre-warm did not run before decoration"
+            )
+            poisoned = sum(1 for fn in rule_map if id(fn) in wrapper_ids)
+            assert poisoned == 0, (
+                f"{poisoned} torchlens wrappers keyed into the dynamo rule map "
+                "despite the pre-wrap warm"
+            )
+        finally:
+            if not _state._is_decorated:
+                wrap_torch()
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +973,29 @@ _ORIGINAL_HOLDING_SITE_ALLOWLIST = {
 }
 
 
+def _inventory_namespaces() -> list[tuple[str, Any]]:
+    """Every namespace named by the wrap inventory, resolved live.
+
+    R3-B3-R02-2: the audit's namespace list is DERIVED from
+    ``get_orig_torch_funcs()`` instead of hardcoded, so the audit is
+    structurally co-extensive with the roster it certifies. The historical
+    7-namespace list omitted ``torch.Tensor`` (the bulk of the roster, where
+    torch adds method aliases), ``torch._VF`` (the interior those aliases
+    delegate to), ``torch.utils.dlpack``, and ``torch.signal.windows`` -- for
+    those the gate was structurally unable to fail.
+    """
+
+    from torchlens.constants import get_orig_torch_funcs
+    from torchlens.utils._torch_compat import get_optional_torch_namespace
+
+    resolved: list[tuple[str, Any]] = []
+    for ns_name in sorted({ns for ns, _ in get_orig_torch_funcs()}):
+        ns = get_optional_torch_namespace(ns_name)
+        if ns is not None:
+            resolved.append((ns_name, ns))
+    return resolved
+
+
 def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> None:
     """Post-wrap, no UNREVIEWED public module attribute may hold an original.
 
@@ -839,25 +1006,13 @@ def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> No
     "invisible capture-gap generator on a version boundary" class (b3-opus
     R02-3). This audit is per (namespace, attribute) SITE: every public
     callable attr whose OBJECT has a wrapper must be repointed or reviewed.
+    The namespace list is derived from the inventory (R3-B3-R02-2), never
+    hardcoded.
     """
 
-    import torch.fft
-    import torch.linalg
-    import torch.nn.init
-    import torch.special
-
     _ensure_wrapped()
-    namespaces = [
-        ("torch", torch),
-        ("torch.functional", torch.functional),
-        ("torch.nn.functional", F),
-        ("torch.nn.init", torch.nn.init),
-        ("torch.linalg", torch.linalg),
-        ("torch.fft", torch.fft),
-        ("torch.special", torch.special),
-    ]
     unreviewed: list[tuple[str, str]] = []
-    for ns_name, ns in namespaces:
+    for ns_name, ns in _inventory_namespaces():
         for attr in dir(ns):
             try:
                 obj = getattr(ns, attr)
@@ -872,4 +1027,54 @@ def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> No
         f"(unwrapped spelling of a wrapped op): {unreviewed}. Repoint the site "
         "in decoration, or review it into _ORIGINAL_HOLDING_SITE_ALLOWLIST "
         "with a composite-over-wrapped-interiors verification."
+    )
+
+
+# Roster rows whose torch attribute is REVIEWED-dead on current torch: the
+# spelling no longer exists, so the row wraps nothing and the decoration
+# loop's hasattr-continue is the correct behavior FOR THESE ROWS ONLY. Each
+# entry needs a reason; an entry that RESOLVES again must be removed (the
+# gate below fails in both directions).
+_KNOWN_DEAD_ROSTER_ROWS = {
+    # Removed upstream (absent on torch 2.13); kept in IGNORED_FUNCS for the
+    # torch releases that still expose it. R3-B3-R02-1 evidence row.
+    ("torch", "_sparse_csr_tensor"),
+}
+
+
+def test_curated_roster_rows_resolve_to_live_sites() -> None:
+    """R3-B3-R02-1 liveness gate: no roster row may go dead SILENTLY.
+
+    ``IGNORED_FUNCS`` is the hand-curated re-add list of ops torch's override
+    registries omit -- exactly the ops whose absence from the roster
+    previously produced silent unattributed-literal capture gaps. The
+    decoration loop ``continue``s on an unresolvable pair with no diagnostic,
+    so a torch release that renames, privatizes, or moves ANY re-added
+    spelling would reopen the precise gap the row exists to close, with zero
+    signal. This gate makes every dead row a REVIEWED fact: unexpected dead
+    rows fail, and known-dead rows that resurrect fail until the ledger entry
+    is removed.
+    """
+
+    from torchlens.constants import get_orig_torch_funcs
+    from torchlens.utils._torch_compat import get_optional_torch_namespace
+
+    _ensure_wrapped()
+    dead: set[tuple[str, str]] = set()
+    for ns_name, func_name in get_orig_torch_funcs():
+        ns = get_optional_torch_namespace(ns_name)
+        if ns is None or not hasattr(ns, func_name):
+            dead.add((ns_name, func_name))
+    unexpected_dead = dead - _KNOWN_DEAD_ROSTER_ROWS
+    resurrected = _KNOWN_DEAD_ROSTER_ROWS - dead
+    assert not unexpected_dead, (
+        f"Wrap-inventory rows silently wrap NOTHING on this torch: "
+        f"{sorted(unexpected_dead)}. If the spelling moved, update the roster "
+        "(the silent gap the row closes is back); if it was removed upstream, "
+        "review it into _KNOWN_DEAD_ROSTER_ROWS with the torch version."
+    )
+    assert not resurrected, (
+        f"_KNOWN_DEAD_ROSTER_ROWS entries resolve again on this torch: "
+        f"{sorted(resurrected)}. Remove them from the ledger so the liveness "
+        "gate re-arms for those rows."
     )

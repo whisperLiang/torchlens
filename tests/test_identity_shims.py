@@ -458,6 +458,61 @@ class TestAsSubclassOpIdentity:
         assert tl.validation.validate_forward_pass(Model(), torch.randn(2, 3))
 
 
+class TestOverloadShimLedgerKeying:
+    def test_overload_shim_keys_on_ledger_identity_not_marker_presence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """b8-fable R56 (attribute-vs-identity anti-pattern): a foreign
+        ``@functools.wraps(F.relu)`` wrapper inherits the torchlens
+        ``__dict__`` markers, and the marker-keyed jit-overload shim silently
+        swapped it for the pristine original -- dropping the foreign behavior
+        from overload resolution. The shim must key on LEDGER identity: real
+        torchlens wrappers resolve to their originals, foreign wrappers pass
+        through untouched even with copied markers.
+        """
+
+        import functools
+
+        from torchlens.backends.torch import identity_shims
+
+        _ensure_wrapped()
+        module = _torch_compat.get_jit_overload_resolver_module()
+        if module is None or not hasattr(module, "_get_overloads"):
+            pytest.skip("no jit overload resolver on this torch")
+
+        wrapped_relu = F.relu
+        original_relu = _state._decorated_to_orig.get(id(wrapped_relu))
+        assert original_relu is not None, "expected F.relu to be wrapped"
+
+        @functools.wraps(wrapped_relu)
+        def foreign_wrapper(*args: object, **kwargs: object) -> object:
+            return wrapped_relu(*args, **kwargs)
+
+        # functools.wraps copied the torchlens markers -- the spoof surface.
+        assert foreign_wrapper.__dict__.get("__tl_wrapper_name__") is not None
+
+        seen: list[object] = []
+
+        def spy(obj: object) -> list[object]:
+            seen.append(obj)
+            return []
+
+        records: list[tuple[object, str, object]] = []
+        monkeypatch.setattr(module, "_get_overloads", spy)
+        identity_shims._install_jit_overload_shim(records)  # shim over the spy
+        shim = module._get_overloads
+        assert shim is not spy, "installer did not shim the spy"
+
+        shim(wrapped_relu)
+        shim(foreign_wrapper)
+        assert seen[0] is original_relu, "torchlens wrapper must resolve to its original"
+        assert seen[1] is foreign_wrapper, (
+            "foreign wrapper with copied __tl_* markers was swapped for the "
+            "pristine original: overload resolution drops the foreign behavior"
+        )
+        # monkeypatch teardown restores the real shim over the real resolver.
+
+
 class TestShimLifecycle:
     def test_shims_removed_on_unwrap_and_reinstalled_on_wrap(self):
         from torchlens.backends.torch import identity_shims

@@ -2791,14 +2791,22 @@ def _clear_session_tensor_metadata(
     if obj_id in seen or depth >= 12:
         return
     seen.add(obj_id)
+    # Scalar leaves cannot carry tl_* stamps; skipping them INLINE (instead of
+    # paying a full call that immediately returns) halves the cost of walking
+    # broadly-imported module namespaces like ``torch`` (round-3 b4 F1: the
+    # pre-forward ownership snapshot made every capture pay this walk twice).
+    _scalar_leaves = (str, bytes, int, float, bool)
     if isinstance(value, dict):
         for key, item in value.items():
-            _clear_session_tensor_metadata(key, seen, depth + 1, visit)
-            _clear_session_tensor_metadata(item, seen, depth + 1, visit)
+            if key is not None and not isinstance(key, _scalar_leaves):
+                _clear_session_tensor_metadata(key, seen, depth + 1, visit)
+            if item is not None and not isinstance(item, _scalar_leaves):
+                _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, (list, tuple, set, frozenset, deque)):
         for item in value:
-            _clear_session_tensor_metadata(item, seen, depth + 1, visit)
+            if item is not None and not isinstance(item, _scalar_leaves):
+                _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, nn.Module):
         return
@@ -2806,7 +2814,8 @@ def _clear_session_tensor_metadata(
     if namespace is None:
         return
     for item in namespace.values():
-        _clear_session_tensor_metadata(item, seen, depth + 1, visit)
+        if item is not None and not isinstance(item, _scalar_leaves):
+            _clear_session_tensor_metadata(item, seen, depth + 1, visit)
 
 
 def _clear_container_tree_tensor_metadata(
@@ -2855,7 +2864,12 @@ def _clear_container_tree_tensor_metadata(
         items = [item for pair in value.items() for item in pair]
     else:
         items = list(value)
+    # Inline scalar-leaf skip: module-namespace container trees are dominated
+    # by strings (``torch.__all__`` alone is ~1400), and each full call here
+    # costs more than the check (round-3 b4 F1 walk-cost finding).
     for item in items:
+        if item is None or isinstance(item, (str, bytes, int, float, bool)):
+            continue
         _clear_container_tree_tensor_metadata(item, seen, depth + 1, visit)
 
 
@@ -2931,8 +2945,8 @@ def _clear_callable_session_tensor_metadata(
             _clear_session_tensor_metadata(globals_dict[name], seen, visit=visit)
 
 
-def _collect_model_owned_tensor_ids(model: nn.Module) -> set[int]:
-    """Snapshot ids of tensors reachable from the model's PRE-FORWARD state.
+def _collect_model_owned_tensor_ids(model: nn.Module) -> dict[int, torch.Tensor]:
+    """Snapshot tensors reachable from the model's PRE-FORWARD state, PINNED.
 
     Walks exactly the surfaces the session-end clear walks -- submodule
     ``__dict__`` object graphs plus each forward callable's defaults, keyword
@@ -2945,6 +2959,15 @@ def _collect_model_owned_tensor_ids(model: nn.Module) -> set[int]:
     sessions), while a tensor first appearing MID-forward is absent from the
     snapshot and keeps the escape disclosure.
 
+    The mapping VALUES are strong references, deliberately (round-3 b1/b3/b4
+    merged finding): a bare ``set[int]`` of recyclable ids had no liveness
+    pinning, so a model that dropped a snapshotted cache tensor mid-forward
+    freed the object and a later stale-pre-wrap escape product could reuse the
+    exact id -- classified "model-owned known source", silently suppressing
+    the adoption disclosure (the exact laundering 3c721316 closed). Pinning
+    every snapshot member for the session makes id reuse impossible; the
+    workspace drop at the transient-state cleanup seam releases the pins.
+
     Parameters
     ----------
     model
@@ -2952,17 +2975,19 @@ def _collect_model_owned_tensor_ids(model: nn.Module) -> set[int]:
 
     Returns
     -------
-    set[int]
-        ``id()`` of every reachable non-Parameter tensor.
+    dict[int, torch.Tensor]
+        ``id() -> tensor`` for every reachable non-Parameter tensor. Consumers
+        test membership (``id(t) in snapshot``), identical to the historical
+        set semantics; the values exist only to pin the ids.
     """
 
-    owned: set[int] = set()
+    owned: dict[int, torch.Tensor] = {}
     seen: set[int] = set()
 
     def _note(tensor: torch.Tensor) -> None:
-        """Record one reachable tensor's object id."""
+        """Record and pin one reachable tensor under its object id."""
 
-        owned.add(id(tensor))
+        owned[id(tensor)] = tensor
 
     for submodule in model.modules():
         for attr_val in submodule.__dict__.values():

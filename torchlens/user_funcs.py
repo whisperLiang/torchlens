@@ -3443,11 +3443,18 @@ def _trace_torch_model(
 
     # Streaming saves, sinks, and halt-predicate partials are not re-runnable;
     # they report an escape as before instead of attempting a rescue re-run.
-    # User-supplied intervention transforms and pre-attached hooks are refused
-    # too (fail closed): a re-run invokes every user callable a SECOND time,
-    # and their side effects (counters, file writes, externally-held state)
-    # would double-apply with only a session-time disclosure. ``save=``
-    # selector predicates stay eligible -- selectors are pure by contract.
+    # EVERY user-callable channel the re-run would invoke a SECOND time is
+    # refused (fail closed): side effects (counters, file writes,
+    # externally-held state) would double-apply with only a session-time
+    # disclosure. That covers intervention transforms, pre-attached hooks,
+    # AND the in-capture transform callables -- ``activation_transform``,
+    # ``grad_transform``, and ``output_transform`` run inside ``run_capture``
+    # and measurably fired twice on a recovered rescue (b6-opus-R16-1 reopen).
+    # Channels applied OUTSIDE the rescue boundary stay eligible: ``save=``
+    # selector predicates (pure by contract), the input ``transform=``
+    # (applied before the re-run boundary; fires once), and
+    # ``layer_visualizers`` (rendered once on the returned trace, after the
+    # driver).
     rescue_eligible = (
         streaming_options.bundle_path is None
         and streaming_options.out_callback is None
@@ -3455,6 +3462,9 @@ def _trace_torch_model(
         and halt is None
         and intervene is None
         and not hooks
+        and activation_transform is None
+        and grad_transform is None
+        and output_transform_value is None
     )
     trace = capture_with_rescue(run_capture, eligible=rescue_eligible, model=model)
     trace.profile_enabled = profile_enabled
