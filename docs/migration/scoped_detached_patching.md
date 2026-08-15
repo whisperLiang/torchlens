@@ -139,8 +139,14 @@ Live torch traces expose these diagnostic fields:
 Public `tl.record(...)` uses the same guarded forward hot path and mirrors these fields onto the
 returned `Recording`.
 
-`capture_verified` and `rescue_rerun` are live diagnostic state and do not survive a `.tlspec`
-round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `True`.
+The verification VERDICT now survives a `.tlspec` round-trip in the negative direction only: a
+capture the producer refused to bless loads with `capture_verified=False` and its string
+`capture_verification_reason` intact, so an escape-disclosed artifact is never
+byte-indistinguishable from a clean one. A positive claim never persists — a loaded trace reports
+`None`/unknown rather than a falsely preserved (or forged) `True`, and load degrades any
+non-`False` persisted value the same way. `rescue_rerun` (and the heavyweight
+`escape_diagnostics`) remain live session-time diagnostic state and still do not survive the
+round-trip.
 
 ## Honest boundaries
 
