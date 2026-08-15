@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable, Mapping  # noqa: F401 (rebound-c
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast  # noqa: F401 (rebound-child globals)
 
+from .._errors import _ActionableErrorMixin
 from .._split_rebind import rebind_function as _rebind_function
 from ..errors._base import ValidationError
 from ..ir.container import (  # noqa: F401 (rebound-child globals)
@@ -78,11 +79,14 @@ InvariantApplicability = Literal["torch", "non_torch", "all"]
 MetadataInvariantFunc = Callable[["Trace"], object]
 
 
-class MetadataInvariantError(ValidationError, ValueError):
+class MetadataInvariantError(_ActionableErrorMixin, ValidationError, ValueError):
     """Raised when a metadata invariant check fails.
 
     Embeds the check name (e.g., ``"graph_topology"``) in the message prefix
     and stores it as an attribute for programmatic inspection in tests.
+    ``_ActionableErrorMixin`` supplies ``__reduce__`` so the strict two-argument
+    constructor survives pickle/deepcopy/process boundaries (R64-F1) instead of
+    degrading to a bare ``TypeError`` when ``cls(*args)`` is replayed.
     """
 
     def __init__(self, check_name: str, message: str) -> None:
@@ -422,6 +426,9 @@ _check_capture_edge_survival = _rebind_function(
     _invariants_topology._check_capture_edge_survival, globals()
 )
 _check_graph_topology = _rebind_function(_invariants_topology._check_graph_topology, globals())
+_check_sibling_relation_derivation = _rebind_function(
+    _invariants_topology._check_sibling_relation_derivation, globals()
+)
 _check_backend_neutral_graph_topology = _rebind_function(
     _invariants_payloads._check_backend_neutral_graph_topology, globals()
 )

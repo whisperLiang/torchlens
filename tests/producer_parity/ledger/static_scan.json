@@ -20,7 +20,7 @@
   "field": "modules",
   "file": "torchlens/_capture_state_helpers.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 5,
   "via_getattr": false
  },
  {
@@ -785,10 +785,18 @@
  },
  {
   "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/backends/paddle/backend.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
   "field": "label_raw",
   "file": "torchlens/backends/paddle/backend.py",
   "has_default": false,
-  "sites": 11,
+  "sites": 13,
   "via_getattr": false
  },
  {
@@ -1732,7 +1740,7 @@
   "field": "modules",
   "file": "torchlens/backends/torch/model_prep.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 7,
   "via_getattr": false
  },
  {
@@ -1996,7 +2004,7 @@
   "field": "kind",
   "file": "torchlens/capture/outcome.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {
@@ -2948,7 +2956,7 @@
   "field": "pass_index",
   "file": "torchlens/data_classes/op.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -2964,7 +2972,7 @@
   "field": "source_trace",
   "file": "torchlens/data_classes/op.py",
   "has_default": false,
-  "sites": 21,
+  "sites": 19,
   "via_getattr": false
  },
  {
@@ -3212,7 +3220,7 @@
   "field": "kind",
   "file": "torchlens/fastlog/_recorder.py",
   "has_default": true,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": true
  },
  {
@@ -3236,7 +3244,7 @@
   "field": "record_context",
   "file": "torchlens/fastlog/_recorder.py",
   "has_default": true,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": true
  },
  {
@@ -4884,7 +4892,7 @@
   "field": "parents",
   "file": "torchlens/postprocess/control_flow.py",
   "has_default": false,
-  "sites": 8,
+  "sites": 9,
   "via_getattr": false
  },
  {
@@ -6140,7 +6148,7 @@
   "field": "parent_arg_positions",
   "file": "torchlens/validation/_invariants_payloads.py",
   "has_default": true,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": true
  },
  {
@@ -6148,7 +6156,7 @@
   "field": "parents",
   "file": "torchlens/validation/_invariants_payloads.py",
   "has_default": true,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": true
  },
  {
@@ -6324,7 +6332,15 @@
   "field": "parent_arg_positions",
   "file": "torchlens/validation/exemptions.py",
   "has_default": true,
-  "sites": 8,
+  "sites": 9,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/validation/exemptions.py",
+  "has_default": true,
+  "sites": 1,
   "via_getattr": true
  },
  {
@@ -6660,7 +6676,7 @@
   "field": "modules",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 14,
+  "sites": 15,
   "via_getattr": false
  },
  {

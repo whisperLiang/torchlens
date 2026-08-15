@@ -2216,6 +2216,37 @@ class Trace(
             return f"layer:{layer_label}"
         return f"op:{getattr(site, 'label')}"
 
+    #: Key namespaces of DERIVED render-time annotation blobs (computed from a
+    #: specific run's activations). Bare ``layer:``/``op:`` keys are USER
+    #: ``annotate(data=...)`` blobs. Rerun refreshes drop the derived
+    #: namespaces (stale against the new activations) and keep user blobs.
+    _DERIVED_ANNOTATION_BLOB_PREFIXES: ClassVar[tuple[str, ...]] = (
+        "mds:",
+        "rdm:",
+        "scree:",
+        "featmap:",
+    )
+
+    def _user_annotation_blobs(self) -> dict[str, Any] | None:
+        """Return only user-attached annotation blobs.
+
+        Returns
+        -------
+        dict[str, Any] | None
+            Blobs outside every derived render namespace, or ``None`` when no
+            user blob exists (matching the unannotated default).
+        """
+
+        blobs = self._annotation_blobs
+        if not isinstance(blobs, dict):
+            return None
+        kept = {
+            key: value
+            for key, value in blobs.items()
+            if not key.startswith(self._DERIVED_ANNOTATION_BLOB_PREFIXES)
+        }
+        return kept or None
+
     def _store_annotation_blob(self, key: str, data: Any) -> None:
         """Store a blob annotation under ``_annotation_blobs``.
 
@@ -3134,10 +3165,6 @@ class Trace(
             "_spec_revision",
             "_out_recipe_revision",
             "input_annotations",
-            # ``_annotation_blobs`` is intentionally NOT preserved: those
-            # render-time payloads (feature maps / RDM / MDS / scree) are
-            # derived from the replaced run's activations and would render
-            # stale data over the new run's stimuli.
         )
         current_state = dict(state_items(self))
         preserved_trace_user_annotations = self._copy_user_annotations(
@@ -3146,6 +3173,13 @@ class Trace(
         preserved_state = {
             field_name: current_state.get(field_name) for field_name in preserved_fields
         }
+        # DERIVED annotation blobs (feature maps / RDM / MDS / scree, the
+        # ``_DERIVED_ANNOTATION_BLOB_PREFIXES`` namespaces) are NOT preserved:
+        # they were computed from the replaced run's activations and would
+        # render stale data over the new run's stimuli. USER
+        # ``annotate(data=...)`` blobs (bare ``layer:``/``op:`` keys) are the
+        # user's own attachments and survive like the user annotations above.
+        preserved_state["_annotation_blobs"] = self._user_annotation_blobs()
         replacement_state = dict(state_items(new_log))
         replacement_state.update(preserved_state)
         replacement_state["annotations"] = self._merge_user_annotations(
@@ -3367,14 +3401,14 @@ class Trace(
             "output_layers_by_pass",
             "output_layers_by_module_call",
             "_output_container_specs_by_raw_label",
-            # Fresh reruns carry no render-time annotation payloads, so this
-            # invalidates the stale feature-map/RDM/MDS/scree blobs derived
-            # from the replaced activations.
-            "_annotation_blobs",
         )
         for field_name in field_names:
             if hasattr(new_log, field_name):
                 setattr(self, field_name, self._copy_rerun_value(getattr(new_log, field_name)))
+        # DERIVED annotation blobs (feature-map/RDM/MDS/scree namespaces) were
+        # computed from the replaced activations and are invalidated; USER
+        # ``annotate(data=...)`` blobs survive the same-shape refresh.
+        self._annotation_blobs = self._user_annotation_blobs()
         self.facet_registry_snapshot = getattr(new_log, "facet_registry_snapshot", None)
 
     def _copy_rerun_value(self, value: Any) -> Any:

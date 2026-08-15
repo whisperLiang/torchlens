@@ -1587,14 +1587,12 @@ class TestVisualizationBugfixes:
     ) -> None:
         """Failed forward rendering keeps the DOT source so the error hint is truthful."""
 
+        from torchlens.visualization import _render_utils
         from torchlens.visualization._render_common import GraphvizRenderError
 
         def _raise_dot_failure(
             cmd: list[str],
-            timeout: int,
-            check: bool,
-            capture_output: bool,
-            start_new_session: bool = False,
+            **kwargs: object,
         ) -> subprocess.CompletedProcess[bytes]:
             """Raise a Graphviz process failure after the DOT source is written."""
 
@@ -1607,7 +1605,9 @@ class TestVisualizationBugfixes:
         model = nn.Identity()
         log = trace_fn(model, torch.randn(2, 3))
         outpath = tmp_path / "identity_render_failure"
-        monkeypatch.setattr(subprocess, "run", _raise_dot_failure)
+        # Every render spawn routes through the ONE bounded-subprocess seam
+        # (process-group teardown, r3 3.10 VIZ); patch it, not subprocess.run.
+        monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_dot_failure)
         try:
             with pytest.raises(GraphvizRenderError):
                 log.draw(

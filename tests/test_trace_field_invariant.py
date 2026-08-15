@@ -112,6 +112,10 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         # (``_trace_components.py`` -> "graph"); plain pickle re-materializes
         # each Op as a detached row, so the store never persists.
         "_trace_core",
+        # Per-trace op accessor cache (sibling of ``_module_call_accessor``):
+        # declared ``FieldPolicy.DROP`` with component owner "graph" and
+        # popped in ``__getstate__``, so it never persists.
+        "_op_accessor_cache",
     }
 
     actual = set(trace.__dict__.keys())

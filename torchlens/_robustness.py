@@ -41,6 +41,7 @@ import torch
 from torch import nn
 
 from ._distributed import check_distributed_capture
+from ._input_walk import INPUT_TREE_MAX_DEPTH
 from .errors._base import CompatibilityError, TorchLensWarning
 from .utils._torch_compat import get_tracing_tensor_types
 
@@ -175,8 +176,17 @@ class VariantScanTruncationWarning(TorchLensWarning):
     """
 
 
-_ITER_TENSORS_MAX_DEPTH = 128
-"""Maximum container-nesting depth inspected by :func:`_iter_tensors`."""
+_ITER_TENSORS_MAX_DEPTH = INPUT_TREE_MAX_DEPTH + 56
+"""Maximum container-nesting depth inspected by :func:`_iter_tensors`.
+
+Derived ABOVE the declared input-container contract (``INPUT_TREE_MAX_DEPTH``,
+200) with headroom: a bound below the contract (the original 128) truncated the
+scan -- and emitted the spurious truncation disclosure -- on fully SUPPORTED
+deep inputs, and preempted the device-move walker's typed over-depth refusal
+on unsupported ones. Trees within the contract now scan completely; over-deep
+input trees reach the walker's ``InvalidArgumentError``; only genuinely deeper
+non-input attribute graphs still truncate with the disclosure.
+"""
 
 _ITER_TENSORS_MAX_NODES = 4096
 """Maximum total objects inspected by one :func:`_iter_tensors` traversal."""
@@ -206,7 +216,7 @@ def _iter_tensors(
     handled separately. Instance ``__dict__`` is read directly, so properties and
     descriptors never execute. Traversal is iterative (an explicit worklist, so
     the depth bound is decoupled from Python's recursion limit) and capped at
-    128 levels / 4096 objects; when either bound truncates the scan, a one-shot
+    ``_ITER_TENSORS_MAX_DEPTH`` levels / 4096 objects; when either bound truncates the scan, a one-shot
     :class:`VariantScanTruncationWarning` disclosure is emitted because
     unsupported variants beyond the bound would fail undetected later. Opaque
     slots-only objects and tensors created later inside ``forward`` remain

@@ -435,7 +435,9 @@ def test_mds_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
     first_key, second_key = list(coords_by_key)
     for key, coords in coords_by_key.items():
         assert coords.shape == (8, 2)
-        assert torch.equal(trace._annotation_blobs[key], torch.from_numpy(coords))
+        # Derived MDS blobs live in the ``mds:`` namespace; bare layer:/op:
+        # keys are reserved for user ``annotate(data=...)`` blobs.
+        assert torch.equal(trace._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords))
 
     raw_second_distances = repgeom.activation_distance_matrix(linear_layers[1].out)
     raw_second_coords, _info = repgeom.classical_mds(raw_second_distances, min_n=8)
@@ -448,7 +450,7 @@ def test_mds_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
 
     assert loaded._annotation_blobs is not None
     for key, coords in coords_by_key.items():
-        assert torch.equal(loaded._annotation_blobs[key], torch.from_numpy(coords))
+        assert torch.equal(loaded._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords))
 
 
 def test_mds_evolution_returned_coords_do_not_alias_annotations() -> None:
@@ -457,11 +459,11 @@ def test_mds_evolution_returned_coords_do_not_alias_annotations() -> None:
     trace = _mds_trace(_MDSClassifier(), tl.func("linear"))
     coords_by_key = repgeom.mds_evolution(trace, save=tl.func("linear"), min_n=8)
     first_key = next(iter(coords_by_key))
-    before = float(trace._annotation_blobs[first_key][0, 0].item())
+    before = float(trace._annotation_blobs[f"mds:{first_key}"][0, 0].item())
 
     coords_by_key[first_key][0, 0] = 999.0
 
-    assert float(trace._annotation_blobs[first_key][0, 0].item()) == before
+    assert float(trace._annotation_blobs[f"mds:{first_key}"][0, 0].item()) == before
 
 
 def test_rdm_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Path) -> None:
@@ -961,7 +963,7 @@ def test_mds_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
     assert list(coords_by_key) == [key]
     assert coords_by_key[key].shape == (8, 2)
     assert trace._annotation_blobs is not None
-    assert torch.equal(trace._annotation_blobs[key], torch.from_numpy(coords_by_key[key]))
+    assert torch.equal(trace._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords_by_key[key]))
 
 
 def test_rdm_evolution_recurrent_aggregate_requires_pass_selection() -> None:

@@ -6,22 +6,100 @@ import contextlib
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
 
+from .._errors import _actionable_message, _ActionableErrorMixin
 from .._input_coerce import _coerce_input_args
+from ..errors._base import CompatibilityError
 from ..utils import _torch_compat
 from ..utils.arg_handling import normalize_input_args
 
 
-class GraphBreaksUnavailableError(RuntimeError):
-    """Raised when the running torch does not expose Dynamo explain."""
+class GraphBreaksUnavailableError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
+    """Raised when the running torch does not expose Dynamo explain.
+
+    Keeps its historical ``RuntimeError`` base while joining the taxonomy
+    with a stable code and a default remedy, so single-message raise sites
+    and existing ``except RuntimeError`` callers stay valid (R64).
+    """
+
+    code: str = "graph_breaks_unavailable"
+    default_remedy: str = (
+        "upgrade to a torch build that exposes torch._dynamo.explain, or skip "
+        "the graph_breaks() correlation on this runtime"
+    )
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable Dynamo-explain capability refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the missing Dynamo explain capability.
+        remedy:
+            Concrete caller action. The class default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        super().__init__(
+            _actionable_message(problem, resolved_remedy),
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
 
 
-class GraphBreaksNormalizationError(RuntimeError):
-    """Raised when a Dynamo explain result has an unsupported shape."""
+class GraphBreaksNormalizationError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
+    """Raised when a Dynamo explain result has an unsupported shape.
+
+    Keeps its historical ``RuntimeError`` base while joining the taxonomy
+    with a stable code and a default remedy, so single-message raise sites
+    and existing ``except RuntimeError`` callers stay valid (R64).
+    """
+
+    code: str = "graph_breaks_normalization_failed"
+    default_remedy: str = (
+        "report the unrecognized torch._dynamo.explain result shape to TorchLens, "
+        "or pin a torch version whose explain output is recognized"
+    )
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable explain-normalization refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the unrecognized explain-result shape.
+        remedy:
+            Concrete caller action. The class default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        super().__init__(
+            _actionable_message(problem, resolved_remedy),
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
 
 
 @dataclass(frozen=True)

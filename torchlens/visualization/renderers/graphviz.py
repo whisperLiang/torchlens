@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import graphviz
 
+from .. import _render_utils
 from ..render_ir import RenderIR, RenderIRDotStatement
 from ..request import RenderTarget
 from .base import RendererCapabilities, RenderReport
@@ -62,12 +62,9 @@ class GraphvizRenderer:
         self.emit(ir, dot)
         source_path = Path(dot.save(target.outpath))
         output_path = Path(f"{target.outpath}.{target.fileformat}")
-        subprocess.run(
+        _render_utils.run_bounded_subprocess(
             [dot.engine, f"-T{target.fileformat}", "-o", str(output_path), str(source_path)],
-            check=True,
-            capture_output=True,
             timeout=target.timeout,
-            start_new_session=True,
         )
         return RenderReport(dot.source, source_path, output_path)
 

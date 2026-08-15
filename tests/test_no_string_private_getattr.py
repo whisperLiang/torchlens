@@ -81,7 +81,10 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # _runnable_transaction.py; absent on non-runnable traces, so the None
     # default is the correct "no runnable seam" reading.
     "<root>": 15,
-    "_io": 24,
+    # 24 -> 25 (2026-08-15 r3settle reconcile): bundle.py reads the optional
+    # `_runnable` seam (absent on non-runnable traces; None default correct),
+    # the same f2bc65a6 idiom already ledgered at <root>.
+    "_io": 25,
     "autoroute": 2,
     "backends/jax": 7,
     "backends/mlx": 21,
@@ -96,7 +99,12 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # op-gradient budget charge reads the optional session-time
     # `_save_budget_accountant` in tensor_tracking.py (x2), the same idiom as
     # the pre-existing _ops_retention.py reads of the same field.
-    "backends/torch": 114,
+    # 114 -> 117 (2026-08-15 r3settle reconcile, b9937876 fix/backward): the
+    # per-call save_grads policy reads the optional session-time
+    # `_active_save_grads_policy` (tensor_tracking.py hasattr+getattr,
+    # backward.py getattr); absent outside a managed backward window, so the
+    # attribute-fallback default is the correct reading.
+    "backends/torch": 117,
     "bridge": 1,
     "bundle": 1,
     "capture": 20,
@@ -104,7 +112,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # linear ordinal_index cache keys its per-trace memo on the session-time
     # `_backward_projection_revision` counter in grad_fn_call.py (x2); absent
     # on loaded traces, so the None default is the correct reading.
-    "data_classes": 27,
+    # 27 -> 29 (2026-08-15 r3settle reconcile): op.py's out-dedup path reads
+    # the optional session-time `_out_dedup_mode` / `_out_identity_cache`
+    # knobs; absent on default captures, so the identity/None defaults are the
+    # correct "dedup off" reading.
+    "data_classes": 29,
     "experimental": 1,
     "fastlog": 2,
     "intervention": 43,
@@ -118,7 +130,10 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # attribute is genuinely optional session state (absent until the first
     # render), so the None default is the correct "no scratch dir yet" reading.
     "utils": 2,
-    "validation": 23,
+    # 23 -> 24 (2026-08-15 r3settle reconcile): _invariants_payloads.py reads
+    # the optional `_trace_core` op-store seam, absent on loaded/preview
+    # traces, so the None default is the correct "no sealed core" reading.
+    "validation": 24,
     # 20 -> 23 (2026-08-14 fixwave-2 reconcile): intended R19/R40 rendering
     # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
     # consolidation into _render_dot.py) against removed `_raw_layer_dict` /

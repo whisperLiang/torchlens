@@ -364,6 +364,11 @@ _LINEAGE_PROBE_BUILTINS: tuple[type[BaseException], ...] = (
     Warning,
     AssertionError,
     AttributeError,
+    # KeyError joined R64: without it a KeyError-lineage door (or a reparenting
+    # onto/off KeyError) would row as the empty tuple, indistinguishable from
+    # no-builtin-base, and sail through the golden exactly like the
+    # AttributeError blindness that once hid RecordContextFieldError.
+    KeyError,
 )
 
 BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
@@ -397,6 +402,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "CaptureError": (),
     "ChunkedForwardConfigError": ("ValueError",),
     "CaptureOutcomeError": (),
+    "CompileCountsUnavailableError": ("RuntimeError",),
     "CollectiveBoundaryReplayError": ("RuntimeError",),
     "CompatibilityError": (),
     "ConfigurationError": (),
@@ -409,6 +415,8 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "DirectWriteInExecutableSaveError": ("ValueError",),
     "DistributedCaptureUnsupportedError": ("RuntimeError",),
     "EngineDispatchError": ("ValueError",),
+    "GraphBreaksNormalizationError": ("RuntimeError",),
+    "GraphBreaksUnavailableError": ("RuntimeError",),
     "GraphShapeMismatchError": ("ValueError",),
     "GraphvizRenderError": ("RuntimeError",),
     "HelperMountError": ("ValueError",),
@@ -847,6 +855,84 @@ def test_actionable_refusal_pickle_round_trip(
     assert restored.severity == original.severity
 
 
+def _multiarg_refusal_cases() -> tuple[tuple[BaseException, dict[str, object]], ...]:
+    """Build one instance of every strict multi-argument refusal class (R64-F1).
+
+    These constructors take 2+ required positional arguments, so the default
+    ``Exception.__reduce__`` recipe (replay ``cls(*self.args)`` with the one
+    formatted message string) degraded them to a bare ``TypeError`` at any
+    pickle/deepcopy/process boundary — e.g. a spawn child's
+    ``MetadataInvariantError`` arrived in the parent as ``TypeError:
+    __init__() missing 1 required positional argument``. The
+    ``torchlens.merged`` ``MergedTraceError`` family shares the shape but is
+    governed by its own frozen-vocabulary contract and lane.
+
+    Returns
+    -------
+    tuple[tuple[BaseException, dict[str, object]], ...]
+        Instances paired with the structured attributes that must survive.
+    """
+
+    from torchlens._io.runnable_load import (
+        ContextFieldInvalidError,
+        DescriptorStructuralBoundError,
+    )
+    from torchlens._io.state_keys import PortableStateKeyError
+    from torchlens.runnable import RunnableErrorCode
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    return (
+        (
+            MetadataInvariantError("graph_topology", "parent link missing"),
+            {"check_name": "graph_topology"},
+        ),
+        (
+            ContextFieldInvalidError("default_device", "not in the closed vocabulary"),
+            {"field": "default_device", "detail": "not in the closed vocabulary"},
+        ),
+        (
+            DescriptorStructuralBoundError(
+                RunnableErrorCode.CALL_ARITY_MISMATCH,
+                "num_positional_args",
+                "exceeds the dense argument-leaf count",
+            ),
+            {
+                "code": RunnableErrorCode.CALL_ARITY_MISMATCH,
+                "field": "num_positional_args",
+                "detail": "exceeds the dense argument-leaf count",
+            },
+        ),
+        (
+            PortableStateKeyError(dict, ["run", "save"]),
+            {"cls": dict, "shadowed": ("run", "save")},
+        ),
+    )
+
+
+def test_multiarg_refusals_survive_pickle_and_deepcopy() -> None:
+    """Strict multi-argument refusal classes cross process boundaries intact.
+
+    ``pickle.loads(pickle.dumps(exc))`` is exactly what multiprocessing runs
+    on each side of a spawn boundary, so a green round-trip here is the
+    process-boundary guarantee; ``copy.deepcopy`` exercises the same
+    ``__reduce__`` recipe through the copy protocol.
+    """
+
+    import copy
+
+    for original, expected_attrs in _multiarg_refusal_cases():
+        for label, restored in (
+            ("pickle", pickle.loads(pickle.dumps(original))),
+            ("deepcopy", copy.deepcopy(original)),
+        ):
+            assert type(restored) is type(original), (label, type(restored))
+            assert str(restored) == str(original), label
+            for attr, expected in expected_attrs.items():
+                assert getattr(restored, attr) == expected, (label, attr)
+            assert isinstance(restored, errors.TorchLensError)
+            assert restored.fields == original.fields, label
+
+
 def test_save_argument_door_is_typed_and_redirects_save_all() -> None:
     """The ``save=`` type door refuses typed and names the `'all'` remedy.
 
@@ -1062,6 +1148,10 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     "torchlens._runnable_execution._ProjectionCountExceeded": (
         "private internal bound signal; caught inside the projection walk"
     ),
+    "torchlens.user_funcs._CaptureCacheEntryOverCeilingError": (
+        "private mid-stream byte-ceiling abort signal; raised and caught inside the "
+        "capture-cache writer, never escapes user_funcs"
+    ),
     "torchlens.utils.rng._NotADigestableRng": (
         "private RNG-classifier signal; caught inside the witness classifier"
     ),
@@ -1158,15 +1248,6 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     ),
     "torchlens.receptive_field._errors.ReceptiveFieldValidationError": (
         "public home is the lazy tl.receptive_field submodule"
-    ),
-    "torchlens.debug._compile_counter.CompileCountsUnavailableError": (
-        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
-    ),
-    "torchlens.debug._graph_breaks.GraphBreaksUnavailableError": (
-        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
-    ),
-    "torchlens.debug._graph_breaks.GraphBreaksNormalizationError": (
-        "power-user tl.debug surface, deliberately outside __all__ and the error registry"
     ),
     "torchlens.attribution._core.AttributionError": (
         "public home is torchlens.attribution.__all__; plain ValueError outside the "

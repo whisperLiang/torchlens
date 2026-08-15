@@ -60,6 +60,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
         ("torchlens/backends/torch/completeness_witness.py", "_DISPATCH_TENSOR_ORIGINS"),
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
+        # RF gradient-probe window depth: incremented/decremented in a
+        # try/finally around each probe (receptive_field/_gradient.py), read
+        # by the hot paths to suppress capture side effects inside the window.
+        ("torchlens/_state.py", "_rf_probe_depth"),
         ("torchlens/capture/projections.py", "_active_recording_state"),
         ("torchlens/capture/trace.py", "_ACTIVE_CAPTURE_BACKEND"),
         ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
@@ -131,6 +135,9 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         # (holder, attribute, original) rows for every installed identity shim;
         # popped by the shim uninstall, so it is install bookkeeping, not capture
         # state.
+        # One-way "shim family installed" sentinel alongside _installed; reset
+        # by the shim uninstall path.
+        ("torchlens/backends/torch/identity_shims.py", "_family_installed"),
         ("torchlens/backends/torch/identity_shims.py", "_installed"),
         # Meta-path finder handle for the lazy causal-bias shim (fix/rescue
         # dcd0ca9c): installed once so a post-wrap `import transformers` still
@@ -347,6 +354,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         # Per-trace grad_fn-call ordinal index (fix/walkers f399c63a, linear
         # ordinal_index): keyed weakly by the owning trace, dies with it.
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
+        # Per-accessor param ordinal index, keyed weakly by the owning
+        # accessor; entries die with it (mirror of _ORDINAL_POSITIONS_CACHE).
+        ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -430,6 +440,10 @@ _PROCESS_CACHES = frozenset(
         # outside _REPLAY_ULP_HEADROOM; clearing only re-derives (pure finfo
         # arithmetic), so it is a memo, not capability state.
         ("torchlens/utils/tensor_utils.py", "_DTYPE_FLOAT_TOLERANCES"),
+        # Adaptive defer-registry prune watermark (doubles away from the live
+        # population; resets down after a mostly-dead sweep). Clearing it back
+        # to the threshold only costs extra sweeps, never correctness.
+        ("torchlens/utils/tensor_utils.py", "_defer_prune_watermark"),
         # Fork-inheritance discriminator for warn_parallel (r-b6 R40-3b): the
         # PID that first observed an initialized process group. Clearing it
         # only re-stamps on the next capture entry; it never steers anything
@@ -956,7 +970,10 @@ _WEAKLY_HELD = frozenset(
         # Kind memos re-keyed weakly by the value TYPE so dynamically created
         # classes stay collectable; lifecycle class stays _PROCESS_CACHES (the
         # ledger is orthogonal: weakness is a storage fact).
+        ("torchlens/_io/bundle.py", "_NESTED_BLOB_KINDS"),
         ("torchlens/_io/rehydrate.py", "_REHYDRATE_KINDS"),
+        ("torchlens/_io/runnable.py", "_DATACLASS_FIELD_NAMES"),
+        ("torchlens/_io/runnable.py", "_SPARSE_CORE_NODE_KINDS"),
         ("torchlens/_io/scrub.py", "_SCRUB_VALUE_KINDS"),
         ("torchlens/_state.py", "_log_registry"),
         ("torchlens/_state.py", "_prepared_models"),
@@ -1003,6 +1020,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
+        ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -1651,8 +1669,73 @@ def test_child_process_guard_refuses_fork_inherited_group_stamp(
     warn_parallel()
 
     # The "parent rank" observed the group under a different PID; the fork
-    # child inherits that stamp and must be refused.
+    # child inherits that stamp and must be refused. A real fork child also
+    # inherits the parent's import-PID value (which differs from its own pid),
+    # so the simulation mismatches the import stamp too — otherwise the R40
+    # importer-reclaim rule would correctly treat this test process (which IS
+    # the interpreter's importer) as the rank.
+    monkeypatch.setattr(display_mod, "_WARN_PARALLEL_IMPORT_PID", os.getpid() + 1)
     monkeypatch.setitem(display_mod._DIST_GROUP_OBSERVED_PID, "pid", os.getpid() + 1)
+    with pytest.raises(tl.errors.CaptureContextError) as refusal:
+        warn_parallel()
+    assert refusal.value.fields["code"] == "child_process_capture_unsupported"
+
+
+def test_child_process_guard_import_pid_rank_reclaims_stolen_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fork child stamping FIRST cannot invert the refusal onto the rank (R40).
+
+    A genuine rank that raw-forks BEFORE its first capture let the child stamp
+    ITS pid first via ``setdefault``; the child then read as the "rank" and the
+    real rank was refused ``child_process_capture_unsupported``. The
+    interpreter's original importer (import-PID process) can never be a fork
+    child, so it reclaims the stamp unconditionally; a non-importer process
+    holding someone else's stamp stays refused.
+    """
+
+    import multiprocessing as mp
+
+    import torchlens.utils.display as display_mod
+    from torchlens.utils.display import warn_parallel
+
+    class _FakeRank:
+        """The real rank process (spawn-style: fresh import, own import PID)."""
+
+        name = "Process-1"
+        daemon = False
+
+    class _FakeDist:
+        """Distributed module stub reporting an initialized group."""
+
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+    monkeypatch.setattr(mp, "current_process", lambda: _FakeRank())
+    monkeypatch.setattr(mp, "parent_process", lambda: _FakeRank())
+    fake_dist = _FakeDist()
+    monkeypatch.setattr(torch, "distributed", fake_dist)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)  # type: ignore[arg-type]
+
+    # This pytest process imported torchlens itself, so it plays the genuine
+    # spawn rank (import PID == own pid). A fork child stamped first.
+    assert os.getpid() == display_mod._WARN_PARALLEL_IMPORT_PID
+    stolen_pid = os.getpid() + 12345
+    monkeypatch.setitem(display_mod._DIST_GROUP_OBSERVED_PID, "pid", stolen_pid)
+
+    # The import-PID rank reclaims the stamp and is accepted.
+    warn_parallel()
+    assert display_mod._DIST_GROUP_OBSERVED_PID["pid"] == os.getpid()
+
+    # A NON-importer process holding someone else's stamp stays refused: the
+    # reclaim rule is import-PID-only and never readmits a fork child.
+    monkeypatch.setattr(display_mod, "_WARN_PARALLEL_IMPORT_PID", os.getpid() + 1)
+    monkeypatch.setitem(display_mod._DIST_GROUP_OBSERVED_PID, "pid", stolen_pid)
     with pytest.raises(tl.errors.CaptureContextError) as refusal:
         warn_parallel()
     assert refusal.value.fields["code"] == "child_process_capture_unsupported"

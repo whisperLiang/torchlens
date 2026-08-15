@@ -610,6 +610,18 @@ def warn_parallel() -> None:
             # never captured is stamped here on ITS first capture — the stamp
             # is per-interpreter state, reset by spawn's fresh import.
             owner_pid = _DIST_GROUP_OBSERVED_PID.setdefault("pid", os.getpid())
+            if owner_pid != os.getpid() and os.getpid() == _WARN_PARALLEL_IMPORT_PID:
+                # R40 steal closure: first-observer stamping must not be
+                # first-FORK-CHILD stamping. A rank that raw-forks BEFORE its
+                # first capture would otherwise lose the stamp to the child
+                # (child accepted as "rank", the REAL rank then refused). The
+                # interpreter's original importer can never be a fork child —
+                # a fork child inherits the parent's import-PID value, which
+                # differs from its own pid — so the import-PID process
+                # reclaims the stamp unconditionally. Non-importer processes
+                # (raw-fork children) still cannot displace an existing stamp.
+                _DIST_GROUP_OBSERVED_PID["pid"] = os.getpid()
+                owner_pid = os.getpid()
             is_rank_process = owner_pid == os.getpid()
     except Exception:
         is_rank_process = False

@@ -376,6 +376,8 @@ def _snapshot_declared_state(model: Any) -> dict[str, Any] | None:
     if model is None or not isinstance(model, torch.nn.Module):
         return None
     snapshot: dict[str, Any] = {}
+    # detach-ok: read-only pre-rescue state snapshot under no_grad; restored
+    # verbatim on divergence, never a training-path payload.
     with _state.pause_logging(), torch.no_grad():
         for name, parameter in model.named_parameters():
             if parameter is not None:

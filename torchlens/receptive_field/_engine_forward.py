@@ -734,7 +734,70 @@ def _transpose_axis_map(
                     provenance=provenance,
                 )
             )
-    return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)
+    return _degrade_for_selected_axes(child, parent, state, result, rule_name, notes, axes)
+
+
+def _degrade_for_selected_axes(
+    child: Op,
+    parent: Op,
+    state: _InputState,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
+    axes: list[_AxisState],
+) -> _InputState:
+    """Widen a transposed axis-map state whose scalar-select drops real extent.
+
+    A scalar-selected parent axis of extent > 1 makes the whole transposed
+    image CONDITIONAL on the source's dropped coordinate: sources at the
+    recorded index project as mapped, every other source projects NOWHERE.
+    The descriptor lattice has no per-axis slot for the dropped parent axis,
+    so the sound presentation is an upper-bound envelope — every surviving
+    claim loses exactness. When the dropped axis is the parent's leading
+    axis (the batch heuristic shared with :func:`_transpose_full`) the
+    select also rebases batch indices across the boundary, so the known
+    target batch axis widens to a whole-extent full claim, DECLARING the
+    coupling geometrically instead of serving an identity pointwise claim
+    that misses the true mapping (disputed-r3 F2).
+    """
+
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
+    oversized = tuple(
+        axis for axis in selected if 0 <= axis < len(parent.shape) and int(parent.shape[axis]) > 1
+    )
+    if not oversized:
+        return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)
+    widened: list[_AxisState] = []
+    for index, axis in enumerate(axes):
+        if (
+            index == state.batch_axis
+            and 0 in oversized
+            and len(parent.shape) > 1
+            and not isinstance(axis.geometry, _Dissolved)
+        ):
+            widened.append(
+                replace(
+                    axis,
+                    geometry=_Full(exact=False),
+                    output_axis=None,
+                    kind="full",
+                    provenance=child.label,
+                )
+            )
+        elif isinstance(axis.geometry, (_Mapped, _Full)):
+            widened.append(replace(axis, geometry=replace(axis.geometry, exact=False)))
+        else:
+            widened.append(axis)
+    notes += (
+        f"{child.label}: a scalar-selected parent axis restricts which sources project;"
+        " unselected sources project nowhere, so these bounds are an upper-bound envelope",
+    )
+    return replace(state, axes=tuple(widened), notes=notes, rule=rule_name)
 
 
 __all__: list[str] = []

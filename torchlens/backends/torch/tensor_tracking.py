@@ -766,6 +766,15 @@ def _log_tensor_grad(self: "Trace", grad: torch.Tensor, _label_raw: str) -> None
     self.has_gradients = True
     if _label_raw not in self._raw_to_final_layer_labels:
         return
+    if not self.layer_dict_all_keys:
+        # A fastlog/raw runtime trace never builds the legacy layer surface
+        # (postprocess is skipped), so the layer-slot write is structurally
+        # inapplicable there -- its gradients ride the backward event stream.
+        # The per-call save_grads policy gate (b9937876) armed this write on
+        # recording backward, where every lookup would KeyError. Full traces
+        # keep the populated dict, so a genuinely missing individual key
+        # still raises below (mapping/dict divergence stays a tripwire).
+        return
     tensor_label = self._raw_to_final_layer_labels[_label_raw]
     layer_log_entry = self.layer_dict_all_keys[tensor_label]
     layers_to_update = [tensor_label]

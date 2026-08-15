@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from collections import Counter, defaultdict
 from html import escape
 from typing import Any, cast
@@ -9,6 +11,8 @@ from typing import Any, cast
 import graphviz
 
 from ..fastlog.types import RecordContext, RecordingTrace
+from . import _render_utils
+from ._render_common import GraphvizRenderError
 
 _RAIL_COLORS = (
     "#4E79A7",
@@ -191,8 +195,53 @@ def draw(
         if op_number > 0:
             dot.edge(f"event_{op_contexts[op_number - 1].event_index}", f"event_{ctx.event_index}")
     if vis_outpath is not None:
-        dot.render(vis_outpath, format=vis_fileformat, cleanup=True, view=not vis_save_only)
+        _render_dry_run_graph(dot, vis_outpath, vis_fileformat, vis_save_only)
     return cast(str, dot.source)
+
+
+def _render_dry_run_graph(
+    dot: graphviz.Digraph,
+    vis_outpath: str,
+    vis_fileformat: str,
+    vis_save_only: bool,
+) -> None:
+    """Render a dry-run graph through the bounded runner and managed viewer.
+
+    Replaces ``dot.render(..., view=...)``: graphviz's ``render`` exposes no
+    timeout (a wedged ``dot`` hung the caller forever, the exact class already
+    fixed on every Trace render path) and its ``view=True`` launched a
+    discarded, unmanaged viewer ``Popen``. Matches ``Trace.draw`` behavior:
+    the render is bounded at ``_render_utils.RENDER_TIMEOUT_SECONDS`` with a
+    typed :class:`GraphvizRenderError` on timeout or failure, the DOT source
+    is cleaned up only on success (``cleanup=True`` semantics), and previews
+    open through the reap-registered, headless-guarded managed viewer.
+    """
+
+    source_path = dot.save(vis_outpath)
+    rendered_path = f"{vis_outpath}.{vis_fileformat}"
+    timeout_seconds = _render_utils.RENDER_TIMEOUT_SECONDS
+    try:
+        _render_utils.run_bounded_subprocess(
+            [dot.engine, f"-T{vis_fileformat}", "-o", rendered_path, source_path],
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GraphvizRenderError(
+            f"Graphviz render timed out after {timeout_seconds}s for fastlog dry-run "
+            f"graph. DOT source was saved to '{source_path}'."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        raise GraphvizRenderError(
+            f"Graphviz failed while rendering fastlog dry-run graph. DOT source was "
+            f"saved to '{source_path}'. Graphviz stderr: {stderr}"
+        ) from error
+    if os.path.exists(source_path):
+        os.remove(source_path)
+    if not vis_save_only:
+        _render_utils._open_file_quietly(rendered_path)
 
 
 def summary(trace: RecordingTrace) -> str:
