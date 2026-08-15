@@ -3012,8 +3012,10 @@ class Op:
         multi-pass layer). Unfinished traces still use raw labels.
         """
 
-        _owner = self._source_trace
-        _finished = self._tracing_finished or (_owner is not None and _owner._tracing_finished)
+        _finished_trace = self._source_trace_or_none()
+        _finished = self._tracing_finished or (
+            _finished_trace is not None and _finished_trace._tracing_finished
+        )
         if not _finished:
             return {self._label_raw}
         spellings = {self.layer_label}
@@ -3412,8 +3414,8 @@ class Op:
         pickle strips the weakref; cleanup clears it) refuses with the same
         typed ``RecordBindingError`` family as the collected-Trace case, so
         no ``None`` can escape behind the ``-> Trace`` signature and crash a
-        caller untyped (the Layer half landed in 1a2b715e; this is the Op
-        half, b7-opus R52-B).
+        caller untyped -- the r4 ``Layer`` fix (1a2b715e) applied to the
+        sibling record class it never reached (r5 b7-opus R52-B).
         """
         ref = self._slot("_source_trace_ref")
         if ref is None:
@@ -3443,14 +3445,21 @@ class Op:
         """
         self._source_trace_ref = weakref.ref(value) if value is not None else None
 
+    def _source_trace_or_none(self) -> "Trace | None":
+        """Owning Trace, or ``None`` when detached (internal quiet spelling)."""
+        ref = self._slot("_source_trace_ref")
+        obj = ref() if ref is not None else None
+        return cast("Trace | None", obj)
+
     @property
     def _source_trace(self) -> "Trace | None":
-        """Owning Trace, if bound and still alive (tolerant internal read)."""
+        """Owning Trace, if bound and still alive (tolerant internal read).
 
-        ref = self._slot("_source_trace_ref")
-        if ref is None:
-            return None
-        return cast("Trace | None", ref())
+        Property alias of :meth:`_source_trace_or_none` so both landed
+        internal spellings stay valid.
+        """
+
+        return self._source_trace_or_none()
 
     def _source_trace_or_error(self) -> "Trace":
         """Return the owning Trace, or raise a detached-log error.
@@ -4567,12 +4576,24 @@ class Op:
     # ********************************************
 
     def __str__(self) -> str:
-        """Return a human-readable operation summary."""
+        """Return a human-readable operation summary.
 
-        owner = self._source_trace
-        trace_finished = owner is not None and owner._tracing_finished
+        Data-model contract: never raises. An Op detached from its Trace
+        (collected, standalone-pickled, or husked by cleanup) degrades to a
+        one-line placeholder instead of silently printing an unknown
+        denominator (``operation 1/?``) or propagating the typed relation
+        refusal out of ``repr()``/``print()`` (r5 b7-opus R52-B, matching
+        the Layer degradation).
+        """
+
+        trace = self._source_trace_or_none()
+        trace_finished = trace is not None and trace._tracing_finished
         if self._tracing_finished or trace_finished:
-            return self._str_after_pass()
+            try:
+                return self._str_after_pass()
+            except RecordBindingError:
+                label = self.layer_label or self._label_raw or "<unbound>"
+                return f"<Op {label}: detached from its Trace>"
         return self._str_during_pass()
 
     def _str_during_pass(self) -> str:
@@ -4612,8 +4633,9 @@ class Op:
             pass_str = f" (pass {self.pass_index}/{self.num_passes}), "
         else:
             pass_str = ", "
-        sml = self._source_trace
-        num_ops = sml.num_ops if sml is not None else "?"
+        # Raises RecordBindingError when detached; __str__ degrades it to the
+        # explicit placeholder instead of printing an unknown denominator.
+        num_ops = self.source_trace.num_ops
         s = f"Layer {self.layer_label}{pass_str}operation {self.step_index}/{num_ops}:"
         s += f"\n\tOutput tensor: shape={self.shape}, dtype={self.dtype}, size={self.activation_memory}"
         if not self.has_saved_activation:

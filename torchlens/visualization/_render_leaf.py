@@ -598,6 +598,8 @@ def _infer_intervening_module_bfs(
         Module key for the nearest paired grad_fn_handle, if found.
     """
 
+    # deque: list.pop(0) shifted the whole queue per node, Theta(V^2) on
+    # wide backward graphs for a linear BFS (R29, b4 sol MED).
     queue = deque(start_ids)
     seen: set[int] = set()
     reverse_edges: dict[int, list[int]] = defaultdict(list)

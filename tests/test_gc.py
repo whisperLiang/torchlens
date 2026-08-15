@@ -541,6 +541,122 @@ class TestTraceGC:
             partial_module._FAILED_CAPTURE_REGISTRY.pop(id(exception), None)
 
     @pytest.mark.smoke
+    def test_nonweakrefable_entry_never_pins_the_exception_graph(self):
+        """A dropped locked+non-weakrefable exception must not pin its capture (R37).
+
+        An ``Exception`` subclass declaring ``__slots__`` is non-weakrefable,
+        and one that also refuses ``__setattr__`` rejects the ``partial_log``
+        attachment, so it reaches the registry fallback. The stub design
+        (fixwave-5 integration; supersedes the strong-retention fallback and
+        its refcount sweep) NEVER retains the exception: its graph --
+        traceback, frame locals, model, inputs -- frees the moment the
+        caller drops it, with NO later registry interaction needed. The
+        price, disclosed on the registry docstring, is that the partial
+        TRACE stays pinned by the entry until the registry cap; this test
+        pins that the registry entry is the ONLY thing retaining it.
+        """
+
+        from torchlens import partial as partial_module
+
+        class _LockedSlots(Exception):
+            __slots__ = ()
+
+            def __setattr__(self, name, value):
+                raise AttributeError("locked")
+
+        with pytest.raises(TypeError):
+            weakref.ref(_LockedSlots("x"))  # the precondition this arm exists for
+
+        class _FrameLocalMarker:
+            pass
+
+        def raise_locked():
+            marker = _FrameLocalMarker()
+            marker_ref = weakref.ref(marker)
+            try:
+                raise _LockedSlots("stub retention probe")
+            except _LockedSlots as error:
+                return error, marker_ref
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        exception, marker_ref = raise_locked()
+        partial_log = partial_module.PartialTrace(trace=trace, original_exception=exception)
+        key = id(exception)
+        partial_module._register_failed_capture(exception, partial_log)
+        del partial_log
+
+        # Recovery works while the caller holds the exception, and the sweep
+        # (which runs inside every lookup) never evicts a stub entry.
+        recovered = partial_module.from_failed_capture(exception)
+        assert recovered.trace is trace
+        del recovered
+        assert key in partial_module._FAILED_CAPTURE_REGISTRY
+
+        # The exception graph frees IMMEDIATELY on drop -- no sweep, no
+        # later registry interaction (stronger than the superseded strong
+        # fallback, which kept it until the next registration or lookup).
+        del exception
+        gc.collect()
+        assert marker_ref() is None, (
+            "the stub entry pinned the dead exception's traceback frame locals"
+        )
+
+        # The trace pin is the registry entry ALONE (cap-bounded): popping
+        # the entry must be the last strong reference standing.
+        trace_ref = weakref.ref(trace)
+        del trace
+        gc.collect()
+        assert trace_ref() is not None, "the cap-bounded registry entry should hold the trace"
+        partial_module._FAILED_CAPTURE_REGISTRY.pop(key, None)
+        gc.collect()
+        assert trace_ref() is None, (
+            "something besides the registry entry retained the partial trace"
+        )
+
+    @pytest.mark.smoke
+    def test_live_run_after_model_collection_refuses_typed_and_names_the_weak_ref(self):
+        """A collected source model refuses run() typed AND discloses why (R37).
+
+        The refusal itself is correct by design (the trace holds its model
+        weakly), but it used to be undocumented and its message named neither
+        the weak reference nor a remedy -- the plainest documented idiom
+        ``tl.trace(Model(), x)`` then failed gc-timing-dependently with no
+        actionable explanation.
+        """
+
+        from torchlens.errors import RunCapabilityUnavailableError
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        gc.collect()
+        assert trace._source_model_ref() is None, "inline model should be collected"
+        with pytest.raises(RunCapabilityUnavailableError) as excinfo:
+            trace.run(inputs=torch.randn(1, 5))
+        message = str(excinfo.value)
+        assert "weakly" in message and "strong reference" in message, (
+            "the collected-model refusal must disclose the weak-reference "
+            f"dependency and its remedy; got: {message}"
+        )
+        with pytest.raises(RunCapabilityUnavailableError) as fast_excinfo:
+            trace.run(inputs=torch.randn(1, 5), fast=True)
+        assert "weakly" in str(fast_excinfo.value)
+
+    @pytest.mark.smoke
+    def test_cleanup_drops_the_receptive_field_solution_cache(self):
+        """cleanup() must evict the rf solution cache, its only eviction path (R33).
+
+        ``_receptive_field_solution`` (~54 MB on a resnet18 trace) lives
+        outside MODEL_LOG_FIELD_ORDER, so the husking loop skipped it and the
+        cache survived cleanup() with no eviction path at all.
+        """
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        trace.__dict__["_receptive_field_solution"] = object()
+        trace.cleanup()
+        assert "_receptive_field_solution" not in trace.__dict__, (
+            "cleanup() left the receptive-field solution cache pinned"
+        )
+
+    @pytest.mark.smoke
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 

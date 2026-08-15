@@ -248,7 +248,7 @@ def _active_span_names(direction: Literal["forward", "backward"]) -> tuple[str, 
 
     return tuple(
         str(span["name"])
-        for span in _state._active_record_spans
+        for span in _state._active_record_spans.get()
         if span.get("direction") in (direction, "both")
     )
 
@@ -328,7 +328,7 @@ def span(
         "start": time.monotonic(),
         "end": None,
     }
-    _state._active_record_spans.append(span_record)
+    _state._active_record_spans.set(_state._active_record_spans.get() + (span_record,))
     trace = _state._active_trace
     if trace is not None:
         trace.observer_spans.append(span_record)
@@ -336,10 +336,13 @@ def span(
         yield span_record
     finally:
         span_record["end"] = time.monotonic()
-        if _state._active_record_spans and _state._active_record_spans[-1] is span_record:
-            _state._active_record_spans.pop()
-        elif span_record in _state._active_record_spans:
-            _state._active_record_spans.remove(span_record)
+        active = _state._active_record_spans.get()
+        if active and active[-1] is span_record:
+            _state._active_record_spans.set(active[:-1])
+        elif span_record in active:
+            _state._active_record_spans.set(
+                tuple(record for record in active if record is not span_record)
+            )
 
 
 @contextmanager
@@ -379,7 +382,7 @@ def active_span_records() -> list[dict[str, Any]]:
         Active span records.
     """
 
-    return list(_state._active_record_spans)
+    return list(_state._active_record_spans.get())
 
 
 __all__ = ["TapObserver", "TapRecord", "active_span_records", "record_span", "span", "tap"]

@@ -56,6 +56,15 @@ inputs -- until unrelated failures evicted them). They store an identity STUB
 holding only the exception TYPE: lookup verifies id + exact type instead of
 object identity, a deliberately weaker check for a diagnostic-only channel,
 disclosed here rather than paid for in gigabytes.
+Stub entries still strongly retain the partial TRACE (that is what makes a
+later ``from_failed_capture`` recoverable at all): nothing weakref-able in a
+non-weakrefable exception's retention graph exists to witness its death
+(frames and tracebacks refuse weak references), so the trace pin is bounded
+by the registry CAP rather than by liveness -- a bounded, disclosed cost,
+categorically smaller than the unbounded exception-graph pin the stub
+eliminates. :func:`_sweep_unreachable_strong_entries` remains as a belt for
+the legacy strong entry shape only (a refcount sweep must never fire on
+stubs, whose sole strong reference legitimately IS the registry).
 """
 
 _FAILED_CAPTURE_RESULTS: weakref.WeakValueDictionary[int, PartialTrace] = (
@@ -311,6 +320,7 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     partial_log = getattr(exception, "partial_log", None)
     if isinstance(partial_log, PartialTrace):
         return partial_log
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
     registry_entry = _FAILED_CAPTURE_REGISTRY.get(exception_id)
     if registry_entry is not None and _held_matches(registry_entry[0], exception):
@@ -328,7 +338,11 @@ class _NonWeakrefIdentityStub:
     """Identity witness for a non-weakrefable registered exception.
 
     Holds only the exception TYPE (a long-lived class object), never the
-    instance, so the registry cannot pin the exception graph.
+    instance, so the registry cannot pin the exception graph. No liveness
+    witness is constructible for the stub arm: the exception refuses weak
+    references and so do its traceback and frames, so the entry (and the
+    partial trace it strongly retains) is bounded by the registry cap
+    rather than by liveness, disclosed on the registry docstring.
     """
 
     __slots__ = ("exc_type",)
@@ -356,6 +370,40 @@ def _held_matches(
     return held is exception
 
 
+def _sweep_unreachable_strong_entries() -> None:
+    """Evict strong-fallback entries whose exception no caller can reach.
+
+    Weak entries evict themselves through their weakref callback the moment
+    the caller drops the exception. Strong entries (non-weakrefable exception
+    types) have no callback, so without this sweep a dropped exception kept
+    its whole traceback -- frame locals, model, inputs -- plus the partial
+    trace pinned until 128 later failures evicted it. Swept at registration
+    and lookup time by refcount: an exception whose only remaining reference
+    is this registry's entry tuple can never be passed to
+    ``from_failed_capture`` again, so its entry is unrecoverable garbage.
+    """
+
+    import sys
+
+    for key, entry in list(_FAILED_CAPTURE_REGISTRY.items()):
+        if isinstance(entry[0], weakref.ref):
+            continue
+        if isinstance(entry[0], _NonWeakrefIdentityStub):
+            # Stub entries hold only the exception TYPE; their sole strong
+            # reference legitimately IS the registry tuple, so a refcount
+            # sweep would evict every stub immediately after registration.
+            # No liveness witness is constructible for them (the exception,
+            # its traceback, and its frames all refuse weak references);
+            # they stay until the registry cap, disclosed on the stub class.
+            continue
+        # Sole-ownership baseline: the registry tuple's slot plus
+        # getrefcount's own argument slot -> 2. Any caller-held reference
+        # (including an in-flight ``except`` binding) raises it above that,
+        # so miscounting can only KEEP an entry, never evict a live one.
+        if sys.getrefcount(entry[0]) <= 2:
+            del _FAILED_CAPTURE_REGISTRY[key]
+
+
 def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:
     """Retain partial recovery when an exception rejects attribute assignment.
 
@@ -372,6 +420,7 @@ def _register_failed_capture(exception: BaseException, partial_log: PartialTrace
         Stores a bounded, weakly-held entry for :func:`from_failed_capture`.
     """
 
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
     held: weakref.ref[BaseException] | _NonWeakrefIdentityStub
     try:

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -158,69 +157,17 @@ _KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", 
 # legacy literal that lived inside ``_render_dot.draw``.
 RENDER_TIMEOUT_SECONDS = 120
 
-# Grace period between SIGTERM and SIGKILL when a timed-out render's whole
-# process group is torn down. Graphviz exits promptly on SIGTERM; the
-# escalation only matters for a wedged engine (or a plugin it forked) that
-# ignores the polite signal.
-_KILL_GRACE_SECONDS = 0.5
-
-# POSIX process-group support. ``start_new_session`` needs ``os.setsid`` and
-# group teardown needs ``os.killpg``/``os.getpgid``; feature-check instead of
-# parsing platform strings so exotic POSIX-likes degrade the same way Windows
-# does (leader-only kill, matching the historical ``subprocess.run`` cleanup).
-_HAS_PROCESS_GROUPS = all(hasattr(os, name) for name in ("setsid", "killpg", "getpgid"))
-
-# Linux parent-death binding for BOUNDED render children. The group teardown
-# above only runs in the parent's exception handlers, so hard parent death
-# (SIGKILL) left the session-leading renderer running unbounded (b6 R40).
-# PR_SET_PDEATHSIG delivers SIGKILL to the child when the spawning thread
-# exits -- for this synchronous seam the spawner outlives every normal child,
-# so the signal fires exactly in the abandoned-child case. The prctl pointer
-# is resolved ONCE at import; the post-fork hook only calls it (no dlopen or
-# allocation between fork and exec). Viewer children intentionally stay
-# unbound: they are detached on purpose and must survive the parent.
-_PR_SET_PDEATHSIG = 1
-_PRCTL: Any = None
-if sys.platform == "linux":
-    with contextlib.suppress(OSError, AttributeError):
-        import ctypes
-
-        _PRCTL = ctypes.CDLL(None, use_errno=True).prctl
-
-
-def _bounded_child_preexec() -> None:
-    """Bind the bounded child's lifetime to its parent (post-fork hook)."""
-
-    _PRCTL(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
-
-
-def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
-    """Tear down ``proc`` and every descendant sharing its process group.
-
-    ``subprocess.run``'s timeout cleanup kills only the direct child, so a
-    forking ``dot`` (plugin loaders, wrapper scripts) leaked grandchildren
-    on every render timeout. SIGTERM the whole group, wait a short grace
-    period, escalate to SIGKILL, and reap the leader. Where process groups
-    are unavailable (Windows), fall back to the historical leader-only kill.
-    """
-
-    pgid: int | None = None
-    if _HAS_PROCESS_GROUPS:
-        try:
-            pgid = os.getpgid(proc.pid)
-        except ProcessLookupError:
-            pgid = None
-    if pgid is None:
-        proc.kill()
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGTERM)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=_KILL_GRACE_SECONDS)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):  # SIGKILL always lands
-        proc.wait(timeout=_KILL_GRACE_SECONDS)
+# The bounded-subprocess spawn discipline (process-group teardown, Linux
+# PR_SET_PDEATHSIG parent-death binding, kill-grace escalation) lives in
+# ``utils/_subprocess`` so non-visualization callers (the doctor ``dot``
+# probe, the bundle git-provenance stamp) can share it without this module's
+# hard ``graphviz`` import (R40). Render call sites and tests monkeypatch
+# ``_render_utils.run_bounded_subprocess``, so the viz-facing wrapper lives
+# here and adds the ONE viz-specific behavior on top of the shared seam.
+from ..utils._subprocess import (  # noqa: E402
+    _HAS_PROCESS_GROUPS,  # noqa: F401  (re-export: tests pin the spawn contract)
+    run_bounded_subprocess as _run_bounded_subprocess_shared,
+)
 
 
 def run_bounded_subprocess(
@@ -233,37 +180,33 @@ def run_bounded_subprocess(
     cwd: str | None = None,
     text: bool = False,
 ) -> subprocess.CompletedProcess[Any]:
-    """Run ``cmd`` bounded by ``timeout``, killing its whole process group.
+    """Run ``cmd`` through the shared bounded spawn seam, refusing typed.
 
-    The ONE spawn seam for every Graphviz/code-panel subprocess in the
-    visualization package. Mirrors ``subprocess.run`` semantics for the
-    argument subset the render paths use (``check`` raises
-    ``CalledProcessError`` with captured stderr; timeout raises
-    ``TimeoutExpired``), but on timeout or any other exception the entire
-    process group is terminated via :func:`_terminate_process_group`, not
-    just the direct child. Tests monkeypatch this function to simulate
-    Graphviz outcomes.
+    Delegates to :func:`torchlens.utils._subprocess.run_bounded_subprocess`
+    (the ONE spawn discipline) and adds the viz-specific door: a missing
+    Graphviz binary raises the typed install-remedy refusal instead of a raw
+    ``FileNotFoundError: 'dot'`` naming neither Graphviz nor the remedy
+    (b8 R65). The doctor ``dot`` probe, by contrast, wants the raw signal
+    and calls the shared seam directly. Tests monkeypatch this function to
+    simulate Graphviz outcomes.
     """
 
-    stdin = subprocess.PIPE if input is not None else None
-    pipe = subprocess.PIPE if capture_output else None
     try:
-        proc = subprocess.Popen(
+        return _run_bounded_subprocess_shared(
             cmd,
-            stdin=stdin,
-            stdout=pipe,
-            stderr=pipe,
+            timeout=timeout,
+            check=check,
+            capture_output=capture_output,
+            input=input,
             cwd=cwd,
             text=text,
-            start_new_session=_HAS_PROCESS_GROUPS,
-            preexec_fn=_bounded_child_preexec if _PRCTL is not None else None,
         )
     except FileNotFoundError as exc:
         # Lazy import: _render_common top-imports this module, so the typed
         # class cannot be imported at module level without minting a cycle.
-        # The single most common cold-user viz failure (R65): the Graphviz
-        # BINARY is not installed (the python 'graphviz' package alone does
-        # not ship it); the class carries the install remedy.
+        # The single most common cold-user viz failure: the Graphviz BINARY
+        # is not installed (the python 'graphviz' package alone does not
+        # ship it); the class carries the install remedy.
         from ._render_common import GraphvizUnavailableError
 
         raise GraphvizUnavailableError(
@@ -271,21 +214,6 @@ def run_bounded_subprocess(
             f"{cmd[0]!r} was not found on PATH",
             executable=cmd[0],
         ) from exc
-    try:
-        stdout, stderr = proc.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_process_group(proc)
-        # Drain pipes and reap after the group kill, mirroring
-        # ``subprocess.run``'s own timeout epilogue.
-        with contextlib.suppress(subprocess.TimeoutExpired, ValueError, OSError):
-            proc.communicate(timeout=_KILL_GRACE_SECONDS)
-        raise
-    except BaseException:
-        _terminate_process_group(proc)
-        raise
-    if check and proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 # -- Module subgraph border widths (shared between Trace and bundle paths)

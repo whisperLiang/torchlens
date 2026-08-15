@@ -1433,25 +1433,43 @@ def synchronize_pending_cpu_async_copies() -> None:
     pending = list(_CPU_ASYNC_PENDING_EVENTS)
     _CPU_ASYNC_PENDING_EVENTS.clear()
     synced_devices: set[str] = set()
-    for entry in pending:
-        if isinstance(entry, torch.device):
-            key = str(entry)
-            if key not in synced_devices:
-                synced_devices.add(key)
-                torch_module = torch_attr(entry.type)
-                sync = getattr(torch_module, "synchronize", None)
-                if sync is not None:
-                    try:
-                        sync(entry)
-                    except TypeError:
-                        # torch.mps.synchronize() (and kin) take no device
-                        # argument. The unguarded call raised TypeError from
-                        # the drain — on the failure-scrub arms that masked
-                        # the ORIGINAL capture exception with a drain
-                        # traceback.
-                        sync()
-        else:
-            entry.synchronize()
+    index = 0
+    try:
+        while index < len(pending):
+            entry = pending[index]
+            if isinstance(entry, torch.device):
+                key = str(entry)
+                if key not in synced_devices:
+                    torch_module = torch_attr(entry.type)
+                    sync = getattr(torch_module, "synchronize", None)
+                    if sync is not None:
+                        try:
+                            sync(entry)
+                        except TypeError:
+                            # torch.mps.synchronize() (and kin) take no device
+                            # argument. The unguarded call raised TypeError from
+                            # the drain — on the failure-scrub arms that masked
+                            # the ORIGINAL capture exception with a drain
+                            # traceback.
+                            sync()
+                    synced_devices.add(key)
+            else:
+                entry.synchronize()
+            index += 1
+    finally:
+        if index < len(pending):
+            # A failed fence must not lose the copies behind it: restore the
+            # unfenced tail (failing entry included) so a later drain retries
+            # instead of returning at the empty-list guard while
+            # ``non_blocking=True`` copies are still in flight.
+            _CPU_ASYNC_PENDING_EVENTS[:0] = pending[index:]
+
+
+#: Backend labels that positively identify a non-CUDA capture home (R36).
+#: Only these skip the allocator flush; any label OUTSIDE this closed set
+#: (including ``"unknown"``/missing) fails toward the historical flush, so a
+#: future accelerator label can never silently skip it.
+_KNOWN_NON_CUDA_MEMORY_BACKENDS = frozenset({"cpu", "mps", "xpu", "hpu"})
 
 
 def capture_touched_cuda(trace: Any) -> bool:
@@ -1464,6 +1482,12 @@ def capture_touched_cuda(trace: Any) -> bool:
     forward peak-memory bracket from the model device; an unknown or missing
     value fails toward the historical flush, never toward skipping it.
 
+    A non-CUDA-homed model can still move tensors to CUDA inside ``forward``,
+    so a known non-CUDA label additionally consults the recorded op devices:
+    any recorded ``cuda`` output flips the verdict to flush. A failure while
+    consulting keeps the stamped fact's verdict — the scan only ever ADDS
+    flushes, never removes one.
+
     Parameters
     ----------
     trace:
@@ -1472,11 +1496,24 @@ def capture_touched_cuda(trace: Any) -> bool:
     Returns
     -------
     bool
-        False only when the capture provably ran on a non-CUDA backend.
+        False only when the capture provably ran on a non-CUDA backend and
+        recorded no CUDA-resident op output.
     """
 
     backend = getattr(trace, "forward_memory_backend", None)
-    return backend not in ("cpu", "mps")
+    if backend == "cuda":
+        return True
+    if backend in _KNOWN_NON_CUDA_MEMORY_BACKENDS:
+        try:
+            ops = getattr(trace, "ops", None) or ()
+            for op in ops:
+                device = getattr(op, "device_ref", None)
+                if isinstance(device, str) and device.startswith("cuda"):
+                    return True
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def _copy_tensor_payload(

@@ -424,7 +424,9 @@ class TraceValidationMixin(_TraceMixinBase):
         ----------
         model:
             Model to execute through TorchLens decorated wrappers. When omitted,
-            the live model captured by this ``Trace`` is reused if still available.
+            the live model captured by this ``Trace`` is reused if still
+            available -- the trace holds it weakly, so this requires the
+            caller to have kept a strong reference (see Raises).
         x:
             Forward input. If ``model`` is omitted, the first positional argument
             is treated as the new user input.

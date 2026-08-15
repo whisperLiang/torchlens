@@ -11,6 +11,7 @@ import importlib
 import inspect
 import itertools
 import textwrap
+import threading
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -1226,6 +1227,12 @@ _REGISTRY: builtins.list[_RegisteredRecipe] = []
 _BUILTIN_REGISTRY: tuple[_RegisteredRecipe, ...] = ()
 _REGISTRY_VERSION = 0
 _RECIPE_COUNTER = itertools.count()
+
+#: Serializes registry mutation (append/reset + version bump) against
+#: ``snapshot()``'s (recipes, version) read (r5 b2-sol R54): unlocked, a
+#: thread switch between either pair yielded new-recipes/old-version or
+#: old-recipes/new-version, defeating provenance identity.
+_REGISTRY_LOCK = threading.Lock()
 _CONTEXT_RECIPES: contextvars.ContextVar[tuple[_RegisteredRecipe, ...]] = contextvars.ContextVar(
     "torchlens_facets_recipes", default=()
 )
@@ -1351,23 +1358,24 @@ def register(
                     setattr(_entry_point, FACET_RECIPE_MARKER_ATTR, True)
                 except (AttributeError, TypeError):
                     pass
-        _REGISTRY.append(
-            _RegisteredRecipe(
-                public=FacetRecipe(
-                    recipe_name=func.__name__,
-                    class_names=class_names,
-                    qualnames=qualnames,
-                    has_predicate=predicate is not None,
-                    target_scope=target_scope,
-                    source="user",
-                ),
-                func=func,
-                predicate=predicate,
-                declared_facets=declared,
-                order=next(_RECIPE_COUNTER),
+        with _REGISTRY_LOCK:
+            _REGISTRY.append(
+                _RegisteredRecipe(
+                    public=FacetRecipe(
+                        recipe_name=func.__name__,
+                        class_names=class_names,
+                        qualnames=qualnames,
+                        has_predicate=predicate is not None,
+                        target_scope=target_scope,
+                        source="user",
+                    ),
+                    func=func,
+                    predicate=predicate,
+                    declared_facets=declared,
+                    order=next(_RECIPE_COUNTER),
+                )
             )
-        )
-        _REGISTRY_VERSION += 1
+            _REGISTRY_VERSION += 1
         return func
 
     return decorator
@@ -1377,8 +1385,9 @@ def reset() -> None:
     """Reset the process registry to the built-in recipe set."""
 
     global _REGISTRY_VERSION
-    _REGISTRY[:] = _BUILTIN_REGISTRY
-    _REGISTRY_VERSION += 1
+    with _REGISTRY_LOCK:
+        _REGISTRY[:] = _BUILTIN_REGISTRY
+        _REGISTRY_VERSION += 1
 
 
 @contextlib.contextmanager
@@ -1469,7 +1478,13 @@ def snapshot(extra_recipes: Sequence[RecipeFunc] | None = None) -> FacetRegistry
     """
 
     extra_entries = tuple(_entry_for_recipe(func) for func in (extra_recipes or ()))
-    recipes = (*_REGISTRY, *_CONTEXT_RECIPES.get(), *extra_entries)
+    with _REGISTRY_LOCK:
+        # Atomic (recipes, version) pair: an unlocked read could pair new
+        # recipes with an old version (or vice versa) across a register()/
+        # reset() in another thread.
+        registry_entries = tuple(_REGISTRY)
+        registry_version = _REGISTRY_VERSION
+    recipes = (*registry_entries, *_CONTEXT_RECIPES.get(), *extra_entries)
     digest = hashlib.sha256()
     for recipe in recipes:
         digest.update(recipe.public.recipe_name.encode("utf-8"))
@@ -1479,7 +1494,7 @@ def snapshot(extra_recipes: Sequence[RecipeFunc] | None = None) -> FacetRegistry
         digest.update(recipe.public.target_scope.encode("utf-8"))
         digest.update(recipe.public.source.encode("utf-8"))
     return FacetRegistrySnapshot(
-        version=_REGISTRY_VERSION,
+        version=registry_version,
         provenance_id=digest.hexdigest()[:16],
         recipes=tuple(recipes),
     )

@@ -3547,7 +3547,12 @@ def _git_commit_hash(cwd: Path) -> str | None:
     """
 
     try:
-        completed = subprocess.run(
+        # R40: routed through the ONE bounded spawn seam so the timeout path
+        # tears down the whole process group instead of orphaning a wedged
+        # git helper's grandchildren.
+        from ..utils._subprocess import run_bounded_subprocess
+
+        completed = run_bounded_subprocess(
             ["git", "rev-parse", "HEAD"],
             cwd=cwd,
             check=False,

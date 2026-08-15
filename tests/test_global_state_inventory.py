@@ -32,7 +32,9 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
-        ("torchlens/_state.py", "_active_record_spans"),
+        # _active_record_spans left this ledger in fixwave-5 (R54): it is now
+        # a never-rebound ContextVar holding an immutable tuple, so it is no
+        # longer process-global mutable state at all.
         ("torchlens/_state.py", "_active_trace"),
         ("torchlens/_state.py", "_capture_replay_templates"),
         # Pre-admission reservation: claimed before any capture-global side
@@ -213,6 +215,10 @@ happen.
 
 _CAPABILITY_PROBE_STATE = frozenset(
     {
+        # Lazy glibc malloc_trim probe (R33): False = unprobed, None =
+        # unavailable, else the resolved libc function. Probed once at the
+        # first cleanup(); never varies afterwards.
+        ("torchlens/data_classes/cleanup.py", "_MALLOC_TRIM"),
         ("torchlens/utils/_torch_compat.py", "HAS_C10D_ABORT_PG"),
         ("torchlens/utils/_torch_compat.py", "HAS_DISABLE_TORCH_FUNCTION"),
         ("torchlens/utils/_torch_compat.py", "HAS_DISPATCH_MODE_STACK_QUERY"),
@@ -2163,3 +2169,59 @@ def test_interrupted_partial_diagnostics_still_restore_the_model(
     # The process is still usable for the next capture.
     recovered = tl.trace(nn.ReLU(), torch.ones(2))
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
+def test_main_process_rank_stamps_ownership_so_fork_children_stay_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A MAIN-process rank claims the group stamp on its first capture (R40).
+
+    The main-guard early-return skipped the stamp entirely, so a rank running
+    in the interpreter's main process never claimed ownership -- a raw
+    ``os.fork()`` child then ``setdefault``ed its OWN pid and was accepted as
+    a rank (probe-proven with a real gloo world=1, b6 fable, 4th round).
+    """
+
+    import multiprocessing as mp
+
+    import torchlens.utils.display as display_mod
+    from torchlens.utils.display import warn_parallel
+
+    class _MainProcess:
+        name = "MainProcess"
+        daemon = False
+
+    class _FakeDist:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+    real_pid = os.getpid()
+    monkeypatch.setattr(mp, "current_process", lambda: _MainProcess())
+    monkeypatch.setattr(mp, "parent_process", lambda: None)
+    fake_dist = _FakeDist()
+    monkeypatch.setattr(torch, "distributed", fake_dist)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)  # type: ignore[arg-type]
+    monkeypatch.setattr(display_mod, "_DIST_GROUP_OBSERVED_PID", {})
+    monkeypatch.setattr(display_mod, "_WARN_PARALLEL_IMPORT_PID", real_pid)
+
+    # Phase 1: the main-process rank captures first and must STAMP, not just
+    # early-return.
+    warn_parallel()
+    assert display_mod._DIST_GROUP_OBSERVED_PID.get("pid") == real_pid, (
+        "the main-guard early-return skipped the rank ownership stamp"
+    )
+
+    # Phase 2: a raw fork child (different pid, inherited import-PID and
+    # stamp) must be refused instead of setdefault-ing its own pid.
+    monkeypatch.setattr(display_mod.os, "getpid", lambda: real_pid + 1)
+    try:
+        with pytest.raises(tl.errors.CaptureContextError) as refusal:
+            warn_parallel()
+    finally:
+        monkeypatch.undo()
+    assert refusal.value.fields["code"] == "child_process_capture_unsupported"

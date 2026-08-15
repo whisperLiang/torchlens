@@ -2333,6 +2333,15 @@ def _merge_iso_groups_to_layers(
 
         # strict=False is deliberate: the consecutive-pairs sliding window is
         # ragged by construction (see the cohort sweep above).
+        # Relation-driven candidates replace the C(N,2) triangle (r5 b4-opus
+        # F29-A, measured: the full triangle walked on a plain feed-forward
+        # chain of N identical bare ops -- 35% of capture CPU at 3200 ops,
+        # rising as N^2, for ZERO produced groupings). Every union arm below
+        # requires the pair's subgraphs to be ADJACENT or (the parameterized
+        # arm only) to share at least one param type, so pairs outside those
+        # two relations are provably inert ``continue``s: enumerating only
+        # related pairs preserves the union transitive closure -- and with it
+        # the final partition and its min-label roots -- exactly.
         pair_iter = it.chain(
             zip(iso_nodes, iso_nodes[1:], strict=False),
             _bucketed_candidate_pairs(),

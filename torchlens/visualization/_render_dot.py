@@ -1895,6 +1895,8 @@ def _setup_subgraphs(
 
     max_call_depth = _get_max_call_depth(subgraphs, module_edge_dict, module_submodule_dict)
 
+    # deque: list.pop(0) shifted the whole queue per module, Theta(M^2) on
+    # flat module-heavy graphs before Graphviz even ran (R29, b4 sol MED).
     subgraph_stack: deque[list[str]] = deque([subgraph] for subgraph in subgraphs)
     call_depth = 0
     emitted_rank_groups = 0

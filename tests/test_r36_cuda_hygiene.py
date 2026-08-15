@@ -31,6 +31,53 @@ def test_cpu_async_pending_events_drain_and_clear() -> None:
     assert _CPU_ASYNC_PENDING_EVENTS == []
 
 
+def test_failed_fence_preserves_the_unfenced_tail_and_retries() -> None:
+    """A mid-drain fence failure must not lose the copies behind it (R36-1).
+
+    The drain used to clear the pending list BEFORE fencing, so any
+    non-TypeError synchronize failure permanently dropped every remaining
+    entry and the retry returned at the empty-list guard -- a silent D2H
+    loss. The failing entry and the tail must stay pending for retry.
+    """
+
+    from torchlens.utils import tensor_utils as tu
+
+    class _FakeEvent:
+        def __init__(self) -> None:
+            self.failures_left = 1
+            self.synchronized = False
+
+        def synchronize(self) -> None:
+            if self.failures_left:
+                self.failures_left -= 1
+                raise RuntimeError("device fell off the bus")
+            self.synchronized = True
+
+    class _HealthyEvent:
+        def __init__(self) -> None:
+            self.synchronized = False
+
+        def synchronize(self) -> None:
+            self.synchronized = True
+
+    failing = _FakeEvent()
+    healthy = _HealthyEvent()
+    assert tu._CPU_ASYNC_PENDING_EVENTS == []
+    try:
+        tu._CPU_ASYNC_PENDING_EVENTS.extend([failing, healthy])
+        with pytest.raises(RuntimeError, match="fell off the bus"):
+            tu.synchronize_pending_cpu_async_copies()
+        # Both the failing entry and the never-reached tail stay pending.
+        assert [failing, healthy] == tu._CPU_ASYNC_PENDING_EVENTS
+        # The retry is a real drain, not a no-op: everything fences.
+        tu.synchronize_pending_cpu_async_copies()
+        assert tu._CPU_ASYNC_PENDING_EVENTS == []
+        assert failing.synchronized
+        assert healthy.synchronized
+    finally:
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+
+
 def test_capture_touched_cuda_predicate_gates_on_trace_fact() -> None:
     """The empty_cache gate keys on the capture's backend fact (R36-3)."""
 
@@ -44,6 +91,44 @@ def test_capture_touched_cuda_predicate_gates_on_trace_fact() -> None:
     # Unknown/missing fails toward the historical flush, never toward skipping.
     assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="unknown")) is True
     assert capture_touched_cuda(SimpleNamespace()) is True
+    # Other KNOWN accelerator homes must not flush the CUDA allocator (the
+    # old blanket `not in ("cpu", "mps")` over-broadly flushed for them).
+    assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="xpu")) is False
+    assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="hpu")) is False
+
+
+def test_capture_touched_cuda_consults_recorded_op_devices() -> None:
+    """A CPU-homed capture that moved tensors to CUDA in forward flushes (R36).
+
+    The stamped backend fact comes from the MODEL device, so a CPU-homed
+    model that moves tensors to CUDA inside ``forward`` read as "cpu" and the
+    allocator cache was never returned (false negative). A recorded cuda op
+    device must flip the verdict; a scan failure keeps the stamped verdict.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.utils.tensor_utils import capture_touched_cuda
+
+    cpu_op = SimpleNamespace(device_ref="cpu")
+    cuda_op = SimpleNamespace(device_ref="cuda:0")
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=[cpu_op, cuda_op]))
+        is True
+    )
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=[cpu_op])) is False
+    )
+
+    class _RaisingOps:
+        def __iter__(self):
+            raise RuntimeError("husked")
+
+    # Consult failure keeps the stamped fact's verdict (adds flushes only).
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=_RaisingOps()))
+        is False
+    )
 
 
 def test_pure_view_probes_consume_no_global_rng() -> None:

@@ -1161,7 +1161,12 @@ def _leaf_arg_token(arg: Any, prefix: str) -> str:
     default_str = arg_type.__str__ is object.__str__  # type: ignore[comparison-overlap]
     if default_repr and default_str:
         return f"{prefix}_obj:{arg_type.__module__}.{arg_type.__qualname__}"
-    return f"{prefix}_{arg}"
+    token = f"{prefix}_{arg}"
+    if " at 0x" in token:
+        # Custom reprs that still embed a memory address (C types,
+        # functools.partial interiors) are equally id()-derived.
+        return f"{prefix}_obj:{arg_type.__module__}.{arg_type.__qualname__}"
+    return token
 
 
 def _append_set_arg_hash(

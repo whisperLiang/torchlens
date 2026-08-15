@@ -38,6 +38,7 @@ Access policy (disputed-r2 b5/R45, exempt-by-declaration):
     external assignment clusters.
 """
 
+import contextvars
 import itertools
 import threading
 import weakref
@@ -182,8 +183,16 @@ which keeps this module free of runtime intervention imports.
 _log_registry: "weakref.WeakSet[Trace]" = weakref.WeakSet()
 """Process-wide weak registry of currently live ``Trace`` objects."""
 
-_active_record_spans: list[dict[str, Any]] = []
-"""Observer spans currently active around or inside a logging session."""
+_active_record_spans: "contextvars.ContextVar[tuple[dict[str, Any], ...]]" = contextvars.ContextVar(
+    "_active_record_spans", default=()
+)
+"""Observer spans currently active around or inside a logging session.
+
+Context-local (r5 b2-sol R54): as a plain process-global list, a two-thread
+probe showed one thread's captures/taps receiving the OTHER thread's active
+span annotations. A ``ContextVar`` holding an immutable tuple isolates spans
+per thread/context; each thread starts from the empty default.
+"""
 
 _naming_counters: dict[str, int] = {}
 """Process-global counters used by unnamed ``trace`` captures.
@@ -1029,6 +1038,15 @@ class _PauseLogging:
         if not self._owns_toggle:
             # Symmetric no-op: a stale restore from a non-owner thread could
             # re-enable logging after the owner's capture already finished.
+            return
+        # b2:A2 remnant (r5 fable R54): re-check ownership at RESTORE time.
+        # This thread can have read owner=None an instant before another
+        # thread's locked capture publication; restoring the stale pre-pause
+        # value here would then silently blind the remainder of that
+        # capture's forward. If a different thread owns the toggle now, the
+        # publication already set the value it needs -- leave it alone.
+        owner = _active_owner_thread_id
+        if owner is not None and owner != threading.get_ident():
             return
         _logging_enabled = self._prev  # restore — enables nesting without corruption
 
