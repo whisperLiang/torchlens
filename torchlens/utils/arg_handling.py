@@ -15,12 +15,14 @@ import torch
 from torch import nn
 
 from .._input_walk import INPUT_TREE_MAX_DEPTH, _inspect_instance_state_items
-from .tensor_utils import (
+from .alias_footprint import (
     TensorByteFootprint,
-    _clone_tensor_payload,
-    _copy_tensor_payload,
     tensor_byte_footprint,
     touched_bytes_relation,
+)
+from .tensor_utils import (
+    _clone_tensor_payload,
+    _copy_tensor_payload,
 )
 
 INPUT_WAS_PARAMETER_ATTR = "_torchlens_input_was_parameter"

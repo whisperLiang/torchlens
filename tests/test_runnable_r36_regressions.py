@@ -1438,7 +1438,7 @@ class TestAliasEngineUnit:
 
     @staticmethod
     def _relation(left: torch.Tensor, right: torch.Tensor) -> str:
-        from torchlens.utils.tensor_utils import touched_bytes_relation
+        from torchlens.utils.alias_footprint import touched_bytes_relation
 
         return touched_bytes_relation(left, right)
 
@@ -1478,7 +1478,7 @@ class TestAliasEngineUnit:
         assert self._relation(base[:0], base) == "disjoint"
 
     def test_over_cap_intersecting_is_unknown_never_disjoint(self) -> None:
-        from torchlens.utils.tensor_utils import ALIAS_ENUMERATION_ELEMENT_CAP
+        from torchlens.utils.alias_footprint import ALIAS_ENUMERATION_ELEMENT_CAP
 
         big = torch.zeros(ALIAS_ENUMERATION_ELEMENT_CAP + 2, 2)
         # Incongruent element grids inside one storage with intersecting bounds and

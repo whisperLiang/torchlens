@@ -738,7 +738,7 @@ def snapshot_state_alias_topology(model: object) -> Mapping[str, Any] | None:
     model exposes no named state accessors.
     """
 
-    from .utils.tensor_utils import tensor_byte_footprint, touched_bytes_relation
+    from .utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
     named_parameters = getattr(model, "named_parameters", None)
     named_buffers = getattr(model, "named_buffers", None)

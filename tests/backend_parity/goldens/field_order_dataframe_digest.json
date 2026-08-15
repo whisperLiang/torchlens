@@ -897,6 +897,8 @@
       "capture_mode",
       "capture_start_time",
       "capture_tensor_grad_hooks",
+      "capture_verification_reason",
+      "capture_verified",
       "chunked_forward",
       "class_docstring",
       "class_source_file",
@@ -1023,13 +1025,13 @@
     ]
   },
   "sha256_chunks": [
-    "25f8bd8f",
-    "4f356556",
-    "e2677543",
-    "db146e7a",
-    "53cdb467",
-    "011d150f",
-    "9c9a2764",
-    "806f62d6"
+    "1cb5aca9",
+    "fa86ec05",
+    "36397942",
+    "f1e11901",
+    "1b2f9bf9",
+    "3a3907f0",
+    "142f57b9",
+    "4ce43fe3"
   ]
 }
