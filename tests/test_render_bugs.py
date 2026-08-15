@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -1005,3 +1006,42 @@ def test_node_image_renders_without_in_source_imagepath(tmp_path: Path) -> None:
         "probe node image was not inlined; Graphviz could not resolve the "
         "relative image ref without an in-source imagepath"
     )
+
+
+def test_final_viewer_child_is_reaped_without_another_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The LAST viewer of a process is reaped asynchronously (r3 R40 carried).
+
+    The registry alone reaped only at the NEXT launch, so one draw() that
+    opened a viewer left one zombie for the process lifetime. Drive the real
+    _open_file_quietly with a stub opener and require the child to be waited
+    on and released with NO later launch.
+    """
+
+    import os
+    import time
+
+    from torchlens.visualization import _render_utils
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    opener_name = "open" if sys.platform == "darwin" else "xdg-open"
+    stub = stub_dir / opener_name
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+
+    target = tmp_path / "artifact.pdf"
+    target.write_text("stub")
+    assert _render_utils._open_file_quietly(str(target)) is True
+    assert len(_render_utils._VIEWER_PROCS) <= 1
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _render_utils._VIEWER_PROCS:
+        time.sleep(0.05)
+    # RED before the fix: the exited child stayed registered (and unreaped,
+    # i.e. a zombie) until another viewer launch.
+    assert _render_utils._VIEWER_PROCS == []
