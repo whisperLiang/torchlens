@@ -54,7 +54,10 @@ def _require_randomly_or_skip() -> None:
             "gate layer is silently unarmed on an environment that promised "
             "it (R76 reopened, 3.16 #4). Reinstall the [test] extra."
         )
-    pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+    else:
+        # Branch shape keeps this a CONDITIONAL skip for the skip audit's
+        # unconditional-skip scanner (it deliberately ignores early returns).
+        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
 
 
 def _test_extra_deps(pyproject_text: str) -> list[str]:

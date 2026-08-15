@@ -740,7 +740,15 @@ def collect_repo_unsatisfiable_skipifs(root: Path, repo_root: Path) -> dict[str,
         path_constants = _module_path_literal_constants(tree)
         env_constants = _module_env_gate_constants(tree)
 
-        def classify(condition: ast.expr, key: str, lineno: int) -> None:
+        def classify(
+            condition: ast.expr,
+            key: str,
+            lineno: int,
+            # Per-file maps bound as defaults: B023 hygiene (also enforced by
+            # the ruff deferred-debt ratchet this same wave landed).
+            path_constants: dict[str, str] = path_constants,
+            env_constants: dict[str, str] = env_constants,
+        ) -> None:
             gate = _skipif_gate(condition)
             if gate is None:
                 return
