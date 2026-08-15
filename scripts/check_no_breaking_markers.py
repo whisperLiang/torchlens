@@ -165,6 +165,16 @@ def _push_records() -> list[list[str]]:
         from_ref = os.environ.get("PRE_COMMIT_FROM_REF", "")
         if to_ref and from_ref:
             records = [["(pre-commit framework push)", to_ref, "(remote)", from_ref]]
+    if not records:
+        # Ref-less remote (e.g. first push to an empty repository): the
+        # framework exports the branch names but NO FROM_REF/TO_REF at all
+        # (grind r4, b9-opus R70r4-F1: this branch used to return [] and the
+        # hook printed "Passed" having scanned NOTHING -- a BREAKING CHANGE
+        # commit landed). Synthesize a new-branch record from the local
+        # branch so the merge-base scan path runs over the outgoing commits.
+        local_branch = os.environ.get("PRE_COMMIT_LOCAL_BRANCH", "")
+        if local_branch:
+            records = [[local_branch, local_branch, "(remote)", "0" * 40]]
     return records
 
 
@@ -172,7 +182,21 @@ def _check_pre_push() -> int:
     """Scan every outgoing commit message in the push payload."""
 
     rc = 0
-    for parts in _push_records():
+    records = _push_records()
+    if not records:
+        # FAIL CLOSED: raw git always hands refspec lines on stdin and the
+        # framework always exports at least the local branch, so "no records"
+        # means the push range could not be determined -- refusing to scan is
+        # a usage error, never a pass (the fail-open half of R70r4-F1).
+        print(
+            "[check_no_breaking_markers] could not determine the push range: "
+            "no refspecs on stdin and no PRE_COMMIT_FROM_REF/PRE_COMMIT_TO_REF/"
+            "PRE_COMMIT_LOCAL_BRANCH in the environment. Refusing to pass "
+            "without scanning any commits.",
+            file=sys.stderr,
+        )
+        return 2
+    for parts in records:
         local_ref, local_sha, _remote_ref, remote_sha = parts
         if local_sha == "0000000000000000000000000000000000000000":
             # Branch deletion -- nothing to scan.
