@@ -6,20 +6,33 @@ with baseline reds hallucinated two kills during the b9 hunt, so this driver
 refuses to score mutants until the UNMUTATED suite is green in the same
 sandbox.
 
-Each mutant NEUTERS one tripwire check (inserts an unconditional early
-``return`` as the first statement after the docstring) and runs the bounded
-arming suite. A mutant that leaves the suite GREEN is a SURVIVOR -- a missing
-red capability that needs a new planted-corruption test, NEVER a reason to
-keep the mutation.
+Two mutant families, one per disarming direction:
+
+* ``MUTANTS`` neuters a tripwire check with an unconditional ``return None``
+  (the first statement after the docstring) -- the disarming direction for
+  raise-on-violation invariants.
+* ``EXEMPT_MUTANTS`` plants ``return True`` on the perturbation-exemption
+  dispatcher and each ``_check_*_exempt`` gate (b9p3 R74p3-F2): for a
+  predicate whose ``True`` means "skip the sensitivity check", ``return
+  None`` is falsy and makes the tripwire STRICTER -- the dangerous direction
+  is exempt-everything, so it needs its own operator.
+
+Kill attribution is per-test, not per-exit-code (b9 R74-2: a green control
+still printed a "KILLED" off an unrelated flaky red): each run's FAILED node
+ids are parsed and a mutant is KILLED only by ``killers = mutant_failures -
+control_failures``, with the killer node ids named in the verdict. A mutant
+run that reds without any parseable failed test (collection error, crash) is
+an ERROR verdict, never a kill.
 
 Usage (from the repo root)::
 
-    python tests/support/mutation_driver.py --make-sandbox /tmp/tl-mut M04 M11
+    python tests/support/mutation_driver.py --make-sandbox /tmp/tl-mut M04 X01
     python tests/support/mutation_driver.py --sandbox /tmp/tl-mut/repo  # all
 
 The driver only ever writes inside the sandbox; running against the real
 checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
 red-capability *tests* live in the suite itself; this measures their margin.
+It is wired into no CI leg -- the margin is measured only when invoked.
 """
 
 from __future__ import annotations
@@ -33,8 +46,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-#: mutant id -> (relative file, function to neuter). Every entry names a
-#: verdict-steering invariant check; extend when a new contract lands.
+#: mutant id -> (relative file, function to neuter with ``return None``).
+#: Every entry names a verdict-steering invariant check; extend when a new
+#: contract lands.
 MUTANTS: dict[str, tuple[str, str]] = {
     "M01": ("torchlens/validation/_invariants_topology.py", "_check_graph_topology"),
     "M02": ("torchlens/validation/_invariants_payloads.py", "_check_op_log_fields"),
@@ -60,6 +74,38 @@ MUTANTS: dict[str, tuple[str, str]] = {
     "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
 }
 
+#: mutant id -> (relative file, exemption predicate to disarm with ``return
+#: True``). ``True`` means "this layer is exempt from the perturbation
+#: sensitivity check", so the dangerous direction is exempt-everything --
+#: killed by the deliberately-named ``*_is_not_exempt`` negative tests
+#: (hand-run on the dispatcher during b9p3: 28 killers).
+EXEMPT_MUTANTS: dict[str, tuple[str, str]] = {
+    "X01": ("torchlens/validation/core.py", "_check_perturbation_exemptions"),
+    "X02": ("torchlens/validation/exemptions.py", "_check_getitem_exempt"),
+    "X03": ("torchlens/validation/exemptions.py", "_check_setitem_exempt"),
+    "X04": ("torchlens/validation/exemptions.py", "_check_index_put_exempt"),
+    "X05": ("torchlens/validation/exemptions.py", "_check_lstm_exempt"),
+    "X06": ("torchlens/validation/exemptions.py", "_check_interpolate_exempt"),
+    "X07": ("torchlens/validation/exemptions.py", "_check_scatter_exempt"),
+    "X08": ("torchlens/validation/exemptions.py", "_check_one_arg_where_index_exempt"),
+    "X09": ("torchlens/validation/exemptions.py", "_check_where_exempt"),
+    "X10": ("torchlens/validation/exemptions.py", "_check_masked_fill_exempt"),
+    "X11": ("torchlens/validation/exemptions.py", "_check_norm_running_stat_exempt"),
+    "X12": ("torchlens/validation/exemptions.py", "_check_scatter_or_index_domain_exempt"),
+    "X13": ("torchlens/validation/_invariants_backward_flow.py", "_is_func_call_id_exempt"),
+    # Landed after the b9p3 inventory (R08 exemption-narrowing wave); swept in
+    # so the newest gate is margin-measured like its siblings.
+    "X14": ("torchlens/validation/exemptions.py", "_check_zipped_sibling_exempt"),
+}
+
+#: mutant id -> the planted return value (the family's disarming direction).
+OPERATORS: dict[str, str] = {
+    **dict.fromkeys(MUTANTS, "None"),
+    **dict.fromkeys(EXEMPT_MUTANTS, "True"),
+}
+
+ALL_MUTANTS: dict[str, tuple[str, str]] = {**MUTANTS, **EXEMPT_MUTANTS}
+
 #: Bounded arming suite: the files whose job is to kill the mutants above.
 SUITE = [
     "tests/test_validation.py",
@@ -79,17 +125,41 @@ SUITE = [
 
 #: Known baseline reds, deselected so a mutant verdict is never confounded.
 #: KEEP THIS LIST SHORT AND DATED; every entry weakens the margin measurement
-#: for whatever its tests would have killed.
-DESELECT = [
-    # ancestry_closure capture bug, FW2-CAPTURE-owned (b9 R71-1); red since
-    # 6fcb54f2 armed the closure. Remove once the capture fix lands.
-    "tests/test_validation.py::test_validate_forward_pass_uses_typed_ground_truth_leaf_order",
-    "tests/test_validation.py::test_plain_trace_internal_source_final_output_is_exempted",
+#: for whatever its tests would have killed. (The two ancestry-closure
+#: deselects were removed 2026-08-15: both tests are green on tip and they
+#: are M04's natural killers -- a stale entry here silently deleted M04's
+#: margin.)
+DESELECT: list[str] = [
+    # Baseline red on main tip 9a561154 (2026-08-15): the forward-global
+    # tensor scenario now emits the no-provenance UserWarning (capture-r3
+    # escape hardening), which filterwarnings promotes to error. Relayed to
+    # the capture lane; neither test is a mutant killer (session-isolation
+    # coverage). Remove once the capture fix lands.
+    "tests/test_validation.py::test_trace_clears_forward_global_tensor_labels_between_sessions",
+    "tests/test_validation.py::test_trace_clears_nested_cached_tensor_labels_between_sessions",
 ]
 
+#: Directories/patterns a sandbox never needs (b9p3 R74p3-F3: without these
+#: --make-sandbox copied 6.0 GB -- 5.3 GB .venv + 127 MB menagerie -- vs
+#: ~450 MB with them; --python supplies the interpreter, so the sandbox
+#: needs no venv).
+SANDBOX_IGNORE = (
+    ".git",
+    "__pycache__",
+    ".ruff_cache",
+    "*.egg-info",
+    ".venv",
+    "menagerie",
+    ".pytest_cache",
+    ".mypy_cache",
+    "build",
+    "dist",
+    "*.tlspec",
+)
 
-def neuter(path: Path, func: str) -> str:
-    """Insert an early ``return None`` into ``func`` and return the original text.
+
+def neuter(path: Path, func: str, value: str) -> str:
+    """Insert an early ``return <value>`` into ``func`` and return the original text.
 
     Parameters
     ----------
@@ -97,6 +167,10 @@ def neuter(path: Path, func: str) -> str:
         File containing the function.
     func:
         Function name to neuter (first match wins).
+    value:
+        Source expression for the planted return value (the family's
+        disarming direction: ``"None"`` for invariant checks, ``"True"``
+        for exemption predicates).
 
     Returns
     -------
@@ -124,13 +198,39 @@ def neuter(path: Path, func: str) -> str:
         else first
     )
     lines = src.splitlines(keepends=True)
-    lines.insert(anchor.lineno - 1, f"{' ' * anchor.col_offset}return None  # R74-MUTANT\n")
+    lines.insert(anchor.lineno - 1, f"{' ' * anchor.col_offset}return {value}  # R74-MUTANT\n")
     path.write_text("".join(lines), encoding="utf-8")
     return src
 
 
+def parse_failures(stdout: str) -> frozenset[str]:
+    """Extract failed/errored test node ids from a ``-rf -q`` pytest run.
+
+    Parameters
+    ----------
+    stdout:
+        Captured pytest stdout.
+
+    Returns
+    -------
+    frozenset[str]
+        Node ids reported ``FAILED`` or ``ERROR`` in the short summary.
+    """
+
+    failed = set()
+    for line in stdout.splitlines():
+        if line.startswith(("FAILED ", "ERROR ")):
+            node = line.split(" ", 2)[1]
+            failed.add(node.split(" - ", 1)[0])
+    return frozenset(failed)
+
+
 def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProcess:
     """Run the bounded arming suite inside the sandbox.
+
+    No ``-x``: kill attribution needs the FULL failed set of every run, both
+    to name each mutant's killers and to measure the margin (killer count),
+    not just first-red-wins.
 
     Parameters
     ----------
@@ -149,7 +249,7 @@ def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProce
 
     cache = sandbox / f".cache-{tag}"
     cache.mkdir(exist_ok=True)
-    cmd = [python, "-m", "pytest", *SUITE, "-p", "no:randomly", "-x", "-q", "--tb=no"]
+    cmd = [python, "-m", "pytest", *SUITE, "-p", "no:randomly", "-q", "--tb=no", "-rf"]
     cmd += ["--basetemp", str(sandbox / f".bt-{tag}")]
     for node in DESELECT:
         cmd += ["--deselect", node]
@@ -186,11 +286,7 @@ def main() -> None:
         sandbox = args.make_sandbox / "repo"
         if not sandbox.exists():
             print(f"copying {repo} -> {sandbox} ...", flush=True)
-            shutil.copytree(
-                repo,
-                sandbox,
-                ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache", "*.egg-info"),
-            )
+            shutil.copytree(repo, sandbox, ignore=shutil.ignore_patterns(*SANDBOX_IGNORE))
     else:
         sandbox = args.sandbox
     if sandbox is None:
@@ -199,45 +295,65 @@ def main() -> None:
     if sandbox == repo:
         raise SystemExit("refusing to mutate the real checkout; use --make-sandbox")
 
-    ids = args.mutants or sorted(MUTANTS)
-    unknown = [mid for mid in ids if mid not in MUTANTS]
+    ids = args.mutants or sorted(ALL_MUTANTS)
+    unknown = [mid for mid in ids if mid not in ALL_MUTANTS]
     if unknown:
         raise SystemExit(f"unknown mutant ids: {unknown}")
 
     # Pristine control: verdicts are meaningless over a red baseline (the b9
     # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
+    control_failures: frozenset[str] = frozenset()
     if not args.skip_control:
         control = run_suite(sandbox, args.python, "control")
+        control_failures = parse_failures(control.stdout)
         if control.returncode != 0:
-            tail = "\n".join(control.stdout.strip().splitlines()[-8:])
+            named = "\n".join(sorted(control_failures)) or "\n".join(
+                control.stdout.strip().splitlines()[-8:]
+            )
             raise SystemExit(
                 "PRISTINE CONTROL RED -- fix or deselect the baseline before "
-                f"scoring any mutant:\n{tail}"
+                f"scoring any mutant:\n{named}"
             )
         print("control: GREEN", flush=True)
 
     results: dict[str, dict[str, object]] = {}
     for mid in ids:
-        rel, func = MUTANTS[mid]
+        rel, func = ALL_MUTANTS[mid]
         path = sandbox / rel
-        original = neuter(path, func)
+        original = neuter(path, func, OPERATORS[mid])
         try:
             proc = run_suite(sandbox, args.python, mid)
         finally:
             path.write_text(original, encoding="utf-8")
+        failures = parse_failures(proc.stdout)
+        killers = sorted(failures - control_failures)
+        if proc.returncode != 0 and not failures:
+            # Collection error / crash: the suite never scored the mutant.
+            verdict = "ERROR"
+        elif killers:
+            verdict = "KILLED"
+        else:
+            verdict = "SURVIVOR"
         results[mid] = {
             "file": rel,
             "func": func,
+            "operator": f"return {OPERATORS[mid]}",
             "returncode": proc.returncode,
-            "verdict": "KILLED" if proc.returncode != 0 else "SURVIVOR",
+            "verdict": verdict,
+            "killers": killers,
+            "n_killers": len(killers),
             "tail": proc.stdout.strip().splitlines()[-4:],
         }
         print(json.dumps({mid: results[mid]}), flush=True)
 
     survivors = sorted(mid for mid, row in results.items() if row["verdict"] == "SURVIVOR")
+    errors = sorted(mid for mid, row in results.items() if row["verdict"] == "ERROR")
     print("RESULTS " + json.dumps(results))
+    if errors:
+        print(f"ERRORS: {errors} -- suite crashed before scoring; not a kill, not a pass")
     if survivors:
         print(f"SURVIVORS: {survivors} -- each needs a new planted-corruption test")
+    if errors or survivors:
         raise SystemExit(1)
     print("all mutants KILLED")
 
