@@ -304,3 +304,46 @@ class TestJaxFiniteDifferenceStep:
 
         grad = jnp.full((4,), 2.0, dtype=jnp.float16)
         assert not _finite_difference_directional_check(value=value, grad=grad, scalar_loss=loss)
+
+    @pytest.mark.backend_jax
+    def test_small_derivative_sign_flip_is_not_blessed_by_an_atol_floor(self) -> None:
+        """F13-A (b): the fixed atol=5e-3 floor blessed ANY tap whose true
+        directional derivative sat below 5e-3 -- including a SIGN-FLIPPED
+        candidate gradient (routine for post-softmax / normalized taps).
+        The derived error model must refuse it (red-capable: pre-fix this
+        exact sign flip PASSED)."""
+
+        pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.ones((4,), dtype=jnp.float32)
+
+        def loss(v):
+            return jnp.sum(v) * jnp.asarray(1e-4, dtype=jnp.float32)
+
+        flipped = jnp.full((4,), -1e-4, dtype=jnp.float32)
+        assert not _finite_difference_directional_check(value=value, grad=flipped, scalar_loss=loss)
+
+    @pytest.mark.backend_jax
+    def test_mixed_magnitude_tap_probes_every_element(self) -> None:
+        """F13-A (a): the step is scaled per element by max(1, |value|), so a
+        tensor spanning magnitudes probes ALL elements. Pre-fix the ABSOLUTE
+        scalar step froze the 1e6-magnitude element (fp32 spacing there is
+        ~0.0625 >> 1e-2) while others moved, the mixed freeze slipped the
+        all(...)-and-all(...) gate, and a CORRECT gradient false-FAILED
+        because the frozen element carried the signal (red-capable)."""
+
+        pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.asarray([1.0e6, 1.0, 1.0, 1.0], dtype=jnp.float32)
+        weights = jnp.asarray([1.0, 1e-8, 1e-8, 1e-8], dtype=jnp.float32)
+
+        def loss(v):
+            return jnp.sum(v * weights)
+
+        assert _finite_difference_directional_check(value=value, grad=weights, scalar_loss=loss)

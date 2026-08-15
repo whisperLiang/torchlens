@@ -3315,6 +3315,17 @@ def _finite_difference_directional_check(
 ) -> bool:
     """Check a gradient with a central finite difference along ``sign(grad)``.
 
+    The comparison is between the observed central loss delta and the
+    first-order prediction ``sum(grad * perturbation)``, judged against a
+    WRITTEN-DOWN error model (F13-A): the dtype replay band
+    (``float_replay_tolerances``) widened by the central-difference
+    truncation term (``~step**2`` relative, 8x headroom) plus the
+    loss-evaluation roundoff (``8 * eps * max(|L+|, |L-|)`` absolute — the
+    two loss evaluations are the quantities actually differenced). The
+    former fixed ``rtol=5e-2, atol=5e-3`` pair was dtype-blind and its
+    absolute floor blessed any tap whose true directional derivative sat
+    below 5e-3.
+
     Parameters
     ----------
     value
@@ -3327,10 +3338,13 @@ def _finite_difference_directional_check(
     Returns
     -------
     bool
-        True when finite difference agrees within dtype-scaled tolerance.
+        True when the finite-difference loss delta agrees with the gradient
+        prediction within the derived error model.
     """
 
     import jax.numpy as jnp
+
+    from .._validation_shared import float_replay_tolerances
 
     direction = jnp.sign(grad)
     if not bool(jnp.any(direction)):
@@ -3349,19 +3363,35 @@ def _finite_difference_directional_check(
         step = 1e-4
     else:
         step = float(finfo.eps) ** (1.0 / 3.0)
-    eps = jnp.asarray(step, dtype=value.dtype)
-    plus_input = value + eps * direction
-    minus_input = value - eps * direction
-    if bool(jnp.all(plus_input == value)) and bool(jnp.all(minus_input == value)):
-        # The step underflowed the dtype's spacing at this magnitude: the
-        # probe never moved the input, so any verdict would be vacuous.
-        # Fail closed rather than certify an unprobed gradient.
+    # Per-element step scaling (F13-A a): float spacing is RELATIVE while a
+    # scalar step is ABSOLUTE, so an element of magnitude ~1e6 fp32 has
+    # spacing far above the raw step and stays frozen in both probes. Scale
+    # each element's step by max(1, |value|) so every intended probe moves.
+    one = jnp.asarray(1.0, dtype=value.dtype)
+    eps = jnp.asarray(step, dtype=value.dtype) * jnp.maximum(one, jnp.abs(value))
+    perturbation = eps * direction
+    plus_input = value + perturbation
+    minus_input = value - perturbation
+    intended = direction != 0
+    frozen = (intended & (plus_input == value)) | (intended & (minus_input == value))
+    if bool(jnp.any(frozen)):
+        # An intended probe never moved its element (spacing underflow even
+        # after magnitude scaling — non-finite or extreme values): the
+        # observed delta would silently omit that element's contribution
+        # while the prediction includes it. Fail closed rather than certify
+        # a partially-probed gradient (the former all(...) and all(...)
+        # gate passed MIXED freezes).
         return False
     plus = scalar_loss(plus_input)
     minus = scalar_loss(minus_input)
-    observed = (plus - minus) / (eps * jnp.asarray(2, dtype=value.dtype))
-    expected = jnp.sum(grad * direction)
-    return bool(jnp.allclose(observed, expected, rtol=5e-2, atol=5e-3))
+    observed = (plus - minus) / jnp.asarray(2, dtype=value.dtype)
+    expected = jnp.sum(grad * perturbation)
+    rtol_repl, atol_repl = float_replay_tolerances(finfo)
+    rtol_fd = max(rtol_repl, 8.0 * step * step)
+    roundoff = 8.0 * float(finfo.eps) * float(jnp.maximum(jnp.abs(plus), jnp.abs(minus)))
+    scale = float(jnp.maximum(jnp.abs(observed), jnp.abs(expected)))
+    tolerance = rtol_fd * scale + roundoff + atol_repl
+    return bool(jnp.abs(observed - expected) <= tolerance)
 
 
 def _experimental_per_op_boundary_vjp_oracle(
