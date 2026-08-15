@@ -7,8 +7,10 @@ capture: it lazily wraps PyTorch functions with toggle-gated wrappers on first t
 capture, runs forward passes with the logging toggle enabled, and records operations.
 
 ## Model Menagerie (`menagerie/`)
-`menagerie/` is a browsable catalog of 10,000+ neural-net architecture families captured with TorchLens:
-a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 300+ trace-verified hand-built
+`menagerie/` is a browsable catalog of 11,600+ entries across ~5,400 neural-net architecture
+families captured with TorchLens:
+a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 2,700+ trace-verified
+hand-built
 historical "classics" (`menagerie/classics/`), and a disk-safe renderer (`menagerie.generate_menagerie`).
 To expand/update the roster — periodically, after a conference cycle, or whenever a stronger model ships
 — use the canonical durable adversarial prompt at **`menagerie/DISCOVER_MODELS.md`** (hostile framing,
@@ -168,9 +170,11 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
 ```
 
 ## Critical Invariants
-1. `_state.py` must never import other torchlens modules.
+1. `_state.py` imports no torchlens modules EXCEPT the one sanctioned cycle-safe leaf
+   import of `CaptureError` from `.errors._base` (documented in `_state.py` itself).
 2. `pause_logging()` must wrap internal torch ops during logging (`safe_copy`,
-   `activation_transform`, `get_memory_amount`).
+   `activation_transform`). `get_memory_amount()` deliberately does NOT toggle it:
+   it resolves the unwrapped size methods once instead (hot-path perf, `08dca260`).
 3. Wrappers are persistent after lazy installation; `_logging_enabled` gates behavior.
 4. FIELD_ORDER constants and class definitions must stay in sync.
 5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
@@ -385,8 +389,10 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   failures.
 - Fast-path module decoration skips `_record_module_entry_metadata`; alignment state must be
   replicated manually.
-- `get_memory_amount()` must use `pause_logging()` because `nelement()` and
-  `element_size()` are decorated.
+- `get_memory_amount()` deliberately avoids `pause_logging()`: it resolves the
+  UNWRAPPED `nelement()`/`element_size()` methods without toggling global logging
+  state per tensor (hot-path perf commit `08dca260`); re-adding the toggle is a
+  regression, not a fix.
 - If a `@property` raises `AttributeError`, Python falls through to `__getattr__`; use
   `ValueError` for TorchLens multi-pass access errors.
 - `copy()` on `Op` shallow-copies selected graph fields and deep-copies the rest.

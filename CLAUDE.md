@@ -19,9 +19,11 @@ extras gate appliance and bridge namespaces; see `pyproject.toml` for the curren
 
 ## Torch Version Compatibility
 
-TorchLens supports torch 2.1 -> 2.12+ for eager torch capture. The declared floor stays
-`torch>=2.1`; torch 2.0 may work best-effort through guarded fallbacks, but it is not a
-declared support floor.
+TorchLens supports torch 2.1 -> 2.13+ for eager torch capture (the newest-admitted CI
+track pins torch 2.13.0). The declared floor is PYTHON-CONDITIONED in pyproject:
+`torch>=2.1` below py3.12, `>=2.2` on 3.12, `>=2.6` on 3.13+ (older torch publishes no
+wheels for those interpreters); torch 2.0 may work best-effort through guarded
+fallbacks, but it is not a declared support floor.
 
 Every fragile torch-private-API probe or cross-version torch signature must route through
 `torchlens/utils/_torch_compat.py`. Feature-detect the runtime capability; do not parse
@@ -31,8 +33,9 @@ Every fragile torch-private-API probe or cross-version torch signature must rout
 
 ## Model Menagerie (`menagerie/`)
 
-`menagerie/` is a browsable atlas of 10,000+ neural-net architecture families captured with TorchLens:
-a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), ~300+ hand-built historical
+`menagerie/` is a browsable atlas of 11,600+ catalogued entries across ~5,400 neural-net
+architecture families captured with TorchLens:
+a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 2,700+ hand-built historical
 "classics" with no prior PyTorch implementation (`menagerie/classics/`, each trace-verified), and a
 disk-safe graph renderer (`python -m menagerie.generate_menagerie`).
 
@@ -180,8 +183,10 @@ print(tl.compat.report(model, x).to_markdown())
 - **Every capture product carries ONE settled typed outcome** (early-stopping
   unification; doc of record `docs/reference/capture_outcomes.md`).
   `Trace.outcome` / `Recording.outcome` / `PartialTrace.outcome` return a frozen
-  `CaptureOutcome` (`tl.types.{CaptureOutcome, CaptureStatus, CapturePhase,
-  FailureOrigin}`): status one of COMPLETE / HALTED / ABORTED_NONFINITE / FAILED
+  `CaptureOutcome` (from `torchlens.types`: `CaptureOutcome`, `CaptureStatus`,
+  `CapturePhase`, `FailureOrigin` — `import torchlens.types` explicitly; `types`
+  is deliberately NOT a lazy `tl.` attribute, so bare `tl.types.X` raises on a
+  fresh import): status one of COMPLETE / HALTED / ABORTED_NONFINITE / FAILED
   (with FORWARD/FINALIZE/POSTPROCESS/TEARDOWN phase) / UNATTESTED (legacy
   finished artifacts without attestation — never blessed COMPLETE) / UNKNOWN
   (unprovable, most restrictive). The outcome PERSISTS (`_capture_outcome`,
@@ -343,13 +348,19 @@ print(tl.compat.report(model, x).to_markdown())
   inside `forward` remain disclosed by the compat row.
   Gated by `HAS_SET_STANCE` / `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - Stale pre-wrap torch references (safety net, stage 2): the sys.modules crawler is DELETED —
-  TorchLens never crawls `__main__`, reads module sources, or mutates user objects. A capture with
+  TorchLens never crawls `__main__` or reads module sources during capture. ONE sanctioned,
+  opt-in mutation of user objects exists: `tl.release_model(model)` walks the model tree and
+  normalizes held torch-function wrapper refs INTO the model's own attributes/containers
+  (`backends/torch/_held_refs.py`) to restore whole-model pickling — the repair is conditional
+  (it installs a TorchLens wrapper, so a later `unwrap_torch()` re-poisons the held ref); no
+  other path mutates user objects. A capture with
   an escape signal (provenance warning / detector diagnostic / output-attribution failure) is
   re-run ONCE with a `TorchFunctionMode` net that redirects stale calls to their exact wrappers
   (`backends/torch/rescue.py`); the result is disclosed (`capture_verified=False`, reason
   `"mode_rescue_rerun"`, session-time `trace.rescue_rerun`). Primary captures are NEVER mode-armed
   (fused-path observer effect). Protocol-invisible constructors that no mode can see (derived
-  per build: `from_numpy`, `frombuffer`, `Tensor.as_subclass`) keep targeted module-attr patching
+  per build; live 5-member set: `from_numpy`, `frombuffer`, `from_dlpack`, `Tensor.as_subclass`,
+  `Tensor._make_subclass`) keep targeted module-attr patching
   (`backends/torch/belt.py`). Residuals declared, typed, never silent: worker-thread stale refs
   (modes are thread-local) and de-moded `handle_torch_function` composite interiors disclose
   `"escape_rescue_unrecovered"`; an authoritative witness/detector/dynamo verdict stays in place,
@@ -411,7 +422,7 @@ scoped to GENUINE user interventions only.
 
 The glossary is the **canonical** API spec (vault `brain/projects/torchlens/reports/<date>-glossary-vN/torchlens_glossary.md`); code conforms to it (spec-drives-code). A rename is not *done* until the docs match too:
 
-- **Rename / add / remove any PUBLIC name** (dataclass field, `@property`, method, top-level `tl.*` name, kwarg) → in the SAME change, update: (1) the **glossary** entry (canonical), (2) this `CLAUDE.md` + `AGENTS.md` examples, (3) the audit notebooks (`notebooks/audit/`) and `examples/` that use it.
+- **Rename / add / remove any PUBLIC name** (dataclass field, `@property`, method, top-level `tl.*` name, kwarg) → in the SAME change, update: (1) the **glossary** entry (canonical), (2) this `CLAUDE.md` + `AGENTS.md` examples, (3) the shipped user-facing glossary `docs/reference/glossary.md` (+ `docs/reference/deprecations.md` for removed spellings), (4) the audit notebooks (`notebooks/audit/`) and `examples/` that use it.
 - A change that touches code but leaves the glossary/docs stale is **INCOMPLETE.** This is exactly how the v7 `memory → activation_memory` gap and the stale `log_forward_pass`/`vis_opt` examples slipped through.
 - After a rename/conformance sprint: re-file the updated glossary to the vault (it supersedes the prior dated version), and confirm a `grep` of every old name is clean across `torchlens/`, `tests/`, `examples/`, `notebooks/`, AND the glossary itself.
 
@@ -563,8 +574,8 @@ only** and must NEVER be committed.
   two whitelisted curated docs. The agent task tracker `.project-context/todos.md` and the
   agent-facing `.project-context/torchlens_glossary.md` (canonical lives in the vault) are private.
 - **Public (the only tracked `.project-context/` files):** `architecture.md`,
-  `state_of_torchlens.md`. The user-facing glossary, when it ships, is `docs/reference/glossary.md`
-  — a separate, curated artifact, NOT the agent copy.
+  `state_of_torchlens.md`. The user-facing glossary is the shipped `docs/reference/glossary.md`
+  — a separate, curated artifact, NOT the agent copy; keep it current with public-name changes.
 - **Enforcement:** `.gitignore` excludes them and a `no-internal-notes` pre-commit hook
   (`.pre-commit-config.yaml`) HARD-FAILS any commit that stages a private path. Never `git add -f`
   to bypass it; never `git rm` the local files (they are your working notes). Long-form
