@@ -6,7 +6,9 @@ Core capture path:
 - `wrappers.py` — lazy torch function wrapping for capture-time interception
   (`wrap_torch()` / `unwrap_torch()`, DeviceContext handling).
 - `model_prep.py` — prepare `nn.Module` objects for capture sessions (permanent +
-  per-session).
+  per-session). Release-time held torch-function-ref normalization moved OUT to
+  `_held_refs.py` (`normalize_held_torch_function_refs`, called by
+  `release_model`).
 - `ops.py` — log tensors produced by decorated torch operations; its implementation is
   split across the `_ops_*.py` family: `_ops_exhaustive.py` (exhaustive emission),
   `_ops_emission.py` (output logging / live-hook dispatch), `_ops_arguments.py`

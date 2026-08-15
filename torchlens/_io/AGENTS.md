@@ -42,12 +42,19 @@ hostile input, and every load path here is fail-closed.
 - `PayloadCodec` protocol with per-backend codecs (`TorchPayloadCodec`, `JaxPayloadCodec`,
   `TinygradPayloadCodec`, `MlxPayloadCodec`, `PaddlePayloadCodec`, `TFPayloadCodec`,
   `NullPayloadCodec`); resolve via `get_payload_codec()`, extend via `register_payload_codec()`.
+  A codec author MUST route device tokens through `_artifact_strings.py`'s
+  device-token gate — it is mandatory, not advisory (it closed an
+  arbitrary-file-write via a `disk:<path>` tinygrad device string).
 - `LazyActivationRef` (lazy.py) defers tensor payload loads; `BundleStreamWriter` (streaming.py)
   streams blobs to disk.
 
 ## Small support modules
 - `__init__.py`: `TorchLensIOError`, `ArtifactVersionBelowFloorError` (rehydration floor),
   `FieldPolicy`, `read_tlspec_version()`.
+- `_artifact_strings.py`: artifact-string validation incl. the MANDATORY
+  device-token gate (see payload_codec above).
+- `_canonical_pickle.py`: the hash-seed-independent canonical metadata pickler
+  (split out of its former host module in fixwave-4).
 - `_json.py`: bounded JSON reads (`loads_bounded()`, `load_bounded()`, `read_bounded()`) with
   size/depth refusal on untrusted text.
 - `paths.py`: `reject_symlink_path()` and bundle blob path resolution.

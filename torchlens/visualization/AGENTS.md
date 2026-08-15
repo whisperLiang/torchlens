@@ -11,7 +11,11 @@ and code panels, and writes/renders output.
 Renders `GradFn` nodes and grad edges captured by `backends/torch/backward.py`.
 
 ### Collapse and Focus
-- `_should_collapse_module()` is the central collapse decision.
+- The v2 smart-collapse ENGINE behind `draw(collapse="auto"/"max")` is
+  `auto_collapse.py` + `collapse_optimizer.py` + `collapse_plan.py` (public
+  schedule via `Trace.collapse_plan()`/`collapse_schedule()`); change policy
+  THERE. `_should_collapse_module()` (`_render_leaf.py`) is only the legacy
+  per-leaf decision path.
 - `_is_collapsed_module()` protects indexing into `modules`; keep its guard strict.
 - `_build_module_focus_entries()` inserts boundary nodes for module-scoped renders.
 - Focus runs before skip/collapse.
@@ -53,7 +57,8 @@ pure-Python rank layout above 20,000 cost units.
   large graph paths should no-op.
 - The rank-layout path is a direct DOT writer rendered through `neato -n`; verify module
   clusters and edge labels after layout changes.
-- `show_model_graph()` should cleanup temporary logs in `finally`.
+- `show_model_graph()` (implemented in `torchlens/_user_public_impls.py`, not
+  package-local) should cleanup temporary logs in `finally`.
 - Buffer visibility has multiple modes; use `_normalize_buffer_visibility()`.
 - Intervention node rendering depends on `intervention_ready` metadata.
 - Bundle diff rendering is SVG-string based; compare snapshots after visual changes.

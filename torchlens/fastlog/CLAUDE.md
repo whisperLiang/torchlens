@@ -77,4 +77,6 @@ copies.
 ## Future Work
 - Async disk drain once benchmarks support it.
 - True distributed capture semantics.
-- Narrow sparse-to-Trace conversion only if it can preserve `Trace` invariants.
+(Sparse-to-Trace conversion SHIPPED as `Recording.to_trace()` — see above; it
+cooks the event stream into a full-structure `Trace` with unsaved payload
+reads rejected explicitly.)

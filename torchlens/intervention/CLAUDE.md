@@ -7,6 +7,12 @@ the compatibility facade for Bundle-level comparison tools. Bundle members are o
 internal Super* views.
 
 ## Internal Layout
+The package's PRIMARY surface lives in flat modules this layout previously
+omitted entirely: `selectors.py` (site selectors incl. `without_op`),
+`sites.py`, `resolver.py` (trusted-callable resolution), `hooks.py`,
+`predicates.py`, `replay.py` (`push`/`push_from`), `rerun.py` (`run`),
+`save.py` (intervention specs), `runtime.py`, `sweep.py`, `types.py`,
+`handles.py`, `helpers.py`, and `errors.py`.
 - `_super/` - generic `Super[T]`, tensor-bearing Super mixins, SuperOp/SuperLayer, the
   remaining Super* log wrappers, and Bundle accessors.
 - `_topology/` - Supergraph, SupergraphNode, TopologyDiff, `build_supergraph()`, and

@@ -141,9 +141,12 @@ maintenance pass:
 
 ## How to add a new visual page
 
-1. Add a row to `visual/coverage_matrix.md` with: model name, options dict, what to nit-check.
-2. `generate_visual_pack.py` reads the matrix and rebuilds `visual_audit.pdf` idempotently.
-3. Run: `python notebooks/audit/visual/generate_visual_pack.py`
+1. Add the page spec IN `visual/generate_visual_pack.py` (its spec list is the
+   input of record). NEVER hand-edit `visual/coverage_matrix.md`: it is a
+   GENERATED OUTPUT of the script (`_write_coverage_matrix`), nothing reads
+   it, and hand edits are lost on regeneration (see `visual/CLAUDE.md`).
+2. Run: `python notebooks/audit/visual/generate_visual_pack.py` — it rebuilds
+   `visual_audit.pdf` AND regenerates the matrix idempotently.
 
 ## Model zoo
 
