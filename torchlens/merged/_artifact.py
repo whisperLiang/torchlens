@@ -309,8 +309,16 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
                 source = Path(handle.path)
                 if source.is_dir():
                     # Copy is the only link mode: member bytes stay byte-identical
-                    # to the standalone rank-core save (P1).
-                    shutil.copytree(source, member_path)
+                    # to the standalone rank-core save (P1). ``symlinks=True``
+                    # copies a symlink AS a symlink instead of DEREFERENCING it
+                    # (b4:R38-5): the default ``symlinks=False`` followed a symlink
+                    # inside the source rank core and copied its TARGET's bytes
+                    # (e.g. a private file outside the core) INTO the shareable
+                    # merged artifact -- an exfiltration channel. Preserved
+                    # symlinks are then refused by the ``tree_hash`` guard below
+                    # (merged artifacts reject symlinks at hash time), so a
+                    # symlinked rank core fails the save instead of leaking.
+                    shutil.copytree(source, member_path, symlinks=True)
                 else:
                     raise MergedArtifactError(
                         f"Rank {rank} core path {source} is not a bundle directory.",
