@@ -323,6 +323,10 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
+# COVERAGE FLOOR (tripwire — never lower it to pass; R72 grind r4). Keep equal
+# to the nightly coverage job's --cov-fail-under; both are locked by
+# tests/test_coverage_floor_governance.py. Measured 64% on 2026-08-15.
+fail_under = 55
 
 [tool.coverage.html]
 directory = "tests/generated_outputs/reports/coverage_html"
