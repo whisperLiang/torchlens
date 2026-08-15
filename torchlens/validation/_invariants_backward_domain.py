@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "_check_backward_pass_domain_invariants",
+    "_layer_feeds_recorded_backward_roots",
     "_layer_postdates_all_backward_triggers",
     "_backward_trigger_forward_positions",
     "_backward_pass_root_forward_position",
@@ -156,6 +157,98 @@ def _layer_postdates_all_backward_triggers(trace: Trace, layer: Layer | Op) -> b
         return False
     trigger_positions = _backward_trigger_forward_positions(trace)
     return bool(trigger_positions) and layer_step_index > max(trigger_positions)
+
+
+def _layer_feeds_recorded_backward_roots(trace: Trace, layer: Layer | Op) -> bool:
+    """Return whether a layer's output can transmit gradient to the backward walk.
+
+    Autograd's backward pass visits a grad_fn only when its output is an
+    ancestor of the loss along GRAD-CARRYING edges. A captured op whose output
+    no captured op consumes (``_ = h.mean()``), or whose only forward path
+    onward crosses a grad-severing op (one with no recorded
+    ``grad_fn_object_id``, e.g. ``detach``), is therefore never visited and
+    legitimately has no GradFn backpointer — that is autograd's contract, not
+    a capture gap (b7-opus R24-X). The backward roots themselves usually pair
+    to a USER-side loss op outside the trace, so the reachability anchor is
+    the set of ops autograd provably VISITED (those retaining a live
+    ``grad_fn`` backpointer): if autograd walked any op downstream of this
+    layer on a grad-carrying path, it must have walked this layer too.
+
+    FAIL-CLOSED by construction: any resolution gap — an empty visited set, a
+    start op without a label, or a child label the per-op index cannot
+    resolve — reports ``True`` (feeds the walk), so the backpointer tripwire
+    STAYS ARMED whenever the graph cannot prove the layer is outside it. A
+    genuinely contributing layer whose own backpointer was dropped still
+    reaches its visited descendants, so the capture-bug case still raises.
+
+    Parameters
+    ----------
+    trace:
+        Trace with materialized backward projections.
+    layer:
+        Layer record (``layer_list`` entry) whose gradient reachability is
+        being checked.
+
+    Returns
+    -------
+    bool
+        False only when no autograd-visited op is reachable from the layer
+        through ops that carry a ``grad_fn_object_id``.
+    """
+
+    # Children reference bare layer labels while op records carry
+    # pass-qualified labels, so index every spelling. A bare label shared by
+    # several passes maps to the UNION of their records: traversing any extra
+    # pass only widens reachability, which widens the no-exemption (True)
+    # side — the fail-closed direction.
+    ops_by_label: dict[str, list[Any]] = {}
+    visited_labels: set[str] = set()
+    for trace_layer in getattr(trace, "layer_list", ()) or ():
+        for op in getattr(trace_layer, "ops", ()) or ():
+            spellings = [
+                spelling
+                for spelling in (getattr(op, "label", None), getattr(op, "layer_label", None))
+                if isinstance(spelling, str)
+            ]
+            if not spellings:
+                continue
+            for spelling in spellings:
+                ops_by_label.setdefault(spelling, []).append(op)
+            if getattr(op, "grad_fn", None) is not None:
+                visited_labels.update(spellings)
+    if not visited_labels:
+        return True
+
+    start_labels = [
+        op_label
+        for op in getattr(layer, "ops", ()) or ()
+        if isinstance(op_label := getattr(op, "label", None), str)
+    ]
+    if not start_labels:
+        return True
+    if any(op_label in visited_labels for op_label in start_labels):
+        return True
+
+    seen: set[str] = set(start_labels)
+    frontier: list[str] = list(start_labels)
+    while frontier:
+        for current in ops_by_label.get(frontier.pop(), ()):
+            for child_label in getattr(current, "children", ()) or ():
+                if not isinstance(child_label, str) or child_label in seen:
+                    continue
+                seen.add(child_label)
+                if child_label in visited_labels:
+                    return True
+                children = ops_by_label.get(child_label)
+                if not children:
+                    return True
+                # Gradient flows THROUGH a child only when autograd built a
+                # node for it; a grad-severed child (detach, no-grad
+                # interior) ends this path without reaching the walked
+                # region.
+                if any(getattr(child, "grad_fn_object_id", None) is not None for child in children):
+                    frontier.append(child_label)
+    return False
 
 
 def _backward_trigger_forward_positions(trace: Trace) -> list[int]:

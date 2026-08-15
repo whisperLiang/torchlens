@@ -28,10 +28,10 @@ from ...data_classes.derived_grad import (
 from ...data_classes.trace import Trace
 from ...ir.refs import DtypeRef
 from .._finalize import mirror_param_derived_grads, stable_callable_name as _callable_identity
+from .._validation_shared import float_replay_tolerances
 from ..registry import BackendUnsupportedError
 from .modules import TFModuleTree
 from .op_callback_capture import TFEagerCaptureSession, TFOpCapture
-from .validation import _float_replay_tolerances
 
 
 @dataclass(frozen=True)
@@ -879,7 +879,7 @@ def _tf_values_close(left: Any, right: Any) -> bool:
             # payloads whose ml_dtypes registration is unavailable) compare
             # exactly: never derive a band from the wrong dtype's finfo.
             return bool(np.array_equal(left_array, right_array))
-        rtol, atol = _float_replay_tolerances(finfo)
+        rtol, atol = float_replay_tolerances(finfo)
         return bool(np.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
 

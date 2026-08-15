@@ -6,11 +6,24 @@ with baseline reds hallucinated two kills during the b9 hunt, so this driver
 refuses to score mutants until the UNMUTATED suite is green in the same
 sandbox.
 
-Two mutant families, one per disarming direction:
+Four mutant families, one per disarming direction or granularity:
 
-* ``MUTANTS`` neuters a tripwire check with an unconditional ``return None``
+* The METADATA-INVARIANT REGISTRY family is DERIVED at run time from
+  ``torchlens.validation.invariants.METADATA_INVARIANT_CONTRACTS`` inside the
+  sandbox (b9-opus R74-2: the hand-listed roster had enrolled 12 of 32
+  contracts, so 20 tripwires were never margin-measured). One whole-function
+  ``return None`` mutant per contract, id = the contract name; a contract
+  landing in the registry is enrolled by construction.
+* ``MUTANTS`` neuters the NON-REGISTRY checks (replay comparator,
+  postprocess contract checker) with an unconditional ``return None``
   (the first statement after the docstring) -- the disarming direction for
   raise-on-violation invariants.
+* ``BLOCK_MUTANTS`` plants a bare ``return None`` immediately BEFORE a named
+  witness block inside a multi-check function (b9-opus R74-2: the
+  whole-function operator is blind to SUB-CHECK deletion -- a bare ``return``
+  before the edge-occurrence multiplicity witness survived the then-current
+  suite 431/431 while every earlier sub-check still ran). Enroll one entry
+  per comment-marked witness block appended to an existing check.
 * ``EXEMPT_MUTANTS`` plants ``return True`` on the perturbation-exemption
   dispatcher and each ``_check_*_exempt`` gate (b9p3 R74p3-F2): for a
   predicate whose ``True`` means "skip the sensitivity check", ``return
@@ -47,21 +60,10 @@ import sys
 from pathlib import Path
 
 #: mutant id -> (relative file, function to neuter with ``return None``).
-#: Every entry names a verdict-steering invariant check; extend when a new
-#: contract lands.
+#: NON-REGISTRY checks only: every metadata-invariant contract is enrolled
+#: automatically from the registry (``derive_registry_mutants``), so this
+#: dict must never list one -- it would double-run under a drifting id.
 MUTANTS: dict[str, tuple[str, str]] = {
-    "M01": ("torchlens/validation/_invariants_topology.py", "_check_graph_topology"),
-    "M02": ("torchlens/validation/_invariants_payloads.py", "_check_op_log_fields"),
-    "M03": ("torchlens/validation/_invariants_connectivity.py", "_check_graph_connectivity"),
-    "M04": ("torchlens/validation/_invariants_connectivity.py", "_check_ancestry_closure"),
-    "M05": ("torchlens/validation/_invariants_equivalence.py", "_check_loop_detection_invariants"),
-    "M06": ("torchlens/validation/_invariants_equivalence.py", "_check_equivalence_symmetry"),
-    "M07": ("torchlens/validation/_invariants_connectivity.py", "_check_lookup_key_consistency"),
-    "M08": ("torchlens/validation/_invariants_conditional_modules.py", "_check_module_hierarchy"),
-    "M09": ("torchlens/validation/_invariants_topology.py", "_check_trace_self_consistency"),
-    "M10": ("torchlens/validation/_invariants_conditional_base.py", "_check_recurrence_invariants"),
-    "M11": ("torchlens/validation/_invariants_equivalence.py", "_check_graph_ordering"),
-    "M12": ("torchlens/validation/_invariants_modules_params.py", "_check_param_xrefs"),
     # The flagship per-op replay comparator (R74/75-2): neutering the
     # comparison result at the callsite must be killed by the corruption
     # battery, not by a single diagnostics test.
@@ -72,6 +74,19 @@ MUTANTS: dict[str, tuple[str, str]] = {
     # through real armed captures by the test_postprocess_dag enforcement
     # plants below.
     "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
+}
+
+#: mutant id -> (relative file, function, comment marker). A bare ``return
+#: None`` is planted immediately BEFORE the first comment line inside the
+#: function that contains the marker: the sub-check deletion direction the
+#: whole-function operator cannot see (b9-opus R74-2). Enroll one entry per
+#: comment-marked witness block that was APPENDED to an existing check.
+BLOCK_MUTANTS: dict[str, tuple[str, str, str]] = {
+    "B01": (
+        "torchlens/validation/_invariants_payloads.py",
+        "_check_edge_use_parent_arg_invariants",
+        "Edge-occurrence MULTIPLICITY witness (see docstring)",
+    ),
 }
 
 #: mutant id -> (relative file, exemption predicate to disarm with ``return
@@ -98,14 +113,6 @@ EXEMPT_MUTANTS: dict[str, tuple[str, str]] = {
     "X14": ("torchlens/validation/exemptions.py", "_check_zipped_sibling_exempt"),
 }
 
-#: mutant id -> the planted return value (the family's disarming direction).
-OPERATORS: dict[str, str] = {
-    **dict.fromkeys(MUTANTS, "None"),
-    **dict.fromkeys(EXEMPT_MUTANTS, "True"),
-}
-
-ALL_MUTANTS: dict[str, tuple[str, str]] = {**MUTANTS, **EXEMPT_MUTANTS}
-
 #: Bounded arming suite: the files whose job is to kill the mutants above.
 SUITE = [
     "tests/test_validation.py",
@@ -115,6 +122,10 @@ SUITE = [
     "tests/test_conditional_invariants.py",
     "tests/test_loop_synthesis_ground_truth.py",
     "tests/test_r29_capval_hardening.py",
+    # B01 killers (b9-opus R74-2): the oracle-independence tamper battery is
+    # the file arming the edge-occurrence multiplicity witness; without it a
+    # bare return planted before that block survived the rest of this suite.
+    "tests/test_oracle_independence.py",
     # M14 killers: the direct synthetic-input liveness file plus the two
     # armed-capture enforcement plants (undeclared read, in-place write
     # smuggle) that exercise the checker through a real postprocess run.
@@ -156,6 +167,57 @@ SANDBOX_IGNORE = (
     "dist",
     "*.tlspec",
 )
+
+
+#: Probe run INSIDE the sandbox to enumerate the metadata-invariant registry.
+#: ``co_filename`` names the defining split module even for the rebind
+#: wrappers ``invariants.py`` exports, so each contract mutates its real
+#: implementation file.
+_REGISTRY_PROBE = """
+import json, os
+from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+rows = {}
+for contract in METADATA_INVARIANT_CONTRACTS:
+    code = contract.check.__code__
+    rows[contract.name] = [os.path.relpath(code.co_filename), contract.check.__name__]
+print(json.dumps(rows))
+"""
+
+
+def derive_registry_mutants(python: str, sandbox: Path) -> dict[str, tuple[str, str]]:
+    """Enumerate one whole-function mutant per metadata-invariant contract.
+
+    Derivation runs in the SANDBOX with the scoring interpreter, so the
+    enrolled roster always matches the code being mutated -- a contract added
+    to ``METADATA_INVARIANT_CONTRACTS`` is margin-measured with no driver
+    edit (b9-opus R74-2: the hand-listed roster had drifted to 12/32).
+
+    Parameters
+    ----------
+    python:
+        Python executable used for scoring runs.
+    sandbox:
+        Sandbox repo root to enumerate.
+
+    Returns
+    -------
+    dict[str, tuple[str, str]]
+        Contract name -> (relative file, check function name).
+    """
+
+    proc = subprocess.run(
+        [python, "-c", _REGISTRY_PROBE],
+        capture_output=True,
+        text=True,
+        cwd=sandbox,
+        env=dict(os.environ, CUDA_VISIBLE_DEVICES=""),
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"registry derivation failed in {sandbox}:\n{proc.stderr}")
+    rows = json.loads(proc.stdout)
+    if not rows:
+        raise SystemExit("registry derivation returned no contracts")
+    return {name: (rel, func) for name, (rel, func) in sorted(rows.items())}
 
 
 def neuter(path: Path, func: str, value: str) -> str:
@@ -201,6 +263,56 @@ def neuter(path: Path, func: str, value: str) -> str:
     lines.insert(anchor.lineno - 1, f"{' ' * anchor.col_offset}return {value}  # R74-MUTANT\n")
     path.write_text("".join(lines), encoding="utf-8")
     return src
+
+
+def neuter_before_marker(path: Path, func: str, marker: str, value: str) -> str:
+    """Insert an early ``return <value>`` before a marked block and return the original.
+
+    The sub-check deletion operator (b9-opus R74-2): a bare return planted
+    just before a comment-marked witness block leaves every earlier sub-check
+    running, which the whole-function operator cannot model. Only COMMENT
+    lines are matched, so a docstring restating the marker text never
+    anchors the plant.
+
+    Parameters
+    ----------
+    path:
+        File containing the function.
+    func:
+        Function whose body holds the marked block.
+    marker:
+        Substring of the block's leading comment line.
+    value:
+        Source expression for the planted return value.
+
+    Returns
+    -------
+    str
+        The file's original source, for restoration.
+    """
+
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func
+        ),
+        None,
+    )
+    if target is None:
+        raise SystemExit(f"function {func} not found in {path}")
+    lines = src.splitlines(keepends=True)
+    for lineno in range(target.body[0].lineno, (target.end_lineno or target.body[0].lineno) + 1):
+        line = lines[lineno - 1]
+        stripped = line.lstrip()
+        if stripped.startswith("#") and marker in stripped:
+            indent = len(line) - len(stripped)
+            lines.insert(lineno - 1, f"{' ' * indent}return {value}  # R74-MUTANT\n")
+            path.write_text("".join(lines), encoding="utf-8")
+            return src
+    raise SystemExit(f"marker {marker!r} not found as a comment inside {func} in {path}")
 
 
 def parse_failures(stdout: str) -> frozenset[str]:
@@ -295,8 +407,35 @@ def main() -> None:
     if sandbox == repo:
         raise SystemExit("refusing to mutate the real checkout; use --make-sandbox")
 
-    ids = args.mutants or sorted(ALL_MUTANTS)
-    unknown = [mid for mid in ids if mid not in ALL_MUTANTS]
+    # Assemble the roster: registry-derived contracts + the three hand lists.
+    # plan: mutant id -> (relative file, function, marker-or-None, value).
+    registry = derive_registry_mutants(args.python, sandbox)
+    overlap = sorted(mid for mid, target in MUTANTS.items() if target in set(registry.values()))
+    if overlap:
+        raise SystemExit(
+            f"hand-listed MUTANTS duplicate registry contracts: {overlap} -- "
+            "delete them; registry contracts enroll automatically"
+        )
+    plan: dict[str, tuple[str, str, str | None, str]] = {}
+    for mid, (rel, func) in registry.items():
+        plan[mid] = (rel, func, None, "None")
+    for mid, (rel, func) in MUTANTS.items():
+        plan[mid] = (rel, func, None, "None")
+    for mid, (rel, func, marker) in BLOCK_MUTANTS.items():
+        plan[mid] = (rel, func, marker, "None")
+    for mid, (rel, func) in EXEMPT_MUTANTS.items():
+        plan[mid] = (rel, func, None, "True")
+    n_families = len(registry) + len(MUTANTS) + len(BLOCK_MUTANTS) + len(EXEMPT_MUTANTS)
+    if len(plan) != n_families:
+        raise SystemExit("mutant id collision across families -- rename the clash")
+    print(
+        f"roster: {len(registry)} registry contracts + {len(MUTANTS)} checks + "
+        f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates",
+        flush=True,
+    )
+
+    ids = args.mutants or sorted(plan)
+    unknown = [mid for mid in ids if mid not in plan]
     if unknown:
         raise SystemExit(f"unknown mutant ids: {unknown}")
 
@@ -318,9 +457,14 @@ def main() -> None:
 
     results: dict[str, dict[str, object]] = {}
     for mid in ids:
-        rel, func = ALL_MUTANTS[mid]
+        rel, func, marker, value = plan[mid]
         path = sandbox / rel
-        original = neuter(path, func, OPERATORS[mid])
+        if marker is None:
+            original = neuter(path, func, value)
+            operator = f"return {value}"
+        else:
+            original = neuter_before_marker(path, func, marker, value)
+            operator = f"return {value} before marker {marker!r}"
         try:
             proc = run_suite(sandbox, args.python, mid)
         finally:
@@ -337,7 +481,7 @@ def main() -> None:
         results[mid] = {
             "file": rel,
             "func": func,
-            "operator": f"return {OPERATORS[mid]}",
+            "operator": operator,
             "returncode": proc.returncode,
             "verdict": verdict,
             "killers": killers,

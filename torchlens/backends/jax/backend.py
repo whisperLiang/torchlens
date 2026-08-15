@@ -78,6 +78,7 @@ from .._options import (
     reject_unsupported_trace_options,
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from .._validation_shared import float_replay_tolerances
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
     JaxCaptureResult,
@@ -3334,9 +3335,30 @@ def _finite_difference_directional_check(
     direction = jnp.sign(grad)
     if not bool(jnp.any(direction)):
         direction = jnp.ones_like(grad)
-    eps = jnp.asarray(1e-2 if value.dtype == jnp.float32 else 1e-4, dtype=value.dtype)
-    plus = scalar_loss(value + eps * direction)
-    minus = scalar_loss(value - eps * direction)
+    # Dtype-derived step (r4 sweep): the former flat 1e-4 for every
+    # non-fp32 dtype sat BELOW fp16/bf16 spacing at unit scale, so
+    # ``value +/- eps`` rounded back to ``value`` and the second oracle
+    # was vacuous there. Wide dtypes keep their tuned historical steps;
+    # storage-rounding dtypes take cbrt(eps) (the central-difference
+    # optimum: ~0.1 fp16, ~0.2 bf16), which survives their spacing.
+    finfo = jnp.finfo(value.dtype)
+    eps32 = float(jnp.finfo(jnp.float32).eps)
+    if value.dtype == jnp.float32:
+        step = 1e-2
+    elif float(finfo.eps) <= eps32:
+        step = 1e-4
+    else:
+        step = float(finfo.eps) ** (1.0 / 3.0)
+    eps = jnp.asarray(step, dtype=value.dtype)
+    plus_input = value + eps * direction
+    minus_input = value - eps * direction
+    if bool(jnp.all(plus_input == value)) and bool(jnp.all(minus_input == value)):
+        # The step underflowed the dtype's spacing at this magnitude: the
+        # probe never moved the input, so any verdict would be vacuous.
+        # Fail closed rather than certify an unprobed gradient.
+        return False
+    plus = scalar_loss(plus_input)
+    minus = scalar_loss(minus_input)
     observed = (plus - minus) / (eps * jnp.asarray(2, dtype=value.dtype))
     expected = jnp.sum(grad * direction)
     return bool(jnp.allclose(observed, expected, rtol=5e-2, atol=5e-3))
@@ -4218,51 +4240,9 @@ def _values_close(left: Any, right: Any) -> bool:
         # Per-dtype ULP-derived bands (ported paddle/mlx validation-oracle
         # derivation); ``jnp.finfo`` reports component precision for complex
         # and covers the extended ml_dtypes floats (bfloat16, fp8).
-        rtol, atol = _float_replay_tolerances(jnp.finfo(left_array.dtype))
+        rtol, atol = float_replay_tolerances(jnp.finfo(left_array.dtype))
         return bool(jnp.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(jnp.array_equal(left_array, right_array))
-
-
-def _float_replay_tolerances(finfo: Any) -> tuple[float, float]:
-    """Derive the dtype-honest ``(rtol, atol)`` replay band from a float finfo.
-
-    Ports the paddle/mlx validation-oracle derivation (b7a07864), replacing
-    the former dtype-blind fp32 decimal pair (rtol 1e-5 / atol 1e-6) that was
-    wrong in both directions: fp64 corruption ~4.5e9 of its own ULPs read as
-    agreement, while a legitimate one-ULP fp16 storage-rounding difference
-    false-failed.
-
-    * Accumulating dtypes (eps <= fp32's): the legacy fp32 relative band
-      rescaled by the eps ratio, so every dtype gets the SAME strictness
-      measured in its own ULPs (fp32 keeps exactly the historical 1e-5).
-    * Storage-rounding dtypes (eps > fp32's): values compute in a wider dtype
-      and round ONCE to storage, so the legitimate replay difference is a few
-      storage ULPs (4-ULP headroom).
-    * The absolute term only absorbs jitter at the bottom of the representable
-      range (the relative band applied to the smallest normal value); the
-      former 1e-6 floor blessed TOTAL corruption of every element below it.
-
-    Parameters
-    ----------
-    finfo
-        ``finfo`` of the payload dtype (``jnp.finfo`` or ``np.finfo``;
-        component finfo for complex dtypes).
-
-    Returns
-    -------
-    tuple[float, float]
-        Derived ``(rtol, atol)`` pair.
-    """
-
-    import numpy as np
-
-    eps32 = float(np.finfo(np.float32).eps)
-    eps = float(finfo.eps)
-    if eps > eps32:
-        rtol = 4.0 * eps
-    else:
-        rtol = 1e-5 * eps / eps32
-    return rtol, rtol * float(finfo.tiny)
 
 
 def _path_to_string(path: Sequence[Any]) -> str:

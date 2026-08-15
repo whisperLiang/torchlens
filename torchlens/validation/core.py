@@ -912,11 +912,19 @@ def _comparator_self_test() -> None:
         unequal = torch.tensor([1.0, -2.0, 0.0, 0.75])
         nan_pair = torch.tensor([float("nan"), 1.0])
         nan_vs_number = torch.tensor([0.25, 1.0])
+        neg_zero = torch.tensor([-0.0, 1.0])
+        pos_zero = torch.tensor([0.0, 1.0])
         healthy = (
             bool(tensor_nanequal(base, base.clone(), allow_tolerance=True))
             and not bool(tensor_nanequal(base, unequal, allow_tolerance=True))
             and bool(tensor_nanequal(nan_pair, nan_pair.clone(), allow_tolerance=True))
             and not bool(tensor_nanequal(nan_pair, nan_vs_number, allow_tolerance=True))
+            # Signed-zero doctrine (sol+fable r4): a -0.0/+0.0 flip is not
+            # EXACT (bit-distinct, diverges through 1/x) but sits inside the
+            # tolerance band.
+            and not bool(tensor_nanequal(neg_zero, pos_zero))
+            and bool(tensor_nanequal(neg_zero, pos_zero, allow_tolerance=True))
+            and bool(tensor_nanequal(neg_zero, neg_zero.clone()))
         )
     if not healthy:
         raise RuntimeError(

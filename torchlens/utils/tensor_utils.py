@@ -504,6 +504,39 @@ def is_functorch_wrapped_tensor(value: Any) -> bool:
         return False
 
 
+def _signed_zeros_match(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> bool:
+    """Return whether zero elements carry the same sign bit on both sides.
+
+    IEEE equality reads ``-0.0 == +0.0`` as True, so ``torch.equal`` alone
+    certifies a sign-flipped-zero replay as EXACT (sol+fable r4 probes) even
+    though the payloads are bit-distinct and diverge downstream
+    (``1/x`` -> opposite infinities). Equal NON-zero finite floats share one
+    representation and equal NaN masks are enforced separately, so the zero
+    positions are the only place bitwise identity can hide behind IEEE
+    equality. NaN sign stays out of scope: kernels legitimately differ on it.
+
+    Parameters
+    ----------
+    tensor_a:
+        First tensor (floating or complex; fp8 callers widen first).
+    tensor_b:
+        Second tensor, already known elementwise-equal to ``tensor_a``.
+
+    Returns
+    -------
+    bool
+        True when every zero element has the same sign bit on both sides.
+    """
+
+    if tensor_a.is_complex():
+        tensor_a = torch.view_as_real(tensor_a.resolve_conj())
+        tensor_b = torch.view_as_real(tensor_b.resolve_conj())
+    zeros = tensor_a == 0
+    if not bool(zeros.any()):
+        return True
+    return bool(torch.equal(tensor_a.signbit() & zeros, tensor_b.signbit() & zeros))
+
+
 def tensor_nanequal(
     tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolerance: bool = False
 ) -> bool:
@@ -558,7 +591,12 @@ def tensor_nanequal(
         # retain the full comparison below.
         if tensor_a.layout == torch.strided and tensor_a.dtype.is_floating_point:
             if torch.equal(tensor_a, tensor_b):
-                return True
+                # IEEE equality hides -0.0 vs +0.0; only certify EXACT when
+                # zero sign bits agree too (fp8 widens first: no signbit
+                # kernel). A flip falls through -- the tolerance band below
+                # may still legitimately accept it.
+                if _signed_zeros_match(*fp8_safe_comparison_pair(tensor_a, tensor_b)):
+                    return True
 
         # fp8 has no isinf/nan_to_num/allclose kernel, so every line below used to
         # raise a raw NotImplementedError out of validation replay. The exact-equality
@@ -599,7 +637,13 @@ def tensor_nanequal(
             tensor_b_nonan = torch.nan_to_num(tensor_b, 0.7234691827346)
 
         if torch.equal(tensor_a_nonan, tensor_b_nonan):
-            return True
+            payload_dtype = tensor_a_nonan.dtype
+            if not (payload_dtype.is_floating_point or payload_dtype.is_complex):
+                return True
+            if _signed_zeros_match(tensor_a_nonan, tensor_b_nonan):
+                return True
+            # Signed-zero flip: not EXACT; the tolerance band below may
+            # still accept it when the caller allows tolerance.
 
         # Tolerance path: allow small floating-point differences (e.g. from
         # convolution replay order, non-deterministic GPU reductions, or

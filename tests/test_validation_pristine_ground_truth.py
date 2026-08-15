@@ -174,3 +174,96 @@ def test_backward_validation_runs_pristine_stock_pass() -> None:
         validate_metadata=False,
     )
     assert _state._is_decorated
+
+
+class TestUnwrapLedgerIntegrity:
+    """r4 census MED-1: ``_decorated_to_orig`` is the single shared root for
+    capture's orig grab, the pristine restoration, AND sparse-runnable
+    callable resolution. A ledger entry whose "orig" is itself a TorchLens
+    wrapper (the orphaned prior-generation-snapshot failure mode) would run
+    the "pristine" forward through a wrapper and bless coherently-corrupt
+    captures -- the oracle now refuses on a wrapper-marked orig value.
+
+    Discipline note: these tests only ADD one synthetic entry under a fake
+    key and remove exactly that key afterwards; the ledger itself is
+    append-only and must never be cleared (2026-08-14 lesson).
+    """
+
+    @staticmethod
+    def _poison() -> int:
+        def fake_prior_generation_wrapper(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("poisoned orig must never be executed")
+
+        fake_prior_generation_wrapper.__tl_wrapper_name__ = "torch_func:poisoned"  # type: ignore[attr-defined]
+        key = id(fake_prior_generation_wrapper)
+        _state._decorated_to_orig[key] = fake_prior_generation_wrapper
+        return key
+
+    def test_poisoned_ledger_refuses_the_pristine_oracle(self) -> None:
+        from torchlens._errors import CaptureContextError
+
+        model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
+        tl.trace(model, torch.randn(2, 4))
+        assert _state._is_decorated
+        key = self._poison()
+        try:
+            with pytest.raises(CaptureContextError) as excinfo:
+                with pristine_torch_oracle():
+                    raise AssertionError("oracle must refuse before yielding")
+            assert excinfo.value.fields["code"] == "pristine_ledger_poisoned"
+        finally:
+            _state._decorated_to_orig.pop(key, None)
+        # The refusal must not have unwrapped torch and left it that way.
+        assert _state._is_decorated
+
+    def test_poisoned_ledger_fails_validation_closed(self) -> None:
+        model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
+        x = torch.randn(2, 4)
+        assert tl.validate(model, x, scope="forward", validate_metadata=False)
+        key = self._poison()
+        try:
+            with pytest.warns(RuntimeWarning, match="pristine"):
+                verdict = tl.validate(model, x, scope="forward", validate_metadata=False)
+            assert verdict is False
+        finally:
+            _state._decorated_to_orig.pop(key, None)
+
+    def test_honest_ledger_carries_no_wrapper_marked_origs(self) -> None:
+        """Positive control: after real captures the append-only ledger holds
+        only unwrapped originals -- the integrity scan has no false positive
+        surface on an honest process."""
+
+        model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
+        tl.trace(model, torch.randn(2, 4))
+        offenders = [
+            getattr(orig, "__tl_wrapper_name__")
+            for orig in _state._decorated_to_orig.values()
+            if hasattr(orig, "__tl_wrapper_name__")
+        ]
+        assert not offenders, offenders
+        with pristine_torch_oracle() as pristine:
+            assert pristine
+
+
+_MASKED_PROBE_SCRIPT = _PROBE_SCRIPT.replace(
+    "return torch.tanh(x) + 1.0",
+    "return (torch.tanh(x) > -5.0).float()",
+)
+
+
+@pytest.mark.heavy
+def test_masked_interior_distortion_boundary_is_pinned() -> None:
+    """r4 census MED-2: pin the DISCLOSED shared-root residual's boundary.
+
+    The same planted 0.1% tanh wrapper distortion, masked by a threshold
+    head, matches the pristine final output AND its own corrupt replay
+    (``layer.func`` identity-shared), so in-process validation reports
+    True. This is the documented scope limit of the pristine phase-0
+    oracle -- the cross-process differential harness is the independent
+    root for the masked-interior class. If this pin starts FAILING, the
+    in-process oracle grew interior teeth: celebrate, then update the
+    disclosure in ``validation/_pristine.py``.
+    """
+
+    stdout = _run_probe(_MASKED_PROBE_SCRIPT)
+    assert "VERDICT=True" in stdout, stdout
