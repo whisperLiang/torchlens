@@ -116,6 +116,13 @@ class _ArmedState:
     capture proceed while unwrapped collectives are silently omitted --
     exactly the fail-open arming exists to prevent. Every arming entry point
     refuses typed while this is set."""
+    ledger_gaps: list[str] = field(default_factory=list)
+    """Unenumerable lifecycle observations (round-3 R18 fail-closed). The
+    ledger holds only PROVEN events, so a wrapped creation/destroy whose
+    membership cannot be read is recorded here instead of being silently
+    dropped. While non-empty, no new group identity is minted and restricted
+    seeding refuses: the dropped event may have been a generation of ANY
+    membership, so every later ordinal derivation is unprovable."""
 
 
 _LOCK = threading.Lock()
@@ -168,18 +175,30 @@ def _dist() -> Any:
 
 
 def _any_group_history() -> bool:
-    """Whether any process group has been observed alive in this process."""
+    """Whether any process group has been observed alive in this process.
+
+    FAIL-CLOSED (round-3 R18): when this returns ``False``, ``arm()`` stamps
+    ``armed_before_any_group`` -- the complete-witness epoch whose lineage
+    vector the merge-time audit lets override other ranks' evidence. A probe
+    failure or an unreadable private registry therefore reads as "history
+    assumed" (``True``, demoting the claim to ``seeded``); only a successfully
+    read, empty registry proves the negative.
+    """
 
     dist = torch.distributed
-    if not dist.is_available():
-        return False
     try:
+        if not dist.is_available():
+            return False
         if dist.is_initialized():
             return True
     except Exception:
-        return False
+        return True
     world = getattr(getattr(dist, "distributed_c10d", None), "_world", None)
     pg_map = getattr(world, "pg_map", None)
+    if pg_map is None:
+        # Private-registry drift: absence of the map is not proof of absence
+        # of groups.
+        return True
     return bool(pg_map)
 
 
@@ -211,14 +230,49 @@ def _group_display_name(group: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _note_ledger_gap(state: _ArmedState, reason: str) -> None:
+    """Record an unenumerable lifecycle observation and disclose it loudly.
+
+    The ledger holds only PROVEN events, so a wrapped observation whose
+    membership cannot be read cannot be appended -- but silently dropping it
+    read as "no churn" downstream and let restricted seeding bless
+    generation-0 claims this rank cannot prove (round-3 R18 fail-open). The
+    gap instead poisons every later lifetime decision: no new identity is
+    minted, restricted seeding refuses typed, and the warning names the
+    consequence.
+    """
+
+    state.ledger_gaps.append(reason)
+    warnings.warn(
+        "torchlens.distributed observed a process-group lifecycle event whose "
+        f"membership could not be enumerated: {reason}. Group-lifetime "
+        "bookkeeping on this rank is unprovable from this point: groups "
+        "created from now on refuse capture correlation typed "
+        "(ambiguous_group_lifetime) and restricted seeding is disabled. "
+        "Recover by re-arming in a fresh process whose groups all enumerate.",
+        stacklevel=4,
+    )
+
+
 def _record_created_group(state: _ArmedState, group: Any) -> None:
     """Assign a wrapped-creation ordinal to a newly created group."""
 
     if group is None or not _is_member_group(group):
         return
+    if state.ledger_gaps:
+        # A prior enumeration gap means the dropped event may have been a
+        # generation of ANY membership, so this creation's ordinal derivation
+        # is unprovable. Mint nothing and append nothing: the group stays
+        # unidentified and resolve_group_identity() refuses it typed instead
+        # of fabricating lineage evidence on a possibly-stale count.
+        return
     try:
         global_ranks = _group_global_ranks(group)
-    except Exception:
+    except Exception as exc:
+        _note_ledger_gap(
+            state,
+            f"wrapped creation not enumerable ({type(exc).__name__}: {exc})",
+        )
         return
     digest = membership_digest_for_ranks(global_ranks)
     ordinal = state.ledger.next_ordinal(digest)
@@ -265,11 +319,21 @@ def _record_destroyed_group(state: _ArmedState, group: Any) -> None:
     else:
         identity = state.identities.pop(id(group), None)
         if identity is None and _is_member_group(group):
+            if state.ledger_gaps:
+                # Same poisoning rule as creation: with a gap open, minting a
+                # churn ordinal from the ledger's generation count could
+                # collide with the dropped generation. Seeding is already
+                # disabled by the gap, so the churn-guard purpose is served.
+                return
             # A destroy of a group we never identified: try to at least record
             # the membership churn so restricted seeding refuses it later.
             try:
                 ranks = _group_global_ranks(group)
-            except Exception:
+            except Exception as exc:
+                _note_ledger_gap(
+                    state,
+                    f"wrapped destroy not enumerable ({type(exc).__name__}: {exc})",
+                )
                 return
             identity = GroupIdentity(
                 membership_digest=membership_digest_for_ranks(ranks),
@@ -495,7 +559,19 @@ def maybe_auto_arm() -> ArmingRecord | None:
     try:
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return None
-    except Exception:
+    except Exception as error:
+        # Fail-open sibling of the arm-time history probe: a probe failure
+        # must not SILENTLY skip arming in a process that may be issuing
+        # collectives. Degrading to unarmed capture is the documented lazy
+        # path, but it is disclosed, not silent.
+        if not _AUTO_ARM_WARNED:
+            _AUTO_ARM_WARNED = True
+            warnings.warn(
+                "torchlens could not probe torch.distributed state at capture "
+                f"entry ({type(error).__name__}: {error}); lazy arming was "
+                "skipped and collective boundary nodes will NOT be recorded.",
+                stacklevel=3,
+            )
         return None
     try:
         return _arm(source="auto")
@@ -585,6 +661,10 @@ def _alive_same_membership_count(digest: str) -> int | None:
     dist = torch.distributed
     world = getattr(getattr(dist, "distributed_c10d", None), "_world", None)
     pg_map = getattr(world, "pg_map", None)
+    if pg_map is None:
+        # Unreadable private registry (API drift) is not a provable zero:
+        # the caller refuses instead of seeding on missing evidence.
+        return None
     if not pg_map:
         return 0
     count = 0
@@ -601,7 +681,20 @@ def _alive_same_membership_count(digest: str) -> int | None:
 def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
     """Restricted registry seeding: only ordinal 0, only provably unambiguous."""
 
-    global_ranks = _group_global_ranks(group)
+    try:
+        global_ranks = _group_global_ranks(group)
+    except Exception as exc:
+        # A group whose own membership cannot be read has no provable
+        # identity at all; refuse typed instead of leaking the raw torch
+        # error mid-capture.
+        raise AmbiguousGroupLifetimeError(
+            "torchlens cannot read this process group's membership "
+            f"(get_process_group_ranks failed: {type(exc).__name__}: {exc}), "
+            "so its lifetime identity is unprovable.",
+            kind=AMBIGUOUS_GROUP_LIFETIME,
+            membership_digest=None,
+            reason="membership_unenumerable",
+        ) from exc
     digest = membership_digest_for_ranks(global_ranks)
 
     def refuse(reason: str) -> AmbiguousGroupLifetimeError:
@@ -617,6 +710,12 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
             reason=reason,
         )
 
+    if state.ledger_gaps:
+        raise refuse(
+            "a group lifecycle event on this rank could not be enumerated "
+            f"({state.ledger_gaps[0]}; {len(state.ledger_gaps)} gap(s) total), "
+            "so no membership's generation-0 claim is provable"
+        )
     churn = [event for event in state.ledger.events if event.membership_digest == digest]
     if churn:
         raise refuse(
@@ -627,8 +726,9 @@ def _seed_group_locked(state: _ArmedState, group: Any) -> GroupIdentity:
     alive = _alive_same_membership_count(digest)
     if alive is None:
         raise refuse(
-            "the live process-group registry contains an entry whose membership "
-            "cannot be read, so the same-membership alive count is incomplete"
+            "the live process-group registry (or one of its entries' "
+            "memberships) cannot be read, so the same-membership alive count "
+            "is incomplete"
         )
     if alive > 1:
         raise refuse(

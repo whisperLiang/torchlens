@@ -265,6 +265,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_param_barcodes",
                 "_param_logs",
                 "activation_memory",
+                # The synthetic output node RESETS the clone-inherited per-op
+                # annotations namespace: inheriting it duplicated a collective
+                # boundary payload (incl. its correlation key) onto the output
+                # node whenever a collective's result was returned directly
+                # (fix/distributed-r3 R18).
+                "annotations",
                 "arg_names",
                 "atomic_module_call",
                 "autograd_memory",
@@ -1927,6 +1933,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                 (
                     "_layer_label_raw",
                     "activation_memory",
+                    "annotations",
                     "dtype",
                     "func_name",
                     "out",
@@ -1972,6 +1979,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                 (
                     "_param_logs",
                     "activation_memory",
+                    "annotations",
                     "autograd_memory",
                     "dtype",
                     "has_output_descendant",
@@ -2035,6 +2043,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                 (
                     "internal_source_parents",
                     "_arg_expressions_cache",
+                    "annotations",
                     "_edge_uses",
                     "_label_raw",
                     "_layer_label_raw",
