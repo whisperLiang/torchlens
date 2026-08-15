@@ -73,6 +73,12 @@ _SCOPED_CAPTURE_STATE = frozenset(
         # unwind -- a survivor past monitor exit is exactly the leak class this
         # row exists to catch (d327e3aa's non-LIFO restore bug).
         ("torchlens/utils/rng.py", "_PATCH_STACKS"),
+        # CUDA RNG snapshot retry latch: set by a failed generator read, RE-ARMED
+        # at every capture entry by set_random_seed (grind p5, B2P3-16). It was
+        # misfiled as an immutable capability memo, which contractually forbade
+        # ever recovering from a TRANSIENT read failure (busy device, momentary
+        # OOM) -- a capture-fidelity latch, not a fact of the torch build.
+        ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         # Accumulate/drain fence for in-flight cpu_async D2H copies (R36-1):
         # armed per copy on the wrapper hot path, drained at the capture
         # finalize seam and on the failure-scrub arms.
@@ -266,7 +272,6 @@ _CAPABILITY_PROBE_STATE = frozenset(
         # One-shot warm of torch's lazy torch._compile/torch._dynamo cascade,
         # fired by the RNG monitor BEFORE its window arms (hunt-b8 F1).
         ("torchlens/utils/_torch_compat.py", "_LAZY_TORCH_IMPORTS_WARMED"),
-        ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         ("torchlens/utils/tensor_utils.py", "_cuda_available"),
     }
 )
@@ -1343,6 +1348,92 @@ def test_publish_active_trace_refuses_concurrent_and_clears_owner() -> None:
     assert owner_errors == []
 
 
+def test_publish_backward_capture_nests_same_thread_and_restores() -> None:
+    """The backward publication handle keeps raw-swap nesting semantics.
+
+    The multi-trace backward bracket and an inner ``backward()`` inside a
+    traced forward legitimately nest backward windows on ONE thread, so the
+    admission-locked replacement for the raw ``_active_trace`` swap must
+    save/restore LIFO on the same thread, restore exactly once (idempotent
+    against stacked unwind arms), and clear the owner id at the end.
+    """
+
+    outer = cast("Any", object())
+    inner = cast("Any", object())
+    outer_publication = _state.publish_backward_capture(
+        outer, hook_plan=None, intervention_spec=None
+    )
+    try:
+        assert _state._active_trace is outer
+        assert _state._active_owner_thread_id == threading.get_ident()
+        inner_publication = _state.publish_backward_capture(
+            inner, hook_plan=None, intervention_spec=None
+        )
+        assert _state._active_trace is inner
+        inner_publication.restore()
+        assert _state._active_trace is outer
+        inner_publication.restore()  # idempotent: must NOT re-clobber to inner
+        assert _state._active_trace is outer
+    finally:
+        outer_publication.restore()
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+
+
+def test_log_backward_refuses_foreign_live_window_instead_of_wedging() -> None:
+    """``log_backward`` concurrent with a foreign capture window refuses typed.
+
+    The last unconverted raw ``_active_trace`` swap: interleaved with another
+    thread's live window, the unlocked save could snapshot that window's trace
+    as "previous" and the ``finally`` republished it after the window closed —
+    ``_active_trace`` stayed permanently non-``None`` and EVERY later capture
+    was refused (a process-global wedge). The admission-locked publication
+    refuses the foreign window typed instead; after the window closes the same
+    backward and later captures run untouched.
+    """
+
+    torch.manual_seed(0)
+    model = nn.Linear(4, 2)
+    x = torch.randn(2, 4, requires_grad=True)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=True))
+    loss = trace[trace.output_layers[0]].out.sum()
+
+    sentinel = cast("Any", object())
+    entered = threading.Event()
+    release = threading.Event()
+    window_errors: list[BaseException] = []
+
+    def hold_window() -> None:
+        """Hold a foreign non-forward publication window open."""
+
+        try:
+            with _state.publish_active_trace(sentinel):
+                entered.set()
+                release.wait(timeout=20.0)
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            window_errors.append(error)
+
+    holder = threading.Thread(target=hold_window)
+    holder.start()
+    assert entered.wait(timeout=5.0), "foreign window never opened"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            trace.log_backward(loss)
+    finally:
+        release.set()
+        holder.join(timeout=10.0)
+    assert window_errors == []
+
+    # No wedge: the globals are clean, the refused backward runs now, and a
+    # later capture is admitted.
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+    trace.log_backward(loss)
+    assert int(trace.num_backward_passes) == 1
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
 def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> None:
     """The reservation never leaks (wedging admission) and nests same-thread.
 
@@ -1578,6 +1669,118 @@ def test_unwrap_torch_refuses_during_an_active_capture() -> None:
     # The wrappers survived the refusal: the next capture needs no re-wrap.
     recovered = tl.trace(nn.ReLU(), torch.ones(2))
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
+def test_release_model_refuses_during_an_active_capture() -> None:
+    """Mid-capture ``tl.release_model()`` is a typed refusal, not silent damage.
+
+    The missing sibling of the ``unwrap_torch`` guard: releasing the model
+    mid-forward (reachable single-threaded from a forward hook or
+    ``activation_transform``) stripped the ``tl_*`` / ``._tl`` metadata the
+    live capture's module attribution reads, and the capture then finished
+    ``capture_verified`` with silently emptied module attribution.
+    """
+
+    seen: list[BaseException] = []
+
+    class _ReleaseMidForward(nn.Module):
+        """Attempt a self-release between two logged operations."""
+
+        def __init__(self) -> None:
+            """Build a submodule so module attribution has something to lose."""
+
+            super().__init__()
+            self.inner = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run one module, try to release, then run another op.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation after both operations.
+            """
+
+            x = self.inner(x)
+            try:
+                tl.release_model(self)
+            except BaseException as error:
+                seen.append(error)
+            return torch.relu(x)
+
+    model = _ReleaseMidForward()
+    trace = tl.trace(model, torch.ones(2))
+
+    assert len(seen) == 1, "release_model() mid-capture did not refuse"
+    error = seen[0]
+    assert isinstance(error, tl.errors.CaptureContextError)
+    assert error.fields["code"] == "release_during_active_capture"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 2, "the refused release still truncated the capture"
+    # Module attribution survived: the submodule call is still attributed.
+    assert any(op.modules for op in trace.compute_ops), (
+        "the refused release still emptied module attribution"
+    )
+
+    # Releasing AFTER the capture stays the supported no-questions path.
+    tl.release_model(model)
+    recovered = tl.trace(model, torch.ones(2))
+    assert any(op.modules for op in recovered.compute_ops)
+
+
+def test_cleanup_of_active_trace_refuses_mid_capture() -> None:
+    """Husking the live capture's own trace mid-forward refuses typed.
+
+    Sibling of the ``unwrap_torch`` / ``release_model`` guards: without the
+    refusal the capture died later on a raw ``AttributeError`` (missing
+    ``_wrapper_runtime_ws``) deep inside the commit path. Cleaning up a
+    DIFFERENT, finished trace during a capture stays supported.
+    """
+
+    from torchlens import _state
+
+    finished = tl.trace(nn.ReLU(), torch.ones(2))
+    seen: list[BaseException] = []
+
+    class _CleanupMidForward(nn.Module):
+        """Attempt to husk the active trace between two logged ops."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Refused self-cleanup; allowed foreign-trace cleanup.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation after both operations.
+            """
+
+            x = torch.relu(x)
+            try:
+                _state._active_trace.cleanup()
+            except BaseException as error:
+                seen.append(error)
+            finished.cleanup()  # foreign finished trace: must stay allowed
+            return torch.relu(x)
+
+    trace = tl.trace(_CleanupMidForward(), torch.ones(2))
+
+    assert len(seen) == 1, "cleanup() of the active trace mid-capture did not refuse"
+    error = seen[0]
+    assert isinstance(error, tl.errors.CaptureContextError)
+    assert error.fields["code"] == "cleanup_during_active_capture"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 2, "the refused cleanup still truncated the capture"
+    trace.cleanup()  # post-capture cleanup stays the supported path
 
 
 def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:

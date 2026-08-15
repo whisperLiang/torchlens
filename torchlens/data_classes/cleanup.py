@@ -45,10 +45,36 @@ def cleanup(self: "Trace") -> None:
     session. After cleanup, the Trace is effectively empty and should
     not be used further. No long-lived safetensors handles need to be
     closed here because lazy materialization opens and closes files per call.
+
+    Raises
+    ------
+    CaptureContextError
+        If ``self`` is the trace a live capture window is currently writing
+        into (code ``cleanup_during_active_capture``). Husking the active
+        trace mid-window (reachable single-threaded from a forward hook or
+        ``activation_transform``) previously let the capture die on a raw
+        ``AttributeError`` deep inside the commit path — sibling of the
+        ``unwrap_torch`` / ``release_model`` mid-capture guards, refused
+        typed here instead. Cleaning up a *different*, finished trace during
+        a capture stays supported.
     """
+    from .. import _state
+    from .._errors import CaptureContextError
     from .._fast_run import close_fast_run_session
     from ..backends.torch.backward import _purge_trace_from_backward_registry
     from ..captured_run import forget_event_stream
+
+    if _state._active_trace is self:
+        raise CaptureContextError(
+            "Trace.cleanup() was called on the trace a live TorchLens capture "
+            "window is still writing into",
+            code="cleanup_during_active_capture",
+            remedy=(
+                "let the capture (or backward projection) finish before "
+                "cleaning up its trace — husking it mid-window kills the "
+                "capture with an unrelated internal error"
+            ),
+        )
 
     close_fast_run_session(self)
     _purge_trace_from_backward_registry(self)

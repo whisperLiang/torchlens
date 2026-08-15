@@ -175,3 +175,97 @@ def test_flag_uncertain_hot_loop_is_fast() -> None:
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0, f"_flag_uncertain hot loop took {elapsed:.2f}s for 1e5 calls"
     assert torch is not None
+
+
+@pytest.mark.smoke
+def test_random_subclass_draw_override_fail_closes_to_uncertain() -> None:
+    """A user ``random.Random`` subclass overriding a draw method cannot read clean.
+
+    The override escapes every witness at once: the class patches sit on the
+    library base (shadowed), the ``c_call`` classifier never fires for a
+    pure-Python method, and the inherited C-state digest does not advance when
+    the override draws from its own attributes. Probe-proven FALSE-CLEAN
+    (grind p5 §3.9): channels=() / uncertain=False on a genuinely
+    nondeterministic-under-replay model. Possession now downgrades
+    completeness with a detail naming the type and method.
+    """
+
+    import random
+
+    import torchlens as tl
+    from torchlens.options import CaptureOptions
+
+    class _CounterRand(random.Random):
+        """Draws from its own attribute; base MT19937 state never advances."""
+
+        def __init__(self) -> None:
+            super().__init__(0)
+            self.counter = 0.0
+
+        def random(self) -> float:
+            self.counter += 0.125
+            return self.counter % 1.0
+
+    class _Model(nn.Module):
+        """Scales its output by the unwitnessable subclass draw."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.rng = _CounterRand()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.lin(x) * self.rng.random()
+
+    capture = CaptureOptions(
+        intervention_ready=True,
+        capture_container_structure=True,
+        cache=False,
+        random_seed=7,
+    )
+    trace = tl.trace(_Model(), torch.randn(2, 4), capture=capture)
+    assert trace._runnable.rng_monitor_uncertain is True
+    assert any(
+        detail.startswith("rng_subclass_override_unwitnessable:")
+        and detail.endswith("._CounterRand.random")
+        for detail in trace._runnable.rng_monitor_uncertain_detail
+    ), trace._runnable.rng_monitor_uncertain_detail
+
+
+@pytest.mark.smoke
+def test_library_rng_subclasses_do_not_over_trigger() -> None:
+    """Held library engines stay clean: the override check trusts library definers.
+
+    ``SystemRandom`` (its draws ARE witnessed by the class patches) and a
+    numpy ``default_rng`` Generator over a ``PCG64`` bit generator (its C
+    state IS digested) must not ceiling a deterministic capture -- the
+    no-over-trigger gate for the subclass-override fail-close.
+    """
+
+    import random
+
+    import torchlens as tl
+    from torchlens.options import CaptureOptions
+
+    class _Plain(nn.Module):
+        """Holds undrawn library engines only."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.base_rng = random.Random(3)
+            self.sys_rng = random.SystemRandom()
+            self.np_gen = np.random.default_rng(5)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.lin(x)
+
+    capture = CaptureOptions(
+        intervention_ready=True,
+        capture_container_structure=True,
+        cache=False,
+        random_seed=7,
+    )
+    trace = tl.trace(_Plain(), torch.randn(2, 4), capture=capture)
+    assert trace._runnable.rng_monitor_uncertain is False
+    assert trace._runnable.rng_monitor_uncertain_detail == ()

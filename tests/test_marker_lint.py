@@ -214,11 +214,18 @@ def test_warn_once_sentinel_census_matches_autouse_reset(
     )
     configured = {(module_name, name) for module_name, name, _default in configured_specs}
     runtime_only = {("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED")}
-    assert configured == discovered | runtime_only, (
+    # Behavioral fidelity latches the NAME heuristic cannot discover (nothing
+    # "warned"-shaped in the identifier), declared here explicitly so the two
+    # ledgers (this census and the conftest reset list) can no longer disagree
+    # silently (grind p5, B2P3-16 / sol R76-2). A test that trips one of these
+    # degrades every later test in the session, so the reset is REQUIRED.
+    sticky_latches = {("torchlens.utils.rng", "_cuda_rng_unusable")}
+    expected = discovered | runtime_only | sticky_latches
+    assert configured == expected, (
         "Warn-once sentinel reset inventory drifted. Add/remove entries in "
         "tests/conftest.py::_WARN_ONCE_SENTINELS. "
-        f"Missing resets: {sorted(discovered - configured)}; "
-        f"stale resets: {sorted(configured - discovered - runtime_only)}"
+        f"Missing resets: {sorted(expected - configured)}; "
+        f"stale resets: {sorted(configured - expected)}"
     )
 
 
@@ -364,34 +371,84 @@ def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     )
 
 
-def test_no_module_level_facet_registration_in_tests() -> None:
-    """Test modules must not mutate the facet registry at IMPORT time.
+_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "unregister_container"})
+"""Public registry mutators whose import-time call is an order-dependence bug."""
 
-    A module-level ``@tl.facets.register`` fires at pytest COLLECTION --
-    before any fixture can isolate it -- so a full collection left extra
-    recipes in the process-global registry for the whole session while a
-    targeted run did not: the same trace hashed different recipe/provenance
-    state depending on how pytest was invoked (hunt-b2-sol R76/R77). Register
-    inside a module-scoped fixture that restores ``_REGISTRY`` on teardown.
+
+def _import_time_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Return every node that executes when the module is IMPORTED.
+
+    Function/lambda bodies run only when called, so they are skipped -- but
+    their decorators DO run at import and stay included. Class bodies execute
+    at import and are walked.
+    """
+
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(getattr(node, "decorator_list", []))
+            continue
+        nodes.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return nodes
+
+
+def _facet_register_aliases(tree: ast.Module) -> set[str]:
+    """Names under which the facet ``register`` decorator is imported bare."""
+
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.endswith("facets"):
+            for imported in node.names:
+                if imported.name == "register":
+                    aliases.add(imported.asname or imported.name)
+    return aliases
+
+
+def test_no_module_level_registry_mutation_in_tests() -> None:
+    """Test modules must not mutate public registries at IMPORT time.
+
+    A module-level ``@tl.facets.register`` or ``tl.register_container(...)``
+    fires at pytest COLLECTION -- before any fixture can isolate it -- so a
+    full collection left extra recipes/containers in the process-global
+    registry for the whole session while a targeted run did not: the same
+    trace hashed different recipe/provenance state depending on how pytest
+    was invoked (hunt-b2-sol R76/R77). Register inside a restoring fixture.
+
+    Covers all three call spellings (grind p5 §3.9: the original check saw
+    only the ``x.facets.register`` decorator form): attribute decorators,
+    BARE-NAME decorators (``from ...facets import register``), and
+    import-time ``register_container``/``unregister_container`` calls whether
+    attribute-qualified or bare.
     """
 
     tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
     for path in tests_root.rglob("test*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        facet_aliases = _facet_register_aliases(tree)
+        for node in _import_time_nodes(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            for decorator in node.decorator_list:
-                call = decorator if isinstance(decorator, ast.Call) else None
-                func = call.func if call is not None else decorator
-                if isinstance(func, ast.Attribute) and func.attr == "register":
+            func = node.func
+            is_violation = False
+            if isinstance(func, ast.Attribute):
+                if func.attr in _REGISTRY_MUTATOR_NAMES:
+                    is_violation = True
+                elif func.attr == "register":
                     base = func.value
                     if isinstance(base, ast.Attribute) and base.attr == "facets":
-                        violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
+                        is_violation = True
+            elif isinstance(func, ast.Name):
+                if func.id in _REGISTRY_MUTATOR_NAMES or func.id in facet_aliases:
+                    is_violation = True
+            if is_violation:
+                violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
     assert not violations, (
-        "module-level @tl.facets.register mutates the public registry at "
-        f"collection time; register inside a restoring fixture: {violations}"
+        "import-time registry mutation (facet register / register_container) runs at "
+        f"pytest collection; register inside a restoring fixture: {sorted(violations)}"
     )
 
 
@@ -783,3 +840,101 @@ def test_strict_trace_fixture_scanner_is_red_capable(snippet: str, expected: lis
     """
 
     assert _strict_trace_fixture_violations_in_source(snippet, "planted.py") == expected
+
+
+def _lru_cached_functions(package_root: Path) -> dict[tuple[str, str], str]:
+    """Collect ``lru_cache``/``cache``-decorated module functions and their source.
+
+    Parameters
+    ----------
+    package_root:
+        Root of the ``torchlens`` package.
+
+    Returns
+    -------
+    dict[tuple[str, str], str]
+        ``(module_name, function_name)`` -> function source segment.
+    """
+
+    cached: dict[tuple[str, str], str] = {}
+    for path in package_root.rglob("*.py"):
+        module_parts = path.relative_to(package_root.parent).with_suffix("").parts
+        if module_parts[-1] == "__init__":
+            module_parts = module_parts[:-1]
+        module_name = ".".join(module_parts)
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for statement in tree.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorated = ast.unparse(statement.decorator_list) if statement.decorator_list else ""
+            if "lru_cache" in decorated or "functools.cache" in decorated:
+                cached[(module_name, statement.name)] = (
+                    ast.get_source_segment(source, statement) or ""
+                )
+    return cached
+
+
+def test_capability_dependent_caches_are_cleared() -> None:
+    """Every probe-derived lru_cache must be in the conftest clear list.
+
+    Restoring the lazy ``HAS_*`` capability latches un-poisons the b7fe953e
+    incident class at the first layer only: an ``lru_cache`` whose value was
+    computed FROM a poisoned probe keeps the poisoned result for the process
+    (grind p5 §3.9, the class one layer down). This census flags every
+    module-level cached function that references ``_torch_compat`` / a
+    ``HAS_*`` flag -- directly or through another flagged cache -- and
+    requires it in ``tests/conftest.py::_CAPABILITY_DEPENDENT_CACHES`` so the
+    autouse probe-restore clears it. Deliberately process-frozen caches
+    (torch-version-fixed inventories) do not reference probes and stay out.
+    """
+
+    import re
+
+    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES
+
+    package_root = Path(__file__).resolve().parents[1] / "torchlens"
+    cached = _lru_cached_functions(package_root)
+    probe_pattern = re.compile(r"_torch_compat|\bHAS_[A-Z_]+\b")
+    dependent: set[tuple[str, str]] = {
+        key for key, body in cached.items() if probe_pattern.search(body)
+    }
+    # Fixpoint: a cache calling another dependent cache is dependent too.
+    while True:
+        names = {name for _, name in dependent}
+        grown = dependent | {
+            key
+            for key, body in cached.items()
+            if key not in dependent and any(re.search(rf"\b{name}\s*\(", body) for name in names)
+        }
+        if grown == dependent:
+            break
+        dependent = grown
+    declared = set(_CAPABILITY_DEPENDENT_CACHES)
+    assert dependent <= declared, (
+        "lru_cached functions derive from a capability probe but are missing from "
+        "tests/conftest.py::_CAPABILITY_DEPENDENT_CACHES (the probe restore cannot "
+        f"clear them): {sorted(dependent - declared)}"
+    )
+    assert declared <= set(cached), (
+        "stale _CAPABILITY_DEPENDENT_CACHES rows (no such cached function): "
+        f"{sorted(declared - set(cached))}"
+    )
+
+
+def test_capability_dependent_cache_clear_actually_clears() -> None:
+    """The conftest clear helper empties every declared probe-derived cache."""
+
+    import importlib
+
+    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES, _clear_capability_dependent_caches
+
+    primed = []
+    for module_name, attr in _CAPABILITY_DEPENDENT_CACHES:
+        function = getattr(importlib.import_module(module_name), attr)
+        function()  # prime
+        assert function.cache_info().currsize >= 1
+        primed.append(function)
+    _clear_capability_dependent_caches()
+    for function in primed:
+        assert function.cache_info().currsize == 0, f"{function} survived the probe restore"

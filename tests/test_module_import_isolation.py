@@ -97,6 +97,26 @@ def _standalone_import_error(module_name: str) -> str | None:
     if pid == 0:  # pragma: no cover - child process, never measured by coverage
         os.close(read_fd)
         try:
+            # Establish the COLD precondition the probe claims. If an earlier
+            # test in this session ran a capture, the child inherits WRAPPED
+            # torch whose wrappers reference the parent's (about-to-be-
+            # orphaned) torchlens modules: an import-time torch call in the
+            # fresh import then routes through a stale wrapper whose lazy
+            # `from .x import y` resolves against the half-initialized fresh
+            # module -- five spurious "circular imports" in backends/torch's
+            # central modules (grind p5 §3.9 R76, 4/4 repro). A real fresh
+            # process can never have wrapped torch before its first torchlens
+            # import, so the child restores torch FIRST (fork-isolated; the
+            # parent is untouched). An unwrap failure is reported as the
+            # probe's failure, never swallowed into a polluted cold import.
+            wrappers = sys.modules.get("torchlens.backends.torch.wrappers")
+            state = sys.modules.get("torchlens._state")
+            if (
+                wrappers is not None
+                and state is not None
+                and getattr(state, "_is_decorated", False)
+            ):
+                wrappers.unwrap_torch()
             for key in [k for k in sys.modules if k == "torchlens" or k.startswith("torchlens.")]:
                 del sys.modules[key]
             __import__(module_name)
@@ -125,6 +145,56 @@ pytestmark = pytest.mark.skipif(
     not hasattr(os, "fork"),
     reason="the cold-import probe needs os.fork to give each module a fresh sys.modules",
 )
+
+
+@pytest.mark.heavy
+def test_standalone_import_probe_is_immune_to_a_prior_capture() -> None:
+    """The cold-import probe holds after a capture wrapped torch in-session.
+
+    One ``tl.trace()`` earlier in the session used to make this gate fail
+    with five spurious circular imports in backends/torch's central modules
+    (the forked child inherited wrapped torch plus orphaned wrapper modules
+    -- a state no real fresh process can be in). The probe now restores torch
+    in the child first; this test pins that immunity by wrapping via a real
+    capture and then probing the five previously-failing modules.
+    """
+
+    import torch
+
+    import torchlens as tl
+
+    class _OneOp(torch.nn.Module):
+        """Minimal module so the capture installs the torch wrappers."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply one logged op.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation.
+            """
+
+            return torch.relu(x)
+
+    tl.trace(_OneOp(), torch.ones(2))
+    failures = {
+        name: error
+        for name in (
+            "torchlens.backends.torch._completeness_cross_thread",
+            "torchlens.backends.torch._ops_predicates",
+            "torchlens.backends.torch.backend",
+            "torchlens.backends.torch.completeness_witness",
+            "torchlens.backends.torch.wrappers",
+        )
+        if (error := _standalone_import_error(name)) is not None
+    }
+    assert not failures, f"the probe is still capture-polluted: {failures}"
 
 
 @pytest.mark.heavy

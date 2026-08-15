@@ -9,6 +9,7 @@ import inspect
 import itertools
 import math
 import sys
+import threading
 import time
 import weakref
 from collections import defaultdict, deque
@@ -22,6 +23,7 @@ import torch
 from torch import nn
 
 from ... import _state
+from ..._errors import CaptureContextError
 from ...constants import LAYER_PASS_LOG_FIELD_ORDER
 from ...data_classes._module_role_hints import multi_output_role_from_path, role_hints_for_module
 from ...data_classes.func_call_location import FuncCallLocation
@@ -379,6 +381,40 @@ def _restore_undecorated_forward(module: nn.Module) -> None:
         module.__dict__.pop("forward", None)
 
 
+def _refuse_release_during_active_capture() -> None:
+    """Refuse model release while a capture owns the logging globals.
+
+    Sibling of the ``unwrap_torch`` mid-capture guard: releasing a model
+    strips the ``._tl`` module metadata and forward decorations the live
+    capture's module-attribution reads, so a mid-forward release (reachable
+    single-threaded from a forward hook or ``activation_transform``) let the
+    capture finish ``capture_verified`` with silently emptied module
+    attribution instead of failing loudly.
+
+    Raises
+    ------
+    CaptureContextError
+        If ``_active_trace`` is set or logging is enabled.
+    """
+
+    if _state._active_trace is None and not _state._logging_enabled:
+        return
+    trace = _state._active_trace
+    model_label = getattr(trace, "model_label", None) or getattr(trace, "model_class_name", None)
+    raise CaptureContextError(
+        "tl.release_model() was called while a TorchLens capture is still active"
+        + (f" for model {model_label!r}" if model_label else ""),
+        code="release_during_active_capture",
+        remedy=(
+            "let the capture finish before releasing the model — releasing "
+            "mid-forward strips the module metadata the capture is reading and "
+            "silently empties module attribution"
+        ),
+        owner_thread_id=_state._active_owner_thread_id,
+        calling_thread_id=threading.get_ident(),
+    )
+
+
 def release_model(model: nn.Module) -> None:
     """Remove persistent TorchLens preparation from a PyTorch module tree.
 
@@ -392,21 +428,38 @@ def release_model(model: nn.Module) -> None:
     None
         The model is modified in place. Releasing an unprepared model is a no-op.
 
+    Raises
+    ------
+    CaptureContextError
+        If a capture is currently active (code
+        ``release_during_active_capture``). Releasing mid-capture strips the
+        ``tl_*`` / ``._tl`` metadata the capture's module attribution reads,
+        so the call is refused instead of finishing a silently degraded trace.
+
     Notes
     -----
     Persistent non-root ``forward`` wrappers make whole-model pickling fail.
     This operation restores those forwards, clears TorchLens-owned module
     metadata and legacy ``tl_*`` instance attributes, and evicts all related
     preparation bookkeeping so a later trace prepares the tree from scratch.
+
+    The refusal check and the release run under ``_capture_admission_lock``
+    (the same seam the ``unwrap_torch`` guard uses): a capture racing this
+    call is either seen by the refusal or blocks at admission until the
+    release is complete and then prepares the tree from scratch — it can
+    never interleave with a half-stripped module tree. No other lock is
+    acquired inside the window.
     """
-    modules = tuple(model.modules())
-    for module in modules:
-        _restore_undecorated_forward(module)
-        for attr_name in tuple(module.__dict__):
-            if attr_name.startswith("tl_"):
-                module.__dict__.pop(attr_name, None)
-        clear_meta(module)
-    _state.release_model_prep(model, modules)
+    with _state._capture_admission_lock:
+        _refuse_release_during_active_capture()
+        modules = tuple(model.modules())
+        for module in modules:
+            _restore_undecorated_forward(module)
+            for attr_name in tuple(module.__dict__):
+                if attr_name.startswith("tl_"):
+                    module.__dict__.pop(attr_name, None)
+            clear_meta(module)
+        _state.release_model_prep(model, modules)
 
 
 def _prepare_model_once(model: nn.Module) -> None:

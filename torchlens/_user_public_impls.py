@@ -297,7 +297,8 @@ def show_model_graph(
         Repeat-fold policy. ``None`` preserves the default policy. ``True`` folds
         every eligible repeated run. ``False`` disables run folding.
     random_seed:
-        Fixed RNG seed for stochastic models.
+        Fixed RNG seed for stochastic models. Reseeds the process-global RNG
+        engines without restoring them; see ``tl.trace``'s ``random_seed``.
     recurrence_detection:
         If True, run full isomorphic subgraph expansion. Set this to False when
         the forward pass has more than about 1M operations and postprocessing
@@ -931,7 +932,8 @@ def validate_forward_pass(
     input_kwargs:
         Keyword arguments for model forward pass.
     random_seed:
-        Fixed RNG seed for reproducibility.
+        Fixed RNG seed for reproducibility. Reseeds the process-global RNG
+        engines without restoring them; see ``tl.trace``'s ``random_seed``.
     verbose:
         If True, print detailed error messages on validation failure.
     validate_metadata:
@@ -1236,7 +1238,9 @@ def _validate_forward_pass_torch(
     input_kwargs:
         Keyword arguments for model forward pass.
     random_seed:
-        Fixed RNG seed for reproducibility (auto-generated if None).
+        Fixed RNG seed for reproducibility (auto-generated if None). Reseeds
+        the process-global RNG engines without restoring them; see
+        ``tl.trace``'s ``random_seed``.
     verbose:
         If True, print detailed error messages on validation failure.
     validate_metadata:
@@ -1636,7 +1640,9 @@ def validate_backward_pass(
     validate_metadata:
         If True, run metadata invariant checks on the captured backward trace.
     random_seed:
-        Fixed RNG seed for stock and candidate passes.
+        Fixed RNG seed for stock and candidate passes. Reseeds the
+        process-global RNG engines without restoring them; see
+        ``tl.trace``'s ``random_seed``.
     atol:
         Absolute allclose tolerance.
     rtol:
