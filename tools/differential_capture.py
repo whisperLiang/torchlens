@@ -292,6 +292,16 @@ def run_wrapper_side(model_name: str) -> dict[str, Any]:
 STRUCTURAL_ROWS = frozenset({"none", "identity"})
 """TorchLens-synthesized graph rows with no user torch call behind them."""
 
+PINNED_NOT_LOGGED = frozenset({"numpy", "__array__", "size", "dim"})
+"""The HARNESS's own copy of the never-logged inventory (b9-sol R75-1).
+
+The oracle's exception authority must not be supplied by the subject under
+test: excusing mode events against the wrapper's live ``funcs_not_to_log``
+means a capture regression that ADDS an op to that table is silently excused.
+Excusal therefore keys on this pin, and any set drift between the pin and the
+wrapper-exported table is a loud mismatch (``NOT_LOGGED_AUTHORITY_DRIFT``)
+that only a reviewed harness edit can clear."""
+
 
 def _dunder_respell(wrapper_name: str) -> str | None:
     """Public-method spelling of an operator dunder, or None."""
@@ -312,11 +322,25 @@ def align_streams(mode_result: dict[str, Any], wrapper_result: dict[str, Any]) -
     and any mismatches. Every dropped or expanded event appears in the ledger
     with the rule that consumed it — silent consumption is impossible.
     """
-    not_logged = set(wrapper_result["funcs_not_to_log"])
+    live_not_logged = set(wrapper_result["funcs_not_to_log"])
     expansions = wrapper_result["composite_expansions"]
 
     ledger: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
+
+    # Exception authority is the harness's pin, never the subject's live
+    # table (b9-sol R75-1); ANY drift between them fails the alignment.
+    added = sorted(live_not_logged - PINNED_NOT_LOGGED)
+    removed = sorted(PINNED_NOT_LOGGED - live_not_logged)
+    if added or removed:
+        mismatches.append(
+            {
+                "kind": "NOT_LOGGED_AUTHORITY_DRIFT",
+                "added_by_subject": added,
+                "missing_from_subject": removed,
+            }
+        )
+    not_logged = PINNED_NOT_LOGGED & live_not_logged
 
     wrapper_ops: list[tuple[int, str]] = []
     for i, name in enumerate(wrapper_result["ops"]):
