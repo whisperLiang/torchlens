@@ -883,3 +883,57 @@ def test_warning_recorder_leaves_a_user_installed_handler_in_place() -> None:
         assert warnings_module.showwarning is user_handler
     finally:
         warnings_module.showwarning = before
+
+
+def test_failed_rescue_rerun_still_restores_state_writes() -> None:
+    """R63: a rescue re-run that WRITES declared state and then RAISES must
+    still restore the snapshot -- the except arm formerly skipped it, leaving
+    the write double-applied on the user's model."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    model = nn.Linear(4, 4)
+    baseline = model.weight.detach().clone()
+    calls = {"n": 0}
+
+    def run_capture() -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _stub_trace(["relu"], signal=True)
+        with torch.no_grad():
+            model.weight.add_(1.0)  # the partial forward's state write
+        raise RuntimeError("rescue died mid-forward")
+
+    trace = capture_with_rescue(run_capture, model=model)
+    assert calls["n"] == 2
+    assert torch.equal(model.weight, baseline), (
+        "the failed rescue re-run's state write was not restored "
+        "(double-applied mutation left on the model)"
+    )
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
+    assert "rescue died mid-forward" in trace.rescue_rerun["rescue_error"]
+
+
+def test_interrupted_rescue_rerun_still_restores_state_writes() -> None:
+    """R63 interrupt arm: KeyboardInterrupt mid-re-run propagates, but the
+    snapshot restore still runs on the way out."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    model = nn.Linear(4, 4)
+    baseline = model.weight.detach().clone()
+    calls = {"n": 0}
+
+    def run_capture() -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _stub_trace(["relu"], signal=True)
+        with torch.no_grad():
+            model.weight.add_(1.0)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        capture_with_rescue(run_capture, model=model)
+    assert torch.equal(model.weight, baseline), (
+        "the interrupted rescue re-run's state write was not restored"
+    )

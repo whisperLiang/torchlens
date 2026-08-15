@@ -648,6 +648,8 @@ def capture_with_rescue(
     state_snapshot = _snapshot_declared_state(model)
 
     rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
+    rescue_exc: Exception | None = None
+    changed_state: tuple[str, ...] = ()
     try:
         # Armed INSIDE the try (the house set-inside-try standard): a
         # KeyboardInterrupt between an outside arm and the try's first line
@@ -665,6 +667,18 @@ def capture_with_rescue(
         ):
             rescued = run_capture()
     except Exception as exc:
+        rescue_exc = exc
+    finally:
+        _thread_local.rescue_active = False
+        # R63: the snapshot restore runs on EVERY exit — success, rescue
+        # failure, and interrupt (KeyboardInterrupt propagates through this
+        # finally). A failed or interrupted re-run may have already written
+        # declared state before dying; skipping the restore left those
+        # writes double-applied on the user's model.
+        if state_snapshot is not None:
+            changed_state = _restore_changed_state(model, state_snapshot)
+
+    if rescue_exc is not None:
         if primary_error is not None:
             # The primary's failure propagates with its diagnostics attached,
             # so its parked advisory is truthful again — re-emit it.
@@ -678,15 +692,12 @@ def capture_with_rescue(
                 trigger=trigger,
                 recovered=False,
                 primary_escape_diagnostics=tuple(getattr(primary, "escape_diagnostics", ()) or ()),
-                rescue_error=f"{type(exc).__name__}: {exc}",
+                rescue_error=f"{type(rescue_exc).__name__}: {rescue_exc}",
             ),
         )
         return primary
-    finally:
-        _thread_local.rescue_active = False
 
     if state_snapshot is not None:
-        changed_state = _restore_changed_state(model, state_snapshot)
         if changed_state:
             # The rescue forward WROTE declared state, so the primary wrote it
             # too and the writes were double-applied. The snapshot restore
