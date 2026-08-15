@@ -31,6 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -64,6 +65,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -105,6 +107,7 @@ jobs:
         #     it was never a justifiable suppression; the build-system floor
         #     in pyproject.toml is raised to match.
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -123,3 +126,11 @@ jobs:
         # get a justified, expiring suppression reviewed by the owner -- never
         # an inherited unexplained ignore.
         run: pip-audit
+
+      - name: Audit the release + builder locks (token-bearing path)
+        # R61 (b2-opus): the hash-locked stacks that run with the repo-write
+        # App token were outside the only vulnerability gate -- a CVE in
+        # requests/urllib3/jinja2 inside the release env was invisible to CI.
+        run: |
+          pip-audit -r .github/workflows/release-requirements.txt --disable-pip
+          pip-audit -r .github/workflows/build-requirements.txt --disable-pip

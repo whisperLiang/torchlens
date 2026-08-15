@@ -260,11 +260,14 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
 
     dev_pins = set(re.findall(r'"ruff==([0-9]+\.[0-9]+\.[0-9]+)"', pyproject_text))
     ci_pins = set(re.findall(r"ruff==([0-9]+\.[0-9]+\.[0-9]+)", lint_text))
+    # The rev is a full commit SHA (R61: the one --fix hook must not ride a
+    # mutable tag); the version lockstep reads the `# vX.Y.Z` provenance
+    # trailer, the same pattern the other SHA-pinned hook repos use.
     hook_revs = set(
         re.findall(
             r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit\s*\n"
             r"(?:\s*#.*\n)*"
-            r"\s*rev:\s*v([0-9]+\.[0-9]+\.[0-9]+)",
+            r"\s*rev:\s*[0-9a-f]{40}\s*#\s*v([0-9]+\.[0-9]+\.[0-9]+)",
             precommit_text,
         )
     )
@@ -406,4 +409,54 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     )
     assert top_level == ["torchlens"], (
         f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
+    )
+
+
+def test_build_command_installs_hash_locked_builder() -> None:
+    """The token-phase builder install is hash-verified (R61, b2-sol HIGH).
+
+    ``semantic-release version`` executes build_command with the repo-write
+    App token in the environment; its old ``pip install 'build==1.5.0'``
+    verified a name/version, not artifact bytes -- escaping the release job's
+    --require-hashes lock. build_command must install from the committed
+    hash-locked build-requirements.txt, the lock must be fully hashed, and the
+    nightly double-build gate must install from the SAME file (single pin
+    authority).
+    """
+
+    try:
+        import tomllib
+    except ImportError:  # python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    repo_root = Path(__file__).resolve().parent.parent
+    with (repo_root / "pyproject.toml").open("rb") as fh:
+        build_command = tomllib.load(fh)["tool"]["semantic_release"]["build_command"]
+
+    assert "--require-hashes" in build_command
+    assert "--only-binary :all:" in build_command
+    assert ".github/workflows/build-requirements.txt" in build_command
+    assert not re.search(r"pip install +'", build_command), (
+        "build_command regained a bare exact-pin pip install; the token-bearing "
+        "phase must install hash-verified"
+    )
+
+    lock_text = (repo_root / ".github" / "workflows" / "build-requirements.txt").read_text()
+    requirement_lines = [
+        line for line in lock_text.splitlines() if re.match(r"^[A-Za-z0-9_.-]+==", line)
+    ]
+    assert any(line.startswith("build==") for line in requirement_lines), (
+        "the build== pin authority left build-requirements.txt"
+    )
+    blocks = re.split(r"\n(?=[A-Za-z0-9_.-]+==)", lock_text)
+    unhashed = [
+        block.splitlines()[0]
+        for block in blocks
+        if re.match(r"^[A-Za-z0-9_.-]+==", block) and "--hash=sha256:" not in block
+    ]
+    assert not unhashed, f"build lock entries without hashes: {unhashed}"
+
+    nightly_yml = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
+    assert ".github/workflows/build-requirements.txt" in nightly_yml, (
+        "the nightly double-build gate no longer installs the release's exact builder"
     )

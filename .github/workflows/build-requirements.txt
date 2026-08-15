@@ -1,0 +1,20 @@
+# Hash-locked builder stack for the TOKEN-BEARING release phase (R61, b2-sol
+# HIGH): `semantic-release version` executes pyproject.toml's build_command with
+# the repo-write App token in the environment, and its old `pip install
+# 'build==1.5.0'` verified a name/version, not artifact bytes -- escaping the
+# release job's --require-hashes lock. This file closes that second install.
+#
+# SINGLE PIN AUTHORITY for build==: the nightly wheel job installs from THIS
+# file (and the packaging-diet gate asserts build_command references it), so
+# the double-build gate always attests exactly the builder the release uses.
+#
+# Wheels only (--only-binary :all:); refresh with:
+#   pip download build==<ver> --only-binary :all: -d /tmp/bl && pip hash /tmp/bl/*
+build==1.5.0 \
+    --hash=sha256:13f3eecb844759ab66efec90ca17639bbf14dc06cb2fdf37a9010322d9c50a6f
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pyproject_hooks==1.2.0 \
+    --hash=sha256:9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913
+tomli==2.4.1 ; python_version < "3.11" \
+    --hash=sha256:0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe

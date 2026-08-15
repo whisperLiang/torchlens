@@ -36,6 +36,7 @@ jobs:
       - name: Install exact canonical CPU benchmark environment
         run: |
           uv venv "${{ runner.temp }}/perf-venv" --python 3.11
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --python "${{ runner.temp }}/perf-venv/bin/python" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -159,6 +160,7 @@ jobs:
 
       - name: Install canonical CPU test environment
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -212,6 +214,7 @@ jobs:
 
       - name: Install the goldens' recording-environment torch
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -403,6 +406,7 @@ jobs:
         # floor; unpinned lowest-direct would pull the multi-GB CUDA build).
         run: |
           uv venv "${{ runner.temp }}/floor-venv" --python 3.10
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --python "${{ runner.temp }}/floor-venv/bin/python" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
@@ -441,11 +445,13 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Build wheel and sdist with the release's exact builder
-        # SINGLE PIN AUTHORITY (grind r4): the build== pin is PARSED out of
-        # pyproject.toml's [tool.semantic_release] build_command instead of
-        # being repeated here, so this gate can never silently attest a
-        # different builder than the release uses (the old lockstep was
-        # comment-only). A parse miss exits non-zero.
+        # SINGLE PIN AUTHORITY (grind r4; hash-locked in R61): the builder
+        # stack is installed from the SAME hash-locked file build_command
+        # references (.github/workflows/build-requirements.txt), so this gate
+        # can never silently attest a different builder than the release uses
+        # (the old lockstep was comment-only). The lockstep assertion that
+        # build_command actually references that file lives in
+        # tests/test_packaging_diet.py.
         # The dirty-tree guard makes the packaging provenance explicit: an
         # artifact must only ever attest the COMMITTED tree (grind r3, R84
         # LOW), and any stale build/ dir is removed because bdist_wheel
@@ -458,19 +464,11 @@ jobs:
             exit 1
           fi
           rm -rf build
-          BUILD_PIN="$(python - <<'PY'
-          import re
-          import tomllib
-
-          with open("pyproject.toml", "rb") as fh:
-              build_command = tomllib.load(fh)["tool"]["semantic_release"]["build_command"]
-          match = re.search(r"build==[0-9][0-9a-zA-Z.]*", build_command)
-          assert match, f"no build== pin found in build_command: {build_command!r}"
-          print(match.group(0))
-          PY
-          )"
+          BUILD_PIN="$(grep -oE '^build==[0-9][0-9a-zA-Z.]*' .github/workflows/build-requirements.txt)"
+          test -n "$BUILD_PIN" || { echo "no build== pin in build-requirements.txt"; exit 1; }
           echo "release builder: $BUILD_PIN"
-          uv pip install --system "$BUILD_PIN"
+          python -m pip install --require-hashes --only-binary :all: \
+            -r .github/workflows/build-requirements.txt
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             python -m build --outdir "${{ runner.temp }}/dist"
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
@@ -536,6 +534,7 @@ jobs:
         # ship unnoticed for up to a week. Run them nightly, where the
         # artifacts are actually built (T13.5).
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \

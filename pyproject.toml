@@ -551,10 +551,13 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
-# build== is PINNED (the old unpinned install resolved arbitrary code while
-# the release App token sat on disk from checkout). PIN AUTHORITY: the nightly
-# wheel job PARSES this build_command for its own build== install, so its
-# double-build gate always attests exactly the builder the release uses.
+# The builder install is HASH-LOCKED (R61): build_command runs while the
+# release App token sits in the environment, and the old exact-pin
+# `pip install 'build==1.5.0'` verified a name/version, not artifact bytes --
+# escaping the release job's --require-hashes lock. PIN AUTHORITY: the
+# build== pin lives in .github/workflows/build-requirements.txt; the nightly
+# wheel job installs from the SAME file, so its double-build gate always
+# attests exactly the builder the release uses.
 #
 # REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel deterministic, and
 # scripts/normalize_sdist.py makes the sdist deterministic too (grind r4,
@@ -569,11 +572,12 @@ major_on_zero = true
 # own commit timestamp") was off by one commit and could never reproduce the
 # published bytes. Correct recipe:
 #   git checkout vX.Y.Z
-#   pip install 'build==1.5.0'
+#   pip install --require-hashes --only-binary :all: \
+#       -r .github/workflows/build-requirements.txt
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
 #       python scripts/normalize_sdist.py dist/*.tar.gz
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
+build_command = "pip install --require-hashes --only-binary :all: -r .github/workflows/build-requirements.txt && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
