@@ -460,12 +460,15 @@ jobs:
           rm -rf build
           BUILD_PIN="$(python - <<'PY'
           import re
-          import tomllib
 
-          with open("pyproject.toml", "rb") as fh:
-              build_command = tomllib.load(fh)["tool"]["semantic_release"]["build_command"]
-          match = re.search(r"build==[0-9][0-9a-zA-Z.]*", build_command)
-          assert match, f"no build== pin found in build_command: {build_command!r}"
+          # The builder pin lives in the hash-locked release requirements
+          # (grind r5, P9/R61: build_command no longer pip-installs anything
+          # inside the token scope), so the gate parses the lock the release
+          # actually installs from.
+          with open(".github/workflows/release-requirements.txt") as fh:
+              lock = fh.read()
+          match = re.search(r"^build==[0-9][0-9a-zA-Z.]*", lock, flags=re.MULTILINE)
+          assert match, "no build== pin found in release-requirements.txt"
           print(match.group(0))
           PY
           )"

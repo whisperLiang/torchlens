@@ -556,10 +556,14 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
-# build== is PINNED (the old unpinned install resolved arbitrary code while
-# the release App token sat on disk from checkout). PIN AUTHORITY: the nightly
-# wheel job PARSES this build_command for its own build== install, so its
-# double-build gate always attests exactly the builder the release uses.
+# `build` is installed from the HASH-LOCKED release-requirements.txt before
+# semantic-release runs (grind r5, P9/R61): build_command formerly ran its
+# own `pip install 'build==1.5.0'` INSIDE the token scope without
+# --require-hashes, so a replaced index artifact could execute with the
+# repo-write App token despite the lock. PIN AUTHORITY: the build== pin in
+# .github/workflows/release-requirements.txt; the nightly wheel job PARSES
+# that lock for its own build== install, so its double-build gate always
+# attests exactly the builder the release uses.
 #
 # REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel's timestamps
 # deterministic, and scripts/normalize_sdist.py normalizes the remaining
@@ -581,7 +585,7 @@ major_on_zero = true
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
 #       python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
+build_command = "SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
