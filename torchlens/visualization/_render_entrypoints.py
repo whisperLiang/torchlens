@@ -382,6 +382,7 @@ def render_combined_graph(
     )
     edge_map = source_graph.edge_map
     edges_used: Set[tuple[str, str, tuple[Any, ...]]] = set()
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] = {}
     collapsed_modules: Set[str] = set()
     captured_forward_edges: list[CapturedForwardEdge] = []
     decisions_by_name = {node.name: node for node in forward_ir.nodes}
@@ -406,6 +407,7 @@ def render_combined_graph(
                     if source_index == 0
                     else replace(node_record, node_calls=(), owned_node_args=())
                 ),
+                deduped_edge_registry=deduped_edge_registry,
             )
 
     _add_combined_backward_nodes(
