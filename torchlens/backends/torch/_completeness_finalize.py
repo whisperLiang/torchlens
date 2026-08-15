@@ -71,6 +71,12 @@ def _MODULE_ESCAPE_TARGETS() -> tuple[tuple[Any, str], ...]:
     dlpack_mod = getattr(torch.utils, "dlpack", None)
     if dlpack_mod is not None:
         targets.append((dlpack_mod, "to_dlpack"))
+    # The PUBLIC ``torch.to_dlpack`` alias is the SAME object re-exported as a separate
+    # module attribute: patching ``torch.utils.dlpack.to_dlpack`` repoints only that
+    # site, so a forward calling ``torch.to_dlpack(x)`` escaped the witness entirely
+    # (the exact unswept-alias sibling of the decorated ``from_dlpack`` pair).
+    if hasattr(torch, "to_dlpack"):
+        targets.append((torch, "to_dlpack"))
     c_mod = getattr(torch, "_C", None)
     if c_mod is not None and hasattr(c_mod, "_to_dlpack"):
         targets.append((c_mod, "_to_dlpack"))

@@ -576,3 +576,284 @@ class TestWrapHistoryConstructionCorpus:
             revived = cls(d_model=8, nhead=2)
             revived.__setstate__(state)
             assert revived.activation is _resolve(F.relu), cls.__name__
+
+
+# ---------------------------------------------------------------------------
+# 6. Import-callback vs unwrap lifecycle race (R21/R55 b7 barrier probe)
+# ---------------------------------------------------------------------------
+
+
+def test_import_callback_unwrap_race_cannot_corrupt_shim_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A causal-bias import callback racing ``unwrap_torch()`` must never leave
+    a shim installed with wrappers off, and a lone late-appended record must
+    never stand in for the full shim family on the next wrap."""
+
+    import threading
+
+    from torchlens.backends.torch import identity_shims
+    from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+    from torchlens.utils import _torch_compat
+
+    if not _torch_compat.HAS_ATTENTION_CAUSAL_BIAS:
+        pytest.skip("causal-bias site absent on this torch")
+    pytest.importorskip("torch.nn.attention.bias")
+    import torch.nn.attention.bias as bias_module
+
+    unwrap_torch()
+    wrap_torch()
+    assert identity_shims.identity_shims_installed()
+
+    unwrap_started = threading.Event()
+    unwrap_done = threading.Event()
+    real_install = identity_shims._install_causal_bias_shim
+
+    def paused_install(records: list) -> None:
+        # Pause the callback tail between the lifecycle check and the install,
+        # exactly where the b7 barrier probe parked the loader. The bounded
+        # wait lets the LOCKED (fixed) tail proceed while unwrap blocks on the
+        # lifecycle lock; the UNLOCKED (buggy) tail instead lets unwrap finish
+        # first and then installs into torn-down state.
+        unwrap_started.set()
+        unwrap_done.wait(timeout=2.0)
+        real_install(records)
+
+    monkeypatch.setattr(identity_shims, "_install_causal_bias_shim", paused_install)
+
+    class _NoopLoader:
+        def exec_module(self, module: object) -> None:
+            return None
+
+    loader = identity_shims._ShimOnExecLoader(_NoopLoader())
+    callback = threading.Thread(target=loader.exec_module, args=(bias_module,))
+    callback.start()
+    assert unwrap_started.wait(timeout=5.0)
+    unwrap_torch()
+    unwrap_done.set()
+    callback.join(timeout=10.0)
+    assert not callback.is_alive()
+    monkeypatch.setattr(identity_shims, "_install_causal_bias_shim", real_install)
+
+    # Wrappers are off: no shim record may survive and CausalBias must be
+    # pristine (final-state equality, the b7 probe's failing assertion).
+    assert not identity_shims.identity_shims_installed()
+    causal_tf = vars(bias_module.CausalBias).get("__torch_function__")
+    assert not identity_shims._is_shimmed(causal_tf)
+
+    # The next wrap must perform the FULL family install: a default-built
+    # encoder layer keeps its fused-fastpath classification.
+    wrap_torch()
+    try:
+        assert identity_shims.identity_shims_installed()
+        if _torch_compat.HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG:
+            layer = nn.TransformerEncoderLayer(d_model=8, nhead=2)
+            assert layer.activation_relu_or_gelu == 1
+    finally:
+        unwrap_torch()
+        wrap_torch()
+
+
+# ---------------------------------------------------------------------------
+# 7. R55 membership-form census — import-time CONTAINER tables (b7 blind spot)
+# ---------------------------------------------------------------------------
+
+# (module name, attribute name) -> reviewed rationale. The defaults scan (1)
+# and the `is`-form grep gate (2) cannot see the THIRD wrap-state shape: a
+# container built at IMPORT time and consulted by MEMBERSHIP at call time
+# (exactly the shape of the shimmed expanded-weights handler tables). Every
+# import-time container holding a WRAPPED-ORIGINAL torch callable must be a
+# reviewed entry here; a new torch release adding one fails this gate.
+_MEMBERSHIP_TABLE_REVIEWED: dict[tuple[str, str], str] = {
+    ("torch._library.utils", "_RANDOM_FUNCTIONS"): (
+        "is_impure()/fx DCE authority; eagerly imported with torch so keys are "
+        "pre-wrap originals, and fx records the protocol-supplied ORIGINAL as "
+        "the node target (verified), so membership answers stay correct."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TORCH_REDUCE_MAP"): (
+        "MaskedTensor reduction dispatch; eagerly imported with torch, and the "
+        "C-level __torch_function__ protocol supplies the ORIGINAL func operand."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TENSOR_REDUCE_MAP"): (
+        "MaskedTensor reduction dispatch; same basis as TORCH_REDUCE_MAP."
+    ),
+    ("torch._jit_internal", "boolean_dispatched"): (
+        "TorchScript boolean-dispatch table; deliberately DUAL-KEYED by "
+        "torchlens (each wrapper registered alongside its original sharing one "
+        "dispatch record), so membership holds under either alias."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TORCH_REDUCE_FNS"): (
+        "Source list the reduce MAPs are built from; same eager-import basis."
+    ),
+    ("torch.masked.maskedtensor.reductions", "TENSOR_REDUCE_FNS"): (
+        "Source list the reduce MAPs are built from; same eager-import basis."
+    ),
+    ("torch.nn.parameter", "UninitializedTensorMixin._allowed_methods"): (
+        "Lazy-module materialization allowlist consulted from "
+        "UninitializedTensorMixin.__torch_function__, where the C-level "
+        "protocol supplies the ORIGINAL func operand; eagerly imported."
+    ),
+}
+
+# Compiler/export/quantization namespaces are out of capture scope by contract
+# (the identity-shim census covers eager runtime paths only).
+_MEMBERSHIP_SCAN_SKIP_PREFIXES = (
+    "torch._dynamo",
+    "torch._inductor",
+    "torch._prims",
+    "torch._refs",
+    "torch._decomp",
+    "torch.ao",
+    "torch.quantization",
+    "torch.fx",
+    "torch.jit",
+    "torch.onnx",
+    "torch.testing",
+    "torch.distributed",
+)
+
+
+def _iter_membership_hits() -> list[tuple[str, str]]:
+    """Scan loaded torch modules for containers holding wrapped originals."""
+
+    import sys as sys_module
+
+    wrapped_original_ids = set(_state._orig_to_decorated.keys())
+    hits: set[tuple[str, str]] = set()
+
+    def _container_members(value) -> list:
+        try:
+            if isinstance(value, dict):
+                return list(value.keys())
+            if isinstance(value, (set, frozenset, tuple, list)):
+                return list(value)
+            if type(value).__name__ == "WeakKeyDictionary":
+                return list(value.keys())
+        except Exception:
+            return []
+        return []
+
+    def _scan_namespace(mod_name: str, holder_name: str, namespace: dict) -> None:
+        for attr_name, value in list(namespace.items()):
+            members = _container_members(value)
+            if not members:
+                continue
+            if any(id(member) in wrapped_original_ids for member in members):
+                hits.add((mod_name, f"{holder_name}{attr_name}"))
+
+    for mod_name, module in list(sys_module.modules.items()):
+        if module is None or not mod_name.startswith("torch"):
+            continue
+        if mod_name.startswith(_MEMBERSHIP_SCAN_SKIP_PREFIXES):
+            continue
+        module_vars = getattr(module, "__dict__", None)
+        if not isinstance(module_vars, dict):
+            continue
+        _scan_namespace(mod_name, "", module_vars)
+        for cls_name, value in list(module_vars.items()):
+            if isinstance(value, type) and getattr(value, "__module__", None) == mod_name:
+                _scan_namespace(mod_name, f"{cls_name}.", dict(vars(value)))
+    return sorted(hits)
+
+
+def test_import_time_membership_tables_holding_wrapped_originals_are_reviewed() -> None:
+    """Every import-time membership table keyed by wrapped originals is reviewed.
+
+    The wrap-state gates covered function DEFAULTS and ``is``-form source
+    comparisons but were structurally blind to import-time membership
+    CONTAINERS (b7-opus + b7-fable, independently corroborated) — the exact
+    shape of the already-shimmed expanded-weights tables. Their safety today
+    rests on eager import (keys are pre-wrap originals) and protocol-supplied
+    original operands; a torch release that adds a NEW such table, or an
+    unreviewed family, must fail here for review rather than flip silently.
+    """
+
+    _ensure_wrapped()
+    unreviewed = [
+        (mod_name, attr_name)
+        for mod_name, attr_name in _iter_membership_hits()
+        if (mod_name, attr_name) not in _MEMBERSHIP_TABLE_REVIEWED
+        and not mod_name.startswith("torch.nn.utils._expanded_weights")
+        and not mod_name.startswith("torchlens")
+    ]
+    assert unreviewed == [], (
+        "Unreviewed import-time membership tables hold wrapped-original torch "
+        f"callables: {unreviewed}. Review each (shim it like the expanded-weights "
+        "tables, or add a reasoned entry to _MEMBERSHIP_TABLE_REVIEWED)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. R02 per-SITE post-wrap audit — object-keyed inventory blindness (b3-opus)
+# ---------------------------------------------------------------------------
+
+# Public module-namespace attribute sites that legitimately keep their ORIGINAL
+# callable while wrapped: torch.functional re-exports outside torch.__all__,
+# so only the torch.functional.<name> twin is repointed. Each is a pure-Python
+# COMPOSITE over wrapped interiors -- traces are byte-identical under either
+# spelling (verified b3-opus /tmp/p3.py). A NEW name appearing here (e.g. a
+# torch release re-exporting a LEAF op into torch outside __all__) must be
+# reviewed, not silently unwrapped.
+_ORIGINAL_HOLDING_SITE_ALLOWLIST = {
+    # The four public composites: torch.functional re-exports outside
+    # torch.__all__, so only the torch.functional.<name> twin is repointed.
+    # Each is a pure-Python COMPOSITE over wrapped interiors -- traces are
+    # byte-identical under either spelling (verified, b3-opus /tmp/p3.py).
+    ("torch", "unique"),
+    ("torch", "pca_lowrank"),
+    ("torch", "svd_lowrank"),
+    ("torch", "lu"),
+    # Private-underscore alias spellings of wrapped objects: the public /
+    # canonical site is repointed; these private twins are not called by the
+    # eager public surface.
+    ("torch", "_segment_reduce"),
+    ("torch", "_sym_sqrt"),
+    ("torch.functional", "_add_docstr"),
+    ("torch.functional", "overload"),
+}
+
+
+def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> None:
+    """Post-wrap, no UNREVIEWED public module attribute may hold an original.
+
+    The wrap-inventory completeness gate was OBJECT-keyed (torch's override
+    registry is keyed by function object and built from ``torch.__all__``),
+    so an attribute SITE keeping its original callable was structurally
+    invisible to it -- a disarmed tripwire for the exact
+    "invisible capture-gap generator on a version boundary" class (b3-opus
+    R02-3). This audit is per (namespace, attribute) SITE: every public
+    callable attr whose OBJECT has a wrapper must be repointed or reviewed.
+    """
+
+    import torch.fft
+    import torch.linalg
+    import torch.nn.init
+    import torch.special
+
+    _ensure_wrapped()
+    namespaces = [
+        ("torch", torch),
+        ("torch.functional", torch.functional),
+        ("torch.nn.functional", F),
+        ("torch.nn.init", torch.nn.init),
+        ("torch.linalg", torch.linalg),
+        ("torch.fft", torch.fft),
+        ("torch.special", torch.special),
+    ]
+    unreviewed: list[tuple[str, str]] = []
+    for ns_name, ns in namespaces:
+        for attr in dir(ns):
+            try:
+                obj = getattr(ns, attr)
+            except (AttributeError, RuntimeError):
+                continue
+            if id(obj) in _state._orig_to_decorated and (
+                (ns_name, attr) not in _ORIGINAL_HOLDING_SITE_ALLOWLIST
+            ):
+                unreviewed.append((ns_name, attr))
+    assert unreviewed == [], (
+        "Public module attribute sites hold a wrapped ORIGINAL callable "
+        f"(unwrapped spelling of a wrapped op): {unreviewed}. Repoint the site "
+        "in decoration, or review it into _ORIGINAL_HOLDING_SITE_ALLOWLIST "
+        "with a composite-over-wrapped-interiors verification."
+    )

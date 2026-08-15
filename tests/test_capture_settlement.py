@@ -608,3 +608,69 @@ def test_teardown_demotion_carries_the_teardown_error_type(monkeypatch) -> None:
     assert outcome.status is CaptureStatus.FAILED
     assert outcome.phase is CapturePhase.TEARDOWN
     assert outcome.error_type == "KeyError"
+
+
+# ---------------------------------------------------------------------------
+# R63 (B8-23 one frame out): teardown double-fault vs unwinding interrupts
+# ---------------------------------------------------------------------------
+
+
+def test_teardown_double_fault_never_swallows_an_unwinding_interrupt(monkeypatch) -> None:
+    """R63 (B8-23 one frame out): a post-settlement teardown Exception raised
+    while a KeyboardInterrupt is unwinding must not replace it -- a caller's
+    ``except Exception`` retry loop would swallow Ctrl-C outright. The
+    ORIGINAL interrupt propagates with the teardown failure attached."""
+
+    import warnings as warnings_module
+
+    from torchlens.capture import trace as trace_module
+
+    def _teardown_bug(*args: object, **kwargs: object) -> None:
+        raise ValueError("injected teardown failure")
+
+    monkeypatch.setattr(trace_module, "_cleanup_forward_memory_once", _teardown_bug)
+
+    class Interrupting(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            _ = self.linear(x)
+            raise KeyboardInterrupt()
+
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("ignore")
+        with pytest.raises(KeyboardInterrupt) as excinfo:
+            tl.trace(Interrupting(), torch.ones(1, 3))
+
+    # The teardown failure stays visible on the propagated interrupt: as a
+    # PEP-678 note (3.11+) or chained as the interrupt's re-raise context.
+    notes = getattr(excinfo.value, "__notes__", None)
+    context = excinfo.value.__context__
+    assert (notes and any("teardown also failed" in note for note in notes)) or (
+        isinstance(context, ValueError) and "injected teardown failure" in str(context)
+    )
+
+
+def test_teardown_failure_on_ordinary_paths_still_propagates(monkeypatch) -> None:
+    """Pin: with no control-flow exception unwinding, a post-settlement
+    teardown failure itself propagates (the demote-and-raise contract)."""
+
+    from torchlens.capture import trace as trace_module
+
+    def _teardown_bug(*args: object, **kwargs: object) -> None:
+        raise ValueError("injected teardown failure")
+
+    monkeypatch.setattr(trace_module, "_cleanup_forward_memory_once", _teardown_bug)
+
+    class Clean(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(self.linear(x))
+
+    with pytest.raises(ValueError, match="injected teardown failure"):
+        tl.trace(Clean(), torch.ones(1, 3))

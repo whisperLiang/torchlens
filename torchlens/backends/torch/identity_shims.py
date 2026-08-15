@@ -17,11 +17,22 @@ broken operand pairings are:
 
 Census (2026-08-14, installed-source grep over the supported eager range,
 identity/equality forms against wrappable callables, runtime paths only)
-found exactly these sites; compiler/export/testing namespaces are out of
-capture scope by contract. A fourth normalization rides along:
+found exactly these sites for the ``is``-comparison FORM; compiler/export/
+testing namespaces are out of capture scope by contract. The grep cannot see
+the third wrap-state shape -- a container built at import time and consulted
+by MEMBERSHIP at call time (the shimmed expanded-weights tables are exactly
+that shape). The runtime membership-container census and its reviewed
+allowlist (``torch._library.utils._RANDOM_FUNCTIONS``, the MaskedTensor
+reduce maps, the lazy-module ``_allowed_methods`` allowlist -- each safe on
+an eager-import or protocol-supplied-original basis) live in
+``tests/test_wrap_state_compat.py``; an unreviewed new table fails that gate. A fourth normalization rides along:
 ``torch.overrides.resolve_name`` keys its cached index by the pre-warm
 originals, so a wrapper argument resolved to ``None`` -- the shim retries a
-miss with the ledger original. The standing installed-tree grep gate lives
+miss with the ledger original. A fifth normalizes TorchScript's overload
+resolver (``torch.jit._script._get_overloads``): it is the one recursive
+compilation entry that skips ``__prepare_scriptable__``, so a wrapped
+overloaded functional compiled its original source against the wrapper's
+globals. The standing installed-tree grep gate lives
 in ``tests/test_wrap_state_compat.py``; the ``nested/_internal`` NJT
 identity reads it surfaces are a documented unshimmed residual (nested
 jagged tensors are not supported capture inputs).
@@ -67,6 +78,14 @@ _MISSING = object()
 
 # (holder, attribute name, original attribute value) for every installed shim.
 _installed: list[tuple[Any, str, Any]] = []
+
+# True ONLY between a successful FULL family install and the matching remove.
+# A non-empty ``_installed`` list must never stand in for family completeness:
+# a raced import callback could append one causal-bias record into a
+# post-teardown empty list, and the next ``install_identity_shims`` would then
+# skip the full install, leaving the transformer/expanded-weights shims absent
+# (the SF-53 fastpath bug re-created through the lifecycle seam).
+_family_installed = False
 
 # Live import hook covering the lazily-importable causal-bias site, or None.
 _import_hook: _CausalBiasShimImportHook | None = None
@@ -129,21 +148,32 @@ class _ShimOnExecLoader:
         shimming restores what this call patched and re-raises loudly — a
         silently unshimmed CausalBias is exactly the wrong-numbers bug this
         hook exists to close.
+
+        The shim-install tail participates in the wrapper lifecycle lock:
+        unlocked, the check-then-install sequence raced ``unwrap_torch()``
+        (remove could run between the completeness check and the append,
+        leaving one causal-bias record installed with wrappers off and the
+        next wrap short-circuiting the full family install). The lock is NOT
+        held across the real module exec — only around the shim tail — so a
+        module import cannot deadlock against a concurrent wrap/unwrap.
         """
 
         self._loader.exec_module(module)
-        if not _installed:
-            # Shims were removed between find_spec and exec (unwrap raced the
-            # import): with wrappers gone every normalization is a no-op and
-            # nothing must be left patched.
-            return
-        records: list[tuple[Any, str, Any]] = []
-        try:
-            _install_causal_bias_shim(records)
-        except Exception:
-            _restore(records)
-            raise
-        _installed.extend(records)
+        from .wrappers import _wrapper_install_lock
+
+        with _wrapper_install_lock:
+            if not _family_installed:
+                # Shims were removed between find_spec and this tail (unwrap
+                # raced the import): with wrappers gone every normalization is
+                # a no-op and nothing must be left patched.
+                return
+            records: list[tuple[Any, str, Any]] = []
+            try:
+                _install_causal_bias_shim(records)
+            except Exception:
+                _restore(records)
+                raise
+            _installed.extend(records)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._loader, name)
@@ -215,12 +245,15 @@ def install_identity_shims() -> None:
     that must surface loudly.
     """
 
-    if _installed:
+    global _family_installed
+    if _family_installed:
         # The causal-bias site resolves only through sys.modules (lazy-import
         # belt). The import hook shims a post-wrap import the moment the
         # module executes; this capture-entry re-pickup stays as the belt for
         # any import the hook missed. The install is a no-op when the site is
-        # absent or already shimmed.
+        # absent or already shimmed. Keyed on the explicit full-install flag,
+        # never on ``_installed`` being non-empty: a lone late-appended record
+        # must not stand in for the whole family.
         _ensure_import_hook()
         late_records: list[tuple[Any, str, Any]] = []
         try:
@@ -236,16 +269,26 @@ def install_identity_shims() -> None:
         _install_causal_bias_shim(records)
         _install_expanded_weights_shims(records)
         _install_resolve_name_shim(records)
+        _install_jit_overload_shim(records)
     except Exception:
         _restore(records)
         raise
     _installed.extend(records)
+    _family_installed = True
     _ensure_import_hook()
 
 
 def remove_identity_shims() -> None:
-    """Remove all installed identity shims; idempotent."""
+    """Remove all installed identity shims; idempotent.
 
+    Caller holds the wrapper install lock (the import-callback tail takes the
+    same lock), so teardown can never interleave with a late causal-bias
+    append: the callback either completes first (its record is restored here)
+    or observes ``_family_installed`` False and installs nothing.
+    """
+
+    global _family_installed
+    _family_installed = False
     _remove_import_hook()
     _restore(_installed)
     _installed.clear()
@@ -540,6 +583,47 @@ def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
     setattr(resolve_name_shim, _SHIM_MARKER, True)
     overrides_module.resolve_name = resolve_name_shim
     records.append((overrides_module, "resolve_name", orig_resolve))
+
+
+# ---------------------------------------------------------------------------
+# Site 5: torch.jit._script._get_overloads
+# ---------------------------------------------------------------------------
+
+
+def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim TorchScript's overload resolver to the wrapper's original basis.
+
+    The C++ sugared-value layer resolves a called functional to the CURRENT
+    namespace object (the torchlens wrapper) and hands it to
+    ``torch.jit._script._get_overloads`` — the one recursive-compilation entry
+    that does NOT honor ``__prepare_scriptable__``. It then compiled the
+    ORIGINAL source (``inspect.unwrap`` follows ``__wrapped__``) against the
+    WRAPPER's globals, so every overloaded pure-Python functional
+    (``F.interpolate``, ``F.adaptive_avg_pool2d/3d``) failed to script with
+    ``undefined value math`` while wrappers were installed. Normalizing a
+    torchlens wrapper to its original before delegating hands torch a
+    self-consistent (source, globals) pair; every other caller is untouched.
+    """
+
+    module = _torch_compat.get_jit_overload_resolver_module()
+    if module is None:
+        return
+    orig_get_overloads = vars(module).get("_get_overloads")
+    if orig_get_overloads is None or _is_shimmed(orig_get_overloads):
+        return
+
+    @functools.wraps(orig_get_overloads)
+    def get_overloads_shim(obj: Any) -> Any:
+        """Resolve a torchlens wrapper to its original before overload lookup."""
+        if getattr(obj, "__tl_wrapper_name__", None) is not None:
+            prepare = getattr(obj, "__prepare_scriptable__", None)
+            if prepare is not None:
+                obj = prepare()
+        return orig_get_overloads(obj)
+
+    setattr(get_overloads_shim, _SHIM_MARKER, True)
+    module._get_overloads = get_overloads_shim
+    records.append((module, "_get_overloads", orig_get_overloads))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:

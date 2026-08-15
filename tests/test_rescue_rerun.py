@@ -473,9 +473,248 @@ def test_escape_detector_diagnostic_triggers_rescue(raw_cos: Any) -> None:
             trace = tl.trace(_stale_closure_model(raw_cos), torch.tensor([0.25, 0.5]))
         info = trace.rescue_rerun
         assert info is not None and info["recovered"] is True
-        assert trace.capture_verification_reason == "mode_rescue_rerun"
+        # REVIEWED FLIP (b3-fable R02-2 / b6-fable R16-3): the rescued run's
+        # own shadow-detector report is a MORE specific verdict than the
+        # generic mode_rescue_rerun stamp and is no longer clobbered by it;
+        # the rerun stays disclosed through ``rescue_rerun`` above.
+        assert trace.capture_verification_reason == "callable_escape_shadow_report"
         assert info["primary_escape_diagnostics"]
         assert "cos" in [op.func_name for op in trace.ops]
     finally:
         unwrap_torch()
         wrap_torch()
+
+
+def test_rescue_never_double_applies_in_forward_parameter_writes(raw_cos: Any) -> None:
+    """A forward that writes declared PARAMETER state must not be applied twice.
+
+    R02-1 regression: the journal-based refusal indexes registered-BUFFER
+    writes only, so a stale-ref escape on a param-mutating forward re-ran the
+    forward, doubled the write, and returned the second, differently
+    parameterized capture with no warning. The state snapshot now detects the
+    rescue's write, restores the duplicate application, and keeps the primary
+    with the escape disclosed.
+    """
+
+    class ParamWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            self.lin.weight.data.mul_(2.0)
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = ParamWriter()
+    model.eval()
+    baseline = model.lin.weight.detach().clone()
+
+    with pytest.warns(UserWarning, match="wrote model state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    # Exactly ONE forward's worth of mutation survives on the user's model.
+    assert torch.equal(model.lin.weight.detach(), baseline * 2.0)
+    # The rescue was attempted, detected as state-writing, undone, refused.
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["recovered"] is False
+    assert trace.rescue_rerun["skipped_reason"] == "state_writes_double_forward_undone"
+    assert trace.rescue_rerun["forward_runs"] == 2
+    assert trace.capture_verified is False
+
+
+def test_rescue_never_double_applies_journal_invisible_param_writes(raw_cos: Any) -> None:
+    """A write the buffer-write journal cannot see must not double-apply.
+
+    R02-2 regression: the success-path guard read an EMPTY buffer-write
+    journal as proof of no writes, but the journal is structurally blind to
+    PARAMETER storage (its index skips ``nn.Parameter``), so a host write
+    into a param during the forward left no record and the re-run
+    double-applied it. The state snapshot audits the re-run by bytes instead
+    of trusting journal emptiness.
+    """
+
+    class HiddenParamWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            # Journal-invisible write: raw host write into PARAMETER storage.
+            self.lin.weight.detach().numpy()[0, 0] += 1.0
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = HiddenParamWriter()
+    model.eval()
+    baseline = model.lin.weight.detach().clone()
+
+    with pytest.warns(UserWarning, match="wrote model state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    expected = baseline.clone()
+    expected[0, 0] += 1.0
+    assert torch.equal(model.lin.weight.detach(), expected)
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["skipped_reason"] == "state_writes_double_forward_undone"
+
+
+def test_journal_visible_buffer_writes_still_refuse_before_the_rerun(raw_cos: Any) -> None:
+    """Pin: a value-changing registered-buffer write still refuses PRE-rescue.
+
+    The cheap journal guard runs first and skips the second forward entirely
+    (forward_runs == 1); the snapshot transaction is the backstop for the
+    classes the journal cannot see, never a replacement for this fast path.
+    """
+
+    class BufferWriter(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.register_buffer("count", torch.zeros(1))
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            self.count.detach().numpy()[0] += 1.0
+            return torch.relu(raw_cos(self.lin(v)))
+
+    model = BufferWriter()
+    model.eval()
+
+    with pytest.warns(UserWarning, match="wrote module buffer state"):
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    assert float(model.count) == 1.0
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["skipped_reason"] == "buffer_writes_double_forward"
+    assert trace.rescue_rerun["forward_runs"] == 1
+
+
+def test_minted_source_nodes_do_not_refuse_a_perfect_rescue() -> None:
+    """R16-1 follow-up: bookkeeping ``none`` nodes are outside the oracle.
+
+    When the primary minted an ``internalsource`` orphan (func_name ``none``)
+    for the escaped op's output and the rescue captured the real op instead,
+    the rescued trace read one ``none`` short -- ``lost_ops=('none',)`` -- and
+    the two-sided oracle refused a PERFECT rescue, leaving the user the broken
+    primary. Functionless source nodes must not count as losses.
+    """
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    primary = _stub_trace(["none", "linear", "relu"], signal=True)
+    rescued = _stub_trace(["cos", "linear", "relu"])
+    traces = iter([primary, rescued])
+
+    result = capture_with_rescue(lambda: next(traces))
+
+    assert result is rescued
+    assert result.capture_verification_reason == "mode_rescue_rerun"
+    assert result.rescue_rerun["recovered"] is True
+    assert result.rescue_rerun["recovered_ops"] == ("cos",)
+    assert result.rescue_rerun["lost_ops"] == ()
+
+
+def test_module_consumed_stale_ref_is_disclosed_and_rescued(raw_cos: Any) -> None:
+    """R16: module-entry adoption must not LAUNDER a stale-ref escape.
+
+    A stale pre-wrap reference whose output is first consumed by a MODULE
+    (``self.lin(stale_fn(x))`` -- the overwhelmingly common shape) used to be
+    adopted as a clean ``internalsource`` node: op absent, zero warnings,
+    ``rescue_rerun`` None -- indistinguishable from a clean capture, while the
+    identical escape consumed by a wrapped FUNCTION warned and rescued.
+    Disclosure must not be consumption-order-dependent.
+    """
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return self.lin(raw_cos(v))
+
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(Model(), torch.randn(3, 4))
+
+    assert "cos" in [op.func_name for op in trace.ops]
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["recovered"] is True
+    assert trace.capture_verification_reason == "mode_rescue_rerun"
+
+
+def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
+    """A rescue re-run would invoke user intervention callables a SECOND time.
+
+    Side-effecting user callables (counters, file writes, externally-held
+    state) double-applied invisibly on the rescue path; interventions now
+    refuse the re-run fail-closed, exactly like streaming/halt captures.
+    """
+
+    calls = {"intervene": 0}
+
+    def counting_transform(value: torch.Tensor, *, hook: Any) -> torch.Tensor:
+        calls["intervene"] += 1
+        return value * 0.5
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return torch.relu(raw_cos(self.lin(v)))
+
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(
+            Model(),
+            torch.randn(3, 4),
+            intervene=tl.when(tl.func("linear"), counting_transform),
+        )
+
+    assert calls["intervene"] == 1
+    assert trace.rescue_rerun is None
+
+
+def test_recovered_rescue_preserves_specific_verification_reasons() -> None:
+    """A recovered rescue must not demote a specific verdict to the generic stamp.
+
+    Only the dynamo reason was protected; an armed detector/witness verdict on
+    the rescued run (owner_thread_tripwire_changed, callable_escape_shadow_report,
+    dispatch_witness_unaccounted_ops, ...) was clobbered into mode_rescue_rerun.
+    """
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    primary = _stub_trace(["none", "linear"], signal=True)
+    rescued = _stub_trace(
+        ["cos", "linear"],
+        capture_verification_reason="owner_thread_tripwire_changed",
+    )
+    traces = iter([primary, rescued])
+
+    result = capture_with_rescue(lambda: next(traces))
+
+    assert result is rescued
+    assert result.capture_verification_reason == "owner_thread_tripwire_changed"
+    assert result.rescue_rerun["recovered"] is True
+
+
+def test_warning_recorder_leaves_a_user_installed_handler_in_place() -> None:
+    """The rescue driver's showwarning swaps restore identity-checked.
+
+    A user or callback that installs its own ``warnings.showwarning`` during
+    the recorded window must not be silently reverted at window exit.
+    """
+
+    import warnings as warnings_module
+
+    from torchlens.backends.torch.rescue import _record_emitted_warnings
+
+    def user_handler(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    before = warnings_module.showwarning
+    try:
+        with _record_emitted_warnings(set()):
+            warnings_module.showwarning = user_handler
+        assert warnings_module.showwarning is user_handler
+    finally:
+        warnings_module.showwarning = before

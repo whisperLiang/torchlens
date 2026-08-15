@@ -919,9 +919,14 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
         else:
             details = (
                 "No OptimizedModule or direct plain-attribute compiled callable detected. "
-                "On this torch (set_stance available), compiled callables reached during "
-                "capture -- including globals/free-function references outside this "
-                "structural preflight -- run their original eager Python and are logged."
+                "On this torch (set_stance available), pre-existing compiled callables "
+                "reached during capture -- including globals/free-function references "
+                "outside this structural preflight -- run their original eager Python and "
+                "are logged. One exception: the stance engages only when Dynamo is already "
+                "imported at capture entry, so a compiled callable CREATED inside the "
+                "forward of a process whose first torch._dynamo import happens mid-capture "
+                "is bypassed and disclosed (capture_verified=False, reason "
+                "dynamo_region_not_logged), not logged."
             )
         suggestion = (
             "Verify the contract with tl.debug.count_compiles(); correlate Dynamo graph "

@@ -145,6 +145,7 @@ round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `Tr
 | `DataLoader(num_workers=0)` callback executed inside forward | Owner-thread domain; shadow reports visible escapes |
 | Worker process preprocessing before model invocation | Outside the armed model-forward domain |
 | Model tensor work delegated to another thread/process | Unsupported; owner-thread qualification applies; TENSOR-crossing escapes are disclosed. A PRE-EXISTING thread running a stale op whose result crosses back only as a python scalar (a float, never a tensor) is a declared SILENT residual — no mode, belt, or tripwire observes it |
+| OWNER-thread stale op whose result crosses to host as a scalar only (`stale_norm(x).item() > t`: no intermediate tensor op consumes it) | Declared SILENT residual on default captures. The scalar-protocol read of the untracked intermediate emits no record, and unlabeled receivers cannot be flagged without false-positives on parameter/attribute scalar reads. The armed shadow detector reports the stale call itself; default captures never claim `capture_verified=True`, so no verdict is inflated |
 | Deferred `trace.log_backward(...)` / `Recording.log_backward(...)` | Explicitly `not_armed` in this rollout |
 | `torch.func` / functorch transform internals | Existing transform boundary warning/marker remains authoritative |
 

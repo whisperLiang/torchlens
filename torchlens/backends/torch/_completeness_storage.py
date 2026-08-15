@@ -568,31 +568,45 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
 
     state = _PlainScalarEscapeState(trace=trace, owner_thread_id=threading.get_ident())
     restores: dict[str, tuple[bool, Any]] = {}
-    for name in HOST_VALUE_ESCAPE_METHODS & {
-        "item",
-        "__bool__",
-        "__int__",
-        "__float__",
-        "__index__",
-        "__complex__",
-    }:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            continue
-        shadowed = name in torch.Tensor.__dict__
-        try:
-            setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state, name))
-        except (TypeError, AttributeError):
-            continue
-        restores[name] = (shadowed, original)
-    try:
-        yield
-    finally:
+
+    def _restore_scalar_belt() -> None:
+        """Restore every scalar-belt patch that actually landed (shadow-aware)."""
         for name, (shadowed, original) in restores.items():
             if shadowed:
                 setattr(torch.Tensor, name, original)
             else:
                 delattr(torch.Tensor, name)
+
+    # R07 (the L4 unwind standard): the install loop lands process-global
+    # ``torch.Tensor`` scalar-protocol patches on EVERY default capture, so a
+    # BaseException escaping it (Python never calls ``__exit__`` when
+    # ``__enter__`` raises) used to strand the already-installed methods for
+    # the life of the process.
+    try:
+        for name in HOST_VALUE_ESCAPE_METHODS & {
+            "item",
+            "__bool__",
+            "__int__",
+            "__float__",
+            "__index__",
+            "__complex__",
+        }:
+            original = getattr(torch.Tensor, name, None)
+            if original is None or not callable(original):
+                continue
+            shadowed = name in torch.Tensor.__dict__
+            try:
+                setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state, name))
+            except (TypeError, AttributeError):
+                continue
+            restores[name] = (shadowed, original)
+    except BaseException:
+        _restore_scalar_belt()
+        raise
+    try:
+        yield
+    finally:
+        _restore_scalar_belt()
         if state.count:
             location = (
                 f"{state.first_file}:{state.first_line}"

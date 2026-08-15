@@ -860,3 +860,92 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
         )
     ]
     assert storage_trips
+
+
+def test_detector_teardown_failure_demotes_and_discloses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed detector uninstall must demote the verdict, not be swallowed."""
+
+    from torchlens.backends.torch import escape_detection as escape_detection_module
+
+    real_uninstall = escape_detection_module._uninstall_detector
+    fail_once = {"armed": True}
+
+    def failing_uninstall(guard: Any) -> None:
+        real_uninstall(guard)
+        if fail_once["armed"]:
+            fail_once["armed"] = False
+            raise RuntimeError("injected teardown failure")
+
+    monkeypatch.setattr(escape_detection_module, "_uninstall_detector", failing_uninstall)
+
+    class Clean(nn.Module):
+        """Escape-free control model."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(x)
+
+    wrap_torch(escape_detector="shadow")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(Clean(), torch.randn(3))
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "escape_detector_teardown_failed"
+    assert trace.escape_detector_verified is False
+    teardown_reports = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if diagnostic.get("kind") == "detector_teardown_failed"
+    ]
+    assert teardown_reports and "injected teardown failure" in teardown_reports[0]["error"]
+    assert any(
+        "failed to uninstall its escape detector" in str(item.message)
+        for item in _gap_warnings(caught)
+    )
+
+    # The failure must not poison the process: the next capture runs and settles
+    # its ordinary shadow verdict with no teardown diagnostic.
+    second = tl.trace(Clean(), torch.randn(3))
+    assert second.capture_verification_reason == "shadow_diagnostic_mode"
+    assert not any(
+        diagnostic.get("kind") == "detector_teardown_failed"
+        for diagnostic in second.escape_diagnostics
+    )
+
+
+def test_owner_thread_scalar_only_stale_escape_is_shadow_reported() -> None:
+    """The owner-thread scalar-only stale crossing is observable via shadow mode.
+
+    On DEFAULT captures this class (``stale_norm(x).item() > t`` -- no
+    intermediate tensor op consumes the stale output) is a DECLARED silent
+    residual (docs/migration/scoped_detached_patching.md, Honest boundaries):
+    the scalar-protocol read of the untracked intermediate emits no record,
+    and unlabeled receivers cannot be flagged without false-positives on
+    parameter/attribute scalar reads. This pin proves the opt-in shadow
+    detector reports the stale CALL itself, so the documented remediation
+    path is real (b3-fable R02-1).
+    """
+
+    unwrap_torch()
+    stale_norm = torch.linalg.norm
+    wrap_torch(escape_detector="shadow")
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            if stale_norm(x).item() > 0.001:
+                return torch.relu(self.lin(x))
+            return torch.sigmoid(self.lin(x))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(Model(), torch.randn(3, 4))
+
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "callable_escape_shadow_report"
+    assert trace.escape_diagnostics
+    assert _gap_warnings(caught)

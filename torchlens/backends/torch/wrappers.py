@@ -43,6 +43,7 @@ from ...utils._torch_compat import (
     get_device_constructors,
     get_device_context_type,
     get_functorch_maybe_current_level,
+    get_jit_boolean_dispatch_table,
     get_jit_builtin_table,
     get_optional_torch_namespace,
     get_torch_function_mode_stack_length,
@@ -2245,6 +2246,18 @@ def torch_func_decorator(
     setattr(wrapped_func, "__tl_wrapper_name__", f"torch_func:{func_name}")
     setattr(wrapped_func, "__tl_detector_excluded__", is_unlogged_func)
 
+    # ---- __prepare_scriptable__ for JIT compatibility ----
+    # torch.jit.script and torch.jit._recursive.try_compile_fn both honor this
+    # hook BEFORE building the resolution callback. Without it, jit pulled the
+    # ORIGINAL functional's source (inspect.unwrap follows __wrapped__) but
+    # resolved its globals against THIS module -- so any wrapped pure-Python
+    # functional whose source needs names beyond the torch.overrides
+    # boilerplate imported above (``F.interpolate`` -> ``undefined value
+    # math``) failed to script, process-wide, once wrappers installed.
+    # Returning the original hands jit a self-consistent (source, globals)
+    # pair; scripted artifacts run raw torch by contract (never logged).
+    setattr(wrapped_func, "__prepare_scriptable__", lambda: func)
+
     return wrapped_func
 
 
@@ -2388,6 +2401,37 @@ def _register_jit_builtin_wrappers() -> None:
                         builtin_table[id(accessor)] = builtin_name
 
 
+def _register_jit_boolean_dispatch_wrappers() -> None:
+    """Register wrappers of boolean-dispatched functionals in torch's table.
+
+    ``torch._jit_internal.boolean_dispatched`` is a WeakKeyDictionary keyed by
+    the ORIGINAL function objects (the whole ``F.max_pool*`` family plus
+    ``fractional_max_pool*`` / ``adaptive_max_pool*``). TorchScript's
+    sugared-value layer consults it BY OBJECT before source compilation, so
+    once decoration replaced the namespace slot with a wrapper,
+    ``torch.jit.script`` on any max-pool-using module hard-failed
+    (``NotSupportedError`` on the wrapper's varargs). Registering each wrapper
+    as an additional key sharing the original's dispatch record keeps jit
+    compiling the SAME if_true/if_false originals under either alias. Entries
+    persist like the builtin-table wrapper ids (wrappers live in the
+    append-only ledger), so stale post-unwrap wrapper references still script.
+    """
+
+    table = get_jit_boolean_dispatch_table()
+    if table is None:
+        return
+    for orig, record in list(table.items()):
+        wrapper = _state._orig_to_decorated.get(id(orig))
+        if wrapper is None or not callable(wrapper) or isinstance(wrapper, property):
+            continue
+        try:
+            if table.get(wrapper) is None:
+                table[wrapper] = record
+        except TypeError:
+            # Non-weakref-able wrapper object: leave the original-only entry.
+            continue
+
+
 # ---------------------------------------------------------------------------
 # One-time decoration at import time
 # ---------------------------------------------------------------------------
@@ -2459,6 +2503,7 @@ def decorate_all_once() -> None:
     # We must register our wrappers so JIT recognizes them as the same ops.
     # Without this, torch.jit.script fails on any code using wrapped functions.
     _register_jit_builtin_wrappers()
+    _register_jit_boolean_dispatch_wrappers()
 
     # ---- DeviceContext bypass setup ----
     # Collect names of factory functions (zeros, ones, empty, etc.) that accept

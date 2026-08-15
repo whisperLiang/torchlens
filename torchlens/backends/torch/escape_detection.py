@@ -631,7 +631,20 @@ def _install_setprofile(guard: _GuardState) -> None:
 
     prior = sys.getprofile()
     if prior is _profile_callback:
-        raise RuntimeError("TorchLens escape detector cannot nest its setprofile adapter.")
+        if isinstance(getattr(_THREAD_STATE, "guard", None), _GuardState):
+            raise RuntimeError("TorchLens escape detector cannot nest its setprofile adapter.")
+        # A previous capture's teardown failed and stranded the adapter with no live
+        # guard behind it (the callback is inert in that state). Refusing here would
+        # deny every later capture on this thread, so self-heal: adopt no prior hook
+        # (the stranded adapter already displaced whatever preceded it) and disclose.
+        warnings.warn(
+            "TorchLens found its escape-detector profile hook stranded by a previous "
+            "capture's failed teardown and reclaimed it. Any host profiler that was "
+            "active below it was already non-functional and is not restored.",
+            TorchLensCaptureGapWarning,
+            stacklevel=2,
+        )
+        prior = None
     guard.prior_profile = prior
     sys.setprofile(_profile_callback)
 
@@ -705,19 +718,35 @@ def _uninstall_monitoring(guard: _GuardState) -> None:
     tool_id = guard.monitoring_tool_id
     if tool_id is None:
         return
+    failures: list[str] = []
     try:
-        with contextlib.suppress(Exception):
+        try:
             monitoring.set_events(tool_id, 0)
+        except Exception as exc:
+            failures.append(f"set_events: {exc!r}")
         for code in guard.monitoring_codes:
-            with contextlib.suppress(Exception):
+            try:
                 monitoring.set_local_events(tool_id, code, 0)
+            except Exception as exc:
+                failures.append(f"set_local_events({code.co_qualname!r}): {exc!r}")
         for event in (monitoring.events.PY_START, monitoring.events.CALL):
-            with contextlib.suppress(Exception):
+            try:
                 monitoring.register_callback(tool_id, event, None)
+            except Exception as exc:
+                failures.append(f"register_callback: {exc!r}")
     finally:
         guard.monitoring_tool_id = None
-        with contextlib.suppress(Exception):
+        try:
             monitoring.free_tool_id(tool_id)
+        except Exception as exc:
+            failures.append(f"free_tool_id: {exc!r}")
+    if failures:
+        # Every step above was still attempted, so state is as clean as it can get;
+        # now surface the failure so the caller can demote the verdict instead of
+        # blessing a capture whose detector may still be firing into a dead guard.
+        raise RuntimeError(
+            "TorchLens sys.monitoring detector teardown failed: " + "; ".join(failures)
+        )
 
 
 def _install_detector(guard: _GuardState) -> None:
@@ -837,8 +866,39 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
         _THREAD_STATE.guard = None
         _THREAD_STATE.tokens = []
         if mode == "shadow":
-            with contextlib.suppress(Exception):
+            try:
                 _uninstall_detector(guard)
+            except Exception as teardown_exc:
+                # A swallowed teardown failure used to leave the leaked profiler /
+                # monitoring callbacks active process-wide while the trace kept its
+                # blessed verdict. Disclose, demote every authority field this guard
+                # owns, and best-effort clear the one residual we can still see.
+                if sys.getprofile() is _profile_callback:
+                    with contextlib.suppress(Exception):
+                        sys.setprofile(guard.prior_profile)
+                trace.escape_detector_verified = False
+                if getattr(trace, "completeness_witness_verified", None) is True:
+                    trace.completeness_witness_verified = False
+                trace.capture_verified = False
+                trace.capture_verification_reason = "escape_detector_teardown_failed"
+                reports = trace.__dict__.setdefault("escape_diagnostics", [])
+                reports.append(
+                    {
+                        "kind": "detector_teardown_failed",
+                        "error": repr(teardown_exc),
+                        "owner_thread_id": guard.owner_thread_id,
+                        "guard_pass_index": guard.guard_pass_index,
+                        "profile_hook_recovered": sys.getprofile() is not _profile_callback,
+                    }
+                )
+                warnings.warn(
+                    "TorchLens failed to uninstall its escape detector "
+                    f"({teardown_exc!r}). The Trace is marked capture_verified=False "
+                    "(reason: escape_detector_teardown_failed); a leaked hook may still "
+                    "be active in this process.",
+                    TorchLensCaptureGapWarning,
+                    stacklevel=2,
+                )
         thread_count_end = threading.active_count()
         trace.capture_thread_count_end = thread_count_end
         trace.capture_thread_activity_detected = thread_count_end != thread_count_start
