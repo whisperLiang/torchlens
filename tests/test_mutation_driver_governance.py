@@ -270,3 +270,44 @@ def test_run_suite_deadline_yields_timeout_sentinel(
     result = driver.run_suite(tmp_path, "python", "gov", timeout=5.0)
     assert isinstance(result, driver.SuiteTimeout)
     assert result.seconds == 5.0
+
+
+@pytest.mark.smoke
+def test_core_check_roster_refuses_enrollment_drift(tmp_path: Path) -> None:
+    """A core.py checker in neither ledger refuses the campaign loudly.
+
+    b9-sol R74r5 finding 2: exhaustive-coverage claims rested on the
+    metadata-contract registry alone while ``validation/core.py`` carried
+    five verdict-steering checkers with no mutant. The derivation makes that
+    drift a refusal, not a silent gap.
+    """
+
+    driver = _load_driver_module()
+    core_dir = tmp_path / "torchlens" / "validation"
+    core_dir.mkdir(parents=True)
+    enrolled = "\n".join(
+        f"def {func}():\n    pass\n" for _, func in driver.CORE_CHECK_MUTANTS.values()
+    )
+    excluded = "\n".join(f"def {func}():\n    pass\n" for func in driver.CORE_CHECK_EXCLUSIONS)
+    (core_dir / "core.py").write_text(
+        enrolled + excluded + "\ndef _check_brand_new_thing():\n    pass\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="_check_brand_new_thing"):
+        driver.derive_core_check_roster(tmp_path)
+
+    # Without the stray def the same tree is accepted.
+    (core_dir / "core.py").write_text(enrolled + excluded, encoding="utf-8")
+    driver.derive_core_check_roster(tmp_path)
+
+    # A ledger row pointing at a vanished def is refused too.
+    (core_dir / "core.py").write_text(enrolled, encoding="utf-8")
+    with pytest.raises(SystemExit, match="without a core.py def"):
+        driver.derive_core_check_roster(tmp_path)
+
+
+def test_core_check_roster_matches_the_real_tree() -> None:
+    """The live core.py passes the enrollment scan (no unledgered checkers)."""
+
+    driver = _load_driver_module()
+    driver.derive_core_check_roster(_REPO_ROOT)

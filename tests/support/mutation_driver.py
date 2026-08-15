@@ -57,7 +57,9 @@ Usage (from the repo root)::
 The driver only ever writes inside the sandbox; running against the real
 checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
 red-capability *tests* live in the suite itself; this measures their margin.
-It is wired into no CI leg -- the margin is measured only when invoked.
+CI: ``.github/workflows/mutation.yml`` runs a weekly rotating shard (bounded
+families together, then the four arm shards in turn), archives every
+verdict, and fails on any SURVIVOR/ERROR/TIMEOUT (R74 b9-sol finding 1).
 """
 
 from __future__ import annotations
@@ -88,6 +90,79 @@ MUTANTS: dict[str, tuple[str, str]] = {
     # plants below.
     "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
 }
+
+#: mutant id -> (relative file, core-validation checker). The checkers of
+#: ``validation/core.py`` OUTSIDE the metadata-invariant registry (b9-sol
+#: R74r5 finding 2: the non-registry roster held one comparator and one
+#: postprocess checker while core.py carried five more verdict-steering
+#: entry points with no mutant). Their dangerous neutral value is an
+#: ALWAYS-VALIDATED result, planted via ``CORE_CHECK_NEUTER``. Enrollment
+#: drift is refused at roster assembly: ``derive_core_check_roster`` scans
+#: core.py for every ``_check_*`` / ``_validate_*`` def and demands each be
+#: enrolled here or excluded with a reason in ``CORE_CHECK_EXCLUSIONS``.
+CORE_CHECK_MUTANTS: dict[str, tuple[str, str]] = {
+    "V01": ("torchlens/validation/core.py", "_check_layer_arguments_logged_correctly"),
+    "V02": ("torchlens/validation/core.py", "_validate_layer_against_arg"),
+    "V03": ("torchlens/validation/core.py", "_check_arglocs_correct_for_arg"),
+    "V04": ("torchlens/validation/core.py", "_check_unattributed_arg_slots"),
+    "V05": (
+        "torchlens/validation/core.py",
+        "_check_whether_func_on_saved_parents_yields_saved_tensor",
+    ),
+}
+
+#: Planted return value for the corechecks family: the always-pass direction
+#: for functions whose contract is a structured verdict.
+CORE_CHECK_NEUTER = 'ValidationCheckResult.validated("R74-CORECHECK-MUTANT")'
+
+#: Checker-shaped core.py functions deliberately NOT in CORE_CHECK_MUTANTS,
+#: each with the reason (a name in neither table refuses the campaign).
+CORE_CHECK_EXCLUSIONS: dict[str, str] = {
+    "_check_perturbation_exemptions": (
+        "enrolled as X01: its dangerous direction is exempt-everything "
+        "(return True), not always-validated"
+    ),
+}
+
+
+def derive_core_check_roster(sandbox: Path) -> None:
+    """Refuse the campaign when a core.py checker is neither enrolled nor excluded.
+
+    b9-sol R74r5 finding 2: exhaustive-coverage claims rested on the
+    metadata-contract registry alone while core.py grew verdict-steering
+    checkers with no mutant. This scan makes enrollment drift LOUD: every
+    top-level ``_check_*`` / ``_validate_*`` def must appear in
+    ``CORE_CHECK_MUTANTS`` or carry a reason in ``CORE_CHECK_EXCLUSIONS``.
+
+    Parameters
+    ----------
+    sandbox:
+        Repo root whose ``torchlens/validation/core.py`` is scanned.
+    """
+
+    core = sandbox / "torchlens" / "validation" / "core.py"
+    tree = ast.parse(core.read_text(encoding="utf-8"))
+    names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith(("_check_", "_validate_"))
+    }
+    enrolled = {func for _, func in CORE_CHECK_MUTANTS.values()}
+    missing = sorted(names - enrolled - set(CORE_CHECK_EXCLUSIONS))
+    if missing:
+        raise SystemExit(
+            f"unenrolled core.py checkers: {missing} -- add each to "
+            "CORE_CHECK_MUTANTS or CORE_CHECK_EXCLUSIONS with a reason "
+            "(b9-sol R74r5: silent enrollment drift is the defect)"
+        )
+    stale = sorted((enrolled | set(CORE_CHECK_EXCLUSIONS)) - names)
+    if stale:
+        raise SystemExit(
+            f"CORE_CHECK ledger rows without a core.py def: {stale} -- "
+            "the checker moved or was renamed; re-point the row"
+        )
+
 
 #: mutant id -> (relative file, function, comment marker). A bare ``return
 #: None`` is planted immediately BEFORE the first comment line inside the
@@ -611,7 +686,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--family",
-        choices=("registry", "checks", "blocks", "exempt", "arms"),
+        choices=("registry", "checks", "blocks", "exempt", "arms", "corechecks"),
         help="score only one mutant family (a full arm campaign is ~161 runs)",
     )
     parser.add_argument(
@@ -656,6 +731,7 @@ def main() -> None:
             "delete them; registry contracts enroll automatically"
         )
     arm_mutants = derive_arm_mutants(sandbox, registry)
+    derive_core_check_roster(sandbox)
     plan: dict[str, tuple[str, str, str | None, str, int | None]] = {}
     families: dict[str, list[str]] = {}
     for mid, (rel, func) in registry.items():
@@ -664,6 +740,9 @@ def main() -> None:
     for mid, (rel, func) in MUTANTS.items():
         plan[mid] = (rel, func, None, "None", None)
         families.setdefault("checks", []).append(mid)
+    for mid, (rel, func) in CORE_CHECK_MUTANTS.items():
+        plan[mid] = (rel, func, None, CORE_CHECK_NEUTER, None)
+        families.setdefault("corechecks", []).append(mid)
     for mid, (rel, func, marker) in BLOCK_MUTANTS.items():
         plan[mid] = (rel, func, marker, "None", None)
         families.setdefault("blocks", []).append(mid)
@@ -674,12 +753,18 @@ def main() -> None:
         plan[mid] = (rel, func, None, "None", arm_index)
         families.setdefault("arms", []).append(mid)
     n_families = (
-        len(registry) + len(MUTANTS) + len(BLOCK_MUTANTS) + len(EXEMPT_MUTANTS) + len(arm_mutants)
+        len(registry)
+        + len(MUTANTS)
+        + len(CORE_CHECK_MUTANTS)
+        + len(BLOCK_MUTANTS)
+        + len(EXEMPT_MUTANTS)
+        + len(arm_mutants)
     )
     if len(plan) != n_families:
         raise SystemExit("mutant id collision across families -- rename the clash")
     print(
         f"roster: {len(registry)} registry contracts + {len(MUTANTS)} checks + "
+        f"{len(CORE_CHECK_MUTANTS)} core checkers + "
         f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates + "
         f"{len(arm_mutants)} raise arms",
         flush=True,
