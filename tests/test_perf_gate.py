@@ -204,8 +204,12 @@ def _median_capture_ms(model: nn.Module, value: torch.Tensor) -> float:
     return statistics.median(samples) / 1_000_000
 
 
+@pytest.mark.heavy
 @pytest.mark.serial
 def test_pinned_small_capture_fixed_cost_ratio_gate() -> None:
+    # heavy, not unmarked (b2 R41 round 5): the moment serial stopped being a
+    # budget exemption, this 27-capture ratio gate measured 13.8s CPU in a
+    # loaded session — squarely in the 5-20s heavy band the tier docs define.
     """A doubled fixed capture floor cannot hide behind large-model timings."""
 
     original_threads = torch.get_num_threads()
