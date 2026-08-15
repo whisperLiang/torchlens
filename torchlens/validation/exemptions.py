@@ -1800,7 +1800,7 @@ def _bool_comparison_straddle_probe(layer: Op, layers_to_perturb: list[str]) -> 
         with torch.no_grad():
             if isinstance(other, torch.Tensor):
                 base = other.detach().to(dtype=parent_saved.dtype).broadcast_to(parent_saved.shape)
-            elif isinstance(other, Number):
+            elif isinstance(other, (bool, int, float)):
                 base = torch.full_like(parent_saved, other)
             else:
                 return None
