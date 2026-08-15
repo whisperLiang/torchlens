@@ -9,7 +9,7 @@ import heapq
 import itertools as it
 from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
@@ -2176,6 +2176,82 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
             workspace.nodes[member].layer_label = leader if len(members) > 1 else member
 
 
+def _related_candidate_pairs(
+    combination_nodes: list[str],
+    node_to_subgraph: dict[str, SubgraphInfo],
+    adjacent_subgraphs: dict[str, set[str]],
+    sg_param_types: dict[str, frozenset[str]],
+) -> Iterator[tuple[str, str]]:
+    """Yield the member pairs whose subgraphs are adjacency- or param-related.
+
+    The union arms in :func:`_merge_iso_groups_to_layers` can only fire for a
+    pair whose subgraphs are adjacent (bare and anchored arms; the check is
+    one-directional, so adjacency here is the inclusive superset in both
+    directions) or share at least one param type (the parameterized arm's
+    ``overlapping_param_types`` gate; ``_seed_reaches`` is evaluated only
+    inside it). Everything else was a guaranteed no-op ``continue``, which is
+    exactly what made the historical ``it.combinations`` triangle O(N^2) on a
+    plain chain. Pairs are yielded in the member ordering of
+    ``combination_nodes`` (raw capture order), matching the triangle's
+    orientation; the union transitive closure is order-independent, so
+    enumeration order cannot change the final partition.
+    """
+
+    members_by_subgraph: dict[str, list[str]] = defaultdict(list)
+    for member in combination_nodes:
+        members_by_subgraph[node_to_subgraph[member].starting_node].append(member)
+    member_order = {member: index for index, member in enumerate(combination_nodes)}
+    member_subgraphs = list(members_by_subgraph)
+    member_subgraph_set = set(member_subgraphs)
+
+    def cross_pairs(sg1: str, sg2: str) -> "Iterator[tuple[str, str]]":
+        if sg1 == sg2:
+            members = members_by_subgraph[sg1]
+            yield from it.combinations(members, 2)
+            return
+        for first in members_by_subgraph[sg1]:
+            for second in members_by_subgraph[sg2]:
+                if member_order[first] <= member_order[second]:
+                    yield (first, second)
+                else:
+                    yield (second, first)
+
+    def subgraphs_related_by_adjacency(sg1: str, sg2: str) -> bool:
+        return sg2 in adjacent_subgraphs.get(sg1, ()) or sg1 in adjacent_subgraphs.get(sg2, ())
+
+    def generate() -> "Iterator[tuple[str, str]]":
+        emitted: set[tuple[str, str]] = set()
+        # Phase 1: adjacency-related subgraph pairs, walked from the adjacency
+        # map itself (never all-pairs membership probes).
+        for sg1 in member_subgraphs:
+            for sg2 in adjacent_subgraphs.get(sg1, ()):
+                if sg2 not in member_subgraph_set:
+                    continue
+                key = (sg1, sg2) if sg1 <= sg2 else (sg2, sg1)
+                if key in emitted:
+                    continue
+                emitted.add(key)
+                yield from cross_pairs(*key)
+        # Phase 2: shared-param-type subgraph pairs not already emitted.
+        subgraphs_by_type: dict[str, list[str]] = defaultdict(list)
+        for sg_label in member_subgraphs:
+            for param_type in sg_param_types.get(sg_label, ()):
+                subgraphs_by_type[param_type].append(sg_label)
+        for type_subgraphs in subgraphs_by_type.values():
+            for index, sg1 in enumerate(type_subgraphs):
+                for sg2 in type_subgraphs[index:]:
+                    key = (sg1, sg2) if sg1 <= sg2 else (sg2, sg1)
+                    if key in emitted:
+                        continue
+                    emitted.add(key)
+                    yield from cross_pairs(*key)
+        # Same-subgraph pairs when the subgraph is self-adjacent or carries
+        # param types are already covered above (phase 1 via the adjacency
+        # map's self-edge, phase 2 via the type buckets).
+
+    return generate()
+
+
 def _merge_iso_groups_to_layers(
     workspace: _GroupingWorkspace,
     iso_node_groups: dict[str, list[str]],
@@ -2280,9 +2356,23 @@ def _merge_iso_groups_to_layers(
                 continue
         # strict=False is deliberate: the consecutive-pairs sliding window is
         # ragged by construction (see the cohort sweep above).
+        # Relation-driven candidates replace the C(N,2) triangle (r5 b4-opus
+        # F29-A, measured: the full triangle walked on a plain feed-forward
+        # chain of N identical bare ops -- 35% of capture CPU at 3200 ops,
+        # rising as N^2, for ZERO produced groupings). Every union arm below
+        # requires the pair's subgraphs to be ADJACENT or (the parameterized
+        # arm only) to share at least one param type, so pairs outside those
+        # two relations are provably inert ``continue``s: enumerating only
+        # related pairs preserves the union transitive closure -- and with it
+        # the final partition and its min-label roots -- exactly.
         pair_iter = it.chain(
             zip(iso_nodes, iso_nodes[1:], strict=False),
-            it.combinations(combination_nodes, 2),
+            _related_candidate_pairs(
+                combination_nodes,
+                node_to_subgraph,
+                adjacent_subgraphs,
+                sg_param_types,
+            ),
         )
         for node1_label, node2_label in pair_iter:
             if find(node1_label) == find(node2_label):
