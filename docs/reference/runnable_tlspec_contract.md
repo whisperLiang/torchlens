@@ -1509,6 +1509,15 @@ return its in-place rerun Trace. New provider-neutral code uses the explicit `in
 loaded sparse traces always dispatch to the sparse provider. The live provider forks first and then
 delegates unchanged to `save_new_outs`, retaining its graph-alignment tripwire.
 
+Live-provider availability is reference-dependent by design: a Trace holds its source model only
+WEAKLY (`_source_model_ref`, never portable), so a live `run()` works exactly as long as the caller
+keeps a strong reference to the model. An inline-constructed model (`tl.trace(Model(), x)`) is
+collected at the first gc pass after capture, after which every live run refuses with the typed
+`RunCapabilityUnavailableError` -- a correct refusal, not a defect, but one whose timing follows
+the collector. Callers that need `run()` later must keep the model alive, pass it explicitly to
+the legacy `run(model, x)` surface, or save/load a runnable artifact (whose availability does not
+depend on the live object).
+
 Inputs require the recorded tree, leaf paths, shapes, and dtypes. Binding follows model site,
 container record, and path, never display order. Seeds are cloned before in-place calls. Call
 construction fills literal/tensor paths, preserves receiver/dispatch/aliases/versions, and checks

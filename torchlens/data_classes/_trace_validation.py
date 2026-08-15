@@ -424,7 +424,9 @@ class TraceValidationMixin(_TraceMixinBase):
         ----------
         model:
             Model to execute through TorchLens decorated wrappers. When omitted,
-            the live model captured by this ``Trace`` is reused if still available.
+            the live model captured by this ``Trace`` is reused if still
+            available -- the trace holds it weakly, so this requires the
+            caller to have kept a strong reference (see Raises).
         x:
             Forward input. If ``model`` is omitted, the first positional argument
             is treated as the new user input.
@@ -463,6 +465,18 @@ class TraceValidationMixin(_TraceMixinBase):
             A unified transactional result for ``inputs=`` and loaded sparse
             providers. Legacy ``run(model, x)`` intervention reruns retain their
             compatibility return until that surface is migrated.
+
+        Raises
+        ------
+        RunCapabilityUnavailableError
+            When no provider can execute this Trace. For a live trace this
+            includes the collected-model case: the trace holds its source
+            model only WEAKLY, so live-run availability depends on the caller
+            keeping a strong reference. An inline-constructed model
+            (``tl.trace(Model(), x)``) is collected at the first gc pass
+            after capture, after which every live run refuses typed. Keep the
+            model alive, pass it explicitly, or save/load a runnable
+            artifact.
 
         Notes
         -----

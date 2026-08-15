@@ -603,6 +603,33 @@ class TestTraceGC:
         assert trace_ref() is None, "the strong entry pinned the partial trace"
 
     @pytest.mark.smoke
+    def test_live_run_after_model_collection_refuses_typed_and_names_the_weak_ref(self):
+        """A collected source model refuses run() typed AND discloses why (R37).
+
+        The refusal itself is correct by design (the trace holds its model
+        weakly), but it used to be undocumented and its message named neither
+        the weak reference nor a remedy -- the plainest documented idiom
+        ``tl.trace(Model(), x)`` then failed gc-timing-dependently with no
+        actionable explanation.
+        """
+
+        from torchlens.errors import RunCapabilityUnavailableError
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        gc.collect()
+        assert trace._source_model_ref() is None, "inline model should be collected"
+        with pytest.raises(RunCapabilityUnavailableError) as excinfo:
+            trace.run(inputs=torch.randn(1, 5))
+        message = str(excinfo.value)
+        assert "weakly" in message and "strong reference" in message, (
+            "the collected-model refusal must disclose the weak-reference "
+            f"dependency and its remedy; got: {message}"
+        )
+        with pytest.raises(RunCapabilityUnavailableError) as fast_excinfo:
+            trace.run(inputs=torch.randn(1, 5), fast=True)
+        assert "weakly" in str(fast_excinfo.value)
+
+    @pytest.mark.smoke
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 

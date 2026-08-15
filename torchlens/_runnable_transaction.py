@@ -472,7 +472,11 @@ def run_live_trace(
     model = source_ref() if source_ref is not None else None
     if model is None:
         raise RunCapabilityUnavailableError(
-            "The live Trace no longer retains its source model.",
+            "The live Trace no longer retains its source model: the trace "
+            "holds it only weakly, so live-run availability depends on the "
+            "caller keeping a strong reference (an inline-constructed model "
+            "is collected at the first gc pass after capture). Keep the "
+            "model alive, or save/load a runnable artifact instead.",
             code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
             provider=RunProvider.LIVE,
         )
