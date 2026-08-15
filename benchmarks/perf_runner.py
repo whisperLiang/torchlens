@@ -12,6 +12,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -644,6 +645,96 @@ def _run_timing(fn: OperationFn, device: str, warmups: int, samples: int) -> dic
     return _stats(samples_s) | _stats(cpu_samples_s, prefix="cpu_")
 
 
+def _reset_rss_high_water() -> bool:
+    """Reset the kernel per-process RSS high-water mark (Linux ``VmHWM``).
+
+    Writing ``5`` to ``/proc/self/clear_refs`` collapses ``VmHWM`` to the
+    current RSS, making a subsequent high-water read PHASE-LOCAL. Note this
+    does NOT reset ``getrusage`` ``ru_maxrss``, so phase-local readers must
+    pair the reset with :func:`_read_rss_high_water`.
+
+    Returns
+    -------
+    bool
+        Whether the reset succeeded (non-Linux and restricted environments
+        return ``False``; callers fall back to lifetime-subtract semantics).
+    """
+
+    try:
+        with open("/proc/self/clear_refs", "w") as handle:
+            handle.write("5")
+        return True
+    except OSError:
+        return False
+
+
+def _read_rss_high_water() -> int:
+    """Return the RSS high-water mark in KiB.
+
+    Prefers ``VmHWM`` from ``/proc/self/status`` (the counter that
+    :func:`_reset_rss_high_water` can reset); falls back to the lifetime
+    ``getrusage`` ``ru_maxrss`` elsewhere.
+    """
+
+    try:
+        with open("/proc/self/status") as handle:
+            for line in handle:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
+class _ConcurrentPeakSampler:
+    """Sample RSS/USS peaks WHILE the measured callable executes.
+
+    r4 b6-sol R33: sampling only AFTER ``fn()`` returns misses every
+    allocate-touch-free transient inside the measured call — a known
+    128 MiB transient read 0.0 across all advertised phase-local peak
+    fields. A daemon thread polls the process at ~1 ms cadence for the
+    duration of the phase; peaks are best-effort floors (the GIL can delay
+    samples), complementing the exact ``VmHWM`` reset path.
+    """
+
+    def __init__(self, process: Any) -> None:
+        """Bind the sampler to one psutil process handle (or ``None``)."""
+
+        self._process = process
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.rss_peak = 0
+        self.uss_peak = 0
+
+    def __enter__(self) -> _ConcurrentPeakSampler:
+        """Start sampling when a process handle is available."""
+
+        if self._process is not None:
+            self._thread = threading.Thread(
+                target=self._sample_loop, name="tl-perf-peak-sampler", daemon=True
+            )
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        """Stop the sampler and wait briefly for the final sample."""
+
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _sample_loop(self) -> None:
+        """Poll RSS (cheap) and USS (exact) until stopped."""
+
+        while not self._stop.is_set():
+            try:
+                self.rss_peak = max(self.rss_peak, self._process.memory_info().rss)
+                self.uss_peak = max(self.uss_peak, self._process.memory_full_info().uss)
+            except Exception:
+                return
+            self._stop.wait(0.001)
+
+
 def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any]:
     """Run a separate memory pass.
 
@@ -659,11 +750,14 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     Returns
     -------
     dict[str, Any]
-        Memory metrics. Peak fields are phase-local: the USS peak is sampled
-        after every run against a pre-loop baseline, and the RSS high-water
-        delta subtracts the pre-loop process high water (so ``0.0`` means the
-        operation phase never exceeded the setup-phase peak, not that the
-        operation allocated nothing).
+        Memory metrics. Peak fields are phase-local and cover transients
+        INSIDE the measured calls (r4 b6-sol R33): the RSS high-water mark
+        is reset before the loop where the platform allows
+        (``rss_high_water_phase_local`` reports which semantics apply), and
+        a concurrent sampler thread polls RSS/USS during the runs, so an
+        allocate-touch-free transient registers instead of reading ``0.0``.
+        End-state deltas stay separately named (``uss_delta_mb_memory_pass``,
+        ``final_uss_mb``).
     """
 
     metrics: dict[str, Any] = {"memory_run_count": memory_runs}
@@ -679,25 +773,33 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
         metrics["uss_delta_mb_memory_pass"] = None
         metrics["uss_peak_delta_mb_memory_pass"] = None
         metrics["uss_skip_reason"] = "psutil unavailable"
-    rss_high_water_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    baseline_rss = process.memory_info().rss if process is not None else None
+    rss_reset = _reset_rss_high_water()
+    metrics["rss_high_water_phase_local"] = rss_reset
+    rss_high_water_before = _read_rss_high_water()
     metrics["rss_high_water_before_mb"] = rss_high_water_before / 1024
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     peak_uss = baseline_uss
-    for _ in range(memory_runs):
-        fn()
-        if process is not None and peak_uss is not None:
-            peak_uss = max(peak_uss, process.memory_full_info().uss)
-    _sync(device)
+    with _ConcurrentPeakSampler(process) as sampler:
+        for _ in range(memory_runs):
+            fn()
+            if process is not None and peak_uss is not None:
+                peak_uss = max(peak_uss, process.memory_full_info().uss)
+        _sync(device)
     if process is not None and baseline_uss is not None and peak_uss is not None:
         final_uss = process.memory_full_info().uss
-        peak_uss = max(peak_uss, final_uss)
+        peak_uss = max(peak_uss, final_uss, sampler.uss_peak)
         metrics["final_uss_mb"] = final_uss / 1024 / 1024
         metrics["uss_delta_mb_memory_pass"] = (final_uss - baseline_uss) / 1024 / 1024
         metrics["uss_peak_delta_mb_memory_pass"] = (peak_uss - baseline_uss) / 1024 / 1024
+    if process is not None and baseline_rss is not None:
+        sampled_rss_peak = max(sampler.rss_peak, baseline_rss)
+        metrics["sampled_rss_peak_delta_mb"] = (sampled_rss_peak - baseline_rss) / 1024 / 1024
     usage = resource.getrusage(resource.RUSAGE_SELF)
     metrics["process_high_water_rss_mb"] = usage.ru_maxrss / 1024
-    metrics["phase_rss_high_water_delta_mb"] = (usage.ru_maxrss - rss_high_water_before) / 1024
+    phase_rss_delta_kib = max(_read_rss_high_water() - rss_high_water_before, 0)
+    metrics["phase_rss_high_water_delta_mb"] = phase_rss_delta_kib / 1024
     if device == "cuda":
         metrics["max_allocated_mb"] = torch.cuda.max_memory_allocated() / 1024 / 1024
         metrics["max_reserved_mb"] = torch.cuda.max_memory_reserved() / 1024 / 1024

@@ -296,3 +296,42 @@ def test_run_memory_reports_phase_local_peaks() -> None:
     assert metrics["phase_rss_high_water_delta_mb"] >= 0.0
     if metrics.get("uss_delta_mb_memory_pass") is not None:
         assert metrics["uss_peak_delta_mb_memory_pass"] >= metrics["uss_delta_mb_memory_pass"]
+
+
+@pytest.mark.heavy
+def test_run_memory_detects_transient_inside_measured_call() -> None:
+    """An allocate-touch-free transient INSIDE ``fn()`` must register.
+
+    r4 b6-sol R33 (HIGH) red pin: peaks were sampled only AFTER ``fn()``
+    returned and the RSS fallback subtracted the process-lifetime high
+    water, so after priming the process with a 256 MiB setup allocation, a
+    known 128 MiB transient inside the measured call read 0.0 across every
+    advertised phase-local peak field.
+    """
+
+    def _touch(buffer: bytearray) -> None:
+        for index in range(0, len(buffer), 4096):
+            buffer[index] = 1
+
+    # Prime the process-lifetime high water ABOVE anything the measured
+    # phase will reach, so lifetime-subtract semantics read 0.0.
+    primer = bytearray(256 * 1024 * 1024)
+    _touch(primer)
+    del primer
+
+    transient_mb = 128
+
+    def _transient() -> None:
+        buffer = bytearray(transient_mb * 1024 * 1024)
+        _touch(buffer)
+        del buffer
+
+    metrics = _run_memory(_transient, "cpu", memory_runs=3)
+
+    if not metrics.get("rss_high_water_phase_local"):
+        pytest.skip("RSS high-water reset unavailable on this platform")
+    observed = metrics["phase_rss_high_water_delta_mb"]
+    assert observed >= transient_mb * 0.8, (
+        f"phase-local RSS peak {observed:.1f} MB missed a {transient_mb} MB "
+        "allocate-touch-free transient inside the measured call"
+    )

@@ -899,10 +899,13 @@ def _write_report(payload: dict[str, Any], path: Path = RESULT_MD) -> None:
         "and process CPU time (`process_time`, `cpu_*` stats). Memory cells are "
         "separate subprocesses that record USS after setup, run the operation 10 "
         "untimed times, and report the end delta `uss_delta_mb_memory_pass` plus the "
-        "phase-local peaks `uss_peak_delta_mb_memory_pass` (per-run sampled) and "
-        "`phase_rss_high_water_delta_mb` (0 means the phase never exceeded the setup "
-        "peak). CUDA memory columns are true allocator peaks after "
-        "`torch.cuda.reset_peak_memory_stats()`.",
+        "phase-local peaks `uss_peak_delta_mb_memory_pass` and "
+        "`phase_rss_high_water_delta_mb`. Peaks cover transients INSIDE the measured "
+        "calls: the RSS high-water mark is reset before the loop where the platform "
+        "allows (`rss_high_water_phase_local`; elsewhere the delta subtracts the "
+        "setup-phase peak) and a concurrent sampler thread polls RSS/USS during the "
+        "runs (`sampled_rss_peak_delta_mb`). CUDA memory columns are true allocator "
+        "peaks after `torch.cuda.reset_peak_memory_stats()`.",
         "",
         "Gradient mode is enabled for headline rows, models are in eval mode, dtype is "
         "float32, autocast is not used, TF32 is disabled, and seeds are fixed to 0. "
