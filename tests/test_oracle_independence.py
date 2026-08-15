@@ -437,3 +437,176 @@ def test_genuine_double_consumption_keeps_children_deduped_and_green():
     assert len(producer.children) == len(set(producer.children))
     assert list(consumer.parents).count("linear_1_1") == 2
     check_metadata_invariants(trace)
+
+
+# ---------------------------------------------------------------------------
+# R75r5-1 (b9 F+O MED, 2nd round): the "Loaded-sparse / fast=True run guards"
+# table row was SHARED with NEITHER quarantine nor a pinned boundary test --
+# the last verdict-steering surface where a wrapper-layer defect could
+# correlate subject and judge unnoticed (standing rule 2 violation). These
+# pins prove the surface fails CLOSED on both shared-root defect directions.
+# ---------------------------------------------------------------------------
+
+
+class _TanhRunnable(nn.Module):
+    """Free-function tanh model whose shell is ledger-unwrapped at load."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.fc(x))
+
+
+def _save_runnable_tanh(tmp_path) -> tuple:
+    import torchlens as tl
+    from torchlens.options import CaptureOptions
+
+    x = torch.randn(2, 4)
+    path = tmp_path / "guards.tlspec"
+    trace = trace_fn(
+        _TanhRunnable().eval(),
+        x,
+        capture=CaptureOptions(
+            intervention_ready=True, capture_container_structure=True, cache=False
+        ),
+    )
+    trace.save(path, level="runnable", include_weights=True, include_activations=True)
+    del tl
+    return path, x
+
+
+def test_loaded_sparse_control_run_is_verified_and_attested(tmp_path) -> None:
+    """Positive control for the two wrapper-defect plants below."""
+
+    import torchlens as tl
+    from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
+
+    path, x = _save_runnable_tanh(tmp_path)
+    result = tl.load(path).run(inputs=x)
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert result.report.numeric_attestation is NumericAttestationStatus.ATTESTED
+
+
+def test_loaded_sparse_refuses_wrapper_shadowed_callable(tmp_path) -> None:
+    """A hostile shell shadowing ``torch.tanh`` at load refuses typed.
+
+    The shared-root defect direction: registry callables resolve through the
+    live torch namespace, so a wrapper-layer defect there could distort the
+    execution the guards then judge. The fresh-namespace resolution must
+    refuse (never report a distorted run ``verified``/``attested``).
+    """
+
+    import torchlens as tl
+
+    path, x = _save_runnable_tanh(tmp_path)
+    real = torch.tanh
+
+    def hostile(*args: object, **kwargs: object):
+        return real(*args, **kwargs) * 1.001
+
+    hostile.__name__ = "tanh"
+    hostile.__qualname__ = "tanh"
+    torch.tanh = hostile
+    try:
+        with pytest.raises(Exception) as excinfo:
+            tl.load(path).run(inputs=x)
+    finally:
+        torch.tanh = real
+    assert type(excinfo.value).__name__ == "ReattachError", excinfo.value
+
+
+def test_loaded_sparse_refuses_poisoned_unwrap_ledger_entry(tmp_path) -> None:
+    """A poisoned ``_decorated_to_orig`` row for the installed shell refuses typed.
+
+    The other shared-root direction: load-time unwrap reads the SAME ledger
+    the capture wrappers maintain. A ledger row rebound to a distorting
+    callable (wrapper-marked "orig") must refuse, never launder a distorted
+    execution into ``verified``. The entry is edited in place and restored
+    exactly -- the ledger is append-only shared state and is never cleared.
+    """
+
+    import torchlens as tl
+    from torchlens import _state
+
+    path, x = _save_runnable_tanh(tmp_path)
+    ledger = _state._decorated_to_orig
+    key = id(torch.tanh)
+    assert key in ledger, "fixture expects the installed tanh shell to be ledger-known"
+    real = ledger[key]
+
+    def hostile(*args: object, **kwargs: object):
+        return real(*args, **kwargs) * 1.001
+
+    ledger[key] = hostile
+    try:
+        with pytest.raises(Exception) as excinfo:
+            tl.load(path).run(inputs=x)
+    finally:
+        ledger[key] = real
+    assert type(excinfo.value).__name__ == "ReattachError", excinfo.value
+    assert ledger[key] is real
+
+
+# ---------------------------------------------------------------------------
+# R75r5-2 (b9 O LOW-MED): the independence table was prose authority with no
+# mechanical lockstep -- nothing checked that its cited arming-test files or
+# observation-root modules still exist, and rule 2 ("a shared row with
+# neither quarantine nor a pinned boundary test IS a finding") had no
+# structural teeth. This scan stops silent rot.
+# ---------------------------------------------------------------------------
+
+
+def _independence_table_text() -> str:
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    return (repo / "docs" / "reference" / "oracle_independence.md").read_text(encoding="utf-8")
+
+
+def test_independence_table_cited_test_files_exist() -> None:
+    """Every arming-test file the table names must exist on disk."""
+
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    text = _independence_table_text()
+    cited = set(re.findall(r"tests/test_[a-z0-9_]+\.py", text))
+    assert cited, "the table lost its arming-test citations entirely"
+    missing = sorted(name for name in cited if not (repo / name).exists())
+    assert missing == [], f"independence table cites vanished test files: {missing}"
+
+
+def test_independence_table_cited_modules_exist() -> None:
+    """Every torchlens module path the table cites must still exist."""
+
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    text = _independence_table_text()
+    cited = set(re.findall(r"(?:torchlens/|validation/|backends/|utils/)[a-z0-9_/]+\.py", text))
+    missing = []
+    for name in cited:
+        rel = name if name.startswith("torchlens/") else f"torchlens/{name}"
+        if not (repo / rel).exists():
+            missing.append(name)
+    assert sorted(missing) == [], f"independence table cites vanished modules: {missing}"
+
+
+def test_independence_table_has_no_untested_shared_rows() -> None:
+    """Standing rule 2, mechanically: no table row may carry 'none yet'.
+
+    A SHARED classification with neither quarantine nor a pinned boundary
+    test is a finding by the table's own rules; this makes the violation a
+    red test instead of prose (the row-8 shape filed two rounds running).
+    """
+
+    offenders = [
+        line
+        for line in _independence_table_text().splitlines()
+        if line.startswith("|") and "none yet" in line
+    ]
+    assert offenders == [], f"table rows without an arming/boundary test: {offenders}"
