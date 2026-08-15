@@ -103,6 +103,33 @@ def _public_axis(axis_index: int, extent: int, state: _AxisState, op: Op) -> Rec
             axis_index, state.output_axis, "unknown", extent, None, None, None, False, False, False
         )
     if state.kind == "pointwise":
+        identity = (
+            not geometry.sparse
+            and geometry.lo == geometry.hi
+            and geometry.lo.a == 1
+            and geometry.lo.b == 0
+        )
+        if not identity:
+            # A public pointwise axis asserts the identity index map, so
+            # composed non-identity geometry (sparse concatenation offsets,
+            # a scalar-select rebase, a broadcast collapse) must not keep the
+            # same-index claim: the claimed singleton can MISS the true
+            # source index entirely, which no exactness flag can repair.
+            # Degrade to an honest whole-extent envelope; an extent-1 axis
+            # keeps the geometry's own exactness because its whole extent IS
+            # the only representable index (disputed-r3 F1/F2).
+            return ReceptiveFieldAxis(
+                axis_index,
+                None,
+                "full",
+                extent,
+                None,
+                None,
+                None,
+                geometry.exact and extent == 1,
+                True,
+                False,
+            )
         return ReceptiveFieldAxis(
             axis_index,
             state.output_axis,

@@ -966,6 +966,14 @@ def _build_box(
         zip(descriptor.axes, descriptor.input_shape, strict=True)
     ):
         if axis_descriptor.kind == "pointwise":
+            # A surviving pointwise axis is identity-geometry by construction
+            # (non-identity composed geometry degrades to a "full" envelope in
+            # _engine_descriptor, disputed-r3 F1/F2, and the full case below
+            # folds its inexactness), so the same-index claim is sound and the
+            # box's exactness stays the query-time derivation from windowed
+            # terminals — the static descriptor ``exact`` flag is a
+            # conservative composition artifact shared with windowed axes and
+            # deliberately NOT folded here.
             box_axes.append(
                 ReceptiveFieldBoxAxis(axis, "pointwise", None, None, None, None, None, None)
             )
