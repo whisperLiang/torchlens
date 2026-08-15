@@ -38,7 +38,6 @@ DEFERRED: dict[tuple[str, str], str] = {
     # (identity_shims.py -> FW2-WRAP, _save_budget.py -> FW2-CAPTURE), so the
     # docstrings ride those lanes; the ledger rows keep the gate exact until
     # they land.
-    ("_save_budget.py", "SaveBudget._on_release"): "FW2-CAPTURE owns _save_budget.py",
     ("backends/torch/identity_shims.py", "causal_bias_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "conv_picker_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "ctor_shim"): "FW2-WRAP owns identity_shims.py",

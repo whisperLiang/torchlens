@@ -152,9 +152,12 @@ def test_trace_docstring_has_no_self_referential_aliases():
         # No second spelling exists, so any "alias for <itself>" line is a lie.
         assert f"{name}: Alias for ``{name}``" not in doc
         assert f"{name}: Deprecated alias for ``{name}``" not in doc
-        # The real canonical parameter still exists and stays documented.
+        # The real canonical parameter still exists and stays documented
+        # exactly once. The count uses the 4-space numpydoc entry spelling
+        # (``    name:``), which also matches the historical 8-space inline
+        # spelling as a substring, so the check is style-agnostic.
         assert name in signature_params
-        assert doc.count(f"        {name}:") == 1
+        assert doc.count(f"    {name}:") == 1
 
 
 # -------------------------------------------------------------------- SOL-A5-002

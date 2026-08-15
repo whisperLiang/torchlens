@@ -1385,8 +1385,7 @@ def _run_model_and_save_specified_outs(
         ``trace.orphans`` while remaining hidden from the main graph.
     output_device:
         Device for saved tensors: 'same' (default), 'cpu', or 'cuda'.
-    activation_transform:
-        Optional transform applied to each out before storage.
+        activation_transform: Optional transform applied to each out before storage
             (e.g., channel-wise averaging to reduce memory).
         grad_transform: Optional transform applied to each grad before storage.
         save_raw_activations: Whether raw outs are retained when ``activation_transform``

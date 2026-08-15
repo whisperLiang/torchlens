@@ -381,6 +381,10 @@ TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
     "_mlx_replay_inventory": "mlx: replay inventory for validation (scrub-declared runtime-only)",
     "_mlx_halt_selector": "mlx: resolved halt selector for the live forward",
     "_mlx_intervention_plan": "mlx: resolved intervention plan for the live forward",
+    "_mlx_intervene_fired": (
+        "mlx: fired-intervention flag stamped during the live forward, read "
+        "back with a getattr default by the mlx validation epilogue"
+    ),
     "_mlx_perturbation_gaps": "mlx: per-op replay perturbation gaps recorded by mlx validation",
     "_paddle_module_stack": "paddle: module-stack scratch, attached/deleted around the forward",
     "_paddle_intervention_runtime": "paddle: live intervention runtime for the dygraph forward",
