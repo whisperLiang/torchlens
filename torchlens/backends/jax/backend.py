@@ -3335,9 +3335,30 @@ def _finite_difference_directional_check(
     direction = jnp.sign(grad)
     if not bool(jnp.any(direction)):
         direction = jnp.ones_like(grad)
-    eps = jnp.asarray(1e-2 if value.dtype == jnp.float32 else 1e-4, dtype=value.dtype)
-    plus = scalar_loss(value + eps * direction)
-    minus = scalar_loss(value - eps * direction)
+    # Dtype-derived step (r4 sweep): the former flat 1e-4 for every
+    # non-fp32 dtype sat BELOW fp16/bf16 spacing at unit scale, so
+    # ``value +/- eps`` rounded back to ``value`` and the second oracle
+    # was vacuous there. Wide dtypes keep their tuned historical steps;
+    # storage-rounding dtypes take cbrt(eps) (the central-difference
+    # optimum: ~0.1 fp16, ~0.2 bf16), which survives their spacing.
+    finfo = jnp.finfo(value.dtype)
+    eps32 = float(jnp.finfo(jnp.float32).eps)
+    if value.dtype == jnp.float32:
+        step = 1e-2
+    elif float(finfo.eps) <= eps32:
+        step = 1e-4
+    else:
+        step = float(finfo.eps) ** (1.0 / 3.0)
+    eps = jnp.asarray(step, dtype=value.dtype)
+    plus_input = value + eps * direction
+    minus_input = value - eps * direction
+    if bool(jnp.all(plus_input == value)) and bool(jnp.all(minus_input == value)):
+        # The step underflowed the dtype's spacing at this magnitude: the
+        # probe never moved the input, so any verdict would be vacuous.
+        # Fail closed rather than certify an unprobed gradient.
+        return False
+    plus = scalar_loss(plus_input)
+    minus = scalar_loss(minus_input)
     observed = (plus - minus) / (eps * jnp.asarray(2, dtype=value.dtype))
     expected = jnp.sum(grad * direction)
     return bool(jnp.allclose(observed, expected, rtol=5e-2, atol=5e-3))

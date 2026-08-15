@@ -227,3 +227,80 @@ class TestJaxToleranceDerivation:
         saved = jnp.ones((8,), dtype=jnp.float64)
         assert not _values_close(saved * (1.0 + 1e-6), saved)
         assert _values_close(saved + 0.0, saved)
+
+
+class TestJaxFiniteDifferenceStep:
+    """r4 sweep: the fdiff second oracle's flat 1e-4 step sat BELOW fp16 and
+    bf16 spacing at unit scale, so the probe never moved the input and the
+    check was vacuous. The step is now dtype-derived (cbrt(eps) for
+    storage-rounding dtypes) and an unmoved probe fails CLOSED."""
+
+    @pytest.mark.backend_jax
+    def test_fp16_probe_actually_moves_the_input(self) -> None:
+        jax = pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.ones((4,), dtype=jnp.float16)
+
+        def loss(v):
+            return jnp.sum(v * 2.0)
+
+        grad = jax.grad(lambda v: jnp.sum(v * 2.0).astype(jnp.float32))(value)
+        # Pre-fix: value +/- 1e-4 rounds back to value in fp16 (spacing at
+        # 1.0 is ~9.77e-4), observed reads 0, and the true gradient of 2s
+        # FAILED the check. The dtype-derived step must confirm it.
+        assert _finite_difference_directional_check(value=value, grad=grad, scalar_loss=loss)
+
+    @pytest.mark.backend_jax
+    def test_bf16_probe_actually_moves_the_input(self) -> None:
+        pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.ones((4,), dtype=jnp.bfloat16)
+
+        def loss(v):
+            return jnp.sum(v * 2.0)
+
+        grad = jnp.full((4,), 2.0, dtype=jnp.bfloat16)
+        assert _finite_difference_directional_check(value=value, grad=grad, scalar_loss=loss)
+
+    @pytest.mark.backend_jax
+    def test_wrong_gradient_still_fails_on_fp16(self) -> None:
+        """The de-vacuumed probe keeps its teeth: a fabricated gradient is
+        refused, proving the fp16 path is no longer trivially unsatisfiable
+        OR trivially satisfiable."""
+
+        pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.ones((4,), dtype=jnp.float16)
+
+        def loss(v):
+            return jnp.sum(v * 2.0)
+
+        wrong = jnp.full((4,), 7.0, dtype=jnp.float16)
+        assert not _finite_difference_directional_check(value=value, grad=wrong, scalar_loss=loss)
+
+    @pytest.mark.backend_jax
+    def test_unmoved_probe_fails_closed(self) -> None:
+        """A magnitude so large the step underflows spacing refuses rather
+        than certifying an unprobed gradient."""
+
+        pytest.importorskip("jax")
+        import jax.numpy as jnp
+
+        from torchlens.backends.jax.backend import _finite_difference_directional_check
+
+        value = jnp.full((4,), 65000.0, dtype=jnp.float16)
+
+        def loss(v):
+            return jnp.sum(v.astype(jnp.float32) * 2.0).astype(jnp.float16)
+
+        grad = jnp.full((4,), 2.0, dtype=jnp.float16)
+        assert not _finite_difference_directional_check(value=value, grad=grad, scalar_loss=loss)
