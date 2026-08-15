@@ -27,13 +27,13 @@ def _mode_events(names):
     return [{"name": n, "unmapped_repr": None} for n in names]
 
 
-def _wrapper_result(ops, not_logged=None):
+def _wrapper_result(ops, not_logged=None, expansions=None):
     return {
         "side": "wrapper",
         "model": "unit",
         "ops": list(ops),
         "funcs_not_to_log": sorted(dc.PINNED_NOT_LOGGED if not_logged is None else not_logged),
-        "composite_expansions": {},
+        "composite_expansions": expansions or {},
     }
 
 
@@ -85,6 +85,68 @@ def test_subject_dropped_exemption_is_drift():
     assert drift["missing_from_subject"] == ["size"]
     # The now-logged op still pairs EXACT through the intersection excusal.
     assert any(row["rule"] == "EXACT" and row["name"] == "size" for row in report["ledger"])
+
+
+def test_shared_root_composite_omission_is_not_excused():
+    """THE PLANT (b9-sol R75-1 round 4): a systematic wrapper omission.
+
+    ``__add__`` is dropped from BOTH wrapper traces — the model stream AND
+    the one-op probe that derives the composite expansion — because both run
+    through the same wrappers. The pre-fix oracle trusted the subject-derived
+    span as the expectation, so the identically-corrupted sides aligned
+    ``matched=True``. Expansion now keys on the hand-reviewed
+    ``PINNED_COMPOSITE_EXPANSIONS``: the corrupted stream mismatches the pin
+    AND the corrupted probe derivation surfaces as authority drift.
+    """
+
+    report = dc.align_streams(
+        _mode_result(["softsign"]),
+        _wrapper_result(
+            ["__abs__", "__truediv__"],
+            expansions={"softsign": ["__abs__", "__truediv__"]},
+        ),
+    )
+    assert not report["matched"], "the shared-root omission plant must FAIL alignment"
+    kinds = {row["kind"] for row in report["mismatches"]}
+    assert "COMPOSITE_AUTHORITY_DRIFT" in kinds
+    drift = next(r for r in report["mismatches"] if r["kind"] == "COMPOSITE_AUTHORITY_DRIFT")
+    assert drift["pinned_span"] == ["__abs__", "__add__", "__truediv__"]
+    assert drift["derived_span"] == ["__abs__", "__truediv__"]
+    assert "COMPOSITE_SPAN_MISMATCH" in kinds, "the stream must be compared against the PIN"
+
+
+def test_unpinned_subject_composite_is_authority_drift():
+    """A composite the subject declares but the pin does not know fails loudly.
+
+    Without this arm a NEW composite family would silently fall back to the
+    tautological subject-derived expectation.
+    """
+
+    report = dc.align_streams(
+        _mode_result(["gelu_tanh"]),
+        _wrapper_result(
+            ["__mul__", "tanh"],
+            expansions={"gelu_tanh": ["__mul__", "tanh"]},
+        ),
+    )
+    assert not report["matched"]
+    drift = next(r for r in report["mismatches"] if r["kind"] == "COMPOSITE_AUTHORITY_DRIFT")
+    assert drift["name"] == "gelu_tanh"
+    assert drift["pinned_span"] is None
+
+
+def test_pinned_composite_span_still_aligns():
+    """A healthy capture aligns: derived span equals the pin, stream matches."""
+
+    report = dc.align_streams(
+        _mode_result(["softsign", "relu"]),
+        _wrapper_result(
+            ["__abs__", "__add__", "__truediv__", "relu"],
+            expansions={"softsign": ["__abs__", "__add__", "__truediv__"]},
+        ),
+    )
+    assert report["matched"], report["mismatches"]
+    assert report["ledger"][0]["rule"] == "COMPOSITE_EXPANSION"
 
 
 def test_pin_matches_live_wrapper_table():

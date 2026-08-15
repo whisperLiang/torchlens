@@ -302,6 +302,22 @@ Excusal therefore keys on this pin, and any set drift between the pin and the
 wrapper-exported table is a loud mismatch (``NOT_LOGGED_AUTHORITY_DRIFT``)
 that only a reviewed harness edit can clear."""
 
+PINNED_COMPOSITE_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    # softsign(x) = x / (1 + |x|): abs, add, div. Hand-reviewed against the
+    # composite's arithmetic, not derived from a capture.
+    "softsign": ("__abs__", "__add__", "__truediv__"),
+}
+"""The HARNESS's own composite leaf spans (b9-sol R75-1 round 4).
+
+The probe-derived expansion runs through the SAME wrappers as the subject
+stream, so a systematic wrapper omission (e.g. ``__add__`` never logged)
+corrupts the expected span and the observed span identically and the
+alignment reads matched -- a tautology. Expansion therefore keys on this
+hand-reviewed pin: the live probe derivation is kept ONLY as a
+cross-check, and any drift between pin and probe is a loud
+``COMPOSITE_AUTHORITY_DRIFT`` mismatch that only a reviewed harness edit
+(with the composite's arithmetic re-checked by hand) can clear."""
+
 
 def _dunder_respell(wrapper_name: str) -> str | None:
     """Public-method spelling of an operator dunder, or None."""
@@ -342,6 +358,35 @@ def align_streams(mode_result: dict[str, Any], wrapper_result: dict[str, Any]) -
         )
     not_logged = PINNED_NOT_LOGGED & live_not_logged
 
+    # Composite spans: the probe derivation shares the subject's wrappers, so
+    # it can never be the expectation (b9-sol R75-1 round 4: a planted
+    # systematic __add__ omission corrupted probe and stream identically and
+    # aligned matched=True). The PIN is the authority; the derived span is
+    # only a cross-check whose drift fails loudly.
+    for comp_name in sorted(set(expansions) | set(PINNED_COMPOSITE_EXPANSIONS)):
+        pinned = PINNED_COMPOSITE_EXPANSIONS.get(comp_name)
+        derived = expansions.get(comp_name)
+        if pinned is None:
+            mismatches.append(
+                {
+                    "kind": "COMPOSITE_AUTHORITY_DRIFT",
+                    "name": comp_name,
+                    "pinned_span": None,
+                    "derived_span": derived,
+                    "detail": "subject declares a composite the harness pin does not know",
+                }
+            )
+        elif derived is not None and list(pinned) != list(derived):
+            mismatches.append(
+                {
+                    "kind": "COMPOSITE_AUTHORITY_DRIFT",
+                    "name": comp_name,
+                    "pinned_span": list(pinned),
+                    "derived_span": derived,
+                    "detail": "probe-derived span drifted from the hand-reviewed pin",
+                }
+            )
+
     wrapper_ops: list[tuple[int, str]] = []
     for i, name in enumerate(wrapper_result["ops"]):
         if name in STRUCTURAL_ROWS:
@@ -360,8 +405,9 @@ def align_streams(mode_result: dict[str, Any], wrapper_result: dict[str, Any]) -
         if name in not_logged:
             ledger.append({"rule": "NOT_LOGGED", "mode_index": j, "name": name})
             continue
-        if name in expansions:
-            span = expansions[name]
+        if name in PINNED_COMPOSITE_EXPANSIONS:
+            # Expected span = the PIN, never the subject-derived probe.
+            span = list(PINNED_COMPOSITE_EXPANSIONS[name])
             got = [w for _, w in wrapper_ops[cursor : cursor + len(span)]]
             if got == span:
                 ledger.append(
