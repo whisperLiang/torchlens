@@ -275,3 +275,35 @@ def test_honest_two_rank_round_trip_still_loads(tmp_path: Path) -> None:
     assert loaded.value_status.value == "attested_complete"
     assert loaded.rank_ids == (0, 1)
     assert loaded.load_degradations == ()
+
+
+@pytest.mark.parametrize("resource_exc", [MemoryError, OSError])
+def test_member_load_resource_failure_surfaces_not_laundered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_exc: type[Exception]
+) -> None:
+    """B2R4-17 (the R58 resource half): ENOMEM/EIO during member load surfaces.
+
+    The member's bytes were just read successfully by the tree-hash integrity
+    layer, so the bare handler's "no longer parses on this runtime" was an
+    actively misleading description of an I/O failure -- and it silently capped
+    the merge at ``partial`` off the remaining members. A ``MemoryError`` or
+    ``OSError`` escaping the member bundle load must propagate raw as the
+    environment error it is, never enter ``load_degradations``.
+    """
+
+    art = _saved_two_rank(tmp_path)
+    import torchlens._io.bundle as bundle_module
+
+    real_load = bundle_module.load
+    calls = {"count": 0}
+
+    def _failing_load(path, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise resource_exc("simulated resource failure during member core load")
+        return real_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_module, "load", _failing_load)
+    with pytest.raises(resource_exc, match="simulated resource failure"):
+        load_merged(art)
+    assert calls["count"] == 2, "the resource failure must abort the member loop mid-flight"

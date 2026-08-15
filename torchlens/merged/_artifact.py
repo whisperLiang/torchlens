@@ -856,6 +856,15 @@ def load_merged(path: str | Path) -> MergedTrace:
     for declared_rank, member_path in sorted(member_paths.items()):
         try:
             trace = load_bundle(member_path)
+        except (MemoryError, OSError):
+            # ENOMEM/EIO during member load is an ENVIRONMENT failure, not
+            # evidence about the artifact: the member's bytes were just read
+            # successfully by tree_hash above, so "no longer parses on this
+            # runtime" would be an actively misleading description and would
+            # silently cap the merge at partial (B2R4-17, the resource half of
+            # A-R58-1). Resource errors surface to the caller raw; they never
+            # enter the degradation channel.
+            raise
         except Exception as exc:
             # A member bundle whose failure is a bundle-INTEGRITY signal -- a
             # guarded-unpickler denylist refusal or a corrupt/truncated pickle
