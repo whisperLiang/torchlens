@@ -3299,28 +3299,35 @@ def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provena
             seen_autocast.add(encoded)
             autocast_facts.append(cast(dict[str, Any], normalized))
 
+    # grind-r5 b7 R22-7 (3rd round): could-not-compute must stay
+    # distinguishable from does-not-apply. A digest failure used to silently
+    # omit the engine (absence read as "engine not present") and the two
+    # hashes degraded to None (indistinguishable from "no inputs"), so a
+    # consumer comparing provenance across artifacts never learned the hash
+    # machinery failed. Failures now record an explicit string-only
+    # "unavailable:<ExceptionName>" sentinel in the same slot.
     rng_digests: dict[str, str] = {}
     rng_states = getattr(trace, "_pre_forward_rng_states", None)
     if isinstance(rng_states, Mapping):
         for engine, state in rng_states.items():
             try:
                 rng_digests[str(engine)] = trace_hash.content(state)
-            except Exception:
-                continue
+            except Exception as digest_error:
+                rng_digests[str(engine)] = f"unavailable:{type(digest_error).__name__}"
 
     input_hash: str | None = None
     try:
         inputs = [input_op.out for input_op in trace.input_ops]
         if inputs:
             input_hash = trace_hash.content(inputs)
-    except Exception:
-        input_hash = None
+    except Exception as input_error:
+        input_hash = f"unavailable:{type(input_error).__name__}"
 
     model_structure_hash: str | None = None
     try:
         model_structure_hash = trace_hash.trace(trace)
-    except Exception:
-        model_structure_hash = None
+    except Exception as structure_error:
+        model_structure_hash = f"unavailable:{type(structure_error).__name__}"
 
     return Provenance(
         provenance_version=1,

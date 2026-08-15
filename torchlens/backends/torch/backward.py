@@ -3382,24 +3382,25 @@ def _restore_slot_identity_checked(
     attr_name: str,
     installed: Callable[..., Any] | None,
     original: Callable[..., Any] | None,
-    buried_sites: list[str],
     site_label: str,
-) -> None:
+) -> str | None:
     """Restore ``owner.attr_name`` to ``original`` only when it is still OURS.
 
     A third-party patch layered over the torchlens patch (apex/deepspeed-style
-    passthroughs on the autograd entry points) is preserved and reported via
-    ``buried_sites`` instead of silently clobbered -- this was the only
-    teardown in the codebase with no drift guard (grind-r5 b8 R56).
+    passthroughs on the autograd entry points) is preserved and its
+    ``site_label`` returned for the caller's burial disclosure instead of
+    being silently clobbered -- this was the only teardown in the codebase
+    with no drift guard (grind-r5 b8 R56). Returns ``None`` when the slot was
+    restored (or there was nothing to restore).
     """
 
     if original is None:
-        return
+        return None
     current = getattr(owner, attr_name, None)
     if installed is not None and current is not installed and current is not original:
-        buried_sites.append(site_label)
-        return
+        return site_label
     setattr(owner, attr_name, original)
+    return None
 
 
 def _warn_buried_autograd_sites(buried_sites: list[str]) -> None:
@@ -3429,22 +3430,19 @@ def _uninstall_saved_tensors_hooks_scope(buried_sites: list[str] | None = None) 
         return
     own_sites = buried_sites if buried_sites is not None else []
     hooks_cls = torch.autograd.graph.saved_tensors_hooks
-    _restore_slot_identity_checked(
-        hooks_cls,
-        "__init__",
-        _INSTALLED_SAVED_TENSORS_HOOKS_INIT,
-        _ORIGINAL_SAVED_TENSORS_HOOKS_INIT,
-        own_sites,
-        "torch.autograd.graph.saved_tensors_hooks.__init__",
-    )
-    _restore_slot_identity_checked(
-        hooks_cls,
-        "__enter__",
-        _INSTALLED_SAVED_TENSORS_HOOKS_ENTER,
-        _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER,
-        own_sites,
-        "torch.autograd.graph.saved_tensors_hooks.__enter__",
-    )
+    for attr_name, installed, original in (
+        ("__init__", _INSTALLED_SAVED_TENSORS_HOOKS_INIT, _ORIGINAL_SAVED_TENSORS_HOOKS_INIT),
+        ("__enter__", _INSTALLED_SAVED_TENSORS_HOOKS_ENTER, _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER),
+    ):
+        buried = _restore_slot_identity_checked(
+            hooks_cls,
+            attr_name,
+            installed,
+            original,
+            f"torch.autograd.graph.saved_tensors_hooks.{attr_name}",
+        )
+        if buried is not None:
+            own_sites.append(buried)
     _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
     if buried_sites is None:
         _warn_buried_autograd_sites(own_sites)
@@ -3548,22 +3546,19 @@ def uninstall_autograd_wrappers() -> None:
     if not _AUTOGRAD_WRAPPERS_INSTALLED:
         _warn_buried_autograd_sites(buried_sites)
         return
-    _restore_slot_identity_checked(
-        torch.autograd,
-        "backward",
-        _INSTALLED_AUTOGRAD_BACKWARD,
-        _ORIGINAL_AUTOGRAD_BACKWARD,
-        buried_sites,
-        "torch.autograd.backward",
-    )
-    _restore_slot_identity_checked(
-        torch.autograd,
-        "grad",
-        _INSTALLED_AUTOGRAD_GRAD,
-        _ORIGINAL_AUTOGRAD_GRAD,
-        buried_sites,
-        "torch.autograd.grad",
-    )
+    for attr_name, installed, original in (
+        ("backward", _INSTALLED_AUTOGRAD_BACKWARD, _ORIGINAL_AUTOGRAD_BACKWARD),
+        ("grad", _INSTALLED_AUTOGRAD_GRAD, _ORIGINAL_AUTOGRAD_GRAD),
+    ):
+        buried = _restore_slot_identity_checked(
+            torch.autograd,
+            attr_name,
+            installed,
+            original,
+            f"torch.autograd.{attr_name}",
+        )
+        if buried is not None:
+            buried_sites.append(buried)
     _AUTOGRAD_WRAPPERS_INSTALLED = False
     _warn_buried_autograd_sites(buried_sites)
 

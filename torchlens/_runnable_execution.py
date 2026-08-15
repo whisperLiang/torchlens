@@ -277,6 +277,21 @@ class _ProjectionCountExceeded(Exception):
     """
 
 
+class _UnreadableProjectedOutput(Exception):
+    """Private sentinel: a projected output's allocation size could not be read.
+
+    Raised from ``_new_allocation_bytes`` when ``numel()``/``element_size()``/
+    ``device`` raises on a projected output tensor (grind-r5 b7 R22, sol
+    HIGH): the old ``except Exception: continue`` charged the unknown
+    allocation as ZERO bytes, contradicting the helper's own fail-closed
+    contract ("an output whose storage identity cannot be read is CHARGED")
+    and letting the real call allocate before any backstop. Converted by the
+    caller to a typed ``op_allocation_preflight`` refusal. Deliberately NOT a
+    ``RuntimeError`` subclass, for the same catch-ordering reason as
+    ``_ProjectionCountExceeded``.
+    """
+
+
 # Allocator-death signatures on a raw ``RuntimeError`` message (r59 section 2.4). A
 # projection or real call that dies of allocation cannot fail OPEN: the real op's
 # identical prelude would die the same way. These convert to a typed refusal.

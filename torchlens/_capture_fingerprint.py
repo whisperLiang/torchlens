@@ -309,11 +309,20 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
         member_reprs = sorted(repr(_attribute_state_fragment(item, depth + 1)) for item in value)
         return ("set", len(value), tuple(member_reprs))
     if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
+        # grind-r5 b7 R22 (fable+opus): object-dtype buffers serialize raw
+        # POINTERS -- content-blind (in-place mutation keeps the pointers) and
+        # address-churning cross-process -- so they are unhashable here, and a
+        # failed read must mint the never-matching token like every ceiling
+        # branch in this file. Falling through to the stable ("object", cls)
+        # tail made two DIFFERENT-content arrays key identically: a false
+        # cache HIT serving the WRONG trace under cache=True.
+        if getattr(getattr(value, "dtype", None), "hasobject", False):
+            return _never_matching_fragment("ndarray-object-dtype")
         try:
             digest = hashlib.sha256(value.tobytes()).hexdigest()
             return ("ndarray", tuple(getattr(value, "shape", ())), str(value.dtype), digest)
         except Exception:
-            pass
+            return _never_matching_fragment("ndarray-unreadable")
     if callable(value):
         return ("callable", _callable_code_digest(value))
     cls = type(value)

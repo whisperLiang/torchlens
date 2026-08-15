@@ -140,33 +140,47 @@ def normalize_held_torch_function_refs(module: nn.Module) -> None:
         replacement = _live_counterpart(attr_value)
         if replacement is not None:
             module.__dict__[attr_name] = replacement
-            continue
-        value_type = type(attr_value)
-        if value_type is list or value_type is dict:
-            _swap_live_refs_inplace(attr_value)
-        elif value_type is tuple:
-            swapped = _live_swapped_tuple(attr_value)
-            if swapped is not None:
-                module.__dict__[attr_name] = swapped
-        elif value_type is set:
-            _swap_live_refs_in_set(attr_value)
-        elif value_type is frozenset:
-            swapped_members = _live_swapped_tuple(tuple(attr_value))
-            if swapped_members is not None:
-                rebuilt = frozenset(swapped_members)
-                # A cardinality change means both epochs' objects were held;
-                # preserving the user's members beats serializability.
-                if len(rebuilt) == len(attr_value):
-                    module.__dict__[attr_name] = rebuilt
-        elif _is_namedtuple_instance(attr_value):
-            swapped = _live_swapped_tuple(tuple(attr_value))
-            if swapped is not None:
-                try:
-                    module.__dict__[attr_name] = type(attr_value)._make(swapped)
-                except (TypeError, ValueError):
-                    # Exotic _make override: leave the user's object alone
-                    # (disclosed custom-container residual).
-                    pass
+        else:
+            rebuilt = _normalized_container(attr_value)
+            if rebuilt is not None:
+                module.__dict__[attr_name] = rebuilt
+
+
+def _normalized_container(attr_value: Any) -> Any | None:
+    """Normalize one container attr; return a rebuild or ``None`` (no rebind).
+
+    Type-exact by design: mutable exact builtins normalize in place (always
+    ``None``), exact tuples and namedtuples rebuild (namedtuples through
+    ``_make``, preserving the runtime type), exact frozensets rebuild only
+    when no cardinality collapse would drop a user member. Every other
+    subclass is left untouched (disclosed custom-container residual).
+    """
+
+    value_type = type(attr_value)
+    if value_type is list or value_type is dict:
+        _swap_live_refs_inplace(attr_value)
+    elif value_type is set:
+        _swap_live_refs_in_set(attr_value)
+    elif value_type is tuple:
+        return _live_swapped_tuple(attr_value)
+    elif value_type is frozenset:
+        swapped_members = _live_swapped_tuple(tuple(attr_value))
+        if swapped_members is not None:
+            rebuilt = frozenset(swapped_members)
+            # A cardinality change means both epochs' objects were held;
+            # preserving the user's members beats serializability.
+            if len(rebuilt) == len(attr_value):
+                return rebuilt
+    elif _is_namedtuple_instance(attr_value):
+        swapped = _live_swapped_tuple(tuple(attr_value))
+        if swapped is not None:
+            try:
+                return value_type._make(swapped)
+            except (TypeError, ValueError):
+                # Exotic _make override: leave the user's object alone
+                # (disclosed custom-container residual).
+                return None
+    return None
 
 
 def _swap_live_refs_inplace(container: list[Any] | dict[Any, Any]) -> None:

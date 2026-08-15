@@ -1136,30 +1136,47 @@ def _append_arg_hash(arg: Any, prefix: str, args_to_hash: list[Any], _depth: int
         for i, elem in enumerate(arg):
             _append_arg_hash(elem, f"{prefix}_i{i}", args_to_hash, _depth + 1)
     elif isinstance(arg, (set, frozenset)):
-        # grind-r5 b7 R21/P4 rider: sets iterate in hash order, so the old
-        # position-encoded ``_i{i}`` prefixes made the persisted fingerprint
-        # PYTHONHASHSEED-dependent (and frozenset fell to the str() tail).
-        # Fingerprint each member independently, then fold the members in
-        # sorted token order -- deterministic for any seed and identical for
-        # set/frozenset of equal members.
-        member_tokens: list[tuple[str, ...]] = []
-        for elem in arg:
-            elem_tokens: list[Any] = []
-            _append_arg_hash(elem, "", elem_tokens, _depth + 1)
-            member_tokens.append(tuple(str(token) for token in elem_tokens))
-        member_tokens.sort()
-        for i, tokens in enumerate(member_tokens):
-            args_to_hash.extend(f"{prefix}_s{i}{token}" for token in tokens)
-    elif type(arg).__repr__ is object.__repr__ and type(arg).__str__ is object.__str__:
-        # grind-r5 b7 R21-C (P4): the default object repr IS the memory
-        # address, so ``str(arg)`` here persisted a process-local address
-        # into ``equivalence_class`` -- cross-process keys diverged for any
-        # op holding an object arg (``torch.randn(..., generator=g)``), the
-        # SAME key could collide for two distinct objects after address
-        # reuse, and recurrence grouping split when a semantically-identical
-        # fresh object was passed per call. Same rule as
-        # ``_capture_fingerprint``: never repr an address; use the
-        # address-free type token.
-        args_to_hash.append(f"{prefix}_obj:{type(arg).__module__}.{type(arg).__qualname__}")
+        _append_set_arg_hash(arg, prefix, args_to_hash, _depth)
     else:
-        args_to_hash.append(f"{prefix}_{arg}")
+        args_to_hash.append(_leaf_arg_token(arg, prefix))
+
+
+def _leaf_arg_token(arg: Any, prefix: str) -> str:
+    """Return the fingerprint token for one non-container leaf argument.
+
+    grind-r5 b7 R21-C (P4): the default object repr IS the memory address,
+    so ``str(arg)`` here persisted a process-local address into
+    ``equivalence_class`` -- cross-process keys diverged for any op holding
+    an object arg (``torch.randn(..., generator=g)``), the SAME key could
+    collide for two distinct objects after address reuse, and recurrence
+    grouping split when a semantically-identical fresh object was passed per
+    call. Same rule as ``_capture_fingerprint``: never repr an address; use
+    the address-free type token.
+    """
+
+    if type(arg).__repr__ is object.__repr__ and type(arg).__str__ is object.__str__:
+        return f"{prefix}_obj:{type(arg).__module__}.{type(arg).__qualname__}"
+    return f"{prefix}_{arg}"
+
+
+def _append_set_arg_hash(
+    arg: "set[Any] | frozenset[Any]", prefix: str, args_to_hash: list[Any], _depth: int
+) -> None:
+    """Fingerprint one set/frozenset arg in seed-independent member order.
+
+    grind-r5 b7 R21/P4 rider: sets iterate in hash order, so the old
+    position-encoded ``_i{i}`` prefixes made the persisted fingerprint
+    PYTHONHASHSEED-dependent (and frozenset fell to the str() tail).
+    Fingerprint each member independently, then fold the members in sorted
+    token order -- deterministic for any seed and identical for
+    set/frozenset of equal members.
+    """
+
+    member_tokens: list[tuple[str, ...]] = []
+    for elem in arg:
+        elem_tokens: list[Any] = []
+        _append_arg_hash(elem, "", elem_tokens, _depth + 1)
+        member_tokens.append(tuple(str(token) for token in elem_tokens))
+    member_tokens.sort()
+    for i, tokens in enumerate(member_tokens):
+        args_to_hash.extend(f"{prefix}_s{i}{token}" for token in tokens)

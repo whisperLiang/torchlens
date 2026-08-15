@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         _mutation_target_slot_id,
         _op_for_slot,
         _ProjectionCountExceeded,
+        _UnreadableProjectedOutput,
     )
 
 __all__ = (
@@ -186,6 +187,10 @@ def _input_storage_ids(value: Any) -> frozenset[int]:
     return frozenset(ids)
 
 
+# NOTE: ``_UnreadableProjectedOutput`` (like ``_ProjectionCountExceeded``) is
+# defined in ``_runnable_execution`` and resolves through the rebound globals.
+
+
 def _new_allocation_bytes(
     projected: Any, input_storage_ids: AbstractSet[int]
 ) -> dict[torch.device, int]:
@@ -215,8 +220,14 @@ def _new_allocation_bytes(
             try:
                 nbytes = int(node.numel()) * int(node.element_size())
                 device = node.device
-            except Exception:
-                continue
+            except Exception as size_error:
+                # grind-r5 b7 R22 (sol HIGH): an unreadable projected size
+                # must never charge ZERO -- that converts "unknown
+                # allocation" into an empty byte charge and lets the real
+                # call allocate before any backstop. Refuse typed upstream.
+                raise _UnreadableProjectedOutput(
+                    f"projected output size unreadable: {type(size_error).__name__}: {size_error}"
+                ) from size_error
             totals[device] = totals.get(device, 0) + nbytes
         elif isinstance(node, (tuple, list)):
             stack.extend(node)
@@ -316,7 +327,20 @@ def _preflight_call_allocation(
                 affected_op_labels=call.op_labels,
             ) from exc
         return
-    for device, requested in _new_allocation_bytes(projected, input_storage_ids).items():
+    try:
+        new_bytes_by_device = _new_allocation_bytes(projected, input_storage_ids)
+    except _UnreadableProjectedOutput as exc:
+        raise RunCapabilityUnavailableError(
+            f"Sparse call {call.call_id!r} produced a projected output whose "
+            f"allocation size could not be read ({exc}); an unknown allocation "
+            "cannot be admitted under the fail-closed budget contract. The "
+            "descriptor may be tampered.",
+            code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+            detection_stage="op_allocation_preflight",
+            call_id=call.call_id,
+            affected_op_labels=call.op_labels,
+        ) from exc
+    for device, requested in new_bytes_by_device.items():
         available = _allocation_budget_bytes(device)
         if requested > available:
             raise RunCapabilityUnavailableError(
