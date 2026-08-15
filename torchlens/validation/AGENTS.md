@@ -15,7 +15,9 @@
 
 ## consolidated.py
 - `validate(model, input_args, scope=...)` is the top-level 2.x dispatcher.
-- Valid scopes are `forward`, `backward`, `saved`, and `intervention`.
+- Valid scopes are `forward`, `backward`, `saved`, `intervention`, and
+  `receptive_field` (own dispatch, gate, and tri-state return; see
+  `_validate_receptive_field_scope`).
 - Reject scope-specific kwargs early when they do not apply.
 
 ## exemptions.py
