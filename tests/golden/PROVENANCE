@@ -1,0 +1,13 @@
+generator: retroactive backfill (b10 R78 round-4: mass-rebaselines predating
+  the PROVENANCE mechanism for this directory carried no record)
+flag: TORCHLENS_UPDATE_VIZ_RENDER_ORACLE=1 / TORCHLENS_UPDATE_RANK_RENDER_IR=1
+  / TORCHLENS_UPDATE_SELECTOR_MATRIX=1 (historical writes)
+reason: backfilled from git history -- viz_render_identity_oracle.json and
+  rank_render_ir_semantics.json rebaselined at cbdb8f93 (2026-08-14) for the
+  R19-1/R19-2 rendering change landed in 04284e78 (honest fold uniformity and
+  per-pass rank geometry); selector_semantics_matrix.json func_non_string cell
+  regenerated at f0c36e73 (2026-08-13) for the typed ArgumentTypeError refusal.
+env: py3.10-torch2.13.0 (the committed ENV marker at those commits)
+torch: 2.13.0
+recorded: 2026-08-15 (backfill entry; future updates append real records via
+  tests/_oracle_env.write_provenance)

@@ -115,25 +115,20 @@ def test_public_surface_matches_golden(model_axis: str) -> None:
     # No wrap-state guard here: generation runs in an isolated subprocess
     # with a clean interpreter (SF-53 is closed structurally for this family).
     if flag_armed(os.environ, _UPDATE_ENV):
+        # Reason BEFORE bytes (b10 R78 round-4): the write used to precede
+        # require_update_reason, so a reasonless update run FAILED but had
+        # already rebaselined the committed goldens in the working tree.
+        reason = require_update_reason(_UPDATE_ENV)
         golden_path, _ = resolve_env_golden(_GOLDEN_DIR, f"{model_axis}.json")
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        write_provenance(
-            golden_path.parent,
-            "tests/surface_oracle",
-            _UPDATE_ENV,
-            require_update_reason(_UPDATE_ENV),
-        )
+        write_provenance(golden_path.parent, "tests/surface_oracle", _UPDATE_ENV, reason)
         pytest.skip(f"updated golden {golden_path.name}; re-run without {_UPDATE_ENV} to verify")
     golden_path = require_env_golden(_GOLDEN_DIR, f"{model_axis}.json", _UPDATE_ENV)
     if not golden_path.exists():
+        reason = require_update_reason(_UPDATE_ENV)
         golden_path.write_text(actual + "\n")
-        write_provenance(
-            golden_path.parent,
-            "tests/surface_oracle",
-            _UPDATE_ENV,
-            require_update_reason(_UPDATE_ENV),
-        )
+        write_provenance(golden_path.parent, "tests/surface_oracle", _UPDATE_ENV, reason)
         pytest.skip(f"recorded first-run surface golden for this environment: {golden_path}")
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:

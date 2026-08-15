@@ -105,12 +105,15 @@ def test_state_keysets_match_golden() -> None:
         pytest.skip(f"updated state-keyset golden; re-run without {_UPDATE_ENV} to verify")
     golden_path = require_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name, _UPDATE_ENV)
     if not golden_path.exists():
+        # Reason BEFORE bytes (b10 R78 round-4): a reasonless record run must
+        # fail with the working tree untouched.
+        reason = require_update_reason(_UPDATE_ENV)
         golden_path.write_text(actual + "\n")
         write_provenance(
             golden_path.parent,
             "tests/test_state_keyset_contract.py",
             _UPDATE_ENV,
-            require_update_reason(_UPDATE_ENV),
+            reason,
         )
         pytest.skip(f"recorded first-run state-keyset golden for this environment: {golden_path}")
     expected = golden_path.read_text().rstrip("\n")
