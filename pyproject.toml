@@ -32,8 +32,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "numpy",
-    "packaging",
+    # Runtime floors are DECLARED and EXERCISED (grind r4, b2:B6 third round:
+    # numpy/packaging/tqdm/graphviz were bare names, so the metadata promised
+    # nothing while CI quietly tested numpy==1.26.4 -- the tested floor and the
+    # declared floor were different artifacts). numpy's floor is the exact pin
+    # the tests.yml floor legs run; the other three are the oldest releases the
+    # nightly lowest-direct leg installs and smoke-imports, so a floor claim
+    # that stops being true goes red there instead of shipping.
+    "numpy>=1.26.4",
+    "packaging>=23.2",
     # torch>=2.1 supported. The only torch-2.4-specific APIs TorchLens used were
     # torch.is_autocast_enabled(device_type) / torch.get_autocast_dtype(device_type)
     # (the device_type argument is torch 2.4+ only); these are now routed through
@@ -52,8 +59,8 @@ dependencies = [
     "torch>=2.2; python_version == '3.12'",
     "torch>=2.6; python_version >= '3.13'",
     "safetensors>=0.4",
-    "tqdm",
-    "graphviz",
+    "tqdm>=4.66",
+    "graphviz>=0.20.1",
     # typing_extensions.Self is used for Python 3.10 (typing.Self is 3.11+).
     "typing_extensions>=4.0",
     # Pillow backs the viz / repgeom image-rendering surfaces (node images,
