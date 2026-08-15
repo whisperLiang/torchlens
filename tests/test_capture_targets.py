@@ -238,6 +238,7 @@ def test_saved_activation_identity_dedup_rejects_key_collision() -> None:
         "old",
         stale_out,
         old_source._version,
+        1,
     )
     fields = _minimal_activation_fields("manual_new")
 
@@ -339,3 +340,30 @@ def test_tied_parameter_notation_smoke() -> None:
         if layer.annotations.get("tied_parameter_notation")
     ]
     assert tied
+
+
+def test_dedup_source_id_is_a_dense_trace_local_ordinal() -> None:
+    """``dedup_source_id`` must never be a raw ``id()`` memory address (B3R4-R21-1).
+
+    The raw ``id()`` bookkeeping key leaked into the persisted annotation
+    dict, so artifacts of the SAME captured program carried per-process
+    memory addresses (byte-compare defeated, meaningless public value).
+    The annotation now carries the trace-local dense dedup-source ordinal.
+    """
+
+    trace = tl.trace(torch.nn.Identity(), torch.randn(1, 2))
+    source = torch.randn(2, 2)
+    other = torch.randn(2, 2)
+    fields = [_minimal_activation_fields(f"manual_{i}") for i in range(4)]
+
+    _save_activation_fields(trace, fields[0], source, (), {}, None)
+    _save_activation_fields(trace, fields[1], source, (), {}, None)
+    _save_activation_fields(trace, fields[2], other, (), {}, None)
+    _save_activation_fields(trace, fields[3], other, (), {}, None)
+
+    first_hit = fields[1]["annotations"]["dedup_source_id"]
+    second_hit = fields[3]["annotations"]["dedup_source_id"]
+    assert first_hit == 1
+    assert second_hit == 2
+    assert first_hit != id(source)
+    assert second_hit != id(other)

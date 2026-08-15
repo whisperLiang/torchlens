@@ -486,3 +486,72 @@ def test_mode_box_changed_field_diverges_runnable_replay(tmp_path):
     same.mode = "a"
     result = tl.load(path).run(inputs=same)
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+
+def test_nontotal_namedtuple_input_refuses_capture_typed():
+    """A malformed-``_fields`` namedtuple INPUT refuses capture entry typed (B3R4-R12-1).
+
+    Before the fix the capture-side walkers descended the (empty) declared
+    field list, so every tensor leaf under the container vanished: the trace
+    had NO input node, the consuming op had no parents, and the gap was
+    misattributed to a stale-reference "escape" -- while the settled outcome
+    still read COMPLETE.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    model = nn.Identity()
+
+    class _Consume(nn.Module):
+        def forward(self, box):  # noqa: D102 - test fixture
+            return box[0] * 2
+
+    model = _Consume()
+    tensor = torch.zeros(3)
+
+    # Control: the plain-tuple spelling captures with a real input node.
+    control = tl.trace(model, (tensor,))
+    assert len(control.input_ops) == 1
+
+    malformed = _ListFields((tensor,))
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        tl.trace(model, malformed)
+    assert excinfo.value.fields.get("code") == "input_namedtuple_schema_not_total"
+
+    # Arity-mismatched schema (declared 1 field, physically 2 elements). The
+    # arg-copy ladder independently warns `input_copy_semantics_unverifiable`
+    # (it cannot rebuild the subclass faithfully) before the typed refusal;
+    # tolerate that pre-existing disclosure here.
+    import warnings as _warnings
+
+    from torchlens._errors import TorchLensCaptureGapWarning
+
+    hidden = tuple.__new__(_OneField, (tensor, torch.ones(1)))
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", TorchLensCaptureGapWarning)
+        with pytest.raises(InvalidArgumentError) as excinfo:
+            tl.trace(model, hidden)
+    assert excinfo.value.fields.get("code") == "input_namedtuple_schema_not_total"
+
+    # A well-formed namedtuple input keeps capturing.
+    fine = _OneField(x=tensor)
+    ok = tl.trace(model, fine)
+    assert len(ok.input_ops) == 1
+
+
+def test_walk_input_boundary_refuses_nontotal_namedtuple():
+    """The shared traversal itself fails closed on a non-total schema."""
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens._input_walk import raw_mapping_key_component
+
+    seen: list[Any] = []
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        walk_input_boundary(
+            {"box": _ListFields((torch.zeros(1),))},
+            (),
+            key_component=raw_mapping_key_component,
+            on_tensor=lambda tensor, path: seen.append(path),
+        )
+    assert excinfo.value.fields.get("code") == "input_namedtuple_schema_not_total"
+    assert seen == []

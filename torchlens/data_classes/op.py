@@ -1616,9 +1616,13 @@ def _dedup_cached_identity_out(
     cached = identity_cache.get(source_key)
     if cached is None:
         return None
-    cached_source, cached_label, cached_out, cached_version = cached
+    cached_source, cached_label, cached_out, cached_version, cached_ordinal = cached
     if cached_source is source_tensor and cached_version == source_version:
-        annotations["dedup_source_id"] = source_key
+        # B3R4-R21-1: the annotation carries the trace-local dense dedup
+        # ordinal, never the raw ``id()`` bookkeeping key -- a memory address
+        # in a persisted field made same-program artifacts byte-differ per
+        # process and exposed a meaningless public value.
+        annotations["dedup_source_id"] = cached_ordinal
         annotations["dedup_source_version"] = source_version
         annotations["dedup_reference_label"] = cached_label
         return cast(torch.Tensor, cached_out)
@@ -1702,14 +1706,20 @@ def _dedup_saved_activation_out(
         source_version = tensor_version_or_none(source_tensor)
     cached = identity_cache.get(source_key)
     if cached is not None:
-        cached_source, cached_label, cached_out, cached_version = cached
+        cached_source, cached_label, cached_out, cached_version, cached_ordinal = cached
         if cached_source is source_tensor and cached_version == source_version:
-            annotations["dedup_source_id"] = source_key
+            # B3R4-R21-1: dense trace-local ordinal, never the raw ``id()``.
+            annotations["dedup_source_id"] = cached_ordinal
             annotations["dedup_source_version"] = source_version
             annotations["dedup_reference_label"] = cached_label
             return cached_out
 
-    identity_cache[source_key] = (source_tensor, label, raw_out, source_version)
+    # Dense ordinal in cache-insertion (execution) order: deterministic across
+    # processes for the same captured program, unlike the ``id()`` slot key. A
+    # replaced slot (id reuse after a mismatch) keeps its original ordinal so
+    # ordinals stay unique within the cache.
+    ordinal = cached[4] if cached is not None else len(identity_cache) + 1
+    identity_cache[source_key] = (source_tensor, label, raw_out, source_version, ordinal)
     return raw_out
 
 

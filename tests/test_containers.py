@@ -456,3 +456,32 @@ class StackTupleOutputModel(nn.Module):
 
         stacked = torch.stack([left, right])
         return stacked, right - left
+
+
+def test_trace_container_capability_fails_closed_on_unknown_backend() -> None:
+    """An unresolvable backend never earns the STRONGEST capability (b1 R22 F2).
+
+    ``_trace_container_capability`` returned ``"full_spec"`` -- full structure
+    plus ``supports_reconstruct=True`` -- both when the backend lookup raised
+    and for a backend that never declared container structure. Unknown
+    backends now read ``"none"`` (fail closed); a legacy trace WITHOUT a
+    backend field resolves the torch default instead of a hardcoded claim.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.backends import get_backend_spec
+    from torchlens.data_classes.container import Role, _trace_container_capability
+
+    unknown = SimpleNamespace(backend="no_such_backend_zzz")
+    assert _trace_container_capability(unknown, Role.CALL_OUTPUT) == "none"
+    assert _trace_container_capability(unknown, Role.MODEL_INPUT) == "none"
+
+    legacy = SimpleNamespace()  # no backend attribute at all
+    torch_caps = get_backend_spec("torch").capabilities
+    assert _trace_container_capability(legacy, Role.CALL_OUTPUT) == str(
+        torch_caps.output_container_structure
+    )
+    assert _trace_container_capability(legacy, Role.MODEL_INPUT) == str(
+        torch_caps.input_container_structure
+    )

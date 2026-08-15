@@ -578,7 +578,11 @@ def _copy_input_tree_node(
     if value_id in in_progress:
         from .._input_walk import raise_input_tree_cycle_refusal
 
-        raise_input_tree_cycle_refusal(kind="sequence" if isinstance(value, tuple) else "mapping")
+        # Only the tuple arm registers in ``in_progress`` (dict/list cycles
+        # resolve through their memo shells), so the re-encountered node is
+        # always a tuple: the historical "else mapping" guess was dead code
+        # reporting a false closed-vocabulary kind (B3R4-R12-2 sibling).
+        raise_input_tree_cycle_refusal(kind="sequence")
 
     def _child(child: Any, child_path: str) -> Any:
         """Recurse into one child with the shared walk state."""

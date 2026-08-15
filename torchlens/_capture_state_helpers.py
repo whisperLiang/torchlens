@@ -2412,7 +2412,18 @@ def _move_tensors_to_device_inner(
         _in_progress = set()
     obj_id = id(obj)
     if obj_id in _in_progress:
-        raise_input_tree_cycle_refusal(kind="mapping" if is_mapping else "sequence")
+        # B3R4-R12-2: report the REAL closed-vocabulary kind the descent
+        # gated on -- the old mapping/sequence binary reported a cyclic
+        # dataclass or registered container as kind="sequence".
+        if registration is not None:
+            cycle_kind = "registered"
+        elif is_dataclass_instance:
+            cycle_kind = "dataclass"
+        elif is_mapping:
+            cycle_kind = "mapping"
+        else:
+            cycle_kind = "sequence"
+        raise_input_tree_cycle_refusal(kind=cycle_kind)
     _in_progress.add(obj_id)
     try:
 

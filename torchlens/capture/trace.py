@@ -1434,6 +1434,14 @@ def run_and_log_inputs_through_model(
         input_args,
         input_kwargs,
     )
+    # B3R4-R12-1: a non-total namedtuple `_fields` schema on any input site
+    # refuses typed HERE, for every capture. The tensor-extraction BFS cannot
+    # see positional slots of tuple subclasses, so such an input used to lose
+    # its tensor leaves silently (no input node, parents dropped, the gap
+    # misattributed to a stale-reference escape) while settling COMPLETE.
+    from torchlens._input_walk import refuse_nontotal_namedtuple_inputs
+
+    refuse_nontotal_namedtuple_inputs(input_args, input_kwargs)
 
     self.capture_start_time = time.time()
     # Settlement state for this pass: the phase marker attributes failures to

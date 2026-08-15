@@ -18,8 +18,10 @@ import torch.nn as nn
 import torchlens as tl
 import torchlens._user_public_impls as user_public_impls
 
-# Import the implementation entry point first: it breaks the standalone
-# collection cycle between torchlens and torchlens._user_public_impls.
+# No import-order protection is needed here anymore: the historical
+# standalone-collection cycle between torchlens and _user_public_impls was
+# fixed at the root (lazy one-time metadata sync in user_funcs), so these
+# imports may be freely re-sorted.
 import torchlens.user_funcs as user_funcs
 from torchlens import Trace, trace as trace_fn
 from torchlens.errors import (

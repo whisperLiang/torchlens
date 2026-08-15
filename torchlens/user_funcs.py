@@ -1125,8 +1125,24 @@ def _warn_zero_match_capture_selectors(
     Returns
     -------
     None
-        Emits at most one warning for each configured selector slot.
+        Emits at most one warning for each configured selector slot, and
+        appends a matching string-only record to the PERSISTED
+        ``trace.annotations["unmatched_capture_selectors"]`` ledger
+        (B3R4-R15-1): the warning is the most losable disclosure kind, and
+        without a durable record a zero-match ablation sweep read as "this
+        layer does not matter" on the returned and saved Trace alike.
     """
+
+    def _record_unmatched(slot: str, selector: Any, direction: str | None = None) -> None:
+        """Append one zero-match fact to the persisted trace annotations."""
+
+        annotations = getattr(trace, "annotations", None)
+        if not isinstance(annotations, dict):
+            return
+        entry: dict[str, str] = {"slot": slot, "selector": repr(selector)}
+        if direction is not None:
+            entry["direction"] = str(direction)
+        annotations.setdefault("unmatched_capture_selectors", []).append(entry)
 
     defer_backward_intervention = False
     try:
@@ -1134,6 +1150,7 @@ def _warn_zero_match_capture_selectors(
             isinstance(save_selector, BaseSelector)
             and int(getattr(trace, "_tl_save_selector_fire_count", 0)) == 0
         ):
+            _record_unmatched("save", save_selector)
             warnings.warn(
                 f"Capture-time save selector {save_selector!r} matched zero sites; "
                 "no activations were selected by it.",
@@ -1151,6 +1168,7 @@ def _warn_zero_match_capture_selectors(
             and intervene_direction in {"forward", "both"}
             and int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) == 0
         ):
+            _record_unmatched("intervene", intervene_selector, intervene_direction)
             warnings.warn(
                 f"Capture-time intervention selector {intervene_selector!r} matched zero sites; "
                 "no intervention fired.",
@@ -1158,6 +1176,7 @@ def _warn_zero_match_capture_selectors(
                 stacklevel=3,
             )
         if isinstance(halt_selector, BaseSelector) and not bool(getattr(trace, "halted", False)):
+            _record_unmatched("halt", halt_selector)
             warnings.warn(
                 f"Capture-time halt selector {halt_selector!r} matched zero sites; "
                 "the capture ran the full forward and completed without halting, so "

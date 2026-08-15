@@ -1009,14 +1009,15 @@ def test_code_panel_doors_split_render_from_config_refusals() -> None:
     assert not isinstance(mode_info.value, TypeError)
 
 
-def test_predicate_type_doors_are_multiclass_by_surface() -> None:
-    """The predicate-type codes carry a per-surface builtin, per site history.
+def test_predicate_type_doors_split_by_surface() -> None:
+    """Each predicate-type door carries ONE code mapping to ONE builtin.
 
-    ``intervention_predicate_type_invalid`` / ``halt_predicate_type_invalid``
-    are ``ArgumentTypeError`` (historically raw ``TypeError``) on the
-    ``tl.trace`` surface but ``InvalidArgumentError`` (historically raw
-    ``ValueError``) on the ``tl.record`` surface. The contract doc documents
-    the multiclass explicitly; this pin makes any silent unification loud.
+    The ``tl.trace`` doors keep ``ArgumentTypeError`` (historically raw
+    ``TypeError``) under the unprefixed codes; the ``tl.record`` doors keep
+    ``InvalidArgumentError`` (historically raw ``ValueError``) under their
+    own ``recording_*`` codes (R64 split, the F1/F3/F4 house pattern). This
+    retires the last dual-lineage pair: one documented code never maps to
+    two catchable builtins depending on surface.
     """
 
     import torch
@@ -1026,21 +1027,16 @@ def test_predicate_type_doors_are_multiclass_by_surface() -> None:
     from torchlens.fastlog.options import RecordingOptions
 
     for kwarg in ("intervene", "halt"):
+        base = "intervention" if kwarg == "intervene" else "halt"
         with pytest.raises(errors.ArgumentTypeError) as trace_info:
             tl.trace(nn.Identity(), torch.randn(2), **{kwarg: 123})
-        assert (
-            trace_info.value.fields["code"]
-            == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
-        )
+        assert trace_info.value.fields["code"] == f"{base}_predicate_type_invalid"
         assert isinstance(trace_info.value, TypeError)
         assert not isinstance(trace_info.value, ValueError)
 
         with pytest.raises(errors.InvalidArgumentError) as record_info:
             RecordingOptions(**{kwarg: 123})
-        assert (
-            record_info.value.fields["code"]
-            == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
-        )
+        assert record_info.value.fields["code"] == f"recording_{base}_predicate_type_invalid"
         assert isinstance(record_info.value, ValueError)
         assert not isinstance(record_info.value, TypeError)
 

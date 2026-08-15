@@ -591,3 +591,24 @@ def test_save_succeeds_for_multi_pass_recurrent_trace(tmp_path: Path) -> None:
     path = tmp_path / "recurrent.tlspec"
     tl.save(trace, path)
     assert tl.load(path).num_ops == trace.num_ops
+
+
+def test_canonical_metadata_relation_sets_round_trip(tmp_path: Path) -> None:
+    """Relation frozensets survive the canonical (sorted-REDUCE) metadata dump.
+
+    B3R4-R21-2 rewrites exact set/frozenset pickling in ``metadata.pkl`` as
+    ``cls(sorted_members)`` — a REDUCE on ``builtins.frozenset``/``set`` —
+    so this pins that the default-deny safe unpickler admits the spelling
+    and the loaded relation sets are logically unchanged.
+    """
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU(), torch.nn.Linear(2, 2))
+    trace = tl.trace(model, torch.ones(1, 2))
+    path = tmp_path / "canonical.tlspec"
+    tl.save(trace, path)
+
+    loaded = tl.load(path)
+    for label in ("linear_1_1", "relu_1_2", "linear_2_3"):
+        loaded_layer = loaded[label]
+        assert isinstance(loaded_layer.input_ancestors, frozenset)
+        assert set(loaded_layer.input_ancestors) == set(trace[label].input_ancestors)
