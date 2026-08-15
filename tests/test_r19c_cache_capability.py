@@ -193,3 +193,43 @@ def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
         assert getattr(_state, "_relationship_input_id") is None
     finally:
         _state.reset_capture_runtime_context()
+
+
+def test_unpicklable_capture_degrades_to_uncached(tmp_path):
+    """cache=True must never destroy a successful capture (b6 R25, 3rd round).
+
+    A stock ``nn.MultiheadAttention`` capture holds a python-level
+    ``Tensor.*`` method in ``Op.func`` while the class attribute is the
+    installed wrapper, so pickle's by-name identity check fails; the cache
+    store propagated the bare ``PicklingError`` out of ``tl.trace`` itself.
+    The store must degrade to "not cached" with a warning instead.
+    """
+
+    import warnings
+
+    class _MHAWrap(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mha = nn.MultiheadAttention(8, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            out, _ = self.mha(x, x, x)
+            return out
+
+    model = _MHAWrap().eval()
+    x = torch.randn(3, 2, 8)
+    cache_dir = str(tmp_path / "cache")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(model, x, cache=True, cache_dir=cache_dir)
+    assert trace.num_ops > 0
+    degrade = [w for w in caught if "Not caching this capture" in str(w.message)]
+    assert degrade, "expected the not-cached degrade warning"
+    assert "unaffected" in str(degrade[0].message)
+
+    # The failed store must not poison later captures either (still warning,
+    # never raising -- pytest's warnings-as-errors needs the explicit expect).
+    with pytest.warns(UserWarning, match="Not caching this capture"):
+        second = tl.trace(model, x, cache=True, cache_dir=cache_dir)
+    assert second.num_ops == trace.num_ops
