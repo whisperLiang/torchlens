@@ -475,16 +475,30 @@ class TraceStatsMixin(_TraceMixinBase):
         # Memoized on the instance, never in a module global: a global
         # weak-keyed cache value reaches this Trace through the held records
         # and would pin it forever (the R37 ``trace.run()`` fork leak).
-        # Versioned BY VALUE (the ordered label sequence), not by bare
-        # ``len()``: an equal-length reassignment or element swap of
-        # ``layer_list`` used to serve the stale accessor.
-        cache_key = tuple(op.label for op in self.layer_list)
+        # Keyed on container IDENTITY (held strongly in the entry, so a
+        # recycled ``id`` can never mistranslate) plus length: every internal
+        # rebind (build, rerun refresh) changes identity, every removal
+        # changes length, and the in-place rename/refresh paths call
+        # ``_invalidate_trace_op_layer_accessor_caches`` explicitly. The r3
+        # by-value label-tuple key (98909fc7) additionally auto-detected
+        # DIRECT equal-length in-place edits of ``layer_list``, but priced
+        # every memo HIT at O(n), turning hot ``trace.ops`` sweeps O(n^2)
+        # (measured exponent ~2.1) and regressing ``tl.trace`` itself
+        # 6-10% (r3 R52-1/R28-1); the r3 fixplan prescribes this identity+len
+        # key. Direct user in-place mutation of this build product is outside
+        # the memo's auto-detection contract -- the supported spellings are
+        # reassignment or the explicit invalidator.
+        container = self.layer_list
         cache_entry = self.__dict__.get(_TRACE_OP_ACCESSOR_ATTR)
-        if cache_entry is None or cache_entry[0] != cache_key:
-            accessor = TraceOpAccessor(self.layer_list, self.layer_num_calls)
-            self.__dict__[_TRACE_OP_ACCESSOR_ATTR] = (cache_key, accessor)
-            return accessor
-        return cache_entry[1]
+        if (
+            cache_entry is not None
+            and cache_entry[0] is container
+            and cache_entry[1] == len(container)
+        ):
+            return cast(TraceOpAccessor, cache_entry[2])
+        accessor = TraceOpAccessor(container, self.layer_num_calls)
+        self.__dict__[_TRACE_OP_ACCESSOR_ATTR] = (container, len(container), accessor)
+        return accessor
 
     @property
     def transforms(self: "Trace") -> tuple[Op, ...]:
@@ -650,16 +664,21 @@ class TraceStatsMixin(_TraceMixinBase):
         # Memoized on the instance, never in a module global: a global
         # weak-keyed cache value reaches this Trace through the held records
         # and would pin it forever (the R37 ``trace.run()`` fork leak).
-        # Versioned BY VALUE (the ordered label keys), not by bare ``len()``:
-        # an equal-length reassignment of ``layer_logs`` used to serve the
-        # stale accessor.
-        cache_key = tuple(self.layer_logs)
+        # Same identity+len key scheme (and contract) as ``ops`` above:
+        # reassignment changes identity, removal changes length, and the
+        # in-place rename/refresh paths call the explicit invalidator
+        # (r3 R52-1 -- the by-value key priced every HIT at O(n)).
+        container = self.layer_logs
         cache_entry = self.__dict__.get(_TRACE_LAYER_ACCESSOR_ATTR)
-        if cache_entry is None or cache_entry[0] != cache_key:
-            accessor = LayerAccessor(self.layer_logs, source_trace=self)
-            self.__dict__[_TRACE_LAYER_ACCESSOR_ATTR] = (cache_key, accessor)
-            return accessor
-        return cast("LayerAccessor", cache_entry[1])
+        if (
+            cache_entry is not None
+            and cache_entry[0] is container
+            and cache_entry[1] == len(container)
+        ):
+            return cast("LayerAccessor", cache_entry[2])
+        accessor = LayerAccessor(container, source_trace=self)
+        self.__dict__[_TRACE_LAYER_ACCESSOR_ATTR] = (container, len(container), accessor)
+        return accessor
 
     @property
     def modules(self: "Trace") -> "ModuleAccessor":
