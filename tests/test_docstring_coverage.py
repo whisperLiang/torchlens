@@ -51,12 +51,6 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("backends/torch/identity_shims.py", "conv_picker_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "ctor_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "expanded_weight_shim"): "FW2-WRAP owns identity_shims.py",
-    # Undocumented closure landed by the fix/capture-r4 merge (bfddf0d9) — the
-    # smoke gate was RED on main when this wave found it; docstring rides the
-    # capture lane (torchlens/ fenced here).
-    ("backends/torch/wrappers.py", "_clear_inherited_capture_state"): (
-        "fix/capture-r4 at-fork hygiene closure; docstring rides the capture lane"
-    ),
     ("ir/op_record.py", "OpRecord.parent_arg_positions"): _OP_RECORD_FACET_PROPERTY,
     ("ir/op_record.py", "OpRecord._edge_uses"): _OP_RECORD_FACET_PROPERTY,
     ("ir/op_record.py", "OpRecord.unattributed_tensor_args"): _OP_RECORD_FACET_PROPERTY,

@@ -233,6 +233,16 @@ def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
         load(integrity)
     assert bad_pickle.value.fields.get("code") == "bundle_metadata_integrity_refused"
 
+    # (5) generic bundle-load failure (torch/codec drift, missing dep, OS error).
+    # metadata.pkl replaced by a directory raises IsADirectoryError (an OSError)
+    # inside the load body — the sixth front-door cause, not an integrity signal.
+    generic = _save_bundle(tmp_path, "generic.tl")
+    (generic / "metadata.pkl").unlink()
+    (generic / "metadata.pkl").mkdir()
+    with pytest.raises(TorchLensIOError) as generic_fail:
+        load(generic)
+    assert generic_fail.value.fields.get("code") == "bundle_load_failed"
+
 
 def test_tampered_manifest_field_raises_with_field_name(tmp_path: Path) -> None:
     """Tampered manifest tensor metadata should fail load with the offending field."""
