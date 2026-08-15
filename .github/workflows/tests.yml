@@ -16,7 +16,13 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    # NO event-name guard here (grind r5, b10 R82-1): inside a reusable
+    # workflow `github.event_name` is the CALLER's event, so a former
+    # `if: pull_request || push` condition meant that adding
+    # `workflow_dispatch:`/`schedule:` to release.yml would SKIP every test
+    # row while the called workflow still reported SUCCESS to
+    # `needs: [tests]` — a release with zero tests executed. Duplicate runs
+    # are already handled by the concurrency group above.
     name: ${{ matrix.track }} (torch ${{ matrix.torch }}, py ${{ matrix.python }})
     runs-on: ubuntu-24.04
     strategy:
