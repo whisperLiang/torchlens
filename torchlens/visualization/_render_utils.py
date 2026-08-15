@@ -170,6 +170,29 @@ _KILL_GRACE_SECONDS = 0.5
 # does (leader-only kill, matching the historical ``subprocess.run`` cleanup).
 _HAS_PROCESS_GROUPS = all(hasattr(os, name) for name in ("setsid", "killpg", "getpgid"))
 
+# Linux parent-death binding for BOUNDED render children. The group teardown
+# above only runs in the parent's exception handlers, so hard parent death
+# (SIGKILL) left the session-leading renderer running unbounded (b6 R40).
+# PR_SET_PDEATHSIG delivers SIGKILL to the child when the spawning thread
+# exits -- for this synchronous seam the spawner outlives every normal child,
+# so the signal fires exactly in the abandoned-child case. The prctl pointer
+# is resolved ONCE at import; the post-fork hook only calls it (no dlopen or
+# allocation between fork and exec). Viewer children intentionally stay
+# unbound: they are detached on purpose and must survive the parent.
+_PR_SET_PDEATHSIG = 1
+_PRCTL: Any = None
+if sys.platform == "linux":
+    with contextlib.suppress(OSError, AttributeError):
+        import ctypes
+
+        _PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+
+
+def _bounded_child_preexec() -> None:
+    """Bind the bounded child's lifetime to its parent (post-fork hook)."""
+
+    _PRCTL(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+
 
 def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
     """Tear down ``proc`` and every descendant sharing its process group.
@@ -224,15 +247,27 @@ def run_bounded_subprocess(
 
     stdin = subprocess.PIPE if input is not None else None
     pipe = subprocess.PIPE if capture_output else None
-    proc = subprocess.Popen(
-        cmd,
-        stdin=stdin,
-        stdout=pipe,
-        stderr=pipe,
-        cwd=cwd,
-        text=text,
-        start_new_session=_HAS_PROCESS_GROUPS,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin,
+            stdout=pipe,
+            stderr=pipe,
+            cwd=cwd,
+            text=text,
+            start_new_session=_HAS_PROCESS_GROUPS,
+            preexec_fn=_bounded_child_preexec if _PRCTL is not None else None,
+        )
+    except FileNotFoundError as exc:
+        # Lazy import: _render_common top-imports this module, so the typed
+        # class cannot be imported at module level without minting a cycle.
+        from ._render_common import GraphvizUnavailableError
+
+        raise GraphvizUnavailableError(
+            f"TorchLens could not render this graph: the Graphviz executable "
+            f"{cmd[0]!r} was not found on PATH",
+            executable=cmd[0],
+        ) from exc
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:

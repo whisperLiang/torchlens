@@ -54,7 +54,7 @@ def _module_stack_from_layer(op_log: Any) -> tuple[ModuleStackFrame, ...]:
     addresses = tuple(getattr(op_log, "modules", ()) or ())
     for index, address in enumerate(addresses, start=1):
         module_type = ""
-        source_trace = getattr(op_log, "source_trace", None)
+        source_trace = getattr(op_log, "_source_trace", None)
         if source_trace is not None:
             modules = getattr(source_trace, "_module_logs", {})
             try:

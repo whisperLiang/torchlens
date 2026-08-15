@@ -357,6 +357,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_implicit_backward_pass_open": "graph",
     "_warned_implicit_backward_pass": "session",
     "_tl_backward_triggers_disarmed": "session",
+    "_tl_cleaned_up": "session",
     "_grad_fn_param_refs_by_object_id": "graph",
     "_param_log_by_pid": "graph",
     "_session_param_inventory": "session",

@@ -1819,3 +1819,55 @@ def test_rank_group_parity_guard_survives_python_O() -> None:
     _assert_rank_group_parity(3, 3)
     with pytest.raises(RuntimeError, match="sibling rank-group emission mismatch"):
         _assert_rank_group_parity(3, 2)
+
+
+def test_collapse_optimizer_ops_ceiling_declines_disclosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the ops ceiling the optimizer declines DISCLOSED, never computes.
+
+    b8-sol R60: the frontier selection is superlinear (~n^1.75) with no
+    preflight node ceiling, time budget, or typed refusal, so one
+    ``draw(collapse="auto"|"max")`` on a several-thousand-op model burned
+    CPU-hours. The ceiling must (a) warn and render uncollapsed on the draw
+    path, (b) refuse typed from ``Trace.collapse_plan()``, and (c) degrade
+    the schedule to its single full-graph step -- while sub-ceiling traces
+    are untouched.
+    """
+
+    import warnings as warnings_module
+
+    from torch import nn
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens.visualization import collapse_optimizer as optimizer_module
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4), nn.ReLU())
+    trace = tl.trace(model, torch.randn(2, 4))
+
+    # Sub-ceiling: the real ceiling admits this trace and produces a plan.
+    assert trace.collapse_plan(mode="max") is not None
+
+    monkeypatch.setattr(optimizer_module, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
+    fresh = tl.trace(model, torch.randn(2, 4))
+
+    with pytest.warns(UserWarning, match="skipping smart collapse"):
+        dot = fresh.draw(
+            collapse="max",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            order_siblings=False,
+        )
+    assert dot  # uncollapsed render still ships
+
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("ignore", UserWarning)
+        with pytest.raises(InvalidArgumentError) as exc_info:
+            fresh.collapse_plan(mode="auto")
+    assert exc_info.value.fields["code"] == "collapse_plan_unavailable"
+    assert "collapse_ops_ceiling" in exc_info.value.fields["reason"]
+
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("ignore")
+        schedule = fresh.collapse_schedule()
+    assert len(schedule.steps) == 1

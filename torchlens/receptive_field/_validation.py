@@ -199,6 +199,7 @@ def _box_for_descriptor(
             index_stop=axis.input_extent if axis.kind == "full" else None,
             clipped_start=0 if axis.kind == "full" else None,
             clipped_stop=axis.input_extent if axis.kind == "full" else None,
+            sparse_possible=axis.sparse_possible,
         )
         for axis in descriptor.axes
     )
@@ -908,6 +909,7 @@ def check_for_unit(
     target: object | None = None,
     atol: float = 0.0,
     rtol: float = 0.0,
+    retain_graph: bool = False,
 ) -> ReceptiveFieldValidation:
     """Cross-check one target unit for the entity-view delegation surface.
 
@@ -926,6 +928,11 @@ def check_for_unit(
     atol, rtol:
         Accepted for compatibility and ignored. Validation always uses exact
         finite nonzero gradient support.
+    retain_graph:
+        Keep the armed autograd graph alive after the check. The default
+        ``False`` FREES the graph -- disclosed here and on ``rf.check`` --
+        so a later ``gradient(..., retain_graph=True)`` on the same armed
+        capture needs ``retain_graph=True`` here first (b3 R14-N1).
 
     Returns
     -------
@@ -945,7 +952,7 @@ def check_for_unit(
         result_target=target,
         atol=atol,
         rtol=rtol,
-        retain_graph=False,
+        retain_graph=retain_graph,
     )
 
 
@@ -959,6 +966,7 @@ def check(
     target: object | None = None,
     atol: float = 0.0,
     rtol: float = 0.0,
+    retain_graph: bool = False,
 ) -> ReceptiveFieldValidation:
     """Cross-check geometry and gradients through an explicit RF view.
 
@@ -977,6 +985,9 @@ def check(
     atol, rtol:
         Accepted for compatibility and ignored. Validation always uses exact
         finite nonzero gradient support.
+    retain_graph:
+        Keep the armed autograd graph alive after the check (default frees
+        it, like ``gradient()``'s default; b3 R14-N1).
 
     Returns
     -------
@@ -993,6 +1004,7 @@ def check(
         target=target,
         atol=atol,
         rtol=rtol,
+        retain_graph=retain_graph,
     )
 
 

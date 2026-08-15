@@ -288,6 +288,42 @@ class RecordBindingError(_ActionableErrorMixin, CaptureError, RuntimeError):
         )
 
 
+class TraceCleanedUpError(_ActionableErrorMixin, CaptureError, AttributeError):
+    """Raised when a public read touches a Trace that ``cleanup()`` husked.
+
+    Keeps ``AttributeError`` lineage so ``hasattr``/``getattr``-with-default
+    probes on a husked trace still degrade instead of erroring, while giving
+    direct readers one stable code to branch on instead of a raw missing-
+    private-field ``AttributeError``.
+    """
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable husked-trace refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the read that hit the husked trace.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code="trace_cleaned_up",
+            remedy=remedy,
+            **cast(dict[str, Any], context),
+        )
+
+
 class PayloadUnavailableError(_ActionableErrorMixin, CaptureError, ValueError):
     """Raised when a requested saved payload was never retained or cannot be rebuilt."""
 

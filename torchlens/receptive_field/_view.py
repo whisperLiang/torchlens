@@ -485,6 +485,7 @@ class ReceptiveFieldView:
         target: object | None = None,
         atol: float = 0.0,
         rtol: float = 0.0,
+        retain_graph: bool = False,
     ) -> ReceptiveFieldValidation:
         """Cross-check geometry against gradients for one complete output index.
 
@@ -503,6 +504,12 @@ class ReceptiveFieldView:
         atol, rtol:
             Accepted for compatibility and ignored. Validation always uses exact
             finite nonzero gradient support.
+        retain_graph:
+            Keep the armed autograd graph alive after the check. The default
+            ``False`` FREES the graph, exactly like ``gradient()``'s default:
+            call with ``retain_graph=True`` (or re-capture) when a later
+            ``gradient(..., retain_graph=True)`` or second check must run on
+            the same armed capture.
 
         Returns
         -------
@@ -525,6 +532,7 @@ class ReceptiveFieldView:
                 target=target,
                 atol=atol,
                 rtol=rtol,
+                retain_graph=retain_graph,
             ),
         )
 

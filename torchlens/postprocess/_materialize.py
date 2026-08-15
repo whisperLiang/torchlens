@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from math import prod
@@ -1446,7 +1446,7 @@ def _module_enter_addresses(
         for enter_event in enter_events
         if enter_event.address in valid_addresses
     }
-    unmatched_exit_by_index: dict[int, list[ModuleExitEvent]] = defaultdict(list)
+    unmatched_exit_by_index: dict[int, deque[ModuleExitEvent]] = defaultdict(deque)
     for exit_event in exit_events:
         if (exit_event.address, exit_event.call_index) not in explicit_enter_keys:
             unmatched_exit_by_index[exit_event.call_index].append(exit_event)
@@ -1460,9 +1460,9 @@ def _module_enter_addresses(
         if enter_event.address in valid_addresses:
             resolved[id(enter_event)] = enter_event.address
             continue
-        candidates = unmatched_exit_by_index.get(enter_event.call_index, [])
+        candidates = unmatched_exit_by_index.get(enter_event.call_index)
         if candidates:
-            resolved[id(enter_event)] = candidates.pop(0).address
+            resolved[id(enter_event)] = candidates.popleft().address
         else:
             resolved[id(enter_event)] = str(enter_event.address)
     return resolved

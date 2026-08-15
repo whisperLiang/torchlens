@@ -975,7 +975,17 @@ def _build_box(
             # conservative composition artifact shared with windowed axes and
             # deliberately NOT folded here.
             box_axes.append(
-                ReceptiveFieldBoxAxis(axis, "pointwise", None, None, None, None, None, None)
+                ReceptiveFieldBoxAxis(
+                    axis,
+                    "pointwise",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    sparse_possible=axis_descriptor.sparse_possible,
+                )
             )
         elif axis_descriptor.kind == "full":
             narrowed = theoretical_sets[axis]
@@ -997,6 +1007,7 @@ def _build_box(
                         narrowed_maximum + 1,
                         max(narrowed_minimum, 0),
                         min(narrowed_maximum + 1, extent),
+                        sparse_possible=axis_descriptor.sparse_possible,
                     )
                 )
             else:
@@ -1009,7 +1020,17 @@ def _build_box(
                 # (disputed-r2 b6/R20-3).
                 exact = exact and axis_descriptor.exact
                 box_axes.append(
-                    ReceptiveFieldBoxAxis(axis, "full", None, None, 0, extent, 0, extent)
+                    ReceptiveFieldBoxAxis(
+                        axis,
+                        "full",
+                        None,
+                        None,
+                        0,
+                        extent,
+                        0,
+                        extent,
+                        sparse_possible=axis_descriptor.sparse_possible,
+                    )
                 )
         elif axis_descriptor.kind == "windowed":
             theoretical = theoretical_sets[axis]
@@ -1035,11 +1056,22 @@ def _build_box(
                     index_stop,
                     actual_start,
                     actual_stop,
+                    sparse_possible=axis_descriptor.sparse_possible,
                 )
             )
         else:
             box_axes.append(
-                ReceptiveFieldBoxAxis(axis, "unknown", None, None, None, None, None, None)
+                ReceptiveFieldBoxAxis(
+                    axis,
+                    "unknown",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    sparse_possible=axis_descriptor.sparse_possible,
+                )
             )
     empty = not path_nonempty
     covers_input = not empty and all(

@@ -159,6 +159,62 @@ def test_layer_standalone_pickle_repr_and_accessors_typed() -> None:
     assert parents_exc.value.fields["code"] == "record_not_bound"
 
 
+def test_op_source_trace_refuses_typed_when_detached() -> None:
+    """``Op.source_trace`` must refuse TYPED for both detachment shapes.
+
+    R52-B (b7-opus r5): the Layer half landed in 1a2b715e but ``Op`` kept
+    the identical type-lie -- a standalone-pickled Op returned a bare
+    ``None`` behind the ``-> Trace`` signature, and a dead weakref returned
+    ``None`` the same way, crashing relation accessors untyped.
+    """
+
+    import gc
+    import pickle
+
+    from torchlens._errors import RecordBindingError
+
+    trace = tl.trace(_TwoStage(), torch.randn(2, 4))
+    op = trace["relu_1_2"].ops[0]
+
+    restored = pickle.loads(pickle.dumps(op))
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = restored.source_trace
+    assert exc_info.value.fields["code"] == "record_not_bound"
+    assert exc_info.value.fields["remedy"]
+
+    with pytest.raises(RecordBindingError) as children_exc:
+        _ = restored.get_children()
+    assert children_exc.value.fields["code"] == "record_not_bound"
+
+    dead = trace["relu_1_2"].ops[0]
+    del trace, op
+    gc.collect()
+    with pytest.raises(RecordBindingError) as dead_exc:
+        _ = dead.source_trace
+    assert dead_exc.value.fields["code"] == "trace_reference_collected"
+    # repr on the dead-ref op must still degrade, never raise.
+    assert "relu_1_2" in repr(dead)
+
+
+def test_op_repr_degrades_under_predicate_save() -> None:
+    """repr/str of an UNSAVED Op under a predicate save must not raise.
+
+    R01 (b1-opus r5): ``_tensor_contents_str_helper`` read ``self.out``
+    unguarded, and ``Op.__getattribute__`` refuses that payload read with
+    ``PayloadUnavailableError`` once a predicate save was used, so
+    ``repr(trace.layer_list)`` raised on 6 of 7 ops.
+    """
+
+    trace = tl.trace(_TwoStage(), torch.randn(2, 4), save=tl.func("relu"))
+    text = repr(trace.layer_list)
+    assert text
+    unsaved = next(op for op in trace.layer_list if not op.has_saved_activation)
+    unsaved_text = f"{unsaved.ops[0]}"
+    assert "not saved" in unsaved_text
+    saved = trace["relu_1_2"]
+    assert "not saved" not in f"{saved.ops[0]}"
+
+
 def test_layer_repr_on_live_trace_unchanged() -> None:
     """A Layer bound to a live Trace keeps the full informative repr."""
 

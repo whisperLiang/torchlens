@@ -103,6 +103,7 @@ add names to the top-level `torchlens` namespace:
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
 | `graph_breaks_normalization_failed` | `tl.debug.graph_breaks()` got a Dynamo explain result of unrecognized shape (`GraphBreaksNormalizationError`, `RuntimeError` lineage) | Report the shape to TorchLens or pin a recognized torch version |
 | `graph_breaks_unavailable` | `tl.debug.graph_breaks()` found no `torch._dynamo.explain` in this torch runtime (`GraphBreaksUnavailableError`, `RuntimeError` lineage) | Upgrade torch or skip the correlation on this runtime |
+| `graphviz_binary_unavailable` | The Graphviz executable is not on PATH, so no render subprocess can start (`GraphvizUnavailableError`, `RuntimeError` lineage) | Install the Graphviz system package (`apt install graphviz` / `brew install graphviz`) |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
@@ -147,6 +148,8 @@ add names to the top-level `torchlens` namespace:
 | `op_lookup_pass_required` | Bare label names a multi-pass layer | Append a pass qualifier such as `:2` |
 | `on_forward_error_invalid` | Forward-error policy is unknown | Choose `raise`, `attach_partial`, or `return_partial` |
 | `on_predicate_error_invalid` | Predicate-error policy is unknown | Choose `auto`, `accumulate`, or `fail-fast` |
+| `postprocess_audit_asserts_stripped` | `TORCHLENS_POSTPROCESS_ASSERTIONS` is armed under `-O`/`-OO`, so every contract check would be stripped and the audit would report clean without verifying anything | Re-run without `-O`, or unset the variable |
+| `postprocess_audit_env_invalid` | A `TORCHLENS_POSTPROCESS_*` audit knob holds an unrecognized value (a typo must never silently rearm or disarm an audit) | Use a documented value for the knob, or unset it |
 | `option_group_conflict` | Grouped and flat options set the same field on a merge entrypoint (`ArgumentConflictError`; historically `ValueError`) | Use one option style |
 | `option_group_keyword_conflict` | Flat draw kwarg and `VisualizationOptions` field set the same option (`KeywordConflictError`; historically `TypeError`) | Use one option style |
 | `option_group_type_invalid` | Grouped option has the wrong object type | Pass the documented options class |
@@ -198,6 +201,7 @@ add names to the top-level `torchlens` namespace:
 | `sweep_values_missing` | Sweep values iterable is missing | Pass a non-empty iterable |
 | `tensor_connection_labels_missing` | Manual edge endpoint lacks a capture label | Use tensors already captured in the active trace |
 | `top_n_invalid` | Requested `top_n` is below one | Pass a positive integer |
+| `trace_cleaned_up` | Public read on a Trace that `cleanup()` husked (`TraceCleanedUpError`, `AttributeError` lineage) | Re-capture with `tl.trace(...)`; cleanup permanently empties a Trace |
 | `trace_not_finished` | Export requested before the forward pass finished | Wait until `trace(...)` has returned |
 | `trace_reference_collected` | Owning Trace was garbage-collected | Keep the Trace alive while reading records |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |

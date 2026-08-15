@@ -66,7 +66,6 @@ from ..ir.container import (
 from ..ir.container_registry import ContainerRecord, ContainerSnapshot, Role
 from ..quantities import Duration
 from ..utils.display import _timed_phase, _vprint, in_notebook, int_list_to_compact_str
-from ..viz import batch_summary
 from ._label_format import (
     format_memory,
     format_module_kwargs,
@@ -364,6 +363,23 @@ class GraphvizRenderError(_ActionableErrorMixin, CompatibilityError, RuntimeErro
             remedy=resolved_remedy,
             **cast(dict[str, Any], context),
         )
+
+
+class GraphvizUnavailableError(GraphvizRenderError):
+    """Raised when the Graphviz executable cannot be found on PATH.
+
+    The most common cold-user visualization failure: the ``graphviz``
+    Python package is installed but the system binary is not, so the
+    spawn seam's ``exec`` fails. Distinct from ``graphviz_render_failed``
+    (a present binary producing no usable artifact) because the remedy is
+    installation, not render tuning.
+    """
+
+    code: str = "graphviz_binary_unavailable"
+    default_remedy: str = (
+        "install the Graphviz system package and ensure its binaries are on "
+        "PATH (Debian/Ubuntu: apt install graphviz; macOS: brew install graphviz)"
+    )
 
 
 _GRAPHVIZ_ESCAPE_HINT = (
@@ -822,7 +838,6 @@ __all__ = [
     "_vprint",
     "apply_theme_to_spec",
     "base64",
-    "batch_summary",
     "build_render_ir",
     "finalize_forward_regions",
     "cast",

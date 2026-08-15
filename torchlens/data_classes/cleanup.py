@@ -64,6 +64,10 @@ def cleanup(self: "Trace") -> None:
     from ..backends.torch.backward import _purge_trace_from_backward_registry
     from ..captured_run import forget_event_stream
 
+    if self.__dict__.get("_tl_cleaned_up", False):
+        # Idempotent: a second cleanup() has nothing left to husk and must
+        # not crash on its own output (b6-opus R25).
+        return
     if _state._active_trace is self:
         raise CaptureContextError(
             "Trace.cleanup() was called on the trace a live TorchLens capture "
@@ -145,6 +149,11 @@ def cleanup(self: "Trace") -> None:
     # postprocess step-13 sites were already gated.
     if _is_cuda_available() and touched_cuda:
         torch.cuda.empty_cache()
+    # Husked-trace sentinel: every later public read funnels through
+    # ``_raise_missing_trace_attribute`` and refuses with ONE typed code
+    # (``trace_cleaned_up``) instead of leaking whichever private field the
+    # reader touches first; ``Trace.outcome`` settles to UNKNOWN.
+    self._tl_cleaned_up = True
 
 
 def _clear_entry_attributes(log_entry: Op) -> None:

@@ -218,6 +218,42 @@ def test_pairwise_sweep_early_exit_keeps_chained_grouping_subquadratic() -> None
     assert find_calls < 12_000
 
 
+class _BareChain(torch.nn.Module):
+    """A plain param-free feed-forward chain: the quadratic sweep's worst case."""
+
+    def __init__(self, num_steps: int) -> None:
+        super().__init__()
+        self.num_steps = num_steps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.num_steps):
+            x = torch.relu(x)
+        return x
+
+
+@pytest.mark.smoke
+def test_bare_chain_sweep_is_linear_in_group_size() -> None:
+    """A param-free chain must not pay the C(N,2) pairwise triangle.
+
+    b4-opus r5 (F29-A): all N chain relus land in ONE iso group with no
+    adjacency, no params, and no anchors, so no union can ever fire and
+    neither documented short-circuit engages -- the full triangle ran
+    (~161k adapter ``find`` calls at 400 ops, exactly 2*C(N,2)+O(N)) and
+    bought zero grouping. The bucketed candidate sweep enumerates only
+    pairs a union arm could accept, so the same capture stays linear
+    (~1.2k finds). Call counts, not timings, so the bound is load-robust.
+    """
+    torch.manual_seed(0)
+    num_steps = 400
+    traced, find_calls = _trace_with_adapter_find_calls(_BareChain(num_steps), torch.rand(4))
+
+    # Grouping oracle: a bare chain mints NO recurrent layers (layers == ops).
+    assert all(op.num_passes == 1 for op in traced.ops)
+    assert traced.num_ops == num_steps
+    # Pre-fix this is >= 2*C(400,2) = 159,600; the bucketed sweep needs O(N).
+    assert find_calls < 12_000
+
+
 @pytest.mark.smoke
 def test_pairwise_sweep_early_exit_preserves_multi_root_group_membership() -> None:
     """Multi-root candidate groups keep exact historical membership.

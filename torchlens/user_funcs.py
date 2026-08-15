@@ -537,6 +537,24 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
             stacklevel=2,
         )
         return False
+    except (pickle.PickleError, TypeError, AttributeError, OSError) as exc:
+        # A performance cache must degrade to "not cached", never annihilate a
+        # capture that already succeeded (b6 R25, 3rd round): an unpicklable
+        # Op.func -- e.g. a python-level Tensor method captured from a stock
+        # nn.MultiheadAttention -- raised the bare PicklingError out of
+        # tl.trace(..., cache=True) itself. Disk failures (ENOSPC) degrade
+        # the same way.
+        temporary_path.unlink(missing_ok=True)
+        warnings.warn(
+            f"Not caching this capture: serializing or writing the cache entry "
+            f"failed ({type(exc).__name__}: {exc}). The capture itself is "
+            "unaffected; it simply will not hit the cache. Existing valid "
+            "entries are left in place (torchlens.clear_capture_cache() "
+            "empties the cache).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

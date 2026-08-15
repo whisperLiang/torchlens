@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -80,6 +81,19 @@ if TYPE_CHECKING:
 K_CAP = 64
 FRONTIER_CAP = 32
 MAX_SALIENCE_FLOOR = 0.75
+
+#: Preflight compute ceiling for the v2 collapse selection (b8 R60). The
+#: frontier DP is measured superlinear (~n^1.75) in rendered op count with no
+#: internal time budget, so above this many ops the optimizer DECLINES with a
+#: disclosed warning instead of silently burning CPU-hours: ``draw`` renders
+#: uncollapsed, ``Trace.collapse_plan()`` refuses typed
+#: (``collapse_plan_unavailable``), and the schedule degrades to its single
+#: full-graph step. Calibration: the largest shipped-suite models
+#: (densenet201 at 1,517 ops, maxvit_t at 1,307) must stay admitted -- their
+#: schedules are the suite's slow cells at tens of seconds -- while the
+#: extrapolated multi-thousand-op cost (an hour-class compute at ~5,000 ops)
+#: is exactly what the ceiling exists to refuse.
+COLLAPSE_OPTIMIZER_MAX_OPS = 2000
 
 
 @dataclass(frozen=True)
@@ -368,6 +382,46 @@ def select_collapse_plan(
     cached = cached_by_context.get(cache_key)
     if cached is not None:
         return cached
+    op_count = len(trace.ops)
+    if op_count > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Preflight compute ceiling (b8 R60): the frontier selection is
+        # measured superlinear (~n^1.75) in op count with no internal budget,
+        # so one draw(collapse="auto"|"max") on a several-thousand-op model
+        # burned CPU-hours before returning anything. Decline DISCLOSED:
+        # draw() renders uncollapsed, Trace.collapse_plan() refuses typed
+        # (collapse_plan_unavailable), and the schedule degrades to its
+        # single full-graph step.
+        if source_graph is None:
+            from .source_graph import build_source_graph
+
+            source_graph = build_source_graph(trace, context)
+        full_plan = collapse_plan_for_source_graph(source_graph, None, None)
+        warnings.warn(
+            f"TorchLens is skipping smart collapse: this trace has {op_count} "
+            f"ops, above the collapse optimizer's compute ceiling of "
+            f"{COLLAPSE_OPTIMIZER_MAX_OPS} (its selection cost grows "
+            "superlinearly and would dominate the render). The graph renders "
+            "uncollapsed; reduce the rendered graph first with module= focus, "
+            "vis_call_depth, or rolled mode.",
+            UserWarning,
+            stacklevel=2,
+        )
+        result = OptimizerResult(
+            selected=frozenset(),
+            repeat_folds={},
+            plan=full_plan,
+            visible_count=count(full_plan),
+            analyze_ms=0.0,
+            select_ms=0.0,
+            g_star=None,
+            declined=True,
+            reason=(
+                f"collapse_ops_ceiling: {op_count} ops exceed "
+                f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS}"
+            ),
+        )
+        cached_by_context[cache_key] = result
+        return result
     if mode == "max":
         result = _select_max_plan(trace, context, weights, source_graph)
         cached_by_context[cache_key] = result

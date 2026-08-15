@@ -1083,6 +1083,33 @@ def test_dilated_max_pool_exact_box_matches_bruteforce() -> None:
     assert checked.n_violations == 0
 
 
+def test_dilated_box_axes_disclose_sparse_possible() -> None:
+    """The box view must carry the axis view's ``sparse_possible`` disclosure.
+
+    A dilated kernel keeps the hull exact while provably skipping interior
+    positions; the axis view disclosed that, but the box axes did not, so
+    ``rf.at(unit)`` presented a dense window under an unqualified
+    ``exact=True`` (b6 R20).
+    """
+
+    model = nn.Conv2d(1, 1, 3, dilation=3, bias=False).eval()
+    inputs = torch.randn(1, 1, 14, 14)
+    trace = capture(model, inputs)
+    box = op_named(trace, "conv2d").receptive_field.at((2, 2))
+    assert box.exact
+    windowed = [axis for axis in box.axes if axis.kind == "windowed"]
+    assert windowed, "expected windowed spatial axes on a conv box"
+    assert all(axis.sparse_possible for axis in windowed)
+    assert box.sparse_possible
+
+    dense = nn.Conv2d(1, 1, 3, bias=False).eval()
+    dense_trace = capture(dense, inputs)
+    dense_box = op_named(dense_trace, "conv2d").receptive_field.at((2, 2))
+    assert dense_box.exact
+    assert not dense_box.sparse_possible
+    assert all(not axis.sparse_possible for axis in dense_box.axes)
+
+
 def test_batch_mean_mix_claims_full_batch_axis() -> None:
     """Batch-axis units: batch mixing must surface as a full batch axis."""
 
@@ -1111,3 +1138,31 @@ def test_batch_mean_mix_claims_full_batch_axis() -> None:
     checked = target.receptive_field.check((1, 0, 2, 2))
     assert checked.status is ReceptiveFieldValidationStatus.PASS
     assert checked.n_violations == 0
+
+
+def test_check_exposes_retain_graph() -> None:
+    """``rf.check`` exposes ``retain_graph`` like its sibling ``gradient``.
+
+    b3 R14-N1 (4th round): ``check()`` hardcoded ``retain_graph=False`` and
+    disclosed nothing, so one check on an armed capture silently freed the
+    graph and a later ``gradient(..., retain_graph=True)`` surfaced torch's
+    raw second-backward RuntimeError mid-workflow.
+    """
+
+    model = nn.Conv2d(1, 1, 3).eval()
+    trace = capture(model, torch.randn(1, 1, 8, 8))
+    target = op_named(trace, "conv2d")
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    checked = target.receptive_field.check(unit, retain_graph=True)
+    assert checked.status is ReceptiveFieldValidationStatus.PASS
+    # The graph survived the check, so a later gradient works.
+    assert target.receptive_field.gradient(unit, retain_graph=True)
+
+    # The default still frees the graph (unchanged behavior, now disclosed).
+    fresh = capture(model, torch.randn(1, 1, 8, 8))
+    fresh_target = op_named(fresh, "conv2d")
+    fresh_unit = fresh_target.receptive_field.center_unit(batch_index=0)
+    fresh_target.receptive_field.check(fresh_unit)
+    with pytest.raises(RuntimeError, match="backward through the graph"):
+        fresh_target.receptive_field.gradient(fresh_unit, retain_graph=True)

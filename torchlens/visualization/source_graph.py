@@ -65,7 +65,12 @@ def build_source_graph(trace: Trace, request: ResolvedRenderRequest) -> SourceGr
     elif request.vis_mode == "rolled":
         entries_to_plot = dict(trace.layer_logs)
     else:
-        raise ValueError("vis_mode must be either 'rolled' or 'unrolled'")
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'rolled' or 'unrolled'; received {request.vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='rolled' or 'unrolled'",
+            argument="vis_mode",
+        )
 
     if request.module is not None:
         target_module = _resolve_focus_module(trace, request.module)

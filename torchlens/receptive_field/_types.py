@@ -330,7 +330,13 @@ class ReceptiveField:
 
 @dataclass(frozen=True)
 class ReceptiveFieldBoxAxis:
-    """Concrete receptive-field bounds for one model-input axis."""
+    """Concrete receptive-field bounds for one model-input axis.
+
+    ``sparse_possible`` mirrors the axis-view disclosure: the bounds are the
+    tight integer hull, but positions inside it may provably not influence
+    the unit (dilated kernels, strided slices). ``exact`` on the parent box
+    speaks to the hull, not to interior density.
+    """
 
     input_axis: int
     kind: AxisKind
@@ -340,6 +346,7 @@ class ReceptiveFieldBoxAxis:
     index_stop: int | None
     clipped_start: int | None
     clipped_stop: int | None
+    sparse_possible: bool = False
 
     def __post_init__(self) -> None:
         """Validate paired bounds and axis identity.
@@ -445,6 +452,18 @@ class ReceptiveFieldBox:
             else:
                 result.append(slice(axis.clipped_start, axis.clipped_stop))
         return tuple(result)
+
+    @property
+    def sparse_possible(self) -> bool:
+        """Return whether any axis hull may contain non-influencing positions.
+
+        ``exact`` speaks to the tight integer hull; a dilated kernel or a
+        strided slice keeps the hull exact while provably skipping interior
+        positions. This aggregate mirrors the per-axis disclosure so box
+        consumers see it without walking ``axes``.
+        """
+
+        return any(axis.sparse_possible for axis in self.axes)
 
     @property
     def source_key(self) -> str:
