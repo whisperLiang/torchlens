@@ -59,7 +59,7 @@ only here:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -179,6 +179,41 @@ def raise_input_tree_cycle_refusal(*, kind: str) -> None:
         code="input_tree_cycle",
         remedy="Remove the container reference cycle from the model input.",
         kind=kind,
+    )
+
+
+def raise_input_tree_namedtuple_refusal(*, declared: int, physical: int) -> None:
+    """Raise the typed non-total-namedtuple-schema input refusal (B3R4-R12-1).
+
+    A tuple subclass DECLARING a ``_fields`` schema that does not account for
+    the physical tuple (a malformed non-tuple-of-str ``_fields``, or a declared
+    arity differing from the physical arity) used to descend only the declared
+    names -- NOTHING for a malformed schema -- so every remaining tensor leaf
+    silently vanished from the capture-side walkers: the trace had no input
+    node and the gap was misattributed to a stale-reference escape.
+
+    Parameters
+    ----------
+    declared:
+        Number of usable declared field names (0 for a malformed schema).
+    physical:
+        Concrete builtin tuple arity.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "Model-input tree contains a tuple subclass declaring a namedtuple "
+        "`_fields` schema that does not account for the physical tuple "
+        f"({declared} usable declared field(s) vs {physical} physical "
+        "element(s); a non-tuple-of-str `_fields` declaration counts as 0).",
+        code="input_namedtuple_schema_not_total",
+        remedy=(
+            "Fix the container's `_fields` declaration (a tuple of one str per "
+            "positional element) or pass a plain tuple/list instead."
+        ),
+        declared_fields=declared,
+        physical_arity=physical,
     )
 
 
@@ -513,6 +548,16 @@ def walk_input_boundary(
                 _descend(child, (*path, index))
             return
         if kind == "namedtuple":
+            if namedtuple_arity_mismatch(value):
+                # Fail closed (B3R4-R12-1): descending only the declared names
+                # -- NOTHING for a malformed schema -- silently dropped the
+                # remaining tensor leaves from every capture-side walker. The
+                # snapshot walker records the symmetric
+                # ``namedtuple_schema_not_total`` refusal fact instead.
+                raise_input_tree_namedtuple_refusal(
+                    declared=len(_instance_fields(value)),
+                    physical=physical_sequence_len(value),
+                )
             for name in _instance_fields(value):
                 _descend(getattr(value, name), (*path, str(name)))
             return
@@ -550,6 +595,33 @@ def walk_input_boundary(
         # A legal (<= ceiling) tree can still exhaust the stack when the caller
         # entered capture deep in its own recursion; refuse typed (T11.4).
         raise_input_tree_stack_refusal(exc)
+
+
+def refuse_nontotal_namedtuple_inputs(
+    input_args: Iterable[Any], input_kwargs: Mapping[Any, Any]
+) -> None:
+    """Refuse capture entry on any non-total namedtuple input schema (B3R4-R12-1).
+
+    The runnable walkers (W1/W2/W3) run only for intervention-ready captures,
+    so a PLAIN capture never traversed its input boundary through the shared
+    dispatch: a malformed-``_fields`` tuple subclass reached the tensor-
+    extraction BFS, which cannot see positional slots of tuple subclasses, and
+    every tensor leaf under it silently vanished (no input node, parents lost,
+    the gap misattributed to a stale-reference escape). One inert traversal per
+    input site at capture entry makes the typed schema-totality refusal fire
+    for every capture, matching the documented
+    :func:`declares_namedtuple_fields` contract.
+
+    Parameters
+    ----------
+    input_args:
+        Normalized positional model inputs.
+    input_kwargs:
+        Normalized keyword model inputs.
+    """
+
+    for value in (*input_args, *input_kwargs.values()):
+        walk_input_boundary(value, (), key_component=raw_mapping_key_component)
 
 
 # --- r67 C2: the input-boundary SNAPSHOT spine -----------------------------------------------
