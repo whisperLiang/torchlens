@@ -17,13 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from ..distributed._ledger import GroupLifecycleLedger, membership_digest_for_ranks
-from ._enums import TENSORLESS_KINDS, MergedErrorCode
+from ._enums import REDUCE_OP_KINDS, TENSORLESS_KINDS, MergedErrorCode
 from ._errors import MergeInputError
 
 __all__ = [
     "BOUNDARY_SCHEMA",
     "KNOWN_KINDS",
     "P2P_KINDS",
+    "REDUCE_OP_KINDS",
     "TENSORLESS_KINDS",
     "RankEvidence",
     "extract_rank_evidence",
@@ -208,6 +209,25 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
                 "(a list of non-negative integers)",
                 source=source,
             )
+    # Reduce-op cardinality vs kind (sibling of the roles-deletion escape):
+    # uniform deletion of ``reduce_op`` from every rank core vacuously
+    # satisfied the reduce-op agreement check the same way.
+    if kind in REDUCE_OP_KINDS:
+        reduce_op = entry.get("reduce_op")
+        if not isinstance(reduce_op, str) or not reduce_op:
+            raise _refuse(
+                f"{where} is a {kind} boundary without its reduce_op record; "
+                "a successful call of this kind always records one",
+                source=source,
+            )
+    # A tampered non-integer seq crashed the engine's delta arithmetic with a
+    # raw TypeError instead of the promised typed refusal (the load-side
+    # descriptor check in _artifact already enforced this; parse now matches).
+    c10d_group_seq = entry.get("c10d_group_seq")
+    if c10d_group_seq is not None and (
+        isinstance(c10d_group_seq, bool) or not isinstance(c10d_group_seq, int)
+    ):
+        raise _refuse(f"{where} c10d_group_seq is not an integer or null", source=source)
     events = entry.get("events")
     if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)
