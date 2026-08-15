@@ -28,6 +28,7 @@ import pickle
 import re
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -936,6 +937,29 @@ _ORIGINAL_HOLDING_SITE_ALLOWLIST = {
 }
 
 
+def _inventory_namespaces() -> list[tuple[str, Any]]:
+    """Every namespace named by the wrap inventory, resolved live.
+
+    R3-B3-R02-2: the audit's namespace list is DERIVED from
+    ``get_orig_torch_funcs()`` instead of hardcoded, so the audit is
+    structurally co-extensive with the roster it certifies. The historical
+    7-namespace list omitted ``torch.Tensor`` (the bulk of the roster, where
+    torch adds method aliases), ``torch._VF`` (the interior those aliases
+    delegate to), ``torch.utils.dlpack``, and ``torch.signal.windows`` -- for
+    those the gate was structurally unable to fail.
+    """
+
+    from torchlens.constants import get_orig_torch_funcs
+    from torchlens.utils._torch_compat import get_optional_torch_namespace
+
+    resolved: list[tuple[str, Any]] = []
+    for ns_name in sorted({ns for ns, _ in get_orig_torch_funcs()}):
+        ns = get_optional_torch_namespace(ns_name)
+        if ns is not None:
+            resolved.append((ns_name, ns))
+    return resolved
+
+
 def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> None:
     """Post-wrap, no UNREVIEWED public module attribute may hold an original.
 
@@ -946,25 +970,13 @@ def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> No
     "invisible capture-gap generator on a version boundary" class (b3-opus
     R02-3). This audit is per (namespace, attribute) SITE: every public
     callable attr whose OBJECT has a wrapper must be repointed or reviewed.
+    The namespace list is derived from the inventory (R3-B3-R02-2), never
+    hardcoded.
     """
 
-    import torch.fft
-    import torch.linalg
-    import torch.nn.init
-    import torch.special
-
     _ensure_wrapped()
-    namespaces = [
-        ("torch", torch),
-        ("torch.functional", torch.functional),
-        ("torch.nn.functional", F),
-        ("torch.nn.init", torch.nn.init),
-        ("torch.linalg", torch.linalg),
-        ("torch.fft", torch.fft),
-        ("torch.special", torch.special),
-    ]
     unreviewed: list[tuple[str, str]] = []
-    for ns_name, ns in namespaces:
+    for ns_name, ns in _inventory_namespaces():
         for attr in dir(ns):
             try:
                 obj = getattr(ns, attr)
@@ -979,4 +991,54 @@ def test_every_public_module_site_holding_a_wrapped_original_is_reviewed() -> No
         f"(unwrapped spelling of a wrapped op): {unreviewed}. Repoint the site "
         "in decoration, or review it into _ORIGINAL_HOLDING_SITE_ALLOWLIST "
         "with a composite-over-wrapped-interiors verification."
+    )
+
+
+# Roster rows whose torch attribute is REVIEWED-dead on current torch: the
+# spelling no longer exists, so the row wraps nothing and the decoration
+# loop's hasattr-continue is the correct behavior FOR THESE ROWS ONLY. Each
+# entry needs a reason; an entry that RESOLVES again must be removed (the
+# gate below fails in both directions).
+_KNOWN_DEAD_ROSTER_ROWS = {
+    # Removed upstream (absent on torch 2.13); kept in IGNORED_FUNCS for the
+    # torch releases that still expose it. R3-B3-R02-1 evidence row.
+    ("torch", "_sparse_csr_tensor"),
+}
+
+
+def test_curated_roster_rows_resolve_to_live_sites() -> None:
+    """R3-B3-R02-1 liveness gate: no roster row may go dead SILENTLY.
+
+    ``IGNORED_FUNCS`` is the hand-curated re-add list of ops torch's override
+    registries omit -- exactly the ops whose absence from the roster
+    previously produced silent unattributed-literal capture gaps. The
+    decoration loop ``continue``s on an unresolvable pair with no diagnostic,
+    so a torch release that renames, privatizes, or moves ANY re-added
+    spelling would reopen the precise gap the row exists to close, with zero
+    signal. This gate makes every dead row a REVIEWED fact: unexpected dead
+    rows fail, and known-dead rows that resurrect fail until the ledger entry
+    is removed.
+    """
+
+    from torchlens.constants import get_orig_torch_funcs
+    from torchlens.utils._torch_compat import get_optional_torch_namespace
+
+    _ensure_wrapped()
+    dead: set[tuple[str, str]] = set()
+    for ns_name, func_name in get_orig_torch_funcs():
+        ns = get_optional_torch_namespace(ns_name)
+        if ns is None or not hasattr(ns, func_name):
+            dead.add((ns_name, func_name))
+    unexpected_dead = dead - _KNOWN_DEAD_ROSTER_ROWS
+    resurrected = _KNOWN_DEAD_ROSTER_ROWS - dead
+    assert not unexpected_dead, (
+        f"Wrap-inventory rows silently wrap NOTHING on this torch: "
+        f"{sorted(unexpected_dead)}. If the spelling moved, update the roster "
+        "(the silent gap the row closes is back); if it was removed upstream, "
+        "review it into _KNOWN_DEAD_ROSTER_ROWS with the torch version."
+    )
+    assert not resurrected, (
+        f"_KNOWN_DEAD_ROSTER_ROWS entries resolve again on this torch: "
+        f"{sorted(resurrected)}. Remove them from the ledger so the liveness "
+        "gate re-arms for those rows."
     )
