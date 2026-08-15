@@ -1416,6 +1416,13 @@ def synchronize_pending_cpu_async_copies() -> None:
             _CPU_ASYNC_PENDING_EVENTS[:0] = pending[index:]
 
 
+#: Backend labels that positively identify a non-CUDA capture home (R36).
+#: Only these skip the allocator flush; any label OUTSIDE this closed set
+#: (including ``"unknown"``/missing) fails toward the historical flush, so a
+#: future accelerator label can never silently skip it.
+_KNOWN_NON_CUDA_MEMORY_BACKENDS = frozenset({"cpu", "mps", "xpu", "hpu"})
+
+
 def capture_touched_cuda(trace: Any) -> bool:
     """Return whether this capture's forward plausibly touched CUDA (R36-3).
 
@@ -1426,6 +1433,12 @@ def capture_touched_cuda(trace: Any) -> bool:
     forward peak-memory bracket from the model device; an unknown or missing
     value fails toward the historical flush, never toward skipping it.
 
+    A non-CUDA-homed model can still move tensors to CUDA inside ``forward``,
+    so a known non-CUDA label additionally consults the recorded op devices:
+    any recorded ``cuda`` output flips the verdict to flush. A failure while
+    consulting keeps the stamped fact's verdict — the scan only ever ADDS
+    flushes, never removes one.
+
     Parameters
     ----------
     trace:
@@ -1434,11 +1447,24 @@ def capture_touched_cuda(trace: Any) -> bool:
     Returns
     -------
     bool
-        False only when the capture provably ran on a non-CUDA backend.
+        False only when the capture provably ran on a non-CUDA backend and
+        recorded no CUDA-resident op output.
     """
 
     backend = getattr(trace, "forward_memory_backend", None)
-    return backend not in ("cpu", "mps")
+    if backend == "cuda":
+        return True
+    if backend in _KNOWN_NON_CUDA_MEMORY_BACKENDS:
+        try:
+            ops = getattr(trace, "ops", None) or ()
+            for op in ops:
+                device = getattr(op, "device_ref", None)
+                if isinstance(device, str) and device.startswith("cuda"):
+                    return True
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def _copy_tensor_payload(

@@ -91,6 +91,44 @@ def test_capture_touched_cuda_predicate_gates_on_trace_fact() -> None:
     # Unknown/missing fails toward the historical flush, never toward skipping.
     assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="unknown")) is True
     assert capture_touched_cuda(SimpleNamespace()) is True
+    # Other KNOWN accelerator homes must not flush the CUDA allocator (the
+    # old blanket `not in ("cpu", "mps")` over-broadly flushed for them).
+    assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="xpu")) is False
+    assert capture_touched_cuda(SimpleNamespace(forward_memory_backend="hpu")) is False
+
+
+def test_capture_touched_cuda_consults_recorded_op_devices() -> None:
+    """A CPU-homed capture that moved tensors to CUDA in forward flushes (R36).
+
+    The stamped backend fact comes from the MODEL device, so a CPU-homed
+    model that moves tensors to CUDA inside ``forward`` read as "cpu" and the
+    allocator cache was never returned (false negative). A recorded cuda op
+    device must flip the verdict; a scan failure keeps the stamped verdict.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.utils.tensor_utils import capture_touched_cuda
+
+    cpu_op = SimpleNamespace(device_ref="cpu")
+    cuda_op = SimpleNamespace(device_ref="cuda:0")
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=[cpu_op, cuda_op]))
+        is True
+    )
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=[cpu_op])) is False
+    )
+
+    class _RaisingOps:
+        def __iter__(self):
+            raise RuntimeError("husked")
+
+    # Consult failure keeps the stamped fact's verdict (adds flushes only).
+    assert (
+        capture_touched_cuda(SimpleNamespace(forward_memory_backend="cpu", ops=_RaisingOps()))
+        is False
+    )
 
 
 def test_pure_view_probes_consume_no_global_rng() -> None:

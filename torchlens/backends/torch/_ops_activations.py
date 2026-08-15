@@ -456,6 +456,13 @@ def _save_activation_fields(
                 save_mode=save_mode,
             )
             if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
+                if save_mode == "cpu_async":
+                    # R36: a cpu_async copy of THIS tensor may still be in
+                    # flight; a cross-device move would read the pinned host
+                    # buffer before its D2H fence. Drain pending fences first.
+                    from ...utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+                    synchronize_pending_cpu_async_copies()
                 raw_out = safe_to(raw_out, fields_dict["output_device"])
             _stamp_reference_out(fields_dict["annotations"], raw_out, save_mode)
 
