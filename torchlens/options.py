@@ -901,7 +901,17 @@ class CaptureOptions:
     save_rng_states:
         Whether operation-level RNG states are captured.
     random_seed:
-        Fixed seed used for deterministic capture.
+        Fixed seed used for deterministic capture. PROCESS-GLOBAL side
+        effect: every capture reseeds all four global RNG engines (Python
+        ``random``, NumPy, torch CPU, and every CUDA device) with this seed
+        at entry and does NOT restore their prior states afterwards, so a
+        pipeline that seeds, captures, then samples draws different numbers
+        than the same pipeline without the capture. When ``None`` (the
+        default) the seed itself is drawn from the entropy-seeded global
+        ``random`` stream, so ``torch.manual_seed(k)`` before an unseeded
+        capture does NOT make the capture reproducible — pass ``random_seed=``
+        explicitly for that. The seed used is recorded on
+        ``trace.random_seed``.
     source_context_lines:
         Number of source-context lines to store.
     optimizer:

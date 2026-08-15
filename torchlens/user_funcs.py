@@ -1406,6 +1406,11 @@ def _run_model_and_save_specified_outs(
         save_grads: If True, register backward hooks to capture grads.
         grads_to_save: Which layer grads to save.
         random_seed: Fixed RNG seed for reproducibility (important for stochastic models).
+            Process-global side effect: the capture reseeds all four global RNG engines
+            (random/NumPy/torch CPU/all CUDA devices) at entry and never restores them;
+            when None the seed is drawn from the entropy-seeded global ``random`` stream,
+            so an outer ``torch.manual_seed`` does not make an unseeded capture
+            reproducible. The seed used is recorded on ``trace.random_seed``.
         num_context_lines: Number of source-code context lines stored per function call.
         optimizer: Optional optimizer - used to tag which parameters have optimizers attached.
         recurrence_detection: If True (default), run full isomorphic subgraph expansion to
@@ -2273,6 +2278,11 @@ def trace(
         SDPA ``scores``, ``pattern``, and ``z``.
     random_seed:
         Fixed RNG seed for reproducibility with stochastic models.
+        Process-global side effect: the capture reseeds all four global RNG
+        engines at entry and never restores them; when ``None`` the seed is
+        drawn from the entropy-seeded global ``random`` stream (an outer
+        ``torch.manual_seed`` does not make an unseeded capture
+        reproducible). Recorded on ``trace.random_seed``.
     num_context_lines:
         Deprecated alias for ``source_context_lines``.
     optimizer:
