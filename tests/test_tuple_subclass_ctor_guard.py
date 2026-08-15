@@ -86,20 +86,25 @@ def test_coerce_input_args_handles_malformed_fields_subclass():
     assert isinstance(coerced[0], torch.Tensor)
 
 
-@pytest.mark.filterwarnings("ignore:TorchLens found tensor arguments with no graph")
-def test_property_fields_subclass_traces_end_to_end():
-    """Plain tl.trace completes on a property-``_fields`` tuple subclass.
+def test_property_fields_subclass_refuses_typed_end_to_end():
+    """Plain tl.trace REFUSES a property-``_fields`` tuple subclass input, typed.
 
-    Pre-fix this crashed with an untyped ``TypeError`` from the *args
-    constructor inference before capture even started. The tolerated
-    provenance warning is a PRE-EXISTING, unrelated gap: input tensors inside
-    ANY plain (no ``_fields``) tuple subclass are also unattributed on
-    unmodified code -- probed 2026-08-14, relayed in the lane results.
+    Contract progression (reviewed, fw4): originally this shape crashed with an
+    untyped ``TypeError`` from the *args constructor inference (T11.7 red);
+    T11.7's fix made it trace -- but with every enclosed tensor leaf silently
+    UNATTRIBUTED (this test formerly tolerated that gap with a warning filter).
+    B3R4-R12-1 settled the honest contract: a tuple subclass DECLARING a
+    ``_fields`` schema that cannot account for its physical elements refuses
+    capture entry with a typed ``InvalidArgumentError`` naming the remedy --
+    never an untyped crash, and never a trace with silently dropped input
+    provenance.
     """
 
+    from torchlens._errors import InvalidArgumentError
+
     box = _PropertyFields((torch.ones(2), torch.zeros(2)))
-    log = tl.trace(_TakesModel(), box)
-    assert len(log) > 0
+    with pytest.raises(InvalidArgumentError, match="_fields"):
+        tl.trace(_TakesModel(), box)
 
 
 def test_unreconstructable_subclass_passes_by_reference():

@@ -551,9 +551,15 @@ def walk_input_boundary(
             if namedtuple_arity_mismatch(value):
                 # Fail closed (B3R4-R12-1): descending only the declared names
                 # -- NOTHING for a malformed schema -- silently dropped the
-                # remaining tensor leaves from every capture-side walker. The
-                # snapshot walker records the symmetric
-                # ``namedtuple_schema_not_total`` refusal fact instead.
+                # remaining tensor leaves from every capture-side walker (the
+                # trace showed NO input node and misattributed the gap as an
+                # "escape" while settling COMPLETE). A typed refusal is the
+                # honest outcome for BOTH the malformed-``_fields`` shape and a
+                # valid schema with the wrong arity: tracing on with silently
+                # unattributed leaves is the dishonesty this tripwire exists to
+                # stop. (Supersedes the T11.7-era trace-through, whose own test
+                # tolerated the unattributed gap; the snapshot walker records
+                # the symmetric ``namedtuple_schema_not_total`` refusal fact.)
                 raise_input_tree_namedtuple_refusal(
                     declared=len(_instance_fields(value)),
                     physical=physical_sequence_len(value),
