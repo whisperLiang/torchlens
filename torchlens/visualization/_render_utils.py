@@ -224,15 +224,26 @@ def run_bounded_subprocess(
 
     stdin = subprocess.PIPE if input is not None else None
     pipe = subprocess.PIPE if capture_output else None
-    proc = subprocess.Popen(
-        cmd,
-        stdin=stdin,
-        stdout=pipe,
-        stderr=pipe,
-        cwd=cwd,
-        text=text,
-        start_new_session=_HAS_PROCESS_GROUPS,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin,
+            stdout=pipe,
+            stderr=pipe,
+            cwd=cwd,
+            text=text,
+            start_new_session=_HAS_PROCESS_GROUPS,
+        )
+    except FileNotFoundError as exc:
+        # Lazy import: _render_common top-imports this module, so the typed
+        # class cannot be imported at module level without minting a cycle.
+        from ._render_common import GraphvizUnavailableError
+
+        raise GraphvizUnavailableError(
+            f"TorchLens could not render this graph: the Graphviz executable "
+            f"{cmd[0]!r} was not found on PATH",
+            executable=cmd[0],
+        ) from exc
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:

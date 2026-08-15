@@ -263,6 +263,10 @@ _LAZY_EXCEPTION_PATHS = {
         "torchlens.visualization._render_common",
         "GraphvizRenderError",
     ),
+    "GraphvizUnavailableError": (
+        "torchlens.visualization._render_common",
+        "GraphvizUnavailableError",
+    ),
     "UnsupportedRendererCapabilityError": (
         "torchlens.visualization.renderers.base",
         "UnsupportedRendererCapabilityError",

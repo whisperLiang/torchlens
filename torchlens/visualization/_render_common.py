@@ -366,6 +366,23 @@ class GraphvizRenderError(_ActionableErrorMixin, CompatibilityError, RuntimeErro
         )
 
 
+class GraphvizUnavailableError(GraphvizRenderError):
+    """Raised when the Graphviz executable cannot be found on PATH.
+
+    The most common cold-user visualization failure: the ``graphviz``
+    Python package is installed but the system binary is not, so the
+    spawn seam's ``exec`` fails. Distinct from ``graphviz_render_failed``
+    (a present binary producing no usable artifact) because the remedy is
+    installation, not render tuning.
+    """
+
+    code: str = "graphviz_binary_unavailable"
+    default_remedy: str = (
+        "install the Graphviz system package and ensure its binaries are on "
+        "PATH (Debian/Ubuntu: apt install graphviz; macOS: brew install graphviz)"
+    )
+
+
 _GRAPHVIZ_ESCAPE_HINT = (
     "Try lowering dpi, rendering direct SVG with vis_fileformat='svg', or reducing the graph "
     "with a node cap such as vis_call_depth."

@@ -422,6 +422,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "GraphBreaksUnavailableError": ("RuntimeError",),
     "GraphShapeMismatchError": ("ValueError",),
     "GraphvizRenderError": ("RuntimeError",),
+    "GraphvizUnavailableError": ("RuntimeError",),
     "HelperMountError": ("ValueError",),
     "HookSignatureError": ("TypeError",),
     "HookSiteCoverageError": ("ValueError",),
