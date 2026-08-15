@@ -31,6 +31,7 @@ from typing import Any, cast
 from ..distributed._audit import MembershipLineageVerdict, audit_membership_lineages
 from ..distributed._ledger import InstallEpoch, membership_digest_for_ranks
 from ._enums import (
+    TENSORLESS_KINDS,
     WITNESS_IDENTITY_KINDS,
     WITNESS_NOT_APPLICABLE_KINDS,
     WITNESS_VERDICT_BACKENDS,
@@ -280,6 +281,17 @@ def _relation_findings(
     if len(kinds_seen) > 1:
         violation(f"ranks disagree on the collective kind: {sorted(kinds_seen)}")
         return findings
+
+    # Role cardinality vs kind (b6-opus-R18-1 belt): the set-of-shapes
+    # agreement below is vacuously satisfied when EVERY presenting rank holds
+    # zero roles, so uniform roles deletion rendered the TOP verdict. Evidence
+    # parse refuses that shape outright; this belt keeps direct engine callers
+    # honest and names each offending rank.
+    if kind not in TENSORLESS_KINDS:
+        all_roles = ("contribution", "destination", "contribution_destination")
+        for rank, entry in sorted(entries.items()):
+            if not _roles_of(entry, all_roles):
+                violation(f"rank {rank} presents zero tensor roles for a tensor-carrying boundary")
 
     reduce_ops = {entry.get("reduce_op") for entry in entries.values()}
     if len(reduce_ops) > 1:

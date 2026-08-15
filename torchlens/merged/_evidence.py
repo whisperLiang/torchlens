@@ -17,13 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from ..distributed._ledger import GroupLifecycleLedger, membership_digest_for_ranks
-from ._enums import MergedErrorCode
+from ._enums import TENSORLESS_KINDS, MergedErrorCode
 from ._errors import MergeInputError
 
 __all__ = [
     "BOUNDARY_SCHEMA",
     "KNOWN_KINDS",
     "P2P_KINDS",
+    "TENSORLESS_KINDS",
     "RankEvidence",
     "extract_rank_evidence",
     "resolve_rank_inputs",
@@ -171,9 +172,24 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             f"recorded group membership {sorted(int(r) for r in global_ranks)}",
             source=source,
         )
-    roles = entry.get("roles", [])
+    roles = entry.get("roles")
     if not isinstance(roles, list):
-        raise _refuse(f"{where} roles is not a list", source=source)
+        raise _refuse(f"{where} has no roles list", source=source)
+    # Role cardinality vs boundary kind (b6-opus-R18-1): deleting the roles
+    # record from EVERY member of a join used to vacuously satisfy the
+    # set-of-shapes agreement checks (asymmetric deletion was caught; uniform
+    # corruption -- the merge threat model -- was the escape). Every
+    # tensor-carrying kind records at least one role on a successful call, so
+    # an empty record refuses here, at the one chokepoint merge time and load
+    # rederivation share.
+    if not roles and kind not in TENSORLESS_KINDS:
+        raise _refuse(
+            f"{where} is a tensor-carrying {kind} boundary with zero tensor "
+            "roles; a successful collective of this kind always records at "
+            "least one role, so an empty or deleted roles record is not "
+            "honest evidence",
+            source=source,
+        )
     for role_index, role in enumerate(roles):
         if not isinstance(role, dict):
             raise _refuse(f"{where} role entry {role_index} is not a mapping", source=source)

@@ -24,6 +24,7 @@ __all__ = [
     "MergeAlignment",
     "MergeValueStatus",
     "MergedErrorCode",
+    "TENSORLESS_KINDS",
     "WITNESS_IDENTITY_KINDS",
     "WITNESS_NOT_APPLICABLE_KINDS",
     "WITNESS_SLICE_KINDS",
@@ -129,6 +130,23 @@ caps the EFFECTIVE alignment at load time (3.2).
 # not CI probes: torch documents all_reduce results bitwise identical across
 # processes, and the copy-semantics kinds are verdict-grade by definitional
 # data movement. Unknown kinds/backends are never guessed.
+
+TENSORLESS_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "barrier",
+        "all_gather_object",
+        "broadcast_object_list",
+        "gather_object",
+        "scatter_object_list",
+    }
+)
+"""Journal-only kinds that legitimately carry ZERO tensor roles.
+
+Mirrors the capture-side ``CollectiveSite.tensorless`` flags exactly: every
+other kind executes on at least one tensor argument (the real c10d call would
+have raised before the boundary was journaled otherwise), so a tensor-carrying
+boundary presenting zero roles is tamper or corruption, never honest evidence.
+"""
 
 WITNESS_IDENTITY_KINDS: Final[frozenset[str]] = frozenset(
     {"all_reduce", "all_gather", "all_gather_into_tensor", "broadcast"}
