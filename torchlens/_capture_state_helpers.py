@@ -1487,10 +1487,17 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
         move or a freeze between ``cache=True`` runs changes ``device_ref``,
         timing/memory, and grad_fn metadata on the capture, so it must be a
         cache miss even though the bytes match.
+
+        The digest frames the LOGICAL dtype, captured before the
+        bf16 -> float32 transport upcast numpy requires: framing the
+        post-upcast dtype made a bfloat16 tensor collide with the float32
+        tensor of the same values, so ``cache=True`` could serve the WRONG
+        trace across dtypes (same fix as ``op.py::_tensor_content_hash``).
     """
 
     with _state.pause_logging():
         cpu = to_cpu_contiguous(tensor)
+        logical_dtype = str(cpu.dtype)
         if cpu.dtype is torch.bfloat16:
             cpu = cpu.to(torch.float32)
         payload = cpu.numpy().tobytes()
@@ -1499,7 +1506,7 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
         repr(
             (
                 tuple(cpu.shape),
-                str(cpu.dtype),
+                logical_dtype,
                 str(tensor.device),
                 bool(tensor.requires_grad),
             )

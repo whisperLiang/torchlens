@@ -363,3 +363,43 @@ def test_sibling_package_forward_is_not_torchlens_instrumentation() -> None:
 
     interior = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "/wrapped.py")
     assert _is_torchlens_instrumentation(interior) is True
+
+
+def test_tensor_content_hash_frames_logical_dtype_bf16_vs_fp32() -> None:
+    """bf16 and fp32 tensors with equal values must NOT collide (r3 R35-1).
+
+    ``_hash_tensor_content`` upcasts bf16 to float32 for numpy transport and
+    framed the POST-upcast dtype, so a bfloat16 attribute/state tensor hashed
+    identically to its float32 twin and ``cache=True`` served the WRONG
+    cached trace across the dtype change. The digest now frames the logical
+    (pre-upcast) dtype, like ``op.py::_tensor_content_hash``.
+    """
+
+    from torchlens._capture_state_helpers import _hash_tensor_content
+
+    values = torch.tensor([0.5, 1.0, 2.0], dtype=torch.float32)
+    as_bf16 = values.to(torch.bfloat16)
+    as_fp32 = as_bf16.to(torch.float32)  # exact same numeric payload post-upcast
+    assert _hash_tensor_content(as_bf16) != _hash_tensor_content(as_fp32)
+    # Determinism within one dtype is unchanged.
+    assert _hash_tensor_content(as_bf16) == _hash_tensor_content(as_bf16.clone())
+
+
+def test_bf16_state_flip_is_a_cache_miss(tmp_path) -> None:
+    """End-to-end: casting a buffer bf16<->fp32 must be a capture-cache miss."""
+
+    class _BufModel(nn.Module):
+        def __init__(self, dtype: torch.dtype) -> None:
+            super().__init__()
+            self.register_buffer("scale", torch.tensor([2.0], dtype=dtype))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x * self.scale.to(x.dtype)
+
+    x = torch.randn(1, 4)
+    first = tl.trace(_BufModel(torch.bfloat16), x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    second = tl.trace(_BufModel(torch.float32), x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "a bf16 buffer and its fp32 twin must not share a capture-cache key"
+    )
