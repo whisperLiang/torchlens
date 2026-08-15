@@ -118,6 +118,35 @@ class TestBoundaryNode:
         assert record["install_epoch"] in ("armed_before_any_group", "seeded")
         json.dumps(record)
 
+    def test_output_passthrough_never_duplicates_boundary_payload(self, gloo_world):
+        dist = gloo_world
+
+        class ReturnsCollective(nn.Module):
+            def forward(self, x):
+                doubled = x * 2
+                dist.all_reduce(doubled)
+                return doubled
+
+        lifecycle.arm()
+        log = tl.trace(ReturnsCollective(), torch.randn(2, 4))
+        record = log.annotations["distributed"]
+        declared = {raw for entry in record["boundaries"] for raw in entry["op_labels_raw"]}
+        carriers = [op for op in log.ops if "collective" in op.annotations]
+        # The journal's op_labels_raw is the boundary->op mapping authority:
+        # exactly the declared ops carry the portable payload. The synthetic
+        # output node used to inherit the payload (correlation key included)
+        # through the step-1 wholesale clone, advertising N+1 carriers for N
+        # boundaries and breaking per-rank correlation-key uniqueness.
+        assert {op._label_raw for op in carriers} == declared
+        keys = [
+            json.dumps(op.annotations["collective"]["correlation"], sort_keys=True)
+            for op in carriers
+        ]
+        assert len(keys) == len(set(keys)), "correlation keys must stay unique per rank"
+        output_ops = [op for op in log.ops if op.is_output]
+        assert output_ops
+        assert all(op.annotations == {} for op in output_ops)
+
     def test_auto_arm_at_capture_entry_for_spmd(self, gloo_world):
         # No explicit arm(): an initialized SPMD process arms lazily at
         # capture entry with restricted registry seeding.

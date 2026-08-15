@@ -503,6 +503,7 @@ _OUTPUT_NODE_REPLACED_FIELDS = frozenset(
         "_param_barcodes",
         "_param_logs",
         "activation_memory",
+        "annotations",
         "arg_names",
         "atomic_module_call",
         "autograd_memory",

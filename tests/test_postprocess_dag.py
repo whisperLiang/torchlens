@@ -95,6 +95,10 @@ MULTI_WRITER_GOLDEN = {
     "_layer_label_raw": ("1", "7"),
     "_param_logs": ("1", "15", "16"),
     "activation_memory": ("1", "11.75"),
+    # fix/distributed-r3 R18: step 1 resets the synthetic output node's
+    # clone-inherited annotations namespace (a returned collective boundary
+    # result otherwise duplicated its portable payload + correlation key).
+    "annotations": ("1", "11.75"),
     "args_template": ("3", "6", "9"),
     "atomic_module_call": ("1", "9"),
     "children": ("1", "6", "9"),

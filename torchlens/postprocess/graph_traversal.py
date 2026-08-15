@@ -362,6 +362,16 @@ def _add_output_layers(
         )
         new_output_node._edge_uses = []
 
+        # Synthetic output nodes start with an EMPTY annotations namespace: the
+        # wholesale clone otherwise inherits the terminal op's per-op payloads,
+        # and when the model returns a collective boundary's result directly
+        # that duplicated the portable collective_boundary_v1 payload INCLUDING
+        # its correlation key onto a second op record (N ops advertising N-1
+        # boundaries, breaking per-rank correlation-key uniqueness). The
+        # journal's op_labels_raw is the boundary->op mapping authority; a
+        # bookkeeping node is never a boundary carrier.
+        new_output_node.annotations = {}
+
         # Clear func_config on synthetic output nodes:
         new_output_node.func_config = {}
         new_output_node.is_transform = False
