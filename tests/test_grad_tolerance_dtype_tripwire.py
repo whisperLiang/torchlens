@@ -273,3 +273,67 @@ def test_fp64_layer_grad_corruption_fails_the_backward_verdict(
         random_seed=11,
         validate_metadata=False,
     )
+
+
+def test_legacy_public_spellings_default_to_dtype_derived_tolerances() -> None:
+    """Every legacy public spelling defaults atol/rtol to None (R13 #a).
+
+    The deprecated top-level shim and the ``_user_public_impls`` spelling
+    pinned the fp32 decimal pair ``atol=1e-5, rtol=1e-4`` as non-None
+    defaults passed unconditionally, keeping the dtype-aware derivation dead
+    on 3 of 4 public entrypoints (fp64 false-PASS / fp16 false-FAIL shipped).
+    """
+
+    import inspect
+
+    import torchlens
+    import torchlens._user_public_impls as user_public_impls
+    import torchlens.validation.backward as backward_validation
+
+    for spelling in (
+        torchlens.validate_backward_pass,
+        user_public_impls.validate_backward_pass,
+        backward_validation.validate_backward_pass,
+    ):
+        params = inspect.signature(spelling).parameters
+        assert params["atol"].default is None, spelling.__module__
+        assert params["rtol"].default is None, spelling.__module__
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["top_level", "user_public_impls", "user_funcs"],
+)
+def test_fp64_corruption_fails_through_every_legacy_spelling(
+    monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """The fp64 corruption the legacy pins blessed FAILS via every spelling (R13 #a).
+
+    Red-capable: before the shim defaults moved to None, the 1e-6-relative
+    fp64 param-grad corruption sat 100x inside the pinned rtol=1e-4 and every
+    legacy spelling returned True.
+    """
+
+    import warnings
+
+    import torchlens
+    import torchlens._user_public_impls as user_public_impls
+    import torchlens.user_funcs as user_funcs
+
+    fns = {
+        "top_level": torchlens.validate_backward_pass,
+        "user_public_impls": user_public_impls.validate_backward_pass,
+        "user_funcs": user_funcs.validate_backward_pass,
+    }
+    _perturb_second_param_grad_census(monkeypatch, 1.0 + 1e-6)
+    model = torch.nn.Linear(4, 3).double().eval()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        passed = fns[spelling](
+            model,
+            torch.randn(2, 4, dtype=torch.float64),
+            random_seed=11,
+            validate_metadata=False,
+            validate_layer_grads=False,
+        )
+    assert passed is False

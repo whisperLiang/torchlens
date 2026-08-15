@@ -57,12 +57,16 @@ Usage (from the repo root)::
 The driver only ever writes inside the sandbox; running against the real
 checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
 red-capability *tests* live in the suite itself; this measures their margin.
-CI wiring (b9 round 5): ``weekly.yml``'s ``mutation-margin`` job scores the
-registry/checks/blocks/exempt families every week and fails on any survivor
-or scoring error. The ~161-run per-arm campaign remains invocation-only
-(``--family arms``); a zero-survivor arm-campaign log (driver sha + suite
-sha + survivor count) is a REQUIRED convergence artifact before the R74 row
-may be declared converged.
+CI wiring (b9 round 5, two complementary legs): ``weekly.yml``'s
+``mutation-margin`` job scores every bounded family
+(registry/checks/corechecks/blocks/exempt) each week in the canonical pinned
+CPU env and fails on any survivor or scoring error;
+``.github/workflows/mutation.yml`` automates the ~161-run per-arm campaign
+as a weekly rotating shard (one of four arm shards per week, plus
+``workflow_dispatch`` for any family), archives every verdict, and fails on
+any SURVIVOR/ERROR/TIMEOUT (R74 b9-sol finding 1). A zero-survivor
+arm-campaign log (driver sha + suite sha + survivor count) is a REQUIRED
+convergence artifact before the R74 row may be declared converged.
 """
 
 from __future__ import annotations
@@ -74,6 +78,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 #: mutant id -> (relative file, function to neuter with ``return None``).
@@ -109,6 +114,79 @@ MUTANTS: dict[str, tuple[str, str]] = {
     "M20": ("torchlens/postprocess/__init__.py", "_assert_no_open_window"),
     "M21": ("torchlens/postprocess/__init__.py", "_assert_postprocess_contract"),
 }
+
+#: mutant id -> (relative file, core-validation checker). The checkers of
+#: ``validation/core.py`` OUTSIDE the metadata-invariant registry (b9-sol
+#: R74r5 finding 2: the non-registry roster held one comparator and one
+#: postprocess checker while core.py carried five more verdict-steering
+#: entry points with no mutant). Their dangerous neutral value is an
+#: ALWAYS-VALIDATED result, planted via ``CORE_CHECK_NEUTER``. Enrollment
+#: drift is refused at roster assembly: ``derive_core_check_roster`` scans
+#: core.py for every ``_check_*`` / ``_validate_*`` def and demands each be
+#: enrolled here or excluded with a reason in ``CORE_CHECK_EXCLUSIONS``.
+CORE_CHECK_MUTANTS: dict[str, tuple[str, str]] = {
+    "V01": ("torchlens/validation/core.py", "_check_layer_arguments_logged_correctly"),
+    "V02": ("torchlens/validation/core.py", "_validate_layer_against_arg"),
+    "V03": ("torchlens/validation/core.py", "_check_arglocs_correct_for_arg"),
+    "V04": ("torchlens/validation/core.py", "_check_unattributed_arg_slots"),
+    "V05": (
+        "torchlens/validation/core.py",
+        "_check_whether_func_on_saved_parents_yields_saved_tensor",
+    ),
+}
+
+#: Planted return value for the corechecks family: the always-pass direction
+#: for functions whose contract is a structured verdict.
+CORE_CHECK_NEUTER = 'ValidationCheckResult.validated("R74-CORECHECK-MUTANT")'
+
+#: Checker-shaped core.py functions deliberately NOT in CORE_CHECK_MUTANTS,
+#: each with the reason (a name in neither table refuses the campaign).
+CORE_CHECK_EXCLUSIONS: dict[str, str] = {
+    "_check_perturbation_exemptions": (
+        "enrolled as X01: its dangerous direction is exempt-everything "
+        "(return True), not always-validated"
+    ),
+}
+
+
+def derive_core_check_roster(sandbox: Path) -> None:
+    """Refuse the campaign when a core.py checker is neither enrolled nor excluded.
+
+    b9-sol R74r5 finding 2: exhaustive-coverage claims rested on the
+    metadata-contract registry alone while core.py grew verdict-steering
+    checkers with no mutant. This scan makes enrollment drift LOUD: every
+    top-level ``_check_*`` / ``_validate_*`` def must appear in
+    ``CORE_CHECK_MUTANTS`` or carry a reason in ``CORE_CHECK_EXCLUSIONS``.
+
+    Parameters
+    ----------
+    sandbox:
+        Repo root whose ``torchlens/validation/core.py`` is scanned.
+    """
+
+    core = sandbox / "torchlens" / "validation" / "core.py"
+    tree = ast.parse(core.read_text(encoding="utf-8"))
+    names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith(("_check_", "_validate_"))
+    }
+    enrolled = {func for _, func in CORE_CHECK_MUTANTS.values()}
+    missing = sorted(names - enrolled - set(CORE_CHECK_EXCLUSIONS))
+    if missing:
+        raise SystemExit(
+            f"unenrolled core.py checkers: {missing} -- add each to "
+            "CORE_CHECK_MUTANTS or CORE_CHECK_EXCLUSIONS with a reason "
+            "(b9-sol R74r5: silent enrollment drift is the defect)"
+        )
+    stale = sorted((enrolled | set(CORE_CHECK_EXCLUSIONS)) - names)
+    if stale:
+        raise SystemExit(
+            f"CORE_CHECK ledger rows without a core.py def: {stale} -- "
+            "the checker moved or was renamed; re-point the row"
+        )
+
 
 #: mutant id -> (relative file, function, comment marker). A bare ``return
 #: None`` is planted immediately BEFORE the first comment line inside the
@@ -314,12 +392,68 @@ def enumerate_raise_arms(src: str, func: str) -> list[tuple[int, int, int]]:
     )
 
 
+def while_exit_arm_keys(src: str, func: str) -> set[tuple[int, int, int]]:
+    """Return the arm keys of ``func`` that sit inside a ``while`` body.
+
+    A raise that is the sole exit of a ``while`` walk turns into an INFINITE
+    LOOP under the ``pass`` operator (b9-opus R74r5-F2: the
+    ``module_containment_logic`` cycle guard held 99.9% CPU for 28 minutes
+    against a 2.5-minute suite). Those arms take the termination-preserving
+    ``break`` operator instead — the raise is still disarmed (the violation
+    goes undetected), but the mutant's margin is measurable at all.
+
+    Parameters
+    ----------
+    src:
+        Module source text.
+    func:
+        Checker function name.
+
+    Returns
+    -------
+    set[tuple[int, int, int]]
+        ``(lineno, end_lineno, col_offset)`` keys of while-body arms.
+    """
+
+    target = _function_node(ast.parse(src), func)
+    keys: set[tuple[int, int, int]] = set()
+
+    def _collect(node: ast.AST, in_while_body: bool) -> None:
+        if in_while_body and _is_invariant_raise(node):
+            raise_node = node
+            keys.add(
+                (
+                    raise_node.lineno,
+                    raise_node.end_lineno or raise_node.lineno,
+                    raise_node.col_offset,
+                )
+            )
+        if isinstance(node, ast.While):
+            # ``break`` is legal in the body; the ``orelse`` block keeps the
+            # enclosing status (a break there would be a syntax error).
+            for stmt in node.body:
+                _collect(stmt, True)
+            for stmt in node.orelse:
+                _collect(stmt, in_while_body)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if node is not target:
+                return
+        for child in ast.iter_child_nodes(node):
+            _collect(child, in_while_body)
+
+    _collect(target, False)
+    return keys
+
+
 def neuter_raise_arm(path: Path, func: str, index: int) -> str:
-    """Replace exactly one raise arm of ``func`` with ``pass`` and return the original.
+    """Disarm exactly one raise arm of ``func`` and return the original source.
 
     Every other arm and every other statement keeps running -- the surgical
     single-arm disarm the whole-function operator cannot model (b9-opus
     R74r4-F1: two such disarms survived the full arming suite silently).
+    Arms inside a ``while`` body are replaced with ``break`` (termination
+    preserved, R74r5-F2); all others with ``pass``.
 
     Parameters
     ----------
@@ -341,8 +475,9 @@ def neuter_raise_arm(path: Path, func: str, index: int) -> str:
     if index >= len(arms):
         raise SystemExit(f"{func} in {path} has {len(arms)} arms; no index {index}")
     lineno, end_lineno, col = arms[index]
+    keyword = "break" if (lineno, end_lineno, col) in while_exit_arm_keys(src, func) else "pass"
     lines = src.splitlines(keepends=True)
-    replacement = f"{' ' * col}pass  # R74-ARM-MUTANT\n"
+    replacement = f"{' ' * col}{keyword}  # R74-ARM-MUTANT\n"
     lines[lineno - 1 : end_lineno] = [replacement]
     path.write_text("".join(lines), encoding="utf-8")
     return src
@@ -496,7 +631,22 @@ def parse_failures(stdout: str) -> frozenset[str]:
     return frozenset(failed)
 
 
-def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProcess:
+class SuiteTimeout:
+    """Sentinel result for a suite run killed at its wall-clock deadline.
+
+    A TIMEOUT is its own verdict — never a kill, never a pass, same doctrine
+    as ERROR (R74r5-F2: a non-terminating mutant held a sandbox for 28
+    minutes because ``run_suite`` had no deadline and the driver waited
+    forever).
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+
+def run_suite(
+    sandbox: Path, python: str, tag: str, timeout: float | None = None
+) -> subprocess.CompletedProcess | SuiteTimeout:
     """Run the bounded arming suite inside the sandbox.
 
     No ``-x``: kill attribution needs the FULL failed set of every run, both
@@ -511,11 +661,14 @@ def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProce
         Python executable to run pytest with.
     tag:
         Unique tag for basetemp/cache isolation.
+    timeout:
+        Wall-clock deadline in seconds; ``None`` runs unbounded (the
+        pristine control, whose wall time seeds the mutant deadline).
 
     Returns
     -------
-    subprocess.CompletedProcess
-        The finished pytest process.
+    subprocess.CompletedProcess | SuiteTimeout
+        The finished pytest process, or the timeout sentinel.
     """
 
     cache = sandbox / f".cache-{tag}"
@@ -530,7 +683,12 @@ def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProce
         CUDA_VISIBLE_DEVICES="",
         TORCHLENS_CACHE_DIR=str(cache),
     )
-    return subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=sandbox)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, env=env, cwd=sandbox, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return SuiteTimeout(float(timeout or 0.0))
 
 
 def main() -> None:
@@ -552,8 +710,23 @@ def main() -> None:
     )
     parser.add_argument(
         "--family",
-        choices=("registry", "checks", "blocks", "exempt", "arms"),
+        choices=("registry", "checks", "blocks", "exempt", "arms", "corechecks"),
         help="score only one mutant family (a full arm campaign is ~161 runs)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help=(
+            "per-mutant suite deadline in seconds (default: 4x the measured "
+            "control wall time, min 300; 1800 with --skip-control)"
+        ),
+    )
+    parser.add_argument(
+        "--arm-shard",
+        default=None,
+        metavar="I/N",
+        help="score only shard I of N (1-based) of the selected ids, for CI rotation",
     )
     args = parser.parse_args()
 
@@ -582,6 +755,7 @@ def main() -> None:
             "delete them; registry contracts enroll automatically"
         )
     arm_mutants = derive_arm_mutants(sandbox, registry)
+    derive_core_check_roster(sandbox)
     plan: dict[str, tuple[str, str, str | None, str, int | None]] = {}
     families: dict[str, list[str]] = {}
     for mid, (rel, func) in registry.items():
@@ -590,6 +764,9 @@ def main() -> None:
     for mid, (rel, func) in MUTANTS.items():
         plan[mid] = (rel, func, None, "None", None)
         families.setdefault("checks", []).append(mid)
+    for mid, (rel, func) in CORE_CHECK_MUTANTS.items():
+        plan[mid] = (rel, func, None, CORE_CHECK_NEUTER, None)
+        families.setdefault("corechecks", []).append(mid)
     for mid, (rel, func, marker) in BLOCK_MUTANTS.items():
         plan[mid] = (rel, func, marker, "None", None)
         families.setdefault("blocks", []).append(mid)
@@ -600,12 +777,18 @@ def main() -> None:
         plan[mid] = (rel, func, None, "None", arm_index)
         families.setdefault("arms", []).append(mid)
     n_families = (
-        len(registry) + len(MUTANTS) + len(BLOCK_MUTANTS) + len(EXEMPT_MUTANTS) + len(arm_mutants)
+        len(registry)
+        + len(MUTANTS)
+        + len(CORE_CHECK_MUTANTS)
+        + len(BLOCK_MUTANTS)
+        + len(EXEMPT_MUTANTS)
+        + len(arm_mutants)
     )
     if len(plan) != n_families:
         raise SystemExit("mutant id collision across families -- rename the clash")
     print(
         f"roster: {len(registry)} registry contracts + {len(MUTANTS)} checks + "
+        f"{len(CORE_CHECK_MUTANTS)} core checkers + "
         f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates + "
         f"{len(arm_mutants)} raise arms",
         flush=True,
@@ -621,12 +804,23 @@ def main() -> None:
     unknown = [mid for mid in ids if mid not in plan]
     if unknown:
         raise SystemExit(f"unknown mutant ids: {unknown}")
+    if args.arm_shard:
+        shard_index_text, _, shard_count_text = args.arm_shard.partition("/")
+        shard_index, shard_count = int(shard_index_text), int(shard_count_text)
+        if not (1 <= shard_index <= shard_count):
+            raise SystemExit(f"bad --arm-shard {args.arm_shard!r}: need 1 <= I <= N")
+        ids = [mid for pos, mid in enumerate(sorted(ids)) if pos % shard_count == shard_index - 1]
+        print(f"shard {shard_index}/{shard_count}: {len(ids)} mutants", flush=True)
 
     # Pristine control: verdicts are meaningless over a red baseline (the b9
     # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
     control_failures: frozenset[str] = frozenset()
+    timeout = args.timeout
     if not args.skip_control:
+        control_started = time.monotonic()
         control = run_suite(sandbox, args.python, "control")
+        control_wall = time.monotonic() - control_started
+        assert not isinstance(control, SuiteTimeout)  # control runs unbounded
         control_failures = parse_failures(control.stdout)
         if control.returncode != 0:
             named = "\n".join(sorted(control_failures)) or "\n".join(
@@ -636,7 +830,13 @@ def main() -> None:
                 "PRISTINE CONTROL RED -- fix or deselect the baseline before "
                 f"scoring any mutant:\n{named}"
             )
-        print("control: GREEN", flush=True)
+        if timeout is None:
+            # R74r5-F2: a non-terminating mutant must produce a TIMEOUT
+            # verdict, never hold the sandbox forever.
+            timeout = max(300.0, 4.0 * control_wall)
+        print(f"control: GREEN ({control_wall:.0f}s; mutant deadline {timeout:.0f}s)", flush=True)
+    elif timeout is None:
+        timeout = 1800.0
 
     results: dict[str, dict[str, object]] = {}
     for mid in ids:
@@ -652,9 +852,23 @@ def main() -> None:
             original = neuter_before_marker(path, func, marker, value)
             operator = f"return {value} before marker {marker!r}"
         try:
-            proc = run_suite(sandbox, args.python, mid)
+            proc = run_suite(sandbox, args.python, mid, timeout=timeout)
         finally:
             path.write_text(original, encoding="utf-8")
+        if isinstance(proc, SuiteTimeout):
+            # R74r5-F2: never a kill, never a pass -- same doctrine as ERROR.
+            results[mid] = {
+                "file": rel,
+                "func": func,
+                "operator": operator,
+                "returncode": None,
+                "verdict": "TIMEOUT",
+                "killers": [],
+                "n_killers": 0,
+                "tail": [f"suite exceeded the {proc.seconds:.0f}s deadline"],
+            }
+            print(json.dumps({mid: results[mid]}), flush=True)
+            continue
         failures = parse_failures(proc.stdout)
         killers = sorted(failures - control_failures)
         if proc.returncode != 0 and not failures:
@@ -678,12 +892,15 @@ def main() -> None:
 
     survivors = sorted(mid for mid, row in results.items() if row["verdict"] == "SURVIVOR")
     errors = sorted(mid for mid, row in results.items() if row["verdict"] == "ERROR")
+    timeouts = sorted(mid for mid, row in results.items() if row["verdict"] == "TIMEOUT")
     print("RESULTS " + json.dumps(results))
     if errors:
         print(f"ERRORS: {errors} -- suite crashed before scoring; not a kill, not a pass")
+    if timeouts:
+        print(f"TIMEOUTS: {timeouts} -- suite never terminated; not a kill, not a pass")
     if survivors:
         print(f"SURVIVORS: {survivors} -- each needs a new planted-corruption test")
-    if errors or survivors:
+    if errors or survivors or timeouts:
         raise SystemExit(1)
     print("all mutants KILLED")
 

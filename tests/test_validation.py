@@ -65,8 +65,15 @@ from torchlens.validation.exemptions import (
 )
 from torchlens.validation.invariants import (
     _check_capture_edge_survival,
+    _check_equivalence_symmetry,
     _check_graph_connectivity,
+    _check_graph_ordering,
+    _check_graph_topology,
+    _check_lookup_key_consistency,
+    _check_loop_detection_invariants,
     _check_op_log_fields,
+    _check_param_xrefs,
+    _check_special_layer_lists,
     check_func_call_id_invariant,
 )
 from torchlens.validation.status import (
@@ -6299,7 +6306,10 @@ def test_corruption_parent_child_link():
             # Remove the parent from the child's parents
             child.parents = [p for p in child.parents if p != lpl.layer_label]
             break
-    with pytest.raises(MetadataInvariantError, match="graph_topology"):
+    # Bracketed match (R74r5): the bare "graph_topology" substring also
+    # matches the sibling contract backend_neutral_graph_topology's tag, so a
+    # laundered kill could hide behind it.
+    with pytest.raises(MetadataInvariantError, match=r"\[graph_topology\]"):
         check_metadata_invariants(log)
     log.cleanup()
 
@@ -8221,3 +8231,247 @@ def test_validation_teardown_is_per_step_fenced(monkeypatch: pytest.MonkeyPatch)
     finally:
         real_uda(prior_enabled, warn_only=prior_warn_only)
         torch.set_num_threads(prior_threads)
+
+
+# ---------------------------------------------------------------------------
+# R74r5-F1 (b9-opus): minimal per-arm killers for the 12 PROVEN survivor arms.
+# The corpus planted corruption at CONTRACT granularity, so one plant tripped
+# several arms and whichever survived absorbed the kill (8/8 graph_topology
+# arms individually disarmable at zero margin). Each test below is the
+# minimal plant for exactly one arm, pinned by that arm's own message text,
+# so a sibling arm absorbing the raise fails the match and still kills.
+# ---------------------------------------------------------------------------
+
+
+class _DiamondFanout(nn.Module):
+    """One producer feeding two consumers, for single-edge topology plants."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(5, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        p = self.fc1(x)
+        return torch.relu(p) + torch.tanh(p)
+
+
+class _ReusedLinear(nn.Module):
+    """One Linear called twice, for equivalence-group plants."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(5, 5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.fc(x)) + torch.relu(self.fc(x))
+
+
+class _TwoLinearChain(nn.Module):
+    """Two distinct Linears, for param-key forgery plants."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(5, 4)
+        self.fc2 = nn.Linear(4, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(torch.relu(self.fc1(x)))
+
+
+def _first_computational_layer(log):
+    """Return the first non-boundary layer of a clean single-pass capture."""
+
+    return next(
+        lpl for lpl in log.layer_list if not (lpl.is_input or lpl.is_output or lpl.is_buffer)
+    )
+
+
+def test_corruption_arm_op_log_fields_shape_lie() -> None:
+    """Killer for op_log_fields#a00: recorded shape != actual payload shape.
+
+    Metadata lying about the tensor it describes is the tripwire's core
+    promise; this arm survived the r5 campaign at zero margin.
+    """
+
+    log = _make_clean_log()
+    try:
+        _first_computational_layer(log).shape = (999,)
+        with pytest.raises(MetadataInvariantError, match=r"shape=\(999,\) != actual shape"):
+            _check_op_log_fields(log)
+        with pytest.raises(MetadataInvariantError):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_op_log_fields_dtype_lie() -> None:
+    """Killer for op_log_fields#a01: recorded dtype != actual payload dtype."""
+
+    log = _make_clean_log()
+    try:
+        _first_computational_layer(log).dtype = torch.float64
+        with pytest.raises(MetadataInvariantError, match="dtype=torch.float64 != actual dtype"):
+            _check_op_log_fields(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_op_log_fields_dropped_module_roster() -> None:
+    """Killer for op_log_fields#a09: empty module roster with a named module."""
+
+    log = _make_clean_log()
+    try:
+        lpl = next(lpl for lpl in log.layer_list if getattr(lpl, "modules", ()))
+        lpl.modules = ()
+        with pytest.raises(MetadataInvariantError, match="module attribution was DROPPED"):
+            _check_op_log_fields(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_op_log_fields_pass_qualified_layer_label() -> None:
+    """Killer for op_log_fields#a12: layer_label carrying a ':' pass qualifier."""
+
+    log = _make_clean_log()
+    try:
+        lpl = _first_computational_layer(log)
+        lpl.layer_label = lpl.layer_label + ":1"
+        with pytest.raises(MetadataInvariantError, match=r"layer_label='[^']*' contains ':'"):
+            _check_op_log_fields(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_graph_ordering_raw_label_survivor() -> None:
+    """Killer for graph_ordering#a04: a raw label surviving postprocessing."""
+
+    log = _make_clean_log()
+    try:
+        log.layer_labels = [*log.layer_labels, "phantom_1_2_raw"]
+        with pytest.raises(
+            MetadataInvariantError, match="Raw label 'phantom_1_2_raw' survived postprocessing"
+        ):
+            _check_graph_ordering(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_graph_topology_parent_side_reciprocity() -> None:
+    """Killer for graph_topology#a01: parent listed, reciprocal child missing.
+
+    The MIRROR direction of test_corruption_parent_child_link -- dropping the
+    child from the PARENT's children -- was planted nowhere, so this arm
+    survived at zero margin. The producer keeps a second child, so the
+    has_children coherence arm cannot absorb the kill.
+    """
+
+    log = trace_fn(_DiamondFanout(), torch.randn(2, 5), random_seed=42)
+    try:
+        ops = [op for lay in log.layer_list for op in lay.ops]
+        parent = next(op for op in ops if len(op.children) >= 2)
+        victim = parent.children[0]
+        parent.children = tuple(c for c in parent.children if c != victim)
+        with pytest.raises(MetadataInvariantError, match="does not list .* as child"):
+            _check_graph_topology(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_graph_topology_slot_names_non_parent() -> None:
+    """Killer for graph_topology#a05: parent_arg_positions naming a non-parent."""
+
+    log = trace_fn(_DiamondFanout(), torch.randn(2, 5), random_seed=42)
+    try:
+        ops = [op for lay in log.layer_list for op in lay.ops]
+        relu_op = next(op for op in ops if op.label.startswith("relu"))
+        tanh_op = next(op for op in ops if op.label.startswith("tanh"))
+        positions = relu_op.parent_arg_positions["args"]
+        positions[next(iter(positions))] = tanh_op.label
+        with pytest.raises(MetadataInvariantError, match="which is not a recorded parent"):
+            _check_graph_topology(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_lookup_key_raw_final_dangling() -> None:
+    """Killer for the lookup_key_consistency raw->final dangling-value arm."""
+
+    log = _make_clean_log()
+    try:
+        log._raw_to_final_layer_labels["phantom_raw"] = "phantom_1_1"
+        with pytest.raises(MetadataInvariantError, match="not in _final_to_raw_layer_labels"):
+            _check_lookup_key_consistency(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_lookup_key_raw_final_asymmetry() -> None:
+    """Killer for lookup_key_consistency#a03: raw->final vs final->raw mismatch."""
+
+    log = _make_clean_log()
+    try:
+        forward = log._raw_to_final_layer_labels
+        raws = sorted(forward)
+        assert len(raws) >= 2, "fixture lost its multi-entry raw-label map"
+        forward[raws[0]] = forward[raws[1]]
+        with pytest.raises(MetadataInvariantError, match=r"but _final_to_raw_layer_labels\["):
+            _check_lookup_key_consistency(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_special_list_flag_without_membership() -> None:
+    """Killer for special_layer_lists#a02: flag True, label absent from list."""
+
+    log = _make_clean_log()
+    try:
+        _first_computational_layer(log).is_output = True
+        with pytest.raises(MetadataInvariantError, match="=True but is not in"):
+            _check_special_layer_lists(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_equivalence_registry_group_mismatch() -> None:
+    """Killer for equivalence_symmetry#a05: op view != registry group."""
+
+    log = trace_fn(_ReusedLinear(), torch.randn(2, 5), random_seed=42)
+    try:
+        key, members = next(
+            (k, sorted(v)) for k, v in log.op_equivalence_classes.items() if len(v) >= 2
+        )
+        log.op_equivalence_classes[key] = set(members[:-1])
+        with pytest.raises(MetadataInvariantError, match=r"equivalent_ops=.* != expected"):
+            _check_equivalence_symmetry(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_param_sharing_key_forgery() -> None:
+    """Killer for loop_detection_invariants#a11: param-sharing violation."""
+
+    import copy as _copy
+
+    log = trace_fn(_TwoLinearChain(), torch.randn(2, 5), random_seed=42)
+    try:
+        first, second = [lay for lay in log.layer_list if lay.layer_label.startswith("linear")][:2]
+        donor = first.ops[0]
+        for op in second.ops:
+            op._param_barcodes = _copy.copy(donor._param_barcodes)
+            op.equivalence_class = donor.equivalence_class
+        with pytest.raises(MetadataInvariantError, match="Param sharing violation"):
+            _check_loop_detection_invariants(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_arm_param_address_outside_canonical_set() -> None:
+    """Killer for param_xrefs#a02: param address absent from its alias set."""
+
+    log = trace_fn(_TwoLinearChain(), torch.randn(2, 5), random_seed=42)
+    try:
+        log.param_logs[0].address = "forged.weight"
+        with pytest.raises(MetadataInvariantError, match="absent from its canonical address set"):
+            _check_param_xrefs(log)
+    finally:
+        log.cleanup()

@@ -960,3 +960,105 @@ def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
     assert status.state == "failed"
     with pytest.raises(MetadataInvariantError):
         check_metadata_invariants(trace_b)
+
+
+# ---------------------------------------------------------------------------
+# R08 (b1-opus round-5): the discrete-bool blanket posthoc exemption
+# ---------------------------------------------------------------------------
+
+
+class _FarThresholdGate(nn.Module):
+    """``(x > 1e30).float()`` -- no feasible perturbation crosses the threshold."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x > 1.0e30).float()
+
+
+def test_bool_comparison_spurious_edge_now_fails() -> None:
+    """Armed-proof (R08): a dead edge on a COMPARISON op is no longer blessed.
+
+    Freeze the ``gt`` op's replay callable to return its saved bool output
+    regardless of inputs -- the recorded parent provably does not influence
+    the output. Pre-fix, ``dtype == torch.bool`` was a blanket posthoc pass,
+    so this exact spurious-edge class was unfalsifiable by perturbation
+    (red-capable: pre-fix this returns ``exempted``/``discrete_bool_output``).
+    The threshold-straddle probe now proves no value influence and the
+    tripwire fires.
+    """
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_FarThresholdGate(), torch.randn(3, 4))
+    gt_op = [op for op in trace.layer_list if op.func_name == "__gt__"][0]
+    saved = gt_op.out.detach().clone()
+    object.__setattr__(gt_op, "func", lambda *args, **kwargs: saved.clone())
+    parent_label = gt_op.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, gt_op.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "failed"
+    assert result.reason == "perturbation_insensitive"
+
+
+def test_far_threshold_comparison_keeps_evidence_backed_exemption() -> None:
+    """A REAL comparison edge no feasible perturbation can flip stays exempt,
+    and the exemption now carries straddle-probe evidence instead of being a
+    blanket dtype pass (red-capable: pre-fix the justification was None)."""
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_FarThresholdGate(), torch.randn(3, 4))
+    gt_op = [op for op in trace.layer_list if op.func_name == "__gt__"][0]
+    parent_label = gt_op.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, gt_op.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "exempted"
+    assert result.reason == "discrete_bool_output"
+    assert result.justification and "straddle" in result.justification
+
+
+def test_isnan_edge_validates_via_nan_probe() -> None:
+    """The NaN retry rung upgrades a real ``isnan`` edge from exempt to
+    VALIDATED (red-capable: pre-fix the finite draws never flipped the output
+    and the blanket bool exemption absorbed it)."""
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    class _NanGate(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.isnan(x).float()
+
+    trace, _ground_truth = _capture(_NanGate(), torch.randn(3, 4))
+    isnan_op = [op for op in trace.layer_list if op.func_name == "isnan"][0]
+    parent_label = isnan_op.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, isnan_op.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "validated"
+    assert result.reason == "perturbation_changed"
+
+
+def test_bool_output_models_still_validate_true_end_to_end() -> None:
+    """No false-fail regression: correct captures with bool ops validate True."""
+
+    class _BoolMix(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            gate = (x > 0.5).float()
+            nan_gate = torch.isnan(x).float()
+            eq_gate = torch.eq(x, x.detach().clone() + 3.0).float()
+            return gate + nan_gate + eq_gate
+
+    torch.manual_seed(0)
+    assert _quiet_validate(_BoolMix(), torch.randn(3, 4)) is True
+    torch.manual_seed(0)
+    assert _quiet_validate(_FarThresholdGate(), torch.randn(3, 4)) is True

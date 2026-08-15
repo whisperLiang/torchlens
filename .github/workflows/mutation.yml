@@ -1,0 +1,121 @@
+name: Mutation Campaign
+
+# R74 (b9 S HIGH + F MED + O LOW, round 5): the mutation driver was wired
+# into no CI leg, so the zero-survivor convergence criterion had no enforced
+# verdict -- margins were measured only when someone remembered to invoke it.
+# TWO complementary legs now exist: weekly.yml's mutation-margin job scores
+# every BOUNDED family (registry/checks/corechecks/blocks/exempt) each week
+# in the canonical pinned CPU env; THIS leg automates the ~161-run per-arm
+# campaign as a scheduled ROTATING shard (one of four arm shards per week --
+# a full per-arm campaign is far past a single job budget), with
+# workflow_dispatch available for any family. Every run archives the control
+# status, per-mutant verdicts, killer node ids, and the survivor summary as
+# an artifact; the job FAILS on any SURVIVOR, ERROR, or TIMEOUT (the
+# driver's own exit contract -- survivors each need a new planted-corruption
+# test, never an allowlist entry).
+
+on:
+  schedule:
+    - cron: "41 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      family:
+        description: "mutant family (registry|checks|blocks|exempt|arms|corechecks|bounded=all-bounded)"
+        required: false
+        default: ""
+      arm_shard:
+        description: "arm shard I/N (only with family=arms)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-campaign
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    name: Mutation shard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[test]" \
+            torch \
+            "pydot==4.0.1"
+
+      - name: Select rotation slot
+        id: slot
+        env:
+          INPUT_FAMILY: ${{ inputs.family }}
+          INPUT_ARM_SHARD: ${{ inputs.arm_shard }}
+        run: |
+          if [ -n "$INPUT_FAMILY" ]; then
+            family="$INPUT_FAMILY"
+            shard="$INPUT_ARM_SHARD"
+          else
+            # 4-week rotation keyed to the ISO week: one arm shard per week
+            # (the bounded families run every week in weekly.yml's
+            # mutation-margin job -- single coverage authority per family).
+            slot=$(( $(date -u +%V | sed 's/^0//') % 4 + 1 ))
+            family="arms"
+            shard="${slot}/4"
+          fi
+          echo "family=$family" >> "$GITHUB_OUTPUT"
+          echo "shard=$shard" >> "$GITHUB_OUTPUT"
+          echo "selected family=$family shard=$shard"
+
+      - name: Run mutation campaign
+        run: |
+          set -o pipefail
+          mkdir -p mutation-results
+          run_family () {
+            local fam="$1" shard="$2" tag="$3"
+            local args=(--make-sandbox "$RUNNER_TEMP/tl-mut-$tag" --family "$fam")
+            if [ -n "$shard" ]; then
+              args+=(--arm-shard "$shard")
+            fi
+            python tests/support/mutation_driver.py "${args[@]}" \
+              2>&1 | tee "mutation-results/$tag.log"
+          }
+          status=0
+          if [ "${{ steps.slot.outputs.family }}" = "bounded" ]; then
+            for fam in registry checks corechecks blocks exempt; do
+              run_family "$fam" "" "$fam" || status=1
+            done
+          else
+            run_family "${{ steps.slot.outputs.family }}" \
+              "${{ steps.slot.outputs.shard }}" \
+              "${{ steps.slot.outputs.family }}" || status=1
+          fi
+          exit "$status"
+
+      - name: Archive verdicts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-verdicts-${{ github.run_id }}
+          path: mutation-results/
+          retention-days: 90
