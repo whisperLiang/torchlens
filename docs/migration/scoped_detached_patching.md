@@ -50,8 +50,13 @@ repair stale bindings. Coverage is now:
   present, which stays authoritative.
 - An armed completeness witness that VERIFIES the capture outranks the heuristic provenance signal
   (for example an `autograd.grad` boundary is a known no-provenance source); no rescue runs.
-- Streaming saves, `out_sink` captures, and halt-predicate partials are not re-runnable; they
-  report the escape and skip the rescue.
+- Ineligible captures skip only the RE-RUN, never the disclosure. Every channel the re-run would
+  invoke a second time refuses (fail closed): streaming saves, `out_sink` callbacks, disk grad
+  storage, `halt=` predicates, `intervene=` predicates, pre-attached `hooks=`, and the
+  `activation_transform`, `grad_transform`, and `output_transform` callables. A live escape
+  signal on such a capture still settles `capture_verified=False` with reason
+  `"escape_rescue_unrecovered"` (`skipped_reason == "rescue_ineligible"`, `forward_runs == 1`)
+  plus a `UserWarning` — never clean-capture fields.
 - A rescue re-run executes the user's forward a SECOND time. When the primary forward ACTUALLY
   WROTE module buffer state (train-mode BatchNorm running stats and `num_batches_tracked`,
   in-forward buffer counters), the re-run is refused — RNG is restored between runs, module state

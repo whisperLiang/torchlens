@@ -511,8 +511,43 @@ def capture_with_rescue(
         no signal fired.
     """
 
-    if _rescue_is_active() or not eligible:
+    if _rescue_is_active():
         return run_capture()
+    if not eligible:
+        # R16-1: ineligibility skips the RE-RUN, never the DISCLOSURE. This
+        # path formerly returned the primary with clean-capture fields
+        # (verified=None / reason=None) even when an escape signal fired --
+        # bit-indistinguishable from a genuinely clean capture across all
+        # nine ineligible channels. Settle the escape on the trace exactly
+        # like a refused re-run does.
+        primary = run_capture()
+        signal = _escape_signal(primary)
+        if signal is not None:
+            warnings.warn(
+                "TorchLens detected an escape signal but skipped the rescue "
+                "re-run: this capture uses a channel the re-run would invoke "
+                "a second time (streaming/sink storage, disk grad storage, "
+                "halt or intervention predicates, hooks, or a user transform "
+                "callable). The escape stands unrecovered; fix the stale "
+                "torch reference (or re-capture without the non-re-runnable "
+                "channel) to recover the escaped ops.",
+                UserWarning,
+                stacklevel=3,
+            )
+            _mark(
+                primary,
+                "escape_rescue_unrecovered",
+                _disclosure(
+                    trigger=signal,
+                    recovered=False,
+                    primary_escape_diagnostics=tuple(
+                        getattr(primary, "escape_diagnostics", ()) or ()
+                    ),
+                    skipped_reason="rescue_ineligible",
+                    forward_runs=1,
+                ),
+            )
+        return primary
 
     rng_snapshot = log_current_rng_states()
     primary: Trace | None = None
