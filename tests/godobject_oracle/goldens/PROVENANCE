@@ -3,3 +3,13 @@ flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 recorded: 2026-08-14T15:52:50.707466+00:00
+---
+generator: tests/test_state_keyset_contract.py (retroactive reason backfill,
+  b10 R78 round-4)
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: backfill for the reasonless 2026-08-14T15:52 record above (written
+  before the mandatory-reason gate): state-keysets golden follows the
+  11f469a5 pickle module-hierarchy preservation (commit 41ef072a).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+recorded: 2026-08-15 (backfill entry)

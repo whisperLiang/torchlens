@@ -138,8 +138,16 @@ def test_perf_gate_blocks_vanished_and_failed_torchlens_rows(perf_gate: Any) -> 
 
 
 @pytest.mark.smoke
-def test_perf_gate_discloses_wall_clock_degradation(perf_gate: Any) -> None:
-    """A baseline without CPU metrics is judged degraded, with a warning."""
+def test_perf_gate_wall_clock_fallback_is_not_authoritative(perf_gate: Any) -> None:
+    """A TorchLens row judged on wall clock BLOCKS the gate by default.
+
+    b6-sol R28 round 4: the committed 196-row baseline carried zero
+    ``cpu_median_ms``, every row fell back to wall clock, and the gate
+    warned but PASSED -- the process-CPU policy was unenforceable. The
+    fallback verdict must not bless the run; the explicit
+    ``require_cpu_metrics=False`` opt-out is the only sanctioned legacy
+    comparison path, and it stays fully disclosed.
+    """
 
     baseline_row = _row(perf_gate, "trace_forward", 100.0, 1.0)
     del baseline_row["passes"]["timing"]["timing"]["cpu_median_ms"]
@@ -150,4 +158,34 @@ def test_perf_gate_discloses_wall_clock_degradation(perf_gate: Any) -> None:
         comparison = perf_gate.compare_gate_payloads(baseline, current)
     assert comparison["metric_degraded_to_wall_clock"] is True
     assert comparison["checks"][0]["metric"] == "wall_clock"
+    assert comparison["passed"] is False, "wall-only TL rows must not pass by default"
+    assert comparison["wall_clock_fallback_blocking_rows"] == [
+        {"model": "synthetic_mlp", "device": "cpu", "operation": "trace_forward"}
+    ]
+    with pytest.warns(UserWarning, match="WALL CLOCK"):
+        legacy = perf_gate.compare_gate_payloads(baseline, current, require_cpu_metrics=False)
+    assert legacy["passed"] is True, "the disclosed legacy opt-out still compares"
+    assert legacy["metric_degraded_to_wall_clock"] is True
+    assert legacy["wall_clock_fallback_blocking_rows"] == []
+
+
+@pytest.mark.smoke
+def test_perf_gate_wall_clock_fallback_on_foreign_rows_does_not_block(perf_gate: Any) -> None:
+    """Non-TorchLens comparison rows (raw torch baselines) may stay wall-only."""
+
+    baseline_row = _row(perf_gate, "torch_forward", 100.0, 1.0)
+    del baseline_row["passes"]["timing"]["timing"]["cpu_median_ms"]
+    del baseline_row["passes"]["timing"]["timing"]["cpu_iqr_ms"]
+    tl_base = _row(perf_gate, "trace_forward", 100.0, 1.0)
+    baseline = _payload(perf_gate, [baseline_row, tl_base])
+    current = _payload(
+        perf_gate,
+        [
+            _row(perf_gate, "torch_forward", 101.0, 1.0),
+            _row(perf_gate, "trace_forward", 101.0, 1.0),
+        ],
+    )
+    with pytest.warns(UserWarning, match="WALL CLOCK"):
+        comparison = perf_gate.compare_gate_payloads(baseline, current)
     assert comparison["passed"] is True
+    assert comparison["wall_clock_fallback_blocking_rows"] == []

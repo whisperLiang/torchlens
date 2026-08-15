@@ -202,6 +202,25 @@ jobs:
           python scripts/check_ci_executed_tests.py \
             "${{ runner.temp }}/render-byte-oracle.junit.xml" 1
 
+      - name: Enforce the surface byte oracle
+        if: matrix.oracle_enforce == '1'
+        # The surface-oracle BYTE family (6 per-axis byte tests + the
+        # two-subprocess determinism control) is heavy-marked, so this row's
+        # smoke selection collects only the 2 fact pins (probe: 2/9), and
+        # every scheduled leg that selects heavy runs on a non-canonical
+        # environment where require_env_golden legitimately skips — byte
+        # identity was enforced on NO CI leg (the T13.2 class recurring one
+        # family over, b10 R78 round-4). Run the family explicitly on the ONE
+        # enforcing row and attest the byte tests EXECUTED (floor 6 = the six
+        # model-axis byte tests; the determinism control also collects).
+        env:
+          TORCHLENS_ORACLE_ENFORCE: "1"
+        run: |
+          pytest tests/surface_oracle/ -m heavy --tb=short -q \
+            --junitxml="${{ runner.temp }}/surface-byte-oracle.junit.xml"
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/surface-byte-oracle.junit.xml" 6
+
   crawler-round21-linux-release:
     name: Crawler Round 21 Linux committed-lock release proofs
     runs-on: ubuntu-latest

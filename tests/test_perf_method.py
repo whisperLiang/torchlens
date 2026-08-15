@@ -69,6 +69,9 @@ def _row(
         Benchmark row.
     """
 
+    # Modern payloads carry BOTH metric families; the gate judges on the
+    # process-CPU pair and wall-only rows are non-authoritative (b6-sol R28
+    # round 4), so the synthetic rows mirror what perf_runner emits.
     return {
         "model": model,
         "device": device,
@@ -80,6 +83,8 @@ def _row(
                 "timing": {
                     "median_ms": median_ms,
                     "iqr_ms": iqr_ms,
+                    "cpu_median_ms": median_ms,
+                    "cpu_iqr_ms": iqr_ms,
                 }
             }
         },
@@ -258,7 +263,10 @@ def test_gate_fails_when_no_matched_rows_are_comparable() -> None:
 
     baseline = _payload([_row("resnet18", "cpu", "tl_trace", 100.0)])
     current = _payload([_row("resnet18", "cpu", "tl_trace", 100.0)])
+    # Strip BOTH metric families: with only one gone the row is still
+    # comparable through the other (cpu preferred, wall as legacy fallback).
     del current["rows"][0]["passes"]["timing"]["timing"]["median_ms"]
+    del current["rows"][0]["passes"]["timing"]["timing"]["cpu_median_ms"]
 
     comparison = compare_gate_payloads(baseline, current)
 

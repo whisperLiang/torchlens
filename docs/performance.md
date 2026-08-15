@@ -367,3 +367,9 @@ python -m benchmarks.generate_perf_numbers benchmarks/perf_baselines/<host>-<dev
 
 On the canonical host, drop the `-provisional` filename suffix; `--baseline-status canonical`
 requires a full non-smoke, non-addendum run and emits generated speed headlines.
+
+The gate judges TorchLens-owned rows on process-CPU statistics (`cpu_median_ms`/`cpu_iqr_ms`);
+the wall-clock fallback for pre-CPU-metric payloads is **not authoritative** — a TorchLens row
+judged on wall clock fails the gate by default (the committed 2026-06-16 `linux-cpu.json`
+baseline predates the CPU metrics, so comparisons against it need either a rebaseline on the
+canonical host or the explicit, disclosed `--allow-wall-clock-only` legacy opt-out).

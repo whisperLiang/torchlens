@@ -36,6 +36,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("model_axes", nargs="+")
     args = parser.parse_args(argv)
 
+    # Pin the execution environment the fixed seeds alone do not cover:
+    # thread count and kernel selection both steer float reduction order,
+    # and the surface dumps embed sha256 of raw tensor bytes. The sibling
+    # capture worker pins for exactly this reason; the documented-blind env
+    # fingerprint makes this worker the only closure point (b10 R78 round-4).
+    # Pinning lives HERE so regen and enforce run identically by construction.
+    import torch
+
+    torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
     from surface_oracle._snapshot import canonical_dump
     from surface_oracle._stages import build_stage_snapshots, prebuild_model_cases
 

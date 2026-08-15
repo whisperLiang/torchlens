@@ -66,12 +66,15 @@ def test_legacy_analysis_artifact_loads_byte_identically() -> None:
         pytest.skip(f"updated legacy loaded-surface golden; re-run without {_UPDATE_ENV} to verify")
     golden_path = require_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name, _UPDATE_ENV)
     if not golden_path.exists():
+        # Reason BEFORE bytes (b10 R78 round-4): a reasonless record run must
+        # fail with the working tree untouched.
+        reason = require_update_reason(_UPDATE_ENV)
         golden_path.write_text(actual + "\n")
         write_provenance(
             golden_path.parent,
             "tests/godobject_oracle legacy",
             _UPDATE_ENV,
-            require_update_reason(_UPDATE_ENV),
+            reason,
         )
         pytest.skip(f"recorded first-run loaded-surface golden for this environment: {golden_path}")
     expected = golden_path.read_text().rstrip("\n")

@@ -144,6 +144,40 @@ def test_render_byte_oracle_executes_on_a_ci_leg() -> None:
     )
 
 
+def test_surface_byte_oracle_executes_on_the_enforcing_leg() -> None:
+    """A dedicated step actually RUNS the heavy surface byte-oracle family.
+
+    The surface-oracle byte tests are heavy-marked, so the enforcing row's
+    ``-m smoke`` selection collects only the fact pins, and every scheduled
+    leg that selects heavy runs off-canonical and skips through
+    ``require_env_golden`` — byte identity enforced on NO CI leg, the T13.2
+    class recurring one family over (b10 R78 round-4). The dedicated step
+    must run on the enforcing row, select the heavy marker, arm enforcement
+    (so an off-canonical drift is a hard failure, not a skip), and attest at
+    least the six model-axis byte tests EXECUTED.
+    """
+
+    smoke = _smoke_job()
+    step = next(
+        (step for step in smoke["steps"] if "tests/surface_oracle/" in step.get("run", "")),
+        None,
+    )
+    assert step is not None, "no smoke step executes the surface byte-oracle family"
+    assert step.get("if") == "matrix.oracle_enforce == '1'", (
+        "the surface byte family must run exactly on the ONE enforcing row"
+    )
+    assert step["env"]["TORCHLENS_ORACLE_ENFORCE"] == "1"
+    assert "-m heavy" in step["run"], (
+        "the surface byte tests are heavy-marked; without selecting the heavy "
+        "marker the step executes nothing"
+    )
+    assert "check_ci_executed_tests.py" in step["run"], (
+        "the surface byte step must attest the tests EXECUTED rather than skipped"
+    )
+    floor = int(step["run"].rsplit(None, 1)[-1])
+    assert floor >= 6, "the executed floor must cover all six model-axis byte tests"
+
+
 def test_capture_oracle_matrix_enforces_on_a_nightly_leg() -> None:
     """Nightly runs the slow capture-characterization matrix with a floor."""
 
