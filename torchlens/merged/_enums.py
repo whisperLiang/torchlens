@@ -57,7 +57,7 @@ remain ordinary bundles gated by the ordinary version rules.
 
 
 class MergeAlignment(str, Enum):
-    """STRUCTURAL merge verdict; value divergence never changes it (3.2)."""
+    """STRUCTURAL merge verdict; value divergence never changes it (contract 3.3)."""
 
     ALIGNED = "aligned"
     PARTIAL = "partial"
@@ -65,7 +65,7 @@ class MergeAlignment(str, Enum):
 
 
 class BoundaryConsistency(str, Enum):
-    """Per-join witness verdict from the totalized derivation (3.3).
+    """Per-join witness verdict from the totalized derivation (contract 3.4).
 
     Kind capability evaluates BEFORE the capture setting: an intrinsically
     unwitnessable kind is ``not_applicable`` at every witness level including
@@ -80,7 +80,7 @@ class BoundaryConsistency(str, Enum):
 
 
 class MergeValueStatus(str, Enum):
-    """Merge-level value verdict derived from the join ledger (3.3 rule 4)."""
+    """Merge-level value verdict derived from the join ledger (contract 3.5)."""
 
     DIVERGENT = "divergent"
     ATTESTED_COMPLETE = "attested_complete"
@@ -121,11 +121,11 @@ MERGE_FINDING_KINDS: Final[tuple[str, ...]] = (
 ``order_contradiction`` / ``correlation_delta_mismatch`` are STRUCTURAL:
 any of them makes the merge ``conflicted`` and construction refuses.
 ``presence_gap`` demotes structure to ``partial``. ``value_divergence``
-demotes only the value status (never structural, 3.3). ``load_degradation``
-caps the EFFECTIVE alignment at load time (3.2).
+demotes only the value status (never structural, contract 3.4/3.5). ``load_degradation``
+caps the EFFECTIVE alignment at load time (contract 3.3).
 """
 
-# --- Witness capability tables (3.3/3.5) -----------------------------------
+# --- Witness capability tables (contract 3.4/3.5) -----------------------------------
 #
 # Semantic authority is the VERSIONED public-contract capability allowlist,
 # not CI probes: torch documents all_reduce results bitwise identical across

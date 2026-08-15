@@ -48,7 +48,8 @@ engines run only when a view is queried.
   (`AmbiguousInputError`, `NoInfluencePathError`, `ReceptiveFieldUnavailableError`, ...).
 
 ## rules/ subpackage
-- `_rules.py` holds the registry: `register_rf_rule()`, `rules()`,
+- `_rules.py` (at the PACKAGE level, `receptive_field/_rules.py` — not inside
+  `rules/`) holds the registry: `register_rf_rule()`, `rules()`,
   `ReceptiveFieldRule` / `ReceptiveFieldRuleContext`.
 - `rules/__init__.py` imports the eight built-in modules (`attention`, `conv_pool`,
   `elementwise`, `interpolation`, `linear`, `norms`, `sequence`, `transforms`) and

@@ -27,7 +27,11 @@ AND a `chore(release):` head-commit condition.
 
 ## Release Pipeline Details
 
-- python-semantic-release pinned exactly in release.yml; conventional commits.
+- python-semantic-release and its FULL transitive stack (plus the `build`
+  backend) install hash-verified, wheels-only from
+  `.github/workflows/release-requirements.txt` (`--require-hashes
+  --only-binary :all:`) — no package code executes at install while the
+  repo-write App token is on disk; conventional commits.
 - Three never-ship-a-major defense layers: commit-msg hook, pre-push hook,
   custom parser that refuses `LevelBump.MAJOR` (see pyproject
   `[tool.semantic_release]` and `scripts/`). Major bumps require explicit

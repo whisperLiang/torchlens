@@ -147,7 +147,7 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
     retry in :func:`_evaluate_keep_op`. Every selector that resolves through the
     capture label universe (``label``, ``contains``, ``regex``) can therefore target a
     short label that is invisible on the first evaluation, so those kinds need the
-    retry too -- not just ``tl.predicate(...)`` trees whose inner callable observes
+    retry too -- not just bare-callable predicate trees whose inner callable observes
     ``ctx.label`` directly. Structured selectors that match non-label fields
     (``func``, ``module``, ``in_module``, ``output``, ...) already see everything they
     need on the base context and are intentionally excluded. The retry fires only after
