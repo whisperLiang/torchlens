@@ -56,9 +56,13 @@ dependencies = [
     "graphviz",
     # typing_extensions.Self is used for Python 3.10 (typing.Self is 3.11+).
     "typing_extensions>=4.0",
-    # Pillow is imported at module load by the viz / repgeom image-rendering
-    # surfaces (node images, input montages, MDS/feature-map thumbnails), which
-    # torchlens.__init__ imports eagerly, so it is a hard import-time dependency.
+    # Pillow backs the viz / repgeom image-rendering surfaces (node images,
+    # input montages, MDS/feature-map thumbnails). It is resolved at CALL time,
+    # not import time -- `import torchlens` succeeds with PIL absent (probed
+    # 2026-08-15; the old "hard import-time dependency" rationale was false,
+    # grind r3 SF-15). It stays a base dependency so the default drawing
+    # surface works out of the box; moving it to an extra is a queued owner
+    # decision, not a hygiene fix.
     "pillow>=9",
 ]
 
@@ -75,7 +79,10 @@ sae = ["sae-lens~=6.45; python_version >= '3.10'"]
 profiler = []
 lightning = ["lightning~=2.4"]
 wandb = ["wandb>=0.16"]
-mlx = ["mlx>=0.26,<0.27"]
+# 0.26.5 is excluded because its manylinux wheel ships without libmlx.so (the
+# nightly preview-backend leg pins 0.26.3 for the same reason): the extra must
+# not admit a version the CI matrix documents as import-broken on Linux.
+mlx = ["mlx>=0.26,<0.27,!=0.26.5"]
 jax = ["jax[cpu]", "equinox", "flax"]
 tinygrad = ["tinygrad>=0.13,<0.14; python_version >= '3.11'"]
 paddle = ["paddlepaddle>=3.3,<3.4"]
@@ -116,12 +123,17 @@ all-stretch = [
     "lovely-tensors~=0.1.18",
 ]
 dev = [
+    # Tooling floors are BOUNDED at the next major (grind r3, b2:B6): these
+    # tools' majors routinely change verdicts (pytest collection rules,
+    # pre-commit config schema, jsonschema validator API), so an unbounded
+    # floor lets a future major silently change what the gates enforce. Exact
+    # pins stay reserved for the verdict-defining trio (ruff/mypy/pip-audit).
     "ruff==0.15.4",
-    "pytest",
-    "pytest-cov",
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
     "mypy==2.1.0",
     "pip-audit==2.10.1",
-    "pre-commit",
+    "pre-commit>=4,<5",
     # jsonschema/referencing back the menagerie crawler's payload validation
     # (menagerie/crawler/schema.py: Draft202012Validator + a referencing Registry).
     # This is internal contributor/automation tooling, not a torchlens runtime
@@ -129,8 +141,8 @@ dev = [
     # in `test` (ML-framework test deps) or core `dependencies` (shipped library
     # surface). `registry=` on Draft202012Validator needs jsonschema>=4.18, the
     # version that adopted the `referencing` library for $ref resolution.
-    "jsonschema>=4.18",
-    "referencing>=0.28",
+    "jsonschema>=4.18,<5",
+    "referencing>=0.28,<1",
 ]
 test = [
     "lightning",
