@@ -520,8 +520,8 @@ def capture_with_rescue(
         # bit-indistinguishable from a genuinely clean capture across all
         # nine ineligible channels. Settle the escape on the trace exactly
         # like a refused re-run does.
-        primary = run_capture()
-        signal = _escape_signal(primary)
+        ineligible_trace = run_capture()
+        signal = _escape_signal(ineligible_trace)
         if signal is not None:
             warnings.warn(
                 "TorchLens detected an escape signal but skipped the rescue "
@@ -535,19 +535,19 @@ def capture_with_rescue(
                 stacklevel=3,
             )
             _mark(
-                primary,
+                ineligible_trace,
                 "escape_rescue_unrecovered",
                 _disclosure(
                     trigger=signal,
                     recovered=False,
                     primary_escape_diagnostics=tuple(
-                        getattr(primary, "escape_diagnostics", ()) or ()
+                        getattr(ineligible_trace, "escape_diagnostics", ()) or ()
                     ),
                     skipped_reason="rescue_ineligible",
                     forward_runs=1,
                 ),
             )
-        return primary
+        return ineligible_trace
 
     rng_snapshot = log_current_rng_states()
     primary: Trace | None = None
