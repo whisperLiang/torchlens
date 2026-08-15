@@ -307,7 +307,13 @@ def render_combined_graph(
     """
 
     if vis_mode == "rolled":
-        raise NotImplementedError("draw_combined does not support vis_mode='rolled' yet.")
+        # Deliberate not-yet gate. The NotImplementedError type is pinned public
+        # behavior; at least name the supported spelling so the user knows the
+        # way out (R65 -- retyping with a code is a public API decision).
+        raise NotImplementedError(
+            "draw_combined does not support vis_mode='rolled' yet; pass "
+            "vis_mode='unrolled' (the supported combined layout)."
+        )
     if vis_mode != "unrolled":
         raise InvalidArgumentError(
             f"vis_mode must be either 'unrolled' or 'rolled'; received {vis_mode!r}",
@@ -325,7 +331,7 @@ def render_combined_graph(
         raise PayloadUnavailableError(
             "Must have all layers logged in order to render the graph",
             code="layers_not_logged",
-            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
+            remedy="re-capture with tl.trace(model, x) (default exhaustive capture) before drawing",
         )
     pass_filter = _normalize_backward_pass_filter(bwd)
 

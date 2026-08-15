@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 from safetensors import SafetensorError
 from safetensors.torch import load_file as load_safetensors_file
 
-from .._io import TorchLensIOError
+from .._io import ArtifactVersionBelowFloorError, TorchLensIOError
 from .._io._json import _MAX_JSON_BYTES, loads_bounded, read_bounded
 from .._io.manifest import Manifest, enforce_version_policy
 from .._io.paths import resolve_bundle_blob_path
@@ -123,6 +124,12 @@ def recover(path: str | Path) -> Recording:
         try:
             manifest = Manifest.read(manifest_path)
             _validate_fastlog_layout(bundle_path, manifest)
+        except ArtifactVersionBelowFloorError:
+            # Drop-not-resurrect (R10-4): a bundle whose declared version is
+            # below the rehydration floor is REFUSED by load(); letting the
+            # bare-pass salvage below resurrect it as recovered=True defeated
+            # the floor entirely.
+            raise
         except TorchLensIOError:
             pass
         else:
@@ -251,12 +258,23 @@ def _read_index_lines(path: Path) -> list[str]:
 
     try:
         with path.open("rb") as handle:
+            # R10-3 fstat-first: refuse on the stat size BEFORE reading so an
+            # over-ceiling index never materializes a transient ~512 MiB
+            # buffer. The post-read length check stays as the truth for a file
+            # that grew after the stat.
+            stat_size = os.fstat(handle.fileno()).st_size
+            if stat_size > _INDEX_MAX_BYTES:
+                raise TorchLensIOError(
+                    f"Fastlog index at {path} exceeds the {_INDEX_MAX_BYTES}-byte ceiling.",
+                    code="fastlog_index_too_large",
+                )
             data = handle.read(_INDEX_MAX_BYTES + 1)
     except OSError as exc:
         raise RecoveryError("no recoverable index") from exc
     if len(data) > _INDEX_MAX_BYTES:
         raise TorchLensIOError(
-            f"Fastlog index at {path} exceeds the {_INDEX_MAX_BYTES}-byte ceiling."
+            f"Fastlog index at {path} exceeds the {_INDEX_MAX_BYTES}-byte ceiling.",
+            code="fastlog_index_too_large",
         )
     return data.decode("utf-8", errors="replace").splitlines()
 
@@ -346,14 +364,28 @@ def _load_verified_blob_tensor(blob_path: Path, expected_sha256: str) -> Any:
     main bundle path's ``sha256_of_file`` + ``load_file`` discipline).
     """
 
+    from .._io.lazy import _file_identity
     from .._io.manifest import sha256_of_file
 
+    # R59 TOCTOU (lazy.py discipline): the digest and the mmap-backed load are
+    # two opens of the same path, so bracket the hash with the file identity and
+    # re-check before loading -- a rename-replace in the window is refused
+    # rather than admitting bytes that were never hashed.
     try:
+        pre_hash_identity = _file_identity(blob_path.stat())
         observed_sha256 = sha256_of_file(blob_path)
     except OSError as exc:
         raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
     if observed_sha256 != expected_sha256:
         raise TorchLensIOError(f"Checksum mismatch for fastlog blob at {blob_path}.")
+    try:
+        pre_load_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
+    if pre_load_identity != pre_hash_identity:
+        raise TorchLensIOError(
+            f"Fastlog blob at {blob_path} changed between integrity check and load."
+        )
     return _load_blob_tensor_from_file(blob_path)
 
 

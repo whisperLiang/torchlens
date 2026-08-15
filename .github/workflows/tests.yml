@@ -135,6 +135,7 @@ jobs:
           TORCHVISION_VERSION: ${{ matrix.torchvision }}
           NUMPY_SPEC: ${{ matrix.numpy }}
         run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \

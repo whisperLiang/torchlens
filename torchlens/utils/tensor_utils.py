@@ -585,6 +585,45 @@ def tensor_nanequal(
         if tensor_a.is_quantized or tensor_b.is_quantized:
             return _quantized_tensor_equal(tensor_a, tensor_b)
 
+        # Sparse layouts have no aten::equal / isinf / nan_to_num kernels: every
+        # comparison below used to escape tl.trace() as a raw torch-internal
+        # NotImplementedError naming the SparseCPU dispatcher (R65; the layout
+        # sibling of the fp8 class documented below). Compare the canonical
+        # structure exactly and recurse on the strided values tensor so
+        # NaN/Inf/tolerance semantics match the dense path.
+        if tensor_a.layout != tensor_b.layout:
+            return False
+        if tensor_a.layout == torch.sparse_coo:
+            tensor_a = tensor_a.coalesce()
+            tensor_b = tensor_b.coalesce()
+            if not torch.equal(tensor_a.indices(), tensor_b.indices()):
+                return False
+            return tensor_nanequal(
+                tensor_a.values(), tensor_b.values(), allow_tolerance=allow_tolerance
+            )
+        if tensor_a.layout in (
+            torch.sparse_csr,
+            torch.sparse_csc,
+            torch.sparse_bsr,
+            torch.sparse_bsc,
+        ):
+            if tensor_a.layout in (torch.sparse_csr, torch.sparse_bsr):
+                index_pairs = (
+                    (tensor_a.crow_indices(), tensor_b.crow_indices()),
+                    (tensor_a.col_indices(), tensor_b.col_indices()),
+                )
+            else:
+                index_pairs = (
+                    (tensor_a.ccol_indices(), tensor_b.ccol_indices()),
+                    (tensor_a.row_indices(), tensor_b.row_indices()),
+                )
+            for index_a, index_b in index_pairs:
+                if not torch.equal(index_a, index_b):
+                    return False
+            return tensor_nanequal(
+                tensor_a.values(), tensor_b.values(), allow_tolerance=allow_tolerance
+            )
+
         # Validation overwhelmingly compares identical ordinary floating-point
         # payloads. Avoid constructing the Inf/NaN masks and substituted tensors
         # in that common case; non-exact comparisons and non-floating dtypes

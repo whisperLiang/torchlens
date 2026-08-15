@@ -689,3 +689,55 @@ def test_the_memo_never_serves_a_stale_clean_verdict_for_fp8() -> None:
     first = trace.first_nonfinite(link_format="text")
     assert first == trace.first_nonfinite(link_format="text")
     assert "First non-finite saved out" in first
+
+
+# --------------------------------------------------------------------------- #
+# Sparse layouts (R65): the layout sibling of the fp8 raw-kernel-escape class  #
+# --------------------------------------------------------------------------- #
+
+
+class _SparseOutputModel(nn.Module):
+    """Model whose forward ends in a sparse COO output."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.linear(x)).to_sparse()
+
+
+def test_tensor_nanequal_is_sparse_coo_safe() -> None:
+    """Sparse COO pairs compare structurally instead of hitting aten::equal."""
+
+    dense = torch.tensor([[0.0, 1.0], [2.0, 0.0]])
+    other = torch.tensor([[0.0, 1.0], [3.0, 0.0]])
+    assert tensor_nanequal(dense.to_sparse(), dense.clone().to_sparse())
+    assert not tensor_nanequal(dense.to_sparse(), other.to_sparse())
+    nan_a = torch.tensor([[float("nan"), 1.0]]).to_sparse()
+    nan_b = torch.tensor([[float("nan"), 1.0]]).to_sparse()
+    assert tensor_nanequal(nan_a, nan_b)
+
+
+def test_tensor_nanequal_is_sparse_csr_safe() -> None:
+    """Compressed layouts compare via their canonical index/value components."""
+
+    dense = torch.tensor([[0.0, 1.0], [2.0, 0.0]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # CSR beta-state advisory
+        assert tensor_nanequal(dense.to_sparse_csr(), dense.clone().to_sparse_csr())
+        assert not tensor_nanequal(
+            dense.to_sparse_csr(), torch.tensor([[0.0, 1.0], [3.0, 0.0]]).to_sparse_csr()
+        )
+
+
+def test_sparse_coo_model_output_traces_complete() -> None:
+    """A forward ending in .to_sparse() completes instead of crashing raw.
+
+    Fail-before: tl.trace() escaped with a raw torch-internal
+    ``NotImplementedError: Could not run 'aten::equal' ... SparseCPU`` out of
+    tensor_nanequal via the output-attribution comparison.
+    """
+
+    log = tl.trace(_SparseOutputModel(), torch.ones(2, 3))
+    assert log.outcome.status.name == "COMPLETE"

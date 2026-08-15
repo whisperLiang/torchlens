@@ -95,6 +95,10 @@ class ValidationFailure:
             metrics.append(f"reduction_depth={self.reduction_depth}")
         if metrics:
             parts.append(": " + " ".join(metrics))
+        if self.nan_mismatch or self.inf_mismatch:
+            # Signpost the purpose-built tooling (R67): the flags already name
+            # the symptom; point at the tracer that localizes it.
+            parts.append(" -- localize with tl.debug.find_nan_in_trace(trace)")
         shapes: list[str] = []
         if self.saved_shape is not None or self.saved_dtype is not None:
             shapes.append(f"saved={self.saved_shape} {self.saved_dtype or ''}".strip())

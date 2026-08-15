@@ -1094,6 +1094,14 @@ class Layer:
         # any model with trainable params does not crash. `grad_fn` (a picklable
         # `GradFn` record after a backward pass) is intentionally retained.
         state["grad_fn_handle"] = None
+        # R10-7 (mirroring ``Op.__getstate__``): user transform callables
+        # (FieldPolicy.DROP) serialize to the loaded-artifact form (None) -- a
+        # lambda transform= made pickle.dumps crash on rolled layer records
+        # while tl.save succeeded on the same trace.
+        if state.get("activation_transform") is not None:
+            state["activation_transform"] = None
+        if state.get("grad_transform") is not None:
+            state["grad_transform"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 

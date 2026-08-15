@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import pickle
+import pickletools
 import platform
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from .._errors import InvalidArgumentError
 from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
 from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
+from ..errors import TorchLensWarning
+from ..utils.display import user_stacklevel
 from . import (
     MIN_TLSPEC_VERSION,
     TLSPEC_VERSION,
@@ -79,10 +82,23 @@ if TYPE_CHECKING:
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"
 # Coarse anti-DoS ceiling on ``metadata.pkl`` (B8-16), for parity with the JSON
-# boundary's byte ceiling. Structural trace metadata (tensor payloads live in
-# separate safetensors blobs) never approaches this, so the cap only refuses an
-# absurd artifact; it is deliberately generous to avoid refusing a real save.
-_MAX_METADATA_PKL_BYTES = 4 * 1024**3
+# boundary's byte ceiling (512 MiB, ``_json._MAX_JSON_BYTES``). Structural trace
+# metadata (tensor payloads live in separate safetensors blobs) never approaches
+# this, so the cap only refuses an absurd artifact; it is deliberately generous
+# to avoid refusing a real save.
+_MAX_METADATA_PKL_BYTES = 512 * 1024**2
+# Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
+# bound allocation -- a pickle of tiny values expands ~5x its byte size into RSS
+# BEFORE any structural check can refuse it (measured: 76 MiB of ints -> ~390 MiB;
+# the old 4 GiB byte cap projected to ~20 GiB). This is the same lesson the JSON
+# boundary's ``_MAX_JSON_NODES`` prescan already encodes, carried to the sibling
+# pickle boundary. The prescan walks the opcode stream (pickletools.genops, no
+# object allocation) with an early stop, so its own worst case is bounded CPU
+# (~0.6 us/opcode, <1 min at the ceiling), never unbounded memory.
+_MAX_METADATA_PKL_OPCODES = 64_000_000
+# Prescan only files large enough to matter: below this, worst-case expansion is
+# a few hundred MiB and the prescan would tax every real load for nothing.
+_METADATA_PKL_PRESCAN_BYTES = 8 * 1024**2
 # Belt bound on the persisted PARTIAL failure-reason sentinel (B8-12).
 _MAX_PARTIAL_REASON_CHARS = 200
 _BLOB_TENSOR_KEY = "data"
@@ -584,11 +600,14 @@ def save(
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
             include_source=include_source,
-            custom_attributes_disclosure=_custom_attributes_disclosure(
-                trace,
-                included=include_custom_attributes and sparse_run_descriptor is None,
+            custom_attributes_disclosure=(
+                custom_attributes_disclosure := _custom_attributes_disclosure(
+                    trace,
+                    included=include_custom_attributes and sparse_run_descriptor is None,
+                )
             ),
         )
+        _warn_custom_attribute_embedding(custom_attributes_disclosure)
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
             trace=trace,
@@ -652,7 +671,14 @@ def save(
         _mark_partial(tmp_path, reason=type(exc).__name__)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
-        raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+        raise TorchLensIOError(
+            f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+            "Remedy: the staging directory was marked PARTIAL (sweepable by "
+            "cleanup) and any pre-overwrite bundle was restored; fix the named "
+            "cause and re-save.",
+            code="bundle_save_failed",
+            cause_type=type(exc).__name__,
+        ) from exc
     except BaseException as exc:
         # Safety-net catch-all that closes the whole *class* of bug the
         # branches above were built to fix one exception type at a time
@@ -676,7 +702,14 @@ def save(
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         if isinstance(exc, Exception):
-            raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+            raise TorchLensIOError(
+                f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+                "Remedy: the staging directory was marked PARTIAL (sweepable by "
+                "cleanup) and any pre-overwrite bundle was restored; fix the named "
+                "cause and re-save.",
+                code="bundle_save_failed",
+                cause_type=type(exc).__name__,
+            ) from exc
         raise
 
 
@@ -1311,11 +1344,23 @@ def _load_trace_payload(
                     f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
                     "structurally implausible artifact."
                 )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, metadata_path)
             scrubbed_state = _RenameAwareUnpickler(
                 handle,
                 trust_custom_callables=trust_custom_callables,
                 allowed_custom_callable_modules=allowed_custom_callable_modules,
             ).load()
+        if not isinstance(scrubbed_state, dict):
+            # R65/F10: without this guard a corrupt/hostile payload escapes
+            # tl.load() as a raw stdlib TypeError/ValueError from the downstream
+            # dict() walk, naming a "dictionary update sequence element".
+            raise TorchLensIOError(
+                f"Bundle metadata at {metadata_path} is not a metadata mapping "
+                f"(got {type(scrubbed_state).__name__}); the artifact is corrupt or "
+                "hand-edited. Remedy: re-save the trace with tl.save().",
+                code="metadata_payload_not_a_mapping",
+            )
     except TorchLensIOError:
         raise
     except (pickle.UnpicklingError, EOFError) as exc:
@@ -2293,6 +2338,8 @@ def _load_unified_bundle(
                     f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
                     "structurally implausible artifact."
                 )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, legacy_pickle_path)
             bundle = _RenameAwareUnpickler(handle).load()
     except (
         pickle.UnpicklingError,
@@ -2477,9 +2524,14 @@ def _read_manifest_object(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             data = _json.load_bounded(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise TorchLensIOError(f"Failed to read manifest at {path}.") from exc
+        raise TorchLensIOError(
+            f"Failed to read manifest at {path}: {type(exc).__name__}: {exc}.",
+            code="manifest_unreadable",
+        ) from exc
     if not isinstance(data, dict):
-        raise TorchLensIOError("Manifest root must be a JSON object.")
+        raise TorchLensIOError(
+            "Manifest root must be a JSON object.", code="manifest_not_json_object"
+        )
     return data
 
 
@@ -2760,9 +2812,14 @@ def _apply_visualization_save_policy(
             scrubbed_layer.visualizer_path = None
             continue
         visualizer_dir.mkdir(parents=True, exist_ok=True)
+        # B8-10 parity: the sidecar tree must not escape the bundle's permission
+        # tightening -- copy2 preserves the scratch file's umask-derived mode and
+        # would leak on cp -a/tar or a relaxed bundle root.
+        _restrict_mode(visualizer_dir, 0o700)
         destination_name = f"{index:05d}_{source_path.name}"
         destination_path = visualizer_dir / destination_name
         shutil.copy2(source_path, destination_path)
+        _restrict_mode(destination_path, 0o600)
         # Persist a bundle-RELATIVE path (R59-6): the absolute final path embeds
         # $HOME/username, contradicting the scrub's basename-only PII policy, and
         # load re-anchors from the basename anyway (_reanchor_visualizer_paths),
@@ -3142,6 +3199,95 @@ def _fast_copy_tensor_blob(
 
 _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP = 100
 """Bound on the number of distinct top-level key names a disclosure records."""
+
+
+# Structural constructor echoes harvested off stock nn.Module types; their key
+# names carry no user secrets, so they do not by themselves trigger the
+# save-time embedding warning below.
+_BORING_CUSTOM_ATTRIBUTE_KEYS = frozenset(
+    {
+        "add_zero_attn",
+        "affine",
+        "batch_first",
+        "bias",
+        "bidirectional",
+        "ceil_mode",
+        "count_include_pad",
+        "d_model",
+        "dilation",
+        "dim_feedforward",
+        "dropout",
+        "elementwise_affine",
+        "embed_dim",
+        "embedding_dim",
+        "end_dim",
+        "eps",
+        "groups",
+        "hidden_size",
+        "in_channels",
+        "in_features",
+        "inplace",
+        "input_size",
+        "kdim",
+        "kernel_size",
+        "max_norm",
+        "momentum",
+        "nhead",
+        "norm_type",
+        "normalized_shape",
+        "num_embeddings",
+        "num_features",
+        "num_heads",
+        "num_layers",
+        "out_channels",
+        "out_features",
+        "output_padding",
+        "p",
+        "padding",
+        "padding_idx",
+        "padding_mode",
+        "return_indices",
+        "scale_grad_by_freq",
+        "sparse",
+        "start_dim",
+        "stride",
+        "track_running_stats",
+        "vdim",
+    }
+)
+_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW = 8
+
+
+def _warn_custom_attribute_embedding(disclosure: Mapping[str, Any]) -> None:
+    """Tell the SAVER that module attributes are shipping in the artifact (R62).
+
+    The manifest disclosure lands INSIDE the file the user is about to hand
+    out -- the one reader guaranteed not to see it is the person saving. A
+    model carrying ``self.hf_token = os.environ["HF_TOKEN"]`` previously saved
+    with zero terminal output; the token shipped silently. One warning at save
+    time, attributed to the user's save call, changes no default and no
+    persisted byte.
+    """
+
+    if not disclosure.get("included"):
+        return
+    interesting = [
+        key
+        for key in disclosure.get("top_level_keys", ())
+        if key not in _BORING_CUSTOM_ATTRIBUTE_KEYS
+    ]
+    if not interesting:
+        return
+    preview = ", ".join(interesting[:_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW])
+    if len(interesting) > _CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW:
+        preview += ", ..."
+    warnings.warn(
+        f"This save embeds {len(interesting)} custom module attribute(s) verbatim "
+        f"in the artifact ({preview}). Review them before sharing the bundle; pass "
+        "include_custom_attributes=False to withhold the values.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
+    )
 
 
 def _custom_attributes_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:
@@ -3814,6 +3960,53 @@ def _eager_verify_blob_payloads(
             raise TorchLensIOError(
                 f"Blob {blob_path} does not contain the expected {_BLOB_TENSOR_KEY!r} tensor entry."
             )
+
+
+def _prescan_metadata_pickle_opcodes(handle: Any, metadata_path: Path) -> None:
+    """Refuse a metadata pickle whose opcode count exceeds the allocation ceiling.
+
+    The byte ceiling alone does not bound allocation (R60/F6): a pickle packed
+    with tiny values expands ~5x its byte size into RSS before any structural
+    check can refuse it. Walking the opcode stream with ``pickletools.genops``
+    allocates no payload objects, so the count is established BEFORE the
+    unpickler materializes anything -- the pickle twin of the JSON boundary's
+    ``_MAX_JSON_NODES`` prescan. The handle is rewound for the real unpickle.
+
+    Parameters
+    ----------
+    handle:
+        Open binary handle positioned at the start of the pickle stream.
+    metadata_path:
+        Path named in refusals.
+
+    Raises
+    ------
+    TorchLensIOError
+        If the opcode count exceeds the ceiling or the stream does not parse.
+    """
+
+    opcode_count = 0
+    try:
+        for _opcode, _arg, _pos in pickletools.genops(handle):
+            opcode_count += 1
+            if opcode_count > _MAX_METADATA_PKL_OPCODES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {metadata_path} exceeds the "
+                    f"{_MAX_METADATA_PKL_OPCODES}-opcode allocation ceiling; refusing "
+                    "to load a structurally implausible artifact.",
+                    code="metadata_object_count_exceeded",
+                )
+    except TorchLensIOError:
+        raise
+    except Exception as exc:
+        # A stream genops cannot parse is a stream the unpickler cannot parse:
+        # refuse it on the same integrity channel the unpickler uses.
+        raise TorchLensIOError(
+            f"Failed to load bundle metadata from {metadata_path}.",
+            code="bundle_metadata_integrity_refused",
+        ) from exc
+    finally:
+        handle.seek(0)
 
 
 def _python_major_mismatch(manifest: Manifest) -> bool:

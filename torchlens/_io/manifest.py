@@ -640,11 +640,27 @@ class Manifest:
         try:
             with manifest_path.open("r", encoding="utf-8") as handle:
                 raw_data = _json.load_bounded(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            # Stable codes on the tl.load front door (R65): a missing / unreadable /
-            # over-limit manifest and a non-object manifest root are distinct causes.
+        except FileNotFoundError as exc:
+            # Stable codes on the tl.load front door (R65): a missing, unreadable,
+            # and malformed/over-limit manifest are distinct causes a caller (or
+            # operator log reader) must be able to tell apart.
             raise TorchLensIOError(
-                f"Failed to read manifest at {manifest_path}.", code="manifest_unreadable"
+                f"Manifest not found at {manifest_path}. Remedy: pass the bundle "
+                "directory produced by tl.save() (it must contain manifest.json).",
+                code="manifest_missing",
+            ) from exc
+        except OSError as exc:
+            raise TorchLensIOError(
+                f"Failed to read manifest at {manifest_path}: {type(exc).__name__}: {exc}. "
+                "Remedy: check file permissions and that the bundle is fully copied.",
+                code="manifest_unreadable",
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise TorchLensIOError(
+                f"Manifest at {manifest_path} does not parse as JSON within the "
+                f"supported bounds: {exc}. Remedy: the artifact is corrupt or "
+                "hand-edited; re-save it with tl.save().",
+                code="manifest_unreadable",
             ) from exc
         if not isinstance(raw_data, dict):
             raise TorchLensIOError(

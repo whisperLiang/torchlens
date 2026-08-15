@@ -377,3 +377,83 @@ def test_loads_bounded_refuses_nonfinite_constants() -> None:
     for payload in ('{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}'):
         with pytest.raises(json.JSONDecodeError, match="non-finite"):
             json_mod.loads_bounded(payload)
+
+
+# --------------------------------------------------------------------------- #
+# R60/F6: metadata.pkl object-count ceiling + R65/F10 typed non-mapping guard  #
+# --------------------------------------------------------------------------- #
+
+
+def test_metadata_pkl_opcode_ceiling_refuses_object_bomb(tmp_path: Path, monkeypatch) -> None:
+    """A metadata pickle packed with tiny values refuses on opcode count.
+
+    Fail-before: the byte cap admitted a pickle whose ~5x RSS expansion happened
+    entirely BEFORE any structural check (measured 76 MiB of ints -> ~390 MiB;
+    the old 4 GiB byte cap projected ~20 GiB) and the eventual refusal escaped
+    as a raw stdlib TypeError.
+    """
+
+    spec = _save(tmp_path)
+    (spec / "metadata.pkl").write_bytes(pickle.dumps([0] * 100_000))
+    monkeypatch.setattr(bundle_mod, "_METADATA_PKL_PRESCAN_BYTES", 0)
+    monkeypatch.setattr(bundle_mod, "_MAX_METADATA_PKL_OPCODES", 1_000)
+    with pytest.raises(TorchLensIOError, match="opcode allocation ceiling") as excinfo:
+        tl.load(str(spec))
+    assert excinfo.value.fields["code"] == "metadata_object_count_exceeded"
+
+
+def test_metadata_pkl_non_mapping_payload_refuses_typed(tmp_path: Path) -> None:
+    """A non-mapping metadata payload refuses typed, not as a raw stdlib error.
+
+    Fail-before: ``tl.load`` on a bundle whose ``metadata.pkl`` held a plain
+    list escaped as ``ValueError: dictionary update sequence element #0 ...``
+    from the downstream dict() walk -- untyped, no code, no remedy.
+    """
+
+    spec = _save(tmp_path)
+    (spec / "metadata.pkl").write_bytes(pickle.dumps([[0] * 3] * 3))
+    with pytest.raises(TorchLensIOError, match="not a metadata mapping") as excinfo:
+        tl.load(str(spec))
+    assert excinfo.value.fields["code"] == "metadata_payload_not_a_mapping"
+
+
+def test_bundle_save_failure_names_cause_and_code(tmp_path: Path, monkeypatch) -> None:
+    """R65: the highest-traffic save door names its cause, code, and remedy.
+
+    Fail-before: every non-typed save failure became the content-free
+    ``TorchLensIOError: Failed to save bundle at <path>.`` with empty fields.
+    """
+
+    def _boom(state, handle) -> None:
+        raise TypeError("cannot pickle '_thread.lock' object")
+
+    monkeypatch.setattr(bundle_mod, "dump_canonical_metadata", _boom)
+    with pytest.raises(TorchLensIOError, match="cannot pickle") as excinfo:
+        _save(tmp_path)
+    assert excinfo.value.fields["code"] == "bundle_save_failed"
+    assert excinfo.value.fields["cause_type"] == "TypeError"
+    assert "Remedy:" in str(excinfo.value)
+
+
+def test_unverified_capture_disclosure_survives_save_and_load(tmp_path: Path) -> None:
+    """P7/R10: capture_verified=False must not launder to no-claim across save.
+
+    Fail-before: the disclosure triple was FieldPolicy.DROP, so a capture
+    TorchLens itself refused to bless loaded as verified=None / reason=None --
+    the round trip IMPROVED a verdict. The negative claim now persists as a
+    string-only row; True/None stay session-time so a loaded artifact can
+    never CLAIM verification.
+    """
+
+    trace = _trace()
+    trace.capture_verified = False
+    trace.capture_verification_reason = "escape_rescue_unrecovered"
+    spec = tmp_path / "unverified.tlspec"
+    tl.save(trace, str(spec))
+    loaded = tl.load(str(spec))
+    assert loaded.capture_verified is False
+    assert loaded.capture_verification_reason == "escape_rescue_unrecovered"
+
+    clean = _save(tmp_path, "clean.tlspec")
+    loaded_clean = tl.load(str(clean))
+    assert loaded_clean.capture_verified is None

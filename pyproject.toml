@@ -561,8 +561,8 @@ major_on_zero = true
 # own `pip install 'build==1.5.0'` INSIDE the token scope without
 # --require-hashes, so a replaced index artifact could execute with the
 # repo-write App token despite the lock. PIN AUTHORITY: the build== pin in
-# .github/workflows/release-requirements.txt; the nightly wheel job PARSES
-# that lock for its own build== install, so its double-build gate always
+# .github/workflows/release-requirements.txt; the nightly wheel job installs
+# hash-verified from the SAME lock, so its double-build gate always
 # attests exactly the builder the release uses.
 #
 # REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel's timestamps
@@ -581,7 +581,8 @@ major_on_zero = true
 # own commit timestamp") was off by one commit and could never reproduce the
 # published bytes. Correct recipe:
 #   git checkout vX.Y.Z
-#   pip install 'build==1.5.0'
+#   pip install --require-hashes --only-binary :all: \
+#       -r .github/workflows/release-requirements.txt
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
 #       python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl

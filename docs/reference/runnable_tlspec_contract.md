@@ -1481,6 +1481,13 @@ mutating the source. Analysis-only loaded Trace raises `RunCapabilityUnavailable
 `run_capability_unavailable`. This is not module/model reconstruction, source emission, or execution
 of untaken branches.
 
+The live provider holds the source model by WEAK reference (capturing never extends the model's
+lifetime), so live-run availability depends on the CALLER still holding the model: once the last
+strong reference is dropped -- including the inline `tl.trace(Model(), x)` idiom, where the trace
+is the only holder -- any garbage-collection pass makes a later `run()` refuse typed with
+`run_capability_unavailable`. This refusal is therefore gc-timing-dependent by design; keep a model
+reference, or save/load a runnable artifact, when `run()` must stay available.
+
 `fast=True` is the explicit stateful static feature-extraction loop. It never changes the
 default transaction or attestation contract. For a loaded sparse provider, the first call is an
 ordinary fully validated run and must settle `verified`; only then are staged state and compiled

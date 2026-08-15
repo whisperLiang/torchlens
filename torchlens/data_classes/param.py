@@ -868,7 +868,13 @@ class ParamAccessor(Accessor["Param"]):
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
+            # Name the bounded candidate set (R65) like the merged-presenter
+            # sibling, instead of telling the user to guess the full address.
+            candidates = tuple(address for match in matches for address in match.all_addresses)
+            raise AmbiguousOpLookupError(
+                f"Ambiguous short name '{key}' -- use a full address: {', '.join(candidates)}",
+                candidates=candidates,
+            )
         return None
 
     def _resolve_pass_qualified(self, key: str) -> "Param | None":

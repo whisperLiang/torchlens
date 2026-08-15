@@ -1157,7 +1157,16 @@ def _warn_zero_match_capture_selectors(
         annotations = getattr(trace, "annotations", None)
         if not isinstance(annotations, dict):
             return
-        entry: dict[str, str] = {"slot": slot, "selector": repr(selector)}
+        from ._io.scrub import _relativize_path_literals
+
+        # R62: this ledger persists at every save level, so a selector repr
+        # embedding an absolute host path (e.g. a file-payload predicate) must
+        # go through the same path-relativization belt as every other
+        # persisted repr.
+        entry: dict[str, str] = {
+            "slot": slot,
+            "selector": _relativize_path_literals(repr(selector)),
+        }
         if direction is not None:
             entry["direction"] = str(direction)
         annotations.setdefault("unmatched_capture_selectors", []).append(entry)

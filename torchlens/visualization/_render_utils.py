@@ -261,6 +261,9 @@ def run_bounded_subprocess(
     except FileNotFoundError as exc:
         # Lazy import: _render_common top-imports this module, so the typed
         # class cannot be imported at module level without minting a cycle.
+        # The single most common cold-user viz failure (R65): the Graphviz
+        # BINARY is not installed (the python 'graphviz' package alone does
+        # not ship it); the class carries the install remedy.
         from ._render_common import GraphvizUnavailableError
 
         raise GraphvizUnavailableError(

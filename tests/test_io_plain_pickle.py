@@ -492,3 +492,47 @@ def test_plain_pickle_preserves_in_memory_outs(tmp_path: Path) -> None:
     assert isinstance(restored_layer.out, torch.Tensor)
     assert restored_layer.out_ref is None
     assert torch.equal(restored_layer.out, source_layer.out)
+
+
+def test_plain_pickle_survives_a_lambda_activation_transform() -> None:
+    """R10-7: a lambda transform= must not crash pickle while tl.save works.
+
+    Fail-before: ``pickle.dumps`` raised ``PicklingError: Can't pickle
+    <lambda>`` from the op/layer records; the raw callable fields now
+    serialize to the loaded-artifact form (None), like every other
+    live-user-object DROP field.
+    """
+
+    log = trace_fn(_PlainPickleModel(), torch.ones(1, 3), activation_transform=lambda t: t * 2)
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored.activation_transform is None
+    assert restored.layer_list[0].activation_transform is None
+
+
+def test_plain_pickle_survives_a_fast_run_session() -> None:
+    """R10-6: run(fast=True) must not make pickle/deepcopy crash on weakrefs.
+
+    Fail-before: ``__getstate__`` popped every other session workspace but
+    never ``_fast_run_session``, so ``pickle.dumps`` AND ``copy.deepcopy``
+    raised ``TypeError: cannot pickle 'weakref.ReferenceType'`` after a fast
+    run.
+    """
+
+    import copy
+
+    class _Wrapped(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.linear(x)
+
+    model = _Wrapped()
+    log = trace_fn(model, torch.ones(1, 3))
+    log.run(inputs=torch.ones(1, 3), fast=True)
+    assert log.__dict__.get("_fast_run_session") is not None
+
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored.__dict__.get("_fast_run_session") is None
+    copy.deepcopy(log)

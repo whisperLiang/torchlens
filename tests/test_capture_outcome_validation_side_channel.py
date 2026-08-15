@@ -138,3 +138,37 @@ def test_side_channel_survives_plain_pickle_like_fast_run_session() -> None:
     record_validation_failure(trace, ValidationFailure(check="probe_check"))
     restored = pickle.loads(pickle.dumps(trace))
     assert TRACE_FAILURE_ATTR in restored.__dict__
+
+
+def test_validate_fail_emits_one_summarizing_warning() -> None:
+    """R67: a validate() FAIL points at the structured diagnosis.
+
+    Fail-before: a planted ground-truth mismatch returned a bare silent False
+    while last_validation_failure() held the full diagnosis unreferenced.
+    """
+
+    import warnings
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    import torchlens.user_funcs as user_funcs_module
+    from torchlens.errors import TorchLensWarning
+
+    real_validate = user_funcs_module.validate_forward_pass
+    user_funcs_module.validate_forward_pass = lambda *args, **kwargs: False
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            passed = tl.validate(nn.Linear(3, 3), torch.ones(2, 3), scope="forward")
+    finally:
+        user_funcs_module.validate_forward_pass = real_validate
+    assert passed is False
+    matching = [
+        w
+        for w in caught
+        if issubclass(w.category, TorchLensWarning) and "tl.validate FAILED" in str(w.message)
+    ]
+    assert len(matching) == 1
+    assert "last_validation_failure" in str(matching[0].message)

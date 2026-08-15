@@ -937,3 +937,26 @@ def test_interrupted_rescue_rerun_still_restores_state_writes() -> None:
     assert torch.equal(model.weight, baseline), (
         "the interrupted rescue re-run's state write was not restored"
     )
+
+
+def test_successful_rescue_rerun_warns_about_the_double_forward() -> None:
+    """R67: the success path was the ONLY silent rescue outcome.
+
+    Fail-before: a recovered rescue returned capture_verified=False with zero
+    warnings while the user's forward had executed twice.
+    """
+
+    from torchlens._errors import TorchLensCaptureGapWarning
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    runs: list[str] = []
+    primary = _stub_trace(["relu"], signal=True)
+    rescued = _stub_trace(["relu", "cos"])
+
+    def run_capture() -> Any:
+        runs.append("run")
+        return primary if len(runs) == 1 else rescued
+
+    with pytest.warns(TorchLensCaptureGapWarning, match="executed TWICE"):
+        result = capture_with_rescue(run_capture)
+    assert result is rescued

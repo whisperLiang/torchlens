@@ -1539,6 +1539,37 @@ def _alias_value_diagnostics(
             slots_by_alias[binding.alias_group].append(slot)
     diagnostics: list[RunnableDiagnostic] = []
     for alias_group, members in sorted(slots_by_alias.items()):
+        # R10-16: an alias group declares ONE live allocation, so its members'
+        # declared devices must agree. A forged split-device group previously
+        # passed the shape/dtype/byte checks (comparing transported values)
+        # and staged into DISTINCT storages, silently breaking the tied-state
+        # contract the group exists to declare.
+        first_member = members[0]
+        for member in members[1:]:
+            if (
+                member.device_type != first_member.device_type
+                or member.device_index != first_member.device_index
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        RunnableErrorCode.STATE_ALIAS_CONFLICT,
+                        f"Alias group {alias_group!r} declares members on different "
+                        "devices; one alias group is one allocation.",
+                        detection_stage="state_alias_validation",
+                        details=(
+                            ("alias_group", alias_group),
+                            (
+                                "first_device",
+                                f"{first_member.device_type}:{first_member.device_index}",
+                            ),
+                            (
+                                "conflicting_device",
+                                f"{member.device_type}:{member.device_index}",
+                            ),
+                        ),
+                    )
+                )
+                break
         named_values = [
             (slot.state_binding.state_dict_name, values_by_name[slot.state_binding.state_dict_name])
             for slot in members
@@ -2529,8 +2560,19 @@ def _binding_error(diagnostics: tuple[RunnableDiagnostic, ...]) -> StateBindingE
     """Build one structured strict state-binding exception."""
 
     codes = tuple(diagnostic.code.value for diagnostic in diagnostics)
+    # Surface the per-diagnostic detail in the message (R65: the aggregate used
+    # to name only the codes, hiding the slot names / shapes the diagnostics
+    # already carry). Bounded to the first few so a mass mismatch stays legible.
+    shown = diagnostics[:5]
+    detail_lines = "".join(
+        f"\n  - {diagnostic.code.value}: {diagnostic.message}" for diagnostic in shown
+    )
+    if len(diagnostics) > len(shown):
+        detail_lines += (
+            f"\n  ... and {len(diagnostics) - len(shown)} more (see .fields['diagnostics'])."
+        )
     return StateBindingError(
-        f"Strict state binding failed with {len(diagnostics)} diagnostic(s): {', '.join(codes)}.",
+        f"Strict state binding failed with {len(diagnostics)} diagnostic(s):{detail_lines}",
         diagnostics=diagnostics,
         codes=codes,
     )

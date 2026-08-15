@@ -211,12 +211,12 @@ def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
         load(link)
     assert sym.value.fields.get("code") == "load_path_symlink_rejected"
 
-    # (2) unreadable / missing manifest.
+    # (2) missing manifest is its own cause, distinct from unreadable (R65).
     empty = tmp_path / "empty.tl"
     empty.mkdir()
     with pytest.raises(TorchLensIOError) as missing:
         load(empty)
-    assert missing.value.fields.get("code") == "manifest_unreadable"
+    assert missing.value.fields.get("code") == "manifest_missing"
 
     # (3) manifest root is not a JSON object.
     not_object = tmp_path / "notobj.tl"
@@ -436,3 +436,14 @@ def test_secA_callsite_arity_mismatch_still_normalizes() -> None:
     stream = io.BytesIO(pickle.dumps(_ArityMismatch()))
     with pytest.raises(pickle.UnpicklingError):
         SafeBundleUnpickler(stream).load()
+
+
+def test_corrupt_manifest_json_refuses_manifest_unreadable(tmp_path: Path) -> None:
+    """A manifest that fails JSON parsing carries the manifest_unreadable code."""
+
+    corrupt = tmp_path / "corrupt.tl"
+    corrupt.mkdir()
+    (corrupt / "manifest.json").write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(TorchLensIOError) as excinfo:
+        load(corrupt)
+    assert excinfo.value.fields.get("code") == "manifest_unreadable"

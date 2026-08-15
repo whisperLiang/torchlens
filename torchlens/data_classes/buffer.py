@@ -417,7 +417,13 @@ class BufferAccessor(Accessor["Buffer"]):
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
+            # Name the bounded candidate set (R65) like the merged-presenter
+            # sibling, instead of telling the user to guess the full address.
+            candidates = ", ".join(match.address for match in matches)
+            raise AmbiguousOpLookupError(
+                f"Ambiguous short name '{key}' -- use a full address: {candidates}",
+                candidates=tuple(match.address for match in matches),
+            )
         return None
 
     def _resolve_pass_qualified(self, key: str) -> Buffer | None:

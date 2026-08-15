@@ -265,6 +265,12 @@ class MergedTrace:
 
     Never construct directly: use :func:`merge_ranks` (live/loaded inputs)
     or :func:`torchlens.merged.load` (a saved ``merged-directory`` artifact).
+
+    Lifetime contract (R37): the presenter holds its rank traces STRONGLY for
+    its own lifetime -- ``merge_ranks([live_a, live_b])`` transitively pins
+    both rank traces (and their retained activations) until the presenter is
+    dropped or :meth:`release` is called. Call :meth:`release` when finished
+    with a presenter built over live traces you do not otherwise retain.
     """
 
     def __init__(
@@ -277,6 +283,18 @@ class MergedTrace:
         self._handles = dict(handles)
         self._load_degradations = tuple(load_degradations)
         self._source_path: str | None = None
+
+    def release(self) -> None:
+        """Drop every rank-trace handle so the member traces can be reclaimed.
+
+        The counterpart of ``Trace.cleanup()`` for the presenter (R37 /
+        b2:B20): the derivation record, verdict properties, findings, and
+        ``load_degradations`` stay readable, but member access
+        (``merged.rank(...)`` and anything that resolves a member trace)
+        raises ``KeyError`` afterwards. Idempotent.
+        """
+
+        self._handles.clear()
 
     # ------------------------------------------------------------------
     # Verdicts (3.2): stored vs effective are DISTINCT properties.

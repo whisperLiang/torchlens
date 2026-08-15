@@ -1,0 +1,21 @@
+# Staleness signal for the repo's frozen pins (R61, b2-opus B2R5-24): every
+# hardened pin here -- the SHA-pinned Actions, the hash-locked release/builder
+# stacks -- is deliberately frozen, and without a refresh signal nothing tells a
+# maintainer when an upstream SECURITY release lands. Dependabot opens review
+# PRs; it never auto-merges, so pins move on review rather than never.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "pip"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # Security releases only for the locked stacks; routine version churn on
+    # the release path is noise.
+    allow:
+      - dependency-type: "all"

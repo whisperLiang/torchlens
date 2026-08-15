@@ -252,3 +252,25 @@ def test_no_ungated_import_module_remains_in_bundle_resolvers() -> None:
 
     save_src = Path(save_mod.__file__).read_text()
     assert "importlib.import_module" not in save_src
+
+
+def test_lazy_import_ref_resaves_as_import_ref() -> None:
+    """R10-12: load->resave keeps an import-ref callable executable.
+
+    Fail-before: ``_serialize_callable`` had no ``LazyImportRef`` branch, read
+    ``__module__``/``__qualname__`` the instance does not expose, got ``None``,
+    and raised ``OpaqueCallableInExecutableSaveError`` on a spec that
+    legitimately saved executable -- without ever needing to import anything.
+    """
+
+    from torchlens.intervention.errors import OpaqueCallableInExecutableSaveError
+    from torchlens.intervention.save import SaveLevel, _serialize_callable
+
+    ref = LazyImportRef("my_trusted_module:my_fn")
+    payload = _serialize_callable(ref, SaveLevel.EXECUTABLE_WITH_CALLABLES)
+    assert payload["portability"] == "import_ref"
+    assert payload["import_path"] == "my_trusted_module:my_fn"
+    assert "my_trusted_module" not in __import__("sys").modules  # no import happened
+
+    with pytest.raises(OpaqueCallableInExecutableSaveError):
+        _serialize_callable(ref, SaveLevel.PORTABLE)

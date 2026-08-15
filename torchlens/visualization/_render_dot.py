@@ -393,7 +393,7 @@ def _resolve_collapse_request(
         raise PayloadUnavailableError(
             "Must have all layers logged in order to render the graph",
             code="layers_not_logged",
-            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
+            remedy="re-capture with tl.trace(model, x) (default exhaustive capture) before drawing",
         )
     return request, repeat_folds, segments, segment_lookup
 

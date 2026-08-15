@@ -75,7 +75,7 @@ def test_none_abstain_uses_default_op() -> None:
 def test_noop_recorder_configuration_errors_at_construction() -> None:
     """A statically empty recorder configuration is rejected immediately."""
 
-    with pytest.raises(RecordingConfigError, match="requires a predicate"):
+    with pytest.raises(RecordingConfigError, match="would capture nothing"):
         tl.fastlog.Recorder(
             DefaultsModel(),
             save=None,

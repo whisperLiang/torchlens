@@ -436,7 +436,7 @@ def test_unrelated_capture_error_after_swallowed_nonfinite_settles_failed() -> N
 
     outcome = settle_failed(trace, None, unrelated, n_ops_committed=0)
     assert outcome.status is CaptureStatus.FAILED
-    assert outcome.error_type == "CaptureError"
+    assert outcome.error_type == "torchlens.errors._base.CaptureError"
     assert outcome.reason == "event stream desync"
 
     # The exact latched exception still classifies the clean abort.
@@ -516,7 +516,7 @@ def test_hostile_str_forward_keeps_identity_and_settles_failed() -> None:
     assert outcome is not None
     assert outcome.status is CaptureStatus.FAILED
     assert outcome.phase is CapturePhase.FORWARD
-    assert outcome.error_type == "_HostileStrError"
+    assert outcome.error_type.endswith("_HostileStrError")
     assert outcome.reason == "<unprintable _HostileStrError: __str__ raised>"
 
 

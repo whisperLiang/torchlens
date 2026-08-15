@@ -140,6 +140,27 @@ def _prescan_depth(text: str, *, max_depth: int, max_nodes: int = _MAX_JSON_NODE
         return _refuse(f"manifest JSON node count exceeds the maximum of {max_nodes}", text)
 
     if "\\" not in text:
+        # R60 fast refusal (b8): establish the node count at C speed FIRST --
+        # ``str.split('"')`` alternates outside/inside-string segments (no
+        # backslash means no escaped quotes), so counting separators/opens over
+        # the outside segments is exactly the loop's node accounting, at ~GB/s
+        # instead of ~1.6 MB/s of per-character Python. A 130 MB comma bomb is
+        # refused in ~0.2 s instead of ~80 s. Chunked so a front-loaded bomb
+        # refuses early and transient memory stays one chunk. The stateful scan
+        # below still owns the (order-dependent) depth ceiling. Disclosed
+        # residual: a payload carrying a backslash routes to the exact
+        # escape-aware scan, whose refusal stays CPU-slow near the ceiling.
+        fast_in_string = False
+        fast_nodes = 0
+        for start in range(0, len(text) or 1, _PRESCAN_CHUNK_CHARS):
+            segments = text[start : start + _PRESCAN_CHUNK_CHARS].split('"')
+            outside_segments = segments[1::2] if fast_in_string else segments[0::2]
+            for segment in outside_segments:
+                fast_nodes += segment.count(",") + segment.count("[") + segment.count("{")
+            if fast_nodes > max_nodes:
+                raise _too_many_nodes()
+            if (len(segments) - 1) % 2:
+                fast_in_string = not fast_in_string
         for start in range(0, len(text) or 1, _PRESCAN_CHUNK_CHARS):
             for char in _QUOTE_OR_BRACKET.findall(text[start : start + _PRESCAN_CHUNK_CHARS]):
                 if in_string:

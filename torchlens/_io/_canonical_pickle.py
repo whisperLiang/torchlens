@@ -6,9 +6,18 @@ streaming writers, independent of the scrub walk itself.
 """
 
 import pickle
+import struct
 from typing import Any
 
 __all__ = ["dump_canonical_metadata"]
+
+
+def _canonical_member_key(member: Any) -> tuple[int, str, str]:
+    """Total order that stays deterministic for NaN-carrying float members."""
+
+    if isinstance(member, float):
+        return (0, struct.pack(">d", member).hex(), "")
+    return (1, type(member).__qualname__, repr(member))
 
 
 class _CanonicalMetadataPickler(pickle._Pickler):
@@ -36,13 +45,25 @@ class _CanonicalMetadataPickler(pickle._Pickler):
 
         cls = type(obj)
         if cls is frozenset or cls is set:
-            try:
-                members = sorted(obj)
-            except TypeError:
-                # Heterogeneous members: any deterministic total order works
-                # for byte stability; type-name-then-repr is stable for the
-                # pure-data values the scrub admits.
-                members = sorted(obj, key=lambda member: (type(member).__qualname__, repr(member)))
+            members_list = list(obj)
+            if any(isinstance(member, float) and member != member for member in members_list):
+                # NaN members defeat ``sorted``'s comparison-based order (every
+                # comparison is False), silently leaving hash/iteration order in
+                # the bytes -- the exact instability this pickler exists to
+                # kill. Order them by their IEEE bit pattern instead (b3-sol
+                # hardening note: closed by construction, not by probe).
+                members = sorted(members_list, key=_canonical_member_key)
+            else:
+                try:
+                    members = sorted(members_list)
+                except TypeError:
+                    # Heterogeneous members: any deterministic total order works
+                    # for byte stability; type-name-then-repr is stable for the
+                    # pure-data values the scrub admits.
+                    members = sorted(
+                        members_list,
+                        key=lambda member: (type(member).__qualname__, repr(member)),
+                    )
             return (cls, (members,))
         return NotImplemented
 

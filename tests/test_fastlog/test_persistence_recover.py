@@ -319,8 +319,9 @@ def test_recover_oversized_index_refuses_typed(
     (bundle_path / "manifest.json").unlink()
     monkeypatch.setattr(recover_module, "_INDEX_MAX_BYTES", 8)
 
-    with pytest.raises(TorchLensIOError, match="ceiling"):
+    with pytest.raises(TorchLensIOError, match="ceiling") as excinfo:
         tl.fastlog.recover(bundle_path)
+    assert excinfo.value.fields["code"] == "fastlog_index_too_large"
 
 
 def test_recover_depth_bomb_metadata_degrades_to_empty_metadata(tmp_path: Path) -> None:
@@ -387,3 +388,106 @@ def test_disk_roundtrip_label_index_deduplicates_same_raw_label(tmp_path: Path) 
 
     assert loaded.by_label[label] == [(1, 0)]
     assert len(loaded[label]) == 1
+
+
+def test_cleanup_partial_treats_bundle_name_as_data_not_glob(tmp_path: Path) -> None:
+    """Glob metacharacters in the bundle name must not sweep sibling bundles' partials."""
+
+    victim_a = tmp_path / "run0.tmp.aaaa"
+    victim_b = tmp_path / "run1.tmp.bbbb"
+    for victim in (victim_a, victim_b):
+        victim.mkdir()
+        (victim / "PARTIAL").write_text("", encoding="utf-8")
+
+    removed = tl.fastlog.cleanup_partial(tmp_path / "run[01]")
+
+    assert removed == []
+    assert victim_a.is_dir()
+    assert victim_b.is_dir()
+
+
+def test_cleanup_partial_still_sweeps_own_partials(tmp_path: Path) -> None:
+    """The escaped pattern still matches the bundle's own temp directories."""
+
+    own = tmp_path / "run0.tmp.cccc"
+    own.mkdir()
+    (own / "PARTIAL").write_text("", encoding="utf-8")
+
+    removed = tl.fastlog.cleanup_partial(tmp_path / "run0")
+
+    assert removed == [own]
+    assert not own.exists()
+
+
+def test_disk_finalize_baseexception_marks_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A KeyboardInterrupt mid-finalize must leave a PARTIAL-marked .tmp dir."""
+
+    from torchlens.fastlog import storage_disk as storage_disk_module
+
+    def _interrupt(_entries: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(storage_disk_module, "_build_fastlog_manifest", _interrupt)
+
+    bundle_path = tmp_path / "interrupted.tlfast"
+    with pytest.raises(KeyboardInterrupt):
+        tl.fastlog.record(
+            PersistenceModel(),
+            torch.ones(1, 3),
+            default_op=True,
+            streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+        )
+
+    assert not bundle_path.exists()
+    debris = list(tmp_path.glob("interrupted.tlfast.tmp.*"))
+    assert len(debris) == 1
+    assert (debris[0] / "PARTIAL").exists()
+
+
+def test_disk_finalize_refuses_concurrently_created_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish must refuse, not silently replace, a target created mid-record."""
+
+    from torchlens.fastlog import storage_disk as storage_disk_module
+
+    bundle_path = tmp_path / "raced.tlfast"
+    real_build = storage_disk_module._build_fastlog_manifest
+
+    def _race_then_build(entries: object) -> object:
+        bundle_path.mkdir()
+        return real_build(entries)
+
+    monkeypatch.setattr(storage_disk_module, "_build_fastlog_manifest", _race_then_build)
+
+    with pytest.raises(TorchLensIOError, match="already exists"):
+        tl.fastlog.record(
+            PersistenceModel(),
+            torch.ones(1, 3),
+            default_op=True,
+            streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+        )
+
+    assert list(bundle_path.iterdir()) == []
+
+
+def test_recover_refuses_below_floor_bundle_instead_of_resurrecting(tmp_path: Path) -> None:
+    """R10-4 drop-not-resurrect: recover() honors the rehydration floor.
+
+    Fail-before: ``recover()`` swallowed the floor refusal with a bare pass and
+    salvaged the below-floor bundle through the index path as recovered=True --
+    resurrecting exactly what ``load()`` refuses.
+    """
+
+    from torchlens._io import ArtifactVersionBelowFloorError
+
+    bundle_path = tmp_path / "oldbundle.tlfast"
+    _write_bundle(bundle_path)
+    manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["tlspec_version"] = 5
+    (bundle_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactVersionBelowFloorError):
+        tl.fastlog.recover(bundle_path)
