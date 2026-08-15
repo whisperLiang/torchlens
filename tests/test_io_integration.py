@@ -268,9 +268,10 @@ def test_streaming_keep_outs_in_memory_true_keeps_tensor_and_ref(tmp_path: Path)
 
 
 @pytest.mark.rare
+@pytest.mark.skip(
+    reason="[2026-08-15] deliberate placeholder: torchlens is single-process by design, "
+    "so no DataParallel/DDP streaming capture exists to test; this entry documents the "
+    "absent coverage and is ledgered in tests/test_skip_audit.py (UNCONDITIONAL_SKIP_LEDGER)"
+)
 def test_data_parallel_and_ddp_streaming_case_is_explicitly_skipped() -> None:
     """Placeholder documenting that parallel-process streaming coverage is absent."""
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    pytest.skip("torchlens is single-process; DataParallel/DDP streaming coverage is skipped")
