@@ -839,6 +839,109 @@ def publish_active_trace(trace: "Trace") -> Iterator[None]:
             _active_owner_thread_id = None
 
 
+class _BackwardCapturePublication:
+    """Admission-locked publish/restore handle for a torch backward window.
+
+    ``_run_backward_with_capture`` historically raw-swapped ``_active_trace``
+    (plus the hook plan and intervention spec) with an unlocked save/restore
+    — the single site left unconverted when tf/paddle moved to
+    ``publish_active_trace``. Interleaved with a concurrent capture, the
+    unlocked read could snapshot that capture's live trace as "previous" and
+    the ``finally`` could republish it after the capture had finished,
+    leaving ``_active_trace`` permanently non-``None`` — every later
+    capture's admission check then refuses (a process-global wedge).
+
+    ``publish_active_trace`` itself cannot be reused verbatim: backward
+    windows legitimately NEST on one thread (the multi-trace backward
+    bracket, an inner ``backward()`` inside a traced forward), so this handle
+    keeps the exact same-thread save/restore semantics of the raw swap while
+    refusing a window owned by ANOTHER thread typed under the admission lock.
+    Cross-thread "previous" snapshots are therefore impossible, which is what
+    kills the wedge.
+
+    Not a context manager: both backward unwind arms must restore the
+    globals FIRST and then run fallible cleanup, so the owner calls
+    ``restore()`` explicitly. ``restore()`` is idempotent and safe against a
+    double-restore from stacked unwind arms.
+    """
+
+    __slots__ = ("_prev_trace", "_prev_owner", "_prev_plan", "_prev_spec", "_restored")
+
+    def __init__(
+        self,
+        prev_trace: "Trace | None",
+        prev_owner: int | None,
+        prev_plan: object,
+        prev_spec: object,
+    ) -> None:
+        """Snapshot the previous owner globals (caller holds the admission lock)."""
+
+        self._prev_trace = prev_trace
+        self._prev_owner = prev_owner
+        self._prev_plan = prev_plan
+        self._prev_spec = prev_spec
+        self._restored = False
+
+    def restore(self) -> None:
+        """Restore the snapshotted owner globals under the admission lock."""
+
+        global _active_trace, _active_owner_thread_id
+        global _active_hook_plan, _active_intervention_spec
+        if self._restored:
+            return
+        with _capture_admission_lock:
+            if self._restored:
+                return
+            _active_trace = self._prev_trace
+            _active_owner_thread_id = self._prev_owner
+            _active_hook_plan = self._prev_plan
+            _active_intervention_spec = self._prev_spec
+            self._restored = True
+
+
+def publish_backward_capture(
+    trace: "Trace",
+    *,
+    hook_plan: object,
+    intervention_spec: object,
+) -> _BackwardCapturePublication:
+    """Publish a backward capture window; refuse a foreign live window typed.
+
+    Same-thread nesting (an already-published capture or backward window
+    owned by THIS thread) is the sanctioned multi-trace/nested-backward path
+    and keeps save/restore semantics; a window owned by another thread — or a
+    capture reservation held by another thread — raises the same typed
+    ``ReentrantTraceError`` admission uses, instead of silently corrupting
+    the other thread's capture.
+
+    Returns
+    -------
+    _BackwardCapturePublication
+        Handle whose ``restore()`` puts the previous owner globals back.
+    """
+
+    global _active_trace, _active_owner_thread_id
+    global _active_hook_plan, _active_intervention_spec
+    ident = threading.get_ident()
+    with _capture_admission_lock:
+        window_live = _active_trace is not None or _logging_enabled
+        if window_live and _active_owner_thread_id != ident:
+            raise _reentrant_refusal()
+        if _capture_reserved_by is not None and _capture_reserved_by != ident:
+            raise _reentrant_refusal()
+        publication = _BackwardCapturePublication(
+            _active_trace,
+            _active_owner_thread_id,
+            _active_hook_plan,
+            _active_intervention_spec,
+        )
+        _active_trace = trace
+        _active_owner_thread_id = ident
+        _active_hook_plan = hook_plan
+        _active_intervention_spec = intervention_spec
+    return publication
+
+
 @contextmanager
 def active_logging(trace: "Trace") -> Iterator[None]:
     """Activate logging for the duration of a forward pass.

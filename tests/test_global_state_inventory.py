@@ -1330,6 +1330,92 @@ def test_publish_active_trace_refuses_concurrent_and_clears_owner() -> None:
     assert owner_errors == []
 
 
+def test_publish_backward_capture_nests_same_thread_and_restores() -> None:
+    """The backward publication handle keeps raw-swap nesting semantics.
+
+    The multi-trace backward bracket and an inner ``backward()`` inside a
+    traced forward legitimately nest backward windows on ONE thread, so the
+    admission-locked replacement for the raw ``_active_trace`` swap must
+    save/restore LIFO on the same thread, restore exactly once (idempotent
+    against stacked unwind arms), and clear the owner id at the end.
+    """
+
+    outer = cast("Any", object())
+    inner = cast("Any", object())
+    outer_publication = _state.publish_backward_capture(
+        outer, hook_plan=None, intervention_spec=None
+    )
+    try:
+        assert _state._active_trace is outer
+        assert _state._active_owner_thread_id == threading.get_ident()
+        inner_publication = _state.publish_backward_capture(
+            inner, hook_plan=None, intervention_spec=None
+        )
+        assert _state._active_trace is inner
+        inner_publication.restore()
+        assert _state._active_trace is outer
+        inner_publication.restore()  # idempotent: must NOT re-clobber to inner
+        assert _state._active_trace is outer
+    finally:
+        outer_publication.restore()
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+
+
+def test_log_backward_refuses_foreign_live_window_instead_of_wedging() -> None:
+    """``log_backward`` concurrent with a foreign capture window refuses typed.
+
+    The last unconverted raw ``_active_trace`` swap: interleaved with another
+    thread's live window, the unlocked save could snapshot that window's trace
+    as "previous" and the ``finally`` republished it after the window closed —
+    ``_active_trace`` stayed permanently non-``None`` and EVERY later capture
+    was refused (a process-global wedge). The admission-locked publication
+    refuses the foreign window typed instead; after the window closes the same
+    backward and later captures run untouched.
+    """
+
+    torch.manual_seed(0)
+    model = nn.Linear(4, 2)
+    x = torch.randn(2, 4, requires_grad=True)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=True))
+    loss = trace[trace.output_layers[0]].out.sum()
+
+    sentinel = cast("Any", object())
+    entered = threading.Event()
+    release = threading.Event()
+    window_errors: list[BaseException] = []
+
+    def hold_window() -> None:
+        """Hold a foreign non-forward publication window open."""
+
+        try:
+            with _state.publish_active_trace(sentinel):
+                entered.set()
+                release.wait(timeout=20.0)
+        except BaseException as error:  # pragma: no cover - surfaced by asserts
+            window_errors.append(error)
+
+    holder = threading.Thread(target=hold_window)
+    holder.start()
+    assert entered.wait(timeout=5.0), "foreign window never opened"
+    try:
+        with pytest.raises(_state.ReentrantTraceError, match="not re-entrant"):
+            trace.log_backward(loss)
+    finally:
+        release.set()
+        holder.join(timeout=10.0)
+    assert window_errors == []
+
+    # No wedge: the globals are clean, the refused backward runs now, and a
+    # later capture is admitted.
+    assert _state._active_trace is None
+    assert _state._active_owner_thread_id is None
+    trace.log_backward(loss)
+    assert int(trace.num_backward_passes) == 1
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
 def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> None:
     """The reservation never leaks (wedging admission) and nests same-thread.
 

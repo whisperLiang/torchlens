@@ -2943,9 +2943,6 @@ def _run_backward_with_capture(
     _ensure_not_chunked_forward_backward(trace)
     if loss.grad_fn is None:
         raise ValueError("cannot run backward: loss has no grad_fn / is detached")
-    previous_trace = _state._active_trace
-    previous_plan = _state._active_hook_plan
-    previous_spec = _state._active_intervention_spec
     if getattr(trace, "_tl_active_backward_bracket", False):
         return backward_callable()
     _close_implicit_backward_pass_if_open(trace)
@@ -2958,12 +2955,21 @@ def _run_backward_with_capture(
     active_save_grads_policy = (
         getattr(trace, "save_grads", None) if save_grads is MISSING else save_grads
     )
+    # Publish the backward window through the admission lock (R54: the raw
+    # unlocked save/swap here was the one site left when tf/paddle converted;
+    # a cross-thread interleave could snapshot a concurrent capture's trace as
+    # "previous" and republish it after that capture finished, wedging every
+    # later admission). Same-thread nesting (multi-trace bracket, inner
+    # backward inside a traced forward) keeps its save/restore semantics; a
+    # foreign thread's live window refuses typed BEFORE any trace scratch is
+    # written.
+    intervention_spec = getattr(trace, "_intervention_spec", None)
+    publication = _state.publish_backward_capture(
+        trace,
+        hook_plan=[*normalize_hooks_from_spec(intervention_spec)],
+        intervention_spec=intervention_spec,
+    )
     trace._active_save_grads_policy = active_save_grads_policy
-    _state._active_trace = trace
-    _state._active_intervention_spec = getattr(trace, "_intervention_spec", None)
-    _state._active_hook_plan = [
-        *normalize_hooks_from_spec(_state._active_intervention_spec),
-    ]
     pass_index = int(getattr(trace, "num_backward_passes", 0)) + 1
     trace._active_backward_pass_index = pass_index
     trace._implicit_backward_pass_open = False
@@ -3007,9 +3013,7 @@ def _run_backward_with_capture(
         # Restore process-global and per-pass scratch state before any fallible
         # cleanup. The graph walk can be interrupted after registering only a
         # prefix of hooks, so unwind those handles and disarm fail-closed.
-        _state._active_trace = previous_trace
-        _state._active_hook_plan = previous_plan
-        _state._active_intervention_spec = previous_spec
+        publication.restore()
         trace.__dict__.pop("_tl_active_backward_bracket", None)
         trace.__dict__.pop("_active_backward_pass_index", None)
         if previous_had_save_grads_policy:
@@ -3055,9 +3059,7 @@ def _run_backward_with_capture(
     finally:
         # Restore globals and per-pass scratch FIRST. Every operation below is
         # user/framework code or non-trivial bookkeeping and may raise.
-        _state._active_trace = previous_trace
-        _state._active_hook_plan = previous_plan
-        _state._active_intervention_spec = previous_spec
+        publication.restore()
         trace.__dict__.pop("_tl_active_backward_bracket", None)
         trace.__dict__.pop("_active_backward_pass_index", None)
         if previous_had_save_grads_policy:
