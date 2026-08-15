@@ -5408,3 +5408,52 @@ class RandomGraphModel(nn.Module):
                 for layer in group:
                     x = layer(x)
         return x
+
+
+#  *************************************
+#  **** Canonical Tiny Test Models  ****
+#  *************************************
+# R77 fixture-health finding 4: these are the most-duplicated inline tiny
+# models across tests/ (each shape was independently redefined in 7-13 test
+# files). Import these instead of redefining them per file; keep them frozen,
+# since many suites depend on the exact op sequence (labels like relu_1_1 and
+# add_1_1) and, for TinyLinearRelu, the module address "lin".
+
+
+class TinyAddOne(nn.Module):
+    """Parameterless one-op model: ``x + 1``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + 1
+
+
+class TinyRelu(nn.Module):
+    """Parameterless one-op model: ``torch.relu(x)``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x)
+
+
+class TinyAddRelu(nn.Module):
+    """Parameterless two-op chain: ``torch.relu(x + 1)``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x + 1)
+
+
+class TinyReluAdd(nn.Module):
+    """Parameterless two-op chain: ``torch.relu(x) + 1``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x) + 1
+
+
+class TinyLinearRelu(nn.Module):
+    """One linear layer (module address ``lin``) followed by a relu."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.lin(x))

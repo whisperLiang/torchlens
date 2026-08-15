@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from torch import nn
+from example_models import TinyReluAdd as _ReluModel
 
 import torchlens as tl
 from torchlens.intervention.errors import UntrustedCallableError
@@ -39,15 +39,6 @@ from torchlens.intervention.save import (
     _resolve_import_ref,
     load_intervention_spec,
 )
-
-
-class _ReluModel(nn.Module):
-    """Tiny model with a single ``relu`` op to attach a hook to."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return ``relu(x) + 1``."""
-
-        return torch.relu(x) + 1
 
 
 def _write_evil_module(tmp_path: Path, sentinel: Path) -> str:

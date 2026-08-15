@@ -4,30 +4,11 @@ from __future__ import annotations
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _TinyInterventionModel
 
 import torchlens as tl
 from torchlens import _state
 from torchlens.options import CaptureOptions
-
-
-class _TinyInterventionModel(torch.nn.Module):
-    """Small model for intervention-ready capture checks."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run a simple loggable graph.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            ReLU output shifted by one.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _MultiOutputModel(torch.nn.Module):
