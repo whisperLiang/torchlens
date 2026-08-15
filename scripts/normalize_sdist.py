@@ -1,24 +1,28 @@
 #!/usr/bin/env python
-"""Normalize sdist tarballs in place so equal inputs give equal bytes.
+"""Normalize sdists AND wheels in place so equal inputs give equal bytes.
 
-``python -m build`` under ``SOURCE_DATE_EPOCH`` produces a deterministic wheel,
-but the sdist stayed non-reproducible for two root-caused reasons (grind r4,
-R86-1): the gzip ENVELOPE stores the compression wall-clock time in its header
-(4 bytes that differ on every rebuild), and the tar members carry the build
-user's uid/gid/uname/gname (which differ across machines, e.g. a CI runner vs
-a maintainer checkout reproducing a release). Member mtimes are pinned to
-SOURCE_DATE_EPOCH as a belt for the same cross-machine reason.
+``python -m build`` under ``SOURCE_DATE_EPOCH`` produces a wheel whose
+timestamps are deterministic, but two machine-dependent residuals remained
+(grind r4 R86-1; grind r5 b10 R84-1, MEASURED): the sdist's gzip ENVELOPE
+stores the compression wall-clock time, its tar members carry the build
+user's uid/gid/uname/gname, and BOTH artifacts carry source-file MODES
+(``chmod 644`` vs ``664`` under umask 022 vs 002 — a GitHub runner vs a
+group-writable maintainer checkout), in the tar member headers and the
+wheel zip entries' ``external_attr`` respectively. Modes are normalized to
+0o644 (0o755 when any execute bit is set) so a checkout's umask can never
+change published bytes.
 
 Usage (exactly how the release build_command and the nightly double-build gate
 invoke it)::
 
     SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-        python scripts/normalize_sdist.py dist/*.tar.gz
+        python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl
 
 The script is deterministic and idempotent: PAX output format, uid/gid 0,
-empty user/group names, member mtime = SOURCE_DATE_EPOCH, gzip header mtime 0
-with no embedded filename, compression level 9. It refuses to run without
-SOURCE_DATE_EPOCH rather than silently minting a non-reproducible artifact.
+empty user/group names, member mtime = SOURCE_DATE_EPOCH, normalized member
+modes, gzip header mtime 0 with no embedded filename, compression level 9
+for both containers. It refuses to run without SOURCE_DATE_EPOCH rather
+than silently minting a non-reproducible artifact.
 """
 
 from __future__ import annotations
@@ -28,6 +32,13 @@ import io
 import os
 import sys
 import tarfile
+import zipfile
+
+
+def _normalized_mode(mode: int) -> int:
+    """Map any source-file mode to the canonical 644/755 pair."""
+
+    return 0o755 if mode & 0o111 else 0o644
 
 
 def normalize_sdist(path: str, epoch: int) -> None:
@@ -56,6 +67,9 @@ def normalize_sdist(path: str, epoch: int) -> None:
             member.gname = ""
             member.mtime = epoch
             member.pax_headers = {}
+            # The build user's umask leaks into member modes (644 vs 664)
+            # and forked sdist bytes across machines (grind r5, b10 R84-1).
+            member.mode = _normalized_mode(member.mode)
             payload = source.extractfile(member) if member.isreg() else None
             target.addfile(member, payload)
 
@@ -72,13 +86,46 @@ def normalize_sdist(path: str, epoch: int) -> None:
         recompressed.write(normalized_tar.getvalue())
 
 
+def normalize_wheel(path: str) -> None:
+    """Rewrite one ``.whl`` with normalized zip entry modes.
+
+    The wheel's timestamps are already deterministic under
+    ``SOURCE_DATE_EPOCH``, but data/license members inherit their source
+    files' modes in ``external_attr`` (measured: 7 members differing 0o644
+    vs 0o664 across umasks, CRCs identical — grind r5, b10 R84-1). Entry
+    order, names, timestamps, and contents are preserved; only the unix
+    mode bits are canonicalized, so RECORD hashes stay valid.
+
+    Parameters
+    ----------
+    path:
+        Path of the wheel to rewrite in place.
+    """
+
+    normalized = io.BytesIO()
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(normalized, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as target,
+    ):
+        for info in source.infolist():
+            data = source.read(info.filename)
+            clone = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            clone.compress_type = zipfile.ZIP_DEFLATED
+            clone.create_system = 3  # unix, so the mode bits are authoritative
+            mode = (info.external_attr >> 16) & 0o7777
+            clone.external_attr = (0o100000 | _normalized_mode(mode)) << 16
+            target.writestr(clone, data)
+    with open(path, "wb") as output:
+        output.write(normalized.getvalue())
+
+
 def main(argv: list[str]) -> int:
-    """Normalize every sdist named on the command line.
+    """Normalize every sdist / wheel named on the command line.
 
     Parameters
     ----------
     argv:
-        Paths of ``.tar.gz`` sdists to normalize.
+        Paths of ``.tar.gz`` sdists and ``.whl`` wheels to normalize.
 
     Returns
     -------
@@ -87,19 +134,22 @@ def main(argv: list[str]) -> int:
     """
 
     if not argv:
-        print("usage: normalize_sdist.py DIST.tar.gz [...]", file=sys.stderr)
+        print("usage: normalize_sdist.py DIST.tar.gz DIST.whl [...]", file=sys.stderr)
         return 2
     epoch_text = os.environ.get("SOURCE_DATE_EPOCH")
     if not epoch_text or not epoch_text.isdigit():
         print(
             "normalize_sdist.py: SOURCE_DATE_EPOCH must be set to an integer "
-            "timestamp (refusing to mint a non-reproducible sdist)",
+            "timestamp (refusing to mint a non-reproducible artifact)",
             file=sys.stderr,
         )
         return 2
     epoch = int(epoch_text)
     for path in argv:
-        normalize_sdist(path, epoch)
+        if path.endswith(".whl"):
+            normalize_wheel(path)
+        else:
+            normalize_sdist(path, epoch)
         print(f"normalized {path} (epoch {epoch})")
     return 0
 

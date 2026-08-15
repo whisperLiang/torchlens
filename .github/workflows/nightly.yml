@@ -474,25 +474,41 @@ jobs:
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             python -m build --outdir "${{ runner.temp }}/dist"
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist/torchlens-*.tar.gz
+            python scripts/normalize_sdist.py \
+            "${{ runner.temp }}"/dist/torchlens-*.tar.gz \
+            "${{ runner.temp }}"/dist/torchlens-*.whl
 
       - name: Fail on a non-reproducible wheel or sdist (double-build gate)
         # Same commit + same SOURCE_DATE_EPOCH must give byte-identical
         # artifacts (grind r3, R86: six dist-info timestamps used to differ
-        # on every wheel rebuild). The sdist joined the gate in grind r4:
-        # its two non-determinism root causes (gzip header wall-clock mtime,
-        # builder uid/gid in tar members) are normalized by
-        # scripts/normalize_sdist.py exactly as in the release build_command,
-        # so the former "gzip envelope not reproducible" residual is closed
-        # and enforced here. The stale local build/ tree is removed first:
-        # bdist_wheel silently reuses build/lib and can resurrect files
-        # pruned since the last build.
+        # on every wheel rebuild). The sdist joined the gate in grind r4
+        # (gzip header wall-clock mtime, builder uid/gid in tar members),
+        # and grind r5 (b10 R84-1/2) proved the same-runner rebuild held
+        # every MACHINE-dependent field constant by construction — a gate
+        # proving determinism while labelled reproducibility. The rebuild
+        # therefore runs under a DIFFERENT umask (002 vs the runner's 022)
+        # from a freshly re-checked-out tree, exercising exactly the
+        # source-file-mode leak measured across checkouts; normalize_sdist
+        # stamps modes in both artifacts so the shas must still match. The
+        # stale local build/ tree is removed first: bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build.
         run: |
           rm -rf build
-          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --outdir "${{ runner.temp }}/dist-rebuild"
-          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz
+          rebuild_src="${{ runner.temp }}/rebuild-src"
+          git worktree add --detach "$rebuild_src" HEAD
+          (
+            cd "$rebuild_src"
+            umask 002
+            chmod -R g+w .
+            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+              python -m build --outdir "${{ runner.temp }}/dist-rebuild"
+            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+              python scripts/normalize_sdist.py \
+              "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz \
+              "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl
+          )
+          git worktree remove --force "$rebuild_src"
           for kind in whl tar.gz; do
             first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.$kind | cut -d' ' -f1)"
             second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.$kind | cut -d' ' -f1)"

@@ -561,10 +561,13 @@ major_on_zero = true
 # wheel job PARSES this build_command for its own build== install, so its
 # double-build gate always attests exactly the builder the release uses.
 #
-# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel deterministic, and
-# scripts/normalize_sdist.py makes the sdist deterministic too (grind r4,
-# R86-1 root causes: gzip header wall-clock mtime + builder uid/gid/uname/
-# gname in the tar members). The nightly double-build gate attests BOTH
+# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel's timestamps
+# deterministic, and scripts/normalize_sdist.py normalizes the remaining
+# machine-dependent metadata in BOTH artifacts (grind r4 R86-1: gzip header
+# wall-clock mtime + builder uid/gid/uname/gname in the tar members; grind
+# r5 b10 R84-1, measured: the build user's umask leaking source-file modes
+# into tar member headers and wheel zip external_attr). The nightly
+# double-build gate rebuilds under a DIFFERENT umask and attests both
 # artifacts byte-identical.
 #
 # REPRODUCE FROM A TAG (grind r4 recipe correction): python-semantic-release
@@ -577,8 +580,8 @@ major_on_zero = true
 #   pip install 'build==1.5.0'
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
-#       python scripts/normalize_sdist.py dist/*.tar.gz
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
+#       python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl
+build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
