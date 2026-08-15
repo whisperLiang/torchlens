@@ -1097,3 +1097,37 @@ def test_capability_dependent_cache_clear_actually_clears() -> None:
     _clear_capability_dependent_caches()
     for function in primed:
         assert function.cache_info().currsize == 0, f"{function} survived the probe restore"
+
+
+def test_usage_stats_gate_arms_on_documented_backstop_spellings() -> None:
+    """Every documented broad tier spelling arms the ArgSpec usage gate.
+
+    The predicate compared literal markexpr strings, so the DOCUMENTED
+    phase-boundary spelling `-m "not rare and not slow"` and the mid
+    backstop silently disarmed the usage-coverage audit while the code's own
+    comment says any broad subset is sound (b2 R41/B2R5-15, proven twice).
+    """
+
+    from types import SimpleNamespace
+
+    from tests.conftest import TESTS_DIR, _is_full_usage_stats_run
+
+    def config(markexpr: str, keyword: str = "", args: list[str] | None = None):
+        return SimpleNamespace(
+            option=SimpleNamespace(keyword=keyword, markexpr=markexpr),
+            args=args if args is not None else [str(TESTS_DIR)],
+        )
+
+    for spelling in (
+        "",
+        "not rare",
+        "not slow and not rare",
+        "not rare and not slow",
+        "not rare and not slow and not heavy",
+        "(not rare) and (not slow)",
+    ):
+        assert _is_full_usage_stats_run(config(spelling)), spelling
+    for narrowed in ("smoke", "slow", "not rare and heavy", "rare"):
+        assert not _is_full_usage_stats_run(config(narrowed)), narrowed
+    assert not _is_full_usage_stats_run(config("", keyword="foo"))
+    assert not _is_full_usage_stats_run(config("", args=[str(Path(TESTS_DIR) / "sub")]))
