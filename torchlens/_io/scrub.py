@@ -358,11 +358,18 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         remapped = remap_barcode_text(value)
         if not isinstance(remapped, str):
             return remapped
-        tokens = _EQUIV_PARAM_TOKEN.findall(remapped)
-        if len(tokens) <= 1:
+        matches = list(_EQUIV_PARAM_TOKEN.finditer(remapped))
+        if len(matches) <= 1:
             return remapped
-        prefix = remapped[: remapped.index(tokens[0])]
-        return prefix + "_".join(sorted(tokens))
+        tokens = [match.group(0) for match in matches]
+        run_start = matches[0].start()
+        run_end = matches[-1].end()
+        # Sort ONLY the contiguous param-token run; the producer legally appends
+        # `_outindex{N}` (multi-output param ops) after it, and dropping that tail
+        # collides all N keys into one, silently losing equivalence groups.
+        if remapped[run_start:run_end] != "_".join(tokens):
+            return remapped
+        return remapped[:run_start] + "_".join(sorted(tokens)) + remapped[run_end:]
 
     equivalence_class_map: dict[str, str] = {}
     for param in params:
