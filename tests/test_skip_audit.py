@@ -91,6 +91,12 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
         "PyMuPDF PDF-render inspection helper, undeclared; extras-gap candidate reported 2026-08-15",
     ),
     "flax.nnx": (OPTIONAL_PREVIEW, "jax extra"),
+    "git": (
+        UNAVAILABLE_OK,
+        "gitpython, a python-semantic-release dependency; release-environment-only "
+        "(installed from the hash-locked release-requirements.txt by the lint "
+        "release-defenses job)",
+    ),
     "graphviz": (TEST_EXTRA, "core torchlens dependency (dist 'graphviz')"),
     "jax": (OPTIONAL_PREVIEW, "jax extra"),
     "jax.experimental.shard_map": (OPTIONAL_PREVIEW, "jax extra"),
@@ -130,6 +136,12 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
     "pytorch_lightning": (TEST_EXTRA, "ships inside the 'lightning' distribution"),
     "rsatoolbox": (OPTIONAL_PREVIEW, "neuro extra"),
     "sae_lens": (OPTIONAL_PREVIEW, "sae extra"),
+    "semantic_release": (
+        UNAVAILABLE_OK,
+        "python-semantic-release, deliberately in no dev extra; release-environment-"
+        "only (installed from the hash-locked release-requirements.txt by the lint "
+        "release-defenses job, which executes tests/test_no_major_parser.py)",
+    ),
     "sentence_transformers": (OPTIONAL_PREVIEW, "compat-shims extra"),
     "tensorboard": (
         UNAVAILABLE_OK,
