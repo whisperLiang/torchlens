@@ -69,6 +69,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 #: mutant id -> (relative file, function to neuter with ``return None``).
@@ -292,12 +293,68 @@ def enumerate_raise_arms(src: str, func: str) -> list[tuple[int, int, int]]:
     )
 
 
+def while_exit_arm_keys(src: str, func: str) -> set[tuple[int, int, int]]:
+    """Return the arm keys of ``func`` that sit inside a ``while`` body.
+
+    A raise that is the sole exit of a ``while`` walk turns into an INFINITE
+    LOOP under the ``pass`` operator (b9-opus R74r5-F2: the
+    ``module_containment_logic`` cycle guard held 99.9% CPU for 28 minutes
+    against a 2.5-minute suite). Those arms take the termination-preserving
+    ``break`` operator instead — the raise is still disarmed (the violation
+    goes undetected), but the mutant's margin is measurable at all.
+
+    Parameters
+    ----------
+    src:
+        Module source text.
+    func:
+        Checker function name.
+
+    Returns
+    -------
+    set[tuple[int, int, int]]
+        ``(lineno, end_lineno, col_offset)`` keys of while-body arms.
+    """
+
+    target = _function_node(ast.parse(src), func)
+    keys: set[tuple[int, int, int]] = set()
+
+    def _collect(node: ast.AST, in_while_body: bool) -> None:
+        if in_while_body and _is_invariant_raise(node):
+            raise_node = node
+            keys.add(
+                (
+                    raise_node.lineno,
+                    raise_node.end_lineno or raise_node.lineno,
+                    raise_node.col_offset,
+                )
+            )
+        if isinstance(node, ast.While):
+            # ``break`` is legal in the body; the ``orelse`` block keeps the
+            # enclosing status (a break there would be a syntax error).
+            for stmt in node.body:
+                _collect(stmt, True)
+            for stmt in node.orelse:
+                _collect(stmt, in_while_body)
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if node is not target:
+                return
+        for child in ast.iter_child_nodes(node):
+            _collect(child, in_while_body)
+
+    _collect(target, False)
+    return keys
+
+
 def neuter_raise_arm(path: Path, func: str, index: int) -> str:
-    """Replace exactly one raise arm of ``func`` with ``pass`` and return the original.
+    """Disarm exactly one raise arm of ``func`` and return the original source.
 
     Every other arm and every other statement keeps running -- the surgical
     single-arm disarm the whole-function operator cannot model (b9-opus
     R74r4-F1: two such disarms survived the full arming suite silently).
+    Arms inside a ``while`` body are replaced with ``break`` (termination
+    preserved, R74r5-F2); all others with ``pass``.
 
     Parameters
     ----------
@@ -319,8 +376,9 @@ def neuter_raise_arm(path: Path, func: str, index: int) -> str:
     if index >= len(arms):
         raise SystemExit(f"{func} in {path} has {len(arms)} arms; no index {index}")
     lineno, end_lineno, col = arms[index]
+    keyword = "break" if (lineno, end_lineno, col) in while_exit_arm_keys(src, func) else "pass"
     lines = src.splitlines(keepends=True)
-    replacement = f"{' ' * col}pass  # R74-ARM-MUTANT\n"
+    replacement = f"{' ' * col}{keyword}  # R74-ARM-MUTANT\n"
     lines[lineno - 1 : end_lineno] = [replacement]
     path.write_text("".join(lines), encoding="utf-8")
     return src
@@ -474,7 +532,22 @@ def parse_failures(stdout: str) -> frozenset[str]:
     return frozenset(failed)
 
 
-def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProcess:
+class SuiteTimeout:
+    """Sentinel result for a suite run killed at its wall-clock deadline.
+
+    A TIMEOUT is its own verdict — never a kill, never a pass, same doctrine
+    as ERROR (R74r5-F2: a non-terminating mutant held a sandbox for 28
+    minutes because ``run_suite`` had no deadline and the driver waited
+    forever).
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+
+def run_suite(
+    sandbox: Path, python: str, tag: str, timeout: float | None = None
+) -> subprocess.CompletedProcess | SuiteTimeout:
     """Run the bounded arming suite inside the sandbox.
 
     No ``-x``: kill attribution needs the FULL failed set of every run, both
@@ -489,11 +562,14 @@ def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProce
         Python executable to run pytest with.
     tag:
         Unique tag for basetemp/cache isolation.
+    timeout:
+        Wall-clock deadline in seconds; ``None`` runs unbounded (the
+        pristine control, whose wall time seeds the mutant deadline).
 
     Returns
     -------
-    subprocess.CompletedProcess
-        The finished pytest process.
+    subprocess.CompletedProcess | SuiteTimeout
+        The finished pytest process, or the timeout sentinel.
     """
 
     cache = sandbox / f".cache-{tag}"
@@ -508,7 +584,12 @@ def run_suite(sandbox: Path, python: str, tag: str) -> subprocess.CompletedProce
         CUDA_VISIBLE_DEVICES="",
         TORCHLENS_CACHE_DIR=str(cache),
     )
-    return subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=sandbox)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, env=env, cwd=sandbox, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return SuiteTimeout(float(timeout or 0.0))
 
 
 def main() -> None:
@@ -532,6 +613,21 @@ def main() -> None:
         "--family",
         choices=("registry", "checks", "blocks", "exempt", "arms"),
         help="score only one mutant family (a full arm campaign is ~161 runs)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help=(
+            "per-mutant suite deadline in seconds (default: 4x the measured "
+            "control wall time, min 300; 1800 with --skip-control)"
+        ),
+    )
+    parser.add_argument(
+        "--arm-shard",
+        default=None,
+        metavar="I/N",
+        help="score only shard I of N (1-based) of the selected ids, for CI rotation",
     )
     args = parser.parse_args()
 
@@ -599,12 +695,23 @@ def main() -> None:
     unknown = [mid for mid in ids if mid not in plan]
     if unknown:
         raise SystemExit(f"unknown mutant ids: {unknown}")
+    if args.arm_shard:
+        shard_index_text, _, shard_count_text = args.arm_shard.partition("/")
+        shard_index, shard_count = int(shard_index_text), int(shard_count_text)
+        if not (1 <= shard_index <= shard_count):
+            raise SystemExit(f"bad --arm-shard {args.arm_shard!r}: need 1 <= I <= N")
+        ids = [mid for pos, mid in enumerate(sorted(ids)) if pos % shard_count == shard_index - 1]
+        print(f"shard {shard_index}/{shard_count}: {len(ids)} mutants", flush=True)
 
     # Pristine control: verdicts are meaningless over a red baseline (the b9
     # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
     control_failures: frozenset[str] = frozenset()
+    timeout = args.timeout
     if not args.skip_control:
+        control_started = time.monotonic()
         control = run_suite(sandbox, args.python, "control")
+        control_wall = time.monotonic() - control_started
+        assert not isinstance(control, SuiteTimeout)  # control runs unbounded
         control_failures = parse_failures(control.stdout)
         if control.returncode != 0:
             named = "\n".join(sorted(control_failures)) or "\n".join(
@@ -614,7 +721,13 @@ def main() -> None:
                 "PRISTINE CONTROL RED -- fix or deselect the baseline before "
                 f"scoring any mutant:\n{named}"
             )
-        print("control: GREEN", flush=True)
+        if timeout is None:
+            # R74r5-F2: a non-terminating mutant must produce a TIMEOUT
+            # verdict, never hold the sandbox forever.
+            timeout = max(300.0, 4.0 * control_wall)
+        print(f"control: GREEN ({control_wall:.0f}s; mutant deadline {timeout:.0f}s)", flush=True)
+    elif timeout is None:
+        timeout = 1800.0
 
     results: dict[str, dict[str, object]] = {}
     for mid in ids:
@@ -630,9 +743,23 @@ def main() -> None:
             original = neuter_before_marker(path, func, marker, value)
             operator = f"return {value} before marker {marker!r}"
         try:
-            proc = run_suite(sandbox, args.python, mid)
+            proc = run_suite(sandbox, args.python, mid, timeout=timeout)
         finally:
             path.write_text(original, encoding="utf-8")
+        if isinstance(proc, SuiteTimeout):
+            # R74r5-F2: never a kill, never a pass -- same doctrine as ERROR.
+            results[mid] = {
+                "file": rel,
+                "func": func,
+                "operator": operator,
+                "returncode": None,
+                "verdict": "TIMEOUT",
+                "killers": [],
+                "n_killers": 0,
+                "tail": [f"suite exceeded the {proc.seconds:.0f}s deadline"],
+            }
+            print(json.dumps({mid: results[mid]}), flush=True)
+            continue
         failures = parse_failures(proc.stdout)
         killers = sorted(failures - control_failures)
         if proc.returncode != 0 and not failures:
@@ -656,12 +783,15 @@ def main() -> None:
 
     survivors = sorted(mid for mid, row in results.items() if row["verdict"] == "SURVIVOR")
     errors = sorted(mid for mid, row in results.items() if row["verdict"] == "ERROR")
+    timeouts = sorted(mid for mid, row in results.items() if row["verdict"] == "TIMEOUT")
     print("RESULTS " + json.dumps(results))
     if errors:
         print(f"ERRORS: {errors} -- suite crashed before scoring; not a kill, not a pass")
+    if timeouts:
+        print(f"TIMEOUTS: {timeouts} -- suite never terminated; not a kill, not a pass")
     if survivors:
         print(f"SURVIVORS: {survivors} -- each needs a new planted-corruption test")
-    if errors or survivors:
+    if errors or survivors or timeouts:
         raise SystemExit(1)
     print("all mutants KILLED")
 

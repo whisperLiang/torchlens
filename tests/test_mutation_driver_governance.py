@@ -180,3 +180,93 @@ def test_deselect_ledger_entries_are_still_red() -> None:
         "'known red' silently deletes the kill margin of whatever mutants its "
         "test would catch. Remove these rows:\n  " + "\n  ".join(stale)
     )
+
+
+@pytest.mark.smoke
+def test_while_exit_arms_take_the_break_operator(tmp_path: Path) -> None:
+    """A raise inside a ``while`` body is disarmed with ``break``, not ``pass``.
+
+    b9-opus R74r5-F2: the ``pass`` operator on a loop-exit arm produced a
+    NON-TERMINATING mutant (the module_containment_logic cycle guard spun a
+    sandbox at 99.9% CPU for 28 minutes). ``break`` disarms the raise while
+    preserving termination, so the arm's margin is measurable at all.
+    """
+
+    driver = _load_driver_module()
+    module = tmp_path / "checker.py"
+    module.write_text(
+        "class MetadataInvariantError(Exception):\n"
+        "    pass\n"
+        "\n"
+        "def _check(chain):\n"
+        "    visited = set()\n"
+        "    current = 0\n"
+        "    while current is not None:\n"
+        "        if current in visited:\n"
+        "            raise MetadataInvariantError('cycle')\n"
+        "        visited.add(current)\n"
+        "        current = chain.get(current)\n"
+        "    if not chain:\n"
+        "        raise MetadataInvariantError('empty')\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    src = module.read_text(encoding="utf-8")
+    arms = driver.enumerate_raise_arms(src, "_check")
+    assert len(arms) == 2
+    while_keys = driver.while_exit_arm_keys(src, "_check")
+    assert arms[0] in while_keys and arms[1] not in while_keys
+
+    original = driver.neuter_raise_arm(module, "_check", 0)
+    mutated_src = module.read_text(encoding="utf-8")
+    assert "break  # R74-ARM-MUTANT" in mutated_src
+    mutated: dict[str, object] = {}
+    exec(mutated_src, mutated)  # noqa: S102 - planted fixture
+    # The disarmed cycle guard TERMINATES (break) instead of spinning forever.
+    assert mutated["_check"]({0: 1, 1: 0}) == "ok"
+    module.write_text(original, encoding="utf-8")
+
+    # A non-loop arm keeps the surgical ``pass`` operator.
+    driver.neuter_raise_arm(module, "_check", 1)
+    assert "pass  # R74-ARM-MUTANT" in module.read_text(encoding="utf-8")
+
+
+def test_real_cycle_guard_arm_is_break_disarmed() -> None:
+    """The actual module_containment_logic cycle arm gets the break operator."""
+
+    import os
+
+    from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+
+    driver = _load_driver_module()
+    contract = next(c for c in METADATA_INVARIANT_CONTRACTS if c.name == "module_containment_logic")
+    rel = os.path.relpath(contract.check.__code__.co_filename, _REPO_ROOT)
+    src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+    while_keys = driver.while_exit_arm_keys(src, contract.check.__name__)
+    assert while_keys, (
+        "module_containment_logic lost its while-body cycle arm -- if the walk "
+        "was restructured, re-verify the non-terminating-mutant class (R74r5-F2)"
+    )
+
+
+@pytest.mark.smoke
+def test_run_suite_deadline_yields_timeout_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A suite run past its deadline returns the TIMEOUT sentinel, never hangs.
+
+    b9-opus R74r5-F2: ``run_suite`` called ``subprocess.run`` with no
+    ``timeout=``, so a non-terminating mutant consumed the sandbox and the
+    campaign never produced a verdict for the rest of its batch.
+    """
+
+    driver = _load_driver_module()
+
+    def _hang(*args: object, **kwargs: object):
+        assert kwargs.get("timeout") == 5.0
+        raise driver.subprocess.TimeoutExpired(cmd="pytest", timeout=5.0)
+
+    monkeypatch.setattr(driver.subprocess, "run", _hang)
+    result = driver.run_suite(tmp_path, "python", "gov", timeout=5.0)
+    assert isinstance(result, driver.SuiteTimeout)
+    assert result.seconds == 5.0
