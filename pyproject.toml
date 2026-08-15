@@ -1,5 +1,11 @@
 [build-system]
-requires = ["setuptools>=77"]
+# >=83: PYSEC-2026-3447 / CVE-2026-59890 -- older setuptools applied
+# MANIFEST.in exclude/prune directives without Unicode normalization, so on
+# macOS filesystems an NFD-named file could bypass an NFC exclusion and be
+# packed into the sdist. This project's sdist governance is exactly that
+# MANIFEST machinery, so the fixed release is a build-time floor, not an
+# audit suppression (grind r3, R61/b2:B5). >=77 was the PEP 639 license floor.
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
