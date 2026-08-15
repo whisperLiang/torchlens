@@ -65,3 +65,29 @@ def test_fastlog_bundle_tree_is_private_under_permissive_umask(tmp_path) -> None
         assert _mode(path) == 0o600, (sidecar, oct(_mode(path)))
     for blob in (final / "blobs").iterdir():
         assert _mode(blob) == 0o600, (blob.name, oct(_mode(blob)))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+def test_bundle_tlspec_tree_is_private_under_permissive_umask(tmp_path) -> None:
+    """R59 parity: the tl.Bundle .tlspec writer tightens its dir + sidecars too.
+
+    ``_TlSpecWriter.write_bundle`` created its directory and wrote its
+    body.safetensors / bundle.json / manifest.json under the ambient umask,
+    leaving them group/world-readable while the core bundle writer tightens its
+    outputs to 0o700/0o600. The same tightening now applies.
+    """
+
+    torch.manual_seed(0)
+    member = tl.trace(_TinyModel(), torch.randn(1, 4), save=tl.func("relu"))
+    target = tmp_path / "bundle.tlspec"
+    old_umask = os.umask(0o022)
+    try:
+        tl.Bundle({"m": member}).save(target)
+    finally:
+        os.umask(old_umask)
+
+    assert _mode(target) == 0o700
+    for sidecar in ("body.safetensors", "bundle.json", "manifest.json"):
+        path = target / sidecar
+        assert path.exists(), sidecar
+        assert _mode(path) == 0o600, (sidecar, oct(_mode(path)))
