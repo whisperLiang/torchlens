@@ -343,14 +343,21 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     the active forward, so TorchLens-internal conversions do not register as user escapes.
     """
 
-    originals: dict[str, Any] = {}
+    # r3 R07 (shadow gaps): every ``torch.Tensor``/storage-class registry is
+    # shadow-aware -- most of these names (``tolist``/``numpy``/``data_ptr``/
+    # ``stride``/``is_contiguous``/the bool-method belt/``UntypedStorage.
+    # data_ptr``) live as C slots on the BASE class and are NOT in the patched
+    # class ``__dict__``, so a plain setattr restore left a permanent shadow
+    # entry behind after every armed capture. Restore DELETES a shadow that was
+    # not originally present and setattrs one that was.
+    originals: dict[str, tuple[bool, Any]] = {}
     host_value_method_restore: dict[str, tuple[bool, Any]] = {}
     module_originals: list[tuple[Any, str, Any]] = []
-    storage_originals: list[tuple[Any, Any]] = []
+    storage_originals: list[tuple[Any, bool, Any]] = []
     storage_member_restore: list[tuple[Any, str, bool, Any]] = []
-    property_originals: dict[str, Any] = {}
-    metadata_originals: dict[str, Any] = {}
-    bool_method_originals: dict[str, Any] = {}
+    property_originals: dict[str, tuple[bool, Any]] = {}
+    metadata_originals: dict[str, tuple[bool, Any]] = {}
+    bool_method_originals: dict[str, tuple[bool, Any]] = {}
     grad_property_restore: dict[str, tuple[bool, Any]] = {}
     torch_ops_call_restore: list[tuple[type, Any]] = []
     private_c_call_restore: list[tuple[Any, str, Any]] = []
@@ -387,9 +394,12 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                     setattr(_pc_module, _pc_attr, _pc_original)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in originals.items():
+        for name, (was_shadowed, original) in originals.items():
             try:
-                setattr(torch.Tensor, name, original)
+                if was_shadowed:
+                    setattr(torch.Tensor, name, original)
+                else:
+                    delattr(torch.Tensor, name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
         for module, func_name, original_func in module_originals:
@@ -397,9 +407,12 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 setattr(module, func_name, original_func)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for storage_cls, storage_original in storage_originals:
+        for storage_cls, was_shadowed, storage_original in storage_originals:
             try:
-                setattr(storage_cls, "data_ptr", storage_original)
+                if was_shadowed:
+                    setattr(storage_cls, "data_ptr", storage_original)
+                else:
+                    delattr(storage_cls, "data_ptr")
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
         # r67 C3: restore the storage accessor wrappers shadow-aware (delete a shadow that
@@ -415,19 +428,28 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
         state.storage_origins = None
         state.storage_state_ptr_names = None
-        for name, descriptor in property_originals.items():
+        for name, (was_shadowed, descriptor) in property_originals.items():
             try:
-                setattr(torch.Tensor, name, descriptor)
+                if was_shadowed:
+                    setattr(torch.Tensor, name, descriptor)
+                else:
+                    delattr(torch.Tensor, name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in metadata_originals.items():
+        for name, (was_shadowed, original) in metadata_originals.items():
             try:
-                setattr(torch.Tensor, name, original)
+                if was_shadowed:
+                    setattr(torch.Tensor, name, original)
+                else:
+                    delattr(torch.Tensor, name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        for name, original in bool_method_originals.items():
+        for name, (was_shadowed, original) in bool_method_originals.items():
             try:
-                setattr(torch.Tensor, name, original)
+                if was_shadowed:
+                    setattr(torch.Tensor, name, original)
+                else:
+                    delattr(torch.Tensor, name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
         for prop_name, (was_shadowed, original_descriptor) in grad_property_restore.items():
@@ -461,12 +483,13 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             if original is None:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
+            shadowed = name in torch.Tensor.__dict__
             try:
                 setattr(torch.Tensor, name, _make_invisible_escape_wrapper(original, state, name))
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
-            originals[name] = original
+            originals[name] = (shadowed, original)
         # r39 hon2_1: mode-independent belt for the aten census -- the scalar numeric protocol
         # (``item``/``__bool__``/``__int__``/``__float__``/``__index__``/``__complex__``) and the
         # pure predicates (``equal``/``allclose``/``is_nonzero``). These fire regardless of
@@ -535,6 +558,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
         for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
             storage_original = storage_cls.data_ptr
+            storage_shadowed = "data_ptr" in storage_cls.__dict__
             try:
                 setattr(
                     storage_cls,
@@ -544,7 +568,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
-            storage_originals.append((storage_cls, storage_original))
+            storage_originals.append((storage_cls, storage_shadowed, storage_original))
         # r67 C3/C6: arm the capture-scoped storage-origin map and install the actual-read
         # accessor wrappers over BOTH storage classes' public surfaces, table-driven from
         # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``. Fail CLOSED: an install failure on a
@@ -592,12 +616,13 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             if descriptor is None or not hasattr(descriptor, "__get__"):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
+            shadowed = name in torch.Tensor.__dict__
             try:
                 setattr(torch.Tensor, name, _make_invisible_escape_property(descriptor, state))
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
-            property_originals[name] = descriptor
+            property_originals[name] = (shadowed, descriptor)
         # Model-input METADATA-PREDICATE observers (r27-H2): ``is_contiguous`` / ``stride``
         # methods and the ``requires_grad`` getset descriptor. Read-through recorders gated to
         # MODEL-INPUT receivers only; a model that never reads input layout/grad records nothing.
@@ -607,6 +632,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             if original is None:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
+            shadowed = name in torch.Tensor.__dict__
             try:
                 setattr(
                     torch.Tensor,
@@ -616,7 +642,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
-            metadata_originals[name] = original
+            metadata_originals[name] = (shadowed, original)
         # Model-input BOOLEAN metadata METHODS beyond the layout trio (r31): ``is_conj`` /
         # ``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced`` /
         # ``_is_view``. Feature-detected (an accessor absent on the running torch is skipped) and
@@ -626,12 +652,13 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
             if original is None or not callable(original):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
+            shadowed = name in torch.Tensor.__dict__
             try:
                 setattr(torch.Tensor, name, _make_input_metadata_bool_method(original, state, name))
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
-            bool_method_originals[name] = original
+            bool_method_originals[name] = (shadowed, original)
         # ``requires_grad`` / ``grad_fn`` / ``is_leaf`` live as getset descriptors on the C BASE
         # class (``torch._C.TensorBase``), not in ``torch.Tensor.__dict__``; patching installs a
         # SHADOWING property on ``torch.Tensor`` itself, so restore must DELETE the shadow when the
