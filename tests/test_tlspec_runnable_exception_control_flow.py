@@ -24,6 +24,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import (
     NumericAttestationStatus,
     PathFaithfulness,
+    RunnableErrorCode,
     WitnessCompleteness,
 )
 
@@ -142,8 +143,11 @@ def test_capture_on_success_raising_runtime_input_stays_typed(tmp_path: Path) ->
     path = tmp_path / "success.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    with pytest.raises(RuntimeSignatureDriftError):
+    with pytest.raises(RuntimeSignatureDriftError) as captured:
         loaded.run(inputs=_non_pd_input())
+    # Provocation pin (r3 b6-opus R25-2): the typed code rides the raise; a
+    # swap of the code value must fail a test that actually provokes it.
+    assert captured.value.fields["code"] == RunnableErrorCode.RUNTIME_SIGNATURE_DRIFT.value
 
 
 def test_raise_free_model_records_zero_facts_and_stays_verified(tmp_path: Path) -> None:

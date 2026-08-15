@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.errors import RunCapabilityUnavailableError
+from torchlens.errors import RunCapabilityUnavailableError, RunPreconditionError
 from torchlens.runnable import (
     RUNNABLE_TLSPEC_SCHEMA_VERSION,
     ReadinessStatus,
@@ -110,6 +110,34 @@ def test_legacy_v1_capability_loads_analysis_only(tmp_path: Path) -> None:
     assert "context" in joined
     with pytest.raises(RunCapabilityUnavailableError):
         loaded.run(inputs=torch.randn(2, 4))
+
+
+def test_unenterable_recorded_device_refuses_execution_context_unavailable(
+    tmp_path: Path,
+) -> None:
+    """A parse-valid but un-enterable recorded device refuses typed at run.
+
+    Provocation pin (r3 b6-opus R25-2): ``execution_context_unavailable``
+    previously appeared in tests only as a spelling assert, so a swap of the
+    code failed zero tests. A device literal inside the closed ``type[:index]``
+    grammar whose index overflows ``torch.device`` parses cleanly, loads
+    READY, and must refuse the RUN with the typed code — never enter a
+    partial context.
+    """
+
+    bundle = _save_runnable(tmp_path, include_weights=True)
+
+    def _overflow_device(manifest: dict[str, Any]) -> None:
+        manifest["run"]["ambient_context"]["default_device"] = "cuda:99999999999999999999"
+
+    _rewrite_manifest(bundle, _overflow_device)
+    loaded = tl.load(str(bundle))
+    assert loaded._runnable.readiness.status is ReadinessStatus.READY
+
+    with pytest.raises(RunPreconditionError) as captured:
+        loaded.run(inputs=torch.randn(2, 4))
+    assert captured.value.fields["code"] == RunnableErrorCode.EXECUTION_CONTEXT_UNAVAILABLE.value
+    assert captured.value.fields["context_field"] == "default_device"
 
 
 def test_v2_descriptor_missing_call_context_is_rejected(tmp_path: Path) -> None:
