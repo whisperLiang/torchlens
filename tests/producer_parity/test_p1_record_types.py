@@ -19,6 +19,9 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -69,6 +72,41 @@ def test_manifest_regenerate_and_diff() -> None:
     from torchlens.ir.op_record_manifest import CELL_SOURCE_MANIFEST
 
     assert CELL_SOURCE_MANIFEST == CELL_SOURCES
+
+
+@pytest.mark.heavy
+@pytest.mark.parametrize("invocation", ["script", "module"])
+def test_manifest_check_cli_works_as_a_subprocess(invocation: str) -> None:
+    """The manifest generator's ``--check`` works as contributors run it (R53-A).
+
+    The in-process regenerate-and-diff above cannot catch a broken CLI: the
+    plain-script spelling failed with ``ModuleNotFoundError`` (no repo root on
+    ``sys.path``, unlike its ``generate_record_schema.py`` sibling, whose CLI
+    IS subprocess-gated at ``test_record_schema_bindings.py``), and neither
+    spelling was exercised as a subprocess. ``PYTHONPATH`` is stripped so the
+    script spelling proves the generator's own path bootstrap rather than the
+    test runner's environment. Green requires rc==0 AND the explicit ``ok:``
+    line, so import breakage and a stale manifest red distinctly.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if invocation == "script":
+        command = [sys.executable, str(repo_root / "tools" / "generate_op_record_manifest.py")]
+    else:
+        command = [sys.executable, "-m", "tools.generate_op_record_manifest"]
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = subprocess.run(
+        [*command, "--check"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=str(repo_root),
+        env=environment,
+    )
+    assert result.returncode == 0, (
+        f"--check ({invocation}) failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
+    )
+    assert result.stdout.strip().startswith("ok:"), result.stdout
 
 
 @pytest.mark.smoke
