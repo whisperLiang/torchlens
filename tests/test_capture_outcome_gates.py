@@ -408,6 +408,34 @@ def test_partial_trace_wrapper_has_one_outcome_answer() -> None:
     assert exc_info.value.fields["status"] == "failed"
 
 
+def test_halted_arm_interrupt_settles_failed_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3.6 rollup: a KeyboardInterrupt inside the halted finalization arm
+    escaped with NO settlement stamp -- the product read UNKNOWN only through
+    the fail-closed no-sidecar default instead of a settled record. It must
+    settle FAILED/INTERRUPT exactly like the outer interrupt arm."""
+
+    import torchlens.capture.trace as trace_module
+    from torchlens.capture.outcome import FailureOrigin, outcome_for
+
+    seen: list[object] = []
+
+    def _interrupt(trace_self: object, *args: object, **kwargs: object) -> object:
+        seen.append(trace_self)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(trace_module, "_finalize_halted_trace", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
+    assert len(seen) == 1
+    outcome = outcome_for(seen[0])
+    assert outcome is not None, "halted-arm interrupt escaped without a settlement stamp"
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.origin is FailureOrigin.INTERRUPT
+    assert "interrupted during halted finalization" in (outcome.settlement_note or "")
+
+
 def test_hand_built_partial_wrapper_around_settled_trace_still_refuses_save(tmp_path) -> None:
     """The outcome delegation must not open tl.save to hand-built wrappers: a
     PartialTrace around a COMPLETE trace previously fail-closed only by
