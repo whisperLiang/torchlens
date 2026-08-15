@@ -976,7 +976,7 @@ def module_collapse_score(module: Module) -> float:
 
 def _module_structural_signature(
     module: Module,
-) -> tuple[int, int, int, int, tuple[tuple[str, str], ...]]:
+) -> tuple[int, int, int, int, tuple[tuple[str, str], ...], object]:
     """Return a per-module structural fingerprint for fold-honesty checks.
 
     Two modules are only considered structurally interchangeable for the
@@ -993,6 +993,12 @@ def _module_structural_signature(
     the homogeneity claim. The fingerprint therefore also carries the ordered
     per-layer op-type sequence and a canonical ``func_config`` digest.
 
+    r3 b6-opus R19-1: op types and kwargs are still not enough — a residual
+    ``x + y`` block and a self-add ``y + y`` block share the same ordered op
+    list and params but are DIFFERENT DAGs. The fingerprint therefore also
+    carries :func:`_module_wiring_digest`, a canonical intra-module dataflow
+    component.
+
     Parameters
     ----------
     module:
@@ -1002,8 +1008,10 @@ def _module_structural_signature(
     -------
     tuple
         ``(num_layers, num_params, num_params_trainable, num_params_frozen,
-        ops_signature)`` where ``ops_signature`` is a tuple of
-        ``(op_type, func_config_digest)`` rows in layer order.
+        ops_signature, wiring_digest)`` where ``ops_signature`` is a tuple of
+        ``(op_type, func_config_digest)`` rows in layer order and
+        ``wiring_digest`` canonicalizes the member's interior edges plus
+        boundary crossings.
     """
 
     ops_signature = tuple(
@@ -1019,7 +1027,54 @@ def _module_structural_signature(
         int(module.num_params_trainable),
         int(module.num_params_frozen),
         ops_signature,
+        _module_wiring_digest(module),
     )
+
+
+def _module_wiring_digest(module: Module) -> object:
+    """Return a canonical intra-module dataflow digest for one fold member.
+
+    Encodes, per interior op in execution order, the ordered parent slots as
+    either ``("i", position)`` — an edge from the interior op at that
+    execution position — or ``("x", k)`` — a boundary crossing from the
+    ``k``-th distinct exterior source first seen while walking this member.
+    Exterior sources are numbered per member (never by label), so two run
+    members fed by different upstream blocks still compare equal when their
+    interior wiring matches, while a residual skip (``x + y``) can never
+    match a self-add (``y + y``): the former's add row reads
+    ``(("x", 0), ("i", j))`` and the latter's ``(("i", j), ("i", j))``.
+
+    A member whose wiring cannot be resolved degrades to its exception type
+    name — coarser matching (the same degradation on every member compares
+    equal on the remaining fingerprint components), never a crash.
+    """
+
+    trace = module.trace
+    if trace is None:
+        return ""
+    try:
+        canonical: list[str] = []
+        seen: set[str] = set()
+        for label in module._op_labels():
+            resolved = trace.ops[label].label
+            if resolved not in seen:
+                seen.add(resolved)
+                canonical.append(resolved)
+        position = {label: index for index, label in enumerate(canonical)}
+        exterior: dict[str, int] = {}
+        rows: list[tuple[tuple[str, int], ...]] = []
+        for label in canonical:
+            slots: list[tuple[str, int]] = []
+            for parent_label in trace.ops[label].parents:
+                parent = trace.ops[parent_label].label
+                if parent in position:
+                    slots.append(("i", position[parent]))
+                else:
+                    slots.append(("x", exterior.setdefault(parent, len(exterior))))
+            rows.append(tuple(slots))
+        return tuple(rows)
+    except Exception as error:  # pragma: no cover - defensive degrade
+        return type(error).__name__
 
 
 def _func_config_digest(func_config: Any) -> str:
