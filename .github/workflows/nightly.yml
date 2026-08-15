@@ -562,3 +562,67 @@ jobs:
             "tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet" \
             "tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed" \
             --tb=short -q
+
+  platform-canary:
+    # macOS and Windows had ZERO controlled execution while the universal
+    # py3-none-any wheel and explicit win32/darwin code paths ship (grind r5,
+    # b10 R85-2): every core leg is Linux/CPU. This is a bounded canary — an
+    # import + capture + save/load round-trip on each OS — not a support
+    # claim; the CI-attested platform statement lives in
+    # docs/reference/limitations.md.
+    name: platform canary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            torch-install: torch==2.13.0 torchvision==0.28.0
+          - os: windows-latest
+            torch-install: >-
+              --index-url https://download.pytorch.org/whl/cpu
+              --extra-index-url https://pypi.org/simple
+              --index-strategy unsafe-best-match
+              torch==2.13.0+cpu torchvision==0.28.0+cpu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install torchlens + torch
+        shell: bash
+        run: uv pip install --system -e . ${{ matrix.torch-install }}
+
+      - name: Import, capture, and round-trip a trace
+        shell: bash
+        run: |
+          python - <<'PY'
+          import tempfile
+          import os
+
+          import torch
+          import torch.nn as nn
+
+          import torchlens as tl
+
+          model = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU(), nn.Flatten(), nn.LazyLinear(5))
+          trace = tl.trace(model, torch.randn(2, 3, 8, 8), save=tl.func("relu"))
+          assert trace.backend == "torch"
+          assert len(trace.layer_labels) > 0, "no layers captured"
+          relu = trace["relu_1_2"]
+          assert relu.out is not None
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = os.path.join(tmp, "canary.tlspec")
+              tl.save(trace, path)
+              loaded = tl.load(path)
+              assert loaded.layer_labels == trace.layer_labels
+
+          print("platform canary OK:", tl.__version__)
+          PY

@@ -109,6 +109,16 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | Two unrelated repeated subgraphs have the same loop fingerprint. | Recurrence detection can group them into a layer with more passes than expected. | Capture with `recurrence_detection=False` / the current recurrence-disable option and inspect the ungrouped Ops. |
 | An input-routed intervention targets an in-place or `out=` call. | Recognized in-place calls snapshot semantic inputs, but raw hooks may see live references; detected `out=` aliasing warns at hook fire time. | Prefer output interventions or non-mutating functional spellings when the original input value matters. |
 
+## CI-attested platforms
+
+Continuous integration executes the full tiered suite on Linux/CPU only
+(Python 3.10–3.13, torch floor through newest-admitted). macOS and Windows
+run a nightly import + capture + save/load canary, not the suite. CUDA and
+MPS behavior — device peak memory reporting, `save_budget="auto"` device
+measurement, `map_location` transport, and the CUDA-artifact-on-CPU-host
+refusal — is implemented and documented but has **no CI execution**; treat
+device-specific claims as attested by local testing only.
+
 ## Related contracts
 
 - [Detached-reference handling](../migration/scoped_detached_patching.md)
