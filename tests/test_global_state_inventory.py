@@ -1567,6 +1567,118 @@ def test_unwrap_torch_refuses_during_an_active_capture() -> None:
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
 
 
+def test_release_model_refuses_during_an_active_capture() -> None:
+    """Mid-capture ``tl.release_model()`` is a typed refusal, not silent damage.
+
+    The missing sibling of the ``unwrap_torch`` guard: releasing the model
+    mid-forward (reachable single-threaded from a forward hook or
+    ``activation_transform``) stripped the ``tl_*`` / ``._tl`` metadata the
+    live capture's module attribution reads, and the capture then finished
+    ``capture_verified`` with silently emptied module attribution.
+    """
+
+    seen: list[BaseException] = []
+
+    class _ReleaseMidForward(nn.Module):
+        """Attempt a self-release between two logged operations."""
+
+        def __init__(self) -> None:
+            """Build a submodule so module attribution has something to lose."""
+
+            super().__init__()
+            self.inner = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run one module, try to release, then run another op.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation after both operations.
+            """
+
+            x = self.inner(x)
+            try:
+                tl.release_model(self)
+            except BaseException as error:
+                seen.append(error)
+            return torch.relu(x)
+
+    model = _ReleaseMidForward()
+    trace = tl.trace(model, torch.ones(2))
+
+    assert len(seen) == 1, "release_model() mid-capture did not refuse"
+    error = seen[0]
+    assert isinstance(error, tl.errors.CaptureContextError)
+    assert error.fields["code"] == "release_during_active_capture"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 2, "the refused release still truncated the capture"
+    # Module attribution survived: the submodule call is still attributed.
+    assert any(op.modules for op in trace.compute_ops), (
+        "the refused release still emptied module attribution"
+    )
+
+    # Releasing AFTER the capture stays the supported no-questions path.
+    tl.release_model(model)
+    recovered = tl.trace(model, torch.ones(2))
+    assert any(op.modules for op in recovered.compute_ops)
+
+
+def test_cleanup_of_active_trace_refuses_mid_capture() -> None:
+    """Husking the live capture's own trace mid-forward refuses typed.
+
+    Sibling of the ``unwrap_torch`` / ``release_model`` guards: without the
+    refusal the capture died later on a raw ``AttributeError`` (missing
+    ``_wrapper_runtime_ws``) deep inside the commit path. Cleaning up a
+    DIFFERENT, finished trace during a capture stays supported.
+    """
+
+    from torchlens import _state
+
+    finished = tl.trace(nn.ReLU(), torch.ones(2))
+    seen: list[BaseException] = []
+
+    class _CleanupMidForward(nn.Module):
+        """Attempt to husk the active trace between two logged ops."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Refused self-cleanup; allowed foreign-trace cleanup.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation after both operations.
+            """
+
+            x = torch.relu(x)
+            try:
+                _state._active_trace.cleanup()
+            except BaseException as error:
+                seen.append(error)
+            finished.cleanup()  # foreign finished trace: must stay allowed
+            return torch.relu(x)
+
+    trace = tl.trace(_CleanupMidForward(), torch.ones(2))
+
+    assert len(seen) == 1, "cleanup() of the active trace mid-capture did not refuse"
+    error = seen[0]
+    assert isinstance(error, tl.errors.CaptureContextError)
+    assert error.fields["code"] == "cleanup_during_active_capture"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 2, "the refused cleanup still truncated the capture"
+    trace.cleanup()  # post-capture cleanup stays the supported path
+
+
 def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The child-process guard raises a typed, actionable refusal.
 
