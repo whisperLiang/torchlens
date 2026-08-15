@@ -148,6 +148,8 @@ add names to the top-level `torchlens` namespace:
 | `op_lookup_pass_required` | Bare label names a multi-pass layer | Append a pass qualifier such as `:2` |
 | `on_forward_error_invalid` | Forward-error policy is unknown | Choose `raise`, `attach_partial`, or `return_partial` |
 | `on_predicate_error_invalid` | Predicate-error policy is unknown | Choose `auto`, `accumulate`, or `fail-fast` |
+| `postprocess_audit_asserts_stripped` | `TORCHLENS_POSTPROCESS_ASSERTIONS` is armed under `-O`/`-OO`, so every contract check would be stripped and the audit would report clean without verifying anything | Re-run without `-O`, or unset the variable |
+| `postprocess_audit_env_invalid` | A `TORCHLENS_POSTPROCESS_*` audit knob holds an unrecognized value (a typo must never silently rearm or disarm an audit) | Use a documented value for the knob, or unset it |
 | `option_group_conflict` | Grouped and flat options set the same field on a merge entrypoint (`ArgumentConflictError`; historically `ValueError`) | Use one option style |
 | `option_group_keyword_conflict` | Flat draw kwarg and `VisualizationOptions` field set the same option (`KeywordConflictError`; historically `TypeError`) | Use one option style |
 | `option_group_type_invalid` | Grouped option has the wrong object type | Pass the documented options class |

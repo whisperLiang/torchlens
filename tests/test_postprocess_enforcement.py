@@ -420,3 +420,69 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
             pp.RECORDED_STEP_EFFECTIVE_WRITES,
         ):
             sink.clear()
+
+
+@pytest.mark.smoke
+def test_audit_env_knob_refusals_are_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit env-knob refusals carry stable codes, not bare RuntimeError.
+
+    b6 R25 (4th round): the three closed-vocabulary knob parsers and the
+    armed-under--O guard were the territory's only branch-on-text refusals.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens.postprocess import (
+        _postprocess_assertions_enabled,
+        _read_audit_mode,
+        _write_audit_record_mode,
+    )
+
+    cases = [
+        ("TORCHLENS_POSTPROCESS_ASSERTIONS", "bogus", _postprocess_assertions_enabled),
+        ("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "recrod", _write_audit_record_mode),
+        ("TORCHLENS_POSTPROCESS_READ_AUDIT", "tru", _read_audit_mode),
+    ]
+    for env_name, bad_value, parser in cases:
+        monkeypatch.setenv(env_name, bad_value)
+        with pytest.raises(InvalidArgumentError) as exc_info:
+            parser()
+        assert exc_info.value.fields["code"] == "postprocess_audit_env_invalid", env_name
+        assert exc_info.value.fields["argument"] == env_name
+        monkeypatch.delenv(env_name)
+
+
+def exc_code_line(stdout: str) -> str:
+    """Return the refusal code printed by the -O provocation child."""
+
+    return stdout.strip().split()[-1]
+
+
+@pytest.mark.smoke
+def test_audit_armed_under_stripped_asserts_refuses_typed() -> None:
+    """Arming the audit under -O refuses with a stable code (real -O child)."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import os\n"
+        "os.environ['TORCHLENS_POSTPROCESS_ASSERTIONS'] = '1'\n"
+        "from torchlens.postprocess import _postprocess_assertions_enabled\n"
+        "try:\n"
+        "    _postprocess_assertions_enabled()\n"
+        "except Exception as exc:\n"
+        "    print(type(exc).__name__, getattr(exc, 'fields', {}).get('code'))\n"
+        "else:\n"
+        "    print('NO_RAISE')\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": os.getcwd()},
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "InvalidArgumentError" in completed.stdout
+    assert exc_code_line(completed.stdout) == "postprocess_audit_asserts_stripped"

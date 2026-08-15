@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from .._errors import InvalidArgumentError
 from .._trace_core.relation_views import freeze_trace_relation_views as _freeze_relation_views
 from ..backends.torch.ops import _compact_ancestor_sets
 from ..capture.session import capture_session_for_events
@@ -183,8 +184,10 @@ def _postprocess_assertions_enabled() -> bool:
 
     Raises
     ------
-    RuntimeError
-        When the audit is armed but assertions are disabled (``-O`` / ``-OO``).
+    InvalidArgumentError
+        When the value is unrecognized (``postprocess_audit_env_invalid``) or
+        the audit is armed with assertions disabled under ``-O`` / ``-OO``
+        (``postprocess_audit_asserts_stripped``).
     """
 
     raw = os.environ.get(_POSTPROCESS_ASSERT_ENV, "")
@@ -194,18 +197,24 @@ def _postprocess_assertions_enabled() -> bool:
         # the audit OFF is a disarmed tripwire. Unset/empty is the only
         # implicit off; anything unrecognized refuses instead of silently
         # capturing without the audit.
-        raise RuntimeError(
-            f"{_POSTPROCESS_ASSERT_ENV}={raw!r} is not a recognized value; "
-            "use '1'/'true'/'yes'/'on' to arm the audit, '0'/'false'/'no'/'off' "
-            "to disarm it explicitly, or unset the variable."
+        raise InvalidArgumentError(
+            f"{_POSTPROCESS_ASSERT_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy=(
+                "use '1'/'true'/'yes'/'on' to arm the audit, '0'/'false'/'no'/'off' "
+                "to disarm it explicitly, or unset the variable"
+            ),
+            argument=_POSTPROCESS_ASSERT_ENV,
         )
     enabled = value in {"1", "true", "yes", "on"}
     if enabled and not __debug__:
-        raise RuntimeError(
+        raise InvalidArgumentError(
             f"{_POSTPROCESS_ASSERT_ENV} is set but Python assertions are disabled "
             "(-O / -OO), so every postprocess contract check would be stripped and "
-            "the audit would report clean without verifying anything. Re-run "
-            "without -O, or unset the variable to capture without the audit."
+            "the audit would report clean without verifying anything",
+            code="postprocess_audit_asserts_stripped",
+            remedy="re-run without -O, or unset the variable to capture without the audit",
+            argument=_POSTPROCESS_ASSERT_ENV,
         )
     return enabled
 
@@ -240,10 +249,11 @@ def _write_audit_record_mode() -> bool:
     raw = os.environ.get(_WRITE_AUDIT_RECORD_ENV, "")
     value = raw.lower()
     if value not in {"", "record"}:
-        raise RuntimeError(
-            f"{_WRITE_AUDIT_RECORD_ENV}={raw!r} is not a recognized value; "
-            "use 'record' for recording mode or unset the variable for "
-            "enforcement mode."
+        raise InvalidArgumentError(
+            f"{_WRITE_AUDIT_RECORD_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy="use 'record' for recording mode or unset the variable for enforcement mode",
+            argument=_WRITE_AUDIT_RECORD_ENV,
         )
     return value == "record"
 
@@ -264,10 +274,11 @@ def _read_audit_mode() -> str:
     raw = os.environ.get(_READ_AUDIT_ENV, "")
     mode = raw.lower()
     if mode not in {"", "record", "enforce"}:
-        raise RuntimeError(
-            f"{_READ_AUDIT_ENV}={raw!r} is not a recognized value; use "
-            "'record' or 'enforce', or unset the variable to leave the read "
-            "audit off."
+        raise InvalidArgumentError(
+            f"{_READ_AUDIT_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy=("use 'record' or 'enforce', or unset the variable to leave the read audit off"),
+            argument=_READ_AUDIT_ENV,
         )
     return mode
 

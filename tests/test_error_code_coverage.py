@@ -90,7 +90,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "bundle_statistic_invalid",
         "code_panel_model_collected",
         "code_panel_side_invalid",
-        "collapse_plan_unavailable",
         "compiled_callable_unsupported",
         "container_leaf_not_saved",
         "container_not_reconstructable",
@@ -380,9 +379,56 @@ def _provoked_candidates_in_tree(
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        if any(_is_assertion_seam(sub) for sub in ast.walk(node)):
-            provoked.update(_candidate_codes_in_tree(node, member_names))
-            referenced_names.update(sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name))
+        seam_statements = [sub for sub in ast.walk(node) if _is_assertion_seam(sub)]
+        if not seam_statements:
+            continue
+        # Seam-anchored attribution (r5 b6 R25): the historical scan counted
+        # EVERY string constant in a seam-bearing function, so a decorative
+        # literal sharing a function with any unrelated assert counted as
+        # "provoked". Candidates now come only from (a) the assertion seams
+        # themselves, (b) the function's decorators (parametrize tables), and
+        # (c) assignments / loop and with bindings whose names a seam
+        # references, fixpointed locally and (below) at module level. A
+        # constant with no dataflow into any seam never counts. Declared
+        # residual: a literal inside a DIFFERENT exception's seam (e.g. an
+        # unrelated ``match=`` regex) still counts — attribution is per seam
+        # statement, not per asserted expression.
+        seam_referenced: set[str] = set()
+        for seam in seam_statements:
+            provoked.update(_candidate_codes_in_tree(seam, member_names))
+            seam_referenced.update(sub.id for sub in ast.walk(seam) if isinstance(sub, ast.Name))
+        for decorator in node.decorator_list:
+            provoked.update(_candidate_codes_in_tree(decorator, member_names))
+            seam_referenced.update(
+                sub.id for sub in ast.walk(decorator) if isinstance(sub, ast.Name)
+            )
+        local_binders: list[tuple[set[str], ast.AST]] = []
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign):
+                names = {t.id for t in sub.targets if isinstance(t, ast.Name)}
+                local_binders.append((names, sub))
+            elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                local_binders.append(({sub.target.id}, sub))
+            elif isinstance(sub, ast.For | ast.AsyncFor | ast.comprehension):
+                names = {n.id for n in ast.walk(sub.target) if isinstance(n, ast.Name)}
+                local_binders.append((names, sub.iter))
+            elif isinstance(sub, ast.withitem) and sub.optional_vars is not None:
+                names = {n.id for n in ast.walk(sub.optional_vars) if isinstance(n, ast.Name)}
+                local_binders.append((names, sub.context_expr))
+        counted_local: set[int] = set()
+        local_changed = True
+        while local_changed:
+            local_changed = False
+            for names, value in local_binders:
+                if id(value) in counted_local or not names & seam_referenced:
+                    continue
+                counted_local.add(id(value))
+                provoked.update(_candidate_codes_in_tree(value, member_names))
+                seam_referenced.update(
+                    sub.id for sub in ast.walk(value) if isinstance(sub, ast.Name)
+                )
+                local_changed = True
+        referenced_names.update(seam_referenced)
     module_assignments = [
         statement for statement in tree.body if isinstance(statement, ast.Assign | ast.AnnAssign)
     ]
@@ -556,9 +602,11 @@ def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
         "zz_comment_code_zz",
         "zz_spelled_code_zz",
         "zz_result_literal_zz",
-        "zz_table_code_zz",
+        "zz_decorative_code_zz",
         "zz_inert_table_code_zz",
-        "zz_used_table_code_zz",
+        "zz_looped_dead_code_zz",
+        "zz_local_seam_code_zz",
+        "zz_module_seam_code_zz",
         "zz_assert_free_code_zz",
         "zz_def_name_only_code_zz",
         "zz_param_code_zz",
@@ -574,7 +622,8 @@ def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
             '"""Docstring mentioning zz_doc_code_zz never provokes."""',
             "",
             'INERT_TABLE = [("zz_inert_table_code_zz", ValueError)]',
-            'USED_CASES = [("zz_used_table_code_zz", ValueError)]',
+            'LOOPED_DEAD_CASES = [("zz_looped_dead_code_zz", ValueError)]',
+            'MODULE_SEAM_CASES = [("zz_module_seam_code_zz", ValueError)]',
             "",
             "",
             "def _assert_free_helper():",
@@ -594,30 +643,40 @@ def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
             "",
             '@pytest.mark.parametrize("code", ["zz_param_code_zz"])',
             "def test_real_provocations(code):",
-            '    cases = [("zz_table_code_zz", ValueError)]',
-            "    for row in USED_CASES:",
+            '    decorative = [("zz_decorative_code_zz", ValueError)]',
+            "    for dead_row in LOOPED_DEAD_CASES:",
             "        pass",
+            '    local_cases = [("zz_local_seam_code_zz", ValueError)]',
+            "    for local_row in local_cases:",
+            '        assert exc.fields["code"] == local_row[0]',
+            "    for module_row in MODULE_SEAM_CASES:",
+            '        assert exc.fields["code"] == module_row[0]',
             '    assert exc.fields["code"] == RunnableErrorCode.ZZ_RESULT_CODE_ZZ.value',
             '    assert mismatch.code.value == "zz_result_literal_zz"',
             '    _assert_refuses("zz_helper_code_zz")',
         ]
     )
     provoked = _provoked_codes_in_source(sample, universe, member_names)
-    # Inert channels: prose, comments, def names, UNREFERENCED module
-    # tables, assert-free functions, and spelling-only asserts never
-    # provoke (r4 b6-sol R25).
+    # Inert channels: prose, comments, def names, assert-free functions,
+    # spelling-only asserts, UNREFERENCED module tables, and — since the r5
+    # seam-anchored attribution — decorative locals and tables consumed only
+    # by assert-free loops inside an otherwise asserting test (the r5 b6
+    # laundering channel: any string constant in an assert-bearing function
+    # used to count).
     assert "zz_doc_code_zz" not in provoked
     assert "zz_comment_code_zz" not in provoked
     assert "zz_def_name_only_code_zz" not in provoked
     assert "zz_inert_table_code_zz" not in provoked
     assert "zz_assert_free_code_zz" not in provoked
     assert "zz_spelled_code_zz" not in provoked
+    assert "zz_decorative_code_zz" not in provoked
+    assert "zz_looped_dead_code_zz" not in provoked
     # Countable channels: result asserts (both spellings), assert-helper
-    # calls, parametrize tables on an asserting test, tables local to an
-    # asserting test, and module tables the asserting test references.
+    # calls, parametrize tables on an asserting test, and local or module
+    # tables whose rows FLOW INTO a seam (loop/with/assignment dataflow).
     assert "zz_result_code_zz" in provoked
     assert "zz_result_literal_zz" in provoked
     assert "zz_helper_code_zz" in provoked
     assert "zz_param_code_zz" in provoked
-    assert "zz_table_code_zz" in provoked
-    assert "zz_used_table_code_zz" in provoked
+    assert "zz_local_seam_code_zz" in provoked
+    assert "zz_module_seam_code_zz" in provoked
