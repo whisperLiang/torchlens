@@ -181,7 +181,9 @@ class TestJaxToleranceDerivation:
     def test_derivation_matches_the_ported_error_model(self) -> None:
         """fp64/fp32/fp16 rows match the paddle/mlx-validation derivation."""
 
-        from torchlens.backends.jax.backend import _float_replay_tolerances
+        from torchlens.backends._validation_shared import (
+            float_replay_tolerances as _float_replay_tolerances,
+        )
 
         eps32 = float(np.finfo(np.float32).eps)
 
@@ -203,7 +205,9 @@ class TestJaxToleranceDerivation:
     def test_complex_component_derivation(self) -> None:
         """Complex dtypes derive from their component real finfo."""
 
-        from torchlens.backends.jax.backend import _float_replay_tolerances
+        from torchlens.backends._validation_shared import (
+            float_replay_tolerances as _float_replay_tolerances,
+        )
 
         rtol_c64, atol_c64 = _float_replay_tolerances(np.finfo(np.complex64))
         rtol_f32, atol_f32 = _float_replay_tolerances(np.finfo(np.float32))

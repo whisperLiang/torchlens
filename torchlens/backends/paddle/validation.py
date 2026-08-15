@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from ... import _state
-from .._validation_shared import ops_by_label as _ops_by_label
+from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
 
 _FACTORY_OR_SOURCE_OPS = {
     "arange",
@@ -217,17 +217,14 @@ def _arrays_close(left: np.ndarray, right: np.ndarray) -> bool:
         return False
     if np.issubdtype(left.dtype, np.bool_) or np.issubdtype(left.dtype, np.integer):
         return bool(np.array_equal(left, right))
-    if np.issubdtype(left.dtype, np.floating):
-        finfo = np.finfo(left.dtype)
-        eps32 = float(np.finfo(np.float32).eps)
-        if float(finfo.eps) > eps32:
-            rtol = 4.0 * float(finfo.eps)
-        else:
-            rtol = 1e-5 * float(finfo.eps) / eps32
-        atol = rtol * float(finfo.tiny)
-        # equal_nan matches this backend's own replay oracle
-        # (paddle/backend.py) and every sibling: identical NaN patterns are
-        # agreement, NaN-vs-number still fails elementwise.
+    if np.issubdtype(left.dtype, np.floating) or np.issubdtype(left.dtype, np.complexfloating):
+        # The ONE shared eps-derived band (b5-opus R17-1 hoist); complex
+        # payloads take the same component-eps band as mlx/jax (bit-exact
+        # complex here false-failed legitimate replay jitter). equal_nan
+        # matches this backend's own replay oracle (paddle/backend.py) and
+        # every sibling: identical NaN patterns are agreement, NaN-vs-number
+        # still fails elementwise.
+        rtol, atol = float_replay_tolerances(np.finfo(left.dtype))
         return bool(np.allclose(left, right, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left, right))
 

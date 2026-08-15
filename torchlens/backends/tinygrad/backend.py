@@ -65,6 +65,7 @@ from .._options import (
     reject_unsupported_trace_options,
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from .._validation_shared import float_replay_tolerances_for_dtype_name, scalar_replay_close
 
 _ACTIVE_TINYGRAD_MODULE_STACK: list[TinygradModuleFrame] = []
 
@@ -3288,4 +3289,10 @@ def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:
         )
     if "bool" in dtype_name or "int" in dtype_name:
         return left == right
-    return abs(float(left) - float(right)) <= 1e-6 + 1e-5 * abs(float(right))
+    # The ONE shared eps-derived band + scalar NaN/inf doctrine (b5-opus
+    # R17-1 sweep: this oracle kept the dtype-blind 1e-6/1e-5 decimal pair
+    # the R13 port replaced everywhere else, and its naive band test
+    # false-FAILED byte-identical NaN replays -- the only backend where an
+    # honest NaN-bearing capture could not validate).
+    rtol, atol = float_replay_tolerances_for_dtype_name(dtype_name)
+    return scalar_replay_close(left, right, rtol, atol)
