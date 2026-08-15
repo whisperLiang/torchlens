@@ -1132,8 +1132,37 @@ def _append_arg_hash(arg: Any, prefix: str, args_to_hash: list[Any], _depth: int
     elif isinstance(arg, dict):
         for k, v in arg.items():
             _append_arg_hash(v, f"{prefix}_dk{k}", args_to_hash, _depth + 1)
-    elif isinstance(arg, (list, tuple, set)):
+    elif isinstance(arg, (list, tuple)):
         for i, elem in enumerate(arg):
             _append_arg_hash(elem, f"{prefix}_i{i}", args_to_hash, _depth + 1)
+    elif isinstance(arg, (set, frozenset)):
+        # Sets iterate in hash-table order, which is PYTHONHASHSEED-salted
+        # for str members, so positional ``_i{i}`` tokens diverged across
+        # processes; ``frozenset`` (NOT a ``set`` subclass) previously fell
+        # to the repr tail with the same instability (r5 b7-opus R21-C
+        # sibling). Membership is unordered: fingerprint each member
+        # independently and append in sorted-token order.
+        member_tokens: list[list[Any]] = []
+        for elem in arg:
+            member: list[Any] = []
+            _append_arg_hash(elem, f"{prefix}_member", member, _depth + 1)
+            member_tokens.append(member)
+        for member in sorted(member_tokens, key=repr):
+            args_to_hash.extend(member)
     else:
-        args_to_hash.append(f"{prefix}_{arg}")
+        # r5 b7-opus R21-C: NEVER let a default object.__repr__ (or any
+        # address-embedding repr) into the fingerprint -- ``equivalence_class``
+        # is a PERSISTED field, so an id()-derived token diverged across
+        # processes, split recurrence grouping for per-call ``generator=``
+        # objects, and collided for distinct objects at a reused address.
+        # A structural fingerprint wants the TYPE of such an argument.
+        if type(arg).__repr__ is object.__repr__:
+            args_to_hash.append(f"{prefix}_{type(arg).__module__}.{type(arg).__qualname__}")
+            return
+        token = f"{prefix}_{arg}"
+        if " at 0x" in token:
+            # Custom reprs that still embed a memory address (C types,
+            # functools.partial interiors) are equally id()-derived.
+            args_to_hash.append(f"{prefix}_{type(arg).__module__}.{type(arg).__qualname__}")
+            return
+        args_to_hash.append(token)

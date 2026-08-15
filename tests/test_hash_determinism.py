@@ -628,3 +628,84 @@ def test_graph_shape_hash_distinguishes_identical_ops_under_different_module_pac
 
 # Torch-version-matrix determinism is a manual CI-matrix gate: one test
 # environment cannot import and compare two independent torch versions.
+
+
+_GENERATOR_EQ_SCRIPT = textwrap.dedent(
+    """
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+
+    class GenModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.gen = torch.Generator().manual_seed(7)
+
+        def forward(self, x):
+            noise = torch.randn(4, generator=self.gen)
+            return self.lin(x + noise)
+
+
+    torch.manual_seed(0)
+    trace = tl.trace(GenModel(), torch.randn(2, 4))
+    print(trace["randn_1_1"].equivalence_class)
+    """
+)
+
+
+def test_object_arg_equivalence_class_is_stable_across_processes() -> None:
+    """An object-valued arg must not make equivalence_class id()-derived (R21-C/P4).
+
+    ``torch.Generator`` has no custom repr, so the arg-hash tail folded its
+    memory address into the PERSISTED ``equivalence_class``: byte-different
+    across processes (controls identical), and colliding for distinct
+    objects at a reused address. The fingerprint now uses the argument's
+    type identity.
+    """
+
+    import os
+
+    outputs = set()
+    for hash_seed in ("0", "1"):
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed)
+        outputs.add(
+            subprocess.check_output(
+                [sys.executable, "-c", _GENERATOR_EQ_SCRIPT], text=True, env=env
+            ).strip()
+        )
+    assert len(outputs) == 1, (
+        f"equivalence_class for a generator-arg op diverged across processes: {outputs!r}"
+    )
+    assert not any("0x" in value for value in outputs)
+
+
+def test_per_call_generator_objects_do_not_split_recurrence_grouping() -> None:
+    """A fresh (semantically identical) Generator per call must still group (R21-C/P4).
+
+    The id()-derived arg hash gave the two structurally-identical ``randn``
+    calls different equivalence classes, so the recurrent block produced two
+    single-pass layers instead of one 2-pass layer -- the address leak
+    changed captured METADATA, not just persisted bytes.
+    """
+
+    class PerCallGen(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for _ in range(2):
+                gen = torch.Generator().manual_seed(7)
+                x = self.lin(x + torch.randn(4, generator=gen))
+            return x
+
+    trace = tl.trace(PerCallGen(), torch.randn(2, 4))
+    randn_layers = [label for label in trace.layer_labels if label.startswith("randn")]
+    assert len(randn_layers) == 1, (
+        "per-call Generator objects split the recurrent randn into "
+        f"separate layers: {randn_layers!r}"
+    )
+    assert trace[randn_layers[0]].num_passes == 2
