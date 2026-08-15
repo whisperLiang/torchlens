@@ -259,17 +259,21 @@ def _validate_recording_values(values: Mapping[str, Any]) -> None:
             remedy="choose a documented lookback payload policy",
             argument="lookback_payload_policy",
         )
+    # R64: the record surface carries its OWN codes (recording_*) so one
+    # documented code never maps to two catchable builtins -- the tl.trace
+    # twins keep TypeError lineage under the unprefixed codes, this surface
+    # keeps its historical ValueError lineage (the F1/F3/F4 split pattern).
     if intervene is not None and not callable(intervene):
         raise InvalidArgumentError(
             f"intervene must be callable or None; received {type(intervene).__name__}",
-            code="intervention_predicate_type_invalid",
+            code="recording_intervention_predicate_type_invalid",
             remedy="pass tl.when(...), another predicate, or None",
             argument="intervene",
         )
     if halt is not None and not callable(halt):
         raise InvalidArgumentError(
             f"halt must be callable or None; received {type(halt).__name__}",
-            code="halt_predicate_type_invalid",
+            code="recording_halt_predicate_type_invalid",
             remedy="pass a halt predicate or None",
             argument="halt",
         )

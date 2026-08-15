@@ -105,14 +105,14 @@ add names to the top-level `torchlens` namespace:
 | `graph_breaks_unavailable` | `tl.debug.graph_breaks()` found no `torch._dynamo.explain` in this torch runtime (`GraphBreaksUnavailableError`, `RuntimeError` lineage) | Upgrade torch or skip the correlation on this runtime |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
-| `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
+| `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
 | `hash_content_type_unsupported` | `tl.hash.content` value cannot be deterministically encoded (`ArgumentTypeError`, `TypeError` lineage) | Pass tensors, arrays, builtin scalars/containers, or `__dict__`-inspectable objects |
 | `hash_expected_type_invalid` | `tl.assert_unchanged` pin is neither a string nor `None` (`ArgumentTypeError`, `TypeError` lineage) | Pass the pinned hash string, or `None` to bootstrap a pin |
 | `input_namedtuple_schema_not_total` | Model-input tuple subclass declares a namedtuple `_fields` schema that does not account for the physical tuple — malformed non-tuple-of-str `_fields`, or declared arity differing from physical arity (`InvalidArgumentError`) | Fix the `_fields` declaration (one str per positional element) or pass a plain tuple/list |
 | `input_tree_cycle` | Model-input tree contains a self-referential container (`InvalidArgumentError`) | Remove the container reference cycle from the model input |
 | `input_tree_depth_exceeded` | Model-input tree nesting exceeds the input-boundary depth ceiling (`InvalidArgumentError`) | Flatten the nested input containers before tracing |
 | `input_tree_stack_exhausted` | Walking the model-input tree exhausted the Python stack budget before the depth ceiling — capture was entered with most of the interpreter stack already consumed (`InvalidArgumentError`) | Enter capture from a shallower call stack or raise `sys.setrecursionlimit()` |
-| `intervention_predicate_type_invalid` | `intervene` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass `tl.when(...)`, another predicate, or `None` |
+| `intervention_predicate_type_invalid` | `tl.trace` `intervene` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_intervention_predicate_type_invalid`) | Pass `tl.when(...)`, another predicate, or `None` |
 | `intervention_action_direction_invalid` | Predicate-side intervention action names an unknown direction (`ArgumentTypeError`; historically `TypeError`, so the live capture path converts it to `PredicateError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_action_type_invalid` | Intervention action has an unsupported type | Pass a decision, helper, callable, or `None` |
 | `intervention_direction_invalid` | Trace-side intervention direction is unknown (`InvalidArgumentError`; historically `ValueError`) | Choose `forward`, `backward`, or `both` |
@@ -158,6 +158,8 @@ add names to the top-level `torchlens` namespace:
 | `recording_backward_halted` | `log_backward()` on a halted Recording (the sparse frontier retained no complete output to root the backward walk) | Re-record without `halt=` or use `trace(halt=...)` for prefix backward |
 | `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |
 | `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
+| `recording_halt_predicate_type_invalid` | `tl.record` `halt` is not callable (`InvalidArgumentError`, `ValueError` lineage; the `tl.trace` twin is `halt_predicate_type_invalid`) | Pass a halt predicate or `None` |
+| `recording_intervention_predicate_type_invalid` | `tl.record` `intervene` is not callable (`InvalidArgumentError`, `ValueError` lineage; the `tl.trace` twin is `intervention_predicate_type_invalid`) | Pass `tl.when(...)`, another predicate, or `None` |
 | `recording_multipass_not_convertible` | `to_trace()` on a multi-pass Recording | Record one pass per Recording |
 | `reentrant_trace` | `tl.trace` was started while another capture was active (`ReentrantTraceError`, `RuntimeError` lineage) | Finish the outer capture before starting another |
 | `release_during_active_capture` | `tl.release_model()` while a capture is still active | Let the capture finish before releasing the model |
