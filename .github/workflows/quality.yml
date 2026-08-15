@@ -43,6 +43,42 @@ jobs:
       - name: Run mypy
         run: mypy torchlens/
 
+  packaging:
+    name: Packaging manifest tripwires
+    runs-on: ubuntu-24.04
+    # PR-BLOCKING copy of the wheel-diet + sdist-governance gates (grind r3,
+    # R82): they previously ran only in the nightly wheel job, so a revert of
+    # the MANIFEST.in / exclude-package-data wiring merged green and shipped
+    # for up to a day before the scheduled leg went red. Both tests build the
+    # real artifacts (~2 min), well inside the PR budget.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.8.0+cpu"
+          uv pip check
+
+      - name: Run the packaging manifest tripwires
+        run: |
+          pytest \
+            "tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet" \
+            "tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed" \
+            --tb=short -q
+
   dep-audit:
     name: Dependency audit
     runs-on: ubuntu-24.04

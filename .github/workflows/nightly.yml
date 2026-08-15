@@ -120,7 +120,16 @@ jobs:
           # re-select rare-but-not-slow tests that the `rare` marker documents as
           # "always excluded unless explicitly requested". Conjoin `not rare` to
           # preserve that contract.
-          pytest tests/ -m "not slow and not rare" --tb=short
+          pytest tests/ -m "not slow and not rare" --tb=short \
+            --junitxml="${{ runner.temp }}/fast-tier.junit.xml"
+
+      - name: Fail on an under-executed fast tier
+        # Executed-floor attestation (grind r3, R82): the full fast tier is
+        # the widest unattended selection (12004 collected, counted
+        # 2026-08-15); the floor is roughly half so collection drift or an
+        # importorskip cascade goes red while normal churn never trips.
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/fast-tier.junit.xml" 6000
 
   coverage:
     name: Coverage floor (smoke tier)

@@ -47,8 +47,19 @@ jobs:
 
       - name: Run slow tests
         run: |
-          pytest tests/ -m slow --tb=short
+          pytest tests/ -m slow --tb=short \
+            --junitxml="${{ runner.temp }}/weekly-slow.junit.xml"
 
       - name: Run rare tests
         run: |
-          pytest tests/ -m rare --tb=short
+          pytest tests/ -m rare --tb=short \
+            --junitxml="${{ runner.temp }}/weekly-rare.junit.xml"
+
+      - name: Fail on an under-executed slow or rare tier
+        # Executed-floor attestation for the ONLY leg that ever runs these
+        # tiers (grind r3, R82): a marker drift or importorskip cascade that
+        # hollows them out must go red, not green. Floors are roughly half
+        # the current selections (295 slow / 16 rare, counted 2026-08-15).
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-slow.junit.xml" 145
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-rare.junit.xml" 8
