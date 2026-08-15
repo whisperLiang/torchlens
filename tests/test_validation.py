@@ -6072,6 +6072,89 @@ def test_backward_invariants_allow_only_post_trigger_missing_backpointers() -> N
         log.cleanup()
 
 
+def test_backward_invariants_exempt_dead_branch_layers() -> None:
+    """Ops whose outputs never feed the backward walk need no backpointer (R24-X).
+
+    Autograd only visits grad_fns reachable from the loss, so a captured op
+    with an unconsumed output (``_ = h.mean()``) or a dead multi-op chain
+    legitimately retains no GradFn backpointer. ``tl.validate(scope="backward")``
+    used to raise ``backward_graph_invariants`` on these ordinary models.
+    """
+
+    class DeadBranch(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = self.lin(x)
+            _ = h.mean()
+            return h.relu()
+
+    class DeadChain(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = self.lin(x)
+            _ = (h.mean() * 2).sqrt()
+            return h.relu()
+
+    for model_cls in (DeadBranch, DeadChain):
+        log = tl.trace(
+            model_cls(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(backward_ready=True, layers_to_save="all"),
+            save_mode="reference",
+        )
+        try:
+            log.log_backward(log.output_ops[0].out.sum())
+            dead = next(layer for layer in log.layer_list if layer.label.startswith("mean"))
+            assert dead.grad_fn_object_id is not None
+            assert dead.grad_fn is None
+            assert check_metadata_invariants(log) is True
+        finally:
+            log.cleanup()
+
+
+def test_dead_branch_exemption_does_not_disarm_contributing_backpointers() -> None:
+    """Severing a CONTRIBUTING layer's backpointer still raises alongside R24-X.
+
+    The dead-branch carve-out requires the handle to be absent from
+    ``grad_fn_logs`` AND the layer to be provably outside the walked region;
+    a projected handle whose backpointer is dropped keeps failing on the very
+    trace that exercises the exemption.
+    """
+
+    class DeadBranch(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = self.lin(x)
+            _ = h.mean()
+            return h.relu()
+
+    log = tl.trace(
+        DeadBranch(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(backward_ready=True, layers_to_save="all"),
+        save_mode="reference",
+    )
+    try:
+        log.log_backward(log.output_ops[0].out.sum())
+        victim = next(layer for layer in log.layer_list if layer.label.startswith("linear"))
+        assert victim.grad_fn is not None
+        victim.grad_fn = None
+
+        with pytest.raises(MetadataInvariantError, match="missing its GradFn backpointer"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
 def test_bad_pre_trigger_layer_grad_fn_backpointer_raises() -> None:
     """A paired pre-trigger layer with a severed GradFn backpointer raises."""
 

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         _check_backward_event_flow_invariants,
         _check_backward_pass_domain_invariants,
         _check_journal_seq_invariants,
+        _layer_feeds_recorded_backward_roots,
         _layer_postdates_all_backward_triggers,
     )
 
@@ -41,6 +42,12 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
     This admits legitimate mid-forward ``autograd.grad`` cases where later
     forward layers did not exist when backward graph walking ran, while still
     failing pre-trigger layers whose backpointer was accidentally severed.
+    A pre-trigger layer is also exempt when it provably sat OUTSIDE the
+    backward walk (b7-opus R24-X): its recorded handle id was never projected
+    into ``grad_fn_logs`` AND no autograd-visited op is reachable from it
+    through grad-carrying edges — the dead-branch case (``_ = h.mean()``) and
+    grad-severed subgraphs, where autograd never constructs a backpointer to
+    retain.
 
     Parameters
     ----------
@@ -315,6 +322,20 @@ def _check_backward_layer_backpointers(trace: Trace, name: str) -> None:
             continue
         if layer.grad_fn is None:
             if _layer_postdates_all_backward_triggers(trace, layer):
+                continue
+            # Dead-branch carve-out (b7-opus R24-X): autograd visits a grad_fn
+            # only when its output feeds a backward root along grad-carrying
+            # edges, so a provably non-contributing layer (unconsumed output,
+            # or a path severed by a grad-less op) never receives a
+            # backpointer BY CONTRACT. The exemption requires BOTH independent
+            # signals: the recorded handle id was never projected into
+            # ``grad_fn_logs`` (a projected handle is proof of visitation, so
+            # a dropped backpointer on it still raises) AND the grad-carrying
+            # reachability walk — which fails closed on every resolution
+            # gap — cannot reach any visited op downstream.
+            if grad_fn_object_id not in getattr(
+                trace, "grad_fn_logs", {}
+            ) and not _layer_feeds_recorded_backward_roots(trace, layer):
                 continue
             raise MetadataInvariantError(
                 name,

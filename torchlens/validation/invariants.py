@@ -371,6 +371,9 @@ _check_grad_fn_relation_list = _rebind_function(
 _check_backward_pass_domain_invariants = _rebind_function(
     _invariants_backward_domain._check_backward_pass_domain_invariants, globals()
 )
+_layer_feeds_recorded_backward_roots = _rebind_function(
+    _invariants_backward_domain._layer_feeds_recorded_backward_roots, globals()
+)
 _layer_postdates_all_backward_triggers = _rebind_function(
     _invariants_backward_domain._layer_postdates_all_backward_triggers, globals()
 )
