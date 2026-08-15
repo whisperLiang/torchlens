@@ -3463,11 +3463,19 @@ def install_autograd_wrappers() -> None:
         return
     _ORIGINAL_AUTOGRAD_BACKWARD = torch.autograd.backward
     _ORIGINAL_AUTOGRAD_GRAD = torch.autograd.grad
+    # Bind the snapshots into the closures, NEVER a call-time global read: a
+    # buried old wrapper (foreign patch layered on top, identity-guarded
+    # teardown, then a re-install snapshotting the foreign chain) otherwise
+    # re-pointed EVERY live old wrapper at the new global -- a chain that
+    # contains the old wrapper itself, i.e. infinite recursion on the first
+    # backward (grind-r5 R56 follow-on, caught by this lane's own gate).
+    closure_original_backward = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_BACKWARD)
+    closure_original_grad = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_GRAD)
 
     def wrapped_backward(*args: Any, **kwargs: Any) -> Any:
         """Route ``torch.autograd.backward`` through TorchLens when roots match."""
 
-        original = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_BACKWARD)
+        original = closure_original_backward
         forward_op_count_at_trigger = _active_forward_op_count_at_trigger()
         roots = _autograd_roots_from_call(args, kwargs, "tensors")
 
@@ -3489,7 +3497,7 @@ def install_autograd_wrappers() -> None:
     def wrapped_grad(*args: Any, **kwargs: Any) -> Any:
         """Route ``torch.autograd.grad`` through TorchLens when roots match."""
 
-        original = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_GRAD)
+        original = closure_original_grad
         forward_op_count_at_trigger = _active_forward_op_count_at_trigger()
         roots = _autograd_roots_from_call(args, kwargs, "outputs")
 

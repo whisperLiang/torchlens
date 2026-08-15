@@ -58,11 +58,16 @@ def test_uninstall_autograd_wrappers_preserves_foreign_patches() -> None:
             "unwrap clobbered a foreign patch on torch.autograd.grad"
         )
     finally:
-        # Drop the foreign layer and finish an honest teardown/reinstall so
-        # later tests see pristine global state.
-        torch.autograd.backward = inner_backward
-        torch.autograd.grad = inner_grad
-        tl_backward.uninstall_autograd_wrappers()
+        # Drop BOTH layers (foreign patch + the still-buried torchlens
+        # wrapper): restore the pristine originals directly, then reinstall
+        # from clean state so later tests see exactly the pre-test world.
+        pristine_backward = tl_backward._ORIGINAL_AUTOGRAD_BACKWARD
+        pristine_grad = tl_backward._ORIGINAL_AUTOGRAD_GRAD
+        if pristine_backward is not None:
+            torch.autograd.backward = pristine_backward
+        if pristine_grad is not None:
+            torch.autograd.grad = pristine_grad
+        tl_backward._AUTOGRAD_WRAPPERS_INSTALLED = False
         tl_backward.install_autograd_wrappers()
 
 
