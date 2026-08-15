@@ -115,6 +115,39 @@ def test_static_attr_cache_detects_replacement_and_does_not_pin_classes() -> Non
     assert all(key is not class_ref() for key in _STATIC_ATTR_MEMO)
 
 
+def test_static_attr_cache_never_self_retains_its_weak_key() -> None:
+    """A class attribute reaching the class must not pin the weak key (R37/b4:R39-6).
+
+    ``answers[name] = resolved`` inside a ``WeakKeyDictionary`` value strongly
+    reached the key when the attribute IS the class (``self_ref``), directly
+    references it (``registry``), or is an instance of it (the fingerprint
+    stored ``type(value)`` -- the class object itself). Eviction could then
+    never start and the class lived forever.
+    """
+
+    class Ephemeral:
+        marker = 1
+
+    Ephemeral.self_ref = Ephemeral
+    Ephemeral.registry = [Ephemeral]
+    Ephemeral.default = Ephemeral()  # fingerprint half: type(value) is the class
+
+    # Lookups still answer correctly (uncached for the self-reaching names).
+    assert static_class_attr(Ephemeral, "self_ref") is Ephemeral
+    assert static_class_attr(Ephemeral, "registry") == [Ephemeral]
+    assert static_class_attr(Ephemeral, "marker") == 1
+    assert static_class_attr(Ephemeral, "self_ref") is Ephemeral  # repeat read
+
+    class_ref = weakref.ref(Ephemeral)
+    del Ephemeral
+    gc.collect()
+    gc.collect()
+    assert class_ref() is None, (
+        "the static-attr memo self-retained its weak key through a "
+        "class-reaching attribute value or the type-object fingerprint"
+    )
+
+
 def test_capture_cache_lru_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Capture cache enforces its entry cap and exposes bounded clearing."""
 
