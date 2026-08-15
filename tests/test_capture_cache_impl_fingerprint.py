@@ -403,3 +403,51 @@ def test_bf16_state_flip_is_a_cache_miss(tmp_path) -> None:
     assert second.capture_cache_hit is False, (
         "a bf16 buffer and its fp32 twin must not share a capture-cache key"
     )
+
+
+def test_float8_attribute_tensors_key_by_content() -> None:
+    """Exotic-dtype tensors hash by CONTENT via the uint8-view byte path.
+
+    r3 b1/b7 (partial reopen of the p4 R39 attr-blind class): the hash-failure
+    fallback degraded to a content-blind ("tensor-meta", shape, dtype, device)
+    fragment, so two DIFFERENT-content float8 attribute tensors produced
+    identical key fragments -- a false cache HIT through the fix's own
+    "false hits never" docstring.
+    """
+
+    float8 = getattr(torch, "float8_e4m3fn", None)
+    if float8 is None:
+        pytest.skip("torch build without float8_e4m3fn")
+
+    from torchlens._capture_state_helpers import _attribute_state_fragment
+
+    a = torch.tensor([1.0, 2.0]).to(float8)
+    b = torch.tensor([3.0, 4.0]).to(float8)
+    assert _attribute_state_fragment(a) != _attribute_state_fragment(b)
+    # Equal content still keys equal: float8 keeps positive cache utility.
+    assert _attribute_state_fragment(a) == _attribute_state_fragment(a.clone())
+
+
+def test_unhashable_tensor_attribute_never_matches() -> None:
+    """A content-unreadable tensor poisons the key instead of keying stably."""
+
+    from torchlens._capture_state_helpers import _attribute_state_fragment
+
+    sparse = torch.sparse_coo_tensor(torch.tensor([[0], [1]]), torch.tensor([1.0]), (2, 2))
+    first = _attribute_state_fragment(sparse)
+    second = _attribute_state_fragment(sparse)
+    assert first != second, (
+        "content-unreadable tensors must mint never-matching fragments, "
+        "never a stable content-blind one"
+    )
+
+
+def test_meta_tensor_attribute_keys_by_metadata() -> None:
+    """Meta tensors have no bytes: metadata IS their content, keyed stably."""
+
+    from torchlens._capture_state_helpers import _attribute_state_fragment
+
+    a = torch.empty(3, device="meta")
+    b = torch.empty(3, device="meta")
+    assert _attribute_state_fragment(a) == _attribute_state_fragment(b)
+    assert _attribute_state_fragment(a) != _attribute_state_fragment(torch.empty(4, device="meta"))

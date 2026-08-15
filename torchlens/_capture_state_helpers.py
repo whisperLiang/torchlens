@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import types
@@ -1500,7 +1501,11 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
         logical_dtype = str(cpu.dtype)
         if cpu.dtype is torch.bfloat16:
             cpu = cpu.to(torch.float32)
-        payload = cpu.numpy().tobytes()
+        # Byte-reinterpreting uint8 view: covers dtypes numpy cannot
+        # transport directly (float8 and friends), so content-bearing
+        # exotic-dtype state hashes by CONTENT instead of falling back to
+        # a content-blind fragment.
+        payload = cpu.reshape(-1).view(torch.uint8).numpy().tobytes()
     hasher = hashlib.sha256()
     hasher.update(
         repr(
@@ -1624,6 +1629,14 @@ def _callable_code_digest(func: Any) -> str:
 _ATTRIBUTE_FRAGMENT_DEPTH_CEILING = 4
 _ATTRIBUTE_FRAGMENT_ITEM_CEILING = 256
 
+# Per-process salt + counter minting NEVER-MATCHING fragments for tensor
+# attributes whose content cannot be read. A stable content-blind fragment
+# here would false-HIT on changed values, which the key contract forbids;
+# the salt keeps the token unique across processes (and across pid reuse),
+# the counter within this process.
+_ATTRIBUTE_MISS_SALT = os.urandom(8).hex()
+_ATTRIBUTE_MISS_COUNTER = itertools.count()
+
 
 def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     """Return a bounded, address-free key fragment for one instance attribute.
@@ -1644,14 +1657,30 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return value
     if isinstance(value, torch.Tensor):
-        try:
-            return ("tensor", _hash_tensor_content(value))
-        except Exception:
+        if value.is_meta:
+            # Meta tensors carry NO bytes: shape/dtype/device metadata IS
+            # their entire observable content, so a stable metadata fragment
+            # cannot be content-blind for them.
             return (
                 "tensor-meta",
                 tuple(value.shape),
                 str(value.dtype),
                 str(value.device),
+            )
+        try:
+            return ("tensor", _hash_tensor_content(value))
+        except Exception:
+            # Content-unreadable tensor (sparse/exotic layout or backend):
+            # degrading to a stable shape/dtype fragment made two
+            # DIFFERENT-content tensors key identically -- a false cache HIT,
+            # inverting this signature's "false hits never" contract. Mint a
+            # never-matching token instead: this capture can never hit any
+            # other entry (conservative always-miss, cache utility traded for
+            # correctness).
+            return (
+                "tensor-unhashable",
+                _ATTRIBUTE_MISS_SALT,
+                next(_ATTRIBUTE_MISS_COUNTER),
             )
     if isinstance(value, (torch.dtype, torch.device, torch.Size)):
         return ("torch-value", str(value))
