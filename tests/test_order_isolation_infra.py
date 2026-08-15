@@ -33,6 +33,32 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _HAS_RANDOMLY = importlib.util.find_spec("pytest_randomly") is not None
 
+#: An importable full-[test]-extra sentinel (same idiom as the skip audit's
+#: FULL_TEST_EXTRA_SENTINEL): when the environment CLAIMS the full test extra,
+#: a missing pytest-randomly is INSTALL BREAKAGE, not a legitimate partial
+#: environment -- the live guards must then FAIL, never skip (3.16 reopened
+#: row: the declaration landed but every guard skipped everywhere, so the
+#: gate layer stayed unarmed even on full installs).
+_CLAIMS_FULL_TEST_EXTRA = importlib.util.find_spec("timm") is not None
+
+
+def _require_randomly_or_skip() -> None:
+    """Skip on genuine partial environments; FAIL on full-extra installs."""
+
+    if _HAS_RANDOMLY:
+        return
+    if _CLAIMS_FULL_TEST_EXTRA:
+        pytest.fail(
+            "this environment carries the full [test] extra (sentinel import "
+            "succeeded) but pytest-randomly is missing: the order-isolation "
+            "gate layer is silently unarmed on an environment that promised "
+            "it (R76 reopened, 3.16 #4). Reinstall the [test] extra."
+        )
+    else:
+        # Branch shape keeps this a CONDITIONAL skip for the skip audit's
+        # unconditional-skip scanner (it deliberately ignores early returns).
+        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+
 
 def _test_extra_deps(pyproject_text: str) -> list[str]:
     """Extract the [test] extra's dependency strings from pyproject source.
@@ -88,8 +114,7 @@ def test_pytest_randomly_declared_in_test_extra() -> None:
 def test_randomly_plugin_registration_matches_invocation(request: pytest.FixtureRequest) -> None:
     """When installed, the plugin must be live unless explicitly disabled."""
 
-    if not _HAS_RANDOMLY:
-        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+    _require_randomly_or_skip()
     disabled = any(
         arg == "no:randomly" for arg in request.config.invocation_params.args
     ) or "no:randomly" in getattr(request.config.option, "plugins", [])
@@ -103,11 +128,22 @@ def test_randomly_plugin_registration_matches_invocation(request: pytest.Fixture
         )
 
 
-def _collect_order(extra_args: list[str]) -> list[str]:
-    """Return the collected node-id order of the marker-lint module.
+_MINI_SUITE = "".join(f"def test_case_{index}():\n    pass\n\n\n" for index in range(12))
+
+
+def _collect_order(suite_dir: Path, extra_args: list[str]) -> list[str]:
+    """Return the collected node-id order of a planted 12-test mini-suite.
+
+    The probe deliberately collects a MINI-SUITE outside the repo rather than
+    a real test module: collecting tests/ loads the root conftest (a full
+    torch import) and its collection-time scan-cache warmers — measured at
+    ~24s PER SUBPROCESS, 72s for the three probe runs. The property under
+    test is pytest-randomly's flag behavior, which is module-agnostic.
 
     Parameters
     ----------
+    suite_dir:
+        Directory holding the planted mini-suite (a ``test_probe.py``).
     extra_args:
         Ordering-relevant pytest flags for this collection run.
 
@@ -122,14 +158,16 @@ def _collect_order(extra_args: list[str]) -> list[str]:
             sys.executable,
             "-m",
             "pytest",
-            "tests/test_marker_lint.py",
+            "test_probe.py",
             "--collect-only",
             "-q",
+            "-p",
+            "no:cacheprovider",
             *extra_args,
         ],
         capture_output=True,
         text=True,
-        cwd=_REPO_ROOT,
+        cwd=suite_dir,
     )
     order = [line for line in proc.stdout.splitlines() if "::" in line]
     assert order, f"collection produced no items:\n{proc.stdout}\n{proc.stderr}"
@@ -137,7 +175,7 @@ def _collect_order(extra_args: list[str]) -> list[str]:
 
 
 @pytest.mark.heavy
-def test_no_randomly_flag_actually_disables_shuffling() -> None:
+def test_no_randomly_flag_actually_disables_shuffling(tmp_path: Path) -> None:
     """``-p no:randomly`` must stabilize order; the default must shuffle.
 
     Red-capable in both directions: if the flag is a silent no-op (the
@@ -145,19 +183,24 @@ def test_no_randomly_flag_actually_disables_shuffling() -> None:
     if shuffling itself is broken the seeded run matches definition order.
     """
 
-    if not _HAS_RANDOMLY:
-        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+    _require_randomly_or_skip()
+    suite_dir = tmp_path
+    (suite_dir / "test_probe.py").write_text(_MINI_SUITE, encoding="utf-8")
     # A blocked plugin contributes no CLI options, so the disabled runs carry
     # no seed flag: were the flag a no-op (plugin still live), each run would
     # draw a fresh time-based seed and the two orders would diverge.
-    disabled_a = _collect_order(["-p", "no:randomly"])
-    disabled_b = _collect_order(["-p", "no:randomly"])
+    disabled_a = _collect_order(suite_dir, ["-p", "no:randomly"])
+    disabled_b = _collect_order(suite_dir, ["-p", "no:randomly"])
     assert disabled_a == disabled_b, (
         "-p no:randomly did not produce a stable order across runs — the "
         "disable flag is not actually disabling the plugin"
     )
-    shuffled = _collect_order(["--randomly-seed=1"])
+    shuffled = _collect_order(suite_dir, ["--randomly-seed=1"])
     assert sorted(shuffled) == sorted(disabled_a)
+    assert shuffled != disabled_a, (
+        "the seeded default run did not shuffle the mini-suite — randomized "
+        "ordering is silently inert"
+    )
     assert shuffled != disabled_a, (
         "a seeded default run produced definition order — shuffling is not "
         "actually happening (order-isolation coverage is fictional)"

@@ -144,6 +144,11 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
         "py<3.11 tomllib backport, only conditionally needed; extras-gap candidate "
         "reported 2026-08-15 (tomli; python_version<'3.11' belongs in [test])",
     ),
+    "torch._dynamo.trace_rules": (
+        UNAVAILABLE_OK,
+        "torch build/version capability probe (core torch is required); "
+        "private Dynamo module, absent/relocated on some torch builds",
+    ),
     "torch._subclasses.fake_tensor": (
         UNAVAILABLE_OK,
         "torch build/version capability probe (core torch is required)",
@@ -209,12 +214,15 @@ UNCONDITIONAL_SKIP_LEDGER: dict[str, str] = {
     ),
 }
 
+# NOTE (b10 R79-4 round 3): ``ast.Try`` is deliberately ABSENT. A ``try``
+# BODY always executes, so ``try: pytest.skip(...)`` laundered an
+# unconditional skip as "conditional"; only a genuinely branchy ancestor
+# counts (an except handler runs iff its try body raised).
 _CONDITIONAL_ANCESTORS: tuple[type, ...] = tuple(
     node_type
     for node_type in (
         ast.If,
         ast.IfExp,
-        ast.Try,
         ast.ExceptHandler,
         ast.While,
         ast.For,
@@ -222,6 +230,18 @@ _CONDITIONAL_ANCESTORS: tuple[type, ...] = tuple(
     )
     if node_type is not None
 )
+
+
+def warm_scan_caches() -> None:
+    """Pre-fill the per-file text/AST caches OUTSIDE any test's charged window.
+
+    Called from the root conftest's collection hook (uncharged time): the
+    whole-tree scans below otherwise charge their one-time ~5-7s parse cost to
+    whichever audit test runs first under randomized ordering.
+    """
+
+    for path in _iter_test_files(TESTS_DIR):
+        _parse_with_parents(str(path))
 
 
 def _iter_test_files(root: Path) -> list[Path]:
@@ -509,6 +529,20 @@ def test_unconditional_skip_scanner_is_red_capable(tmp_path: Path) -> None:
         "@pytest.mark.skipif(True, reason='skipif decoy; must NOT be flagged')\n"
         "def test_skipif_decoy():\n"
         "    pass\n"
+        "\n"
+        "\n"
+        "def test_try_laundered_skip():\n"
+        "    try:\n"
+        "        pytest.skip('try BODY always runs; MUST be flagged (R79-4)')\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "\n"
+        "\n"
+        "def test_handler_skip_decoy():\n"
+        "    try:\n"
+        "        _probe()\n"
+        "    except ImportError:\n"
+        "        pytest.skip('handler runs iff the body raised; must NOT be flagged')\n"
     )
     marked = tmp_path / "test_planted_pytestmark.py"
     marked.write_text(
@@ -519,7 +553,309 @@ def test_unconditional_skip_scanner_is_red_capable(tmp_path: Path) -> None:
     assert set(findings) == {
         "test_planted_skips.py::test_decorated",
         "test_planted_skips.py::test_body_skip",
+        "test_planted_skips.py::test_try_laundered_skip",
         "test_planted_pytestmark.py::<pytestmark>",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2b. skipif audit: repo-unsatisfiable conditions (b10 R79-1 round 3)
+# ---------------------------------------------------------------------------
+#
+# ``skipif`` was explicitly OUT of the unconditional-skip scanner's scope, and
+# that is where the real always-skips hid: ten tests gated on (a) a gitignored
+# local artifact that cannot exist in any fresh clone or CI runner, and (b) an
+# env var nothing in the repo ever sets. A skip that fires EVERYWHERE is a
+# deleted test wearing a disguise — each such site must be ledgered, and the
+# ledger is two-way: when the condition becomes satisfiable (the artifact is
+# committed / the env var gains a repo-side setter) the row goes stale and
+# this audit demands its removal.
+
+#: scanner key (``relpath::qualname``) -> dated justification for a skipif
+#: whose condition is UNSATISFIABLE in every repo-defined environment.
+_MENAGERIE_LOCAL_DATA = (
+    "[2026-08-15] menagerie catalog.db is a local research artifact (gitignored, "
+    "never in a fresh clone or CI); the routing tests run only on boxes that "
+    "built the menagerie locally — documented as out of the portable suite"
+)
+_MENAGERIE_CLUSTER_ENV = (
+    "[2026-08-15] TORCHLENS_MENAGERIE_CLUSTER is set by no repo config; the "
+    "cluster-dispatch tests run only on the owner's cluster-connected boxes — "
+    "documented as out of the portable suite"
+)
+REPO_UNSATISFIABLE_SKIPIF_LEDGER: dict[str, str] = {
+    "test_menagerie_module_split.py::<pytestmark>": _MENAGERIE_LOCAL_DATA,
+    # Sibling sweep (this audit's first run) beyond b10 R79-1's ten:
+    "test_menagerie_cluster_cascade_gate.py::<pytestmark>": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_csv_export.py::test_public_csv_export_schema_join_and_dictionary": (
+        "[2026-08-15] gated on .research/menagerie-csv-schema/SCHEMA_v2.md — a "
+        "PRIVATE gitignored notes artifact that exists only on the owner's "
+        "boxes; the schema-join check runs there only (found by this audit's "
+        "first sweep; consider committing a public schema doc to re-arm it)"
+    ),
+    "test_menagerie_csv_export.py::test_stale_trace_summary_nulls_retrace_fields_and_side_tables": (
+        "[2026-08-15] gated on .research/menagerie-csv-schema/SCHEMA_v2.md — a "
+        "PRIVATE gitignored notes artifact that exists only on the owner's "
+        "boxes (see the sibling row above)"
+    ),
+    "test_menagerie_cluster_routing.py::test_catalog_cuda_required_ids_route_to_local_rtx_2080_ti": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_cluster_routing.py::test_cuda_required_catalog_recipes_request_cuda": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_cluster_routing.py::test_cuda_required_catalog_rows_resolve_to_cuda_env": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_cluster_routing.py::test_giant_registry_force_cluster_only_for_genuine_giants": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_cluster_routing.py::test_cluster_candidates_exclude_pixi_island_giants": _MENAGERIE_LOCAL_DATA,
+    "test_menagerie_cluster_routing.py::test_auto_runner_dispatches_static_giant_and_keeps_non_giant_local": _MENAGERIE_CLUSTER_ENV,
+    "test_menagerie_cluster_routing.py::test_cluster_routing_resume_uses_ledger_not_manifest": _MENAGERIE_CLUSTER_ENV,
+    "test_menagerie_cluster_routing.py::test_cluster_unreachable_writes_terminal_rows_and_continues": _MENAGERIE_CLUSTER_ENV,
+    "test_menagerie_cluster_routing.py::test_cluster_timeout_writes_terminal_rows_and_continues": _MENAGERIE_CLUSTER_ENV,
+}
+
+
+def _module_path_literal_constants(tree: ast.AST) -> dict[str, str]:
+    """Map module-level names to repo-relative paths built from `/` literals.
+
+    Matches the ``NAME = <base> / "seg" / "seg"`` idiom: the string-literal
+    segments are joined; the (dynamic) base is ignored, since the repo-relative
+    tail is what decides trackability.
+    """
+
+    constants: dict[str, str] = {}
+    for node in tree.body if hasattr(tree, "body") else []:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        segments: list[str] = []
+        value: ast.expr = node.value
+        while isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+            if isinstance(value.right, ast.Constant) and isinstance(value.right.value, str):
+                segments.append(value.right.value)
+            value = value.left
+        if segments:
+            constants[target.id] = "/".join(reversed(segments))
+    return constants
+
+
+def _module_env_gate_constants(tree: ast.AST) -> dict[str, str]:
+    """Map module-level names to the env var they gate on.
+
+    Matches ``NAME = os.environ.get("X")`` optionally wrapped in ``bool(...)``.
+    """
+
+    constants: dict[str, str] = {}
+    for node in tree.body if hasattr(tree, "body") else []:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        value: ast.expr = node.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "bool"
+            and value.args
+        ):
+            value = value.args[0]
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr in {"get", "getenv"}
+            and value.args
+            and isinstance(value.args[0], ast.Constant)
+            and isinstance(value.args[0].value, str)
+        ):
+            constants[target.id] = value.args[0].value
+    return constants
+
+
+def _skipif_gate(condition: ast.expr) -> tuple[str, str] | None:
+    """Classify a skipif condition into an auditable gate shape.
+
+    Returns ``("artifact", NAME)`` for ``not NAME.exists()``, ``("env", NAME)``
+    for ``not NAME``, or ``None`` for any other shape (out of scope).
+    """
+
+    if not (isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not)):
+        return None
+    operand = condition.operand
+    if (
+        isinstance(operand, ast.Call)
+        and isinstance(operand.func, ast.Attribute)
+        and operand.func.attr == "exists"
+        and isinstance(operand.func.value, ast.Name)
+    ):
+        return ("artifact", operand.func.value.id)
+    if isinstance(operand, ast.Name):
+        return ("env", operand.id)
+    return None
+
+
+@cache
+def _tracked_repo_files() -> frozenset[str]:
+    """Return git-tracked repo-relative paths (empty outside a git checkout)."""
+
+    completed = subprocess.run(
+        ["git", "ls-files"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return frozenset(completed.stdout.splitlines())
+
+
+@cache
+def _repo_config_corpus() -> str:
+    """Concatenate the repo's tracked config/tooling text for env-var searches.
+
+    An env var counts as REPO-SET when any tracked workflow, script, tool, or
+    config mentions it; only vars mentioned NOWHERE outside their defining
+    test module classify as repo-unsatisfiable gates.
+    """
+
+    chunks: list[str] = []
+    for rel in sorted(_tracked_repo_files()):
+        if rel.startswith((".github/", "scripts/", "tools/", "benchmarks/")) or rel in (
+            "pyproject.toml",
+            ".pre-commit-config.yaml",
+        ):
+            path = REPO_ROOT / rel
+            try:
+                chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+    return "\n".join(chunks)
+
+
+def collect_repo_unsatisfiable_skipifs(root: Path, repo_root: Path) -> dict[str, str]:
+    """Scan ``root`` for skipif sites whose condition no repo environment meets.
+
+    Two proven classes (b10 R79-1):
+
+    - **artifact gates**: ``not NAME.exists()`` where NAME's string-literal
+      path tail is neither git-tracked nor present on disk — impossible in a
+      fresh clone or CI runner;
+    - **env gates**: ``not NAME`` where NAME wraps ``os.environ.get("X")`` and
+      ``X`` is mentioned in no tracked workflow/script/tool/config.
+
+    Returns scanner keys (``relpath::qualname``) -> site description.
+    """
+
+    findings: dict[str, str] = {}
+    for path in _iter_test_files(root):
+        text = _read_text(str(path))
+        if "skipif" not in text:
+            continue
+        rel = path.relative_to(root).as_posix()
+        tree = ast.parse(text, filename=str(path))
+        path_constants = _module_path_literal_constants(tree)
+        env_constants = _module_env_gate_constants(tree)
+
+        def classify(
+            condition: ast.expr,
+            key: str,
+            lineno: int,
+            # Per-file maps bound as defaults: B023 hygiene (also enforced by
+            # the ruff deferred-debt ratchet this same wave landed).
+            path_constants: dict[str, str] = path_constants,
+            env_constants: dict[str, str] = env_constants,
+        ) -> None:
+            gate = _skipif_gate(condition)
+            if gate is None:
+                return
+            kind, name = gate
+            if kind == "artifact" and name in path_constants:
+                tail = path_constants[name]
+                if tail not in _tracked_repo_files() and not (repo_root / tail).exists():
+                    findings[key] = f"line {lineno}: gated on untracked, absent artifact {tail!r}"
+            elif kind == "env" and name in env_constants:
+                var = env_constants[name]
+                if var not in _repo_config_corpus():
+                    findings[key] = f"line {lineno}: gated on env var {var!r} set by no repo config"
+
+        def classify_mark(mark: ast.expr, key: str) -> None:
+            if (
+                isinstance(mark, ast.Call)
+                and isinstance(mark.func, ast.Attribute)
+                and mark.func.attr == "skipif"
+                and mark.args
+            ):
+                classify(mark.args[0], key, mark.lineno)
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for dec in node.decorator_list:
+                    classify_mark(dec, f"{rel}::{node.name}")
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets
+            ):
+                marks = (
+                    node.value.elts
+                    if isinstance(node.value, (ast.List, ast.Tuple))
+                    else [node.value]
+                )
+                for mark in marks:
+                    classify_mark(mark, f"{rel}::<pytestmark>")
+    return findings
+
+
+@pytest.mark.smoke
+def test_no_unledgered_repo_unsatisfiable_skipifs() -> None:
+    """Every provably-always-firing skipif is ledgered; no ledger row is stale."""
+
+    findings = collect_repo_unsatisfiable_skipifs(TESTS_DIR, REPO_ROOT)
+    unledgered = set(findings) - set(REPO_UNSATISFIABLE_SKIPIF_LEDGER)
+    stale = set(REPO_UNSATISFIABLE_SKIPIF_LEDGER) - set(findings)
+    assert not unledgered and not stale, (
+        "repo-unsatisfiable skipif drift (a skip that fires everywhere is a "
+        "deleted test wearing a disguise — b10 R79-1). Ledger new sites with a "
+        "dated justification in REPO_UNSATISFIABLE_SKIPIF_LEDGER; delete rows "
+        "whose condition became satisfiable.\n"
+        f"  unledgered: {sorted(unledgered)}\n"
+        f"  stale: {sorted(stale)}\n"
+        f"  details: { {key: findings[key] for key in sorted(unledgered)} }"
+    )
+
+
+def test_repo_unsatisfiable_skipif_scanner_is_red_capable(tmp_path: Path) -> None:
+    """Planted artifact/env gates are caught; satisfiable decoys are not."""
+
+    planted = tmp_path / "test_planted_skipifs.py"
+    planted.write_text(
+        "import os\n"
+        "import pytest\n"
+        "from pathlib import Path\n"
+        "\n"
+        "MISSING = Path(__file__).parents[1] / 'no_such_dir' / 'no_such.db'\n"
+        "TRACKED = Path(__file__).parents[1] / 'pyproject.toml'\n"
+        "HAS_PHANTOM = bool(os.environ.get('TORCHLENS_PHANTOM_NEVER_SET_VAR'))\n"
+        "HAS_REAL = bool(os.environ.get('CI'))\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not MISSING.exists(), reason='planted artifact gate')\n"
+        "def test_artifact_gated():\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not TRACKED.exists(), reason='tracked decoy; not flagged')\n"
+        "def test_tracked_decoy():\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not HAS_PHANTOM, reason='planted env gate')\n"
+        "def test_env_gated():\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not HAS_REAL, reason='repo-set decoy; not flagged')\n"
+        "def test_repo_set_decoy():\n"
+        "    pass\n"
+    )
+    findings = collect_repo_unsatisfiable_skipifs(tmp_path, REPO_ROOT)
+    assert set(findings) == {
+        "test_planted_skipifs.py::test_artifact_gated",
+        "test_planted_skipifs.py::test_env_gated",
     }
 
 

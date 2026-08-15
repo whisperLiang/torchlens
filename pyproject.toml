@@ -362,6 +362,10 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
+# COVERAGE FLOOR (tripwire — never lower it to pass; R72 grind r4). Keep equal
+# to the nightly coverage job's --cov-fail-under; both are locked by
+# tests/test_coverage_floor_governance.py. Measured 64% on 2026-08-15.
+fail_under = 55
 
 [tool.coverage.html]
 directory = "tests/generated_outputs/reports/coverage_html"
@@ -370,12 +374,22 @@ directory = "tests/generated_outputs/reports/coverage_html"
 output = "tests/generated_outputs/coverage.lcov"
 
 [tool.mypy]
+# STRICTNESS RATCHET (R68, grind r4): the flags below only ever FLIP TO TRUE,
+# each landed at measured zero cost against the pinned mypy; the set is locked
+# by tests/test_mypy_ratchet_governance.py (narrowing any of them goes red
+# there). Next rungs, measured 2026-08-15 and relayed to the source lane:
+# disallow_untyped_defs (3 sites: _runnable_output_contracts.py:547,:563,
+# data_classes/op.py:3647) and warn_unused_ignores (63 dead ignores in 31
+# files). Flip each here in the SAME change that clears its sites.
 python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
 # Check bodies of unannotated functions so the package ratchet catches local drift.
 check_untyped_defs = true
+no_implicit_optional = true
+disallow_incomplete_defs = true
+strict_equality = true
 disallow_untyped_defs = false
 
 [tool.ruff]
@@ -420,6 +434,11 @@ select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP", "C4"]
 # honest alternative to leaving a whole family out of `select`: the family is ON,
 # so no new site of any OTHER code in it can land, and every exception is named.
 # Entries leave this list; nothing joins it without a reason.
+#
+# COUNT AUTHORITY (R70 grind r4): per-code site counts below are informational
+# snapshots (measured 2026-08-15, pinned ruff, isolated CI scope); the ENFORCED
+# no-growth ceilings live in tests/test_ruff_ratchet_governance.py, which also
+# locks `select` against narrowing. Deferred debt may shrink, never grow.
 ignore = [
     # --- proven harmful HERE, not merely deferred -------------------------------
     # B009/B010 rewrite `getattr(o, "x")` / `setattr(o, "x", v)` into attribute
@@ -452,41 +471,41 @@ ignore = [
     "SIM401",
 
     # --- owned by another grind row: do NOT double-fix here ---------------------
-    "B905",  # zip-without-explicit-strict -> row R23 (105 sites)
-    "B028",  # no-explicit-stacklevel -> row R66, warnings hygiene (9 sites)
+    "B905",  # zip-without-explicit-strict -> row R23 (109 sites)
+    "B028",  # no-explicit-stacklevel -> row R66, warnings hygiene (2 sites; near-closable)
 
     # --- judgment calls, later rounds ------------------------------------------
-    # 102 sites. if/else -> ternary is a readability call, and several sit in
+    # 88 sites. if/else -> ternary is a readability call, and several sit in
     # invariant-heavy code where the explicit branch carries a per-arm comment.
     "SIM108",
-    # 74 sites. `contextlib.suppress` is measurably slower than bare
+    # 99 sites. `contextlib.suppress` is measurably slower than bare
     # try/except/pass, and several of these sit on capture hot paths the
     # SPEEDENING sprint tuned. Needs a per-site perf verdict, not a sweep.
     "SIM105",
-    # 37 sites. Collapsing the two `if`s orphans the per-branch comments that
+    # 40 sites. Collapsing the two `if`s orphans the per-branch comments that
     # explain why the second condition is separate.
     "SIM102",
-    # 27 sites, no ruff fix. Combining `with` statements changes teardown ORDER
+    # 41 sites, no ruff fix. Combining `with` statements changes teardown ORDER
     # on failure, which is load-bearing for the capture/restore transactions.
     "SIM117",
-    # 8 sites. Each needs a real handle-lifetime decision, not a mechanical
+    # 7 sites. Each needs a real handle-lifetime decision, not a mechanical
     # context-manager wrap.
     "SIM115",
     # 16 sites. printf -> format changes message TEXT, and error-message tests
     # match on it.
     "UP031",
-    # 16 sites. `raise ... from` changes traceback chaining and several sites
+    # 17 sites. `raise ... from` changes traceback chaining and several sites
     # deliberately drop the context; each needs a verdict.
     "B904",
-    # 13 sites. Several are intentional "this attribute access must not raise"
+    # 14 sites. Several are intentional "this attribute access must not raise"
     # probes in tests, where the bare expression IS the assertion.
     "B018",
-    # 15 sites. This is a REAL bug class (late-binding closure over a loop
+    # 17 sites. This is a REAL bug class (late-binding closure over a loop
     # variable), so every site needs a correctness verdict AND a regression test
     # -- exactly what a mechanical rewrite would paper over. Highest-value item
     # left in this ledger.
     "B023",
-    # 13 sites with no ruff fix (the name is referenced, or is a tuple unpack).
+    # 16 sites with no ruff fix (the name is referenced, or is a tuple unpack).
     "B007",
     # 3 sites. A call in a default argument is sometimes load-bearing for a
     # captured closure; needs a per-site read.
@@ -510,17 +529,11 @@ combine-as-imports = true
 # code (E402). This shim is mandated by notebooks/audit/CLAUDE.md.
 "notebooks/audit/*.ipynb" = ["E402", "F401"]
 
-# menagerie/classics/ holds faithful random-init architecture reconstructions AND vendored/
-# ported REAL repo code (the model atlas). They are compact recipes / verbatim vendored source,
-# not first-party library code: dense one-line block definitions (E702), conventional math/ML
-# single-letter names like l/I/O for layers/identity (E741), unused imports kept verbatim from
-# the real source (F401), intentional dead scaffolding vars kept for readability of the
-# reconstructed forward (F841), and lambda-assignment factory idioms common in vendored source,
-# e.g. lucidrains repos (E731). Vendored source also keeps its original `type(x) == T`
-# comparisons (E721). Enforcing these would mean editing generated/vendored forwards
-# and perturbing already-rendered architecture graphs or diverging from the real source.
-# Real-bug lints (F821/F811/etc.) stay enforced.
-"menagerie/classics/*.py" = ["E702", "E741", "F401", "F841", "E731", "E712", "E721", "E402", "E711"]
+# NOTE (R70 grind r4): menagerie/ is WHOLLY extend-excluded above (and the
+# hooks pass --force-exclude), so nothing in it is linted at all — a former
+# menagerie/classics per-file-ignores entry here was dead config whose
+# "real-bug lints stay enforced" comment was false. Re-including menagerie in
+# lint scope is an owner decision; until then, no per-file-ignores for it.
 
 # =============================================================================
 # RELEASE POLICY (locked): TorchLens stays on the 2.x family on PyPI.

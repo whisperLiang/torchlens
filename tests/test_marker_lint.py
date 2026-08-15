@@ -13,7 +13,9 @@ tests/AGENTS.md "Markers"):
 
 2. **Duration budget** (runtime tripwire). The conftest hook accounts for fixture
    setup, call, and teardown time, then checks both each item and each resolved
-   parametrized family against the documented 5s partition boundary.
+   parametrized family (smoke AND unmarked) against the documented 5s partition
+   boundary. The charged measure is ``min(wall, cpu)`` — load-robust and
+   threading-robust; see the budget-constant comment block in conftest.py.
 
 3. **State-isolation census** (static). Every warn-once module global must appear
    in the root autouse reset inventory, and every module-scoped fixture that
@@ -26,6 +28,7 @@ smoke/full-tier run and pass vacuously when this file is run alone.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 import pytest
@@ -33,21 +36,105 @@ import pytest
 pytestmark = pytest.mark.smoke
 
 
+#: Markers that may never combine with ``smoke`` on one resolved item.
+#: ``heavy``/``slow``: additive markers keep the item in `-m smoke` despite the
+#: heavier tier. ``serial``/``rare`` (R41-2): both are duration-budget
+#: EXEMPTION channels, so a smoke+serial or smoke+rare item would sit in the
+#: commit gate with zero duration enforcement (and `-m smoke` overrides the
+#: default `-m 'not rare'`, so smoke+rare items DO run in the commit gate).
+_SMOKE_INCOMPATIBLE_MARKERS = ("heavy", "slow", "serial", "rare")
+
+
+def _tier_combo_violations(
+    marker_names: set[str], callspec_marker_names: set[str], nodeid: str
+) -> list[str]:
+    """Return tier-combination violations for one resolved item's markers.
+
+    Pure helper so the combination policy is unit-testable (red-capable)
+    without planting real mis-marked tests.
+
+    Policy:
+    - ``smoke`` may not combine with any of ``_SMOKE_INCOMPATIBLE_MARKERS``.
+    - ``heavy`` + ``slow`` is a partition contradiction (a test cannot be both
+      5-20s and >20s) UNLESS ``slow`` arrived as a per-parametrize-cell
+      refinement of a heavy family (``pytest.param(..., marks=slow)``), the
+      sanctioned shape for "this one cell measures beyond heavy's ceiling"
+      (R41-3). Budget enforcement already resolves the combo as slow-wins.
+
+    Parameters
+    ----------
+    marker_names:
+        All marker names on the resolved item.
+    callspec_marker_names:
+        Marker names contributed by the item's parametrize callspec.
+    nodeid:
+        Item node id used in violation strings.
+
+    Returns
+    -------
+    list[str]
+        Human-readable violation strings (empty when compliant).
+    """
+
+    violations = []
+    if "smoke" in marker_names:
+        for incompatible in _SMOKE_INCOMPATIBLE_MARKERS:
+            if incompatible in marker_names:
+                violations.append(f"{nodeid} [smoke + {incompatible}]")
+    if (
+        "heavy" in marker_names
+        and "slow" in marker_names
+        and "slow" not in callspec_marker_names
+        and "heavy" not in callspec_marker_names
+    ):
+        violations.append(f"{nodeid} [heavy + slow, not a per-cell refinement]")
+    return violations
+
+
+def _item_combo_violations(item: pytest.Item) -> list[str]:
+    """Apply the tier-combination policy to one collected pytest item."""
+
+    marker_names = {marker.name for marker in item.iter_markers()}
+    callspec = getattr(item, "callspec", None)
+    callspec_marker_names = {marker.name for marker in getattr(callspec, "marks", [])}
+    return _tier_combo_violations(marker_names, callspec_marker_names, item.nodeid)
+
+
 def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequest) -> None:
-    """No collected item may combine ``smoke`` with ``heavy`` or ``slow``."""
+    """No collected item may carry a contradictory tier-marker combination."""
 
     conflicted = []
     for item in request.session.items:
-        if item.get_closest_marker("smoke") is None:
-            continue
-        for heavier in ("heavy", "slow"):
-            if item.get_closest_marker(heavier) is not None:
-                conflicted.append(f"{item.nodeid} [smoke + {heavier}]")
+        conflicted.extend(_item_combo_violations(item))
     assert not conflicted, (
-        "Tests carry `smoke` together with a heavier tier marker, so `-m smoke` "
-        "still runs them despite the heavier mark. Drop `smoke` from each "
-        "(markers are additive):\n  " + "\n  ".join(conflicted)
+        "Tests carry contradictory tier-marker combinations (markers are "
+        "additive; exemption markers disarm duration budgets). Fix each "
+        "combination:\n  " + "\n  ".join(conflicted)
     )
+
+
+@pytest.mark.parametrize(
+    ("markers", "callspec_markers", "expected_fragments"),
+    [
+        pytest.param({"smoke", "heavy"}, set(), ["smoke + heavy"], id="smoke-heavy"),
+        pytest.param({"smoke", "slow"}, set(), ["smoke + slow"], id="smoke-slow"),
+        pytest.param({"smoke", "serial"}, set(), ["smoke + serial"], id="smoke-serial"),
+        pytest.param({"smoke", "rare"}, set(), ["smoke + rare"], id="smoke-rare"),
+        pytest.param({"heavy", "slow"}, set(), ["heavy + slow"], id="heavy-slow-decorators"),
+        pytest.param({"heavy", "slow"}, {"slow"}, [], id="heavy-family-slow-cell-ok"),
+        pytest.param({"smoke"}, set(), [], id="smoke-alone-ok"),
+        pytest.param({"heavy", "serial"}, set(), [], id="heavy-serial-ok"),
+    ],
+)
+def test_tier_combo_policy_is_red_capable(
+    markers: set[str], callspec_markers: set[str], expected_fragments: list[str]
+) -> None:
+    """The combination policy flags each banned shape and passes each sanctioned one."""
+
+    violations = _tier_combo_violations(markers, callspec_markers, "planted::node")
+    assert len(violations) == len(expected_fragments)
+    for fragment in expected_fragments:
+        assert any(fragment in violation for violation in violations), (fragment, violations)
 
 
 def test_bounded_tier_tests_stay_within_duration_budget(
@@ -57,10 +144,13 @@ def test_bounded_tier_tests_stay_within_duration_budget(
 
     The budget is TWO-directional (R41): ``smoke`` AND unmarked tests are held
     to the 5s partition boundary, ``heavy`` to its 20s ceiling (all
-    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. Budget
-    values live in ``tests/conftest.py`` and ride along on each recorded
-    offender -- a bare ``conftest`` import here would be ambiguous during
-    full-suite collection (nested conftests share the module name).
+    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. The
+    CHARGED time is ``min(wall, cpu)`` so neither orchestrator load (wall
+    inflation) nor torch intra-op threading (cpu inflation) can false-fail a
+    genuinely in-budget test (round-4 load-flake fix). Budget values live in
+    ``tests/conftest.py`` and ride along on each recorded offender -- a bare
+    ``conftest`` import here would be ambiguous during full-suite collection
+    (nested conftests share the module name).
 
     This test also asserts its own LAST-position ordering: the offender
     ledger only covers tests that already ran, so a reordering regression
@@ -88,8 +178,9 @@ def test_bounded_tier_tests_stay_within_duration_budget(
     }
     offenders = getattr(request.session, "_tl_duration_budget_offenders", [])
     lines = [
-        f"{nodeid} [{tier}]: {duration:.1f}s (budget {budget:.0f}s) -- {guidance[tier]}"
-        for nodeid, tier, duration, budget in offenders
+        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
+        f"(budget {budget:.0f}s on min(wall, cpu)) -- {guidance[tier]}"
+        for nodeid, tier, wall, cpu, budget in offenders
     ]
     assert not offenders, (
         "Tests exceeded their tier duration budget this session:\n  " + "\n  ".join(lines)
@@ -99,12 +190,14 @@ def test_bounded_tier_tests_stay_within_duration_budget(
 def test_smoke_parametrized_families_stay_within_duration_budget(
     request: pytest.FixtureRequest,
 ) -> None:
-    """Resolved smoke parameter families must stay within the aggregate budget.
+    """Resolved 5s-tier parameter families must stay within the aggregate budget.
 
-    A family of N parameters legitimately costs ~N single-test durations (the
-    selector matrix is 278 cells), so each family's budget scales with its
-    resolved cell count: load_factor * max(2x the per-test budget, the
-    per-cell allowance x n_cells). Genuine per-cell ballooning still trips.
+    Covers smoke AND unmarked families (R41-4: untiered families previously
+    had no aggregate bound). A family of N parameters legitimately costs ~N
+    single-test durations (the selector matrix is 278 cells), so each family's
+    budget scales with its resolved cell count: load_factor * max(2x the
+    per-test budget, the per-cell allowance x n_cells), charged on
+    min(wall, cpu). Genuine per-cell ballooning still trips.
     """
 
     family_stats = getattr(request.session, "_tl_smoke_family_stats", {})
@@ -127,7 +220,11 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
 def test_smoke_module_imports_stay_within_duration_budget(
     request: pytest.FixtureRequest,
 ) -> None:
-    """Smoke-bearing modules must import and collect within the 5s boundary."""
+    """Smoke-bearing modules must import and collect within the 5s boundary.
+
+    Charged on ``min(wall, cpu)`` like the per-test budgets, so parallel
+    orchestrator load cannot false-fail module imports either.
+    """
 
     budget = 5.0
     durations = getattr(request.session, "_tl_module_collection_durations", {})
@@ -137,12 +234,61 @@ def test_smoke_module_imports_stay_within_duration_budget(
         if item.get_closest_marker("smoke") is not None
     }
     offenders = [
-        (path, durations[path]) for path in sorted(smoke_paths) if durations.get(path, 0.0) > budget
+        (path, durations[path])
+        for path in sorted(smoke_paths)
+        if path in durations and min(durations[path]) > budget
     ]
-    lines = [f"{path}: {duration:.1f}s (budget {budget:.0f}s)" for path, duration in offenders]
+    lines = [
+        f"{path}: wall {wall:.1f}s / cpu {cpu:.1f}s (budget {budget:.0f}s on min)"
+        for path, (wall, cpu) in offenders
+    ]
     assert not offenders, (
         "Smoke-bearing modules exceeded the import/collection budget. Move expensive setup "
         "behind fixtures or re-tier the module:\n  " + "\n  ".join(lines)
+    )
+
+
+def warm_scan_caches() -> None:
+    """Pre-fill the whole-tree parse caches OUTSIDE any test's charged window.
+
+    Called from the root conftest's collection hook when this module's tests
+    are collected: the tests/-tree and torchlens/-package parses cost ~5-8s
+    of genuine CPU, which would otherwise land in whichever lint test runs
+    first and sit exactly on the smoke budget boundary.
+    """
+
+    _parsed_test_trees()
+    _warn_once_declarations(Path(__file__).resolve().parents[1] / "torchlens")
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_test_trees() -> tuple[tuple[str, ast.Module], ...]:
+    """Parse every test-suite Python file ONCE per session.
+
+    The static lints below each used to re-parse the whole tree (~1300 files),
+    costing ~5s PER TEST and sitting exactly on the smoke budget boundary
+    under composition noise; one shared parse keeps each lint at ~0.1s.
+    """
+
+    tests_root = Path(__file__).resolve().parent
+    return tuple(
+        (
+            str(path.relative_to(tests_root)),
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)),
+        )
+        for path in sorted(tests_root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_root_test_trees() -> tuple[tuple[str, ast.Module], ...]:
+    """Root-level ``test*.py`` subset of :func:`_parsed_test_trees`."""
+
+    return tuple(
+        (relative, tree)
+        for relative, tree in _parsed_test_trees()
+        if "/" not in relative and relative.startswith("test")
     )
 
 
@@ -169,6 +315,7 @@ def _assigned_module_names(statement: ast.stmt) -> set[str]:
     return {target.id for target in targets if isinstance(target, ast.Name)}
 
 
+@functools.lru_cache(maxsize=1)
 def _warn_once_declarations(package_root: Path) -> set[tuple[str, str]]:
     """Collect warn-once module-global declarations from TorchLens sources.
 
@@ -309,9 +456,9 @@ def _module_trace_fixtures_without_yield(tests_root: Path) -> list[str]:
         Stable ``path::fixture`` violations.
     """
 
+    del tests_root
     violations: list[str] = []
-    for path in tests_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative, tree in _parsed_test_trees():
         functions = (
             node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
@@ -322,7 +469,7 @@ def _module_trace_fixtures_without_yield(tests_root: Path) -> list[str]:
                 continue
             if any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(function)):
                 continue
-            violations.append(f"{path.relative_to(tests_root)}::{function.name}")
+            violations.append(f"{relative}::{function.name}")
     return violations
 
 
@@ -364,13 +511,11 @@ def test_root_conftest_does_not_inject_repo_into_sys_path() -> None:
 def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     """Root tests must consume shared state without bare ``conftest`` imports."""
 
-    tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
-    for path in tests_root.glob("test*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative, tree in _parsed_root_test_trees():
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "conftest":
-                violations.append(f"{path.name}:{node.lineno}")
+                violations.append(f"{relative}:{node.lineno}")
     assert not violations, (
         "Root tests import the ambiguous bare `conftest` module; use the session output "
         f"environment or a real helper module instead: {violations}"
@@ -430,10 +575,13 @@ def test_no_module_level_registry_mutation_in_tests() -> None:
     attribute-qualified or bare.
     """
 
-    tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
-    for path in tests_root.rglob("test*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # Session-cached parse (one ~5s tree parse per session, not per lint) with
+    # the full three-spelling import-time coverage: attribute decorators,
+    # bare-name aliases, and bare/qualified register_container calls.
+    for relative, tree in _parsed_test_trees():
+        if not relative.rsplit("/", 1)[-1].startswith("test"):
+            continue
         facet_aliases = _facet_register_aliases(tree)
         for node in _import_time_nodes(tree):
             if not isinstance(node, ast.Call):
@@ -451,7 +599,7 @@ def test_no_module_level_registry_mutation_in_tests() -> None:
                 if func.id in _REGISTRY_MUTATOR_NAMES or func.id in facet_aliases:
                     is_violation = True
             if is_violation:
-                violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
+                violations.append(f"{relative}:{node.lineno}")
     assert not violations, (
         "import-time registry mutation (facet register / register_container) runs at "
         f"pytest collection; register inside a restoring fixture: {sorted(violations)}"
@@ -703,6 +851,12 @@ def _strict_trace_fixture_violations_in_source(source: str, label: str) -> list[
     """
 
     tree = ast.parse(source, filename=label)
+    return _strict_trace_fixture_violations_in_tree(tree, label)
+
+
+def _strict_trace_fixture_violations_in_tree(tree: ast.Module, label: str) -> list[str]:
+    """Tree-level core of the strict scanner (shared with the cached walk)."""
+
     helper_names = _module_local_trace_helper_names(tree)
     violations: list[str] = []
     for qualified_name, function in _iter_scoped_fixture_functions(tree):
@@ -727,12 +881,10 @@ def _strict_trace_fixture_violations(tests_root: Path) -> list[str]:
         Stable ``path::fixture`` violations.
     """
 
+    del tests_root
     violations: list[str] = []
-    for path in sorted(tests_root.rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        violations.extend(
-            _strict_trace_fixture_violations_in_source(source, str(path.relative_to(tests_root)))
-        )
+    for relative, tree in _parsed_test_trees():
+        violations.extend(_strict_trace_fixture_violations_in_tree(tree, relative))
     return violations
 
 

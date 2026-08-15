@@ -32,6 +32,15 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1] / "torchlens"
 #: Adding an entry is a last resort -- write the docstring. The staleness test
 #: keeps the ledger from rotting into a permanent exemption in either
 #: direction.
+#: Shared reason for the 35 call-rooted OpRecord facet properties surfaced
+#: when the trivial-property exemption stopped laundering call-rooted chains
+#: (b9 R69-1 round 3): each is ``return self._facet_or_default(...).x``, which
+#: carries real missing-facet defaulting semantics. torchlens/ is fenced for
+#: this lane; the docstrings ride the ir/ source lane.
+_OP_RECORD_FACET_PROPERTY = (
+    "call-rooted facet-defaulting property (b9 R69-1); docstring rides the ir/ source lane"
+)
+
 DEFERRED: dict[tuple[str, str], str] = {
     # Sites newly VISIBLE when the gate learned to descend into loop/match
     # bodies (b9 R69-1). Both files are other-lane territory in fixwave-2
@@ -42,6 +51,47 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("backends/torch/identity_shims.py", "conv_picker_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "ctor_shim"): "FW2-WRAP owns identity_shims.py",
     ("backends/torch/identity_shims.py", "expanded_weight_shim"): "FW2-WRAP owns identity_shims.py",
+    # Undocumented closure landed by the fix/capture-r4 merge (bfddf0d9) — the
+    # smoke gate was RED on main when this wave found it; docstring rides the
+    # capture lane (torchlens/ fenced here).
+    ("backends/torch/wrappers.py", "_clear_inherited_capture_state"): (
+        "fix/capture-r4 at-fork hygiene closure; docstring rides the capture lane"
+    ),
+    ("ir/op_record.py", "OpRecord.parent_arg_positions"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord._edge_uses"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.unattributed_tensor_args"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.dropped_edge_tensor_args"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.is_output_parent"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.input_was_parameter"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.equivalence_class"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.module_stack"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.modules"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.input_ancestors"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.internal_source_ancestors"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.root_ancestors"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.has_internal_source_ancestor"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.grad_fn_class_qualname"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.is_transform"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_kind"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_chain"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_config"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_fn_name"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_fn_qualname"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.transform_fn_source"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.is_scalar_bool"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.bool_value"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.params"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.parent_params"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.backend_semantics"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.policy"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.predicate_matched"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.tracing_finished"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.construction_done"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.record_context"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.capture_spec"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.intervention_fired"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.intervention_replaced"): _OP_RECORD_FACET_PROPERTY,
+    ("ir/op_record.py", "OpRecord.fire_results"): _OP_RECORD_FACET_PROPERTY,
 }
 
 _PROPERTY_DECORATORS = frozenset({"property", "cached_property", "functools.cached_property"})
@@ -83,9 +133,18 @@ def _is_trivial_property(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     if len(node.body) != 1:
         return False
     statement = node.body[0]
-    return isinstance(statement, ast.Return) and isinstance(
-        statement.value, (ast.Name, ast.Attribute, ast.Constant)
-    )
+    if not isinstance(statement, ast.Return):
+        return False
+    # The returned expression must be a PLAIN attribute chain rooted at a name
+    # (or a bare name/literal). A chain rooted at a CALL — e.g.
+    # ``return self._facet_or_default("graph").x`` — computes (missing-facet
+    # defaulting semantics) and is NOT trivial; the old isinstance-on-the-tip
+    # check laundered 35 such computing properties through the exemption
+    # (b9 R69-1 round 3).
+    value = statement.value
+    while isinstance(value, ast.Attribute):
+        value = value.value
+    return isinstance(value, (ast.Name, ast.Constant))
 
 
 def _undocumented(path: pathlib.Path) -> list[tuple[str, int]]:
@@ -127,6 +186,13 @@ def _undocumented(path: pathlib.Path) -> list[tuple[str, int]]:
                     ast.AsyncFor,
                     ast.While,
                     ast.Match,
+                    # INTERMEDIATE nodes (b9-sol R69-1 round 3): iter_child_nodes
+                    # of a Try yields ExceptHandler nodes (not their bodies) and
+                    # of a Match yields match_case nodes — neither matched any
+                    # branch, so a def in an except arm or a case body evaded
+                    # the claimed repo-wide gate entirely.
+                    ast.ExceptHandler,
+                    ast.match_case,
                 ),
             ):
                 # Loop and match bodies hold real defs too (a def under a
@@ -201,7 +267,11 @@ def test_exemption_policy_is_structural() -> None:
         "    @property\n"
         "    def passthrough(self): return self._x\n"
         "    @property\n"
+        "    def deep_passthrough(self): return self.core.inner.x\n"
+        "    @property\n"
         "    def derived(self): return [op for op in self._ops if op]\n"
+        "    @property\n"
+        "    def call_rooted(self): return self._facet_or_default('graph').x\n"
         "    def helper(self): return 1\n"
         "    def _x(self): return 1\n"
     )
@@ -213,5 +283,37 @@ def test_exemption_policy_is_structural() -> None:
     assert not _is_dunder("_x")
     assert not _is_dunder("__x")
     assert _is_trivial_property(methods["passthrough"])
+    assert _is_trivial_property(methods["deep_passthrough"])
     assert not _is_trivial_property(methods["derived"]), "a computing property is not trivial"
+    assert not _is_trivial_property(methods["call_rooted"]), (
+        "a chain rooted at a CALL computes (missing-facet defaulting) and must "
+        "not launder through the pass-through exemption (b9 R69-1)"
+    )
     assert not _is_trivial_property(methods["helper"]), "a plain method is not a property"
+
+
+@pytest.mark.smoke
+def test_walker_descends_except_and_match_arms(tmp_path: pathlib.Path) -> None:
+    """Defs hidden in except handlers and match cases are visible (b9-sol R69-1).
+
+    ``ast.iter_child_nodes`` of a ``Try`` yields ``ExceptHandler`` nodes (not
+    their bodies) and of a ``Match`` yields ``match_case`` nodes; neither used
+    to match any walker branch, so a def in either arm evaded the claimed
+    repo-wide gate entirely.
+    """
+
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        "try:\n"
+        "    import missing\n"
+        "except ImportError:\n"
+        "    def hidden_in_except():\n"
+        "        return 1\n"
+        "\n"
+        "match 1:\n"
+        "    case 1:\n"
+        "        def hidden_in_match():\n"
+        "            return 2\n"
+    )
+    names = {qualname for qualname, _lineno in _undocumented(planted)}
+    assert names == {"hidden_in_except", "hidden_in_match"}

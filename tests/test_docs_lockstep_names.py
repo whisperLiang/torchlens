@@ -143,6 +143,49 @@ def test_dated_test_tier_claim_is_present_and_selector_is_additive() -> None:
     assert 'pytest tests/ -m "not rare and not slow"' in test_guide
 
 
+#: Structured duration-budget claim, required VERBATIM-parseable in both agent
+#: docs. The r3 re-tier shipped a 5s load-scaled budget while CLAUDE.md said
+#: "15s" three lines from its own "<5s" partition table and tests/AGENTS.md
+#: repeated the 15s — no gate parsed either sentence (R41-1/R81-2/R88-3,
+#: cross-filed by all three labs). The numbers are compared against the
+#: shipped conftest constants below, so budget and doc can only move together.
+BUDGET_CLAIM_RE = re.compile(
+    r"budget (?P<smoke>\d+(?:\.\d+)?)s and heavy (?P<heavy>\d+(?:\.\d+)?)s "
+    r"\(load-scaled 1x-4x plus a (?P<grace>\d+(?:\.\d+)?)s\s+boundary-noise grace, "
+    r"charged\s+on min\(wall, cpu\)\)"
+)
+
+
+def test_documented_duration_budgets_match_the_shipped_constants() -> None:
+    """CLAUDE.md and tests/AGENTS.md budget sentences track conftest reality."""
+
+    root = _repo_root()
+    conftest_text = (root / "tests" / "conftest.py").read_text(encoding="utf-8")
+    shipped = {
+        name: float(match)
+        for name, pattern in (
+            ("smoke", r"^SMOKE_DURATION_BUDGET_SECONDS\s*=\s*([\d.]+)"),
+            ("heavy", r"^HEAVY_DURATION_BUDGET_SECONDS\s*=\s*([\d.]+)"),
+            ("grace", r"^DURATION_BUDGET_GRACE_SECONDS\s*=\s*([\d.]+)"),
+        )
+        for match in re.findall(pattern, conftest_text, flags=re.MULTILINE)
+    }
+    assert set(shipped) == {"smoke", "heavy", "grace"}, "conftest budget constants moved or renamed"
+    for doc in ("CLAUDE.md", "tests/AGENTS.md"):
+        text = (root / doc).read_text(encoding="utf-8")
+        claim = BUDGET_CLAIM_RE.search(text)
+        assert claim is not None, (
+            f"{doc} lost its structured duration-budget sentence ('budget Ns and "
+            "heavy Ms (load-scaled 1x-4x, charged on min(wall, cpu))'); the doc "
+            "and the shipped budget must move together (R41-1)"
+        )
+        for tier in ("smoke", "heavy", "grace"):
+            assert float(claim.group(tier)) == shipped[tier], (
+                f"{doc} documents a {tier} budget of {claim.group(tier)}s but "
+                f"tests/conftest.py ships {shipped[tier]}s — update both together"
+            )
+
+
 def test_public_relative_markdown_links_resolve() -> None:
     """Ensure every local Markdown link names an existing repository path."""
 

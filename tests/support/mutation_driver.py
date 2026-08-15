@@ -132,6 +132,11 @@ SUITE = [
     "tests/test_postprocess_contract_arming.py",
     "tests/test_postprocess_dag.py::test_read_enforcement_trips_on_undeclared_read",
     "tests/test_postprocess_dag.py::test_executor_seam_patched_step_executes_and_audits",
+    # The dedicated arming file for the newest oracle-independence witnesses
+    # (edge-occurrence multiplicity et al.) -- its ABSENCE let a sub-check
+    # deletion survive the whole SUITE while this file's killer caught it in
+    # 1.4s (b9-opus R74r3-F2 part 1).
+    "tests/test_oracle_independence.py",
 ]
 
 #: Known baseline reds, deselected so a mutant verdict is never confounded.
@@ -139,16 +144,14 @@ SUITE = [
 #: for whatever its tests would have killed. (The two ancestry-closure
 #: deselects were removed 2026-08-15: both tests are green on tip and they
 #: are M04's natural killers -- a stale entry here silently deleted M04's
-#: margin.)
-DESELECT: list[str] = [
-    # Baseline red on main tip 9a561154 (2026-08-15): the forward-global
-    # tensor scenario now emits the no-provenance UserWarning (capture-r3
-    # escape hardening), which filterwarnings promotes to error. Relayed to
-    # the capture lane; neither test is a mutant killer (session-isolation
-    # coverage). Remove once the capture fix lands.
-    "tests/test_validation.py::test_trace_clears_forward_global_tensor_labels_between_sessions",
-    "tests/test_validation.py::test_trace_clears_nested_cached_tensor_labels_between_sessions",
-]
+#: margin. The two capture-r3 session-isolation deselects were removed later
+#: the same day: green on tip for the second consecutive pass.)
+#:
+#: EXPIRY IS ENFORCED: tests/test_mutation_driver_governance.py runs every
+#: entry and FAILS when a deselected node passes, so a stale entry can no
+#: longer silently delete a mutant's margin (b9-opus R71r3-F1 part 2 -- the
+#: second consecutive pass violated the keep-short-and-dated rule).
+DESELECT: list[str] = []
 
 #: Directories/patterns a sandbox never needs (b9p3 R74p3-F3: without these
 #: --make-sandbox copied 6.0 GB -- 5.3 GB .venv + 127 MB menagerie -- vs

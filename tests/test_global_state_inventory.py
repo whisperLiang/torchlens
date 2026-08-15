@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import sys
 import threading
@@ -776,6 +777,17 @@ def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
         only from a ``global`` declaration).
     """
 
+    return _mutable_module_state_cached(repo)
+
+
+@functools.lru_cache(maxsize=1)
+def _mutable_module_state_cached(repo: Path) -> dict[tuple[str, str], str]:
+    """One whole-package scan per session, shared by every census consumer.
+
+    The scan costs ~9s (parse-dominated); the two heavy census tests and the
+    smoke-tier hot-subset sentinel below all read this one result.
+    """
+
     trees = {
         path.relative_to(repo).as_posix(): ast.parse(path.read_text())
         for path in _package_python_paths(repo)
@@ -1101,8 +1113,68 @@ def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     assert not stale, f"inventory rows no longer present in the package: {stale}"
 
 
+#: Historically hot state-bearing surface for the SMOKE-tier census sentinel:
+#: the capture/wrapper territory where the b2p2-F2 incident landed 24
+#: unclassified globals across 3 commits with no commit-gate red, plus the
+#: root-level state modules. Prefix-matched against package-relative paths.
+_HOT_STATE_SUBSET_PREFIXES = (
+    "torchlens/_state.py",
+    "torchlens/_capture_state_helpers.py",
+    "torchlens/_save_budget.py",
+    "torchlens/backends/torch/",
+    "torchlens/capture/",
+    "torchlens/fastlog/",
+    "torchlens/utils/rng.py",
+    "torchlens/utils/_torch_compat.py",
+)
+
+
+@pytest.mark.smoke
+def test_hot_state_subset_census_runs_in_the_commit_gate() -> None:
+    """Commit-gate sentinel over the hot capture/wrapper state surface.
+
+    The r3settle2 re-tier moved the whole-package census to ``heavy`` (its
+    ~9s scan cannot fit the 5s smoke partition), which REOPENED the exact
+    b2p2-F2 hole: unclassified globals accumulate for days before the mid
+    backstop runs. This bounded census re-arms the COMMIT gate over the
+    territory where that incident actually happened; the heavy tests remain
+    the exhaustive whole-package authority.
+    """
+
+    repo = Path(__file__).resolve().parents[1]
+    classified = set().union(*_LIFECYCLE_CLASSES)
+    subset_paths = [
+        path
+        for path in _package_python_paths(repo)
+        if path.relative_to(repo).as_posix().startswith(_HOT_STATE_SUBSET_PREFIXES)
+    ]
+    trees = {
+        path.relative_to(repo).as_posix(): ast.parse(path.read_text()) for path in subset_paths
+    }
+    mutated_names = _names_mutated_in_place(trees)
+    observed: set[tuple[str, str]] = set()
+    for relative, tree in trees.items():
+        bindings = _module_level_mutable_bindings(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Global):
+                for name in node.names:
+                    observed.add((relative, name))
+        for name in bindings:
+            if name in mutated_names:
+                observed.add((relative, name))
+    for owner, attribute in _cross_module_attribute_rebinds(trees, frozenset(trees)):
+        observed.add((owner, attribute))
+    missing = sorted(observed - classified)
+    assert not missing, (
+        "unclassified mutable module state landed in the hot capture/wrapper "
+        "surface (assign each a lifecycle class in this file; the heavy "
+        f"whole-package census is the exhaustive authority): {missing}"
+    )
+
+
 # heavy, not smoke (r3settle2 budget lint): same whole-process scan cost
-# as the shrink-only inventory test above (~10s).
+# as the shrink-only inventory test above (~10s); the smoke-tier sentinel
+# above covers the hot subset in the commit gate.
 @pytest.mark.heavy
 def test_weakly_held_state_is_exactly_the_declared_ledger() -> None:
     """The weak/strong split of every inventory member is frozen and exact.

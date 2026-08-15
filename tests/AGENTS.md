@@ -60,10 +60,12 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 | `backend_paddle` | Requires the optional Paddle runtime. |
 | `tf_backend` | Requires the optional TensorFlow runtime. |
 
-Markers are additive: a test carrying `smoke` together with `heavy`/`slow` still runs
-under `-m smoke`, so the combination is forbidden — drop `smoke` instead.
-`tests/test_marker_lint.py` enforces the partition (no smoke+heavy/slow combos, plus a
-15s runtime budget on smoke-marked tests, checked at the end of every session).
+Markers are additive: a test carrying `smoke` together with `heavy`/`slow`/`serial`/`rare`
+still runs under `-m smoke`, so those combinations are forbidden — drop `smoke` instead
+(a per-parametrize-cell `slow` refinement of a `heavy` family is the one sanctioned combo).
+`tests/test_marker_lint.py` enforces the partition and the runtime tripwire: smoke/unmarked
+tests budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s boundary-noise grace, charged on min(wall, cpu)), checked at
+the end of every session.
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,
