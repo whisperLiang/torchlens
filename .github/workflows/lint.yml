@@ -69,10 +69,22 @@ jobs:
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      - run: uv pip install --system "pre-commit>=4,<5"
+      # Exact pin in a release-gating job (grind r4, R83): the parity verdict
+      # must not move because pre-commit resolved a new minor overnight. The
+      # dev extra keeps its bounded >=4,<5 range for contributors; this job is
+      # the verdict environment.
+      - run: uv pip install --system "pre-commit==4.6.2"
 
       - name: Run every pre-commit hook over the full tree
         run: pre-commit run --all-files --show-diff-on-failure
+
+      - name: Full-tree gitleaks scan
+        # The stock gitleaks hook reads the STAGED diff, so in the --all-files
+        # run above nothing is staged and it scans ZERO content while the job
+        # claimed secret coverage (grind r4, R87-1). The manual-stage variant
+        # scans the checkout itself (gitleaks dir), making the secret gate
+        # real on every PR.
+        run: pre-commit run gitleaks-full-tree --hook-stage manual --all-files --show-diff-on-failure
 
   # Workflow-file lint authority (schema, expressions, embedded shell via
   # shellcheck). Advisory CI job for now: whether it becomes a REQUIRED status
@@ -121,4 +133,41 @@ jobs:
               "bump them together so type-check/audit run on the newest admitted torch"
           )
           print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
+          PY
+
+      - name: Golden-fingerprint and audit pin lockstep (pydot, pip-audit)
+        # pydot is a DOT-render golden fingerprint KEY: the [test] extra is the
+        # pin authority and the lean .[dev,tabular] legs repeat it inline, so a
+        # bump that misses a site silently renders goldens with a different
+        # pydot (grind r4, R83-6). pip-audit is dual-declared (dev extra +
+        # quality.yml inline, where the inline copy is what actually runs);
+        # same drift shape, same gate (R83-7).
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          pyproject = pathlib.Path("pyproject.toml").read_text()
+          tests = pathlib.Path(".github/workflows/tests.yml").read_text()
+          canary = pathlib.Path(".github/workflows/latest-canary.yml").read_text()
+          quality = pathlib.Path(".github/workflows/quality.yml").read_text()
+
+          pydot_authority = set(re.findall(r'"pydot==([0-9][^"]*)"', pyproject))
+          assert len(pydot_authority) == 1, f"expected ONE pydot pin in pyproject: {pydot_authority}"
+          pydot_inline = set(re.findall(r"pydot==([0-9][^\"'\s]*)", tests + canary))
+          assert pydot_inline == pydot_authority, (
+              f"inline pydot pins {pydot_inline} drifted from the [test] extra "
+              f"authority {pydot_authority}: bump every site together or the "
+              "DOT goldens' recording environment forks between tiers"
+          )
+
+          audit_authority = set(re.findall(r'"pip-audit==([0-9][^"]*)"', pyproject))
+          assert len(audit_authority) == 1, f"expected ONE pip-audit pin in pyproject: {audit_authority}"
+          audit_inline = set(re.findall(r"pip-audit==([0-9][^\"'\s]*)", quality))
+          assert audit_inline == audit_authority, (
+              f"quality.yml pip-audit pin {audit_inline} drifted from the dev "
+              f"extra authority {audit_authority}: the inline copy is the one "
+              "that actually audits releases"
+          )
+          print(f"pydot {pydot_authority} and pip-audit {audit_authority} in lockstep")
           PY

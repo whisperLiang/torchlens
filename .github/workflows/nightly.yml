@@ -330,6 +330,102 @@ jobs:
             "${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml" \
             "${{ matrix.executed_floor }}"
 
+  metadata-gates:
+    name: Extras resolvability and dependency floors
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Every declared extra resolves on every advertised interpreter
+        # First leg that resolves ANY extra beyond dev/test/tabular (grind r4,
+        # R83-1: `torchlens[neuro]` required a distribution that does not
+        # exist on PyPI and stayed uninstallable for every user because no CI
+        # leg ever tried to resolve it). Resolution-only -- metadata
+        # solvability across the advertised interpreter range, no installs.
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import tomllib
+
+          with open("pyproject.toml", "rb") as fh:
+              extras = sorted(tomllib.load(fh)["project"]["optional-dependencies"])
+          # DISCLOSED SKIP, never silent (grind r4): all/all-stretch are
+          # KNOWN-unsatisfiable as shipped (lit-nlp~=1.3 requires shap<0.46
+          # against the shap~=0.46 pin) and their composition is a queued
+          # owner decision, so they are excluded here and reported loudly.
+          # If they start resolving, the notice below says to update this
+          # ledger.
+          known_unsatisfiable = {"all", "all-stretch"}
+          failures = []
+          fixed = []
+          with tempfile.TemporaryDirectory() as tmp:
+              lock = os.path.join(tmp, "lock.txt")
+              for python_version in ("3.10", "3.11", "3.12", "3.13"):
+                  for extra in extras:
+                      proc = subprocess.run(
+                          ["uv", "pip", "compile", "pyproject.toml",
+                           "--extra", extra, "--python-version", python_version,
+                           "--no-header", "-q", "-o", lock],
+                          capture_output=True, text=True,
+                      )
+                      ok = proc.returncode == 0
+                      if extra in known_unsatisfiable:
+                          if ok:
+                              fixed.append((python_version, extra))
+                          continue
+                      if not ok:
+                          failures.append((python_version, extra, proc.stderr.strip()))
+          for python_version, extra, err in failures:
+              print(f"UNRESOLVABLE: [{extra}] on {python_version}\n{err}\n")
+          if fixed:
+              print("NOTE: known-unsatisfiable extras now resolve; update this ledger:", fixed)
+          print(f"checked {len(extras) - len(known_unsatisfiable)} extras x 4 interpreters; "
+                f"skipped (disclosed, queued owner fork): {sorted(known_unsatisfiable)}")
+          sys.exit(1 if failures else 0)
+          PY
+
+      - name: Declared dependency floors install and import (lowest-direct)
+        # The floors declared in pyproject are EXERCISED here (grind r4,
+        # b2:B6 third round: numpy/packaging/tqdm/graphviz were bare names
+        # and no leg anywhere resolved lowest). torch is pinned to the floor
+        # leg's exact CPU build (the smoke matrix already exercises the torch
+        # floor; unpinned lowest-direct would pull the multi-GB CUDA build).
+        run: |
+          uv venv "${{ runner.temp }}/floor-venv" --python 3.10
+          uv pip install --python "${{ runner.temp }}/floor-venv/bin/python" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            --resolution lowest-direct \
+            -e . \
+            "torch==2.1.2+cpu"
+          "${{ runner.temp }}/floor-venv/bin/python" - <<'PY'
+          import graphviz
+          import numpy
+          import packaging
+          import tqdm
+          import torch
+          import torchlens as tl
+          from torch import nn
+
+          print("floors:", numpy.__version__, packaging.__version__,
+                tqdm.__version__, graphviz.__version__, torch.__version__)
+          trace = tl.trace(nn.Sequential(nn.Linear(4, 3), nn.ReLU()), torch.randn(2, 4))
+          assert trace.num_ops >= 2
+          print("floor-env capture OK")
+          PY
+
   wheel:
     name: Wheel package smoke
     runs-on: ubuntu-latest
@@ -344,15 +440,17 @@ jobs:
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      - name: Build wheel
-        # PIN AUTHORITY: build== must equal the pin inside pyproject.toml's
-        # [tool.semantic_release] build_command -- the nightly gate below only
-        # attests reproducibility for the builder the release actually uses.
-        # The dirty-tree guard makes the packaging provenance explicit: a
-        # wheel must only ever attest the COMMITTED tree (grind r3, R84 LOW),
-        # and any stale build/ dir is removed because bdist_wheel silently
-        # reuses build/lib and can resurrect files pruned since the last
-        # build.
+      - name: Build wheel and sdist with the release's exact builder
+        # SINGLE PIN AUTHORITY (grind r4): the build== pin is PARSED out of
+        # pyproject.toml's [tool.semantic_release] build_command instead of
+        # being repeated here, so this gate can never silently attest a
+        # different builder than the release uses (the old lockstep was
+        # comment-only). A parse miss exits non-zero.
+        # The dirty-tree guard makes the packaging provenance explicit: an
+        # artifact must only ever attest the COMMITTED tree (grind r3, R84
+        # LOW), and any stale build/ dir is removed because bdist_wheel
+        # silently reuses build/lib and can resurrect files pruned since the
+        # last build.
         run: |
           if ! git diff --quiet || ! git diff --cached --quiet; then
             echo "refusing to package a dirty tree"
@@ -360,27 +458,48 @@ jobs:
             exit 1
           fi
           rm -rf build
-          uv pip install --system "build==1.5.0"
-          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --wheel --outdir "${{ runner.temp }}/dist"
+          BUILD_PIN="$(python - <<'PY'
+          import re
+          import tomllib
 
-      - name: Fail on a non-reproducible wheel (double-build gate)
-        # Same commit + same SOURCE_DATE_EPOCH must give a byte-identical
-        # wheel (grind r3, R86: six dist-info timestamps used to differ on
-        # every rebuild, so no artifact could be independently verified).
-        # The stale local build/ tree is removed first: bdist_wheel silently
-        # reuses build/lib and can resurrect files pruned since the last
-        # build. The sdist stays out of this gate -- its gzip envelope is not
-        # yet reproducible under setuptools (disclosed residual).
+          with open("pyproject.toml", "rb") as fh:
+              build_command = tomllib.load(fh)["tool"]["semantic_release"]["build_command"]
+          match = re.search(r"build==[0-9][0-9a-zA-Z.]*", build_command)
+          assert match, f"no build== pin found in build_command: {build_command!r}"
+          print(match.group(0))
+          PY
+          )"
+          echo "release builder: $BUILD_PIN"
+          uv pip install --system "$BUILD_PIN"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --outdir "${{ runner.temp }}/dist"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist/torchlens-*.tar.gz
+
+      - name: Fail on a non-reproducible wheel or sdist (double-build gate)
+        # Same commit + same SOURCE_DATE_EPOCH must give byte-identical
+        # artifacts (grind r3, R86: six dist-info timestamps used to differ
+        # on every wheel rebuild). The sdist joined the gate in grind r4:
+        # its two non-determinism root causes (gzip header wall-clock mtime,
+        # builder uid/gid in tar members) are normalized by
+        # scripts/normalize_sdist.py exactly as in the release build_command,
+        # so the former "gzip envelope not reproducible" residual is closed
+        # and enforced here. The stale local build/ tree is removed first:
+        # bdist_wheel silently reuses build/lib and can resurrect files
+        # pruned since the last build.
         run: |
           rm -rf build
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --wheel --outdir "${{ runner.temp }}/dist-rebuild"
-          first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.whl | cut -d' ' -f1)"
-          second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl | cut -d' ' -f1)"
-          echo "build 1: $first"
-          echo "build 2: $second"
-          test "$first" = "$second"
+            python -m build --outdir "${{ runner.temp }}/dist-rebuild"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python scripts/normalize_sdist.py "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz
+          for kind in whl tar.gz; do
+            first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.$kind | cut -d' ' -f1)"
+            second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.$kind | cut -d' ' -f1)"
+            echo "$kind build 1: $first"
+            echo "$kind build 2: $second"
+            test "$first" = "$second"
+          done
 
       - name: Install wheel in a clean venv
         run: |

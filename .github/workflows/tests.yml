@@ -49,6 +49,15 @@ jobs:
             torchvision: "0.23.0+cpu"
             numpy: numpy
             scope: smoke
+            # ONE gating row runs with pytest-randomly installed (grind r4,
+            # reopened R76/3.16.4: the plugin was declared in the [test]
+            # extra but no release-gating leg installed it, so the
+            # order-isolation guards skipped on every PR and randomized-order
+            # coverage existed only on scheduled legs). This row's smoke run
+            # shuffles under a fresh seed each run -- the seed prints in the
+            # pytest header for reproduction -- while the other five rows
+            # stay definition-ordered.
+            randomized: "1"
           - track: newest-admitted
             python: "3.10"
             torch: "2.13.0+cpu"
@@ -117,6 +126,13 @@ jobs:
             "torchvision==${TORCHVISION_VERSION}" \
             "${NUMPY_SPEC}" \
             "pydot==4.0.1"
+
+      - name: Arm randomized test ordering (order-isolation gate row)
+        if: matrix.randomized == '1'
+        # Exact pin, matching the release-gating pin discipline; the [test]
+        # extra declares the plugin unpinned for contributors, and the
+        # scheduled .[test] legs resolve it freely.
+        run: uv pip install --system "pytest-randomly==4.1.0"
 
       - name: Validate installed environment
         env:
@@ -263,7 +279,10 @@ jobs:
       - name: Materialize and verify the committed SHA-256 Linux lock
         shell: bash
         run: |
-          python -m pip install jsonschema
+          # Exact pin in a release-gating job (grind r4, R83): a free-resolving
+          # jsonschema can change lock-validation verdicts between runs. Kept
+          # inside the dev extra's jsonschema>=4.18,<5 band.
+          python -m pip install "jsonschema==4.26.0"
           PYTHONPATH=. python -m menagerie.crawler.tools.release_lock \
             --lock "$MENAGERIE_PLATFORM_LOCK" \
             --resolved-export "${MENAGERIE_PLATFORM_LOCK%.lock}.resolved.json" \
@@ -351,7 +370,10 @@ jobs:
       - name: Materialize and verify the committed SHA-256 macOS lock
         shell: bash
         run: |
-          python -m pip install jsonschema
+          # Exact pin in a release-gating job (grind r4, R83): a free-resolving
+          # jsonschema can change lock-validation verdicts between runs. Kept
+          # inside the dev extra's jsonschema>=4.18,<5 band.
+          python -m pip install "jsonschema==4.26.0"
           PYTHONPATH=. python -m menagerie.crawler.tools.release_lock \
             --lock "$MENAGERIE_PLATFORM_LOCK" \
             --resolved-export "${MENAGERIE_PLATFORM_LOCK%.lock}.resolved.json" \
@@ -425,7 +447,10 @@ jobs:
           else
             echo "Optional sysctl kernel.unprivileged_userns_clone is unavailable"
           fi
-          python -m pip install jsonschema
+          # Exact pin in a release-gating job (grind r4, R83): a free-resolving
+          # jsonschema can change lock-validation verdicts between runs. Kept
+          # inside the dev extra's jsonschema>=4.18,<5 band.
+          python -m pip install "jsonschema==4.26.0"
           PYTHONPATH=. python -m menagerie.crawler.tools.release_lock \
             --lock "$MENAGERIE_PLATFORM_LOCK" \
             --resolved-export "${MENAGERIE_PLATFORM_LOCK%.lock}.resolved.json" \

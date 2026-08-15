@@ -32,8 +32,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "numpy",
-    "packaging",
+    # Runtime floors are DECLARED and EXERCISED (grind r4, b2:B6 third round:
+    # numpy/packaging/tqdm/graphviz were bare names, so the metadata promised
+    # nothing while CI quietly tested numpy==1.26.4 -- the tested floor and the
+    # declared floor were different artifacts). numpy's floor is the exact pin
+    # the tests.yml floor legs run; the other three are the oldest releases the
+    # nightly lowest-direct leg installs and smoke-imports, so a floor claim
+    # that stops being true goes red there instead of shipping.
+    "numpy>=1.26.4",
+    "packaging>=23.2",
     # torch>=2.1 supported. The only torch-2.4-specific APIs TorchLens used were
     # torch.is_autocast_enabled(device_type) / torch.get_autocast_dtype(device_type)
     # (the device_type argument is torch 2.4+ only); these are now routed through
@@ -44,16 +51,21 @@ dependencies = [
     #
     # The floor is PYTHON-CONDITIONED because a bare torch>=2.1 is UNSATISFIABLE
     # on newer interpreters (grind r3, R85/SF-16, measured): the first torch with
-    # cp312 wheels is 2.2.0 and the first with cp313 wheels is 2.6.0, so on
-    # py3.12/3.13 the resolver either fails or falls back to a source build that
-    # cannot succeed. The support floor is unchanged (2.1 wherever 2.1 exists);
-    # these markers only state where each interpreter's real floor sits.
+    # cp312 wheels is 2.2.0. For py3.13 the honest picture is platform-split
+    # (grind r4 correction -- the old "first cp313 is 2.6.0" claim was wrong):
+    # torch 2.5.0/2.5.1 DO ship a cp313 wheel, but only for manylinux x86_64;
+    # 2.6.0 is the first release with cp313 wheels across the supported
+    # platforms (macOS arm64, aarch64, Windows), so 2.6 is the floor a
+    # platform-neutral marker can promise. Without these markers the resolver
+    # either fails or falls back to a source build that cannot succeed. The
+    # support floor is unchanged (2.1 wherever 2.1 exists); these markers only
+    # state where each interpreter's real floor sits.
     "torch>=2.1; python_version < '3.12'",
     "torch>=2.2; python_version == '3.12'",
     "torch>=2.6; python_version >= '3.13'",
     "safetensors>=0.4",
-    "tqdm",
-    "graphviz",
+    "tqdm>=4.66",
+    "graphviz>=0.20.1",
     # typing_extensions.Self is used for Python 3.10 (typing.Self is 3.11+).
     "typing_extensions>=4.0",
     # Pillow backs the viz / repgeom image-rendering surfaces (node images,
@@ -68,7 +80,21 @@ dependencies = [
 
 [project.optional-dependencies]
 notebook = ["ipython>=8.0", "jupyter-client>=8.0"]
-neuro = ["rsatoolbox~=0.1.5", "brain-score~=2.2"]
+# rsatoolbox: >=0.1.5 keeps the validated floor; the ceiling admits the 0.2/0.3
+# line because 0.1.5 ships no cp313 wheels (0.3.x is the first that does) and the
+# bridge surface used (rsatoolbox.data.Dataset) is stable across the range.
+# brainscore_core is the real PyPI distribution behind the Brain-Score project's
+# core library -- the previous `brain-score~=2.2` requirement named a dist that
+# does not exist on PyPI at ANY version, so `pip install torchlens[neuro]` was
+# uninstallable for every user (grind r4, R83-1). torchlens.neuro gates on the
+# `brainscore_core` import name. The dist declares requires-python >=3.11 on
+# every release, so the marker keeps the extra installable on 3.10 (rsatoolbox
+# only there; the appliance's dependency gate names the missing package at use
+# time).
+neuro = [
+    "rsatoolbox>=0.1.5,<0.4",
+    "brainscore_core~=2.2; python_version >= '3.11'",
+]
 viz = ["torchshow~=0.5", "lovely-tensors~=0.1.18"]
 tabular = ["pandas>=2.0", "pyarrow>=14"]
 captum = ["captum~=0.7"]
@@ -146,7 +172,14 @@ dev = [
 ]
 test = [
     "lightning",
-    "pydot",
+    # PIN AUTHORITY for pydot: the DOT-render goldens embed the pydot version as
+    # a fingerprint KEY, so an environment that resolves pydot freely (nightly/
+    # weekly install .[test]) drifts off the goldens' recording environment and
+    # surfaces as confusing scheduled-only render failures (grind r4, R83-6).
+    # Keep equal to the inline pins in tests.yml / latest-canary.yml (their lean
+    # .[dev,tabular] envs cannot see this extra); the Lint workflow's
+    # pin-lockstep step asserts the equality.
+    "pydot==4.0.1",
     "pillow",
     "pytest",
     # Order-isolation infra: every `-p no:randomly` in the suite/drivers and
@@ -506,17 +539,41 @@ version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
 # build== is PINNED (the old unpinned install resolved arbitrary code while
-# the release App token sat on disk from checkout) and SOURCE_DATE_EPOCH is
-# set from the released commit so the shipped wheel is bit-reproducible from
-# its tag (grind r3, R86). PIN AUTHORITY: keep equal to the nightly wheel
-# job's `build==` pin, whose double-build gate attests exactly this builder.
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build"
+# the release App token sat on disk from checkout). PIN AUTHORITY: the nightly
+# wheel job PARSES this build_command for its own build== install, so its
+# double-build gate always attests exactly the builder the release uses.
+#
+# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel deterministic, and
+# scripts/normalize_sdist.py makes the sdist deterministic too (grind r4,
+# R86-1 root causes: gzip header wall-clock mtime + builder uid/gid/uname/
+# gname in the tar members). The nightly double-build gate attests BOTH
+# artifacts byte-identical.
+#
+# REPRODUCE FROM A TAG (grind r4 recipe correction): python-semantic-release
+# runs this build_command AFTER bumping the version files but BEFORE creating
+# the release commit and tag, so at build time `git log -1` resolves to the
+# PARENT of the future tag. The old recipe ("check out the tag and use its
+# own commit timestamp") was off by one commit and could never reproduce the
+# published bytes. Correct recipe:
+#   git checkout vX.Y.Z
+#   pip install 'build==1.5.0'
+#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
+#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
+#       python scripts/normalize_sdist.py dist/*.tar.gz
+build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
 commit_message = "chore(release): {version} [skip ci]"
 # Layer 3: custom parser that refuses to emit LevelBump.MAJOR.
 commit_parser = "scripts/no_major_parser.py:NoMajorAngularParser"
+
+[tool.semantic_release.changelog]
+# DISCOVERY PIN (grind r4, R86-3): template_dir is stated explicitly. Under the
+# implicit default, a PSR default-value change or a templates/ rename silently
+# reverts the GitHub release notes to the uncapped builtin template, whose
+# failure mode is exactly the 2.34.0 422-blocks-PyPI incident.
+template_dir = "templates"
 
 [tool.semantic_release.remote]
 type = "github"
