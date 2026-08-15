@@ -286,3 +286,203 @@ def test_fold_honesty_topology_dot_differs(tmp_path) -> None:
             "rendered byte-identical DOT; the fold fingerprint is "
             "topology-blind"
         )
+
+
+class _ScalarBlock(nn.Module):
+    """Same class / params / ordered op types; only a scalar operand differs.
+
+    ``linear -> relu -> * k`` blocks share every count, op type, kwargs dict
+    (``func_config`` is empty for the dunder mul), and interior wiring — only
+    the non-tensor operand VALUE ``k`` tells the members' computations apart
+    (r4 b6-opus R19-1).
+    """
+
+    def __init__(self, k: float) -> None:
+        super().__init__()
+        self.lin = nn.Linear(8, 8)
+        self.k = k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.lin(x)) * self.k
+
+
+class _ScalarStack(nn.Module):
+    """Repeated scalar blocks that auto-collapse folds into one ellipsis."""
+
+    def __init__(self, scales: list[float]) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([_ScalarBlock(k) for k in scales])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def test_run_fold_rejects_scalar_operand_different_members() -> None:
+    """A ``* 3.0`` block cannot hide inside a "+N more" of ``* 1.0`` blocks.
+
+    r4 b6-opus R19-1 red pin: op types, kwargs, params, and wiring all match
+    across the run — only the scalar operand value tells the members apart.
+    RED before the non-tensor operand component.
+    """
+
+    trace = tl.trace(_ScalarStack([1.0, 1.0, 3.0]), torch.randn(2, 8))
+    assert not _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_run_fold_accepts_scalar_operand_uniform_members() -> None:
+    """Identically-scaled members keep folding (no over-rejection)."""
+
+    trace = tl.trace(_ScalarStack([2.0, 2.0, 2.0]), torch.randn(2, 8))
+    assert _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_fold_honesty_scalar_operand_dot_differs(tmp_path) -> None:
+    """Two models differing only in a hidden scalar operand never render
+    byte-identical DOT.
+
+    The r4 b6-opus probe verbatim: 24 blocks, model A all ``* 1.0``, model B
+    blocks 1..23 ``* 3.0``. The models compute numerically different
+    functions; before the operand-value component both folded behind
+    ``+23 more`` and the DOT was byte-identical at auto and max.
+    """
+
+    for mode in ("auto", "max"):
+        sources: list[str] = []
+        for variant in ("ones", "threes"):
+            scales = [1.0] * 24
+            if variant == "threes":
+                scales = [1.0] + [3.0] * 23
+            torch.manual_seed(0)
+            trace = tl.trace(_ScalarStack(scales), torch.randn(2, 8))
+            outpath = tmp_path / f"scalar_{mode}_{variant}"
+            trace.draw(
+                collapse=mode,
+                fold_repeats=True,
+                vis_save_only=True,
+                vis_fileformat="dot",
+                vis_outpath=str(outpath),
+            )
+            sources.append((tmp_path / f"scalar_{mode}_{variant}.dot").read_text())
+        assert sources[0] != sources[1], (
+            f"collapse={mode!r}: two models with different hidden scalar "
+            "operands rendered byte-identical DOT; the fold fingerprint is "
+            "operand-value-blind"
+        )
+
+
+class _BindBlock(nn.Module):
+    """Same class / op / wiring shape; exterior-operand BINDING differs.
+
+    ``a - b`` and ``b - a`` both canonicalize their two exterior parents to
+    per-member first-seen numbers, so the historical wiring digest read both
+    as ``(("x", 0), ("x", 1))`` — the cross-member source correspondence was
+    lost (r4 b6-sol R19-1).
+    """
+
+    def __init__(self, swap: bool) -> None:
+        super().__init__()
+        self.swap = swap
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return (b - a) if self.swap else (a - b)
+
+
+class _BindStack(nn.Module):
+    """Sibling bind blocks all fed the same two exterior tensors."""
+
+    def __init__(self, swap_flags: list[bool]) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([_BindBlock(flag) for flag in swap_flags])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a = torch.relu(x)
+        b = torch.tanh(x)
+        outs = [block(a, b) for block in self.blocks]
+        return torch.stack(outs).sum(dim=0)
+
+
+def test_run_fold_rejects_swapped_exterior_binding_members() -> None:
+    """A ``b - a`` member cannot hide inside a "+N more" of ``a - b`` members.
+
+    r4 b6-sol R19-1 red pin: every member's per-member wiring digest is
+    identical — only the correspondence of the exterior sources ACROSS
+    members (both fed the same two tensors, bound to swapped operand slots)
+    tells them apart. RED before the cross-member binding-consistency check.
+    """
+
+    trace = tl.trace(_BindStack([False, False, True]), torch.randn(2, 8))
+    assert not _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_run_fold_accepts_shared_exterior_binding_uniform_members() -> None:
+    """Members binding shared exteriors to the SAME slots keep folding."""
+
+    trace = tl.trace(_BindStack([False, False, False]), torch.randn(2, 8))
+    assert _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_fold_honesty_exterior_binding_dot_differs(tmp_path) -> None:
+    """Two models differing only in hidden exterior-operand binding never
+    render byte-identical DOT.
+
+    The r4 b6-sol probe's shape: 24 sibling blocks all receive the same two
+    exterior tensors; model A subtracts ``a - b`` everywhere, model B swaps
+    to ``b - a`` in blocks 1..23. Materially different outputs; before the
+    binding-consistency check both folded into one multiplicity-24 fold.
+    """
+
+    for mode in ("auto", "max"):
+        sources: list[str] = []
+        for variant in ("plain", "swapped"):
+            flags = [False] * 24
+            if variant == "swapped":
+                flags = [False] + [True] * 23
+            torch.manual_seed(0)
+            trace = tl.trace(_BindStack(flags), torch.randn(2, 8))
+            outpath = tmp_path / f"bind_{mode}_{variant}"
+            trace.draw(
+                collapse=mode,
+                fold_repeats=True,
+                vis_save_only=True,
+                vis_fileformat="dot",
+                vis_outpath=str(outpath),
+            )
+            sources.append((tmp_path / f"bind_{mode}_{variant}.dot").read_text())
+        assert sources[0] != sources[1], (
+            f"collapse={mode!r}: two models with different hidden exterior "
+            "bindings rendered byte-identical DOT; the wiring digest erases "
+            "cross-member source correspondence"
+        )
+
+
+def test_run_fold_never_folds_unresolvable_wiring(monkeypatch) -> None:
+    """A member whose wiring cannot be resolved must NEVER fold.
+
+    r4 b6-fable R19 (fresh LOW): the degrade arm used to collapse every
+    unresolvable member to the same exception TYPE NAME, so two members with
+    genuinely different (but both unresolvable) wiring compared EQUAL and the
+    fold fell back to the op-signature-only comparison the r3 HIGH proved
+    insufficient. Degradation must be a unique per-member sentinel.
+    """
+
+    from torchlens.visualization import auto_collapse
+
+    trace = tl.trace(_WiringStack([False, False, False]), torch.randn(2, 8))
+    assert _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+    def _boom(module):  # noqa: ANN001, ANN202
+        raise KeyError("orphan relation label")
+
+    monkeypatch.setattr(auto_collapse, "_module_wiring_walk", _boom)
+    assert not _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+    sig_a = auto_collapse._module_structural_signature(cast_module(trace, "blocks.0"))
+    sig_b = auto_collapse._module_structural_signature(cast_module(trace, "blocks.1"))
+    assert sig_a != sig_b, "degraded members must never compare equal"
+
+
+def cast_module(trace: tl.Trace, address: str):  # noqa: ANN201
+    """Resolve one Module record by address."""
+
+    return trace.modules[address]
