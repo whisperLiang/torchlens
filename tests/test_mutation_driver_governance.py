@@ -180,3 +180,61 @@ def test_deselect_ledger_entries_are_still_red() -> None:
         "'known red' silently deletes the kill margin of whatever mutants its "
         "test would catch. Remove these rows:\n  " + "\n  ".join(stale)
     )
+
+
+@pytest.mark.smoke
+def test_every_direct_check_entry_point_is_enrolled() -> None:
+    """Check-shaped functions in the direct-target scope are all mutant targets.
+
+    b9-sol round-5 R74-2: the direct roster covered exactly one validation
+    comparator and one postprocess checker while validation/core.py carried
+    five more raise-on-violation entry points and postprocess/__init__.py two
+    assert seams — claimed-exhaustive tripwire coverage derived from the
+    metadata-contract registry alone. Registry contracts are enrolled by
+    construction; this census makes the DIRECT scope structural too: a new
+    ``_check_*``/``_validate_*``/``_assert_*`` def in either file must join
+    MUTANTS or EXEMPT_MUTANTS (or a reasoned exclusion here) before it ships.
+    """
+
+    import re
+
+    driver = _load_driver_module()
+    enrolled = {(path, function) for path, function in driver.MUTANTS.values()} | {
+        (path, function) for path, function in driver.EXEMPT_MUTANTS.values()
+    }
+    # Reasoned exclusions only — every entry needs a why.
+    excluded: set[tuple[str, str]] = set()
+    scope = ("torchlens/validation/core.py", "torchlens/postprocess/__init__.py")
+    unenrolled = []
+    for rel in scope:
+        source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        for name in re.findall(r"^def (_(?:check|validate|assert|verify)_\w+)", source, re.M):
+            key = (rel, name)
+            if key not in enrolled and key not in excluded:
+                unenrolled.append(key)
+    assert not unenrolled, (
+        "check-shaped entry points with no mutation enrollment (their disarm "
+        f"margin is unmeasured): {sorted(unenrolled)}"
+    )
+
+
+@pytest.mark.smoke
+def test_direct_targets_exist_and_are_neuterable() -> None:
+    """Every MUTANTS/EXEMPT_MUTANTS row names a real function in a real file."""
+
+    import ast as _ast
+
+    driver = _load_driver_module()
+    rows = list(driver.MUTANTS.values()) + list(driver.EXEMPT_MUTANTS.values())
+    missing = []
+    for rel, function in rows:
+        path = _REPO_ROOT / rel
+        if not path.exists():
+            missing.append((rel, function, "file missing"))
+            continue
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        if not any(
+            isinstance(node, _ast.FunctionDef) and node.name == function for node in _ast.walk(tree)
+        ):
+            missing.append((rel, function, "function missing"))
+    assert not missing, f"stale mutation-roster rows: {missing}"
