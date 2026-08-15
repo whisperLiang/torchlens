@@ -614,11 +614,19 @@ def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
 
     @functools.wraps(orig_get_overloads)
     def get_overloads_shim(obj: Any) -> Any:
-        """Resolve a torchlens wrapper to its original before overload lookup."""
-        if getattr(obj, "__tl_wrapper_name__", None) is not None:
-            prepare = getattr(obj, "__prepare_scriptable__", None)
-            if prepare is not None:
-                obj = prepare()
+        """Resolve a torchlens wrapper to its original before overload lookup.
+
+        Keyed on LEDGER IDENTITY, never on ``__tl_*`` attribute presence: a
+        foreign ``@functools.wraps(F.relu)`` wrapper inherits the torchlens
+        ``__dict__`` markers (``__tl_wrapper_name__``,
+        ``__prepare_scriptable__``), and the attribute-keyed check silently
+        swapped such a wrapper for the pristine original -- dropping the
+        foreign behavior from overload resolution (b8-fable R56,
+        attribute-vs-identity anti-pattern).
+        """
+        original = _state._decorated_to_orig.get(id(obj))
+        if original is not None:
+            obj = original
         return orig_get_overloads(obj)
 
     setattr(get_overloads_shim, _SHIM_MARKER, True)
