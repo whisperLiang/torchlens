@@ -113,15 +113,30 @@ def test_agent_docs_use_current_internal_paths() -> None:
     assert "torchlens.bundle.Bundle" not in intervention_doc
 
 
+#: Structured smoke-count claim in CLAUDE.md's tier section. The lockstep test
+#: below requires the claim to PARSE (dated, with raw collect-only numbers);
+#: the drift tripwire compares the parsed numbers against a live collection so
+#: the gate detects staleness instead of freezing it (the pre-r3 version
+#: hard-asserted the literal count, ENFORCING the stale doc; R41/R81/R88).
+TIER_CLAIM_RE = re.compile(
+    r"~\d+(?:\.\d+)?k tests \((?P<smoke>\d[\d,]*)/(?P<total>\d[\d,]*) "
+    r"collect-only, measured (?P<date>20\d{2}-\d{2}-\d{2})\)"
+)
+
+
 def test_dated_test_tier_claim_is_present_and_selector_is_additive() -> None:
-    """Require a dated tier record and preserve default rare-test exclusion."""
+    """Require a parseable dated tier record and default rare-test exclusion."""
 
     root = _repo_root()
     guide = (root / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "measured 2026-08-14" in guide
-    assert "~4.4k tests" in guide
-    assert "measured 2026-08-13" in guide
-    assert "1194s (~20 min)" in guide
+    assert TIER_CLAIM_RE.search(guide), (
+        "CLAUDE.md's Testing Tiers section lost its structured smoke-count "
+        "claim ('~Nk tests (S/T collect-only, measured YYYY-MM-DD)'); the "
+        "drift tripwire needs it parseable"
+    )
+    assert re.search(r"measured 20\d{2}-\d{2}-\d{2}.{0,200}took \d+s \(~\d+ min\)", guide, re.S), (
+        "CLAUDE.md lost its dated smoke wall-clock measurement record"
+    )
     assert 'pytest tests/ -m "not rare and not slow"' in guide
 
     test_guide = (root / "tests/AGENTS.md").read_text(encoding="utf-8")
