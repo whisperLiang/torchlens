@@ -1149,6 +1149,11 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     "torchlens._runnable_execution._ProjectionCountExceeded": (
         "private internal bound signal; caught inside the projection walk"
     ),
+    "torchlens._runnable_execution._UnreadableProjectedOutput": (
+        "private allocation-preflight signal (grind-r5 b7 R22); raised when a "
+        "projected output's size cannot be read and converted by the caller to "
+        "the typed op_allocation_preflight refusal"
+    ),
     "torchlens.user_funcs._CaptureCacheEntryOverCeilingError": (
         "private mid-stream byte-ceiling abort signal; raised and caught inside the "
         "capture-cache writer, never escapes user_funcs"
