@@ -27,7 +27,7 @@ from .._state import pause_logging
 from . import TLSPEC_VERSION, TorchLensIOError
 from ._durability import fsync_dir, fsync_tree
 from .manifest import Manifest, TensorEntry, sha256_of_file
-from .scrub import BlobSpec
+from .scrub import BlobSpec, dump_canonical_metadata
 from .tensor_policy import FailReason, Ok, SkipReason, is_supported_for_save
 from .tlspec import _TlSpecWriter
 
@@ -292,7 +292,9 @@ class BundleStreamWriter:
             )
             _restrict_mode(self.tmp_path / "manifest.json", 0o600)
             with (self.tmp_path / "metadata.pkl").open("wb") as handle:
-                pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                # B3R4-R21-2: canonical container bytes (set/frozenset members
+                # sorted); persisted metadata must not vary with PYTHONHASHSEED.
+                dump_canonical_metadata(scrubbed_state, handle)
             _restrict_mode(self.tmp_path / "metadata.pkl", 0o600)
         except TorchLensIOError:
             raise

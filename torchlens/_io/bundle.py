@@ -60,7 +60,7 @@ from .payload_codec import (
     numpy_to_transport_tensor,
 )
 from .rehydrate import rehydrate_trace
-from .scrub import BlobSpec, scrub_for_save
+from .scrub import BlobSpec, dump_canonical_metadata, scrub_for_save
 from .state_keys import invalidate_static_class_attr_cache
 from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level
@@ -598,7 +598,9 @@ def save(
         )
         _restrict_mode(tmp_path / "manifest.json", 0o600)
         with (tmp_path / "metadata.pkl").open("wb") as handle:
-            pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            # B3R4-R21-2: canonical container bytes (set/frozenset members
+            # sorted), so persisted metadata does not vary with PYTHONHASHSEED.
+            dump_canonical_metadata(scrubbed_state, handle)
         _restrict_mode(tmp_path / "metadata.pkl", 0o600)
 
         # Durability before publish: fsync every written blob/sidecar and the
