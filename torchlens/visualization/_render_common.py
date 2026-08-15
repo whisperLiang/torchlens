@@ -14,10 +14,12 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# noqa UP035: `Dict`/`List`/`Set`/`Tuple` are deliberately re-exported through
-# this module's __all__ for the sibling renderers that do
-# `from ._render_common import *`, which still annotate with them. Modernizing
-# the alias here means modernizing every star-import consumer first.
+# UP035 rationale (suppressed on the import line below): `Dict`/`List`/`Set`/
+# `Tuple` are deliberately re-exported through this module's __all__ for the
+# sibling renderers that do `from ._render_common import *`, which still
+# annotate with them. Modernizing the alias here means modernizing every
+# star-import consumer first. (Reworded so this prose line no longer LEXES as
+# a blanket noqa directive — SF-24.)
 from typing import (  # noqa: UP035
     TYPE_CHECKING,
     Any,
