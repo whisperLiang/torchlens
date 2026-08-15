@@ -1025,8 +1025,18 @@ def _deferred_storage_key(x: torch.Tensor) -> tuple[int, int, str] | None:
     """Return the pending-registry key for ``x``'s storage, or ``None``.
 
     Callers must hold ``_paused_internal_reads()``. Any failure (exotic layout,
-    storageless tensor) reads as ineligible rather than raising.
+    storageless tensor) reads as ineligible rather than raising. Tracing
+    tensor variants (FakeTensor/FunctionalTensor) are ineligible WITHOUT
+    touching storage: reading a FakeTensor's data pointer trips torch's
+    "almost definitely a bug" warning before the entry guard's typed refusal
+    fires, and the entry guard's own contract is that FakeTensors never reach
+    pointer-reading metadata (grind-r5 b6 R16, order-dependent repro).
     """
+    from ._torch_compat import get_tracing_tensor_types
+
+    tracing_types = get_tracing_tensor_types()
+    if tracing_types and isinstance(x, tracing_types):
+        return None
     try:
         storage = x.untyped_storage()
         ptr = storage.data_ptr()

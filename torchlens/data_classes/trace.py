@@ -1222,8 +1222,13 @@ class Trace(
         "completeness_witness_expected_opaque_count": FieldPolicy.DROP,
         "completeness_witness_unaccounted_count": FieldPolicy.DROP,
         "completeness_witness_callback_ns": FieldPolicy.DROP,
-        "capture_verified": FieldPolicy.DROP,
-        "capture_verification_reason": FieldPolicy.DROP,
+        # grind-r5 P7: the escape-disclosure VERDICT persists (negative claims
+        # only -- __getstate__/__setstate__ degrade anything else to None), so
+        # a capture TorchLens refused to bless is no longer byte-
+        # indistinguishable from a clean one after save/load. rescue_rerun
+        # stays session-time per docs/migration/scoped_detached_patching.md.
+        "capture_verified": FieldPolicy.KEEP,
+        "capture_verification_reason": FieldPolicy.KEEP,
         "rescue_rerun": FieldPolicy.DROP,
         "capture_owner_thread_id": FieldPolicy.DROP,
         "capture_owner_thread_qualified": FieldPolicy.DROP,
@@ -2832,6 +2837,18 @@ class Trace(
         state["_capture_outcome"] = (
             outcome.to_payload() if outcome is not None and hasattr(outcome, "to_payload") else None
         )
+        # grind-r5 P7 (b3 opus R10-1 / b6 opus R16-1): the producer's NEGATIVE
+        # verification claim persists -- a capture TorchLens itself refused to
+        # bless must not round-trip into "no claim". A POSITIVE claim never
+        # persists (a tampered artifact could otherwise forge verified=True;
+        # verdicts may only degrade across persistence). ``rescue_rerun``
+        # stays session-time per the migration doc.
+        if state.get("capture_verified") is False:
+            reason = state.get("capture_verification_reason")
+            state["capture_verification_reason"] = reason if isinstance(reason, str) else None
+        else:
+            state["capture_verified"] = None
+            state["capture_verification_reason"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
@@ -2856,6 +2873,11 @@ class Trace(
             "Trace",
             pickle.loads(pickle.dumps(self, protocol=pickle.HIGHEST_PROTOCOL)),
         )
+        # A deepcopy stays inside the live session, so the SAME-process copy
+        # keeps the full verification verdict -- the pickle path deliberately
+        # refuses to persist a positive claim (grind-r5 P7).
+        cloned.capture_verified = self.capture_verified
+        cloned.capture_verification_reason = self.capture_verification_reason
         memo[id(self)] = cloned
         return cloned
 
@@ -3102,6 +3124,16 @@ class Trace(
                 if op_passes is not None and hasattr(op_passes, "values"):
                     for layer_pass in op_passes.values():
                         layer_pass.grad_fn_handle = grad_fn_handle
+        # grind-r5 P7: load-side twin of the __getstate__ sanitation -- a
+        # tampered artifact claiming capture_verified=True (or any non-bool)
+        # degrades to None/no-claim; only the producer's NEGATIVE claim (with
+        # a string-only reason) is adopted. Verdicts never improve across a
+        # save/load cycle.
+        if self.__dict__.get("capture_verified") is not False:
+            self.__dict__["capture_verified"] = None
+            self.__dict__["capture_verification_reason"] = None
+        elif not isinstance(self.__dict__.get("capture_verification_reason"), (str, type(None))):
+            self.__dict__["capture_verification_reason"] = None
         # Resolve the settled capture outcome BEFORE core rehydration: adopt a
         # coherent persisted attestation, else derive from the structural
         # lattice (fail-closed to UNKNOWN on parse/coherence violations). The

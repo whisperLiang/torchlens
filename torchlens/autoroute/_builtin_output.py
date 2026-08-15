@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+from torchlens._capture_fingerprint import _never_matching_fragment
 from torchlens.autoroute.output import register
 from torchlens.data_classes.trace import ResolvedPostprocessing, Trace
 from torchlens.ir.container_registry import _is_hf_model_output
@@ -67,15 +68,35 @@ def decode_outputs_for_trace(
         # The output decode is an opportunistic post-capture nicety; a
         # heuristic sniffer must never abort an otherwise-successful capture
         # (R65: nested-tensor outputs raised raw RuntimeError from shape
-        # reads). Degrade to "no decode" with a disclosed warning.
+        # reads). Degrade to "no decode" -- but leave a DURABLE record, not
+        # just a warning: the warning is the most losable disclosure kind,
+        # and without the annotation a failed decode was byte-
+        # indistinguishable from "decode not applicable" on the returned AND
+        # saved Trace (grind-r5 b1 R22-2, sibling of the zero-match ledger).
+        # Roll back the partial-write window first: the unguarded body
+        # assigns decoded_output BEFORE output_postprocessor, so a raise
+        # between the two would otherwise leave a decoded output with no
+        # provenance record while the message claims none was attached.
         import warnings
 
         from torchlens.errors import TorchLensWarning
 
+        trace.decoded_output = None
+        trace.output_postprocessor = None
+        annotations = getattr(trace, "annotations", None)
+        if isinstance(annotations, dict):
+            annotations.setdefault("decode_skipped", []).append(
+                {
+                    "output_style": str(output_style),
+                    "output_head": str(output_head),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
         warnings.warn(
             "Semantic output decode skipped: the output detector raised "
             f"{type(exc).__name__}: {exc}. The capture itself is unaffected; "
-            "no decoded_output/output_postprocessor was attached.",
+            "no decoded_output/output_postprocessor was attached "
+            "(durable record: trace.annotations['decode_skipped']).",
             TorchLensWarning,
             stacklevel=2,
         )
@@ -149,23 +170,31 @@ def semantic_output_cache_key(
         Stable-ish metadata that affects output auto-detection and labels.
     """
 
+    # grind-r5 b7 R22-C(a): this fingerprint participates in the capture-cache
+    # EQUALITY key (user_funcs folds it under cache=True), so a raising
+    # ``config``/``default_cfg`` getter must NOT silently drop the whole
+    # config axis -- two models differing only in config (id2label,
+    # num_labels: the axis this key exists for) would collide and the second
+    # capture would serve the FIRST's cached Trace with the first's decoded
+    # labels. A raising getter mints the never-matching token instead
+    # (false hits never; the only cost is a cache miss).
+    config_unreadable: object | None = None
     try:
         config = getattr(model, "config", None)
     except Exception:
-        # ``config`` may be a property whose getter raises for reasons unrelated to
-        # attribute existence (e.g. delegating to a submodule that only partially
-        # implements it). This cache-key fingerprint is best-effort, so a raising
-        # getter degrades to "no config metadata" rather than aborting capture.
         config = None
+        config_unreadable = _never_matching_fragment("model-config-getter-raised")
     try:
         default_cfg = getattr(model, "default_cfg", None)
     except Exception:
         default_cfg = None
+        config_unreadable = _never_matching_fragment("model-default-cfg-getter-raised")
     weights = getattr(model, "_torchlens_weights", None)
     return {
         "version": DETECTOR_VERSION,
         "output_style": output_style,
         "output_head": output_head,
+        "config_unreadable": config_unreadable,
         "config": {
             "id2label": _normalized_id2label(getattr(config, "id2label", None)),
             "label2id": _normalized_mapping(getattr(config, "label2id", None)),

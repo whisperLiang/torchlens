@@ -61,9 +61,17 @@ from .tensor_tracking import (
 _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
 _ORIGINAL_AUTOGRAD_BACKWARD: Callable[..., Any] | None = None
 _ORIGINAL_AUTOGRAD_GRAD: Callable[..., Any] | None = None
+# Exact installed patch objects: teardown restores a slot only when it still
+# holds OUR patch (the identity-checked standard every sibling teardown in
+# wrappers.py/belt.py/identity_shims.py/rescue.py follows). A foreign patch
+# layered on top is preserved and disclosed, never clobbered.
+_INSTALLED_AUTOGRAD_BACKWARD: Callable[..., Any] | None = None
+_INSTALLED_AUTOGRAD_GRAD: Callable[..., Any] | None = None
 _AUTOGRAD_WRAPPERS_INSTALLED = False
 _ORIGINAL_SAVED_TENSORS_HOOKS_INIT: Callable[..., Any] | None = None
 _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER: Callable[..., Any] | None = None
+_INSTALLED_SAVED_TENSORS_HOOKS_INIT: Callable[..., Any] | None = None
+_INSTALLED_SAVED_TENSORS_HOOKS_ENTER: Callable[..., Any] | None = None
 _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
 _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _INFERENCE_ONLY_BACKWARD_ERROR = (
@@ -3363,24 +3371,81 @@ def _install_saved_tensors_hooks_scope() -> None:
 
     hooks_cls.__init__ = patched_init  # type: ignore[method-assign]
     hooks_cls.__enter__ = patched_enter  # type: ignore[method-assign]
+    global _INSTALLED_SAVED_TENSORS_HOOKS_INIT, _INSTALLED_SAVED_TENSORS_HOOKS_ENTER
+    _INSTALLED_SAVED_TENSORS_HOOKS_INIT = patched_init
+    _INSTALLED_SAVED_TENSORS_HOOKS_ENTER = patched_enter
     _SAVED_TENSORS_HOOKS_INIT_PATCHED = True
 
 
-def _uninstall_saved_tensors_hooks_scope() -> None:
+def _restore_slot_identity_checked(
+    owner: Any,
+    attr_name: str,
+    installed: Callable[..., Any] | None,
+    original: Callable[..., Any] | None,
+    site_label: str,
+) -> str | None:
+    """Restore ``owner.attr_name`` to ``original`` only when it is still OURS.
+
+    A third-party patch layered over the torchlens patch (apex/deepspeed-style
+    passthroughs on the autograd entry points) is preserved and its
+    ``site_label`` returned for the caller's burial disclosure instead of
+    being silently clobbered -- this was the only teardown in the codebase
+    with no drift guard (grind-r5 b8 R56). Returns ``None`` when the slot was
+    restored (or there was nothing to restore).
+    """
+
+    if original is None:
+        return None
+    current = getattr(owner, attr_name, None)
+    if installed is not None and current is not installed and current is not original:
+        return site_label
+    setattr(owner, attr_name, original)
+    return None
+
+
+def _warn_buried_autograd_sites(buried_sites: list[str]) -> None:
+    """Disclose teardown slots left holding a foreign patch."""
+
+    if not buried_sites:
+        return
+    from ..._errors import TorchLensWarning
+
+    warnings.warn(
+        "uninstall of TorchLens autograd wrappers left "
+        f"{len(buried_sites)} slot(s) holding a third-party patch layered over "
+        f"the torchlens wrapper: {', '.join(buried_sites)}. TorchLens never "
+        "clobbers foreign patches, so those slots still run the torchlens "
+        "wrapper underneath. Remove or reinstall the outer patch around the "
+        "restored original to fully unwrap.",
+        TorchLensWarning,
+        stacklevel=3,
+    )
+
+
+def _uninstall_saved_tensors_hooks_scope(buried_sites: list[str] | None = None) -> None:
     """Restore the original ``saved_tensors_hooks`` methods when patched."""
 
     global _SAVED_TENSORS_HOOKS_INIT_PATCHED
     if not _SAVED_TENSORS_HOOKS_INIT_PATCHED:
         return
-    if _ORIGINAL_SAVED_TENSORS_HOOKS_INIT is not None:
-        torch.autograd.graph.saved_tensors_hooks.__init__ = (  # type: ignore[method-assign]
-            _ORIGINAL_SAVED_TENSORS_HOOKS_INIT
+    own_sites = buried_sites if buried_sites is not None else []
+    hooks_cls = torch.autograd.graph.saved_tensors_hooks
+    for attr_name, installed, original in (
+        ("__init__", _INSTALLED_SAVED_TENSORS_HOOKS_INIT, _ORIGINAL_SAVED_TENSORS_HOOKS_INIT),
+        ("__enter__", _INSTALLED_SAVED_TENSORS_HOOKS_ENTER, _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER),
+    ):
+        buried = _restore_slot_identity_checked(
+            hooks_cls,
+            attr_name,
+            installed,
+            original,
+            f"torch.autograd.graph.saved_tensors_hooks.{attr_name}",
         )
-    if _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER is not None:
-        torch.autograd.graph.saved_tensors_hooks.__enter__ = (  # type: ignore[method-assign]
-            _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER
-        )
+        if buried is not None:
+            own_sites.append(buried)
     _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
+    if buried_sites is None:
+        _warn_buried_autograd_sites(own_sites)
 
 
 def install_autograd_wrappers() -> None:
@@ -3398,11 +3463,19 @@ def install_autograd_wrappers() -> None:
         return
     _ORIGINAL_AUTOGRAD_BACKWARD = torch.autograd.backward
     _ORIGINAL_AUTOGRAD_GRAD = torch.autograd.grad
+    # Bind the snapshots into the closures, NEVER a call-time global read: a
+    # buried old wrapper (foreign patch layered on top, identity-guarded
+    # teardown, then a re-install snapshotting the foreign chain) otherwise
+    # re-pointed EVERY live old wrapper at the new global -- a chain that
+    # contains the old wrapper itself, i.e. infinite recursion on the first
+    # backward (grind-r5 R56 follow-on, caught by this lane's own gate).
+    closure_original_backward = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_BACKWARD)
+    closure_original_grad = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_GRAD)
 
     def wrapped_backward(*args: Any, **kwargs: Any) -> Any:
         """Route ``torch.autograd.backward`` through TorchLens when roots match."""
 
-        original = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_BACKWARD)
+        original = closure_original_backward
         forward_op_count_at_trigger = _active_forward_op_count_at_trigger()
         roots = _autograd_roots_from_call(args, kwargs, "tensors")
 
@@ -3424,7 +3497,7 @@ def install_autograd_wrappers() -> None:
     def wrapped_grad(*args: Any, **kwargs: Any) -> Any:
         """Route ``torch.autograd.grad`` through TorchLens when roots match."""
 
-        original = cast(Callable[..., Any], _ORIGINAL_AUTOGRAD_GRAD)
+        original = closure_original_grad
         forward_op_count_at_trigger = _active_forward_op_count_at_trigger()
         roots = _autograd_roots_from_call(args, kwargs, "outputs")
 
@@ -3450,6 +3523,17 @@ def install_autograd_wrappers() -> None:
             forward_op_count_at_trigger=forward_op_count_at_trigger,
         )
 
+    # Provenance parity with every namespace wrapper (grind-r5 b8 R56): the
+    # entry wrappers carry the original's metadata so introspection reports
+    # torch.autograd.backward/grad (not a closure qualname), inspect.signature
+    # resolves through __wrapped__, and pickling the wrapped entry by
+    # reference succeeds for the whole wrapped epoch.
+    functools.update_wrapper(wrapped_backward, _ORIGINAL_AUTOGRAD_BACKWARD)
+    functools.update_wrapper(wrapped_grad, _ORIGINAL_AUTOGRAD_GRAD)
+
+    global _INSTALLED_AUTOGRAD_BACKWARD, _INSTALLED_AUTOGRAD_GRAD
+    _INSTALLED_AUTOGRAD_BACKWARD = wrapped_backward
+    _INSTALLED_AUTOGRAD_GRAD = wrapped_grad
     torch.autograd.backward = wrapped_backward
     torch.autograd.grad = wrapped_grad
     _AUTOGRAD_WRAPPERS_INSTALLED = True
@@ -3465,14 +3549,26 @@ def uninstall_autograd_wrappers() -> None:
     """
 
     global _AUTOGRAD_WRAPPERS_INSTALLED
-    _uninstall_saved_tensors_hooks_scope()
+    buried_sites: list[str] = []
+    _uninstall_saved_tensors_hooks_scope(buried_sites)
     if not _AUTOGRAD_WRAPPERS_INSTALLED:
+        _warn_buried_autograd_sites(buried_sites)
         return
-    if _ORIGINAL_AUTOGRAD_BACKWARD is not None:
-        torch.autograd.backward = _ORIGINAL_AUTOGRAD_BACKWARD
-    if _ORIGINAL_AUTOGRAD_GRAD is not None:
-        torch.autograd.grad = _ORIGINAL_AUTOGRAD_GRAD
+    for attr_name, installed, original in (
+        ("backward", _INSTALLED_AUTOGRAD_BACKWARD, _ORIGINAL_AUTOGRAD_BACKWARD),
+        ("grad", _INSTALLED_AUTOGRAD_GRAD, _ORIGINAL_AUTOGRAD_GRAD),
+    ):
+        buried = _restore_slot_identity_checked(
+            torch.autograd,
+            attr_name,
+            installed,
+            original,
+            f"torch.autograd.{attr_name}",
+        )
+        if buried is not None:
+            buried_sites.append(buried)
     _AUTOGRAD_WRAPPERS_INSTALLED = False
+    _warn_buried_autograd_sites(buried_sites)
 
 
 def _finalize_grad_streaming(trace: Any) -> None:

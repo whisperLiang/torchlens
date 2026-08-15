@@ -102,6 +102,10 @@ _NUMPY_RNG_INSTANCE_TYPES: tuple[type, ...] = (
     np.random.Generator,
     np.random.RandomState,
     np.random.BitGenerator,
+    # grind-r5 b8 R57: SeedSequence is a spawnable entropy root whose
+    # ``spawn()`` advances only ``_n_children_spawned`` -- digestable hidden
+    # state, so it is a first-class monitored holder.
+    np.random.SeedSequence,
 )
 """Public NumPy RNG receiver types covered by the host-nondeterminism witness."""
 
@@ -1757,6 +1761,44 @@ def _call_site_argcount(frame: Any) -> int | None:
         return None
 
 
+def _call_site_time_arg_proof(frame: Any, argcount: int, time_arg_index: int) -> str:
+    """Classify the explicit time argument at a held-ref converter call site.
+
+    The positional-count decode alone is VALUE-BLIND: ``localtime(None)`` (and
+    the common idiom ``def fmt(ts=None): return ctime(ts)``) passes the
+    explicit-time slot yet still reads the current clock, so counting
+    positionals let a held pre-window alias escape unmarked (grind-r5 b8
+    R57). Only a literal non-``None`` constant pushed as the LAST positional
+    proves the site is a pure transform.
+
+    Returns
+    -------
+    str
+        ``"transform"`` -- provably a non-``None`` literal (pure transform);
+        ``"now_read"`` -- provably a literal ``None`` (implicit-now clock
+        read); ``"unknown"`` -- computed argument or undecodable site, which
+        callers treat as monitor uncertainty (the value is runtime-dependent,
+        so neither a clock-draw claim nor a clean pass is provable).
+    """
+
+    if time_arg_index != argcount - 1:
+        return "unknown"
+    try:
+        lasti = frame.f_lasti
+        pushed = None
+        for instruction in _dis_module.get_instructions(frame.f_code):
+            if instruction.offset >= lasti:
+                break
+            if instruction.opname in {"CACHE", "PRECALL", "EXTENDED_ARG"}:
+                continue
+            pushed = instruction
+        if pushed is None or pushed.opname != "LOAD_CONST":
+            return "unknown"
+        return "now_read" if pushed.argval is None else "transform"
+    except Exception:
+        return "unknown"
+
+
 _ACTIVE_MONITOR: "host_nondeterminism_monitor | None" = None
 """The capture-scoped monitor currently installed, or ``None`` (r41 hon2_1).
 
@@ -1836,7 +1878,18 @@ def _skip_retired_hooks(candidate: Any, predecessor_attr: str) -> Any:
         owner = getattr(candidate, "_tl_owner", None)
         if owner is None or not getattr(owner, "_hooks_retired", False):
             break
-        candidate = getattr(owner, predecessor_attr, None)
+        # Key the predecessor off WHICH of the owner's two hooks this link IS,
+        # not off the slot being restored: a thread spawned during a previous
+        # window carries that window's THREADING hook even when the slot under
+        # restore is the sys slot, and following the slot's attr handed it the
+        # dead owner's sys predecessor instead of the threading chain
+        # (grind-r5 b8 R57).
+        if candidate is getattr(owner, "_threading_hook", None):
+            candidate = getattr(owner, "_previous_threading_profile", None)
+        elif candidate is getattr(owner, "_sys_hook", None):
+            candidate = getattr(owner, "_previous_sys_profile", None)
+        else:
+            candidate = getattr(owner, predecessor_attr, None)
     return candidate
 
 
@@ -2752,11 +2805,21 @@ class host_nondeterminism_monitor:
                     self._mark(held_channel)
                 else:
                     # Implicit-now converter: a call site providing the explicit-time
-                    # argument is a pure transform. Undecodable (star-call / unknown
-                    # opcode) marks fail-closed -- over-marking, never under-marking.
+                    # argument is a pure transform ONLY when that argument is provably
+                    # non-None -- ``localtime(None)`` reads the clock exactly like
+                    # ``localtime()`` (grind-r5 b8 R57). Undecodable (star-call /
+                    # unknown opcode) marks fail-closed; a literal ``None`` marks; a
+                    # computed argument flags uncertainty (runtime-dependent value:
+                    # neither a clock-draw claim nor a clean pass is provable).
                     argcount = _call_site_argcount(frame)
                     if argcount is None or argcount <= time_arg_index:
                         self._mark(held_channel)
+                    else:
+                        proof = _call_site_time_arg_proof(frame, argcount, time_arg_index)
+                        if proof == "now_read":
+                            self._mark(held_channel)
+                        elif proof == "unknown":
+                            self._flag_uncertain(f"held_ref_time_arg_unproven:{held_channel}")
         receiver = getattr(arg, "__self__", None)
         if receiver is None:
             return
@@ -3729,26 +3792,70 @@ class host_nondeterminism_monitor:
         return self._digest_rng_instance(holder)
 
     @staticmethod
+    def _seed_seq_spawn_fragment(bit_generator: Any) -> str:
+        """Digest the spawn-relevant SeedSequence state behind one BitGenerator.
+
+        ``Generator.spawn()`` / ``BitGenerator.spawn()`` advance NO sampled
+        state: they mutate ``seed_seq._n_children_spawned``, which is
+        verdict-steering hidden state (a fresh oracle-1 run spawns a
+        differently-keyed child). Folding the spawn counter plus the seeding
+        identity into the digest makes an in-window spawn on a digest-rooted
+        engine witnessable (grind-r5 b8 R57 HIGH). Absent/opaque seed
+        sequences digest to the empty fragment (nothing spawnable to hide).
+        """
+
+        seed_seq = getattr(bit_generator, "seed_seq", None)
+        if seed_seq is None:
+            seed_seq = getattr(bit_generator, "_seed_seq", None)
+        if seed_seq is None:
+            return ""
+        return host_nondeterminism_monitor._seed_seq_state_fragment(seed_seq)
+
+    @staticmethod
+    def _seed_seq_state_fragment(seed_seq: Any) -> str:
+        """Digest one SeedSequence's seeding identity and spawn counter."""
+
+        return host_nondeterminism_monitor._exact_state_repr(
+            (
+                "seed_seq",
+                getattr(seed_seq, "entropy", None),
+                getattr(seed_seq, "spawn_key", None),
+                getattr(seed_seq, "pool_size", None),
+                getattr(seed_seq, "n_children_spawned", None),
+            )
+        )
+
+    @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
         """Return a comparable state digest for one RNG holder.
 
-        Covers numpy ``Generator``/``RandomState``/bare ``BitGenerator`` and
-        ``random.Random``. A stateless ``Random`` subclass whose ``getstate()``
+        Covers numpy ``Generator``/``RandomState``/bare ``BitGenerator``,
+        bare ``SeedSequence`` holders, and ``random.Random``. Generator and
+        BitGenerator digests fold in the underlying SeedSequence spawn state
+        so ``spawn()`` -- which advances no sampled state -- is witnessed. A
+        stateless ``Random`` subclass whose ``getstate()``
         raises ``NotImplementedError`` (``SystemRandom``) is classified
         monitored-not-digestible rather than an inventory error: possessing an
         undrawn stateless engine is not nondeterminism.
         """
 
         exact = host_nondeterminism_monitor._exact_state_repr
+        spawn_fragment = host_nondeterminism_monitor._seed_seq_spawn_fragment
         if isinstance(holder, np.random.Generator):
-            return exact(holder.bit_generator.state)
+            bit_generator = holder.bit_generator
+            return exact(bit_generator.state) + spawn_fragment(bit_generator)
         if isinstance(holder, np.random.RandomState):
             return exact(holder.get_state())
         # r41 (Sol): a BARE model-held BitGenerator (``self.bg = PCG64(...)`` drawn
         # through a wrapping Generator) advances its own ``state``; digest it directly
         # so the registry's BitGenerator claim is digest-true.
         if isinstance(holder, np.random.BitGenerator):
-            return exact(holder.state)
+            return exact(holder.state) + spawn_fragment(holder)
+        # grind-r5 b8 R57: a model-held bare ``SeedSequence`` is a spawnable
+        # entropy root; ``seed_seq.spawn()`` mid-window is the same hidden
+        # verdict-steering mutation as ``Generator.spawn()``.
+        if isinstance(holder, np.random.SeedSequence):
+            return host_nondeterminism_monitor._seed_seq_state_fragment(holder)
         if isinstance(holder, random.Random):
             try:
                 state = holder.getstate()
@@ -4655,8 +4762,15 @@ class host_nondeterminism_monitor:
         # to flag uncertainty and pass through. Monitor-internal writes use
         # the held originals above and never trip these. A pre-window
         # ``from sys import setprofile`` alias or a C-level
-        # ``PyEval_SetProfile`` (cProfile.enable) bypasses the module attr;
-        # both fall in the held-ref alias residual class.
+        # ``PyEval_SetProfile`` (cProfile.enable) bypasses the module attr
+        # AND both endpoint identity checks (a balanced held-ref swap
+        # restores our hook before teardown), re-opening the blind
+        # sub-window for the profile-only channel class. No Python-level
+        # fail-closed spelling exists for a pre-window held slot-writer;
+        # this is the NAMED contract residual (runnable_tlspec_contract.md,
+        # residual tail clause on held profile-slot writers) until the
+        # sys.monitoring port -- interpreter-global, slot-swap-immune --
+        # closes it on py>=3.12 (grind-r5 b8 R57).
         self._patch_attr(
             _sys_module,
             "setprofile",

@@ -59,6 +59,7 @@ import importlib.util
 import inspect
 import sys
 import threading
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -270,6 +271,8 @@ def install_identity_shims() -> None:
         _install_expanded_weights_shims(records)
         _install_resolve_name_shim(records)
         _install_jit_overload_shim(records)
+        _install_fx_trace_shim(records)
+        _install_overrides_membership_shims(records)
     except Exception:
         _restore(records)
         raise
@@ -632,6 +635,157 @@ def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
     setattr(get_overloads_shim, _SHIM_MARKER, True)
     module._get_overloads = get_overloads_shim
     records.append((module, "_get_overloads", orig_get_overloads))
+
+
+# ---------------------------------------------------------------------------
+# Site 6: torch.fx.Tracer.trace -- wrapper-free graph artifacts
+# ---------------------------------------------------------------------------
+
+
+def _install_fx_trace_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim ``torch.fx.Tracer.trace`` so node targets record ORIGINALS.
+
+    fx's patcher reads Python functionals from the live namespace at trace
+    time, so a ``symbolic_trace`` run during the wrapped epoch baked the
+    torchlens WRAPPER object into ``call_function`` node targets (C functions
+    correctly record the protocol-supplied original). Any identity/equality-
+    keyed fx pass (``node.target == F.relu`` -- the standard torch.ao
+    quantization matcher shape) then silently mismatched once wrappers were
+    removed or in any other process, and the GraphModule artifact permanently
+    embedded a torchlens object (grind-r5 b8 R56). Remapping targets through
+    the wrapper ledger after the trace hands every consumer the same graph an
+    unwrapped eager trace produces; subclassed tracers (HF-style) funnel
+    through the same base method.
+    """
+
+    fx_module = getattr(torch, "fx", None)
+    tracer_cls = getattr(fx_module, "Tracer", None)
+    if tracer_cls is None:
+        return
+    orig_trace = vars(tracer_cls).get("trace")
+    if orig_trace is None or _is_shimmed(orig_trace):
+        return
+
+    @functools.wraps(orig_trace)
+    def trace_shim(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Trace, then re-point wrapper-valued call_function targets."""
+        graph = orig_trace(self, *args, **kwargs)
+        try:
+            for node in graph.nodes:
+                if node.op == "call_function":
+                    original = _state._decorated_to_orig.get(id(node.target))
+                    if original is not None:
+                        node.target = original
+        except Exception as error:
+            from ..._errors import TorchLensWarning
+
+            warnings.warn(
+                "TorchLens could not normalize torchlens wrappers out of an "
+                f"fx graph's node targets ({type(error).__name__}: {error}); "
+                "the traced GraphModule may embed wrapper objects that break "
+                "identity-keyed fx passes after unwrap_torch().",
+                TorchLensWarning,
+                stacklevel=2,
+            )
+        return graph
+
+    setattr(trace_shim, _SHIM_MARKER, True)
+    tracer_cls.trace = trace_shim
+    records.append((tracer_cls, "trace", orig_trace))
+
+
+# ---------------------------------------------------------------------------
+# Site 7: torch.overrides membership tables
+# ---------------------------------------------------------------------------
+
+
+class _LedgerResolvingTable(dict):
+    """Dict view whose LOOKUPS resolve torchlens wrappers to originals.
+
+    Iteration/keys stay exactly the underlying original-keyed contents (the
+    wrapper-poisoning census gate keeps holding); only ``in``/``[]``/``get``
+    additionally accept the live wrapper alias, so the documented
+    ``func in torch.overrides.get_testing_overrides()`` membership check
+    answers the same in both wrap epochs (grind-r5 b7 R55-A).
+    """
+
+    def __contains__(self, key: Any) -> bool:
+        if super().__contains__(key):
+            return True
+        original = _resolve(key)
+        return original is not key and super().__contains__(original)
+
+    def __getitem__(self, key: Any) -> Any:
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            original = _resolve(key)
+            if original is not key:
+                return super().__getitem__(original)
+            raise
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+class _LedgerResolvingMembers(list):
+    """List view whose membership test resolves torchlens wrappers."""
+
+    def __contains__(self, item: Any) -> bool:
+        if super().__contains__(item):
+            return True
+        original = _resolve(item)
+        return original is not item and super().__contains__(original)
+
+
+def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim the two cached ``torch.overrides`` table accessors for membership.
+
+    ``decorate_all_once`` pre-warms both caches so their CONTENTS stay keyed
+    by pristine originals (r4 F3, verified). But membership by the CURRENT
+    namespace read -- ``F.relu in get_testing_overrides()`` or
+    ``my_op in get_overridable_functions()[F]``, the documented
+    ``__torch_function__`` author checks -- was False for every wrapped
+    function during the wrap epoch. The shims hand back per-underlying-table
+    cached views that resolve a wrapper argument through the ledger, exactly
+    like the shipped ``resolve_name`` shim.
+    """
+
+    overrides_module = getattr(torch, "overrides", None)
+    if overrides_module is None:
+        return
+    for accessor_name in ("get_testing_overrides", "get_overridable_functions"):
+        orig_accessor = vars(overrides_module).get(accessor_name)
+        if orig_accessor is None or _is_shimmed(orig_accessor):
+            continue
+        view_cache: dict[int, Any] = {}
+
+        def _make_shim(orig: Callable[[], Any], cache: dict[int, Any]) -> Callable[[], Any]:
+            @functools.wraps(orig)
+            def accessor_shim() -> Any:
+                table = orig()
+                view = cache.get(id(table))
+                if view is None:
+                    if table and isinstance(next(iter(table.values()), None), list):
+                        view = _LedgerResolvingTable(
+                            (key, _LedgerResolvingMembers(members))
+                            for key, members in table.items()
+                        )
+                    else:
+                        view = _LedgerResolvingTable(table)
+                    cache.clear()  # underlying cache rebuilt: drop stale views
+                    cache[id(table)] = view
+                return view
+
+            return accessor_shim
+
+        shim = _make_shim(orig_accessor, view_cache)
+        setattr(shim, _SHIM_MARKER, True)
+        setattr(overrides_module, accessor_name, shim)
+        records.append((overrides_module, accessor_name, orig_accessor))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:

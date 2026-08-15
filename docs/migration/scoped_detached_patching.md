@@ -20,13 +20,17 @@ repair stale bindings. Coverage is now:
    `torchlens.backends.torch.wrappers.wrap_torch()` before creating aliases, closures, partials,
    or object-held torch callables.
    Then those bindings capture the wrappers directly and no rescue is needed.
-   The MIRROR direction is a declared residual: a plain attribute read taken WHILE wrappers are
-   installed (`held = F.relu`) hands the user the wrapper object, and
+   The MIRROR direction is a declared residual for BARE references: a plain attribute read taken
+   WHILE wrappers are installed (`held = F.relu`) hands the user the wrapper object, and
    `torchlens.backends.torch.wrappers.unwrap_torch()` does not repair user-held wrapper references
-   — TorchLens never crawls or mutates user objects. The held reference stays callable (it
-   delegates to the original) but is identity-poisoned after unwrap: `held is F.relu` is `False`
-   and pickling it (or any object holding it) fails. Recovery requires re-reading the attribute
-   after unwrap, or a fresh process.
+   — TorchLens never crawls or mutates user objects during capture. The held reference stays
+   callable (it delegates to the original) but is identity-poisoned after unwrap: `held is F.relu`
+   is `False` and pickling it (or any object holding it) fails. For references held on a MODEL,
+   `tl.release_model(model)` is the shipped repair: it normalizes held torch-function attributes
+   (one level of exact builtin containers, namedtuples included, dict keys included) to the
+   currently-live values, and registers the model so every later wrap-state flip re-normalizes it
+   — released models stay serializable in every epoch. Bare references held outside a model still
+   require re-reading the attribute after unwrap, or a fresh process.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
    `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`
@@ -135,8 +139,14 @@ Live torch traces expose these diagnostic fields:
 Public `tl.record(...)` uses the same guarded forward hot path and mirrors these fields onto the
 returned `Recording`.
 
-`capture_verified` and `rescue_rerun` are live diagnostic state and do not survive a `.tlspec`
-round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `True`.
+The verification VERDICT now survives a `.tlspec` round-trip in the negative direction only: a
+capture the producer refused to bless loads with `capture_verified=False` and its string
+`capture_verification_reason` intact, so an escape-disclosed artifact is never
+byte-indistinguishable from a clean one. A positive claim never persists — a loaded trace reports
+`None`/unknown rather than a falsely preserved (or forged) `True`, and load degrades any
+non-`False` persisted value the same way. `rescue_rerun` (and the heavyweight
+`escape_diagnostics`) remain live session-time diagnostic state and still do not survive the
+round-trip.
 
 ## Honest boundaries
 
@@ -154,6 +164,9 @@ round-trip: a loaded trace reports `None`/unknown, never a falsely preserved `Tr
 | Deferred `trace.log_backward(...)` / `Recording.log_backward(...)` | Explicitly `not_armed` in this rollout |
 | `torch.func` / functorch transform internals | Existing transform boundary warning/marker remains authoritative |
 | `stacklevel`-attributed torch warnings raised inside wrapped Python functionals (e.g. `F.softmax` implicit-dim) | Declared residual while wrappers are installed: the wrapper adds one Python frame, so the warning is attributed to torch internals instead of the user call site, and Python's default-filter dedup (keyed on the attributed location) collapses DISTINCT user call sites into one warning per process. The frame is inherent to Python-level wrapping; pinned by `test_wrapped_functional_warning_attribution_residual_shape` |
+| User/extension `__torch_function__` handler tables keyed by a namespace read taken WHILE wrappers are installed (`HANDLED = {torch.mean: ...}` after the first capture — the official "Extending torch" `@implements` pattern in a library imported mid-session) | Declared residual: the C protocol delivers the ORIGINAL as `func`, so a wrapper-keyed table silently misses during the wrapped epoch and after unwrap. TorchLens shims torch-INTERNAL tables only; it cannot rewrite arbitrary user registries. Remedies: build handler tables before the first capture, key by `torch.overrides.resolve_name(func)`, or normalize keys through `unwrap_torch()` |
+| User-side callable-keyed registries generally (`REGISTRY = {F.relu: "relu"}` built before the first capture, membership-tested after it) | Declared residual while wrappers are installed: the namespace read now returns the wrapper, so identity/membership answers flip. Key by name (`resolve_name`) or call `unwrap_torch()` before consulting the registry |
+| `inspect.signature` on wrapped C builtins (`torch.cos`) | Declared residual while wrappers are installed: pre-wrap it RAISES `ValueError` (no signature for a C builtin); post-wrap it returns the permissive `(*args, **kwargs)` fabrication, so a caller using the raise to detect "C builtin, cannot bind" gets a silent wrong answer. `__wrapped__` must stay deleted for JIT compatibility, so the fabrication is inherent |
 
 The thread tripwire compares `threading.active_count()` at forward entry and exit. It catches a live
 count delta cheaply, but a worker that starts and joins entirely inside the forward can evade that

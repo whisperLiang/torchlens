@@ -3047,6 +3047,12 @@ def _unwrap_torch_locked() -> None:
         except (AttributeError, TypeError):
             pass
 
+    # Released models were normalized to the WRAPPED epoch's live values; with
+    # the originals now restored, re-normalize them so the documented
+    # release_model serializability remedy survives the unwrap instead of
+    # inverting into the unrecoverable pickle shape.
+    _renormalize_released_models_after_flip()
+
 
 def _configure_escape_detector(mode: EscapeDetectorMode | None) -> EscapeDetectorMode:
     """Validate and apply the process-level diagnostic detector mode.
@@ -3201,6 +3207,7 @@ def _wrap_torch_locked(
         decorate_all_once()
         install_autograd_wrappers()
         sweep_stale_belt_references()
+        _renormalize_released_models_after_flip()
         return
 
     # Re-install from existing maps (after a prior unwrap_torch).
@@ -3245,6 +3252,36 @@ def _wrap_torch_locked(
 
     # Re-wrapping __getitem__ pollutes sq_item again; clear it.
     _fix_tensor_sequence_slot()
+
+    _renormalize_released_models_after_flip()
+
+
+def _renormalize_released_models_after_flip() -> None:
+    """Re-point released models' held refs at the values live in this epoch.
+
+    ``release_model`` normalizes held torch-function attrs to the values live
+    at release time; without this hook a later wrap-state flip inverted the
+    documented serializability remedy into the UNRECOVERABLE pickle shape (a
+    released-while-wrapped model permanently held the transient epoch's
+    wrapper). Best-effort with a routed warning: a teardown/install seam must
+    never die on one model's exotic state, but it must not go silent either.
+    """
+
+    from ._held_refs import renormalize_released_models
+
+    try:
+        renormalize_released_models()
+    except Exception as error:  # pragma: no cover - defensive seam belt
+        from ..._errors import TorchLensWarning
+
+        warnings.warn(
+            "TorchLens could not re-normalize held torch-function references "
+            f"on a released model after a wrap-state change ({type(error).__name__}: "
+            f"{error}). That model may fail whole-model pickle/torch.save until "
+            "tl.release_model(model) is called again.",
+            TorchLensWarning,
+            stacklevel=3,
+        )
 
 
 @contextmanager

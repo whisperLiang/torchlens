@@ -37,6 +37,31 @@ RAW_LABEL_SUFFIX = "_raw"
 RAW_LABEL_FIELD = "raw_label"
 ARG_EXPRESSIONS_FIELD = "arg_expressions"
 
+# The documented non-reproducible artifact surface (grind-r5 b7 R21, 3rd
+# round): every persisted field that LEGITIMATELY varies between two
+# byte-level-identical captures (same model, same input, same seeds, same
+# PYTHONHASHSEED, fresh processes). Empirically derived from a same-seed
+# two-process control at 1d00442c -- these were the ONLY semantic diffs.
+# Byte-identity oracles (the trace_core_design surface oracle, cross-process
+# artifact A/B gates) must mask exactly this set and nothing else; widening
+# it is a reviewed contract diff, because every additional row weakens the
+# reproducibility tripwire.
+ARTIFACT_VOLATILE_METADATA_FIELDS: tuple[str, ...] = (
+    "random_seed",
+    "capture_start_time",
+    "capture_end_time",
+    "_phase_timings",
+    "setup_duration",
+    "forward_duration",
+    "cleanup_duration",
+    "func_calls_duration",
+    "forward_peak_memory",
+)
+ARTIFACT_VOLATILE_MANIFEST_FIELDS: tuple[str, ...] = (
+    "created_at",
+    "rng_state_digests",
+)
+
 MODEL_LOG_FIELD_ORDER = [
     # General info
     "trace_label",
@@ -1190,11 +1215,19 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
 
             # cannot be overridden by __torch_function__
             if func in ignored_funcs_set:
-                msg = (
-                    "{}.{} is in the tuple returned by torch._overrides.get_ignored_functions "
-                    "but still has an explicit override"
-                )
-                assert func not in testing_overrides_set, msg.format(namespace, func.__name__)
+                # A real ``raise``, never ``assert`` (grind-r5 b7 R24, the
+                # descriptor branch's twin): under ``python -O`` the assert
+                # stripped and the ``continue`` silently excluded the function
+                # from the wrapper roster -- fault-injection proved
+                # ``torch.tensor`` vanishing from the 3,350-entry roster with
+                # zero signal on exactly the future-torch drift this
+                # contradiction check exists to catch.
+                if func in testing_overrides_set:
+                    raise RuntimeError(
+                        f"{namespace}.{func.__name__} is in the tuple returned by "
+                        "torch._overrides.get_ignored_functions but still has an "
+                        "explicit override"
+                    )
                 continue
             func_names.append((f"{namespace_str}", func_name))
     return func_names

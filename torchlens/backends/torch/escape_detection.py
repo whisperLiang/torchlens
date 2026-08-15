@@ -650,15 +650,29 @@ def _install_setprofile(guard: _GuardState) -> None:
 
 
 def _uninstall_setprofile(guard: _GuardState) -> None:
-    """Restore the exact profile hook that preceded detector installation."""
+    """Restore the profile slot only when it still holds OUR callback.
 
-    sys.setprofile(guard.prior_profile)
+    The codebase's profile-slot standard (rng.py e08cab94, rescue.py): a
+    foreign profiler installed over the detector mid-window must not be
+    clobbered by an unconditional restore -- leave the slot to its current
+    owner instead (grind-r5 b8 R56).
+    """
+
+    if sys.getprofile() is _profile_callback:
+        sys.setprofile(guard.prior_profile)
 
 
 def _find_monitoring_tool_id(monitoring: Any) -> int:
-    """Reserve one free sys.monitoring tool id or fail loudly."""
+    """Reserve one free sys.monitoring tool id or fail loudly.
 
-    candidates = range(5, -1, -1)
+    Only the unreserved ids are candidates: claiming PEP-669's reserved
+    DEBUGGER (0) / COVERAGE (1) / PROFILER (2) / OPTIMIZER (5) slots invited
+    silent contention -- legacy ``sys.setprofile`` (the RNG monitor's belt)
+    rides tool id 2 without consulting ``use_tool_id`` reservations, so a
+    detector parked there stopped seeing events (grind-r5 b8 R57).
+    """
+
+    candidates = (4, 3)
     for tool_id in candidates:
         try:
             if monitoring.get_tool(tool_id) is None:

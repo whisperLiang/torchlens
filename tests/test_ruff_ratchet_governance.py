@@ -72,11 +72,28 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     "PLR0912": 253,
     "PLR0913": 417,
     "PLR0915": 146,
+    # The broad-catch / silent-swallow family (grind-r5 b1 R22-1, 4th round,
+    # + b7 fable/opus corroboration): the population grew 369 -> 463 AST
+    # handlers across the sprint with zero tripwire while every neighbour
+    # family got ceilinged -- "every one a place a capture bug can hide".
+    # Ceilings frozen at the 2026-08-15 fix/capture-r6 measurement (pinned
+    # ruff 0.15.4, isolated, CI scope + config extend-excludes). SHRINK-ONLY.
+    "BLE001": 511,
+    "S110": 39,
+    "S112": 35,
+    # grind-r5 b7 R24 (SF-23): every in-package assert strips under
+    # ``python -O``, so each new site is a potential optimized-mode semantic
+    # split (the roster contradiction guard was the proven instance --
+    # torch.tensor silently vanished from the wrapper roster). torchlens/
+    # only: tests legitimately assert.
+    "S101": 97,
 }
 
 #: Codes measured over torchlens/ only (see the D417 and complexity notes
 #: above).
-_PACKAGE_ONLY_CODES = frozenset({"D417", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915"})
+_PACKAGE_ONLY_CODES = frozenset(
+    {"D417", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S101"}
+)
 
 _CI_SCOPE = ("torchlens", "tests", "scripts", "tools", "benchmarks", "examples", "notebooks")
 

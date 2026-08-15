@@ -186,12 +186,6 @@ _member_map: dict[int, Any] | None = None
 _swept_module_ids: dict[int, Callable[[], Any | None]] = {}
 """Module identities already swept this wrapper epoch (weak where possible)."""
 
-_swept_sys_modules_size = -1
-"""``len(sys.modules)`` at the last complete belt sweep."""
-
-_swept_modules_dirty = False
-"""Whether a previously swept weak module reference has died."""
-
 _ledger: list[tuple[Callable[[], Any | None], str, Any, Any]] = []
 """(module_ref, attr_name, original, replacement) reversal entries."""
 
@@ -337,16 +331,10 @@ def _weak_module_ref(module: types.ModuleType) -> Callable[[], Any | None]:
 def _weak_swept_module_ref(
     module: types.ModuleType,
 ) -> Callable[[], Any | None]:
-    """Return a module reference that invalidates the sweep watermark on collection."""
-
-    def _mark_sweep_dirty(_reference: weakref.ReferenceType[types.ModuleType]) -> None:
-        """Mark the module inventory dirty after a swept module is collected."""
-
-        global _swept_modules_dirty
-        _swept_modules_dirty = True
+    """Return a weak module reference for the per-module sweep memo."""
 
     try:
-        return weakref.ref(module, _mark_sweep_dirty)
+        return weakref.ref(module)
     except TypeError:
         return lambda: module
 
@@ -366,11 +354,15 @@ def sweep_stale_belt_references() -> int:
         Number of slots patched by this sweep.
     """
 
-    global _swept_modules_dirty, _swept_sys_modules_size
+    # grind-r5 b3 R02 (opus+sol corroborated LOW, 2 rounds): NO length
+    # watermark. ``len(sys.modules)`` equality is not identity -- a same-length
+    # mutation (del one key + insert another) skipped the sweep and left a
+    # protocol-invisible stale ``from_numpy``/``frombuffer``/``as_subclass``
+    # reference unpatched, exactly the zero-signal class the belt exists to
+    # close. The per-module memo below already makes every sweep O(modules)
+    # dict lookups with O(new modules) real work.
     report = belt_report()
     if report is None or _member_map is None or not _member_map:
-        return 0
-    if len(sys.modules) == _swept_sys_modules_size and not _swept_modules_dirty:
         return 0
     patched = 0
     for mod_key, module in list(sys.modules.items()):
@@ -398,8 +390,6 @@ def sweep_stale_belt_references() -> int:
                 continue
             _ledger.append((_weak_module_ref(module), attr_name, attr_val, replacement))
             patched += 1
-    _swept_sys_modules_size = len(sys.modules)
-    _swept_modules_dirty = False
     return patched
 
 
@@ -410,7 +400,6 @@ def restore_belt_references() -> None:
     installed; user reassignments made after the sweep are preserved.
     """
 
-    global _swept_modules_dirty, _swept_sys_modules_size
     for module_ref, attr_name, original, replacement in reversed(_ledger):
         module = module_ref()
         if module is None:
@@ -423,5 +412,3 @@ def restore_belt_references() -> None:
             continue
     _ledger.clear()
     _swept_module_ids.clear()
-    _swept_sys_modules_size = -1
-    _swept_modules_dirty = False

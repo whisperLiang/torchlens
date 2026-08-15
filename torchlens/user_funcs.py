@@ -2710,6 +2710,32 @@ def _trace_torch_model(
             received_type=type(model).__name__,
         )
     _reject_opaque_wrappers(model)
+    # grind-r5 b7 R55 (fable MED, survived from round 1 -- it misdirected two
+    # hostile review lanes): the natural multi-input spelling
+    # ``tl.trace(model, q, k, v)`` lands tensor ``k`` in ``input_kwargs`` and
+    # ``v`` in the deprecated ``layers_to_save`` slot, then crashes DEEP with
+    # an ambient-import-dependent error that never names the mistake. Refuse
+    # typed at entry, naming the tuple spelling.
+    if input_kwargs is not None and not isinstance(input_kwargs, collections.abc.Mapping):
+        raise ArgumentTypeError(
+            "input_kwargs must be a Mapping of keyword arguments for "
+            f"model.forward(), got {type(input_kwargs).__name__}. Passing "
+            "multiple positional inputs as separate arguments is not "
+            "supported: bundle them as one tuple, e.g. "
+            "tl.trace(model, (input_a, input_b, input_c)).",
+            code="input_kwargs_type_invalid",
+            remedy="pass keyword args as a dict, or bundle positional inputs into one tuple",
+        )
+    if isinstance(layers_to_save, torch.Tensor):
+        raise ArgumentTypeError(
+            "layers_to_save (deprecated positional slot) received a "
+            "torch.Tensor -- this is almost always a fourth positional model "
+            "input. Bundle model inputs as one tuple, e.g. "
+            "tl.trace(model, (input_a, input_b, input_c)), and use save= for "
+            "selective capture.",
+            code="layers_to_save_type_invalid",
+            remedy="bundle positional inputs into one tuple; use save= for selection",
+        )
     model = unwrap_compiled_model(model)
     model = _unwrap_data_parallel(model)
     if reconstruction_ready is not MISSING and reconstruction_ready:

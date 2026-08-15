@@ -677,8 +677,27 @@ class _FastSparseSession:
                     details=(("expected", repr(expected_paths)), ("actual", repr(actual_paths))),
                 ),
             )
+        # grind-r5 b7 R23-A: op_labels is an independent persisted field, so a
+        # descriptor with fewer labels would truncate this zip and skip the
+        # shape/dtype/device guards for the trailing slots while reporting
+        # clean. The slow-path twin enforces exactly this parity inside its
+        # output_structure contract check; mirror it here.
+        if len(call.output_slot_ids) != len(call.op_labels):
+            return (
+                _contract_check(
+                    f"fast_output_slot_label_parity:{call.call_id}",
+                    False,
+                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                    f"Fast call {call.call_id!r} records {len(call.output_slot_ids)} output "
+                    f"slots but {len(call.op_labels)} op labels; the descriptor may be "
+                    "tampered.",
+                    affected_op_labels=call.op_labels,
+                ),
+            )
         out_slot = _out_argument_slot_id(call) if call.is_inplace else None
-        for slot_id, op_label, path in zip(call.output_slot_ids, call.op_labels, expected_paths):
+        for slot_id, op_label, path in zip(
+            call.output_slot_ids, call.op_labels, expected_paths, strict=True
+        ):
             value = (
                 output
                 if not path and isinstance(output, torch.Tensor)
