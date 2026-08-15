@@ -19,7 +19,8 @@ this package mostly stateless and free of high-level TorchLens business logic.
 | `_callable_safety.py` | Security gate deciding which resolved callables are pure forward/tensor ops (untrusted `.tlspec` registry) |
 | `_multipass_access.py` | Multi-pass-safe attribute access for aggregate (recurrent) `Layer` objects |
 | `_torch_symbols.py` | Single sanctioned spelling for resolving top-level `torch` attributes on the load/decode/exec path |
-| `__init__.py` | Package marker |
+| `_uninit_alloc.py` | Closed uninitialized-memory value-source name table (the ONE shared predicate block; `rng.py` re-exports it) |
+| `__init__.py` | 1,000+ lines of PUBLIC API — `doctor()`, `list_modules`/`list_ops`, `flop_count`, `peek_graph`, `synthetic_input`, `find_executable_save_set`, `trace_streaming`, and the `_LAZY_EXPORTS` `__getattr__`; NOT editable boilerplate |
 
 (Source-link helpers live at top level in `torchlens/_source_links.py`, not in this package.)
 
@@ -28,7 +29,8 @@ this package mostly stateless and free of high-level TorchLens business logic.
   metadata when the logging pipeline needs it.
 - `safe_to()` moves tensors under `pause_logging()`.
 - `tensor_nanequal()` is NaN-aware and complex-aware.
-- `get_memory_amount()` must use `pause_logging()` because tensor custom_methods are wrapped.
+- `get_memory_amount()` deliberately AVOIDS `pause_logging()`: it resolves the unwrapped
+  size methods once instead of toggling global logging state per tensor (hot-path perf).
 - `MAX_FLOATING_POINT_TOLERANCE` is shared by validation.
 
 ## RNG and Autocast
@@ -49,6 +51,8 @@ this package mostly stateless and free of high-level TorchLens business logic.
 ## Introspection
 - `get_vars_of_type_from_obj()` is a bounded recursive finder for tensors/modules.
 - `_ATTR_SKIP_SET` avoids expensive tensor pseudo-properties.
+- (`_is_cuda_available`/`_is_cuda_initialized` live in `tensor_utils.py`, not
+  `introspection.py`.)
 - `_is_cuda_available()` caches CUDA availability to avoid repeated driver probes, and treats a
   raising probe as "no CUDA" (warned once) so a broken accelerator cannot abort a CPU capture.
 - `_is_cuda_initialized()` is the uncached, probe-free read of torch's own init flag; use it to
