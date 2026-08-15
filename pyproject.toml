@@ -35,7 +35,16 @@ dependencies = [
     # to the legacy per-device autocast helpers on torch 2.1-2.3. Lowering the floor
     # to 2.1 unblocks frameworks pinned to older torch (e.g. the OpenMMLab stack,
     # which caps mmcv<2.2 -> prebuilt wheels only for torch<=2.1).
-    "torch>=2.1",
+    #
+    # The floor is PYTHON-CONDITIONED because a bare torch>=2.1 is UNSATISFIABLE
+    # on newer interpreters (grind r3, R85/SF-16, measured): the first torch with
+    # cp312 wheels is 2.2.0 and the first with cp313 wheels is 2.6.0, so on
+    # py3.12/3.13 the resolver either fails or falls back to a source build that
+    # cannot succeed. The support floor is unchanged (2.1 wherever 2.1 exists);
+    # these markers only state where each interpreter's real floor sits.
+    "torch>=2.1; python_version < '3.12'",
+    "torch>=2.2; python_version == '3.12'",
+    "torch>=2.6; python_version >= '3.13'",
     "safetensors>=0.4",
     "tqdm",
     "graphviz",
