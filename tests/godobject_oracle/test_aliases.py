@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._errors import RecordBindingError
 from torchlens._trace_state import TraceState
 from torchlens.intervention.errors import DirectActivationWriteWarning
 
@@ -337,7 +338,11 @@ def test_direct_write_warning_and_dirty_transition() -> None:
 
 @pytest.mark.smoke
 def test_source_trace_weakref_lifetime() -> None:
-    """Row 9: op->trace is weak; a collected Trace is not resurrected."""
+    """Row 9: op->trace is weak; a collected Trace is not resurrected.
+
+    The read after collection refuses typed (r5 b7-opus R52-B: never a bare
+    ``None`` behind the ``-> Trace`` signature) rather than returning ``None``.
+    """
 
     trace = _capture_cnn()
     op = next(iter(trace.ops.values()))
@@ -347,7 +352,9 @@ def test_source_trace_weakref_lifetime() -> None:
     del trace
     gc.collect()
     assert trace_ref() is None
-    assert op.source_trace is None
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = op.source_trace
+    assert exc_info.value.fields["code"] == "trace_reference_collected"
 
 
 @pytest.mark.smoke

@@ -18,6 +18,7 @@ import pytest
 
 import torchlens as tl
 from torchlens._deprecations import TorchLensDeprecationWarning
+from torchlens._errors import InvalidArgumentError
 from torchlens.postprocess import (
     _POSTPROCESS_ASSERT_ENV,
     _READ_AUDIT_ENV,
@@ -88,11 +89,16 @@ def test_module_containment_engine_kwarg_is_deleted():
     ],
 )
 def test_postprocess_knob_refuses_unrecognized_values(monkeypatch, env_name, parser, junk):
-    """A typo can no longer silently disarm or reroute an audit knob (R47-3)."""
+    """A typo can no longer silently disarm or reroute an audit knob (R47-3).
+
+    The refusal is the typed ``InvalidArgumentError`` door
+    (``postprocess_audit_env_invalid``), not a bare ``RuntimeError``.
+    """
 
     monkeypatch.setenv(env_name, junk)
-    with pytest.raises(RuntimeError, match=env_name):
+    with pytest.raises(InvalidArgumentError, match=env_name) as exc_info:
         parser()
+    assert exc_info.value.fields["code"] == "postprocess_audit_env_invalid"
 
 
 def test_postprocess_knob_legal_values_still_parse(monkeypatch):

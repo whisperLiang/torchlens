@@ -73,8 +73,9 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "capture_thread_activity_detected",
                 "capture_thread_count_end",
                 "capture_thread_count_start",
-                "capture_verification_reason",
-                "capture_verified",
+                # capture_verified / capture_verification_reason left this
+                # ledger in fixwave-5 (2020c7c2): the negative verification
+                # verdict now PERSISTS across save/load (FieldPolicy.KEEP).
                 "rescue_rerun",
                 "completeness_decompositions",
                 "completeness_diagnostics",

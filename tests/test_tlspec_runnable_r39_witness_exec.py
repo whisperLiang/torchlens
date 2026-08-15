@@ -1220,7 +1220,7 @@ def test_genuine_structseq_trust_gate_accepts_torch_return_type() -> None:
 def test_dense_interval_overcap_overlap_proves_diverged() -> None:
     """corr2_6: two dense over-cap overlapping views prove overlap (not unknown)."""
 
-    from torchlens.utils.tensor_utils import touched_bytes_relation
+    from torchlens.utils.alias_footprint import touched_bytes_relation
 
     base = torch.zeros(200_000)
     assert touched_bytes_relation(base[:150_000], base[100_000:]) == "overlap"
@@ -1229,7 +1229,7 @@ def test_dense_interval_overcap_overlap_proves_diverged() -> None:
 def test_dense_interval_permuted_overlap_proves_overlap() -> None:
     """corr2_6: permuted (transposed) dense over-cap overlapping views prove overlap."""
 
-    from torchlens.utils.tensor_utils import touched_bytes_relation
+    from torchlens.utils.alias_footprint import touched_bytes_relation
 
     base = torch.zeros(400, 400)
     left = base.t()  # permuted dense, 160000 elements > cap
@@ -1240,7 +1240,7 @@ def test_dense_interval_permuted_overlap_proves_overlap() -> None:
 def test_dense_interval_adjacent_proves_disjoint() -> None:
     """corr2_6 control: adjacent dense over-cap views are disjoint."""
 
-    from torchlens.utils.tensor_utils import touched_bytes_relation
+    from torchlens.utils.alias_footprint import touched_bytes_relation
 
     base = torch.zeros(200_000)
     assert touched_bytes_relation(base[:100_000], base[100_000:]) == "disjoint"
@@ -1249,7 +1249,7 @@ def test_dense_interval_adjacent_proves_disjoint() -> None:
 def test_sparse_overcap_stays_unknown() -> None:
     """corr2_6 control: a genuinely sparse over-cap geometry stays ``unknown``."""
 
-    from torchlens.utils.tensor_utils import touched_bytes_relation
+    from torchlens.utils.alias_footprint import touched_bytes_relation
 
     base = torch.zeros(400_000)
     left = base[::2][:100_000]  # stride-2, over cap, not dense
@@ -1272,7 +1272,7 @@ def test_dense_interval_proof_independent_byte_oracle_fuzz() -> None:
     import itertools
     import random as _random
 
-    from torchlens.utils.tensor_utils import (
+    from torchlens.utils.alias_footprint import (
         _footprint_is_dense_interval,
         footprint_touched_element_addresses,
         tensor_byte_footprint,

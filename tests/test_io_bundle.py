@@ -15,7 +15,7 @@ import safetensors  # noqa: F401
 import torch
 from torch import nn
 
-from torchlens import Trace, load, save, trace as trace_fn
+from torchlens import Trace, func, load, save, trace as trace_fn
 from torchlens._io import (
     MIN_TLSPEC_VERSION,
     TLSPEC_VERSION,
@@ -303,6 +303,37 @@ def test_manifest_provenance_roundtrip_and_hash_determinism(tmp_path: Path) -> N
     assert first.provenance.model_structure_hash == second.provenance.model_structure_hash
     assert first.provenance.rng_state_digests == second.provenance.rng_state_digests
     assert len(json.dumps(first.to_dict()["provenance"])) < 16_384
+
+
+def test_manifest_provenance_sentinel_round_trips_and_tamper_refuses(tmp_path: Path) -> None:
+    """Selective saves record the could-not-compute sentinel; tampering still refuses.
+
+    A selective ``save=`` capture discards input payloads before save time, so
+    the writer records ``unavailable:<ExceptionName>`` for ``input_hash`` by
+    design (could-not-compute stays distinguishable from does-not-apply). Load
+    must accept exactly that closed grammar -- and keep refusing any digest
+    value that is neither a SHA-256 hex digest nor the sentinel.
+    """
+
+    torch.manual_seed(45)
+    model = _ActivationPostfuncModel().eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    captured = trace_fn(model, inputs, save=func("relu"))
+    bundle_path = tmp_path / "selective.tlspec"
+    save(captured, bundle_path)
+
+    manifest = _read_manifest(bundle_path)
+    recorded = manifest["provenance"]["input_hash"]
+    assert recorded.startswith("unavailable:")
+    assert recorded.partition(":")[2].isidentifier()
+    restored = load(bundle_path)
+    assert restored.num_ops == captured.num_ops
+
+    for forged in ("deadbeef", "unavailable:", "unavailable:not an identifier", "x" * 64):
+        manifest["provenance"]["input_hash"] = forged
+        _write_manifest(bundle_path, manifest)
+        with pytest.raises(TorchLensIOError, match="input_hash"):
+            load(bundle_path)
 
 
 def test_manifest_without_optional_provenance_still_loads(tmp_path: Path) -> None:
@@ -706,7 +737,7 @@ def test_bundle_load_raises_on_corrupt_manifest(tmp_path: Path) -> None:
     bundle_path, _ = _save_bundle(tmp_path)
     (bundle_path / "manifest.json").write_text("{not valid json", encoding="utf-8")
 
-    with pytest.raises(TorchLensIOError, match="Failed to read manifest"):
+    with pytest.raises(TorchLensIOError, match="does not parse as JSON"):
         load(bundle_path)
 
 

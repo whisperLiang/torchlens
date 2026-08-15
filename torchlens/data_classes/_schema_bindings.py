@@ -311,6 +311,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_implicit_backward_pass_open": StorageBinding(StorageKind.RUNTIME),
         "_warned_implicit_backward_pass": StorageBinding(StorageKind.RUNTIME),
         "_tl_backward_triggers_disarmed": StorageBinding(StorageKind.RUNTIME),
+        "_tl_cleaned_up": StorageBinding(StorageKind.RUNTIME),
         "_grad_fn_param_refs_by_object_id": StorageBinding(StorageKind.RUNTIME),
         "_param_log_by_pid": StorageBinding(StorageKind.RUNTIME),
         "_session_param_inventory": StorageBinding(StorageKind.RUNTIME),

@@ -1510,6 +1510,11 @@ class Trace(
         "_implicit_backward_pass_open": FieldPolicy.DROP,
         "_warned_implicit_backward_pass": FieldPolicy.DROP,
         "_tl_backward_triggers_disarmed": FieldPolicy.DROP,
+        # Idempotent-cleanup sentinel (b6-opus R25): stamped by cleanup() so a
+        # second cleanup() early-returns and every reader of a husked trace
+        # funnels into the one typed TraceCleanedUpError. Session-time by
+        # construction -- a load rebinds a live trace, never a husk.
+        "_tl_cleaned_up": FieldPolicy.DROP,
         "capture_start_time": FieldPolicy.KEEP,
         "capture_end_time": FieldPolicy.KEEP,
         "_phase_timings": FieldPolicy.KEEP,

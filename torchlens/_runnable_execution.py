@@ -112,6 +112,7 @@ from .runnable import (
     mark_trace_path_status,
 )
 from .utils._torch_compat import tensor_has_named_dims, tensor_version_or_none
+from .utils.alias_footprint import touched_bytes_relation
 from .utils.rng import (
     aten_qualname_is_seeded_rng,
     deterministic_fill_governs,
@@ -123,7 +124,6 @@ from .utils.rng import (
     snapshot_host_rng,
     uninit_new_call_is_size_form,
 )
-from .utils.tensor_utils import touched_bytes_relation
 
 _RUN_FORK_COUNTER = count(1)
 

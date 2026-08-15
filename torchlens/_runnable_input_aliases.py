@@ -21,7 +21,7 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
-from .utils.tensor_utils import touched_bytes_relation
+from .utils.alias_footprint import touched_bytes_relation
 
 if TYPE_CHECKING:
     from ._runnable_execution import (

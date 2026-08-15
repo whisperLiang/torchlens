@@ -56,7 +56,10 @@ def test_component_sizes_respect_the_design_bound() -> None:
     for component, size in sizes.items():
         if component == "graph":
             continue
-        assert size <= 60, f"component {component} holds {size} fields (> 60)"
+        # 61: fixwave-5 added the _tl_cleaned_up idempotent-cleanup sentinel
+        # (b6-opus R25) to the session component; the ~60 design pressure
+        # stands -- the next session field should evict or consolidate one.
+        assert size <= 61, f"component {component} holds {size} fields (> 61)"
 
 
 @pytest.mark.smoke

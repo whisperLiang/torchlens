@@ -725,6 +725,8 @@ class _LedgerResolvingTable(dict):
             raise
 
     def get(self, key: Any, default: Any = None) -> Any:
+        """Return the value for ``key`` (wrapper-resolving), else ``default``."""
+
         try:
             return self[key]
         except KeyError:
@@ -764,8 +766,12 @@ def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> 
         view_cache: dict[int, Any] = {}
 
         def _make_shim(orig: Callable[[], Any], cache: dict[int, Any]) -> Callable[[], Any]:
+            """Bind one accessor's original and view cache into its shim closure."""
+
             @functools.wraps(orig)
             def accessor_shim() -> Any:
+                """Return the accessor's table wrapped in a ledger-resolving view."""
+
                 table = orig()
                 view = cache.get(id(table))
                 if view is None:

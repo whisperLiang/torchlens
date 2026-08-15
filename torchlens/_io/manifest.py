@@ -302,11 +302,15 @@ class Provenance:
     dtype_policy:
         Recorded default-dtype and autocast facts; unavailable facts remain ``None``.
     rng_state_digests:
-        Compact SHA-256 digests for capture-time RNG engines actually recorded.
+        Compact SHA-256 digests for capture-time RNG engines actually recorded;
+        a failed digest records an ``unavailable:<ExceptionName>`` sentinel.
     input_hash:
-        Content digest of materialized captured input tensors, when available.
+        Content digest of materialized captured input tensors, when available;
+        a failed digest (e.g. payloads discarded by a selective save) records
+        an ``unavailable:<ExceptionName>`` sentinel.
     model_structure_hash:
-        Address-free structural trace digest, when collection succeeds.
+        Address-free structural trace digest, when collection succeeds;
+        a failed digest records an ``unavailable:<ExceptionName>`` sentinel.
     git_commit_hash:
         Commit of the user's current working directory, when it is a Git repository.
     """
@@ -351,11 +355,13 @@ class Provenance:
             raise TorchLensIOError("Manifest provenance dtype_policy must be an object.")
         rng_state_digests = data.get("rng_state_digests")
         if not isinstance(rng_state_digests, dict) or any(
-            not isinstance(engine, str) or not _is_sha256(digest)
+            not isinstance(engine, str)
+            or not (_is_sha256(digest) or _is_unavailable_sentinel(digest))
             for engine, digest in rng_state_digests.items()
         ):
             raise TorchLensIOError(
-                "Manifest provenance rng_state_digests must map names to SHA-256 digests."
+                "Manifest provenance rng_state_digests must map names to SHA-256 digests "
+                "or 'unavailable:<ExceptionName>' sentinels."
             )
         input_hash = _optional_sha256(data, "input_hash")
         model_structure_hash = _optional_sha256(data, "model_structure_hash")
@@ -778,8 +784,35 @@ def _is_sha256(value: Any) -> bool:
     )
 
 
+def _is_unavailable_sentinel(value: Any) -> bool:
+    """Return whether a value is a sanctioned could-not-compute digest sentinel.
+
+    The save side records ``unavailable:<ExceptionName>`` when digest machinery
+    fails (e.g. selective saves discard input payloads before save time), so a
+    consumer can distinguish could-not-compute from does-not-apply. The grammar
+    is closed: a single ``unavailable:`` prefix followed by one Python
+    identifier (the exception class name), bounded in length, so arbitrary
+    strings cannot ride the sentinel slot.
+
+    Parameters
+    ----------
+    value:
+        Candidate sentinel.
+
+    Returns
+    -------
+    bool
+        Whether ``value`` matches the closed sentinel grammar.
+    """
+
+    if not isinstance(value, str) or len(value) > 256:
+        return False
+    prefix, _, exception_name = value.partition(":")
+    return prefix == "unavailable" and exception_name.isidentifier()
+
+
 def _optional_sha256(data: dict[str, Any], field_name: str) -> str | None:
-    """Validate an optional SHA-256 provenance field.
+    """Validate an optional SHA-256 provenance digest field.
 
     Parameters
     ----------
@@ -791,17 +824,21 @@ def _optional_sha256(data: dict[str, Any], field_name: str) -> str | None:
     Returns
     -------
     str | None
-        Validated digest or ``None``.
+        Validated digest or could-not-compute sentinel, or ``None``.
 
     Raises
     ------
     TorchLensIOError
-        If the present value is not a SHA-256 digest.
+        If the present value is neither a SHA-256 digest nor a sanctioned
+        ``unavailable:<ExceptionName>`` sentinel.
     """
 
     value = data.get(field_name)
-    if value is not None and not _is_sha256(value):
-        raise TorchLensIOError(f"Manifest provenance {field_name} must be a SHA-256 digest.")
+    if value is not None and not _is_sha256(value) and not _is_unavailable_sentinel(value):
+        raise TorchLensIOError(
+            f"Manifest provenance {field_name} must be a SHA-256 digest "
+            "or an 'unavailable:<ExceptionName>' sentinel."
+        )
     return value
 
 
