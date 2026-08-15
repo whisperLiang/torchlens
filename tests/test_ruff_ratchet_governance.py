@@ -59,10 +59,24 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # parameter-documentation debt, torchlens/ only by design (tests/ has no
     # param-doc policy).
     "D417": 143,
+    # The complexity family (r4 b5-fable R44r2-1 HIGH + b5-opus R44-1/2
+    # convergent): completely ungated through fixwave-3 — C901 grew 408->441
+    # and PLR0912 227->253 with zero tripwire while the round-1 named
+    # hotspots were properly fixed. Ceilings frozen at the 2026-08-15 tip
+    # measurement (pinned ruff 0.15.4, isolated defaults, torchlens/ only —
+    # interior quality debt, not a test-style policy). SHRINK-ONLY like every
+    # row above; splitting a hot-path god-function should lower the ceiling
+    # in the same change.
+    "C901": 441,
+    "PLR0911": 189,
+    "PLR0912": 253,
+    "PLR0913": 417,
+    "PLR0915": 146,
 }
 
-#: Codes measured over torchlens/ only (see the D417 note above).
-_PACKAGE_ONLY_CODES = frozenset({"D417"})
+#: Codes measured over torchlens/ only (see the D417 and complexity notes
+#: above).
+_PACKAGE_ONLY_CODES = frozenset({"D417", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915"})
 
 _CI_SCOPE = ("torchlens", "tests", "scripts", "tools", "benchmarks", "examples", "notebooks")
 
