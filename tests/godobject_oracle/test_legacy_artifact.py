@@ -33,21 +33,46 @@ _LOADED_SURFACE_GOLDEN = _GOLDEN_DIR / "legacy_baseline_cnn_loaded.json"
 def test_legacy_analysis_artifact_loads_byte_identically() -> None:
     """The frozen analysis artifact loads with an identical public surface."""
 
+    from _oracle_env import (
+        flag_armed,
+        guard_wrap_state_for_golden_update,
+        require_env_golden,
+        require_update_reason,
+        resolve_env_golden,
+        write_provenance,
+    )
+
+    regen = flag_armed(os.environ, _UPDATE_ENV)
+    if regen:
+        # The loaded-surface snapshot is generated in-process: refuse to
+        # generate golden bytes on a torch already wrapped by earlier tests
+        # (SF-53), and require the WHY before the load runs.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
     assert _ANALYSIS_ARTIFACT.exists(), "frozen legacy artifact missing"
     loaded = tl.load(str(_ANALYSIS_ARTIFACT))
     actual = canonical_dump(snapshot_trace_surface(loaded))
-    from _oracle_env import require_env_golden, resolve_env_golden, write_provenance
 
-    if os.environ.get(_UPDATE_ENV) == "1":
+    if regen:
         golden_path, _ = resolve_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name)
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        write_provenance(golden_path.parent, "tests/godobject_oracle legacy", _UPDATE_ENV)
+        write_provenance(
+            golden_path.parent,
+            "tests/godobject_oracle legacy",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
+        )
         pytest.skip(f"updated legacy loaded-surface golden; re-run without {_UPDATE_ENV} to verify")
     golden_path = require_env_golden(_GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name, _UPDATE_ENV)
     if not golden_path.exists():
         golden_path.write_text(actual + "\n")
-        write_provenance(golden_path.parent, "tests/godobject_oracle legacy", _UPDATE_ENV)
+        write_provenance(
+            golden_path.parent,
+            "tests/godobject_oracle legacy",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
+        )
         pytest.skip(f"recorded first-run loaded-surface golden for this environment: {golden_path}")
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:

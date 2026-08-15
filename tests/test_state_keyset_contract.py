@@ -74,19 +74,44 @@ def _capture_stage_records() -> dict[str, dict[str, list[str]]]:
 def test_state_keysets_match_golden() -> None:
     """state_items key sets are frozen per class and lifecycle stage."""
 
-    actual = json.dumps(_capture_stage_records(), indent=1, sort_keys=True)
-    from _oracle_env import require_env_golden, resolve_env_golden, write_provenance
+    from _oracle_env import (
+        flag_armed,
+        guard_wrap_state_for_golden_update,
+        require_env_golden,
+        require_update_reason,
+        resolve_env_golden,
+        write_provenance,
+    )
 
-    if os.environ.get(_UPDATE_ENV) == "1":
+    regen = flag_armed(os.environ, _UPDATE_ENV)
+    if regen:
+        # Generation is in-process: refuse to generate golden bytes on a
+        # torch already wrapped by earlier tests (SF-53), and require the
+        # WHY before the captures run.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
+    actual = json.dumps(_capture_stage_records(), indent=1, sort_keys=True)
+
+    if regen:
         golden_path, _ = resolve_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name)
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
-        write_provenance(golden_path.parent, "tests/test_state_keyset_contract.py", _UPDATE_ENV)
+        write_provenance(
+            golden_path.parent,
+            "tests/test_state_keyset_contract.py",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
+        )
         pytest.skip(f"updated state-keyset golden; re-run without {_UPDATE_ENV} to verify")
     golden_path = require_env_golden(_GOLDEN_PATH.parent, _GOLDEN_PATH.name, _UPDATE_ENV)
     if not golden_path.exists():
         golden_path.write_text(actual + "\n")
-        write_provenance(golden_path.parent, "tests/test_state_keyset_contract.py", _UPDATE_ENV)
+        write_provenance(
+            golden_path.parent,
+            "tests/test_state_keyset_contract.py",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
+        )
         pytest.skip(f"recorded first-run state-keyset golden for this environment: {golden_path}")
     expected = golden_path.read_text().rstrip("\n")
     if actual != expected:

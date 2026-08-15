@@ -1,4 +1,16 @@
-"""Tests for Phase 10 export surfaces."""
+"""Tests for Phase 10 export surfaces.
+
+Governance adjudication (b10 R78 round-3): the two export goldens under
+``tests/fixtures/exports/`` are ENVIRONMENT-INDEPENDENT semantic contracts
+and deliberately NOT routed through the ``tests/_oracle_env.py``
+env-fingerprint resolver. The payloads are normalized structural JSON
+(viewer schema fields, node ids/labels from torchlens-owned label
+vocabulary, edge lists) with process-global identifiers normalized before
+comparison — no floats, reprs, or emitter bytes. A torch upgrade that
+changed the exported graph structure would be a REAL export-contract change
+this gate must surface. Registered in the environment-independent ledger
+enforced by ``tests/test_golden_governance_lint.py``.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +27,17 @@ from torch import nn
 
 pd = pytest.importorskip("pandas")
 
+from _oracle_env import (  # noqa: E402
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_update_reason,
+    write_provenance,
+)
+
 import torchlens as tl  # noqa: E402
 
 EXPORT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "exports"
+_UPDATE_ENV = "TORCHLENS_REGEN_EXPORT_GOLDENS"
 
 
 def _assert_model_explorer_structure(payload: dict[str, Any]) -> None:
@@ -116,9 +136,11 @@ def _assert_or_regenerate_export_golden(name: str, payload: dict[str, Any]) -> b
     """
 
     fixture_path = EXPORT_FIXTURE_DIR / name
-    if os.environ.get("TORCHLENS_REGEN_EXPORT_GOLDENS") == "1":
+    if flag_armed(os.environ, _UPDATE_ENV):
+        reason = require_update_reason(_UPDATE_ENV)
         fixture_path.parent.mkdir(parents=True, exist_ok=True)
         fixture_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        write_provenance(EXPORT_FIXTURE_DIR, f"tests/test_exports.py ({name})", _UPDATE_ENV, reason)
         return True
     if not fixture_path.exists():
         pytest.fail(
@@ -252,6 +274,10 @@ def export_log() -> Any:
         Logged model.
     """
 
+    if flag_armed(os.environ, _UPDATE_ENV):
+        # Golden regeneration derives from this in-process capture: refuse
+        # to generate on a torch earlier tests already wrapped (SF-53).
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
     model = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 2))
     return tl.trace(model, torch.randn(2, 3), capture=tl.options.CaptureOptions())
 

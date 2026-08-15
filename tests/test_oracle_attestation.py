@@ -25,11 +25,16 @@ import _oracle_env
 import pytest
 from _oracle_env import (
     ENFORCE_ENV_VAR,
+    REASON_ENV_VAR,
     RECORD_ENV_VAR,
     env_fingerprint,
+    flag_armed,
     golden_mutation_flags_armed_under_ci,
+    guard_wrap_state_for_golden_update,
     require_env_golden,
+    require_update_reason,
     resolve_env_golden,
+    write_provenance,
 )
 
 _TESTS_DIR = Path(__file__).resolve().parent
@@ -89,6 +94,7 @@ def test_env_markers_match_a_committed_baseline() -> None:
     for goldens_dir in (
         _TESTS_DIR / "surface_oracle" / "goldens",
         _TESTS_DIR / "godobject_oracle" / "goldens",
+        _TESTS_DIR / "golden",
     ):
         marker = goldens_dir / "ENV"
         assert marker.exists(), f"missing ENV marker in {goldens_dir}"
@@ -96,10 +102,29 @@ def test_env_markers_match_a_committed_baseline() -> None:
         assert recorded, f"empty ENV marker in {goldens_dir}"
 
 
+@pytest.mark.smoke
+def test_viz_families_commit_emitter_version_markers() -> None:
+    """Viz byte families record their DOT-emitter versions (b10 R78 round-3).
+
+    The graphviz python package directly emits the DOT bytes these goldens
+    freeze (pydot additionally parses the render-identity structural digest),
+    so the family-scoped fingerprint extension needs committed ``ENV-<pkg>``
+    markers naming the canonical emitter versions.
+    """
+
+    for marker in (
+        _TESTS_DIR / "godobject_oracle" / "goldens" / "ENV-graphviz",
+        _TESTS_DIR / "golden" / "ENV-graphviz",
+        _TESTS_DIR / "golden" / "ENV-pydot",
+    ):
+        assert marker.exists(), f"missing emitter-version marker {marker}"
+        assert marker.read_text().strip(), f"empty emitter-version marker {marker}"
+
+
 def _fake_env(monkeypatch: pytest.MonkeyPatch, fingerprint: str, **env: str | None) -> None:
     """Pin the fingerprint and the relevant environment variables."""
 
-    monkeypatch.setattr(_oracle_env, "env_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(_oracle_env, "env_fingerprint", lambda extra_packages=(): fingerprint)
     for name in ("CI", RECORD_ENV_VAR, ENFORCE_ENV_VAR):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -262,3 +287,130 @@ def test_golden_mutation_flags_hard_error_under_ci() -> None:
     ]
     assert golden_mutation_flags_armed_under_ci({"TORCHLENS_UPDATE_SURFACE_ORACLE": "1"}) == []
     assert golden_mutation_flags_armed_under_ci({"CI": "true"}) == []
+
+
+@pytest.mark.smoke
+def test_flag_armed_requires_exact_one() -> None:
+    """Golden flags arm on the exact value "1" ONLY (b10 R78 round-3).
+
+    The pre-fix selector-matrix read (``bool(environ.get(...))``) armed
+    regeneration on NAME=0 — the value a user sets to DISARM.
+    """
+
+    name = "TORCHLENS_UPDATE_X"
+    assert flag_armed({name: "1"}, name) is True
+    for disarmed in ("0", "", "true", "yes", "2", " 1"):
+        assert flag_armed({name: disarmed}, name) is False, disarmed
+    assert flag_armed({}, name) is False
+
+
+@pytest.mark.smoke
+def test_update_reason_is_required_and_returned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Update runs refuse to proceed without a non-empty golden reason."""
+
+    monkeypatch.delenv(REASON_ENV_VAR, raising=False)
+    with pytest.raises(pytest.fail.Exception, match="requires TORCHLENS_GOLDEN_REASON"):
+        require_update_reason("TORCHLENS_UPDATE_X")
+    monkeypatch.setenv(REASON_ENV_VAR, "   ")
+    with pytest.raises(pytest.fail.Exception, match="requires TORCHLENS_GOLDEN_REASON"):
+        require_update_reason("TORCHLENS_UPDATE_X")
+    monkeypatch.setenv(REASON_ENV_VAR, "r3 fix: enumerated behavior change")
+    assert require_update_reason("TORCHLENS_UPDATE_X") == "r3 fix: enumerated behavior change"
+
+
+@pytest.mark.smoke
+def test_write_provenance_appends_full_history(tmp_path: Path) -> None:
+    """PROVENANCE keeps every record: last-writer-wins erased sibling families."""
+
+    write_provenance(tmp_path, "family_a", "TORCHLENS_UPDATE_A", "first rebaseline")
+    write_provenance(tmp_path, "family_b", "TORCHLENS_UPDATE_B", "second family, same dir")
+    content = (tmp_path / "PROVENANCE").read_text()
+    assert "generator: family_a" in content
+    assert "generator: family_b" in content
+    assert "flag: TORCHLENS_UPDATE_A=1" in content
+    assert "flag: TORCHLENS_UPDATE_B=1" in content
+    assert "reason: first rebaseline" in content
+    assert "reason: second family, same dir" in content
+    assert content.count("---\n") == 1, "records are separated, none overwritten"
+
+
+@pytest.mark.smoke
+def test_wrap_state_guard_refuses_wrapped_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In-process golden generation refuses to start on wrapped torch (SF-53)."""
+
+    import torchlens._state as tl_state
+
+    monkeypatch.setattr(tl_state, "_is_decorated", True)
+    flag = "TORCHLENS_UPDATE_WRAP_GUARD_PROBE_RED"
+    _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
+    with pytest.raises(pytest.fail.Exception, match="UNWRAPPED torch"):
+        guard_wrap_state_for_golden_update(flag)
+    assert flag not in _oracle_env._WRAP_GUARD_CLEARED, "refusal must not memoize"
+    _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
+
+
+@pytest.mark.smoke
+def test_wrap_state_guard_passes_clean_then_memoizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean start passes once per family; later intra-family wraps are inherent."""
+
+    import torchlens._state as tl_state
+
+    flag = "TORCHLENS_UPDATE_WRAP_GUARD_PROBE_GREEN"
+    _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
+    monkeypatch.setattr(tl_state, "_is_decorated", False)
+    guard_wrap_state_for_golden_update(flag)
+    # The family's OWN captures wrap torch mid-generation; that is inherent
+    # to in-process families and deterministic in a fresh single-family run.
+    monkeypatch.setattr(tl_state, "_is_decorated", True)
+    guard_wrap_state_for_golden_update(flag)
+    _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
+
+
+@pytest.mark.smoke
+def test_extended_fingerprint_appends_emitter_versions() -> None:
+    """The family-scoped fingerprint extension stays base-compatible."""
+
+    base = env_fingerprint()
+    extended = env_fingerprint(extra_packages=("graphviz",))
+    assert extended.startswith(base + "-graphviz")
+    assert env_fingerprint(extra_packages=()) == base
+    absent = env_fingerprint(extra_packages=("definitely-not-a-real-dist",))
+    assert absent == f"{base}-definitely-not-a-real-distabsent"
+
+
+@pytest.mark.smoke
+def test_extras_markers_gate_canonical_resolution(tmp_path: Path) -> None:
+    """Emitter markers must MATCH for canonical viz-golden enforcement.
+
+    A missing or mismatched ``ENV-<pkg>`` marker moves the family off-
+    canonical (fail-closed downstream) instead of silently comparing bytes
+    emitted by a different generator version.
+    """
+
+    package = "definitely-not-a-real-dist"  # _package_version -> "absent"
+    goldens = tmp_path / "goldens"
+    goldens.mkdir()
+    (goldens / "ENV").write_text(env_fingerprint() + "\n")
+
+    # Missing extras marker: off-canonical even though the base ENV matches.
+    path, off_canonical = resolve_env_golden(goldens, "case.gv", (package,))
+    assert off_canonical is True
+    assert path.parent.name == f"env-{env_fingerprint((package,))}"
+
+    # Mismatched extras marker: off-canonical.
+    (goldens / f"ENV-{package}").write_text("9.9.9\n")
+    _, off_canonical = resolve_env_golden(goldens, "case.gv", (package,))
+    assert off_canonical is True
+
+    # Matching extras marker: canonical path, plain enforcement.
+    (goldens / f"ENV-{package}").write_text("absent\n")
+    path, off_canonical = resolve_env_golden(goldens, "case.gv", (package,))
+    assert off_canonical is False
+    assert path == goldens / "case.gv"
+
+    # And the base ENV mismatch still dominates.
+    (goldens / "ENV").write_text("py0.0-torch0.0.0\n")
+    _, off_canonical = resolve_env_golden(goldens, "case.gv", (package,))
+    assert off_canonical is True

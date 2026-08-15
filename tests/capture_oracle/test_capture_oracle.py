@@ -126,11 +126,22 @@ def _read_or_update_golden(case: CaseSpec, actual: dict[str, Any]) -> dict[str, 
         Decoded golden payload.
     """
 
+    from _oracle_env import flag_armed, require_update_reason, write_provenance
+
     path = _GOLDEN_DIR / f"{case.name}.json"
-    if os.environ.get(_UPDATE_ENV) == "1":
+    if flag_armed(os.environ, _UPDATE_ENV):
+        # Generation runs in an isolated subprocess (no wrap-state guard
+        # needed); the WHY is still required and recorded (b10 R78 round-3).
+        reason = require_update_reason(_UPDATE_ENV)
         payload = _golden_payload(actual)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_provenance(
+            _GOLDEN_DIR,
+            f"tests/capture_oracle ({case.name})",
+            _UPDATE_ENV,
+            reason,
+        )
         pytest.skip(f"updated golden {path.name}; re-run without {_UPDATE_ENV} to verify")
     return json.loads(path.read_text(encoding="utf-8"))
 
