@@ -286,6 +286,15 @@ class _TlSpecWriter:
             # machine in ``torchlens/_io/bundle.py`` (``_make_backup_path`` /
             # ``_restore_backup``).
             if target_path.exists():
+                # Re-check overwrite at swap time, not just at save start
+                # (R59 TOCTOU): under ``overwrite=False`` a concurrent writer
+                # could have created ``target_path`` AFTER the start-of-save
+                # check passed, and the unconditional swap below would then
+                # back it aside and destroy it (the backup is rmtree'd on
+                # success). Mirror ``torchlens/_io/bundle.py`` and refuse
+                # instead of live-destroying a concurrently-published artifact.
+                if not overwrite:
+                    raise FileExistsError(f"Bundle path already exists: {target_path}")
                 backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
                 os.replace(target_path, backup_path)
             os.replace(tmp_path, target_path)

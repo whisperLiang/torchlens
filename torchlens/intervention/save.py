@@ -275,6 +275,13 @@ def save_intervention(
         _write_text_file(tmp_path / _README_FILE, _readme_text(spec_json, tensor_entries))
         _fsync_directory(tmp_path)
         if target_path.exists():
+            # Re-check overwrite at swap time, not just at save start (R59
+            # TOCTOU): a concurrent writer could have created ``target_path``
+            # after the start-of-save check, and the unconditional swap below
+            # would back it aside and then destroy it (the backup is rmtree'd
+            # on success). Refuse instead of live-destroying it.
+            if not overwrite:
+                raise FileExistsError(f"Intervention spec path already exists: {target_path}")
             backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
             os.rename(target_path, backup_path)
         os.rename(tmp_path, target_path)
