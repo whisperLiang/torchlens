@@ -641,9 +641,15 @@ class Manifest:
             with manifest_path.open("r", encoding="utf-8") as handle:
                 raw_data = _json.load_bounded(handle)
         except (OSError, json.JSONDecodeError) as exc:
-            raise TorchLensIOError(f"Failed to read manifest at {manifest_path}.") from exc
+            # Stable codes on the tl.load front door (R65): a missing / unreadable /
+            # over-limit manifest and a non-object manifest root are distinct causes.
+            raise TorchLensIOError(
+                f"Failed to read manifest at {manifest_path}.", code="manifest_unreadable"
+            ) from exc
         if not isinstance(raw_data, dict):
-            raise TorchLensIOError("Manifest root must be a JSON object.")
+            raise TorchLensIOError(
+                "Manifest root must be a JSON object.", code="manifest_not_json_object"
+            )
         return cls.from_dict(raw_data)
 
     def write(self, path: str | Path) -> None:

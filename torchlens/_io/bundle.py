@@ -1186,13 +1186,18 @@ def load(
             trust_custom_callables=trust_custom_callables,
             allowed_custom_callable_modules=allowed_custom_callable_modules,
         )
-    _reject_symlink_path(bundle_path, context="bundle path")
+    # Stable ``fields["code"]`` on the six distinct tl.load front-door causes so a
+    # caller can branch on the cause instead of parsing one content-free string
+    # (R65): a symlinked load path, an unreadable manifest, a non-object manifest
+    # root, a metadata-integrity refusal (tagged at the unpickle boundary below), a
+    # below-floor version, and a generic bundle-load failure.
+    _reject_symlink_path(bundle_path, context="bundle path", code="load_path_symlink_rejected")
     manifest_path = bundle_path / "manifest.json"
     metadata_path = bundle_path / "metadata.pkl"
     blobs_path = bundle_path / "blobs"
-    _reject_symlink_path(manifest_path, context="manifest")
-    _reject_symlink_path(metadata_path, context="metadata")
-    _reject_symlink_path(blobs_path, context="blobs directory")
+    _reject_symlink_path(manifest_path, context="manifest", code="load_path_symlink_rejected")
+    _reject_symlink_path(metadata_path, context="metadata", code="load_path_symlink_rejected")
+    _reject_symlink_path(blobs_path, context="blobs directory", code="load_path_symlink_rejected")
 
     try:
         manifest = Manifest.read(manifest_path)
@@ -1304,7 +1309,11 @@ def _load_trace_payload(
             code="bundle_metadata_integrity_refused",
         ) from exc
     except (OSError, AttributeError, ImportError, TypeError, ValueError) as exc:
-        raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc
+        # Generic bundle-load failure (torch/codec drift, missing dep): the sixth
+        # tl.load front-door cause gets its own stable code (R65).
+        raise TorchLensIOError(
+            f"Failed to load bundle at {bundle_path}.", code="bundle_load_failed"
+        ) from exc
 
     try:
         trace = rehydrate_trace(
