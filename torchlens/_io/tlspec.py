@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -49,10 +50,8 @@ def _restrict_mode(path: Path, mode: int) -> None:
 
     if os.name != "posix":
         return
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(mode)
-    except OSError:
-        pass
 
 
 # NOTE: ``TLSPEC_VERSION`` is imported (not redefined) from ``torchlens._io``
@@ -341,10 +340,8 @@ class _TlSpecWriter:
                 # The swap did not install the new bundle; put the old one back
                 # exactly where it was. If this restore itself fails, the old
                 # bundle survives under ``backup_path`` as a recovery artifact.
-                try:
+                with contextlib.suppress(OSError):
                     os.replace(backup_path, target_path)
-                except OSError:
-                    pass
             raise
 
     @classmethod

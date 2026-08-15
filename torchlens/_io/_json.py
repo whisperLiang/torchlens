@@ -162,9 +162,8 @@ def _prescan_depth(text: str, *, max_depth: int, max_nodes: int = _MAX_JSON_NODE
                     nodes += 1
                     if nodes > max_nodes:
                         raise _too_many_nodes()
-                elif char in _CLOSE_BRACKETS:
-                    if depth > 0:
-                        depth -= 1
+                elif char in _CLOSE_BRACKETS and depth > 0:
+                    depth -= 1
         return
 
     # ``escaped_at`` is the absolute offset of the character a backslash escapes.
@@ -201,9 +200,8 @@ def _prescan_depth(text: str, *, max_depth: int, max_nodes: int = _MAX_JSON_NODE
             nodes += 1
             if nodes > max_nodes:
                 raise _too_many_nodes()
-        elif char in _CLOSE_BRACKETS:
-            if depth > 0:
-                depth -= 1
+        elif char in _CLOSE_BRACKETS and depth > 0:
+            depth -= 1
 
 
 def loads_bounded(
@@ -304,6 +302,8 @@ def read_bounded(
         Maximum permitted bracket nesting depth.
     max_bytes:
         Maximum permitted payload size.
+    max_nodes:
+        Maximum permitted container-node count.
 
     Returns
     -------

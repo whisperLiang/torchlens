@@ -86,7 +86,7 @@ def test_retained_op_does_not_pin_all_payloads() -> None:
     assert op.out is None
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_live_fork_keeps_shared_base_payloads() -> None:
     """A live fork co-owns the sealed base: parent death must not evict."""
 
@@ -108,7 +108,7 @@ def test_live_fork_keeps_shared_base_payloads() -> None:
     assert op.out is None
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_fork_chain_owners_all_counted() -> None:
     """Every core in a fork chain is an owner; the last death evicts."""
 
@@ -153,7 +153,7 @@ def test_loaded_trace_fork_death_does_not_evict_parent_payloads(tmp_path) -> Non
     assert isinstance(loaded["relu_1_2"].ops[0].out, torch.Tensor)
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_no_handles_no_leak() -> None:
     """Guard: with no retained handles at all, everything collects."""
 

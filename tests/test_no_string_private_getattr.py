@@ -81,7 +81,10 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # live-refresh run report reads the optional `_runnable` seam in
     # _runnable_transaction.py; absent on non-runnable traces, so the None
     # default is the correct "no runnable seam" reading.
-    "<root>": 15,
+    # 15 -> 16 (2026-08-15 fw3settle reconcile, fe2444e3 fix/runnable-r4): the
+    # fast-provider host-RNG declaration reads the optional `_runnable` seam in
+    # _fast_run.py, the same f2bc65a6 idiom already ledgered here and at _io.
+    "<root>": 16,
     # 24 -> 25 (2026-08-15 r3settle reconcile): bundle.py reads the optional
     # `_runnable` seam (absent on non-runnable traces; None default correct),
     # the same f2bc65a6 idiom already ledgered at <root>.

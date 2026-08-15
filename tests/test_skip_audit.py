@@ -706,6 +706,26 @@ def _tracked_repo_files() -> frozenset[str]:
 
 
 @cache
+def _repo_ignored(tail: str) -> bool:
+    """Return whether ``tail`` is gitignored (never present in a fresh clone).
+
+    A gitignored artifact existing locally must not rescue its gate from the
+    repo-unsatisfiable classification: the audit's verdict otherwise flips
+    between the owner's boxes (private ``.research/`` notes present) and every
+    fresh clone/CI runner (fw3settle: two ledgered csv-export rows read
+    "stale" only on checkouts that happened to carry the private schema doc).
+    """
+
+    completed = subprocess.run(
+        ["git", "check-ignore", "-q", "--", tail],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+@cache
 def _repo_config_corpus() -> str:
     """Concatenate the repo's tracked config/tooling text for env-var searches.
 
@@ -767,7 +787,9 @@ def collect_repo_unsatisfiable_skipifs(root: Path, repo_root: Path) -> dict[str,
             kind, name = gate
             if kind == "artifact" and name in path_constants:
                 tail = path_constants[name]
-                if tail not in _tracked_repo_files() and not (repo_root / tail).exists():
+                if tail not in _tracked_repo_files() and (
+                    _repo_ignored(tail) or not (repo_root / tail).exists()
+                ):
                     findings[key] = f"line {lineno}: gated on untracked, absent artifact {tail!r}"
             elif kind == "env" and name in env_constants:
                 var = env_constants[name]

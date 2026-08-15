@@ -277,6 +277,33 @@ class TinyMultiplyByZero(nn.Module):
         return x * torch.zeros_like(x)
 
 
+class TinyIntMultiplyByZero(nn.Module):
+    """Tiny integer multiply-by-zero for the structural annihilator proof.
+
+    The float :class:`TinyMultiplyByZero` now validates honestly through the
+    signed-zero exact tier (the zero output's sign bits carry the perturbed
+    parent's signs), so the ``multiplicative_zero_annihilator`` category needs
+    a sign-free dtype to stay covered by the zoo.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Multiply an integer cast by a zero tensor.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Integer zero-valued output.
+        """
+
+        cast = x.to(torch.int64)
+        return cast * torch.zeros_like(cast)
+
+
 def _trace_output(trace: Any) -> torch.Tensor:
     """Return the first tensor output saved on a trace.
 
@@ -531,6 +558,15 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         capture=full_capture,
     )
 
+    torch.manual_seed(22)
+    int_multiply_zero = TinyIntMultiplyByZero().eval()
+    x_int_multiply_zero = torch.randn(2, 3)
+    int_multiply_zero_trace = tl.trace(
+        int_multiply_zero,
+        x_int_multiply_zero,
+        capture=full_capture,
+    )
+
     return {
         "tiny_feed_forward": _case_summary(
             _seeded_status_for_trace(101, ff_trace, [_trace_output(ff_trace)])
@@ -574,6 +610,13 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
                 111,
                 multiply_zero_trace,
                 [_trace_output(multiply_zero_trace)],
+            )
+        ),
+        "tiny_multiply_zero_int": _case_summary(
+            _seeded_status_for_trace(
+                112,
+                int_multiply_zero_trace,
+                [_trace_output(int_multiply_zero_trace)],
             )
         ),
     }

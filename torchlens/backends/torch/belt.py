@@ -155,14 +155,17 @@ def _probe_rng_bracket() -> Iterator[None]:
     construction (b8-fable R56 latent-reseed hardening).
     """
 
-    cpu_state = torch.random.get_rng_state()
-    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    # Route through the W11-F1-guarded snapshot pair: gating on
+    # ``torch.cuda.is_available()`` alone re-created the visible-but-unusable
+    # CUDA abort on pure-CPU captures (the snapshot never touches CUDA until
+    # the process has actually initialized it, and latches on a failed read).
+    from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
+
+    saved_states = log_current_rng_states(torch_only=True)
     try:
         yield
     finally:
-        torch.random.set_rng_state(cpu_state)
-        if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
+        set_rng_from_saved_states(saved_states)
 
 
 @dataclass(frozen=True)

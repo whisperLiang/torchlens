@@ -45,27 +45,31 @@ def normalize_sdist(path: str, epoch: int) -> None:
         raw_tar = compressed.read()
 
     normalized_tar = io.BytesIO()
-    with tarfile.open(fileobj=io.BytesIO(raw_tar)) as source:
-        with tarfile.open(fileobj=normalized_tar, mode="w", format=tarfile.PAX_FORMAT) as target:
-            for member in source.getmembers():
-                member.uid = 0
-                member.gid = 0
-                member.uname = ""
-                member.gname = ""
-                member.mtime = epoch
-                member.pax_headers = {}
-                payload = source.extractfile(member) if member.isreg() else None
-                target.addfile(member, payload)
+    with (
+        tarfile.open(fileobj=io.BytesIO(raw_tar)) as source,
+        tarfile.open(fileobj=normalized_tar, mode="w", format=tarfile.PAX_FORMAT) as target,
+    ):
+        for member in source.getmembers():
+            member.uid = 0
+            member.gid = 0
+            member.uname = ""
+            member.gname = ""
+            member.mtime = epoch
+            member.pax_headers = {}
+            payload = source.extractfile(member) if member.isreg() else None
+            target.addfile(member, payload)
 
-    with open(path, "wb") as output:
-        # filename="" keeps the original-name field out of the gzip header;
-        # mtime=0 zeroes the header timestamp (the 4 bytes that differed on
-        # every rebuild); a fixed compression level keeps the deflate stream
-        # itself stable.
-        with gzip.GzipFile(
+    # filename="" keeps the original-name field out of the gzip header;
+    # mtime=0 zeroes the header timestamp (the 4 bytes that differed on
+    # every rebuild); a fixed compression level keeps the deflate stream
+    # itself stable.
+    with (
+        open(path, "wb") as output,
+        gzip.GzipFile(
             filename="", mode="wb", fileobj=output, mtime=0, compresslevel=9
-        ) as recompressed:
-            recompressed.write(normalized_tar.getvalue())
+        ) as recompressed,
+    ):
+        recompressed.write(normalized_tar.getvalue())
 
 
 def main(argv: list[str]) -> int:

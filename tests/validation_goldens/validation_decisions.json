@@ -449,12 +449,11 @@
         "reason": "replay_matched"
       },
       {
-        "decision": "exempted",
+        "decision": "validated",
         "func_name": "__mul__",
-        "justification": "non-perturbed multiplication operand at args[1] is all zero",
         "op_label": "mul_1_2:1",
         "phase": "perturbation",
-        "reason": "multiplicative_zero_annihilator"
+        "reason": "perturbation_changed"
       },
       {
         "decision": "validated",
@@ -479,11 +478,94 @@
       }
     ],
     "exempted_reason_counts": {
-      "multiplicative_zero_annihilator": 1,
       "skip_perturbation_entirely:zeros_like": 1
     },
     "failed_node_count": 0,
     "replayed_node_count": 3,
+    "state": "passed",
+    "unverified_node_count": 0,
+    "unverified_reason_counts": {}
+  },
+  "tiny_multiply_zero_int": {
+    "decisions": [
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1",
+        "phase": "ground_truth",
+        "reason": "ground_truth_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "validated",
+        "func_name": "__mul__",
+        "op_label": "mul_1_3:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "exempted",
+        "func_name": "__mul__",
+        "justification": "non-perturbed multiplication operand at args[1] is all zero",
+        "op_label": "mul_1_3:1",
+        "phase": "perturbation",
+        "reason": "multiplicative_zero_annihilator"
+      },
+      {
+        "decision": "validated",
+        "func_name": "__mul__",
+        "op_label": "mul_1_3:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "validated",
+        "func_name": "to",
+        "op_label": "to_1_1:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "to",
+        "op_label": "to_1_1:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "validated",
+        "func_name": "zeros_like",
+        "op_label": "zeroslike_1_2:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "exempted",
+        "func_name": "zeros_like",
+        "op_label": "zeroslike_1_2:1",
+        "phase": "perturbation",
+        "reason": "skip_perturbation_entirely:zeros_like"
+      }
+    ],
+    "exempted_reason_counts": {
+      "multiplicative_zero_annihilator": 1,
+      "skip_perturbation_entirely:zeros_like": 1
+    },
+    "failed_node_count": 0,
+    "replayed_node_count": 4,
     "state": "passed",
     "unverified_node_count": 0,
     "unverified_reason_counts": {}

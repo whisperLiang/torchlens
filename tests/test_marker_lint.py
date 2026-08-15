@@ -595,9 +595,10 @@ def test_no_module_level_registry_mutation_in_tests() -> None:
                     base = func.value
                     if isinstance(base, ast.Attribute) and base.attr == "facets":
                         is_violation = True
-            elif isinstance(func, ast.Name):
-                if func.id in _REGISTRY_MUTATOR_NAMES or func.id in facet_aliases:
-                    is_violation = True
+            elif isinstance(func, ast.Name) and (
+                func.id in _REGISTRY_MUTATOR_NAMES or func.id in facet_aliases
+            ):
+                is_violation = True
             if is_violation:
                 violations.append(f"{relative}:{node.lineno}")
     assert not violations, (

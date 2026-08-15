@@ -72,6 +72,7 @@ add names to the top-level `torchlens` namespace:
 | `cleanup_during_active_capture` | `Trace.cleanup()` on the trace a live capture window is writing into | Let the capture or backward projection finish first |
 | `child_process_capture_unsupported` | Capture attempted from a non-deliberate child process | Capture from the owning process, or an initialized SPMD rank |
 | `unwrap_during_active_capture` | `unwrap_torch()` called while a capture is running | Finish or abort the capture before unwrapping |
+| `pristine_ledger_poisoned` | The `_decorated_to_orig` unwrap ledger records a TorchLens wrapper as an original callable, so the pristine-torch restoration cannot be trusted | Restart the process; if it recurs, a wrap-machinery defect is recording wrapped callables as originals — report it |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
 | `collapse_mode_invalid` | Collapse mode is unsupported — PER-SURFACE DOMAINS: rendering `collapse=` accepts `none`/`auto`/`max`/float, `collapse_plan(mode=)` accepts `auto`/`max`/float, `collapse_order(mode=)` accepts only `auto`/`max` | Choose a mode documented for that surface; the raised remedy names the exact set |
 | `collapse_plan_unavailable` | Collapse optimizer declined the render context | Use a supported render context and mode |

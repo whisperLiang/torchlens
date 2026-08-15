@@ -46,7 +46,10 @@ def _live_count() -> int:
     return len(gc.get_objects())
 
 
-@pytest.mark.smoke
+# slow, not smoke: the gc.get_objects() census scales with accumulated session
+# state -- 3.5s isolated but 97.6s charged min(wall, cpu) in the merged full
+# not-slow session, past even the heavy ceiling.
+@pytest.mark.slow
 def test_fork_retention_measured_with_calibration_guards() -> None:
     """Fork object retention stays below a fresh capture (calibrated census)."""
 

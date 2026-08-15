@@ -1018,14 +1018,14 @@ def _plain_attr_values_equal(left: Any, right: Any, attr_path: str) -> bool:
             return False
         return all(
             _plain_attr_values_equal(left_item, right_item, f"{attr_path}[{index}]")
-            for index, (left_item, right_item) in enumerate(zip(left, right))
+            for index, (left_item, right_item) in enumerate(zip(left, right, strict=True))
         )
     if isinstance(left, tuple) or isinstance(right, tuple):
         if not isinstance(left, tuple) or not isinstance(right, tuple) or len(left) != len(right):
             return False
         return all(
             _plain_attr_values_equal(left_item, right_item, f"{attr_path}[{index}]")
-            for index, (left_item, right_item) in enumerate(zip(left, right))
+            for index, (left_item, right_item) in enumerate(zip(left, right, strict=True))
         )
     if isinstance(left, dict) or isinstance(right, dict):
         if not isinstance(left, dict) or not isinstance(right, dict) or left.keys() != right.keys():
@@ -2496,7 +2496,7 @@ def _move_tensors_to_device_inner(
                 rebuilt = object.__new__(type(obj))
                 for name, value in state_items.items():
                     object.__setattr__(rebuilt, name, value)
-                for field, value in zip(fields, moved_values):
+                for field, value in zip(fields, moved_values, strict=True):
                     object.__setattr__(rebuilt, field.name, value)
             except Exception:
                 return _UNMOVED
@@ -2520,13 +2520,15 @@ def _move_tensors_to_device_inner(
                 moved_values, changed = _children(obj[key] for key in proxy_keys)
                 if not changed:
                     return _UNMOVED
-                return _types.MappingProxyType(dict(zip(proxy_keys, moved_values)))
+                return _types.MappingProxyType(dict(zip(proxy_keys, moved_values, strict=True)))
             if isinstance(obj, dict):
                 pairs = list(dict.items(obj))  # physical read, never a user override
                 moved_values, changed = _children(value for _, value in pairs)
                 if not changed:
                     return _UNMOVED
-                moved_pairs = [(key, moved) for (key, _), moved in zip(pairs, moved_values)]
+                moved_pairs = [
+                    (key, moved) for (key, _), moved in zip(pairs, moved_values, strict=True)
+                ]
                 if type(obj) is dict:
                     return dict(moved_pairs)
                 from torchlens.utils.arg_handling import rebuild_mapping_like
@@ -2550,7 +2552,7 @@ def _move_tensors_to_device_inner(
                 return _UNMOVED
             try:
                 rebuilt = object.__new__(type(obj))
-                for name, value in zip(state_names, moved_state):
+                for name, value in zip(state_names, moved_state, strict=True):
                     object.__setattr__(rebuilt, name, value)
             except Exception:
                 return _UNMOVED

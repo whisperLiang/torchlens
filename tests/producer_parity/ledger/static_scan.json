@@ -68,7 +68,7 @@
   "field": "modules",
   "file": "torchlens/_io/bundle.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {
@@ -1961,6 +1961,14 @@
  },
  {
   "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/backends/torch/wrappers.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
   "field": "parents",
   "file": "torchlens/bridge/profiler.py",
   "has_default": true,
@@ -2884,7 +2892,7 @@
   "field": "source_trace",
   "file": "torchlens/data_classes/layer.py",
   "has_default": false,
-  "sites": 14,
+  "sites": 7,
   "via_getattr": false
  },
  {
@@ -6700,7 +6708,7 @@
   "field": "parents",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {

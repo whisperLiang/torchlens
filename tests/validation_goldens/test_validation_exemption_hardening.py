@@ -514,10 +514,18 @@ class UniqueMaxModel(nn.Module):
 
 
 class MultiplyByZeroModel(nn.Module):
-    """Model where a parent is provably annihilated by another parent."""
+    """Model where a parent is provably annihilated by another parent.
+
+    Integer dtype on purpose: float multiply-by-zero is now HONESTLY validated
+    through the signed-zero exact tier (the product's zero signs carry the
+    perturbed parent's signs, so the edge is provably live and no exemption is
+    consulted). Integers have no signed zero, so the perturbed replay stays
+    bit-identical and the structural annihilator proof remains the only
+    legitimate rescue -- exactly the path this test pins.
+    """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Multiply by a zero tensor.
+        """Multiply an integer cast by a zero tensor.
 
         Parameters
         ----------
@@ -527,10 +535,11 @@ class MultiplyByZeroModel(nn.Module):
         Returns
         -------
         torch.Tensor
-            Zero output independent of ``x``.
+            Integer zero output independent of ``x``.
         """
 
-        return x * torch.zeros_like(x)
+        cast = x.to(torch.int64)
+        return cast * torch.zeros_like(cast)
 
 
 class LoopOutputBookkeepingModel(nn.Module):

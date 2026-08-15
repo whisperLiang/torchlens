@@ -594,6 +594,7 @@ def test_identity_transform_double_reference_credits_once() -> None:
     assert ledger.retained_storage == {}
 
 
+@pytest.mark.heavy
 def test_dead_accountant_does_not_break_payload_release() -> None:
     """Payloads may outlive the budget; their release callbacks must be inert."""
 
