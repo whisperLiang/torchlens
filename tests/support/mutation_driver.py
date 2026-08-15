@@ -6,7 +6,7 @@ with baseline reds hallucinated two kills during the b9 hunt, so this driver
 refuses to score mutants until the UNMUTATED suite is green in the same
 sandbox.
 
-Four mutant families, one per disarming direction or granularity:
+Five mutant families, one per disarming direction or granularity:
 
 * The METADATA-INVARIANT REGISTRY family is DERIVED at run time from
   ``torchlens.validation.invariants.METADATA_INVARIANT_CONTRACTS`` inside the
@@ -29,6 +29,18 @@ Four mutant families, one per disarming direction or granularity:
   predicate whose ``True`` means "skip the sensitivity check", ``return
   None`` is falsy and makes the tripwire STRICTER -- the dangerous direction
   is exempt-everything, so it needs its own operator.
+* The PER-ARM family is DERIVED like the registry family (b9-opus R74r4-F1):
+  every ``raise MetadataInvariantError`` statement inside a registered
+  checker is one mutant (id ``<contract>#aNN``, lexical order) whose operator
+  replaces exactly that raise with ``pass``. The whole-function operator is
+  blind to single-arm disarms -- two arms (the op_log_fields functionless
+  sentinel and the capture_edge_survival slot-rewire reconciliation) were
+  PROVEN silent survivors over the 448-test arming suite -- and a
+  hand-enrolled ``BLOCK_MUTANTS`` roster is the same drift shape the
+  registry derivation eliminated. Arm enrollment is by construction: a new
+  raise arm in any registered checker is margin-measured with no driver
+  edit. A full arm campaign is ~161 suite runs; select subsets with explicit
+  ids or ``--family arms``.
 
 Kill attribution is per-test, not per-exit-code (b9 R74-2: a green control
 still printed a "KILLED" off an unrelated flaky red): each run's FAILED node
@@ -223,6 +235,128 @@ def derive_registry_mutants(python: str, sandbox: Path) -> dict[str, tuple[str, 
     return {name: (rel, func) for name, (rel, func) in sorted(rows.items())}
 
 
+def _function_node(tree: ast.AST, func: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Return the first function node named ``func`` in ``tree``."""
+
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func
+        ),
+        None,
+    )
+    if target is None:
+        raise SystemExit(f"function {func} not found")
+    return target
+
+
+def _is_invariant_raise(node: ast.AST) -> bool:
+    """Return whether ``node`` raises ``MetadataInvariantError``."""
+
+    if not isinstance(node, ast.Raise) or node.exc is None:
+        return False
+    exc = node.exc
+    callee = exc.func if isinstance(exc, ast.Call) else exc
+    name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", None)
+    return name == "MetadataInvariantError"
+
+
+def enumerate_raise_arms(src: str, func: str) -> list[tuple[int, int, int]]:
+    """Return every ``raise MetadataInvariantError`` arm of ``func``, in order.
+
+    The per-arm operator's address space (b9-opus R74r4-F1): each arm is one
+    mutant, so single-arm disarms are margin-measured instead of only
+    whole-function neuters.
+
+    Parameters
+    ----------
+    src:
+        Module source text.
+    func:
+        Checker function name.
+
+    Returns
+    -------
+    list[tuple[int, int, int]]
+        ``(lineno, end_lineno, col_offset)`` per arm, lexical order.
+    """
+
+    target = _function_node(ast.parse(src), func)
+    # ast.walk is breadth-first; sort into SOURCE order so arm indices are
+    # stable, human-mappable addresses (id <contract>#aNN).
+    return sorted(
+        (node.lineno, node.end_lineno or node.lineno, node.col_offset)
+        for node in ast.walk(target)
+        if _is_invariant_raise(node)
+    )
+
+
+def neuter_raise_arm(path: Path, func: str, index: int) -> str:
+    """Replace exactly one raise arm of ``func`` with ``pass`` and return the original.
+
+    Every other arm and every other statement keeps running -- the surgical
+    single-arm disarm the whole-function operator cannot model (b9-opus
+    R74r4-F1: two such disarms survived the full arming suite silently).
+
+    Parameters
+    ----------
+    path:
+        File containing the checker.
+    func:
+        Checker function name.
+    index:
+        Lexical arm index from :func:`enumerate_raise_arms`.
+
+    Returns
+    -------
+    str
+        The file's original source, for restoration.
+    """
+
+    src = path.read_text(encoding="utf-8")
+    arms = enumerate_raise_arms(src, func)
+    if index >= len(arms):
+        raise SystemExit(f"{func} in {path} has {len(arms)} arms; no index {index}")
+    lineno, end_lineno, col = arms[index]
+    lines = src.splitlines(keepends=True)
+    replacement = f"{' ' * col}pass  # R74-ARM-MUTANT\n"
+    lines[lineno - 1 : end_lineno] = [replacement]
+    path.write_text("".join(lines), encoding="utf-8")
+    return src
+
+
+def derive_arm_mutants(
+    sandbox: Path, registry: dict[str, tuple[str, str]]
+) -> dict[str, tuple[str, str, int]]:
+    """Enumerate one single-arm mutant per invariant raise in every contract.
+
+    Derived from the same sandbox registry as the whole-function family, so a
+    new arm is enrolled by construction (the hand-listed ``BLOCK_MUTANTS``
+    shape drifts; b9-opus R74r4-F2).
+
+    Parameters
+    ----------
+    sandbox:
+        Sandbox repo root whose sources are enumerated.
+    registry:
+        Contract name -> (relative file, checker name) from
+        :func:`derive_registry_mutants`.
+
+    Returns
+    -------
+    dict[str, tuple[str, str, int]]
+        Mutant id ``<contract>#aNN`` -> (relative file, checker, arm index).
+    """
+
+    arms: dict[str, tuple[str, str, int]] = {}
+    for contract, (rel, func) in registry.items():
+        src = (sandbox / rel).read_text(encoding="utf-8")
+        for index in range(len(enumerate_raise_arms(src, func))):
+            arms[f"{contract}#a{index:02d}"] = (rel, func, index)
+    return arms
+
+
 def neuter(path: Path, func: str, value: str) -> str:
     """Insert an early ``return <value>`` into ``func`` and return the original text.
 
@@ -394,6 +528,11 @@ def main() -> None:
         action="store_true",
         help="UNSAFE: skip the pristine control (only when just proven green)",
     )
+    parser.add_argument(
+        "--family",
+        choices=("registry", "checks", "blocks", "exempt", "arms"),
+        help="score only one mutant family (a full arm campaign is ~161 runs)",
+    )
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[2]
@@ -410,8 +549,9 @@ def main() -> None:
     if sandbox == repo:
         raise SystemExit("refusing to mutate the real checkout; use --make-sandbox")
 
-    # Assemble the roster: registry-derived contracts + the three hand lists.
-    # plan: mutant id -> (relative file, function, marker-or-None, value).
+    # Assemble the roster: registry-derived contracts + derived arms + the
+    # three hand lists. plan: mutant id -> (relative file, function,
+    # marker-or-None, value, arm-index-or-None).
     registry = derive_registry_mutants(args.python, sandbox)
     overlap = sorted(mid for mid, target in MUTANTS.items() if target in set(registry.values()))
     if overlap:
@@ -419,25 +559,43 @@ def main() -> None:
             f"hand-listed MUTANTS duplicate registry contracts: {overlap} -- "
             "delete them; registry contracts enroll automatically"
         )
-    plan: dict[str, tuple[str, str, str | None, str]] = {}
+    arm_mutants = derive_arm_mutants(sandbox, registry)
+    plan: dict[str, tuple[str, str, str | None, str, int | None]] = {}
+    families: dict[str, list[str]] = {}
     for mid, (rel, func) in registry.items():
-        plan[mid] = (rel, func, None, "None")
+        plan[mid] = (rel, func, None, "None", None)
+        families.setdefault("registry", []).append(mid)
     for mid, (rel, func) in MUTANTS.items():
-        plan[mid] = (rel, func, None, "None")
+        plan[mid] = (rel, func, None, "None", None)
+        families.setdefault("checks", []).append(mid)
     for mid, (rel, func, marker) in BLOCK_MUTANTS.items():
-        plan[mid] = (rel, func, marker, "None")
+        plan[mid] = (rel, func, marker, "None", None)
+        families.setdefault("blocks", []).append(mid)
     for mid, (rel, func) in EXEMPT_MUTANTS.items():
-        plan[mid] = (rel, func, None, "True")
-    n_families = len(registry) + len(MUTANTS) + len(BLOCK_MUTANTS) + len(EXEMPT_MUTANTS)
+        plan[mid] = (rel, func, None, "True", None)
+        families.setdefault("exempt", []).append(mid)
+    for mid, (rel, func, arm_index) in arm_mutants.items():
+        plan[mid] = (rel, func, None, "None", arm_index)
+        families.setdefault("arms", []).append(mid)
+    n_families = (
+        len(registry) + len(MUTANTS) + len(BLOCK_MUTANTS) + len(EXEMPT_MUTANTS) + len(arm_mutants)
+    )
     if len(plan) != n_families:
         raise SystemExit("mutant id collision across families -- rename the clash")
     print(
         f"roster: {len(registry)} registry contracts + {len(MUTANTS)} checks + "
-        f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates",
+        f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates + "
+        f"{len(arm_mutants)} raise arms",
         flush=True,
     )
 
-    ids = args.mutants or sorted(plan)
+    if args.family:
+        ids = args.mutants or sorted(families.get(args.family, []))
+        outside = [mid for mid in ids if mid not in families.get(args.family, [])]
+        if outside:
+            raise SystemExit(f"ids outside --family {args.family}: {outside}")
+    else:
+        ids = args.mutants or sorted(plan)
     unknown = [mid for mid in ids if mid not in plan]
     if unknown:
         raise SystemExit(f"unknown mutant ids: {unknown}")
@@ -460,9 +618,12 @@ def main() -> None:
 
     results: dict[str, dict[str, object]] = {}
     for mid in ids:
-        rel, func, marker, value = plan[mid]
+        rel, func, marker, value, arm_index = plan[mid]
         path = sandbox / rel
-        if marker is None:
+        if arm_index is not None:
+            original = neuter_raise_arm(path, func, arm_index)
+            operator = f"pass replacing raise arm {arm_index}"
+        elif marker is None:
             original = neuter(path, func, value)
             operator = f"return {value}"
         else:

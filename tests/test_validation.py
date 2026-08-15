@@ -62,7 +62,9 @@ from torchlens.validation.exemptions import (
     posthoc_perturb_check,
 )
 from torchlens.validation.invariants import (
+    _check_capture_edge_survival,
     _check_graph_connectivity,
+    _check_op_log_fields,
     check_func_call_id_invariant,
 )
 from torchlens.validation.status import (
@@ -7149,6 +7151,127 @@ def test_corruption_connectivity_pruned_orphan_resurrected_into_final_labels() -
 
         with pytest.raises(MetadataInvariantError, match="graph_connectivity"):
             _check_graph_connectivity(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_functionless_sentinel_on_computational_op() -> None:
+    """A computational op renamed to the functionless sentinel is rejected.
+
+    Killer for the b9-opus R74r4-F1 survivor A1 (grind r4): disarming the
+    ``func_name == "none"`` arm of ``op_log_fields`` survived the full
+    541-test extended arming suite. The sentinel on an op that carries a real
+    callable is the signature of an op TorchLens failed to wrap -- the exact
+    class of the LOCKED 2026-06-02 incident -- so the arm needs a dedicated
+    planted corruption. The plant is surgical: func stays callable and
+    func_name stays non-empty, so the two earlier arms cannot mask a disarm
+    of this one.
+    """
+
+    log = _make_clean_log()
+    try:
+        lpl = next(
+            lpl
+            for lpl in log.layer_list
+            if not (lpl.is_input or lpl.is_buffer or lpl.is_output)
+            and callable(lpl.func)
+            and lpl.func_name
+        )
+        lpl.func_name = "none"
+        with pytest.raises(MetadataInvariantError, match="functionless sentinel"):
+            _check_op_log_fields(log)
+        with pytest.raises(MetadataInvariantError, match="functionless sentinel"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
+class _TwoParentCatModel(nn.Module):
+    """Two distinct producers feeding one ``cat``, for the slot-swap plant."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fa = nn.Linear(5, 3)
+        self.fb = nn.Linear(5, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([torch.relu(self.fa(x)), torch.tanh(self.fb(x))], dim=1)
+
+
+def test_corruption_capture_witnessed_slot_permutation_is_rejected() -> None:
+    """Two args slots swapped between surviving producers are rejected.
+
+    Killer for the b9-opus R74r4-F1 survivor A2 (grind r4): disarming the
+    slot-exact reconciliation arm of ``capture_edge_survival`` (r33 F-1)
+    survived the full extended arming suite -- the existing plants cover the
+    symmetric edge DROP (the "absent from the final graph" arm) but not the
+    slot PERMUTATION class that arm was built for. Both swapped labels remain
+    real recorded parents, so membership-rooted checks
+    (``edge_use_parent_arg_consistency``, ``graph_connectivity``) stay green
+    by construction and only the slot-exact arm can name the corruption --
+    which is what makes this test that arm's killer.
+    """
+
+    log = trace_fn(_TwoParentCatModel(), torch.randn(2, 5))
+    try:
+        target = None
+        for op in log.layer_list:
+            positions = (op.parent_arg_positions or {}).get("args") or {}
+            if len(set(positions.values())) >= 2:
+                target = (op, sorted(positions)[:2])
+                break
+        assert target, "fixture produced no op with two distinct args-slot parents"
+        op, (slot_a, slot_b) = target
+        positions = op.parent_arg_positions["args"]
+        positions[slot_a], positions[slot_b] = positions[slot_b], positions[slot_a]
+        with pytest.raises(MetadataInvariantError, match="dropped or rewired"):
+            _check_capture_edge_survival(log)
+        with pytest.raises(MetadataInvariantError, match="dropped or rewired"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
+def test_corruption_plain_parent_witnessed_edge_drop_is_rejected() -> None:
+    """A witnessed PLAIN-parent edge absent from the final graph is rejected.
+
+    Killer for the second ``capture_edge_survival`` arm (grind r4 sweep after
+    b9-opus R74r4-F1): the membership arm for ``("parent", None, raw)`` truth
+    rows — parents witnessed WITHOUT an arg position — was a silent mutation
+    survivor because every existing plant scrubs argpos too, which the
+    slot-exact args arm catches first. No simple fixture mints plain-parent
+    truth rows organically (they are a defensive tail for exotic capture
+    classes), so this plant resets a real edge's sealed witness to the
+    plain-parent SHAPE for the SAME true producer, then drops the edge from
+    every recorded surface: only the membership arm can name that corruption.
+    """
+
+    log = _make_clean_log()
+    try:
+        truth = log.__dict__.get("_capture_parent_edge_truth")
+        assert truth, "fixture sealed no capture-time edge witness"
+        target = None
+        for op in log.layer_list:
+            raw_label = getattr(op, "_label_raw", None)
+            edges = truth.get(raw_label) if raw_label is not None else None
+            if not edges:
+                continue
+            for arg_type, slot, parent_raw in edges:
+                if arg_type == "args" and op.parents:
+                    target = (op, raw_label, parent_raw)
+                    break
+            if target:
+                break
+        assert target, "fixture produced no witnessed args edge to reshape"
+        op, raw_label, parent_raw = target
+        dropped = op.parent_arg_positions["args"].pop(0, None)
+        assert dropped is not None
+        # Reshape the sealed witness for this op to the plain-parent form of
+        # the SAME true edge, and scrub the recorded graph surfaces.
+        truth[raw_label] = (("parent", None, parent_raw),)
+        op.parents = tuple(label for label in op.parents if label != dropped)
+        with pytest.raises(MetadataInvariantError, match="absent from the final graph"):
+            _check_capture_edge_survival(log)
     finally:
         log.cleanup()
 
