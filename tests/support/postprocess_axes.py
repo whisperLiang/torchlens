@@ -133,6 +133,31 @@ class DuplicateBufferModel(nn.Module):
         return self.lin(d)
 
 
+class DivergentReachBufferModel(nn.Module):
+    """Step-6 merge where the SURVIVOR dead-ends and the duplicate reaches output.
+
+    r3 b1-opus R04-F1: e12aa996's child-direction reach repair (merge-time
+    ``output_descendants`` union + ancestor-cone re-derivation) shipped with
+    no axis able to observe it — every recorded merge already shared the
+    survivor's reach, so its writes were pinned content no-ops and an
+    effect-neutralizing revert left the whole gate green. Here the initial
+    read (the merge survivor) feeds only an input-connected DEAD END while
+    the equal-valued duplicate read feeds the output, so the merge must flip
+    the survivor's ``has_output_descendant`` False→True and grow
+    ``output_descendants`` — the axis that retired both step-6 pinned rows.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("mask", torch.ones(4))
+        self._stash = torch.ones(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _dead = x * self.mask  # survivor's only pre-merge child: dead end
+        self.mask = self._stash  # equal-valued reassign -> duplicate node
+        return x + self.mask  # duplicate's child reaches the output
+
+
 class BufferFromInputModel(nn.Module):
     """Buffer reassigned from an input-derived tensor (B2 residual closure).
 
@@ -300,6 +325,11 @@ def _axis_buffer_duplicate() -> Any:
     return tl.trace(DuplicateBufferModel(), torch.randn(2, 4))
 
 
+def _axis_buffer_divergent_reach() -> Any:
+    _seed_everything()
+    return tl.trace(DivergentReachBufferModel(), torch.randn(2, 4))
+
+
 def _axis_buffer_from_input() -> Any:
     _seed_everything()
     return tl.trace(BufferFromInputModel(), torch.randn(2, 4), mark_layer_depths=False)
@@ -432,6 +462,7 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("factory_source_output", _axis_factory_source_output),
         ("buffer_pressure", _axis_buffer_pressure),
         ("buffer_duplicate", _axis_buffer_duplicate),
+        ("buffer_divergent_reach", _axis_buffer_divergent_reach),
         ("buffer_from_input", _axis_buffer_from_input),
         ("lookback", lambda: _axis_lookback(tmp_dir, streaming=False, transform=False)),
         ("lookback_transform", lambda: _axis_lookback(tmp_dir, streaming=False, transform=True)),

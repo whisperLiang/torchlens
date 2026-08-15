@@ -813,3 +813,32 @@ def test_data_setter_reconciliation_records_buffer_write() -> None:
     assert len(writes) == 1
     assert writes[0].buffer_write_kind == "data_reassign"
     assert torch.equal(writes[0].out, torch.full((2,), 2.0))
+
+
+def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
+    """The step-6 merge reconciles the survivor's child-direction reach.
+
+    r3 b1-opus R04-F1 content pin: e12aa996's repair (merge-time
+    ``output_descendants`` union + ancestor-cone re-derivation) previously
+    had ZERO content-effective coverage — an effect-neutralizing revert left
+    135 targeted tests green. Here the merge SURVIVOR (the initial read)
+    feeds only an input-connected dead end, while the equal-valued duplicate
+    read reaches the output: without the repair the survivor ships
+    ``has_output_descendant=False`` and an empty ``output_descendants`` on
+    an op that demonstrably feeds the model output. RED under the revert.
+    """
+
+    from support.postprocess_axes import DivergentReachBufferModel
+
+    trace = tl.trace(DivergentReachBufferModel(), torch.randn(2, 4))
+    try:
+        assert list(trace.buffer_layers), "duplicate reads must merge to one buffer node"
+        merged = trace[trace.buffer_layers[0]]
+        op = next(iter(merged.ops.values()))
+        # The survivor owns BOTH pre-merge children (dead end + output path)...
+        assert len(op.children) == 2
+        # ...and its child-direction reach reflects the merged edges.
+        assert op.has_output_descendant is True
+        assert any(label.startswith("output") for label in op.output_descendants)
+    finally:
+        trace.cleanup()
