@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import torchlens as tl
+from torchlens import _state
 from torchlens._errors import TorchLensCaptureGapWarning
 from torchlens.backends.torch import completeness_witness as cw
 from torchlens.backends.torch.completeness_witness import (
@@ -127,14 +128,22 @@ def _is_observer_failed_add(statement: ast.stmt) -> bool:
 
 @pytest.fixture(autouse=True)
 def _isolated_witness_epoch() -> Iterator[None]:
-    """Give each witness test a clean process-level wrapper configuration."""
+    """Give each witness test a clean process-level wrapper configuration.
 
+    Teardown restores the PRE-TEST diagnostic modes rather than hardcoding
+    them off: a fixed ``escape_detector="off", completeness_witness=False``
+    re-wrap silently disarmed diagnostics a surrounding session had
+    deliberately armed (R77 fixture-health finding 3).
+    """
+
+    saved_escape_detector = _state._escape_detector_mode
+    saved_completeness_witness = _state._completeness_witness_mode
     unwrap_torch()
     yield
     unwrap_torch()
     wrap_torch(
-        escape_detector="off",
-        completeness_witness=False,
+        escape_detector=saved_escape_detector,
+        completeness_witness=saved_completeness_witness,
     )
 
 
