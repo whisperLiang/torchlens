@@ -58,6 +58,7 @@ from .._errors import (
     InvalidArgumentError,
     MutatedReferenceError,
     PayloadUnavailableError,
+    RecordBindingError,
     TorchLensPostfuncError,
 )
 from .._io import (
@@ -2668,7 +2669,7 @@ class Op:
             or ``None`` when this op has no exact intermediate-derived record.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         records = getattr(trace, "intermediate_derived_grads", None)
         if records is None:
             return None
@@ -2962,7 +2963,7 @@ class Op:
         address = self.atomic_module_address
         if address is None:
             return None
-        trace = self.source_trace
+        trace = self._source_trace
         if trace is None:
             return None
         try:
@@ -3011,9 +3012,8 @@ class Op:
         multi-pass layer). Unfinished traces still use raw labels.
         """
 
-        _finished = self._tracing_finished or (
-            self.source_trace is not None and self.source_trace._tracing_finished
-        )
+        _owner = self._source_trace
+        _finished = self._tracing_finished or (_owner is not None and _owner._tracing_finished)
         if not _finished:
             return {self._label_raw}
         spellings = {self.layer_label}
@@ -3025,7 +3025,7 @@ class Op:
     @property
     def siblings(self) -> list[str]:
         """Layers sharing at least one parent (excluding output layers and this op)."""
-        ml = self.source_trace
+        ml = self._source_trace
         if ml is None:
             return []
         siblings = []
@@ -3060,7 +3060,7 @@ class Op:
     @property
     def co_parents(self) -> list[str]:
         """Layers sharing at least one child (excluding output layers and this op)."""
-        ml = self.source_trace
+        ml = self._source_trace
         if ml is None:
             return []
         spouses = []
@@ -3342,7 +3342,7 @@ class Op:
         trace-level ``grad_transform`` that was applied to this Op's gradient.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         if trace is None:
             return None
         return cast("Callable[..., Any] | None", getattr(trace, "grad_transform", None))
@@ -3406,11 +3406,30 @@ class Op:
 
     @property
     def source_trace(self) -> "Trace":
-        """Back-reference to the owning Trace (stored as weakref)."""
+        """Back-reference to the owning Trace (stored as weakref).
+
+        Never returns ``None``: an Op detached from its Trace (standalone
+        pickle strips the weakref; cleanup clears it) refuses with the same
+        typed ``RecordBindingError`` family as the collected-Trace case, so
+        no ``None`` can escape behind the ``-> Trace`` signature and crash a
+        caller untyped (the Layer half landed in 1a2b715e; this is the Op
+        half, b7-opus R52-B).
+        """
         ref = self._slot("_source_trace_ref")
         if ref is None:
-            return None  # type: ignore[return-value]
+            raise RecordBindingError(
+                "This Op is not bound to a Trace (standalone pickle, "
+                "cleanup, or a record never attached to a Trace)",
+                code="record_not_bound",
+                remedy="read the op through a live Trace accessor",
+            )
         obj = ref()
+        if obj is None:
+            raise RecordBindingError(
+                "Trace has been garbage-collected",
+                code="trace_reference_collected",
+                remedy="keep the owning Trace alive while reading its records",
+            )
         return cast("Trace", obj)
 
     @source_trace.setter
@@ -3423,6 +3442,15 @@ class Op:
             Owning model log, or ``None`` to clear the reference.
         """
         self._source_trace_ref = weakref.ref(value) if value is not None else None
+
+    @property
+    def _source_trace(self) -> "Trace | None":
+        """Owning Trace, if bound and still alive (tolerant internal read)."""
+
+        ref = self._slot("_source_trace_ref")
+        if ref is None:
+            return None
+        return cast("Trace | None", ref())
 
     def _source_trace_or_error(self) -> "Trace":
         """Return the owning Trace, or raise a detached-log error.
@@ -4048,7 +4076,7 @@ class Op:
             activation_transform: Optional transform applied to the tensor
                 before storing (e.g. detach, to-numpy, normalize).
         """
-        trace = self.source_trace
+        trace = self._source_trace
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
         try:
             save_mode = _effective_activation_save_mode(
@@ -4198,7 +4226,7 @@ class Op:
         Args:
             grad: The grad tensor flowing back through this operation.
         """
-        trace = self.source_trace
+        trace = self._source_trace
         raw_grad = grad
         self.grad_shape = tuple(raw_grad.shape)
         self.grad_dtype = raw_grad.dtype
@@ -4310,7 +4338,7 @@ class Op:
     ) -> None:
         """Validate differentiability requirements for train-mode transform outputs."""
 
-        trace = self.source_trace
+        trace = self._source_trace
         validate_train_mode_transform_output(
             raw_tensor=raw_tensor,
             transformed_tensor=output,
@@ -4373,7 +4401,7 @@ class Op:
             Mutates the writer state if present.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
         if writer is not None:
             writer.abort(message)
@@ -4511,7 +4539,8 @@ class Op:
     def __str__(self) -> str:
         """Return a human-readable operation summary."""
 
-        trace_finished = self.source_trace is not None and self.source_trace._tracing_finished
+        owner = self._source_trace
+        trace_finished = owner is not None and owner._tracing_finished
         if self._tracing_finished or trace_finished:
             return self._str_after_pass()
         return self._str_during_pass()
@@ -4553,7 +4582,7 @@ class Op:
             pass_str = f" (pass {self.pass_index}/{self.num_passes}), "
         else:
             pass_str = ", "
-        sml = self.source_trace
+        sml = self._source_trace
         num_ops = sml.num_ops if sml is not None else "?"
         s = f"Layer {self.layer_label}{pass_str}operation {self.step_index}/{num_ops}:"
         s += f"\n\tOutput tensor: shape={self.shape}, dtype={self.dtype}, size={self.activation_memory}"
@@ -4593,12 +4622,19 @@ class Op:
 
     def _tensor_contents_str_helper(self) -> str:
         """Returns short, readable string for the tensor contents."""
-        if self.out is None:
+        try:
+            out = self.out
+        except PayloadUnavailableError:
+            # A predicate save refuses payload reads for unselected ops; the
+            # repr must degrade (the "(not saved)" marker already prints),
+            # never propagate the refusal out of __repr__/__str__ (b1 R01).
+            return ""
+        if out is None:
             return ""
         else:
             s = ""
-            s += f"\n\t\t{tensor_stats_summary(self.out)}"
-            if not isinstance(self.out, torch.Tensor):
+            s += f"\n\t\t{tensor_stats_summary(out)}"
+            if not isinstance(out, torch.Tensor):
                 # Preview-backend (non-torch) saved activation, e.g. MLX/tinygrad/
                 # TF/JAX/Paddle. The slice-then-clone preview below relies on
                 # torch-only methods (.detach(), .requires_grad, .clone()); the
@@ -4608,19 +4644,19 @@ class Op:
                 return s
             tensor_size_shown = 8
             # Use logged shape, not live tensor shape (#45)
-            saved_shape = self.shape if self.shape is not None else self.out.shape
+            saved_shape = self.shape if self.shape is not None else out.shape
             # Slice first, then clone only the small slice (#73)
             if len(saved_shape) == 0:
-                tensor_slice = self.out.detach().clone()
+                tensor_slice = out.detach().clone()
             elif len(saved_shape) == 1:
                 num_dims = min(tensor_size_shown, saved_shape[0])
-                tensor_slice = self.out[0:num_dims].detach().clone()
+                tensor_slice = out[0:num_dims].detach().clone()
             elif len(saved_shape) == 2:
                 num_dims = min(tensor_size_shown, saved_shape[-2], saved_shape[-1])
-                tensor_slice = self.out[0:num_dims, 0:num_dims].detach().clone()
+                tensor_slice = out[0:num_dims, 0:num_dims].detach().clone()
             else:
                 num_dims = min(tensor_size_shown, saved_shape[-2], saved_shape[-1])
-                tensor_slice = self.out.data
+                tensor_slice = out.data
                 for _ in range(len(saved_shape) - 2):
                     tensor_slice = tensor_slice[0]
                 tensor_slice = tensor_slice[0:num_dims, 0:num_dims].detach().clone()

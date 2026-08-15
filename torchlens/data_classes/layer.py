@@ -965,6 +965,15 @@ class Layer:
         self._source_trace_ref = weakref.ref(value) if value is not None else None
 
     @property
+    def _source_trace(self) -> "Trace | None":
+        """Owning Trace, if bound and still alive (tolerant internal read)."""
+
+        ref = self.__dict__.get("_source_trace_ref")
+        if ref is None:
+            return None
+        return cast("Trace | None", ref())
+
+    @property
     def trace(self) -> "Trace":
         """Alias for the owning Trace back-reference."""
 

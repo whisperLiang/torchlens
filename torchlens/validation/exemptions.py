@@ -588,7 +588,7 @@ def _perturbed_parent_is_uninitialized_setitem_dest(
 
     # Resolve the source op of each perturbed parent from this op's saved source
     # trace so we can read its producing func_name without a Trace handle.
-    source_trace = getattr(layer, "source_trace", None)
+    source_trace = getattr(layer, "_source_trace", None)
     if source_trace is None:
         return False
 
