@@ -52,6 +52,57 @@ ENFORCE_ENV_VAR = "TORCHLENS_ORACLE_ENFORCE"
 #: follow-up): the PROVENANCE record documents how AND why a golden changed.
 REASON_ENV_VAR = "TORCHLENS_GOLDEN_REASON"
 
+#: Reviewed refresh flag for the producer-parity ledger corpus
+#: (``tests/producer_parity/ledger/*.json``). Registered here so the flag
+#: participates in BOTH governance layers (see the registry below).
+PRODUCER_LEDGER_REFRESH_ENV = "TORCHLENS_REFRESH_PRODUCER_LEDGER"
+
+#: Name PREFIXES that always denote golden mutation flags, in every layer.
+GOLDEN_FLAG_PREFIXES = ("TORCHLENS_UPDATE_", "TORCHLENS_REGEN_")
+
+#: THE single named-flag registry (b10 R78 round-4). Two hand-maintained
+#: registries drifted apart — ``TL_SELECTOR_MATRIX_REGEN`` was in the CI
+#: guard but not the arming lint, and ``TORCHLENS_REFRESH_PRODUCER_LEDGER``
+#: was in NEITHER, so a ledger refresh flag truthy-armed and auto-greened
+#: invisibly. Every non-prefix golden/enforcement flag is declared ONCE here
+#: with its roles; the governance lint's arming scanner and the root
+#: conftest's CI session guard both DERIVE their sets from this table.
+#:
+#: Roles:
+#:  * ``"arming"`` — reads of the flag in tests/ must arm on the exact value
+#:    ``"1"`` (``flag_armed`` or inline ``== "1"``), enforced by
+#:    ``tests/test_golden_governance_lint.py``.
+#:  * ``"ci-forbidden"`` — the flag mutates committed artifacts, so a CI run
+#:    with it set (ANY value; presence is fail-closed there) hard-errors in
+#:    the root conftest instead of rebaselining.
+#: ``ENFORCE_ENV_VAR`` deliberately carries no ``"ci-forbidden"`` role (CI's
+#: canonical row SETS it), and the retired ``TL_SELECTOR_MATRIX_REGEN`` no
+#: ``"arming"`` role (its sole read is an any-value hard error on the old
+#: name).
+GOLDEN_FLAG_REGISTRY: dict[str, frozenset[str]] = {
+    RECORD_ENV_VAR: frozenset({"arming", "ci-forbidden"}),
+    ENFORCE_ENV_VAR: frozenset({"arming"}),
+    "TL_SELECTOR_MATRIX_REGEN": frozenset({"ci-forbidden"}),
+    PRODUCER_LEDGER_REFRESH_ENV: frozenset({"arming", "ci-forbidden"}),
+}
+
+
+def golden_flag_names_for_role(role: str) -> frozenset[str]:
+    """Return every registered named flag carrying ``role``.
+
+    Parameters
+    ----------
+    role:
+        ``"arming"`` or ``"ci-forbidden"`` (see ``GOLDEN_FLAG_REGISTRY``).
+
+    Returns
+    -------
+    frozenset[str]
+        Registered flag names with that role.
+    """
+
+    return frozenset(name for name, roles in GOLDEN_FLAG_REGISTRY.items() if role in roles)
+
 
 def flag_armed(environ: Mapping[str, str], name: str) -> bool:
     """Return whether a golden update/regen/record flag is ARMED.
@@ -268,11 +319,9 @@ def golden_mutation_flags_armed_under_ci(environ: Mapping[str, str]) -> list[str
 
     if not environ.get("CI"):
         return []
+    forbidden = golden_flag_names_for_role("ci-forbidden")
     return sorted(
-        name
-        for name in environ
-        if name.startswith(("TORCHLENS_UPDATE_", "TORCHLENS_REGEN_"))
-        or name in {RECORD_ENV_VAR, "TL_SELECTOR_MATRIX_REGEN"}
+        name for name in environ if name.startswith(GOLDEN_FLAG_PREFIXES) or name in forbidden
     )
 
 

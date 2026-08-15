@@ -31,12 +31,17 @@ import functools
 from pathlib import Path
 
 import pytest
+from _oracle_env import GOLDEN_FLAG_PREFIXES, golden_flag_names_for_role
 
 _TESTS_DIR = Path(__file__).resolve().parent
 
-#: Env-var name shapes that arm golden mutation.
-GOLDEN_FLAG_PREFIXES = ("TORCHLENS_UPDATE_", "TORCHLENS_REGEN_")
-GOLDEN_FLAG_NAMES = frozenset({"TORCHLENS_ORACLE_RECORD_ENV", "TORCHLENS_ORACLE_ENFORCE"})
+#: Env-var name shapes that arm golden mutation. DERIVED from the single
+#: registry in tests/_oracle_env.py (b10 R78 round-4): this set and the root
+#: conftest's CI session guard were two hand-maintained registries with
+#: different memberships, and TORCHLENS_REFRESH_PRODUCER_LEDGER sat in
+#: neither — its truthy-arming auto-green write was invisible to all four
+#: scanners here.
+GOLDEN_FLAG_NAMES = golden_flag_names_for_role("arming")
 
 
 def _is_golden_flag(name: str) -> bool:
@@ -204,6 +209,13 @@ def _flag_bool_names(tree: ast.AST, constants: dict[str, str]) -> dict[str, str]
 def _test_flag(test: ast.AST, constants: dict[str, str], flag_bools: dict[str, str]) -> str | None:
     """Return the golden flag an ``if`` test arms on, if any."""
 
+    # A bare truthy read (`if environ.get(FLAG):`) is ALSO an update branch:
+    # the b10 R78 round-4 producer-ledger path armed exactly this way, and
+    # scanner 2 previously recognized only flag_armed/comparison/bool-name
+    # tests, so its auto-green write was invisible here.
+    bare_key = _env_read_key(test, constants)
+    if bare_key is not None and _is_golden_flag(bare_key):
+        return bare_key
     if isinstance(test, ast.BoolOp):
         for value in test.values:
             flag = _test_flag(value, constants, flag_bools)
@@ -337,6 +349,9 @@ _GOLDEN_ROOTS = (
     # b10 R78-1 round 3: a 32-file corpus lived here OUTSIDE every governance
     # scanner and self-baselined unconditionally (write-then-skip, no flag).
     "snapshots",
+    # b10 R78 round 4: the producer-parity ledger corpus lived outside the
+    # roots while its refresh flag was registered nowhere.
+    "producer_parity/ledger",
 )
 
 #: relpath-glob -> (category, reason). Categories:
@@ -413,6 +428,13 @@ GOLDEN_LEDGER: dict[str, tuple[str, str]] = {
         "committed TORCH_VARIANT_FIXTURES registry, and generation is "
         "flag-gated (TORCHLENS_UPDATE_MODULE_CONTAINMENT + reason + "
         "provenance; b10 R78-1 round 3)",
+    ),
+    "producer_parity/ledger/*.json": (
+        "env-independent",
+        "machine-independent producer/consumer inventories (repo-relative "
+        "paths, line-free site counts, external callers collapsed); compared "
+        "never written on normal runs, refresh is flag+reason gated "
+        "(TORCHLENS_REFRESH_PRODUCER_LEDGER; b10 R78 round 4)",
     ),
     # --- frozen input artifacts -------------------------------------------
     "golden/io_v3_sample.tlspec/**": (
@@ -638,6 +660,64 @@ def test_autogreen_scanner_accepts_write_then_skip_and_return_true() -> None:
     """pytest.skip and the caller-skips `return True` patterns are clean."""
 
     assert find_autogreen_update_branches(_FIXED_WRITE_THEN_SKIP) == []
+
+
+_PLANTED_PRODUCER_LEDGER_REFRESH = """
+import os
+_REFRESH_ENV = "TORCHLENS_REFRESH_PRODUCER_LEDGER"
+def assert_artifact_current(path, payload):
+    if os.environ.get(_REFRESH_ENV):
+        path.write_text(payload, encoding="utf-8")
+        return
+    assert path.read_text(encoding="utf-8") == payload
+"""
+
+
+@pytest.mark.smoke
+def test_scanners_catch_pre_fix_producer_ledger_refresh_pattern() -> None:
+    """The b10 R78 round-4 producer-ledger shape now trips BOTH scanners.
+
+    The pre-fix ``tests/producer_parity/test_ledger.py`` refresh branch
+    truthy-armed (``TORCHLENS_REFRESH_PRODUCER_LEDGER=0`` overwrote the
+    tracked corpus) AND returned green having replaced its own evidence —
+    defect classes 1 and 2 of this lint — yet was invisible because the flag
+    was registered nowhere. With the flag in the derived registry, both
+    scanners fire on the exact pre-fix shape, and the prefilter token now
+    reaches the file.
+    """
+
+    truthy = find_unguarded_flag_reads(_PLANTED_PRODUCER_LEDGER_REFRESH)
+    assert len(truthy) == 1 and "TORCHLENS_REFRESH_PRODUCER_LEDGER" in truthy[0]
+    autogreen = find_autogreen_update_branches(_PLANTED_PRODUCER_LEDGER_REFRESH)
+    assert len(autogreen) == 1 and "TORCHLENS_REFRESH_PRODUCER_LEDGER" in autogreen[0]
+    assert any(token in _PLANTED_PRODUCER_LEDGER_REFRESH for token in _FLAG_TOKENS)
+
+
+@pytest.mark.smoke
+def test_flag_registry_roles_cover_both_governance_layers() -> None:
+    """The single registry feeds both layers with the intended memberships.
+
+    The arming lint must see the refresh/record/enforce flags; the CI guard
+    must refuse every mutating flag (including the retired selector-matrix
+    name) but never the enforce declaration CI's canonical row itself sets.
+    """
+
+    from _oracle_env import golden_mutation_flags_armed_under_ci
+
+    assert "TORCHLENS_REFRESH_PRODUCER_LEDGER" in GOLDEN_FLAG_NAMES
+    assert "TORCHLENS_ORACLE_ENFORCE" in GOLDEN_FLAG_NAMES
+    ci_env = {
+        "CI": "true",
+        "TORCHLENS_REFRESH_PRODUCER_LEDGER": "0",
+        "TL_SELECTOR_MATRIX_REGEN": "1",
+        "TORCHLENS_ORACLE_ENFORCE": "1",
+        "TORCHLENS_UPDATE_SURFACE_ORACLE": "1",
+    }
+    armed = golden_mutation_flags_armed_under_ci(ci_env)
+    assert "TORCHLENS_REFRESH_PRODUCER_LEDGER" in armed, "presence is fail-closed under CI"
+    assert "TL_SELECTOR_MATRIX_REGEN" in armed
+    assert "TORCHLENS_UPDATE_SURFACE_ORACLE" in armed
+    assert "TORCHLENS_ORACLE_ENFORCE" not in armed, "CI's canonical row sets ENFORCE itself"
 
 
 _PLANTED_BARE_XFAIL = """

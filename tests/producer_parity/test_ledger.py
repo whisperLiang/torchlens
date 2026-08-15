@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _oracle_env import REASON_ENV_VAR, flag_armed, require_update_reason
 
 from ._ledger import (
     OPEVENT_FIELDS,
@@ -83,7 +84,8 @@ _REFRESH_ENV = "TORCHLENS_REFRESH_PRODUCER_LEDGER"
 
 #: Command the failure message hands the developer.
 _REFRESH_COMMAND = (
-    f"{_REFRESH_ENV}=1 pytest tests/producer_parity/test_ledger.py::test_generate_and_close_ledger"
+    f"{_REFRESH_ENV}=1 {REASON_ENV_VAR}='<why>' "
+    "pytest tests/producer_parity/test_ledger.py::test_generate_and_close_ledger"
 )
 
 #: Location stand-in for a caller outside the repository (venv / stdlib). Their
@@ -217,12 +219,16 @@ def artifact_payload(content: Any) -> str:
     return json.dumps(content, indent=1, sort_keys=True) + "\n"
 
 
-def assert_artifact_current(path: Path, payload: str) -> None:
+def assert_artifact_current(path: Path, payload: str) -> bool:
     """Diff one tracked ledger artifact against freshly generated content.
 
-    Writes ONLY under :data:`_REFRESH_ENV`; otherwise a mismatch (or a missing
-    artifact) is a failure naming the refresh command, so an unreviewed
-    producer/consumer change can no longer overwrite its own evidence.
+    Writes ONLY under :data:`_REFRESH_ENV` armed on the exact value ``"1"``
+    (b10 R78 round-4: ``os.environ.get`` truthy-armed, so the ``=0`` spelling
+    a user types to DISARM overwrote the tracked corpus) and with the
+    mandatory ``TORCHLENS_GOLDEN_REASON`` checked BEFORE bytes are written.
+    Otherwise a mismatch (or a missing artifact) is a failure naming the
+    refresh command, so an unreviewed producer/consumer change can no longer
+    overwrite its own evidence.
 
     Parameters
     ----------
@@ -230,14 +236,22 @@ def assert_artifact_current(path: Path, payload: str) -> None:
         Tracked artifact path.
     payload:
         Freshly generated canonical content.
+
+    Returns
+    -------
+    bool
+        True when the artifact was refreshed (the caller must SKIP the run
+        rather than report a verifying green — the write replaced the very
+        evidence a comparison would check), False on a verified match.
     """
 
-    if os.environ.get(_REFRESH_ENV):
+    if flag_armed(os.environ, _REFRESH_ENV):
+        require_update_reason(_REFRESH_ENV)
         path.write_text(payload, encoding="utf-8")
-        return
+        return True
     checked_in = path.read_text(encoding="utf-8") if path.exists() else ""
     if checked_in == payload:
-        return
+        return False
     diff = list(
         difflib.unified_diff(
             checked_in.splitlines(),
@@ -261,6 +275,35 @@ def assert_artifact_current(path: Path, payload: str) -> None:
     )
 
 
+def _finish_ledger_refresh(refreshed: list[bool], generator: str) -> None:
+    """After a refresh run: record provenance and SKIP, never report green.
+
+    A refresh writes the regenerated payloads over the tracked artifacts, so
+    any subsequent comparison is against evidence the run itself just
+    replaced (the auto-green regen class of
+    ``tests/test_golden_governance_lint.py``). The run therefore records an
+    appended PROVENANCE sidecar and skips; the reviewed rerun WITHOUT the
+    flag is the verifying run.
+
+    Parameters
+    ----------
+    refreshed:
+        Per-artifact refresh outcomes from :func:`assert_artifact_current`.
+    generator:
+        Test identity for the PROVENANCE record.
+    """
+
+    if not any(refreshed):
+        return
+    from _oracle_env import write_provenance
+
+    write_provenance(_LEDGER_DIR, generator, _REFRESH_ENV, require_update_reason(_REFRESH_ENV))
+    pytest.skip(
+        f"{sum(refreshed)} ledger artifact(s) refreshed under {_REFRESH_ENV}; review the "
+        "diff and rerun without the flag to verify"
+    )
+
+
 # heavy, not smoke (r3settle2 budget lint): the full static re-scan of
 # both AST ledgers measures ~9-10s, inside heavy's 5-20s band.
 @pytest.mark.heavy
@@ -273,15 +316,20 @@ def test_static_ledger_artifacts_are_current() -> None:
     (runtime battery, step-0 recorder) stays in the heavy test below.
     """
 
+    refreshed: list[bool] = []
     sites = static_scan(_PACKAGE_ROOT)
-    assert_artifact_current(
-        _LEDGER_DIR / "static_scan.json",
-        artifact_payload(normalized_static_scan(sites)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "static_scan.json",
+            artifact_payload(normalized_static_scan(sites)),
+        )
     )
     mutators = mutator_inventory(_PACKAGE_ROOT)
-    assert_artifact_current(
-        _LEDGER_DIR / "mutators.json",
-        artifact_payload(normalized_mutators(mutators)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "mutators.json",
+            artifact_payload(normalized_mutators(mutators)),
+        )
     )
     amendment_files = {site.rsplit(":", 1)[0] for site in mutators["append_amendment_callers"]}
     assert amendment_files == EXPECTED_APPEND_AMENDMENT_CALLER_FILES, (
@@ -289,6 +337,7 @@ def test_static_ledger_artifacts_are_current() -> None:
         "channel needs a registry family: "
         f"{amendment_files ^ EXPECTED_APPEND_AMENDMENT_CALLER_FILES}"
     )
+    _finish_ledger_refresh(refreshed, "producer_parity/test_ledger.py (static half)")
 
 
 @pytest.mark.heavy
@@ -296,13 +345,16 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     """Regenerate every ledger artifact, diff it, and assert the closure properties."""
 
     _LEDGER_DIR.mkdir(exist_ok=True)
+    refreshed: list[bool] = []
 
     # ---- source 1: static scan (with getattr default-reliers) -------------
     sites = static_scan(_PACKAGE_ROOT)
     static_fields = {site.field for site in sites}
-    assert_artifact_current(
-        _LEDGER_DIR / "static_scan.json",
-        artifact_payload(normalized_static_scan(sites)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "static_scan.json",
+            artifact_payload(normalized_static_scan(sites)),
+        )
     )
     # the pinned getattr default-relier examples (hashing.py) must be present
     hashing_defaults = [
@@ -317,9 +369,11 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
         for scenario in SCENARIOS:
             with tempfile.TemporaryDirectory() as tmp:
                 run_scenario(scenario, Path(tmp), with_artifact=False)
-    assert_artifact_current(
-        _LEDGER_DIR / "runtime_reads.json",
-        artifact_payload(normalized_runtime_reads(reads, _REPO_ROOT)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "runtime_reads.json",
+            artifact_payload(normalized_runtime_reads(reads, _REPO_ROOT)),
+        )
     )
     # Closure: every field read at runtime FROM INSIDE torchlens/ appears in
     # the static inventory. Harness-internal and stdlib-dataclasses machinery
@@ -347,16 +401,20 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
             with_artifact=False,
         )
     assert observed, "step-0 recorder observed nothing (hook broken)"
-    assert_artifact_current(
-        _LEDGER_DIR / "step0_trace_reads.json",
-        artifact_payload(sorted(observed)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "step0_trace_reads.json",
+            artifact_payload(sorted(observed)),
+        )
     )
 
     # ---- source 4: mutator inventory (exact) --------------------------------
     mutators = mutator_inventory(_PACKAGE_ROOT)
-    assert_artifact_current(
-        _LEDGER_DIR / "mutators.json",
-        artifact_payload(normalized_mutators(mutators)),
+    refreshed.append(
+        assert_artifact_current(
+            _LEDGER_DIR / "mutators.json",
+            artifact_payload(normalized_mutators(mutators)),
+        )
     )
 
     amendment_files = {site.rsplit(":", 1)[0] for site in mutators["append_amendment_callers"]}
@@ -388,6 +446,7 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     assert not inplace_writes, (
         f"in-place op_events[i] writes resurfaced after the P4 migration: {inplace_writes}"
     )
+    _finish_ledger_refresh(refreshed, "producer_parity/test_ledger.py (full closure)")
 
 
 @pytest.mark.heavy
@@ -406,6 +465,7 @@ class TestLedgerDiffGateIsRedCapable:
         """Run these checks in normal (compare-only) mode."""
 
         monkeypatch.delenv(_REFRESH_ENV, raising=False)
+        monkeypatch.delenv(REASON_ENV_VAR, raising=False)
 
     def test_matching_artifact_passes_and_is_not_rewritten(self, tmp_path: Path) -> None:
         """An up-to-date artifact is left byte-identical on disk."""
@@ -435,13 +495,67 @@ class TestLedgerDiffGateIsRedCapable:
             assert_artifact_current(tmp_path / "absent.json", artifact_payload([]))
 
     def test_refresh_env_writes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The sanctioned refresh path still updates the artifact."""
+        """The sanctioned refresh path updates the artifact and reports it.
+
+        The True return is load-bearing: the caller must end the run in a
+        SKIP, never a verifying green over evidence the run just wrote.
+        """
+
+        monkeypatch.setenv(_REFRESH_ENV, "1")
+        monkeypatch.setenv(REASON_ENV_VAR, "red-capability self-test")
+        artifact = tmp_path / "ledger.json"
+        payload = artifact_payload({"b": 2})
+        assert assert_artifact_current(artifact, payload) is True
+        assert artifact.read_text(encoding="utf-8") == payload
+
+    def test_disarm_spelling_zero_never_writes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The b10 R78 round-4 defect: `=0` must DISARM, not overwrite.
+
+        Pre-fix, ``os.environ.get(_REFRESH_ENV)`` truthy-armed, so the
+        spelling a user types to disarm overwrote the tracked corpus and the
+        run returned green having replaced its own evidence.
+        """
+
+        monkeypatch.setenv(_REFRESH_ENV, "0")
+        artifact = tmp_path / "ledger.json"
+        stale = artifact_payload({"old": 1})
+        artifact.write_text(stale, encoding="utf-8")
+        with pytest.raises(AssertionError, match=_REFRESH_ENV):
+            assert_artifact_current(artifact, artifact_payload({"new": 2}))
+        assert artifact.read_text(encoding="utf-8") == stale
+        assert assert_artifact_current(artifact, stale) is False
+
+    def test_refresh_without_reason_fails_before_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An armed refresh with no TORCHLENS_GOLDEN_REASON writes NOTHING."""
 
         monkeypatch.setenv(_REFRESH_ENV, "1")
         artifact = tmp_path / "ledger.json"
-        payload = artifact_payload({"b": 2})
-        assert_artifact_current(artifact, payload)
-        assert artifact.read_text(encoding="utf-8") == payload
+        stale = artifact_payload({"old": 1})
+        artifact.write_text(stale, encoding="utf-8")
+        with pytest.raises(pytest.fail.Exception, match=REASON_ENV_VAR):
+            assert_artifact_current(artifact, artifact_payload({"new": 2}))
+        assert artifact.read_text(encoding="utf-8") == stale
+
+    def test_finish_ledger_refresh_skips_and_records_provenance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that refreshed anything ends in SKIP with a PROVENANCE record."""
+
+        monkeypatch.setenv(_REFRESH_ENV, "1")
+        monkeypatch.setenv(REASON_ENV_VAR, "red-capability self-test")
+        import sys
+
+        monkeypatch.setattr(sys.modules[__name__], "_LEDGER_DIR", tmp_path, raising=True)
+        with pytest.raises(pytest.skip.Exception, match="rerun without the flag"):
+            _finish_ledger_refresh([False, True], "self-test")
+        provenance = (tmp_path / "PROVENANCE").read_text(encoding="utf-8")
+        assert "red-capability self-test" in provenance
+        assert _REFRESH_ENV in provenance
+        _finish_ledger_refresh([False, False], "self-test")  # no refresh -> no skip
 
     def test_an_added_site_in_a_listed_file_is_drift(self) -> None:
         """Line numbers are dropped, but site COUNTS keep a new site visible."""
