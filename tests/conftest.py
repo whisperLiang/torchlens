@@ -225,10 +225,18 @@ def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
     -------
     tuple[str, float] | None
         ``(tier_name, base_budget_seconds)``, or ``None`` for exempt tiers
-        (``slow`` unbounded, ``rare`` request-only, ``serial`` load-exempt).
+        (``slow`` unbounded, ``rare`` request-only).
+
+    ``serial`` is deliberately NOT exempt (b2 R41 round 5): it means
+    "load-sensitive, run away from parallel worker load", never "unbudgeted"
+    — the former blanket exemption let any unmarked test dodge the 5s
+    partition boundary by adding one ``@pytest.mark.serial``, with the
+    marker's isolation claim enforced by nothing. A serial item resolves its
+    heavy/smoke/unmarked budget normally; the load-factor scaling can only
+    help it.
     """
 
-    for exempt in ("slow", "rare", "serial"):
+    for exempt in ("slow", "rare"):
         if item.get_closest_marker(exempt) is not None:
             return None
     if item.get_closest_marker("heavy") is not None:
