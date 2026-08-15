@@ -134,6 +134,44 @@ def test_strided_int_plus_slice_box_matches_gradient_truth() -> None:
     assert (by_axis[3].index_start, by_axis[3].index_stop) == truth[3]
 
 
+def test_strided_slice_discloses_sparse_support() -> None:
+    """A step-2 slice axis must disclose ``sparse_possible`` (r3 b6-fable R20-1).
+
+    The slice-affine composition claimed ``exact=True, sparse_possible=False``
+    for step != 1 while the true support has holes (gradient truth keeps only
+    every second row). RED before the fix: H axis reported dense support.
+    """
+
+    class _Strided(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(1, 1, 3, padding=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.conv(x[0, :, ::2, :].unsqueeze(0))
+
+    torch.manual_seed(0)
+    model = _Strided().eval()
+    x = torch.randn(2, 1, 12, 8)
+
+    # Independent oracle: the H support of any output unit has holes.
+    probe = x.clone().detach().requires_grad_(True)
+    out = model(probe)
+    out[(0, 0, 1, 2)].backward()
+    assert probe.grad is not None
+    h_rows = torch.nonzero(probe.grad[0, 0].abs().sum(dim=1) != 0).flatten()
+    h_rows_list = [int(r) for r in h_rows]
+    span = range(h_rows_list[0], h_rows_list[-1] + 1)
+    assert set(h_rows_list) != set(span), "oracle support unexpectedly dense"
+
+    trace = _armed_trace(model, x)
+    op = next(o for o in trace.layer_list if "conv" in o.label)
+    axes = {axis.input_axis: axis for axis in op.receptive_field.axes}
+    # The strided H axis discloses holes; the step-1 W axis stays dense.
+    assert axes[2].sparse_possible is True
+    assert axes[3].sparse_possible is False
+
+
 def test_int_only_batch_axis_narrows_and_stays_honest() -> None:
     """int-only selection: batch box is the singleton, not the full extent."""
 
