@@ -61,7 +61,7 @@ __all__ = (
 )
 
 
-def _metadata_shape(t: torch.Tensor) -> tuple[int, ...]:
+def _metadata_shape(t: torch.Tensor, op_label: str | None = None) -> tuple[int, ...]:
     """Return a captured tensor's shape, refusing TYPED for a shapeless variant.
 
     ``tuple(t.shape)`` is the very first metadata read of every recorded output, and on a
@@ -77,13 +77,32 @@ def _metadata_shape(t: torch.Tensor) -> tuple[int, ...]:
     appears later refuses the same way instead of leaking a raw internal error.
     """
 
+    # Both mid-forward raises honor the class fields contract (R65): stable
+    # ``code``, a ``remedy``, and one structured offense naming the op label
+    # this output was being recorded at (the mid-forward analog of the entry
+    # gate's input-tree path).
+    site = op_label if op_label is not None else "<mid-forward output>"
     if getattr(t, "is_nested", False):
         raise UnsupportedTensorVariantError(
             "torchlens cannot log a NESTED tensor created inside forward(): the variant "
             "has no dense shape, so TorchLens can record no shape, memory, or FLOPs "
             "metadata for it. Restructure the forward to build the nested tensor "
             "outside the traced region, or pad to a dense tensor before the ops you "
-            "want captured."
+            "want captured.",
+            code="unsupported_tensor_variant",
+            remedy=(
+                "build the nested tensor outside the traced region, or pad to a "
+                "dense tensor before the ops you want captured"
+            ),
+            offenses=(
+                {
+                    "name": "nested tensor created inside forward()",
+                    "reason": "the variant has no dense shape",
+                    "path": site,
+                    "shape": None,
+                    "dtype": str(getattr(t, "dtype", None)),
+                },
+            ),
         )
     try:
         return tuple(t.shape)
@@ -91,7 +110,21 @@ def _metadata_shape(t: torch.Tensor) -> tuple[int, ...]:
         raise UnsupportedTensorVariantError(
             "torchlens cannot log a tensor variant that does not support `sizes` "
             f"({type(t).__name__}); TorchLens can record no shape metadata for it. "
-            f"Underlying torch error: {error}"
+            f"Underlying torch error: {error}",
+            code="unsupported_tensor_variant",
+            remedy=(
+                "materialize a dense, strided tensor before the ops you want "
+                "captured; this variant exposes no shape metadata"
+            ),
+            offenses=(
+                {
+                    "name": f"shapeless tensor variant ({type(t).__name__})",
+                    "reason": str(error),
+                    "path": site,
+                    "shape": None,
+                    "dtype": str(getattr(t, "dtype", None)),
+                },
+            ),
         ) from error
 
 
@@ -339,7 +372,7 @@ def _log_output_tensor_info(
     fields_dict["has_saved_args"] = False
     fields_dict["saved_args"] = None
     fields_dict["saved_kwargs"] = None
-    fields_dict["shape"] = _metadata_shape(t)
+    fields_dict["shape"] = _metadata_shape(t, op_label=fields_dict.get("_label_raw"))
     fields_dict["transformed_out_shape"] = None
     fields_dict["dtype"] = t.dtype
     fields_dict["transformed_out_dtype"] = None

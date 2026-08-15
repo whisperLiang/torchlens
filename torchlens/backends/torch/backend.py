@@ -870,13 +870,41 @@ class TorchBackend:
                     # Nested tensors raise from ``.shape``; the refusal must
                     # stay typed instead of crashing on its own message (R65).
                     shape_text = "<unavailable: nested>" if t.is_nested else "<unavailable>"
+                if getattr(t, "is_nested", False):
+                    # An unlabeled NESTED output is an unsupported tensor
+                    # variant constructed inside forward (protocol-invisible
+                    # constructors like torch.nested.nested_tensor are never
+                    # logged), NOT a pre-bound-function escape -- the escape
+                    # remedy can never fix it (R65: typed-misdiagnosis
+                    # successor of the round-4 raw crash).
+                    raise OutputAttributionError(
+                        "TorchLens could not attribute a model output tensor to any "
+                        f"traced op (output address {output_address!r}, "
+                        f"shape={shape_text}, dtype={t.dtype}): the output is a NESTED "
+                        "tensor constructed inside forward(), an unsupported tensor "
+                        "variant TorchLens cannot log. Remedy: build the nested tensor "
+                        "outside the traced region, or pad to a dense tensor before "
+                        "the ops you want captured.",
+                        code="output_unsupported_tensor_variant",
+                        remedy=(
+                            "build the nested tensor outside the traced region, or "
+                            "pad to a dense tensor before the ops you want captured"
+                        ),
+                        output_address=output_address,
+                    )
                 raise OutputAttributionError(
                     "TorchLens could not attribute a model output tensor to any traced op "
                     f"(output address {output_address!r}, "
                     f"shape={shape_text}, dtype={t.dtype}). This may indicate an opaque "
                     "execution boundary or a pre-bound torch function that escaped wrapping. "
                     "Use ordinary torch module attributes during forward, or bind/import torch "
-                    "functions after TorchLens has wrapped torch."
+                    "functions after TorchLens has wrapped torch.",
+                    code="output_attribution_failed",
+                    remedy=(
+                        "use ordinary torch module attributes during forward, or "
+                        "bind/import torch functions after TorchLens has wrapped torch"
+                    ),
+                    output_address=output_address,
                 )
             attributable_output_tensors.append(t)
             attributable_output_tensor_addresses.append(output_address)
