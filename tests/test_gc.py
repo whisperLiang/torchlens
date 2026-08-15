@@ -541,6 +541,68 @@ class TestTraceGC:
             partial_module._FAILED_CAPTURE_REGISTRY.pop(id(exception), None)
 
     @pytest.mark.smoke
+    def test_strong_fallback_entries_evict_once_the_caller_drops_the_exception(self):
+        """A dropped locked+non-weakrefable exception must not pin its capture (R37).
+
+        An ``Exception`` subclass declaring ``__slots__`` is non-weakrefable,
+        and one that also refuses ``__setattr__`` rejects the ``partial_log``
+        attachment, so it reaches the strong-retention fallback. That entry
+        has no weakref callback; without the sweep it kept the exception's
+        traceback (frame locals, model, inputs) AND the partial trace alive
+        until 128 later failures evicted it.
+        """
+
+        from torchlens import partial as partial_module
+
+        class _LockedSlots(Exception):
+            __slots__ = ()
+
+            def __setattr__(self, name, value):
+                raise AttributeError("locked")
+
+        with pytest.raises(TypeError):
+            weakref.ref(_LockedSlots("x"))  # the precondition this arm exists for
+
+        class _FrameLocalMarker:
+            pass
+
+        def raise_locked():
+            marker = _FrameLocalMarker()
+            marker_ref = weakref.ref(marker)
+            try:
+                raise _LockedSlots("strong retention probe")
+            except _LockedSlots as error:
+                return error, marker_ref
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        exception, marker_ref = raise_locked()
+        partial_log = partial_module.PartialTrace(trace=trace, original_exception=exception)
+        key = id(exception)
+        partial_module._register_failed_capture(exception, partial_log)
+        del partial_log
+
+        # Recovery works while the caller holds the exception, and the sweep
+        # (which runs inside every lookup) never evicts a caller-held entry.
+        recovered = partial_module.from_failed_capture(exception)
+        assert recovered.trace is trace
+        del recovered
+        assert key in partial_module._FAILED_CAPTURE_REGISTRY
+
+        trace_ref = weakref.ref(trace)
+        del trace, exception
+        gc.collect()
+        # The next registry interaction sweeps the unreachable strong entry.
+        partial_module._sweep_unreachable_strong_entries()
+        assert key not in partial_module._FAILED_CAPTURE_REGISTRY, (
+            "the strong fallback kept an entry no caller can ever recover"
+        )
+        gc.collect()
+        assert marker_ref() is None, (
+            "the strong entry pinned the dead exception's traceback frame locals"
+        )
+        assert trace_ref() is None, "the strong entry pinned the partial trace"
+
+    @pytest.mark.smoke
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 

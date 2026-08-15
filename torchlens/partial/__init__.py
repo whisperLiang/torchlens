@@ -49,10 +49,15 @@ Weak retention is sound because the only route to an entry is
 it dies the entry is unreachable garbage and the weakref callback drops it.
 Keying on ``id()`` stays safe across id reuse for the reason it already was:
 lookup re-checks referent identity, and a dead referent can never satisfy it.
-Exception types that do not support weak references (C-extension types; note
-that builtin exceptions and ``__slots__`` subclasses never reach this table,
-since BaseException always carries a dict and accepts the attachment) fall back
-to strong retention under the same entry cap.
+Exception types that do not support weak references DO reach this table --
+an ``Exception`` subclass declaring ``__slots__`` is non-weakrefable, and one
+that also refuses ``__setattr__`` rejects the ``partial_log`` attachment too --
+and fall back to strong retention under the same entry cap. A strong entry has
+no weakref callback, so :func:`_sweep_unreachable_strong_entries` restores the
+weak path's lifetime contract for it: at every registry interaction, entries
+whose exception no caller can reach anymore (sole reference = this registry)
+are evicted, so a dropped exception's trace/traceback pin lasts at most until
+the next registration or lookup instead of until 128 later failures.
 """
 
 _FAILED_CAPTURE_RESULTS: weakref.WeakValueDictionary[int, PartialTrace] = (
@@ -308,6 +313,7 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     partial_log = getattr(exception, "partial_log", None)
     if isinstance(partial_log, PartialTrace):
         return partial_log
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
     registry_entry = _FAILED_CAPTURE_REGISTRY.get(exception_id)
     if registry_entry is not None and _registry_referent(registry_entry[0]) is exception:
@@ -343,6 +349,32 @@ def _registry_referent(
     return held
 
 
+def _sweep_unreachable_strong_entries() -> None:
+    """Evict strong-fallback entries whose exception no caller can reach.
+
+    Weak entries evict themselves through their weakref callback the moment
+    the caller drops the exception. Strong entries (non-weakrefable exception
+    types) have no callback, so without this sweep a dropped exception kept
+    its whole traceback -- frame locals, model, inputs -- plus the partial
+    trace pinned until 128 later failures evicted it. Swept at registration
+    and lookup time by refcount: an exception whose only remaining reference
+    is this registry's entry tuple can never be passed to
+    ``from_failed_capture`` again, so its entry is unrecoverable garbage.
+    """
+
+    import sys
+
+    for key, entry in list(_FAILED_CAPTURE_REGISTRY.items()):
+        if isinstance(entry[0], weakref.ref):
+            continue
+        # Sole-ownership baseline: the registry tuple's slot plus
+        # getrefcount's own argument slot -> 2. Any caller-held reference
+        # (including an in-flight ``except`` binding) raises it above that,
+        # so miscounting can only KEEP an entry, never evict a live one.
+        if sys.getrefcount(entry[0]) <= 2:
+            del _FAILED_CAPTURE_REGISTRY[key]
+
+
 def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:
     """Retain partial recovery when an exception rejects attribute assignment.
 
@@ -359,6 +391,7 @@ def _register_failed_capture(exception: BaseException, partial_log: PartialTrace
         Stores a bounded, weakly-held entry for :func:`from_failed_capture`.
     """
 
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
     held: weakref.ref[BaseException] | BaseException
     try:
