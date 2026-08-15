@@ -581,7 +581,7 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost: `smoke` selects ~4.6k tests (4,580/12,330 collect-only, measured 2026-08-15).
+Tiers by cost: `smoke` selects ~4.6k tests (4,644/12,430 collect-only, measured 2026-08-15).
 The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
 devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
 (~500s on a quieter box earlier the same sprint); budget at least that at today's ~40%
@@ -590,9 +590,10 @@ sub-minute and NOT a per-step gate — per-step verification is the targeted tes
 the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
 the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
 must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
-`tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow` fails
-(markers are additive — the test would still run under `-m smoke`), and any smoke test
-exceeding a 15s runtime budget fails the session it ran in. `pytest -n auto` requires the
+`tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow`/`serial`/`rare`
+fails (markers are additive — the test would still run under `-m smoke`), and the runtime
+tripwire holds smoke/unmarked tests to budget 5s and heavy 20s (load-scaled 1x-4x, charged
+on min(wall, cpu)) — an offender fails the session it ran in. `pytest -n auto` requires the
 optional `pytest-xdist` plugin, which is not installed by TorchLens's declared test extra.
 When xdist is installed separately, measure before relying on it: torch intra-op threads can
 oversubscribe workers, and fixture/import setup may dominate.
