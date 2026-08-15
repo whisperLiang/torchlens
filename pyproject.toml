@@ -68,7 +68,21 @@ dependencies = [
 
 [project.optional-dependencies]
 notebook = ["ipython>=8.0", "jupyter-client>=8.0"]
-neuro = ["rsatoolbox~=0.1.5", "brain-score~=2.2"]
+# rsatoolbox: >=0.1.5 keeps the validated floor; the ceiling admits the 0.2/0.3
+# line because 0.1.5 ships no cp313 wheels (0.3.x is the first that does) and the
+# bridge surface used (rsatoolbox.data.Dataset) is stable across the range.
+# brainscore_core is the real PyPI distribution behind the Brain-Score project's
+# core library -- the previous `brain-score~=2.2` requirement named a dist that
+# does not exist on PyPI at ANY version, so `pip install torchlens[neuro]` was
+# uninstallable for every user (grind r4, R83-1). torchlens.neuro gates on the
+# `brainscore_core` import name. The dist declares requires-python >=3.11 on
+# every release, so the marker keeps the extra installable on 3.10 (rsatoolbox
+# only there; the appliance's dependency gate names the missing package at use
+# time).
+neuro = [
+    "rsatoolbox>=0.1.5,<0.4",
+    "brainscore_core~=2.2; python_version >= '3.11'",
+]
 viz = ["torchshow~=0.5", "lovely-tensors~=0.1.18"]
 tabular = ["pandas>=2.0", "pyarrow>=14"]
 captum = ["captum~=0.7"]
