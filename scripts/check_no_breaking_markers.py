@@ -148,16 +148,31 @@ def _check_commit_msg(path: str) -> int:
     return _check_text(body, location=str(msg_path))
 
 
-def _check_pre_push() -> int:
-    """Read pre-push refspecs from stdin and scan every outgoing commit message."""
+def _push_records() -> list[list[str]]:
+    """Collect "<local_ref> <local_sha> <remote_ref> <remote_sha>" records.
 
-    # pre-commit framework passes "<remote_name> <remote_url>" as argv[1:] and
-    # the "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin.
+    Raw git hands the refspec lines on stdin. The pre-commit FRAMEWORK, however,
+    consumes that stdin itself and re-executes hooks with EMPTY stdin, exporting
+    ``PRE_COMMIT_TO_REF`` (local sha) / ``PRE_COMMIT_FROM_REF`` (remote sha)
+    instead -- so an stdin-only reader silently scans NOTHING and passes under
+    the framework (grind r3, R61/B27: the pre-push layer was green-but-inert).
+    Read stdin first, then fall back to the framework's env contract.
+    """
+
+    records = [parts for line in sys.stdin if len(parts := line.strip().split()) == 4]
+    if not records:
+        to_ref = os.environ.get("PRE_COMMIT_TO_REF", "")
+        from_ref = os.environ.get("PRE_COMMIT_FROM_REF", "")
+        if to_ref and from_ref:
+            records = [["(pre-commit framework push)", to_ref, "(remote)", from_ref]]
+    return records
+
+
+def _check_pre_push() -> int:
+    """Scan every outgoing commit message in the push payload."""
+
     rc = 0
-    for line in sys.stdin:
-        parts = line.strip().split()
-        if len(parts) != 4:
-            continue
+    for parts in _push_records():
         local_ref, local_sha, _remote_ref, remote_sha = parts
         if local_sha == "0000000000000000000000000000000000000000":
             # Branch deletion -- nothing to scan.
