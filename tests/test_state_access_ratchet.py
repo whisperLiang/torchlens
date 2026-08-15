@@ -25,7 +25,13 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 # Pinned 2026-08-14 (disputed-r2 fix wave): 292 access sites across 45 modules.
 # Shrink-only: update DOWNWARD when refactors remove sites; growing it requires
 # naming why the new site cannot use active_capture() or a state transition.
-_ACCESS_SITE_BASELINE = 292
+# 292 -> 294 (2026-08-15 r3settle reconcile): tensor_utils.py's defer-prune
+# owner-thread guard reads `_active_trace`/`_active_owner_thread_id` raw on
+# the hot path (r43 cross-thread pause guard -- there is no capture handle to
+# route through), and validation/_pristine.py's pristine-oracle window is
+# inherently wrap-state surgery (`_is_decorated` + the detector/witness mode
+# reads that re-arm after unwrap/rewrap).
+_ACCESS_SITE_BASELINE = 294
 
 
 def _state_access_sites() -> list[tuple[str, int]]:

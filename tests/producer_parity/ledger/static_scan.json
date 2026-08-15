@@ -1740,7 +1740,7 @@
   "field": "modules",
   "file": "torchlens/backends/torch/model_prep.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 7,
   "via_getattr": false
  },
  {
