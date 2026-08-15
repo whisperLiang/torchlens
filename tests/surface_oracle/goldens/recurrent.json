@@ -304,9 +304,7 @@
       "tanh_1_2"
      ]
     },
-    "co_parents": [
-     "linear_1_1"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -359,13 +357,13 @@
     "grad_fn_handle": "<callable AddmmBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -502,9 +500,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -841,9 +837,7 @@
       "output_1"
      ]
     },
-    "co_parents": [
-     "tanh_1_2"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -893,13 +887,13 @@
     "grad_fn_handle": "<callable TanhBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -1009,9 +1003,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2380,9 +2372,7 @@
     "children": [
      "tanh_1_2:1"
     ],
-    "co_parents": [
-     "linear_1_1:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -2477,7 +2467,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -2806,9 +2796,7 @@
     "children": [
      "tanh_1_2:2"
     ],
-    "co_parents": [
-     "linear_1_1:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -2903,7 +2891,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -2914,7 +2902,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -3122,9 +3110,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3234,9 +3220,7 @@
     "children": [
      "tanh_1_2:3"
     ],
-    "co_parents": [
-     "linear_1_1:3"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -3331,7 +3315,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -3342,7 +3326,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -3550,9 +3534,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4002,9 +3984,7 @@
     "children": [
      "linear_1_1:2"
     ],
-    "co_parents": [
-     "tanh_1_2:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -4092,7 +4072,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -4103,7 +4083,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -4294,9 +4274,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4388,9 +4366,7 @@
     "children": [
      "linear_1_1:3"
     ],
-    "co_parents": [
-     "tanh_1_2:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -4478,7 +4454,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -4489,7 +4465,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -4680,9 +4656,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4873,7 +4847,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -5054,9 +5028,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6675,9 +6647,7 @@
       "tanh_1_2"
      ]
     },
-    "co_parents": [
-     "linear_1_1"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -6730,13 +6700,13 @@
     "grad_fn_handle": "<callable AddmmBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -6873,9 +6843,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7212,9 +7180,7 @@
       "output_1"
      ]
     },
-    "co_parents": [
-     "tanh_1_2"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -7264,13 +7230,13 @@
     "grad_fn_handle": "<callable TanhBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -7380,9 +7346,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8751,9 +8715,7 @@
     "children": [
      "tanh_1_2:1"
     ],
-    "co_parents": [
-     "linear_1_1:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -8848,7 +8810,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -9177,9 +9139,7 @@
     "children": [
      "tanh_1_2:2"
     ],
-    "co_parents": [
-     "linear_1_1:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -9274,7 +9234,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -9285,7 +9245,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -9493,9 +9453,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9605,9 +9563,7 @@
     "children": [
      "tanh_1_2:3"
     ],
-    "co_parents": [
-     "linear_1_1:3"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -9702,7 +9658,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -9713,7 +9669,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -9921,9 +9877,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10373,9 +10327,7 @@
     "children": [
      "linear_1_1:2"
     ],
-    "co_parents": [
-     "tanh_1_2:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -10463,7 +10415,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -10474,7 +10426,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -10665,9 +10617,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10759,9 +10709,7 @@
     "children": [
      "linear_1_1:3"
     ],
-    "co_parents": [
-     "tanh_1_2:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -10849,7 +10797,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -10860,7 +10808,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -11051,9 +10999,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -11244,7 +11190,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -11425,9 +11371,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -13057,9 +13001,7 @@
       "tanh_1_2"
      ]
     },
-    "co_parents": [
-     "linear_1_1"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -13112,13 +13054,13 @@
     "grad_fn_handle": null,
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -13255,9 +13197,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -13594,9 +13534,7 @@
       "output_1"
      ]
     },
-    "co_parents": [
-     "tanh_1_2"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -13646,13 +13584,13 @@
     "grad_fn_handle": null,
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -13762,9 +13700,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15133,9 +15069,7 @@
     "children": [
      "tanh_1_2:1"
     ],
-    "co_parents": [
-     "linear_1_1:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -15230,7 +15164,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -15559,9 +15493,7 @@
     "children": [
      "tanh_1_2:2"
     ],
-    "co_parents": [
-     "linear_1_1:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -15656,7 +15588,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -15667,7 +15599,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -15875,9 +15807,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15987,9 +15917,7 @@
     "children": [
      "tanh_1_2:3"
     ],
-    "co_parents": [
-     "linear_1_1:3"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -16084,7 +16012,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -16095,7 +16023,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -16303,9 +16231,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -16755,9 +16681,7 @@
     "children": [
      "linear_1_1:2"
     ],
-    "co_parents": [
-     "tanh_1_2:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -16845,7 +16769,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -16856,7 +16780,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -17047,9 +16971,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17141,9 +17063,7 @@
     "children": [
      "linear_1_1:3"
     ],
-    "co_parents": [
-     "tanh_1_2:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -17231,7 +17151,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -17242,7 +17162,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -17433,9 +17353,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17626,7 +17544,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -17807,9 +17725,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19360,9 +19276,7 @@
       "tanh_1_2"
      ]
     },
-    "co_parents": [
-     "linear_1_1"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -19415,13 +19329,13 @@
     "grad_fn_handle": "<callable AddmmBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -19558,9 +19472,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19897,9 +19809,7 @@
       "output_1"
      ]
     },
-    "co_parents": [
-     "tanh_1_2"
-    ],
+    "co_parents": [],
     "code_context": "<raises InvalidArgumentError>",
     "conditional_arm_children": {},
     "conditional_branch_stack_ops": {
@@ -19949,13 +19859,13 @@
     "grad_fn_handle": "<callable TanhBackward0>",
     "grad_fn_object_id": "<measured>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": "<raises InvalidArgumentError>",
     "has_input_ancestor": true,
     "has_parents": true,
     "has_saved_activation": "<raises InvalidArgumentError>",
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -20065,9 +19975,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21436,9 +21344,7 @@
     "children": [
      "tanh_1_2:1"
     ],
-    "co_parents": [
-     "linear_1_1:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -21533,7 +21439,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -21862,9 +21768,7 @@
     "children": [
      "tanh_1_2:2"
     ],
-    "co_parents": [
-     "linear_1_1:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -21959,7 +21863,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -21970,7 +21874,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -22178,9 +22082,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -22290,9 +22192,7 @@
     "children": [
      "tanh_1_2:3"
     ],
-    "co_parents": [
-     "linear_1_1:3"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -22387,7 +22287,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -22398,7 +22298,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": true,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -22606,9 +22506,7 @@
      2,
      4
     ],
-    "siblings": [
-     "linear_1_1:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -23058,9 +22956,7 @@
     "children": [
      "linear_1_1:2"
     ],
-    "co_parents": [
-     "tanh_1_2:1"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -23148,7 +23044,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -23159,7 +23055,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -23350,9 +23246,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:1"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -23444,9 +23338,7 @@
     "children": [
      "linear_1_1:3"
     ],
-    "co_parents": [
-     "tanh_1_2:2"
-    ],
+    "co_parents": [],
     "code_context": [
      {
       "__ref__": "FuncCallLocation",
@@ -23534,7 +23426,7 @@
     "gradient_transform": null,
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
     "has_children": true,
-    "has_co_parents": true,
+    "has_co_parents": false,
     "has_frozen_params": false,
     "has_grad": false,
     "has_input_ancestor": true,
@@ -23545,7 +23437,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -23736,9 +23628,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:2"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -23929,7 +23819,7 @@
     "has_saved_activation": true,
     "has_saved_args": false,
     "has_saved_gradient": false,
-    "has_siblings": true,
+    "has_siblings": false,
     "has_trainable_params": false,
     "in_conditionals": [],
     "in_multi_output": false,
@@ -24110,9 +24000,7 @@
      2,
      4
     ],
-    "siblings": [
-     "tanh_1_2:3"
-    ],
+    "siblings": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null

@@ -1342,6 +1342,7 @@ def _registered_exception_homes() -> set[str]:
     return homes
 
 
+@pytest.mark.heavy
 def test_package_exception_classes_are_registered_or_allowlisted() -> None:
     """Every exception class in the package has a conscious classification.
 
@@ -1363,6 +1364,7 @@ def test_package_exception_classes_are_registered_or_allowlisted() -> None:
     )
 
 
+@pytest.mark.heavy
 def test_taxonomy_allowlist_has_no_stale_or_shadowing_entries() -> None:
     """The allowlist stays exact: no dead entries, no double-classification.
 

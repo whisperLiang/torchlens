@@ -139,8 +139,18 @@ PINNED_NOOP_WRITERS = {
             "conditional_entry_children",
             "conditional_then_children",
             "has_children",
+            # r3settle e12aa996's child-direction reach repair: the merge
+            # unions the removed duplicate's output reach into the survivor
+            # and the ancestor-cone re-derivation recomputes the closure. On
+            # the recorded axes every merged duplicate already shares the
+            # survivor's reach, so the rewrites are content-equal (reviewed
+            # 2026-08-15; same class as has_internal_source_ancestor above —
+            # the ancestry_closure/graph_topology invariants are the
+            # correctness tripwire, and a no-op pin cannot discharge reads).
+            "has_output_descendant",
             "interventions",
             "kwargs_template",
+            "output_descendants",
         )
     ),
     "7": frozenset(("equivalence_class",)),

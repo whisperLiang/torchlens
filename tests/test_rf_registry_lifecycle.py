@@ -8,6 +8,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -102,6 +103,7 @@ def test_builtin_rule_pack_reimport_is_idempotent() -> None:
     assert before_epoch == _rules._RF_RULES_EPOCH
 
 
+@pytest.mark.heavy
 def test_core_then_extension_rf_files_share_one_deterministic_registry() -> None:
     """Run the adversarial core-then-extension RF order in one fresh process."""
 

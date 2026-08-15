@@ -39,7 +39,8 @@ import pytest
 from torchlens.merged._errors import MergeInputError
 from torchlens.merged._presenter import MergedTrace, _rank_raw_to_final_op_labels
 
-pytestmark = pytest.mark.smoke
+# Module-wide smoke dropped (r3settle2 budget lint): the repo-wide reach-in
+# count scan below measures over the 5s smoke partition; per-test marks.
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 
@@ -203,6 +204,7 @@ def _scan_package() -> dict[str, list[str]]:
     return {package: sorted(sites) for package, sites in found.items()}
 
 
+@pytest.mark.heavy
 def test_trace_reachin_counts_match_the_ledger_exactly() -> None:
     """Per-package trace reach-in counts equal the seeded ledger, both ways."""
 
@@ -233,6 +235,7 @@ def test_trace_reachin_counts_match_the_ledger_exactly() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_fail_closed_packages_hold_zero_reachins() -> None:
     """`merged/` and `distributed/` carry no silent-default Trace reads."""
 
@@ -250,6 +253,7 @@ def test_fail_closed_packages_hold_zero_reachins() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_gate_scanner_detects_planted_offenders() -> None:
     """Planted positives/negatives: the scanner sees the four builtin forms only."""
 
@@ -318,6 +322,7 @@ class _Presenter:
         self.ranks = {0: trace}
 
 
+@pytest.mark.smoke
 def test_declared_seam_refuses_typed_when_absent_or_wrong_type() -> None:
     """The raw->final seam is fail-closed: absence and wrong type both refuse."""
 
@@ -332,6 +337,7 @@ def test_declared_seam_refuses_typed_when_absent_or_wrong_type() -> None:
     assert _rank_raw_to_final_op_labels(0, _ResolvingTrace()) == {"raw_1": "final_1"}
 
 
+@pytest.mark.smoke
 def test_join_ops_refuses_an_unresolvable_recorded_boundary_label() -> None:
     """A recorded back-reference the core cannot resolve refuses, never drops."""
 

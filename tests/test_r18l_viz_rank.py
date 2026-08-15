@@ -208,6 +208,7 @@ def _rank_order_for_seed(seed: str) -> str:
     return out.strip()
 
 
+@pytest.mark.heavy
 def test_m4_rank_order_deterministic_across_hashseed():
     orders = {seed: _rank_order_for_seed(seed) for seed in ("0", "1", "2", "3", "7")}
     assert len(set(orders.values())) == 1, orders

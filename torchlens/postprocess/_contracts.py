@@ -672,6 +672,15 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 # model input reported no input ancestry at all).
                 "has_internal_source_ancestor",
                 "has_input_ancestor",
+                # Reviewed widening (r3settle e12aa996): the duplicate-buffer
+                # merge unions the removed duplicate's child-direction reach
+                # into the survivor, and the ancestor-cone re-derivation
+                # recomputes output reach in reverse topological order —
+                # output_descendants/has_output_descendant were computed at
+                # step 2 from PRE-MERGE edges and shipped stale on the
+                # survivor and every ancestor otherwise.
+                "has_output_descendant",
+                "output_descendants",
                 # B2 residual closure: the buffer-source ancestry fallback
                 # (control_flow.py lines 827-828) copies the source's
                 # input_ancestors onto journaled buffer version rows. Step 4
@@ -717,10 +726,16 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "equivalence_class",
                 "equivalent_ops",
                 "has_input_ancestor",
+                # Reviewed widening (r3settle e12aa996): the merge consults the
+                # removed duplicate's child-direction reach flag, and the cone
+                # re-derivation reads is_output plus each child's
+                # output_descendants (declared below) to rebuild the closure.
+                "has_output_descendant",
                 "input_ancestors",
                 "internal_source_ancestors",
                 "internal_source_parents",
                 "interventions",
+                "is_output",
                 "kwargs_template",
                 "layer_label",
                 "modules",
@@ -1779,10 +1794,16 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "func",
                     "func_name",
                     "has_children",
+                    # r3settle e12aa996: the merge's child-direction reach
+                    # repair reads/rewrites the reach step 1's output-node
+                    # minting seeded (is_output marks the minted rows the
+                    # cone re-derivation anchors on).
+                    "has_output_descendant",
                     "internal_source_parents",
                     "interventions",
                     "is_input",
                     "is_internal_source",
+                    "is_output",
                     "modules",
                     "out",
                     "out_versions_by_child",
@@ -2324,6 +2345,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             frozenset(
                 (
                     "has_input_ancestor",
+                    # r3settle e12aa996: step 6's reach repair rewrites the
+                    # flag step 4's distance marking also maintains.
+                    "has_output_descendant",
                     "input_ancestors",
                 )
             ),
@@ -2448,6 +2472,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "internal_source_parents",
                     "interventions",
                     "kwargs_template",
+                    # r3settle e12aa996: step 6's merge repairs child-direction
+                    # reach; step 9 relabels the closure into final-label space.
+                    "output_descendants",
                     "parent_arg_positions",
                     "parents",
                     "root_ancestors",
@@ -2503,6 +2530,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "conditional_arm_children",
                     "conditional_entry_children",
                     "has_input_ancestor",
+                    # r3settle e12aa996: aggregation reads output reach as
+                    # step 6's merge repair left it.
+                    "has_output_descendant",
                     "parents",
                 )
             ),
@@ -2554,11 +2584,15 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "func_name",
                     "has_children",
                     "has_input_ancestor",
+                    # r3settle e12aa996: the bundle persists output reach as
+                    # step 6's merge repair finalized it.
+                    "has_output_descendant",
                     "input_ancestors",
                     "internal_source_ancestors",
                     "internal_source_parents",
                     "interventions",
                     "kwargs_template",
+                    "output_descendants",
                     "parent_arg_positions",
                     "parents",
                     "root_ancestors",
@@ -3078,7 +3112,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("2", "6"): PinnedPair(
             "columns",
-            frozenset(("output_descendants",)),
+            # r3settle e12aa996 added has_output_descendant: the merge and
+            # cone re-derivation rewrite the reach flag step 2 seeded.
+            frozenset(("has_output_descendant", "output_descendants")),
             "the buffer-merge scrub filters removed labels out of the "
             "output-descendant closures step 2 marks",
         ),

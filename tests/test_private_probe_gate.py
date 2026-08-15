@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.smoke
+# Module-wide smoke dropped (r3settle2 budget lint): the full-package AST
+# ledger scan below measures over the 5s smoke partition; per-test marks.
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 
@@ -153,6 +154,7 @@ def _scan_package() -> dict[str, set[str]]:
     return found
 
 
+@pytest.mark.heavy
 def test_private_torch_touches_match_the_ledger_exactly() -> None:
     """Every private torch touch outside `_torch_compat` is ledgered, both ways."""
 
@@ -179,6 +181,7 @@ def test_private_torch_touches_match_the_ledger_exactly() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_gate_scanner_detects_planted_offenders() -> None:
     """Planted positives: the scanner sees attribute, import, and getattr forms."""
 

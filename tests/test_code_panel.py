@@ -543,12 +543,14 @@ def test_code_panel_svg_renders_through_bounded_runner(monkeypatch: Any) -> None
     invocation outside the bounded subprocess discipline — an unbounded
     ``Digraph.pipe()`` with no timeout and no fresh session can hang the
     caller forever and leave orphaned ``dot`` processes. The panel must go
-    through ``subprocess.run`` with the shared render timeout and
-    ``start_new_session=True``, and ``pipe()`` must not be called at all.
+    through ``run_bounded_subprocess`` (the ONE process-group-bounded spawn
+    seam) with the shared render timeout and a fresh session, and ``pipe()``
+    must not be called at all.
     """
 
     import graphviz
 
+    from torchlens.visualization import _render_utils
     from torchlens.visualization._render_utils import RENDER_TIMEOUT_SECONDS
 
     def _pipe_forbidden(self: Any, *args: Any, **kwargs: Any) -> bytes:
@@ -557,18 +559,25 @@ def test_code_panel_svg_renders_through_bounded_runner(monkeypatch: Any) -> None
     monkeypatch.setattr(graphviz.Digraph, "pipe", _pipe_forbidden)
 
     observed: dict[str, Any] = {}
-    real_run = code_panel.subprocess.run
+    real_bounded = _render_utils.run_bounded_subprocess
 
-    def _spy_run(*args: Any, **kwargs: Any) -> Any:
+    def _spy_bounded(cmd: Any, **kwargs: Any) -> Any:
         observed["timeout"] = kwargs.get("timeout")
-        observed["start_new_session"] = kwargs.get("start_new_session")
-        return real_run(*args, **kwargs)
+        return real_bounded(cmd, **kwargs)
 
-    monkeypatch.setattr(code_panel.subprocess, "run", _spy_run)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _spy_bounded)
+
+    real_popen = _render_utils.subprocess.Popen
+
+    def _spy_popen(*args: Any, **kwargs: Any) -> Any:
+        observed["start_new_session"] = kwargs.get("start_new_session")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(_render_utils.subprocess, "Popen", _spy_popen)
 
     svg = code_panel.render_code_panel_svg("def forward(self, x):\n    return x\n")
 
     assert svg.lstrip().startswith("<?xml") or "<svg" in svg
     assert "__tl_code_panel_node" not in svg or "<svg" in svg
     assert observed["timeout"] == RENDER_TIMEOUT_SECONDS
-    assert observed["start_new_session"] is True
+    assert observed["start_new_session"] is _render_utils._HAS_PROCESS_GROUPS

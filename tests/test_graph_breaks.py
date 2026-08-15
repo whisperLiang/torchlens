@@ -101,5 +101,6 @@ def test_graph_breaks_unknown_runtime_shape_is_typed(
     monkeypatch.setattr(_torch_compat, "HAS_DYNAMO_EXPLAIN", True)
     monkeypatch.setattr(_torch_compat, "run_dynamo_explain", lambda *_args, **_kwargs: object())
 
-    with pytest.raises(GraphBreaksNormalizationError, match="unsupported"):
+    with pytest.raises(GraphBreaksNormalizationError, match="unsupported") as excinfo:
         tl.debug.graph_breaks(_BreakFreeModel(), torch.ones(2, 3))
+    assert excinfo.value.fields["code"] == "graph_breaks_normalization_failed"

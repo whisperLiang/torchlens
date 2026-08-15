@@ -1124,9 +1124,23 @@ def _restore_torch_num_threads() -> Iterator[None]:
     [
         ("resnet50", lambda: tvm.resnet50(weights=None), torch.randn(1, 3, 224, 224)),
         ("vit_b_16", lambda: tvm.vit_b_16(weights=None), torch.randn(1, 3, 224, 224)),
-        ("maxvit_t", lambda: tvm.maxvit_t(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): the nested-schedule sweep on
+        # maxvit_t measures far beyond heavy's 20s ceiling.
+        pytest.param(
+            "maxvit_t",
+            lambda: tvm.maxvit_t(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
         ("mobilenet_v2", lambda: tvm.mobilenet_v2(weights=None), torch.randn(1, 3, 224, 224)),
-        ("densenet201", lambda: tvm.densenet201(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): densenet201's deep module tree
+        # measures minutes under the schedule sweep.
+        pytest.param(
+            "densenet201",
+            lambda: tvm.densenet201(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
     ],
 )
 def test_float_collapse_schedule_monotone_and_nested(

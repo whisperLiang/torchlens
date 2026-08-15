@@ -15,6 +15,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.data_classes.trace import Trace
+from torchlens.visualization import _render_utils
 from torchlens.visualization._rank_layout_internal import layout as rank_layout
 from torchlens.visualization._render_common import GraphvizRenderError
 from torchlens.visualization._render_dot import _strip_render_extension
@@ -303,7 +304,7 @@ def test_shared_render_timeout_preserves_reported_dot_source(
 ) -> None:
     """Shared bundle render helper keeps DOT source after a timeout warning."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_timeout)
     outpath = tmp_path / "timeout_graph"
     dot = graphviz.Digraph()
     dot.node("a")
@@ -349,13 +350,13 @@ def test_rank_layout_failure_preserves_dot_source(
 
 
 def _raise_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-    """Simulate a Graphviz timeout from ``subprocess.run``."""
+    """Simulate a Graphviz timeout from the bounded render runner."""
 
     raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
 
 
 def _raise_called_process_error(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-    """Simulate a Graphviz process failure from ``subprocess.run``."""
+    """Simulate a Graphviz process failure from the bounded render runner."""
 
     raise subprocess.CalledProcessError(returncode=1, cmd=args[0], stderr=b"graphviz failed")
 
@@ -369,6 +370,44 @@ def _write_zero_byte_output(args: Sequence[str], **kwargs: Any) -> subprocess.Co
     return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
 
+def test_draw_bool_flag_kwarg_refuses_non_bool_typed(
+    forward_trace: Trace,
+    tmp_path: Path,
+) -> None:
+    """Bool-typed draw kwargs refuse strings with the stable code (R64-F3).
+
+    ``order_siblings='no'`` used to be silently truthy — OFF spelled as a
+    string meant ON.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="order_siblings") as excinfo:
+        forward_trace.draw(
+            vis_outpath=str(tmp_path / "bool_flag"),
+            vis_save_only=True,
+            order_siblings="no",  # type: ignore[arg-type]
+        )
+    assert excinfo.value.fields["code"] == "visualization_bool_option_invalid"
+
+
+def test_draw_show_containers_vocabulary_refuses_typed(
+    forward_trace: Trace,
+    tmp_path: Path,
+) -> None:
+    """``show_containers`` outside its closed vocabulary refuses typed."""
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="show_containers") as excinfo:
+        forward_trace.draw(
+            vis_outpath=str(tmp_path / "containers_vocab"),
+            vis_save_only=True,
+            show_containers="everything",  # type: ignore[arg-type]
+        )
+    assert excinfo.value.fields["code"] == "visualization_show_containers_invalid"
+
+
 def test_forward_render_timeout_raises_typed_error(
     forward_trace: Trace,
     tmp_path: Path,
@@ -376,7 +415,7 @@ def test_forward_render_timeout_raises_typed_error(
 ) -> None:
     """Forward rendering raises a typed error when Graphviz times out."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_timeout)
 
     with pytest.raises(GraphvizRenderError, match="timed out.*lowering dpi.*direct SVG.*node cap"):
         forward_trace.draw(
@@ -394,7 +433,7 @@ def test_backward_render_timeout_raises_typed_error(
 ) -> None:
     """Backward rendering raises a typed error when Graphviz times out."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_timeout)
 
     with pytest.raises(GraphvizRenderError, match="timed out.*lowering dpi.*direct SVG.*node cap"):
         backward_trace.draw_backward(
@@ -411,7 +450,7 @@ def test_combined_render_timeout_raises_typed_error(
 ) -> None:
     """Combined rendering raises a typed error when Graphviz times out."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_timeout)
 
     with pytest.raises(GraphvizRenderError, match="timed out.*lowering dpi.*direct SVG.*node cap"):
         backward_trace.draw_combined(
@@ -428,7 +467,7 @@ def test_forward_zero_byte_render_raises_typed_error(
 ) -> None:
     """Forward rendering raises when Graphviz reports success with an empty file."""
 
-    monkeypatch.setattr(subprocess, "run", _write_zero_byte_output)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _write_zero_byte_output)
 
     with pytest.raises(GraphvizRenderError, match="zero-byte.*lowering dpi.*direct SVG.*node cap"):
         forward_trace.draw(
@@ -446,7 +485,7 @@ def test_backward_zero_byte_render_raises_typed_error(
 ) -> None:
     """Backward rendering raises when Graphviz reports success with an empty file."""
 
-    monkeypatch.setattr(subprocess, "run", _write_zero_byte_output)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _write_zero_byte_output)
 
     with pytest.raises(GraphvizRenderError, match="zero-byte.*lowering dpi.*direct SVG.*node cap"):
         backward_trace.draw_backward(
@@ -463,7 +502,7 @@ def test_combined_zero_byte_render_raises_typed_error(
 ) -> None:
     """Combined rendering raises when Graphviz reports success with an empty file."""
 
-    monkeypatch.setattr(subprocess, "run", _write_zero_byte_output)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _write_zero_byte_output)
 
     with pytest.raises(GraphvizRenderError, match="zero-byte.*lowering dpi.*direct SVG.*node cap"):
         backward_trace.draw_combined(
@@ -480,7 +519,7 @@ def test_forward_called_process_error_raises_typed_error(
 ) -> None:
     """Forward rendering raises a typed error when Graphviz exits unsuccessfully."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_called_process_error)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_called_process_error)
 
     with pytest.raises(GraphvizRenderError, match="Graphviz failed.*graphviz failed"):
         forward_trace.draw(
@@ -498,7 +537,7 @@ def test_backward_called_process_error_raises_typed_error(
 ) -> None:
     """Backward rendering raises a typed error when Graphviz exits unsuccessfully."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_called_process_error)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_called_process_error)
 
     with pytest.raises(GraphvizRenderError, match="Graphviz failed.*graphviz failed"):
         backward_trace.draw_backward(
@@ -515,7 +554,7 @@ def test_combined_called_process_error_raises_typed_error(
 ) -> None:
     """Combined rendering raises a typed error when Graphviz exits unsuccessfully."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_called_process_error)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_called_process_error)
 
     with pytest.raises(GraphvizRenderError, match="Graphviz failed.*graphviz failed"):
         backward_trace.draw_combined(
@@ -532,7 +571,7 @@ def test_combined_render_keeps_dot_source_on_graphviz_failure(
 ) -> None:
     """Combined rendering preserves DOT source when Graphviz fails."""
 
-    monkeypatch.setattr(subprocess, "run", _raise_called_process_error)
+    monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_called_process_error)
     dot_path = tmp_path / "combined_failed"
 
     with pytest.raises(GraphvizRenderError, match="DOT source was saved"):

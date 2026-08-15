@@ -50,16 +50,29 @@ def _live_count() -> int:
 def test_fork_retention_measured_with_calibration_guards() -> None:
     """Fork object retention stays below a fresh capture (calibrated census)."""
 
-    # Guard 1: a no-op census delta must be zero.
-    base = _live_count()
-    assert _live_count() - base == 0
+    # Guard 1: a no-op census delta must be zero. Ambient churn (an unrelated
+    # object dying between the two counts under a busy full-suite session,
+    # round-3 gate: delta -1) is retried away; a genuinely mis-calibrated
+    # census fails every attempt and still trips.
+    for _ in range(5):
+        base = _live_count()
+        if _live_count() - base == 0:
+            break
+    else:
+        pytest.fail("census never stabilized to a zero no-op delta")
 
-    # Guard 2: a known tracked allocation must be counted exactly.
-    base = _live_count()
-    hold = [[i] for i in range(10_000)]
-    counted = _live_count() - base
-    assert counted == 10_001, f"census mis-calibrated: {counted} != 10001"
-    del hold
+    # Guard 2: a known tracked allocation must be counted exactly (same
+    # bounded-retry discipline for ambient churn; a real over/under-count is
+    # deterministic and fails all attempts).
+    for _ in range(5):
+        base = _live_count()
+        hold = [[i] for i in range(10_000)]
+        counted = _live_count() - base
+        del hold
+        if counted == 10_001:
+            break
+    else:
+        pytest.fail(f"census mis-calibrated: {counted} != 10001")
 
     torch.manual_seed(0)
     model = _Net()

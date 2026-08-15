@@ -114,7 +114,10 @@ MULTI_WRITER_GOLDEN = {
     "func_name": ("1", "6"),
     "has_children": ("1", "6"),
     "has_input_ancestor": ("4", "6"),
-    "has_output_descendant": ("1", "2", "4"),
+    # r3settle e12aa996: the step-6 duplicate-buffer merge unions the removed
+    # duplicate's child-direction reach into the survivor and re-derives the
+    # ancestor cone's output reach (step 2 computed it from PRE-MERGE edges).
+    "has_output_descendant": ("1", "2", "4", "6"),
     "input_ancestors": ("4", "6", "9"),
     "input_to_module_calls": ("1", "11"),
     "internal_source_ancestors": ("6", "9"),
@@ -132,7 +135,8 @@ MULTI_WRITER_GOLDEN = {
     "modules": ("1", "11"),
     "num_passes": ("1", "7"),
     "out": ("1", "11.75", "19"),
-    "output_descendants": ("1", "2", "9"),
+    # Step 6 joined at r3settle e12aa996 (buffer-merge reach repair, above).
+    "output_descendants": ("1", "2", "6", "9"),
     "output_of_module_calls": ("1", "11"),
     "parent_arg_positions": ("1", "6", "9"),
     "parent_params": ("1", "15"),

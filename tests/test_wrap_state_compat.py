@@ -693,6 +693,22 @@ _MEMBERSHIP_TABLE_REVIEWED: dict[tuple[str, str], str] = {
         "UninitializedTensorMixin.__torch_function__, where the C-level "
         "protocol supplies the ORIGINAL func operand; eagerly imported."
     ),
+    # The two torch._export sym-op tables surface only when a suite test
+    # imports torch._export pre-wrap (lazy, not eagerly imported with torch).
+    # Both are consulted exclusively inside torch.export pass/serde machinery,
+    # which is out of capture scope by contract (the same class as the
+    # _MEMBERSHIP_SCAN_SKIP_PREFIXES export/compiler namespaces; TorchLens
+    # never logs torch.export artifacts and capture forces eager). Reviewed
+    # per-table rather than prefix-skipped so a NEW torch._export table still
+    # fails here for review.
+    ("torch._export.pass_base", "_TORCH_SYM_OPS"): (
+        "Export-pass sym-op classifier; consulted only while running "
+        "torch.export passes, out of eager capture scope by contract."
+    ),
+    ("torch._export.serde.serialize", "_SYM_OPS"): (
+        "Export serde sym-op table; consulted only while serializing an "
+        "ExportedProgram, out of eager capture scope by contract."
+    ),
 }
 
 # Compiler/export/quantization namespaces are out of capture scope by contract

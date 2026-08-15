@@ -1054,7 +1054,9 @@ _LIFECYCLE_CLASSES = (
 """Every lifecycle class, in declaration order. The union must be exact."""
 
 
-@pytest.mark.smoke
+# heavy, not smoke (r3settle2 budget lint): the whole-process state scan
+# measures ~9-10s after the fixwave-2 inventory growth.
+@pytest.mark.heavy
 def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     """Every mutable module global in the PACKAGE has exactly one lifecycle class.
 
@@ -1081,7 +1083,9 @@ def test_global_state_inventory_is_classified_and_shrink_only() -> None:
     assert not stale, f"inventory rows no longer present in the package: {stale}"
 
 
-@pytest.mark.smoke
+# heavy, not smoke (r3settle2 budget lint): same whole-process scan cost
+# as the shrink-only inventory test above (~10s).
+@pytest.mark.heavy
 def test_weakly_held_state_is_exactly_the_declared_ledger() -> None:
     """The weak/strong split of every inventory member is frozen and exact.
 

@@ -89,7 +89,11 @@ def _diff_summary(expected: str, actual: str, limit: int = 60) -> str:
     return body
 
 
-@pytest.mark.smoke
+# heavy, not smoke (r3settle2 budget lint): the family's ONE batch
+# subprocess (all six axes generated pre-wrap in a single isolated
+# interpreter, the SF-53 design) costs ~7-9s attributed to the first
+# cell -- over the 5s smoke partition, inside heavy's 5-20s band.
+@pytest.mark.heavy
 @pytest.mark.parametrize("model_axis", MODEL_AXES)
 def test_public_surface_matches_golden(model_axis: str) -> None:
     """The full public object surface is byte-identical to the golden.
@@ -139,7 +143,9 @@ def test_public_surface_matches_golden(model_axis: str) -> None:
         )
 
 
-@pytest.mark.smoke
+# heavy with the family above: first-caller cache fill plus the fresh
+# single-axis pass exceeds the smoke partition on its own.
+@pytest.mark.heavy
 def test_surface_snapshot_is_deterministic() -> None:
     """Two independent isolated generation passes are byte-identical.
 
