@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import pickle
+import pickletools
 import platform
 import shutil
 import subprocess
@@ -79,10 +80,23 @@ if TYPE_CHECKING:
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"
 # Coarse anti-DoS ceiling on ``metadata.pkl`` (B8-16), for parity with the JSON
-# boundary's byte ceiling. Structural trace metadata (tensor payloads live in
-# separate safetensors blobs) never approaches this, so the cap only refuses an
-# absurd artifact; it is deliberately generous to avoid refusing a real save.
-_MAX_METADATA_PKL_BYTES = 4 * 1024**3
+# boundary's byte ceiling (512 MiB, ``_json._MAX_JSON_BYTES``). Structural trace
+# metadata (tensor payloads live in separate safetensors blobs) never approaches
+# this, so the cap only refuses an absurd artifact; it is deliberately generous
+# to avoid refusing a real save.
+_MAX_METADATA_PKL_BYTES = 512 * 1024**2
+# Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
+# bound allocation -- a pickle of tiny values expands ~5x its byte size into RSS
+# BEFORE any structural check can refuse it (measured: 76 MiB of ints -> ~390 MiB;
+# the old 4 GiB byte cap projected to ~20 GiB). This is the same lesson the JSON
+# boundary's ``_MAX_JSON_NODES`` prescan already encodes, carried to the sibling
+# pickle boundary. The prescan walks the opcode stream (pickletools.genops, no
+# object allocation) with an early stop, so its own worst case is bounded CPU
+# (~0.6 us/opcode, <1 min at the ceiling), never unbounded memory.
+_MAX_METADATA_PKL_OPCODES = 64_000_000
+# Prescan only files large enough to matter: below this, worst-case expansion is
+# a few hundred MiB and the prescan would tax every real load for nothing.
+_METADATA_PKL_PRESCAN_BYTES = 8 * 1024**2
 # Belt bound on the persisted PARTIAL failure-reason sentinel (B8-12).
 _MAX_PARTIAL_REASON_CHARS = 200
 _BLOB_TENSOR_KEY = "data"
@@ -1311,11 +1325,23 @@ def _load_trace_payload(
                     f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
                     "structurally implausible artifact."
                 )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, metadata_path)
             scrubbed_state = _RenameAwareUnpickler(
                 handle,
                 trust_custom_callables=trust_custom_callables,
                 allowed_custom_callable_modules=allowed_custom_callable_modules,
             ).load()
+        if not isinstance(scrubbed_state, dict):
+            # R65/F10: without this guard a corrupt/hostile payload escapes
+            # tl.load() as a raw stdlib TypeError/ValueError from the downstream
+            # dict() walk, naming a "dictionary update sequence element".
+            raise TorchLensIOError(
+                f"Bundle metadata at {metadata_path} is not a metadata mapping "
+                f"(got {type(scrubbed_state).__name__}); the artifact is corrupt or "
+                "hand-edited. Remedy: re-save the trace with tl.save().",
+                code="metadata_payload_not_a_mapping",
+            )
     except TorchLensIOError:
         raise
     except (pickle.UnpicklingError, EOFError) as exc:
@@ -2293,6 +2319,8 @@ def _load_unified_bundle(
                     f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
                     "structurally implausible artifact."
                 )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, legacy_pickle_path)
             bundle = _RenameAwareUnpickler(handle).load()
     except (
         pickle.UnpicklingError,
@@ -3812,6 +3840,53 @@ def _eager_verify_blob_payloads(
             raise TorchLensIOError(
                 f"Blob {blob_path} does not contain the expected {_BLOB_TENSOR_KEY!r} tensor entry."
             )
+
+
+def _prescan_metadata_pickle_opcodes(handle: Any, metadata_path: Path) -> None:
+    """Refuse a metadata pickle whose opcode count exceeds the allocation ceiling.
+
+    The byte ceiling alone does not bound allocation (R60/F6): a pickle packed
+    with tiny values expands ~5x its byte size into RSS before any structural
+    check can refuse it. Walking the opcode stream with ``pickletools.genops``
+    allocates no payload objects, so the count is established BEFORE the
+    unpickler materializes anything -- the pickle twin of the JSON boundary's
+    ``_MAX_JSON_NODES`` prescan. The handle is rewound for the real unpickle.
+
+    Parameters
+    ----------
+    handle:
+        Open binary handle positioned at the start of the pickle stream.
+    metadata_path:
+        Path named in refusals.
+
+    Raises
+    ------
+    TorchLensIOError
+        If the opcode count exceeds the ceiling or the stream does not parse.
+    """
+
+    opcode_count = 0
+    try:
+        for _opcode, _arg, _pos in pickletools.genops(handle):
+            opcode_count += 1
+            if opcode_count > _MAX_METADATA_PKL_OPCODES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {metadata_path} exceeds the "
+                    f"{_MAX_METADATA_PKL_OPCODES}-opcode allocation ceiling; refusing "
+                    "to load a structurally implausible artifact.",
+                    code="metadata_object_count_exceeded",
+                )
+    except TorchLensIOError:
+        raise
+    except Exception as exc:
+        # A stream genops cannot parse is a stream the unpickler cannot parse:
+        # refuse it on the same integrity channel the unpickler uses.
+        raise TorchLensIOError(
+            f"Failed to load bundle metadata from {metadata_path}.",
+            code="bundle_metadata_integrity_refused",
+        ) from exc
+    finally:
+        handle.seek(0)
 
 
 def _python_major_mismatch(manifest: Manifest) -> bool:

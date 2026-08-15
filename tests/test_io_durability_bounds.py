@@ -377,3 +377,41 @@ def test_loads_bounded_refuses_nonfinite_constants() -> None:
     for payload in ('{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}'):
         with pytest.raises(json.JSONDecodeError, match="non-finite"):
             json_mod.loads_bounded(payload)
+
+
+# --------------------------------------------------------------------------- #
+# R60/F6: metadata.pkl object-count ceiling + R65/F10 typed non-mapping guard  #
+# --------------------------------------------------------------------------- #
+
+
+def test_metadata_pkl_opcode_ceiling_refuses_object_bomb(tmp_path: Path, monkeypatch) -> None:
+    """A metadata pickle packed with tiny values refuses on opcode count.
+
+    Fail-before: the byte cap admitted a pickle whose ~5x RSS expansion happened
+    entirely BEFORE any structural check (measured 76 MiB of ints -> ~390 MiB;
+    the old 4 GiB byte cap projected ~20 GiB) and the eventual refusal escaped
+    as a raw stdlib TypeError.
+    """
+
+    spec = _save(tmp_path)
+    (spec / "metadata.pkl").write_bytes(pickle.dumps([0] * 100_000))
+    monkeypatch.setattr(bundle_mod, "_METADATA_PKL_PRESCAN_BYTES", 0)
+    monkeypatch.setattr(bundle_mod, "_MAX_METADATA_PKL_OPCODES", 1_000)
+    with pytest.raises(TorchLensIOError, match="opcode allocation ceiling") as excinfo:
+        tl.load(str(spec))
+    assert excinfo.value.fields["code"] == "metadata_object_count_exceeded"
+
+
+def test_metadata_pkl_non_mapping_payload_refuses_typed(tmp_path: Path) -> None:
+    """A non-mapping metadata payload refuses typed, not as a raw stdlib error.
+
+    Fail-before: ``tl.load`` on a bundle whose ``metadata.pkl`` held a plain
+    list escaped as ``ValueError: dictionary update sequence element #0 ...``
+    from the downstream dict() walk -- untyped, no code, no remedy.
+    """
+
+    spec = _save(tmp_path)
+    (spec / "metadata.pkl").write_bytes(pickle.dumps([[0] * 3] * 3))
+    with pytest.raises(TorchLensIOError, match="not a metadata mapping") as excinfo:
+        tl.load(str(spec))
+    assert excinfo.value.fields["code"] == "metadata_payload_not_a_mapping"
