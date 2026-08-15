@@ -335,12 +335,22 @@ directory = "tests/generated_outputs/reports/coverage_html"
 output = "tests/generated_outputs/coverage.lcov"
 
 [tool.mypy]
+# STRICTNESS RATCHET (R68, grind r4): the flags below only ever FLIP TO TRUE,
+# each landed at measured zero cost against the pinned mypy; the set is locked
+# by tests/test_mypy_ratchet_governance.py (narrowing any of them goes red
+# there). Next rungs, measured 2026-08-15 and relayed to the source lane:
+# disallow_untyped_defs (3 sites: _runnable_output_contracts.py:547,:563,
+# data_classes/op.py:3647) and warn_unused_ignores (63 dead ignores in 31
+# files). Flip each here in the SAME change that clears its sites.
 python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
 # Check bodies of unannotated functions so the package ratchet catches local drift.
 check_untyped_defs = true
+no_implicit_optional = true
+disallow_incomplete_defs = true
+strict_equality = true
 disallow_untyped_defs = false
 
 [tool.ruff]
