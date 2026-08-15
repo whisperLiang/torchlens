@@ -400,6 +400,11 @@ def test_r39_candidate_children_expose_new_holder_edges() -> None:
     """The one-edge frame belt reaches each witnessable r39 holder's generator."""
 
     children = rng_utils.host_nondeterminism_monitor._numpy_frame_candidate_children
+    # Warm the memoized factory HERE: a COLD lru wrapper's tp_traverse exposes no
+    # cache dict yet (nothing cached = nothing to witness, correctly), so this
+    # assertion is only meaningful on a warm wrapper. Relying on another test to
+    # have warmed it made this assertion order-dependent (fw3 settle red).
+    _lru_get_gen()
     assert _LRU_HIDDEN["gen"] in children(_lru_get_gen)
     assert _MAPPING_PROXY["gen"] in children(_MAPPING_PROXY)
     assert _CONTEXT_VAR.get() in children(_CONTEXT_VAR)

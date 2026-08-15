@@ -7,7 +7,7 @@ import inspect
 import threading
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -643,12 +643,19 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
         try:
             _warn_escapes()
         except Exception:
-            with suppress(Exception):
+            # Bare try/except (NOT contextlib.suppress): per the rebind NOTE
+            # above, this body runs with completeness_witness's globals, where
+            # `suppress` is not bound -- the name lookup itself NameError'd and
+            # replaced the user's in-flight exception (the exact bug this arm
+            # exists to prevent).
+            try:
                 inflight.add_note(
                     "TorchLens scalar-escape advisory suppressed (a warnings "
                     f"filter raised it): {state.count} tensor-to-Python scalar "
                     "escape(s) were observed during this failed capture."
                 )
+            except Exception:
+                pass
         raise
     else:
         _restore_scalar_belt()
