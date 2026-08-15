@@ -22,6 +22,7 @@ from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
 # through the module attribute so the patch seam has one home.
 from . import _condensed_flow
 from ._condensed_flow import (  # noqa: F401
+    JUNCTION_FUNC_NAMES,
     ChildCondensedFlowGraph,
     FlowIntervalFlags,
     ModuleCollapseSignals,
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
 
 GENERIC_CONTAINER_CLASSES = frozenset({"Sequential", "ModuleList", "ModuleDict", "ParameterList"})
 _COUNT_MISMATCH_WARNING_EMITTED = False
-JUNCTION_FUNC_NAMES = frozenset({"__add__", "add", "cat", "concat", "concatenate"})
 
 
 def _indexed_child_stem(name: str) -> str | None:

@@ -66,7 +66,6 @@ from ..ir.container import (
 from ..ir.container_registry import ContainerRecord, ContainerSnapshot, Role
 from ..quantities import Duration
 from ..utils.display import _timed_phase, _vprint, in_notebook, int_list_to_compact_str
-from ..viz import batch_summary
 from ._label_format import (
     format_memory,
     format_module_kwargs,
@@ -839,7 +838,6 @@ __all__ = [
     "_vprint",
     "apply_theme_to_spec",
     "base64",
-    "batch_summary",
     "build_render_ir",
     "finalize_forward_regions",
     "cast",

@@ -780,6 +780,10 @@ def _render_raw_input(
         strings = cast(Sequence[str], sequence)
         if not include_more:
             strings = strings[:max_items]
+        # Lazy: ..viz top-imports this package, so an import-time edge back
+        # into ..viz would mint a bidirectional package cycle (b5 R51).
+        from ..viz import batch_summary
+
         return {
             "label": batch_summary.text_table(strings, max_items),
             "tooltip": _tooltip_repr(strings),
@@ -973,6 +977,9 @@ def _render_raw_input_image_batch(
     more_count = total - min(total, max_items)
     if more_count > 0:
         label_lines.append(f"+{more_count} more")
+    # Lazy for the same package-cycle reason as the text-table branch above.
+    from ..viz import batch_summary
+
     try:
         montage = batch_summary.montage(images, max_items)
         montage.save(image_path)
