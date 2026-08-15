@@ -55,7 +55,7 @@ from ...utils.tensor_utils import (
     is_functorch_wrapped_tensor,
 )
 from . import module_stack as _mstack
-from ._held_refs import normalize_held_torch_function_refs
+from ._held_refs import normalize_held_torch_function_refs, register_released_model
 from ._tl import (
     begin_label_session,
     clear_meta,
@@ -376,10 +376,22 @@ def _restore_undecorated_forward(module: nn.Module) -> None:
     if current_forward is None or not is_forward_call_decorated(current_forward):
         return
     original_forward = getattr(current_forward, "__wrapped__", None)
-    if original_forward is not None:
-        module.forward = original_forward
-    else:
+    if original_forward is None:
         module.__dict__.pop("forward", None)
+        return
+    # When the recovered forward is just the module's own class method, drop
+    # the instance override instead of pinning the bound method as an instance
+    # attribute: an instance-level forward churns the implementation
+    # fingerprint (`_fingerprint_model_implementation` folds it), so the
+    # documented trace -> release_model -> trace(cache=True) workflow missed
+    # the cache on every released model.
+    original_func = getattr(original_forward, "__func__", None)
+    if original_func is not None and original_func is inspect.getattr_static(
+        type(module), "forward", None
+    ):
+        module.__dict__.pop("forward", None)
+    else:
+        module.forward = original_forward
 
 
 def _refuse_release_during_active_capture() -> None:
@@ -446,9 +458,9 @@ def release_model(model: nn.Module) -> None:
     It also normalizes plain module attributes holding epoch-mismatched torch
     function references (``self.act = F.relu`` captured in the other wrap
     state) to the values currently live at their public names, so
-    ``pickle``/``torch.save`` succeed at release time; changing the wrap
-    state afterwards (``unwrap_torch()``/re-wrap) re-introduces the mismatch
-    until ``release_model`` is called again.
+    ``pickle``/``torch.save`` succeed at release time, and registers the
+    model so a later wrap-state flip (``unwrap_torch()``/re-wrap)
+    re-normalizes it: a released model stays serializable in every epoch.
 
     The refusal check and the release run under ``_capture_admission_lock``
     (the same seam the ``unwrap_torch`` guard uses): a capture racing this
@@ -460,14 +472,23 @@ def release_model(model: nn.Module) -> None:
     with _state._capture_admission_lock:
         _refuse_release_during_active_capture()
         modules = tuple(model.modules())
-        for module in modules:
-            _restore_undecorated_forward(module)
-            for attr_name in tuple(module.__dict__):
-                if attr_name.startswith("tl_"):
-                    module.__dict__.pop(attr_name, None)
-            clear_meta(module)
-            normalize_held_torch_function_refs(module)
-        _state.release_model_prep(model, modules)
+        try:
+            for module in modules:
+                _restore_undecorated_forward(module)
+                for attr_name in tuple(module.__dict__):
+                    if attr_name.startswith("tl_"):
+                        module.__dict__.pop(attr_name, None)
+                clear_meta(module)
+                normalize_held_torch_function_refs(module)
+        finally:
+            # Evict preparation bookkeeping on EVERY exit: a fault (or ^C)
+            # mid-loop otherwise left a half-stripped tree the registry still
+            # certified as prepared, and the next capture took the
+            # already-prepared fast path and silently emitted incomplete
+            # module containment. Evicted, the next trace re-prepares the
+            # tree from scratch as the docstring promises.
+            _state.release_model_prep(model, modules)
+        register_released_model(model)
 
 
 def _prepare_model_once(model: nn.Module) -> None:

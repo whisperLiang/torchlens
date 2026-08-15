@@ -20,13 +20,17 @@ repair stale bindings. Coverage is now:
    `torchlens.backends.torch.wrappers.wrap_torch()` before creating aliases, closures, partials,
    or object-held torch callables.
    Then those bindings capture the wrappers directly and no rescue is needed.
-   The MIRROR direction is a declared residual: a plain attribute read taken WHILE wrappers are
-   installed (`held = F.relu`) hands the user the wrapper object, and
+   The MIRROR direction is a declared residual for BARE references: a plain attribute read taken
+   WHILE wrappers are installed (`held = F.relu`) hands the user the wrapper object, and
    `torchlens.backends.torch.wrappers.unwrap_torch()` does not repair user-held wrapper references
-   — TorchLens never crawls or mutates user objects. The held reference stays callable (it
-   delegates to the original) but is identity-poisoned after unwrap: `held is F.relu` is `False`
-   and pickling it (or any object holding it) fails. Recovery requires re-reading the attribute
-   after unwrap, or a fresh process.
+   — TorchLens never crawls or mutates user objects during capture. The held reference stays
+   callable (it delegates to the original) but is identity-poisoned after unwrap: `held is F.relu`
+   is `False` and pickling it (or any object holding it) fails. For references held on a MODEL,
+   `tl.release_model(model)` is the shipped repair: it normalizes held torch-function attributes
+   (one level of exact builtin containers, namedtuples included, dict keys included) to the
+   currently-live values, and registers the model so every later wrap-state flip re-normalizes it
+   — released models stay serializable in every epoch. Bare references held outside a model still
+   require re-reading the attribute after unwrap, or a fresh process.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
    `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`

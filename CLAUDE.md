@@ -343,7 +343,10 @@ print(tl.compat.report(model, x).to_markdown())
   inside `forward` remain disclosed by the compat row.
   Gated by `HAS_SET_STANCE` / `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - Stale pre-wrap torch references (safety net, stage 2): the sys.modules crawler is DELETED —
-  TorchLens never crawls `__main__`, reads module sources, or mutates user objects. A capture with
+  TorchLens never crawls `__main__`, reads module sources, or mutates user objects during capture
+  (the one sanctioned, user-invoked exception: `tl.release_model` normalizes held torch-function
+  attributes on the released model, and wrap-state flips re-normalize registered released
+  models). A capture with
   an escape signal (provenance warning / detector diagnostic / output-attribution failure) is
   re-run ONCE with a `TorchFunctionMode` net that redirects stale calls to their exact wrappers
   (`backends/torch/rescue.py`); the result is disclosed (`capture_verified=False`, reason
