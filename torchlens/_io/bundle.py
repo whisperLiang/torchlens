@@ -36,6 +36,8 @@ from .._errors import InvalidArgumentError
 from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
 from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
+from ..errors import TorchLensWarning
+from ..utils.display import user_stacklevel
 from . import (
     MIN_TLSPEC_VERSION,
     TLSPEC_VERSION,
@@ -598,11 +600,14 @@ def save(
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
             include_source=include_source,
-            custom_attributes_disclosure=_custom_attributes_disclosure(
-                trace,
-                included=include_custom_attributes and sparse_run_descriptor is None,
+            custom_attributes_disclosure=(
+                custom_attributes_disclosure := _custom_attributes_disclosure(
+                    trace,
+                    included=include_custom_attributes and sparse_run_descriptor is None,
+                )
             ),
         )
+        _warn_custom_attribute_embedding(custom_attributes_disclosure)
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
             trace=trace,
@@ -3194,6 +3199,95 @@ def _fast_copy_tensor_blob(
 
 _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP = 100
 """Bound on the number of distinct top-level key names a disclosure records."""
+
+
+# Structural constructor echoes harvested off stock nn.Module types; their key
+# names carry no user secrets, so they do not by themselves trigger the
+# save-time embedding warning below.
+_BORING_CUSTOM_ATTRIBUTE_KEYS = frozenset(
+    {
+        "add_zero_attn",
+        "affine",
+        "batch_first",
+        "bias",
+        "bidirectional",
+        "ceil_mode",
+        "count_include_pad",
+        "d_model",
+        "dilation",
+        "dim_feedforward",
+        "dropout",
+        "elementwise_affine",
+        "embed_dim",
+        "embedding_dim",
+        "end_dim",
+        "eps",
+        "groups",
+        "hidden_size",
+        "in_channels",
+        "in_features",
+        "inplace",
+        "input_size",
+        "kdim",
+        "kernel_size",
+        "max_norm",
+        "momentum",
+        "nhead",
+        "norm_type",
+        "normalized_shape",
+        "num_embeddings",
+        "num_features",
+        "num_heads",
+        "num_layers",
+        "out_channels",
+        "out_features",
+        "output_padding",
+        "p",
+        "padding",
+        "padding_idx",
+        "padding_mode",
+        "return_indices",
+        "scale_grad_by_freq",
+        "sparse",
+        "start_dim",
+        "stride",
+        "track_running_stats",
+        "vdim",
+    }
+)
+_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW = 8
+
+
+def _warn_custom_attribute_embedding(disclosure: Mapping[str, Any]) -> None:
+    """Tell the SAVER that module attributes are shipping in the artifact (R62).
+
+    The manifest disclosure lands INSIDE the file the user is about to hand
+    out -- the one reader guaranteed not to see it is the person saving. A
+    model carrying ``self.hf_token = os.environ["HF_TOKEN"]`` previously saved
+    with zero terminal output; the token shipped silently. One warning at save
+    time, attributed to the user's save call, changes no default and no
+    persisted byte.
+    """
+
+    if not disclosure.get("included"):
+        return
+    interesting = [
+        key
+        for key in disclosure.get("top_level_keys", ())
+        if key not in _BORING_CUSTOM_ATTRIBUTE_KEYS
+    ]
+    if not interesting:
+        return
+    preview = ", ".join(interesting[:_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW])
+    if len(interesting) > _CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW:
+        preview += ", ..."
+    warnings.warn(
+        f"This save embeds {len(interesting)} custom module attribute(s) verbatim "
+        f"in the artifact ({preview}). Review them before sharing the bundle; pass "
+        "include_custom_attributes=False to withhold the values.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
+    )
 
 
 def _custom_attributes_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:

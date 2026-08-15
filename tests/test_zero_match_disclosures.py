@@ -167,3 +167,76 @@ def test_zero_match_halt_and_save_record_their_slots() -> None:
     records = log.annotations.get("unmatched_capture_selectors") or ()
     slots = {record["slot"] for record in records}
     assert slots == {"save", "halt"}
+
+
+def test_secret_bearing_save_warns_the_saver(tmp_path) -> None:
+    """R62: the save that embeds custom attributes is no longer silent.
+
+    Fail-before: a model carrying ``self.api_token = ...`` saved with zero
+    terminal output; the only disclosure landed INSIDE the artifact being
+    handed out. Structural constructor echoes (in_features, ...) alone never
+    trigger the warning, and include_custom_attributes=False silences it.
+    """
+
+    import warnings
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens.errors import TorchLensWarning
+
+    class _Leaky(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 2)
+            self.api_token = "sk-not-a-real-token"
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(self.linear(x))
+
+    log = tl.trace(_Leaky(), torch.ones(1, 3))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        tl.save(log, tmp_path / "leaky.tlspec")
+    matching = [
+        w
+        for w in caught
+        if issubclass(w.category, TorchLensWarning) and "custom module attribute" in str(w.message)
+    ]
+    assert len(matching) == 1
+    assert "api_token" in str(matching[0].message)
+
+    clean = tl.trace(nn.Sequential(nn.Linear(3, 2)), torch.ones(1, 3))
+    with warnings.catch_warnings(record=True) as caught_clean:
+        warnings.simplefilter("always")
+        tl.save(clean, tmp_path / "clean.tlspec")
+    assert not [w for w in caught_clean if "custom module attribute" in str(w.message)]
+
+    with warnings.catch_warnings(record=True) as caught_optout:
+        warnings.simplefilter("always")
+        tl.save(log, tmp_path / "optout.tlspec", include_custom_attributes=False)
+    assert not [w for w in caught_optout if "custom module attribute" in str(w.message)]
+
+
+def test_persisted_selector_repr_relativizes_absolute_paths() -> None:
+    """R62 LOW: the zero-match ledger goes through the path-relativization belt."""
+
+    import warnings
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        log = tl.trace(
+            nn.Sequential(nn.Linear(3, 2)),
+            torch.ones(1, 3),
+            save=tl.func("/home/someone/secret/cfg.json"),
+        )
+    entries = log.annotations.get("unmatched_capture_selectors", [])
+    assert entries, "expected a zero-match ledger entry"
+    assert "/home/someone" not in entries[0]["selector"]
+    assert "cfg.json" in entries[0]["selector"]
