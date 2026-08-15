@@ -480,7 +480,17 @@ def _check_distance_closure(name: str, entries: list[Any], resolve: Any, key: An
                 and getattr(record, max_field) is not None
             ]
             if not neighbours:
-                continue
+                # The flood seeds ONLY at boundary nodes and propagates along
+                # recorded edges, so a populated non-boundary distance with
+                # zero distance-populated neighbours is FABRICATED (R73
+                # generative-sweep find: the former skip here accepted any
+                # stored distance on a flood-unreached record).
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer '{key(lpl)}': {min_field}/{max_field}=({stored_min}, "
+                    f"{stored_max}) but no recorded {edge_field} carries populated "
+                    f"distances -- the flood cannot have reached this record",
+                )
             expected_min = min(getattr(record, min_field) for record in neighbours) + 1
             expected_max = max(getattr(record, max_field) for record in neighbours) + 1
             if stored_min != expected_min or stored_max != expected_max:
