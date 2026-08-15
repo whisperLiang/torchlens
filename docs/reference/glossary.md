@@ -150,3 +150,148 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 : Portable origin and resolution fields for backend records. They travel with `param_source`,
   `dtype_ref`, and `device_ref`; none should be inferred from a torch-only object when a
   backend-neutral field exists.
+
+## Site selectors
+
+**Label selectors**
+: `tl.label` (exact final label), `tl.contains` (label substring), and `tl.regex` (label
+  regex pattern) select ops by their public labels. `tl.where` filters a table with a
+  predicate callable.
+
+**Structural selectors**
+: `tl.func` / `tl.module` / `tl.in_module` select by callable or module context;
+  `tl.head` selects one attention head; `tl.facet` selects a semantic facet view;
+  `tl.func_transform` selects `torch.func` transform boundary ops; `tl.output` selects
+  model outputs, and `tl.output_at` / `tl.input_at` select a nested output or model-input
+  path.
+
+**Temporal composition**
+: `tl.followed_by` (retroactive successor) and `tl.preceded_by` (lookback predecessor)
+  compose with boolean operators to form temporal predicates over the op stream.
+
+**Backward selectors**
+: `tl.grad_fn` (backward grad_fn), `tl.grad_fn_label` (exact grad_fn label),
+  `tl.grad_input` / `tl.grad_output` (backward event tensors), `tl.in_backward_pass`
+  (one backward pass number), and `tl.without_op` (grad_fns without a paired forward op;
+  the old `tl.intervening` spelling is a deprecated alias that warns).
+
+## Intervention helpers
+
+**Value helpers**
+: `tl.zero_ablate`, `tl.scale`, `tl.add`, `tl.clamp`, `tl.noise` (Gaussian noise),
+  `tl.mean_ablate` (replace with a source mean), `tl.resample_ablate` (sample replacement
+  values from a source tensor), `tl.replace_with` (fixed value), `tl.swap_with` (another
+  site's tensor), `tl.steer` (add a scaled steering direction), `tl.project_onto` /
+  `tl.project_off` (keep or remove the component along a direction), and
+  `tl.splice_module` (call a module as a black-box forward splice). Availability outside
+  the torch backend is narrower; see the per-backend rosters in the backends guide.
+
+**Backward helpers**
+: `tl.bwd_hook` builds a live/rerun-only backward hook; `tl.grad_zero`, `tl.grad_scale`,
+  `tl.grad_clamp`, `tl.grad_clip`, and `tl.grad_noise` edit gradient tensors during the
+  backward pass.
+
+**Replay verbs**
+: `tl.do` applies a one-shot intervention to a captured log; `tl.push` pushes an edit
+  downstream through the recorded graph (DAG replay) and `tl.push_from` pushes from a
+  pre-mutated site; `tl.run` performs a full-forward run with the log's active
+  intervention spec; `tl.sweep` captures one intervened trace per swept replacement
+  value. `tl.replay`, `tl.replay_from`, and `tl.rerun` are deprecated aliases of `push`,
+  `push_from`, and `run`.
+
+## Extraction, observers, and admin
+
+**Extraction helpers**
+: `tl.pluck` returns the saved out for one layer, `tl.extract` for many layers, and
+  `tl.extract_dataset` extracts outs from an iterable dataset in batches. `tl.peek` and
+  `tl.batched_extract` are deprecated aliases that warn.
+
+**Observers**
+: `tl.tap` creates a tap observer for a site; `tl.span` records a named observer span
+  around captures or hook execution (`tl.record_span` is its deprecated alias);
+  `tl.record_kpi_in_graph` records a user KPI on the active capture graph;
+  `tl.register_tensor_connection` registers a manual parent-child tensor edge during
+  capture; `tl.decide_recording_of_batch` retroactively keeps or discards a captured
+  batch log.
+
+**Validation entry**
+: `tl.validate(model, x, scope=...)` validates a model/input pair for a requested scope
+  (for example `"saved"` or `"receptive_field"`), capturing what it needs itself.
+
+**Session admin**
+: `tl.release_model` releases a traced model from persistent TorchLens preparation
+  (restoring whole-model pickle / `torch.save` serializability); `tl.clear_capture_cache`
+  empties the capture cache; `tl.list_logs` / `tl.reset_naming_counter` manage log
+  bookkeeping.
+
+## Persistence, containers, and namespaces
+
+**Save / load**
+: `tl.save` persists a `Trace` into a portable `.tlspec` directory bundle at a chosen
+  level; `tl.load` loads a `.tlspec` object with eager tensor materialization.
+  `tl.PayloadLoadHints` carries backend-specific payload materialization hints
+  (`tl.JaxPayloadLoadHint` is the JAX-specific form).
+
+**Options**
+: `tl.options` groups the public option dataclasses: `CaptureOptions`, `SaveOptions`,
+  `VisualizationOptions`, `ReplayOptions`, `InterventionOptions`, `StreamingOptions`.
+
+**Structural hash**
+: `tl.hash` is the provisional structural-hash namespace; `tl.assert_unchanged` asserts
+  a model still matches a pinned address-free structural hash.
+
+**Container registration**
+: `tl.register_container` registers a custom container type (flatten/unflatten pair) for
+  capture and reconstruction. `tl.Container` is the computed view over a captured Python
+  output container.
+
+**Capture-product bases**
+: `tl.CapturedRun` is the shared base for uncooked and cooked capture projections;
+  `tl.ActivationLookup` is the protocol for raw-label/pass/address activation lookup
+  consumers.
+
+**Namespaces**
+: `tl.fastlog` is the sparse predicate-recording namespace behind `tl.record`;
+  `tl.facets` is the semantic facet namespace (canonical home `torchlens.semantic`);
+  `tl.export` holds static export helpers; `tl.bundle(...)` / `tl.Bundle` build aligned
+  Trace collections and `tl.show_bundle_graph` renders a bundle's graph.
+
+## Quantities and typed errors
+
+**Quantities**
+: `tl.Quantity` is the marker base for numeric quantity wrappers with unit-aware
+  display: `tl.Bytes` (memory), `tl.Duration` (seconds), `tl.Flops` (floating-point
+  operations), `tl.Macs` (multiply-accumulates).
+
+**Lookup and reentrancy errors**
+: `tl.AmbiguousOpLookupError` is raised when a bare Op lookup matches multiple
+  pass-qualified Ops; `tl.ReentrantTraceError` when a trace is started while another
+  trace is active.
+
+## Distributed capture and cross-rank merging
+
+**Distributed arming**
+: `tl.distributed.arm()` opts a process into first-class capture of explicit
+  `torch.distributed` collectives (required at process start for MPMD / spawn-rank
+  programs; SPMD processes may arm lazily at capture entry). Sharded state (DTensor,
+  tensor/pipeline parallel) still refuses typed at capture entry.
+
+**Collective boundary op**
+: A captured op whose portable `annotations["collective"]` carries the
+  `collective_boundary_v1` payload: correlation key, role-indexed dual geometry, event
+  disclosures, witness fields, and lifetime evidence.
+
+**merge_ranks / MergedTrace**
+: `tl.merge_ranks([trace_or_path, ...])` stitches N rank-local captures into a
+  `MergedTrace` presenter (never a `Trace` subclass) at their explicit collective
+  boundaries; loads rerun the derivation and refuse tampered artifacts typed.
+
+**merge_report**
+: `tl.merge_report(...)` is the graph-free merge diagnostic that derives alignment and
+  consistency verdicts without constructing a merged graph, and never raises on
+  conflicts.
+
+**Merge vocabularies**
+: `MergeAlignment`, `BoundaryConsistency`, `MergeValueStatus`, and `MergedErrorCode` are
+  frozen vocabularies in `torchlens.merged`, release-gated against
+  [the merged-trace contract](merged_trace_contract.md).
