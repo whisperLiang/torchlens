@@ -1350,10 +1350,15 @@ def _validate_forward_pass_torch(
     prior_deterministic = torch.are_deterministic_algorithms_enabled()
     prior_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     prior_num_threads = torch.get_num_threads()
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    if num_threads is not None:
-        torch.set_num_threads(num_threads)
     try:
+        # R07-2 (install-move half): both process-global installs run INSIDE
+        # the restoring try -- a raising set_num_threads used to strand the
+        # already-flipped deterministic stance for the life of the process
+        # (the finally below never ran). Restoring to the just-snapshotted
+        # priors is idempotent when an install never landed.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if num_threads is not None:
+            torch.set_num_threads(num_threads)
         ground_truth_model, plain_attr_snapshot = _model_for_ground_truth_validation(model)
         if plain_attr_snapshot is not None and not plain_attr_snapshot.is_complete:
             warnings.warn(

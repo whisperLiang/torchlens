@@ -386,6 +386,33 @@ def test_validation_restores_prior_deterministic_algorithms_setting() -> None:
         torch.use_deterministic_algorithms(prior_enabled, warn_only=prior_warn_only)
 
 
+def test_validation_stance_restored_when_thread_pin_install_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R07-2 (install-move half): the deterministic-algorithms stance was
+    installed BEFORE the restoring ``try``, so a raising ``set_num_threads``
+    stranded the process-global stance for the life of the process."""
+
+    model = nn.Linear(4, 4).eval()
+    x = torch.randn(2, 4)
+
+    prior_enabled = torch.are_deterministic_algorithms_enabled()
+    prior_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+
+    def _boom(_n: int) -> None:
+        raise RuntimeError("hostile thread pin")
+
+    try:
+        torch.use_deterministic_algorithms(False)
+        monkeypatch.setattr(torch, "set_num_threads", _boom)
+        with pytest.raises(RuntimeError, match="hostile thread pin"):
+            user_funcs._validate_forward_pass_torch(model, (x,), num_threads=1)
+        monkeypatch.undo()
+        assert torch.are_deterministic_algorithms_enabled() is False
+    finally:
+        torch.use_deterministic_algorithms(prior_enabled, warn_only=prior_warn_only)
+
+
 def test_validation_default_threads_and_explicit_single_thread_pin_restore() -> None:
     """LOAD-BEARING: default forwards use process threads; explicit pin restores.
 
