@@ -609,6 +609,44 @@ def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
         )
 
 
+# Visualization option fields that accept ONLY real bools. Strings such as
+# ``'yes'`` or ``'no'`` used to be accepted silently, and ``'no'``/``'false'``
+# truthily meant ON (R64-F3).
+_VISUALIZATION_BOOL_FIELDS = (
+    "save_only",
+    "show_cone",
+    "show_legend",
+    "for_paper",
+    "return_graph",
+    "order_siblings",
+)
+
+
+def _validate_bool_option(name: str, value: Any) -> None:
+    """Validate a bool-only visualization option value.
+
+    Parameters
+    ----------
+    name:
+        Public option field name for the diagnostic.
+    value:
+        Candidate option value.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real ``bool``.
+    """
+
+    if not isinstance(value, bool):
+        raise InvalidArgumentError(
+            f"Visualization {name}={value!r} is not a bool",
+            code="visualization_bool_option_invalid",
+            remedy=f"set {name} to True or False",
+            argument=name,
+        )
+
+
 def _validate_capture_values(values: Mapping[str, Any]) -> None:
     """Validate resolved capture field values.
 
@@ -1626,6 +1664,8 @@ class VisualizationOptions:
         _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
+        for bool_field in _VISUALIZATION_BOOL_FIELDS:
+            _validate_bool_option(bool_field, values[bool_field])
         _set_frozen_fields(self, _VISUALIZATION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
@@ -1695,6 +1735,8 @@ class VisualizationOptions:
         _validate_buffer_visibility(values["show_buffers"])
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
+        for bool_field in _VISUALIZATION_BOOL_FIELDS:
+            _validate_bool_option(bool_field, values[bool_field])
         _set_frozen_fields(instance, _VISUALIZATION_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)
         return instance

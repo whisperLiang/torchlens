@@ -16,6 +16,7 @@ from typing import Any
 
 from ..._errors import InvalidArgumentError
 from ...utils.display import atomic_write_text, user_stacklevel
+from .. import _render_utils
 from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
@@ -870,9 +871,7 @@ def _run_neato(
         rendered_path,
         source_path,
     ]
-    return subprocess.run(
-        cmd, timeout=render_timeout, capture_output=True, text=True, start_new_session=True
-    )
+    return _render_utils.run_bounded_subprocess(cmd, timeout=render_timeout, check=False, text=True)
 
 
 def _run_neato_with_fallbacks(

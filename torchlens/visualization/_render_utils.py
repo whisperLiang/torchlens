@@ -15,6 +15,7 @@ Trace.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import warnings
@@ -128,6 +129,108 @@ _KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", 
 # Default subprocess timeout for Graphviz render calls. Mirrors the
 # legacy literal that lived inside ``_render_dot.draw``.
 RENDER_TIMEOUT_SECONDS = 120
+
+# Grace period between SIGTERM and SIGKILL when a timed-out render's whole
+# process group is torn down. Graphviz exits promptly on SIGTERM; the
+# escalation only matters for a wedged engine (or a plugin it forked) that
+# ignores the polite signal.
+_KILL_GRACE_SECONDS = 0.5
+
+# POSIX process-group support. ``start_new_session`` needs ``os.setsid`` and
+# group teardown needs ``os.killpg``/``os.getpgid``; feature-check instead of
+# parsing platform strings so exotic POSIX-likes degrade the same way Windows
+# does (leader-only kill, matching the historical ``subprocess.run`` cleanup).
+_HAS_PROCESS_GROUPS = all(hasattr(os, name) for name in ("setsid", "killpg", "getpgid"))
+
+
+def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
+    """Tear down ``proc`` and every descendant sharing its process group.
+
+    ``subprocess.run``'s timeout cleanup kills only the direct child, so a
+    forking ``dot`` (plugin loaders, wrapper scripts) leaked grandchildren
+    on every render timeout. SIGTERM the whole group, wait a short grace
+    period, escalate to SIGKILL, and reap the leader. Where process groups
+    are unavailable (Windows), fall back to the historical leader-only kill.
+    """
+
+    pgid: int | None = None
+    if _HAS_PROCESS_GROUPS:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = None
+    if pgid is None:
+        proc.kill()
+    else:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        proc.wait(timeout=_KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL always lands
+        pass
+
+
+def run_bounded_subprocess(
+    cmd: list[str],
+    *,
+    timeout: float,
+    check: bool = True,
+    capture_output: bool = True,
+    input: bytes | str | None = None,
+    cwd: str | None = None,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    """Run ``cmd`` bounded by ``timeout``, killing its whole process group.
+
+    The ONE spawn seam for every Graphviz/code-panel subprocess in the
+    visualization package. Mirrors ``subprocess.run`` semantics for the
+    argument subset the render paths use (``check`` raises
+    ``CalledProcessError`` with captured stderr; timeout raises
+    ``TimeoutExpired``), but on timeout or any other exception the entire
+    process group is terminated via :func:`_terminate_process_group`, not
+    just the direct child. Tests monkeypatch this function to simulate
+    Graphviz outcomes.
+    """
+
+    stdin = subprocess.PIPE if input is not None else None
+    pipe = subprocess.PIPE if capture_output else None
+    proc = subprocess.Popen(
+        cmd,
+        stdin=stdin,
+        stdout=pipe,
+        stderr=pipe,
+        cwd=cwd,
+        text=text,
+        start_new_session=_HAS_PROCESS_GROUPS,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        # Drain pipes and reap after the group kill, mirroring
+        # ``subprocess.run``'s own timeout epilogue.
+        try:
+            proc.communicate(timeout=_KILL_GRACE_SECONDS)
+        except (subprocess.TimeoutExpired, ValueError, OSError):  # pragma: no cover
+            pass
+        raise
+    except BaseException:
+        _terminate_process_group(proc)
+        raise
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
 
 # -- Module subgraph border widths (shared between Trace and bundle paths)
 # Outermost modules get the thickest border; deeper modules thin out by depth
@@ -411,13 +514,7 @@ def render_dot_to_file(
     try:
         rendered_path = f"{outpath}.{file_format}"
         cmd = [dot.engine, f"-T{file_format}", "-o", rendered_path, source_path]
-        subprocess.run(
-            cmd,
-            timeout=timeout_seconds,
-            check=True,
-            capture_output=True,
-            start_new_session=True,
-        )
+        run_bounded_subprocess(cmd, timeout=timeout_seconds)
         render_succeeded = True
         if not save_only:
             _open_file_quietly(rendered_path)

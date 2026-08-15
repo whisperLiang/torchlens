@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
 from ..utils.display import atomic_write_text, user_stacklevel
+from . import _render_utils
 from ._render_common import *
 from ._render_edges import *
 from ._render_flow import *
@@ -248,6 +249,45 @@ def _validate_draw_options(
             code="fold_repeats_invalid",
             remedy="pass fold_repeats=None, True, or False",
             argument="fold_repeats",
+        )
+
+
+# The non-``False`` ``show_containers`` vocabulary (``Trace.draw`` literal).
+_SHOW_CONTAINERS_MODES = ("labels", "cluster", "collapsed", "auto", "nodes")
+
+
+def _validate_draw_flag_options(
+    show_containers: ShowContainersLiteral,
+    **bool_options: object,
+) -> None:
+    """Validate the bool-typed public draw kwargs and ``show_containers``.
+
+    R64-F3: strings such as ``order_siblings='yes'`` were accepted silently,
+    and ``'no'``/``'false'`` truthily meant ON. Only real bools are accepted;
+    ``show_containers`` additionally allows its closed string vocabulary.
+
+    Raises
+    ------
+    ValueError
+        If any flag is not a real bool, or ``show_containers`` falls outside
+        its supported vocabulary.
+    """
+
+    for name, value in bool_options.items():
+        if not isinstance(value, bool):
+            raise InvalidArgumentError(
+                f"{name} must be a bool (True or False); received {value!r}",
+                code="visualization_bool_option_invalid",
+                remedy=f"pass {name}=True or {name}=False",
+                argument=name,
+            )
+    if not (show_containers is False or show_containers in _SHOW_CONTAINERS_MODES):
+        modes = ", ".join(repr(mode) for mode in _SHOW_CONTAINERS_MODES)
+        raise InvalidArgumentError(
+            f"show_containers must be False or one of {modes}; received {show_containers!r}",
+            code="visualization_show_containers_invalid",
+            remedy=f"pass show_containers=False or one of {modes}",
+            argument="show_containers",
         )
 
 
@@ -904,12 +944,9 @@ def _emit_and_finish_forward(
                     os.path.abspath(rendered_path),
                     os.path.abspath(source_path),
                 ]
-                subprocess.run(
+                _render_utils.run_bounded_subprocess(
                     cmd,
                     timeout=render_timeout,
-                    check=True,
-                    capture_output=True,
-                    start_new_session=True,
                     # T9 (grind-p3): relative node image refs resolve against
                     # the scratch root via cwd, keeping the per-run temp path
                     # out of the saved DOT source.
@@ -992,6 +1029,17 @@ def draw(
         Renderer-specific result, Graphviz graph, or final DOT source.
     """
     _validate_draw_options(node_mode, vis_intervention_mode, collapse, fold_repeats)
+    _validate_draw_flag_options(
+        show_containers,
+        vis_save_only=vis_save_only,
+        vis_show_cone=vis_show_cone,
+        show_legend=show_legend,
+        for_paper=for_paper,
+        return_graph=return_graph,
+        order_siblings=order_siblings,
+        show_input_transform_summary=show_input_transform_summary,
+        show_orphans=show_orphans,
+    )
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
         show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
@@ -1164,12 +1212,9 @@ def _render_graph_only_svg(
     ``imagepath`` (the saved DOT must not carry the per-run temp path).
     """
 
-    completed = subprocess.run(
+    completed = _render_utils.run_bounded_subprocess(
         [engine, "-Tsvg", os.path.abspath(source_path)],
         timeout=timeout,
-        check=True,
-        capture_output=True,
-        start_new_session=True,
         cwd=str(image_root) if image_root else None,
     )
     return _inline_svg_local_images(completed.stdout.decode("utf-8"), image_root)
@@ -1727,13 +1772,10 @@ def _layout_dot_plain(
         source_file.write(source)
         source_path = source_file.name
     try:
-        proc = subprocess.run(
+        proc = _render_utils.run_bounded_subprocess(
             ["dot", "-Tplain", source_path],
-            check=True,
-            capture_output=True,
             text=True,
             timeout=120,
-            start_new_session=True,
         )
     finally:
         os.remove(source_path)

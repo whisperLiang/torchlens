@@ -2234,8 +2234,10 @@ def _child_segment_range_text(addresses: tuple[str, ...]) -> str:
     """Return an honest member summary for a child-segment label.
 
     Name-consecutive runs keep the compact ``prefix.first-last`` interval.
-    Flow-legal but name-noncontiguous runs enumerate their members (elided in
-    the middle for long runs) because an interval would overstate coverage.
+    Flow-legal but name-noncontiguous runs enumerate their members IN FULL,
+    regardless of count (R19): an elided ``first, second, ..., last`` reads
+    as a complete interval and overstates hidden membership whenever the
+    run skips names that render as separate visible boxes.
     """
 
     first = addresses[0]
@@ -2244,10 +2246,7 @@ def _child_segment_range_text(addresses: tuple[str, ...]) -> str:
     if _members_are_name_consecutive(addresses):
         range_text = f"{leaves[0]}-{leaves[-1]}"
         return f"{prefix}.{range_text}" if prefix else range_text
-    if len(leaves) > 4:
-        listed = f"{leaves[0]}, {leaves[1]}, ..., {leaves[-1]}"
-    else:
-        listed = ", ".join(leaves)
+    listed = ", ".join(leaves)
     return f"{prefix}.{{{listed}}}" if prefix else f"{{{listed}}}"
 
 
