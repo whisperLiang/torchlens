@@ -4,18 +4,23 @@
   Overrides ONLY the release-notes body (the file GitHub receives for a release).
   It is the sole file under ``templates/``, so python-semantic-release keeps
   using its bundled default for the full ``CHANGELOG.md`` (which has no size
-  limit) -- only this GitHub-release body is capped.
+  limit) -- only this GitHub-release body is capped. Discovery of this file is
+  pinned by the explicit ``[tool.semantic_release.changelog] template_dir``.
 
   WHY: the default release-notes template inlines every commit's full multi-line
   body (``commit.descriptions[1:]``). Across a large release that easily exceeds
   GitHub's 125,000-character release-body limit and the create-release API then
   fails with ``422 Unprocessable Entity`` (a 549-commit release produced ~294KB
   and blocked the 2.34.0 publish). This template emits one line per commit --
-  scope + subject + short hash -- which stays well under the limit (subjects-only
-  for the same 549 commits is ~45KB) while the annotated CHANGELOG.md keeps the
+  scope + subject + short hash -- AND enforces a HARD global budget of 100,000
+  characters (grind r4, R86-3: the one-line form alone is a per-commit
+  reduction, not a cap -- at ~82 chars/line it re-crosses the 125K limit around
+  ~1,500 commits, the same order as the survived 1,599-commit runaway). Commits
+  over budget are counted and disclosed; the annotated CHANGELOG.md keeps the
   full detail.
 -#}
 {% set license_name = license_name | default("", true) -%}
+{% set ns = namespace(chars=0, omitted=0) -%}
 ## {{ release.version.as_semver_tag() }} ({{ release.tagged_date.strftime("%Y-%m-%d") }})
 {% if license_name %}
 _This release is published under the {{ license_name }} License._
@@ -23,15 +28,24 @@ _This release is published under the {{ license_name }} License._
 {% set commit_objects = release["elements"] | dictsort -%}
 {% for type_, commits in commit_objects if type_ != "unknown" %}
 ### {{ type_ | title }}
+{% set ns.chars = ns.chars + (type_ | length) + 8 -%}
 {% for commit in commits -%}
 {% if commit.error is undefined -%}
 {% set summary = commit.descriptions[0] -%}
 {% if commit.scope %}{% set summary = "**" ~ commit.scope ~ "**: " ~ summary %}{% endif -%}
-- {{ summary }} (`{{ commit.short_hash }}`)
+{% set line = "- " ~ summary ~ " (`" ~ commit.short_hash ~ "`)" -%}
 {% else -%}
-- {{ (commit.commit.message | string).split("\n")[0] }}
+{% set line = "- " ~ (commit.commit.message | string).split("\n")[0] -%}
+{% endif -%}
+{% if ns.chars + (line | length) + 1 <= 100000 -%}
+{{ line }}
+{% set ns.chars = ns.chars + (line | length) + 1 -%}
+{% else -%}
+{% set ns.omitted = ns.omitted + 1 -%}
 {% endif -%}
 {% endfor %}
 {%- endfor %}
-
+{% if ns.omitted > 0 %}
+_...plus {{ ns.omitted }} more commits elided by the 100,000-character release-body cap; every one is in the changelog below._
+{% endif %}
 _The full annotated changelog for this release is in [CHANGELOG.md](https://github.com/{{ repo_owner }}/{{ repo_name }}/blob/{{ release.version.as_tag() }}/CHANGELOG.md)._

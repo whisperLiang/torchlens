@@ -562,6 +562,13 @@ commit_message = "chore(release): {version} [skip ci]"
 # Layer 3: custom parser that refuses to emit LevelBump.MAJOR.
 commit_parser = "scripts/no_major_parser.py:NoMajorAngularParser"
 
+[tool.semantic_release.changelog]
+# DISCOVERY PIN (grind r4, R86-3): template_dir is stated explicitly. Under the
+# implicit default, a PSR default-value change or a templates/ rename silently
+# reverts the GitHub release notes to the uncapped builtin template, whose
+# failure mode is exactly the 2.34.0 422-blocks-PyPI incident.
+template_dir = "templates"
+
 [tool.semantic_release.remote]
 type = "github"
 token = { env = "GH_TOKEN" }
