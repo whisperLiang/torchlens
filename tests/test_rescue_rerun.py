@@ -640,6 +640,47 @@ def test_module_consumed_stale_ref_is_disclosed_and_rescued(raw_cos: Any) -> Non
     assert trace.capture_verification_reason == "mode_rescue_rerun"
 
 
+def test_ownership_snapshot_pins_members_against_id_reuse() -> None:
+    """Round-3 b1/b3/b4 merged: the pre-forward ownership snapshot PINS its members.
+
+    A bare ``set[int]`` of recyclable ids had no liveness pinning: a model
+    that dropped a snapshotted cache tensor mid-forward (``self.cache = new``)
+    freed the object, and a stale-pre-wrap escape product allocated later
+    could reuse the exact id -- classified "model-owned known source", so the
+    module-entry adoption disclosure was silently suppressed (the laundering
+    3c721316 closed, reopened through the exemption added one commit later).
+    Pinning every snapshot member for the session makes id reuse impossible;
+    the workspace drop releases the pins at session end.
+    """
+
+    import gc
+    import weakref
+
+    from torchlens.backends.torch.model_prep import _collect_model_owned_tensor_ids
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.cache = torch.randn(4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return self.lin(v)
+
+    model = Model()
+    snapshot = _collect_model_owned_tensor_ids(model)
+    cache_id = id(model.cache)
+    assert cache_id in snapshot, "pre-forward cache tensor missing from the snapshot"
+    dropped = weakref.ref(model.cache)
+    model.cache = None  # the mid-forward drop shape, minus the forward
+    gc.collect()
+    assert dropped() is not None, (
+        "the ownership snapshot did not pin its members: the dropped cache "
+        "tensor was freed, so its id is recyclable by a mid-forward "
+        "stale-pre-wrap escape product (adoption disclosure laundering)"
+    )
+
+
 def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
     """A rescue re-run would invoke user intervention callables a SECOND time.
 
