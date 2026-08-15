@@ -276,6 +276,33 @@ def test_a_smoke_row_covers_the_sys_monitoring_python() -> None:
     )
 
 
+def test_every_advertised_python_classifier_has_a_smoke_row() -> None:
+    """Each `Programming Language :: Python :: X.Y` classifier is CI-real.
+
+    Python 3.13 was advertised (and even test-locked) while its only CI
+    appearance was nightly's resolution-only ``uv pip compile`` loop, which
+    imports nothing — a classifier enforced in metadata while unenforceable
+    in CI (grind r5, b10 R85-1, SF-16). Every advertised interpreter must
+    have a PR-blocking smoke row; drop the classifier or add the row.
+    """
+
+    import re
+
+    # Regex on purpose: tomllib is 3.11+ and the suite's floor row runs 3.10.
+    pyproject = (_PROJECT_ROOT / "pyproject.toml").read_text()
+    advertised = set(re.findall(r'"Programming Language :: Python :: (3\.\d+)"', pyproject))
+    assert advertised, "no python-version classifiers found in pyproject.toml"
+    rows = [
+        row for row in _smoke_job()["strategy"]["matrix"]["include"] if row.get("scope") == "smoke"
+    ]
+    executed = {str(row["python"]) for row in rows}
+    unbacked = sorted(advertised - executed)
+    assert not unbacked, (
+        f"python classifiers with no PR-blocking smoke row: {unbacked} — "
+        "resolution-only coverage is not execution"
+    )
+
+
 def test_packaging_tripwires_run_on_the_nightly_wheel_leg() -> None:
     """Nightly builds run the wheel-diet and sdist manifest tripwires.
 
