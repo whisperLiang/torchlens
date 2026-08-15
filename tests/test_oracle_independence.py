@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 
 from torchlens import trace as trace_fn
+from torchlens.errors import MetadataInvariantError
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.diagnostics import TRACE_FAILURE_ATTR
 
@@ -389,3 +390,44 @@ def test_symmetric_edge_drop_on_a_loaded_artifact_known_gap(tmp_path) -> None:
     )
     failure = getattr(loaded, TRACE_FAILURE_ATTR, None)
     assert failure is not None, "validation failed without recording a failure"
+
+
+def test_duplicated_child_entry_is_caught_on_a_live_trace():
+    """b3-opus R05: the child-direction multiplicity gap.
+
+    The frozen children view is deduped by construction, so a duplicated
+    entry in a children sequence (the twice-fixed duplicated-child-edge
+    producer bug, or a corrupted per-record shadow) is corruption the
+    name-based symmetry checks cannot see: the duplicated PARENT direction
+    fired while the child direction was silently accepted (r4 probe).
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4))
+    trace = trace_fn(model, torch.randn(2, 4))
+    check_metadata_invariants(trace)
+    record = next(r for r in trace.layer_list if r.layer_label == "linear_1_1")
+    record.children = list(record.children) + [record.children[0]]
+    with pytest.raises(MetadataInvariantError, match="deduped by construction"):
+        check_metadata_invariants(trace)
+
+
+def test_genuine_double_consumption_keeps_children_deduped_and_green():
+    """Positive control for the child-direction witness: real ``h + h``
+    double consumption records ONE children entry (multiplicity lives in
+    the parent-side arg positions) and validates clean."""
+
+    class DoubleUse(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x):
+            h = self.lin(x)
+            return h + h
+
+    trace = trace_fn(DoubleUse(), torch.randn(2, 4))
+    producer = next(r for r in trace.layer_list if r.layer_label.startswith("linear"))
+    consumer = next(r for r in trace.layer_list if "add" in r.layer_label)
+    assert len(producer.children) == len(set(producer.children))
+    assert list(consumer.parents).count("linear_1_1") == 2
+    check_metadata_invariants(trace)

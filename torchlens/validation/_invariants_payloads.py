@@ -238,6 +238,29 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
                     continue
                 positions = position_counts.get(parent_label, 0)
                 expected[source_row] += positions if positions else 1
+            # Child-direction MULTIPLICITY witness (b3-opus R05): the frozen
+            # children view is DEDUPED by construction (genuine double
+            # consumption records ONE children entry; multiplicity lives in
+            # the parent-side arg positions checked above), so a duplicated
+            # entry in a children sequence is producer/shadow corruption the
+            # name-based symmetry checks cannot see -- the twice-fixed
+            # duplicated-child-edge producer bug had no tripwire. Unresolved
+            # (cross-pass) spellings are counted too: dedup is a property of
+            # the label sequence itself, not of resolution.
+            child_counts: Counter = Counter(
+                child_label
+                for child_label in getattr(op, "children", ()) or ()
+                if isinstance(child_label, str)
+            )
+            duplicated = next((label for label, count in child_counts.items() if count > 1), None)
+            if duplicated is not None:
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer '{getattr(op, 'label', '<unknown>')}' children names "
+                    f"'{duplicated}' {child_counts[duplicated]} times -- the frozen "
+                    f"children view is deduped by construction, so a repeated entry "
+                    f"is a duplicated child edge",
+                )
             actual = Counter(edge.source for edge in edges.in_edges(row))
             if actual != expected:
                 offender = next(
