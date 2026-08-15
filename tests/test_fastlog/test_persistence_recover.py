@@ -387,3 +387,32 @@ def test_disk_roundtrip_label_index_deduplicates_same_raw_label(tmp_path: Path) 
 
     assert loaded.by_label[label] == [(1, 0)]
     assert len(loaded[label]) == 1
+
+
+def test_cleanup_partial_treats_bundle_name_as_data_not_glob(tmp_path: Path) -> None:
+    """Glob metacharacters in the bundle name must not sweep sibling bundles' partials."""
+
+    victim_a = tmp_path / "run0.tmp.aaaa"
+    victim_b = tmp_path / "run1.tmp.bbbb"
+    for victim in (victim_a, victim_b):
+        victim.mkdir()
+        (victim / "PARTIAL").write_text("", encoding="utf-8")
+
+    removed = tl.fastlog.cleanup_partial(tmp_path / "run[01]")
+
+    assert removed == []
+    assert victim_a.is_dir()
+    assert victim_b.is_dir()
+
+
+def test_cleanup_partial_still_sweeps_own_partials(tmp_path: Path) -> None:
+    """The escaped pattern still matches the bundle's own temp directories."""
+
+    own = tmp_path / "run0.tmp.cccc"
+    own.mkdir()
+    (own / "PARTIAL").write_text("", encoding="utf-8")
+
+    removed = tl.fastlog.cleanup_partial(tmp_path / "run0")
+
+    assert removed == [own]
+    assert not own.exists()
