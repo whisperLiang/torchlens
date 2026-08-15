@@ -50,10 +50,23 @@ repos:
     # repo-root config gitleaks auto-discovers) actually referenced by the
     # repo itself — previously only a machine-side global hook ran gitleaks,
     # so fresh clones inherited the allowlist but no scanner (grind r3, R61).
-    # The CI `pre-commit` job runs this over the full tree on every PR.
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1 (git sha, not a secret)  # pragma: allowlist secret
     hooks:
+      # Commit-time scan of the STAGED diff (`gitleaks git --pre-commit
+      # --staged`). NOTE: under the CI parity job's `pre-commit run
+      # --all-files` nothing is staged, so THIS hook scans zero content there
+      # -- full-tree CI coverage comes from the manual-stage variant below
+      # (grind r4, R87-1: the old comment claimed full-tree coverage from
+      # this hook, which was vacuous).
       - id: gitleaks
+      # Full-tree scan of the checkout itself for the CI parity job, which
+      # invokes it explicitly with `--hook-stage manual` (the stage keeps the
+      # slower whole-tree scan out of every local commit).
+      - id: gitleaks
+        alias: gitleaks-full-tree
+        name: Detect hardcoded secrets (full tree)
+        entry: gitleaks dir . --redact --verbose
+        stages: [manual]
   - repo: https://github.com/Yelp/detect-secrets
     # The commit the annotated tag v1.5.0 points at (tag object: 68e8b454).
     rev: 01886c8a910c64595c47f186ca1ffc0b77fa5458  # v1.5.0 (git sha, not a secret)  # pragma: allowlist secret

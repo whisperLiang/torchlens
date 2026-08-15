@@ -74,6 +74,14 @@ jobs:
       - name: Run every pre-commit hook over the full tree
         run: pre-commit run --all-files --show-diff-on-failure
 
+      - name: Full-tree gitleaks scan
+        # The stock gitleaks hook reads the STAGED diff, so in the --all-files
+        # run above nothing is staged and it scans ZERO content while the job
+        # claimed secret coverage (grind r4, R87-1). The manual-stage variant
+        # scans the checkout itself (gitleaks dir), making the secret gate
+        # real on every PR.
+        run: pre-commit run gitleaks-full-tree --hook-stage manual --all-files --show-diff-on-failure
+
   # Workflow-file lint authority (schema, expressions, embedded shell via
   # shellcheck). Advisory CI job for now: whether it becomes a REQUIRED status
   # check is the queued R82-4 repo-settings decision (disputed-r2 b10/R82).
