@@ -76,6 +76,7 @@ add names to the top-level `torchlens` namespace:
 | `container_not_reconstructable` | Container spec or backend support is absent | Capture with `capture_container_structure=True` |
 | `container_selector_requires_registry` | Snapshot selector on a non-registry view | Call `reconstruct()` without site/role |
 | `container_selector_unresolved` | Container selector matched zero or many records | Pass a more specific `site=`/`role=` |
+| `container_spec_inadmissible` | Recorded output-container spec is corrupt, tampered, or names an inadmissible type (`ContainerReconstructionError`, `ValueError` lineage; default-deny security tripwire, also raised by public `Op.multi_output_type`) | Re-save the artifact from a trusted capture |
 | `container_value_source_invalid` | Container value source is unknown | Pass `values='out'` or `'transformed'` |
 | `context_field_invalid` | Persisted execution-context field fails its closed-vocabulary parse | Re-export the artifact; do not hand-edit descriptor context fields |
 | `decoded_output_not_classification` | Decoded output is not a batch top-k table | Capture with classification output decoding |

@@ -213,6 +213,13 @@ _LAZY_EXCEPTION_PATHS = {
         "CaptureAttemptFailedWarning",
     ),
     "CaptureContextError": ("torchlens._errors", "CaptureContextError"),
+    # r3 b1-opus R64-3: the default-deny output-container tripwire escapes to
+    # users from the public ``Op.multi_output_type`` property, so its except
+    # must be spellable from the public error surface.
+    "ContainerReconstructionError": (
+        "torchlens.ir.container",
+        "ContainerReconstructionError",
+    ),
     "CompileCountsUnavailableError": (
         "torchlens.debug._compile_counter",
         "CompileCountsUnavailableError",

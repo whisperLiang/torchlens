@@ -401,6 +401,9 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "CaptureContextError": ("RuntimeError",),
     "CaptureError": (),
     "ChunkedForwardConfigError": ("ValueError",),
+    # ValueError lineage is load-bearing: the runnable run wrapper reports the
+    # container-spec tripwire as a typed RunPreconditionError denial (R64-3).
+    "ContainerReconstructionError": ("ValueError",),
     "CaptureOutcomeError": (),
     "CompileCountsUnavailableError": ("RuntimeError",),
     "CollectiveBoundaryReplayError": ("RuntimeError",),
@@ -1188,9 +1191,9 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     "torchlens.ir.capture_events.SourceSequencingError": (
         "internal journal source-sequencing invariant; a raise indicates a TorchLens bug"
     ),
-    "torchlens.ir.container.ContainerReconstructionError": (
-        "internal replay container-codec error; surfaces wrapped in typed runnable refusals"
-    ),
+    # ``ContainerReconstructionError`` left this allowlist (r3 b1-opus R64-3):
+    # it escapes users from the public ``Op.multi_output_type`` property, so it
+    # is registered on ``torchlens.errors`` with code ``container_spec_inadmissible``.
     "torchlens.ir.live_index.LiveIndexWindowError": (
         "internal lookback-window KeyError; caught by the windowed-save machinery"
     ),

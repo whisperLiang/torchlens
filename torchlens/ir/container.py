@@ -11,7 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, TypeAlias, cast
 
+from .._errors import _actionable_message, _ActionableErrorMixin
 from .._io import FieldPolicy
+from ..errors._base import TorchLensError
 
 # Canonical ``defaultdict`` factory callables restorable on load WITHOUT importing
 # an arbitrary callable. Capture imports this SAME mapping; a factory outside the
@@ -1106,7 +1108,7 @@ def _rebuild_child_or_leaf(
         raise ValueError("Not enough leaves supplied for ContainerSpec.") from exc
 
 
-class ContainerReconstructionError(ValueError):
+class ContainerReconstructionError(_ActionableErrorMixin, TorchLensError, ValueError):
     """Raised when an output-container spec names a type that is not admissible.
 
     The output ``ContainerSpec`` is portable, attacker-influenceable data. Its
@@ -1115,7 +1117,46 @@ class ContainerReconstructionError(ValueError):
     benign container allowlist for its ``kind`` is refused BEFORE any construction,
     mirroring the safe-unpickler's global denial. Subclasses ``ValueError`` so the
     runnable run wrapper reports it as a typed ``RunPreconditionError`` denial.
+
+    r3 b1-opus R64-3: the class also escapes RAW from the PUBLIC documented
+    ``Op.multi_output_type`` property, so it is a user-catchable typed refusal,
+    not only an internal codec error: it resolves from ``torchlens.errors``,
+    carries ``fields["code"] == "container_spec_inadmissible"`` plus a remedy,
+    and rows in ``docs/reference/error_refusal_contract.md``.
     """
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        code: str = "container_spec_inadmissible",
+        remedy: str = (
+            "Re-save the artifact from a trusted capture; the recorded "
+            "output-container spec is corrupt, tampered, or names an "
+            "inadmissible type."
+        ),
+        **context: object,
+    ) -> None:
+        """Initialize the typed default-deny container-spec refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the inadmissible spec fact.
+        code:
+            Stable machine-readable refusal code.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code=code,
+            remedy=remedy,
+            **cast("dict[str, Any]", context),
+        )
 
 
 # ``dict``-subtype output containers are only ever recorded for the two mapping
