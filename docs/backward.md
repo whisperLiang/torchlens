@@ -28,7 +28,7 @@ relu_trace.log_backward(relu_trace[relu_trace.output_layers[0]].out.sum())
 `save_grads=True` saves all observed op gradients. `False` or `None` observes backward structure
 without retaining gradient tensors. Predicate expressions use the same forward selector language,
 plus backward selectors such as `tl.grad_fn(...)`, `tl.grad_fn_label(...)`,
-`tl.intervening()`, `tl.grad_input()`, `tl.grad_output()`, and `tl.in_backward_pass(k)`.
+`tl.without_op()` (formerly `tl.intervening()`, now a deprecated alias), `tl.grad_input()`, `tl.grad_output()`, and `tl.in_backward_pass(k)`.
 
 `storage=tl.to_disk(path)` streams retained gradient payloads into a `.tlspec` bundle. The
 standing trace policy can be widened or narrowed per trigger:

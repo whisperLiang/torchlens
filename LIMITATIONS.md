@@ -1,5 +1,9 @@
 # TorchLens Limitations
 
+> Canonical user-facing catalog: [docs/reference/limitations.md](docs/reference/limitations.md).
+> This root file is the extended engineering companion; on any disagreement the
+> canonical page wins.
+
 TorchLens observes eager PyTorch execution by wrapping PyTorch call sites and recording what
 actually runs. Its substrate identity is therefore "PyTorch eager execution plus TorchLens
 metadata", not a separate static IR, compiler graph, or symbolic model format.
@@ -78,7 +82,7 @@ transform storage is charged after it exists. The guard prevents the ordinary ov
 copy that it can project, while these allocations remain disclosed residuals.
 
 Only payloads retained in RAM are charged. Predicate-selected disk-only saves such as
-`save=tl.func("relu"), storage=tl.to_disk(...)` are exempt. Default exhaustive `save="all"` plus
+`save=tl.func("relu"), storage=tl.to_disk(...)` are exempt. Exhaustive `capture=CaptureOptions(layers_to_save="all")` plus
 `to_disk(...)` is **not** exempt: it keeps RAM copies until postprocess attaches disk refs and evicts
 them, so a tiny budget refuses. `layers_to_save="none"` remains uncharged.
 

@@ -5,8 +5,9 @@ binding created before that installation—such as `from torch import relu`—ca
 callable after the torch namespace itself is wrapped.
 
 **The historical sys.modules crawler (and its `patch_policy` rollout) is deleted.** TorchLens no
-longer rewrites module attributes broadly, reads module sources, or mutates user model instances to
-repair stale bindings. Coverage is now:
+longer rewrites module attributes broadly or reads module sources, and no capture path mutates
+user model instances to repair stale bindings. (One sanctioned, explicit, opt-in repair exists
+OUTSIDE capture: `tl.release_model(model)` — see the mirror-direction paragraph below.) Coverage is now:
 
 1. **Rescue re-run.** A completed capture that carries an escape signal — the tensor-provenance
    warning, an `escape_detector` diagnostic, or an output-attribution failure — is re-run ONCE with
@@ -23,13 +24,19 @@ repair stale bindings. Coverage is now:
    The MIRROR direction is a declared residual: a plain attribute read taken WHILE wrappers are
    installed (`held = F.relu`) hands the user the wrapper object, and
    `torchlens.backends.torch.wrappers.unwrap_torch()` does not repair user-held wrapper references
-   — TorchLens never crawls or mutates user objects. The held reference stays callable (it
+   — unwrap never crawls user objects. The held reference stays callable (it
    delegates to the original) but is identity-poisoned after unwrap: `held is F.relu` is `False`
-   and pickling it (or any object holding it) fails. Recovery requires re-reading the attribute
-   after unwrap, or a fresh process.
+   and pickling it (or any object holding it) fails. Recovery options, in order: call the
+   SHIPPED repair `tl.release_model(model)` — it walks the model tree and normalizes held
+   torch-function wrapper refs in the model's own attributes and one level of list/dict/set
+   containers (`backends/torch/_held_refs.py`), restoring whole-model pickling; note the repair
+   installs a live wrapper ref while wrappers are up, so a LATER `unwrap_torch()` re-poisons it
+   and `release_model` must be called again. For non-model holders (plain objects, closures),
+   re-read the attribute after unwrap or use a fresh process.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
-   `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`
+   `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, `torch.Tensor.as_subclass`, and
+   `torch.Tensor._make_subclass`
    (the authoritative set is the live derivation in `belt_report().members`, pinned per build in
    `tests/test_mechanical_belt.py`). A stale reference to one
    of these produces no signal a rescue could trigger on, so module-level attribute references to
