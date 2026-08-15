@@ -42,6 +42,13 @@ _SIMPLE_KEEP_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.devi
 # Canonical remapped param barcode token (``param_000001``), for R21-1's
 # trace-level equivalence-key ordering.
 _EQUIV_PARAM_TOKEN = re.compile(r"param_\d{6}")
+
+#: One P-independent scan for the exact live-barcode shape: 8 chars of the
+#: barcode alphabet, bounded by non-alphanumerics (barcodes are '_'-joined in
+#: identity strings, and '_' is outside the alphabet). See the R29 note at
+#: the remap construction site.
+_BARCODE_TOKEN_PATTERN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Za-z]{8}(?![0-9A-Za-z])")
+_BARCODE_TOKEN_FULLMATCH = re.compile(r"[0-9A-Za-z]{8}").fullmatch
 _RAW_INPUT_TEXT_LIMIT = 10_000
 _RAW_INPUT_TENSOR_BYTES_LIMIT = 1_000_000
 _RAW_OUTPUT_TEXT_LIMIT = _RAW_INPUT_TEXT_LIMIT
@@ -325,13 +332,26 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
         for barcode in getattr(record, "_param_barcodes", ()) or ():
             register_barcode(barcode)
 
-    barcode_pattern = (
-        re.compile(
+    # R29 (b4, 4th round): the all-P alternation regex trialed every one of P
+    # branches at essentially every position of every param-FREE record's
+    # guaranteed-miss key -- O(V_paramfree x P), ~40s of pure regex misses per
+    # portable save at 100k ops / 2k params. Live barcodes are exactly 8
+    # chars of ``[0-9A-Za-z]`` (utils/hashing barcode alphabet), so one
+    # P-independent bounded-token scan plus a dict probe does the same work
+    # in O(L) per string (~300x measured at P=4000). The alternation remains
+    # as the fallback for any registered token violating the 8-char
+    # invariant (legacy/exotic captures), keeping remap coverage identical.
+    fast_barcode_scan = bool(barcode_map) and all(
+        _BARCODE_TOKEN_FULLMATCH(barcode) is not None for barcode in barcode_map
+    )
+    if fast_barcode_scan:
+        barcode_pattern = _BARCODE_TOKEN_PATTERN
+    elif barcode_map:
+        barcode_pattern = re.compile(
             "|".join(re.escape(barcode) for barcode in sorted(barcode_map, key=len, reverse=True))
         )
-        if barcode_map
-        else None
-    )
+    else:
+        barcode_pattern = None
 
     def remap_barcode_text(value: Any) -> Any:
         """Replace registered barcodes in a scalar identity string."""
@@ -342,6 +362,10 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
             return barcode_map[value]
         if barcode_pattern is None:
             return value
+        if fast_barcode_scan:
+            return barcode_pattern.sub(
+                lambda match: barcode_map.get(match.group(0), match.group(0)), value
+            )
         return barcode_pattern.sub(lambda match: barcode_map[match.group(0)], value)
 
     def canonical_equivalence_key(value: Any) -> Any:
