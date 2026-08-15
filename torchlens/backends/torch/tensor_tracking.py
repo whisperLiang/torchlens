@@ -1154,8 +1154,13 @@ def _leaf_arg_token(arg: Any, prefix: str) -> str:
     the address-free type token.
     """
 
-    if type(arg).__repr__ is object.__repr__ and type(arg).__str__ is object.__str__:
-        return f"{prefix}_obj:{type(arg).__module__}.{type(arg).__qualname__}"
+    arg_type = type(arg)
+    # mypy sees bound-descriptor types diverge here; the identity comparison
+    # against the object slots is exactly the intended check.
+    default_repr = arg_type.__repr__ is object.__repr__  # type: ignore[comparison-overlap]
+    default_str = arg_type.__str__ is object.__str__  # type: ignore[comparison-overlap]
+    if default_repr and default_str:
+        return f"{prefix}_obj:{arg_type.__module__}.{arg_type.__qualname__}"
     return f"{prefix}_{arg}"
 
 
