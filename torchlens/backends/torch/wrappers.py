@@ -5,6 +5,7 @@ This module also patches detached torch references and torch transform boundarie
 """
 
 import inspect
+import sys
 import threading
 import time
 import types
@@ -2467,34 +2468,7 @@ def decorate_all_once() -> None:
     # decoration. Using _is_decorated (set at end of this function) ensures
     # retry after partial failure (#138).
 
-    # Collect immutable device-constructor names before creating wrappers so each
-    # closure can hoist the membership test out of its per-call dispatch path.
-    device_constructors = get_device_constructors()
-    if device_constructors is not None:
-        try:
-            device_constructors.cache_clear()
-            for ctor in device_constructors():
-                name = getattr(ctor, "__name__", None)
-                if name:
-                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
-        except (AttributeError, TypeError):
-            mark_torch_capability_missing(
-                "HAS_DEVICE_CONSTRUCTORS",
-                "factory-function device injection inventory could not be evaluated",
-            )
-
-    # B8-4: warm BOTH ``functools.cache``'d torch introspection tables BEFORE
-    # the first wrapper setattr. ``get_testing_overrides()`` was already warmed
-    # transitively by the pair crawl, but ``get_overridable_functions()``
-    # previously materialized on the belt's first post-wrap ``_derive()`` call,
-    # permanently keying most entries by torchlens wrappers -- the one measured
-    # side effect that survived ``unwrap_torch()`` -- and making belt
-    # derivation order-dependent. Invariant: no torchlens path may FIRST-call a
-    # cached torch introspection table while wrappers are installed.
-    from torch.overrides import get_overridable_functions, get_testing_overrides
-
-    get_overridable_functions()
-    get_testing_overrides()
+    _warm_derived_identity_caches()
 
     _decorate_torch_func_pairs(get_orig_torch_funcs())
 
@@ -2505,22 +2479,17 @@ def decorate_all_once() -> None:
     _register_jit_builtin_wrappers()
     _register_jit_boolean_dispatch_wrappers()
 
-    # ---- DeviceContext bypass setup ----
-    # Collect names of factory functions (zeros, ones, empty, etc.) that accept
-    # a device kwarg. The lru_cache must be cleared first so _device_constructors()
-    # re-evaluates with our wrapped functions (otherwise it returns stale refs).
-    if device_constructors is not None:
-        try:
-            device_constructors.cache_clear()
-            for ctor in device_constructors():
-                name = getattr(ctor, "__name__", None)
-                if name:
-                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
-        except (AttributeError, TypeError):
-            mark_torch_capability_missing(
-                "HAS_DEVICE_CONSTRUCTORS",
-                "factory-function device injection inventory could not be evaluated",
-            )
+    # ---- DeviceContext bypass ----
+    # ``_DEVICE_CONSTRUCTOR_NAMES`` was collected from the PRE-wrap warm above,
+    # and torch's ``_device_constructors()`` lru-cache deliberately stays keyed
+    # by ORIGINALS (B8-4). ``DeviceContext.__torch_function__`` always receives
+    # the original C function, so re-materializing the cache with wrappers here
+    # (the historical behavior) made the C-level membership test miss and
+    # silently skipped device injection for stale pre-wrap factory references
+    # (``from torch import zeros`` before the first capture, then
+    # ``with torch.device('meta')``: tensors landed on CPU). Wrapped calls
+    # never need the C-level path -- ``_maybe_inject_device_kwarg`` replicates
+    # the injection inside the wrapper.
 
     # Create the decorated identity — a no-op that forces a new log entry at
     # module boundaries (nn.Identity, pass-through outputs).  Stored on _state
@@ -2537,6 +2506,91 @@ def decorate_all_once() -> None:
     # making PySequence_Check(tensor) return True.  Clear it so torch.tensor()
     # doesn't try to iterate 0-d tensor elements as sequences.
     _fix_tensor_sequence_slot()
+
+
+#: ``torch._dynamo.trace_rules`` lru-caches whose keys are LIVE torch callables.
+#: The string-keyed siblings (``dynamo_dir``, ``get_mod_inlinelist``, ...) are
+#: identity-safe and deliberately excluded.
+_DYNAMO_IDENTITY_RULE_CACHE_NAMES = ("get_torch_obj_rule_map", "get_tensor_method")
+
+
+def _warm_derived_identity_caches() -> None:
+    """Warm torch's identity-keyed DERIVED caches while the namespace holds originals.
+
+    B8-4 invariant: no torchlens path may FIRST-call a cached torch
+    introspection table while wrappers are installed. Called by BOTH install
+    paths -- full decoration (``decorate_all_once``) and re-install after a
+    prior ``unwrap_torch()`` -- BEFORE any wrapper setattr, so every covered
+    table stays keyed by originals for the whole wrapped epoch. Covered:
+
+    - the two ``torch.overrides`` tables (the original B8-4 pair);
+    - torch's ``_device_constructors()`` set -- ``DeviceContext.__torch_function__``
+      always receives the ORIGINAL C function, so a wrapper-keyed set silently
+      skips device injection for stale pre-wrap factory references (R56); the
+      warm also collects ``_DEVICE_CONSTRUCTOR_NAMES`` for the wrapper-side
+      injection path;
+    - dynamo's identity-keyed rule tables, when dynamo is already imported
+      (never force-imported -- tables a user materializes mid-epoch are
+      dropped at ``unwrap_torch()`` instead).
+    """
+
+    from torch.overrides import get_overridable_functions, get_testing_overrides
+
+    get_overridable_functions()
+    get_testing_overrides()
+
+    device_constructors = get_device_constructors()
+    if device_constructors is not None:
+        try:
+            device_constructors.cache_clear()
+            for ctor in device_constructors():
+                name = getattr(ctor, "__name__", None)
+                if name:
+                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
+        except (AttributeError, TypeError):
+            mark_torch_capability_missing(
+                "HAS_DEVICE_CONSTRUCTORS",
+                "factory-function device injection inventory could not be evaluated",
+            )
+
+    for rule_cache in _dynamo_identity_rule_caches():
+        try:
+            rule_cache()
+        except Exception:  # pragma: no cover - dynamo-internal failure
+            from ..._errors import TorchLensWarning
+
+            warnings.warn(
+                "torchlens could not pre-warm a torch._dynamo.trace_rules "
+                "cache before wrapping; torch.compile identity rules may "
+                "re-derive against torchlens wrappers until unwrap_torch().",
+                TorchLensWarning,
+                stacklevel=2,
+            )
+
+
+def _dynamo_identity_rule_caches() -> list[Any]:
+    """Return dynamo's identity-keyed rule caches, without importing dynamo.
+
+    ``torch._dynamo.trace_rules`` memoizes rule tables keyed by the live
+    callable objects resolved from the torch namespace at materialization
+    time. Like the ``torch.overrides`` tables (B8-4) these are DERIVED caches:
+    the attribute-identity restore census cannot see them, so a table built
+    while torchlens wrappers are installed silently poisons ``torch.compile``
+    for the rest of the process (``lookup(torch.cos)`` degrades to
+    ``SkipFunctionVariable`` after ``unwrap_torch()``). Feature-detected via
+    ``sys.modules`` + ``getattr`` -- never force-imports dynamo, and degrades
+    to an empty list on any future torch that renames the getters.
+    """
+
+    trace_rules = sys.modules.get("torch._dynamo.trace_rules")
+    if trace_rules is None:
+        return []
+    caches: list[Any] = []
+    for cache_name in _DYNAMO_IDENTITY_RULE_CACHE_NAMES:
+        cache = getattr(trace_rules, cache_name, None)
+        if cache is not None and hasattr(cache, "cache_clear"):
+            caches.append(cache)
+    return caches
 
 
 def _stamp_wrapper_provenance(
@@ -2933,16 +2987,28 @@ def _unwrap_torch_locked() -> None:
 
     # Torch's ``_device_constructors()`` is an lru_cache keyed on nothing; it
     # memoizes the SET of factory callables that ``DeviceContext.__torch_function__``
-    # injects a device into. ``wrap_torch`` cleared and re-populated it so the set
-    # held our WRAPPED callables. Now that the originals are restored, that cache is
-    # stale (it still points at the replaced wrappers), so torch's device-context
-    # dispatch would no longer recognise the restored ``torch.empty``/``zeros``/...
-    # as device constructors -- silently breaking ``with torch.device('meta'): ...``
-    # after an unwrap. Clear it so torch re-evaluates against the restored originals.
+    # injects a device into. ``wrap_torch`` warms it PRE-wrap so it stays keyed
+    # by originals for the whole wrapped epoch (R56: repopulating it post-wrap
+    # broke C-level injection for stale pre-wrap factory refs). The clear here
+    # is defense-in-depth: if any third-party path cleared and re-materialized
+    # the cache mid-epoch it would hold the now-replaced wrappers, so drop it
+    # and let torch re-derive against the restored originals.
     device_constructors = get_device_constructors()
     if device_constructors is not None:
         try:
             device_constructors.cache_clear()
+        except (AttributeError, TypeError):
+            pass
+
+    # R56 derived-cache class: dynamo rule tables materialized during the
+    # wrapped epoch (a user importing/compiling after the first capture) are
+    # keyed by torchlens wrappers and would SURVIVE this unwrap -- the poisoned
+    # ``get_torch_obj_rule_map`` made post-unwrap ``torch.compile(fullgraph=True)``
+    # fail on skipped-function lookups. Drop them so the next materialization
+    # re-derives from the restored originals.
+    for rule_cache in _dynamo_identity_rule_caches():
+        try:
+            rule_cache.cache_clear()
         except (AttributeError, TypeError):
             pass
 
@@ -3098,7 +3164,14 @@ def _wrap_torch_locked(
         sweep_stale_belt_references()
         return
 
-    # Re-install from existing maps (after a prior unwrap_torch)
+    # Re-install from existing maps (after a prior unwrap_torch).
+    # B8-4 holds per EPOCH: unwrap_torch() cleared the derived identity caches
+    # (device constructors, any dynamo rule tables), so they must be re-warmed
+    # against the restored originals BEFORE the setattr loop repoints the
+    # namespace -- the historical asymmetry left epoch 2+ correct only when
+    # something happened to materialize them between unwrap and re-wrap.
+    _warm_derived_identity_caches()
+
     for namespace_name, func_name in get_orig_torch_funcs():
         # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
         # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,

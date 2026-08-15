@@ -393,6 +393,113 @@ class TestOverrideTableCoherence:
             assert isinstance(namespace_name, str) and isinstance(func_name, str)
 
 
+class TestDerivedCacheCensus:
+    """R56 derived-cache census (b8-fable/b8-opus round 3).
+
+    Torch's DERIVED caches memoize sets/maps keyed by the live callables
+    resolved from the namespace at materialization time. The attribute-identity
+    restore census structurally cannot see them: a table materialized while
+    torchlens wrappers are installed holds wrappers, misses identity tests
+    against originals, and (for tables built mid-epoch) survives
+    ``unwrap_torch()``. Every identity-keyed derived cache torchlens knows
+    about must be keyed by ORIGINALS during the wrapped epoch, or dropped at
+    unwrap so torch re-derives it from the restored originals.
+    """
+
+    def test_device_constructor_cache_keyed_by_originals(self):
+        # b8-fable-R56-1: decorate_all_once used to cache_clear+re-materialize
+        # torch's _device_constructors() AFTER installing wrappers, so the
+        # memoized set held torchlens wrappers for the whole epoch.
+        _ensure_wrapped()
+        from torch.utils._device import _device_constructors
+
+        wrapper_ids = set(_state._decorated_to_orig.keys())
+        poisoned = [
+            getattr(fn, "__name__", repr(fn))
+            for fn in _device_constructors()
+            if id(fn) in wrapper_ids
+        ]
+        assert not poisoned, (
+            f"_device_constructors() holds {len(poisoned)} torchlens wrappers "
+            f"({poisoned[:5]}...): DeviceContext.__torch_function__ receives "
+            "ORIGINALS, so C-level device injection misses for stale pre-wrap "
+            "factory references"
+        )
+
+    def test_stale_prewrap_factory_ref_gets_context_device(self):
+        # The user-visible failure: `from torch import zeros` held from before
+        # the first capture, called under `with torch.device('meta')` while
+        # wrappers are installed, must still land on meta (C-level injection).
+        _ensure_wrapped()
+        stale_zeros = _resolve(torch.zeros)
+        assert stale_zeros is not torch.zeros, "expected torch.zeros to be wrapped"
+        with torch.device("meta"):
+            out = stale_zeros(2, 2)
+        assert out.device.type == "meta", (
+            f"stale pre-wrap zeros landed on {out.device}: torch's "
+            "_device_constructors() cache is not keyed by originals"
+        )
+
+    def test_dynamo_rule_map_built_mid_epoch_does_not_survive_unwrap(self):
+        # b8-opus-R56-1: a rule map materialized while wrapped is keyed by
+        # wrappers; without the unwrap-time clear it survives unwrap_torch()
+        # and torch.compile(fullgraph=True) fails (lookup(torch.cos) degrades
+        # to SkipFunctionVariable).
+        trace_rules = pytest.importorskip("torch._dynamo.trace_rules")
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            # Simulate the user materializing the tables mid-epoch.
+            trace_rules.get_torch_obj_rule_map.cache_clear()
+            trace_rules.get_tensor_method.cache_clear()
+            wrapped_map = trace_rules.get_torch_obj_rule_map()
+            wrapped_methods = trace_rules.get_tensor_method()
+            unwrap_torch()
+            fresh_map = trace_rules.get_torch_obj_rule_map()
+            fresh_methods = trace_rules.get_tensor_method()
+            assert fresh_map is not wrapped_map, (
+                "get_torch_obj_rule_map() built during the wrapped epoch survived unwrap_torch()"
+            )
+            assert fresh_methods is not wrapped_methods, (
+                "get_tensor_method() built during the wrapped epoch survived unwrap_torch()"
+            )
+            assert torch.cos in fresh_map, (
+                "restored torch.cos missing from the re-derived dynamo rule "
+                "map: post-unwrap torch.compile(fullgraph=True) would fail"
+            )
+        finally:
+            wrap_torch()
+
+    def test_dynamo_rule_caches_prewarmed_before_wrapping(self):
+        # The other half of the fix: when dynamo is already imported at wrap
+        # time, the tables are warmed BEFORE the first wrapper setattr, so a
+        # torch.compile during the wrapped epoch reads originals-keyed rules.
+        trace_rules = pytest.importorskip("torch._dynamo.trace_rules")
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        try:
+            unwrap_torch()
+            trace_rules.get_torch_obj_rule_map.cache_clear()
+            trace_rules.get_tensor_method.cache_clear()
+            wrap_torch()
+            wrapper_ids = set(_state._decorated_to_orig.keys())
+            rule_map = trace_rules.get_torch_obj_rule_map()
+            assert _resolve(torch.cos) in rule_map, (
+                "original torch.cos missing from the dynamo rule map after "
+                "wrap_torch(): the pre-warm did not run before decoration"
+            )
+            poisoned = sum(1 for fn in rule_map if id(fn) in wrapper_ids)
+            assert poisoned == 0, (
+                f"{poisoned} torchlens wrappers keyed into the dynamo rule map "
+                "despite the pre-wrap warm"
+            )
+        finally:
+            if not _state._is_decorated:
+                wrap_torch()
+
+
 # ---------------------------------------------------------------------------
 # 4b. Unwrap safety: R54 admission-lock atomicity + B8-6 burial diagnostic
 # ---------------------------------------------------------------------------
