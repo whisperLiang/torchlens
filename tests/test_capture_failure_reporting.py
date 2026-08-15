@@ -76,6 +76,41 @@ def test_failed_capture_success_path_notes_partial_log():
     assert any("partial_log" in note for note in notes), notes
 
 
+def test_failed_capture_advisory_never_replaces_user_exception_under_error_filter():
+    """b3-opus-R07-1: a warnings-as-error filter raises the terminal advisory
+    AT THE WARN SITE, replacing the user's real forward exception (and killing
+    the ``exc.partial_log`` recovery the advisory's own text advertises). The
+    user's exception must propagate; the advisory degrades to a note."""
+    from torchlens.backends.torch.rescue import CaptureAttemptFailedWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.filterwarnings("error", category=CaptureAttemptFailedWarning)
+        with pytest.raises(_BoomError) as exc_info:
+            tl.trace(_FailingModel(), torch.randn(1, 2))
+    exc = exc_info.value
+    assert getattr(exc, "partial_log", None) is not None
+    if hasattr(BaseException, "add_note"):
+        notes = getattr(exc, "__notes__", [])
+        assert any("advisory" in note for note in notes), notes
+
+
+def test_partial_construction_failure_warning_never_replaces_user_exception(monkeypatch):
+    """Sibling sweep of b3-opus-R07-1: the construction-failure RuntimeWarning
+    inside the partial-attachment arm has the same as-error filter hazard."""
+    from torchlens.partial import PartialTrace
+
+    def _boom_from_trace(*args, **kwargs):
+        raise ValueError("construction exploded")
+
+    monkeypatch.setattr(PartialTrace, "from_trace", classmethod(_boom_from_trace))
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.filterwarnings("error", category=RuntimeWarning)
+        with pytest.raises(_BoomError):
+            tl.trace(_FailingModel(), torch.randn(1, 2))
+
+
 def test_cleanup_forward_memory_gated_on_capture_touched_cuda(monkeypatch):
     from torchlens.backends.torch import backend as backend_module
     from torchlens.backends.torch.backend import TorchBackend

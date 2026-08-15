@@ -286,6 +286,48 @@ def test_compiled_submodule_traversal_failure_restores_earlier_swaps(
     assert parent.good is good_wrapper
 
 
+class _HostileModules(dict):
+    """``_modules`` stand-in that raises on one keyed restore once armed."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.armed_key: str | None = None
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if self.armed_key == key:
+            raise RuntimeError("hostile _modules restore")
+        super().__setitem__(key, value)
+
+
+def test_compiled_submodule_unwind_completes_past_raising_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """b3-sol sibling of the fixed 6896e8a9 unwind cluster: one raising restore
+    in the reversed compiled-submodule unwind used to skip every REMAINING
+    swap, stranding those children in their eager form for the life of the
+    process. The unwind must complete and re-raise the first failure."""
+    import torchlens._capture_state_helpers as helpers
+
+    wrapper_a = _WrapperWithOriginal(nn.Linear(4, 4))
+    wrapper_b = _WrapperWithOriginal(nn.Linear(4, 4))
+    parent = nn.Module()
+    parent.child_a = wrapper_a
+    parent.child_b = wrapper_b
+    hostile = _HostileModules(parent._modules)
+    object.__setattr__(parent, "_modules", hostile)
+    monkeypatch.setattr(helpers, "get_dynamo_optimized_module_type", lambda: _WrapperWithOriginal)
+
+    with pytest.raises(RuntimeError, match="hostile _modules restore"):
+        with unwrap_compiled_submodules(parent):
+            assert parent._modules["child_a"] is wrapper_a._orig_mod
+            assert parent._modules["child_b"] is wrapper_b._orig_mod
+            hostile.armed_key = "child_b"
+
+    # child_b's restore raised (it honestly stays eager); child_a's restore
+    # runs anyway instead of being skipped by the propagating failure.
+    assert parent._modules["child_a"] is wrapper_a
+
+
 @pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
 @pytest.mark.parametrize("parent_raises", [False, True])
 def test_compiled_submodule_restored_after_forward_exception(parent_raises: bool) -> None:

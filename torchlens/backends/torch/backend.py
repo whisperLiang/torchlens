@@ -1093,6 +1093,32 @@ class TorchBackend:
             if entry is not None and hasattr(entry, "out") and entry.out is not None:
                 _tl.clear_meta(entry.out)
 
+    @staticmethod
+    def _warn_without_masking(
+        exc: BaseException,
+        message: str,
+        category: type[Warning],
+        stacklevel: int,
+    ) -> None:
+        """Emit one failure-path advisory without ever masking ``exc``.
+
+        A warnings-as-error filter raises the advisory AT THE WARN SITE;
+        letting that escape the failed-capture cleanup would REPLACE the
+        user's real forward exception -- and with it the ``exc.partial_log``
+        recovery the advisory's own text advertises (b3-opus-R07-1). The
+        advisory degrades to an exception note instead; the user's exception
+        stays the one that propagates.
+        """
+
+        try:
+            warnings.warn(message, category, stacklevel=stacklevel + 1)
+        except Exception as advisory_error:
+            with contextlib.suppress(Exception):
+                exc.add_note(
+                    "TorchLens advisory suppressed (a warnings filter raised it "
+                    f"as {type(advisory_error).__name__}): {message}"
+                )
+
     def cleanup_failed_forward_session(
         self,
         session: object,
@@ -1146,7 +1172,8 @@ class TorchBackend:
             try:
                 partial_log = PartialTrace.from_trace(cast("Trace", session), exc)
             except Exception as construction_error:
-                warnings.warn(
+                self._warn_without_masking(
+                    exc,
                     "TorchLens could not construct partial-trace recovery after the "
                     f"forward failed: {type(construction_error).__name__}: "
                     f"{construction_error}",
@@ -1171,7 +1198,8 @@ class TorchBackend:
                         )
                 except Exception as attachment_error:
                     _register_failed_capture(exc, partial_log)
-                    warnings.warn(
+                    self._warn_without_masking(
+                        exc,
                         "The forward exception rejected TorchLens partial_log attachment; "
                         "recovery remains available through "
                         "torchlens.partial.from_failed_capture(exception). "
@@ -1214,7 +1242,8 @@ class TorchBackend:
         # instead of pointing users at an exception they never receive.
         from .rescue import CaptureAttemptFailedWarning
 
-        warnings.warn(
+        self._warn_without_masking(
+            exc,
             "TorchLens capture attempt failed "
             f"({type(exc).__name__}); the model and torch environment were "
             "restored. Partial diagnostics ride the exception (exc.partial_log "

@@ -94,13 +94,19 @@ class PartialTrace:
         }
     )
 
+    # b1-opus-R06-1: the sanctioned outcome-delegation hop. ``outcome_for``
+    # (and through it every capability gate) reads the inner trace's settled
+    # stamp instead of this wrapper's empty ``__dict__`` -- one answer,
+    # whether callers ask the wrapper or the trace.
+    _OUTCOME_DELEGATE_FIELD: ClassVar[str] = "trace"
+
     @property
     def outcome(self) -> Any | None:
-        """Forward the inner trace's settled capture outcome sidecar."""
+        """Return the ONE settled capture outcome (the inner trace's stamp)."""
 
         from ..capture.outcome import outcome_for
 
-        return outcome_for(self.trace)
+        return outcome_for(self)
 
     @classmethod
     def from_trace(cls, trace: Trace, exception: BaseException) -> PartialTrace:

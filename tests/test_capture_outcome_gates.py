@@ -373,6 +373,85 @@ def test_unstamped_recording_outcome_derives() -> None:
     assert derived.derived is True
 
 
+def test_partial_trace_wrapper_has_one_outcome_answer() -> None:
+    """b1-opus-R06-1: ``outcome_for(wrapper)`` read the WRAPPER's ``__dict__``,
+    so every capability gate treated a shipped FAILED partial as UNKNOWN with a
+    false hand-built-object RuntimeWarning, while ``p.outcome`` forwarded the
+    inner FAILED stamp -- two answers for one product. The sanctioned
+    delegation hop makes every reader see the inner trace's settled record."""
+
+    import warnings
+
+    from torchlens.capture.outcome import outcome_for, require_capture_capability
+
+    try:
+        with torch.no_grad():
+            tl.trace(ExplodingModel(), torch.ones(1, 3))
+    except RuntimeError as exc:
+        partial = tl.partial.from_failed_capture(exc)
+    else:
+        raise AssertionError("capture unexpectedly succeeded")
+
+    inner = outcome_for(partial.trace)
+    assert inner is not None
+    assert inner.status is CaptureStatus.FAILED
+    assert outcome_for(partial) is inner
+    assert partial.outcome is inner
+
+    with warnings.catch_warnings():
+        # The false "no settled capture outcome" advisory must be GONE, not
+        # merely tolerated: any RuntimeWarning here raises.
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(CaptureOutcomeError) as exc_info:
+            require_capture_capability(partial, "save_analysis")
+    assert exc_info.value.fields["code"] == "N1"
+    assert exc_info.value.fields["status"] == "failed"
+
+
+def test_halted_arm_interrupt_settles_failed_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3.6 rollup: a KeyboardInterrupt inside the halted finalization arm
+    escaped with NO settlement stamp -- the product read UNKNOWN only through
+    the fail-closed no-sidecar default instead of a settled record. It must
+    settle FAILED/INTERRUPT exactly like the outer interrupt arm."""
+
+    import torchlens.capture.trace as trace_module
+    from torchlens.capture.outcome import FailureOrigin, outcome_for
+
+    seen: list[object] = []
+
+    def _interrupt(trace_self: object, *args: object, **kwargs: object) -> object:
+        seen.append(trace_self)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(trace_module, "_finalize_halted_trace", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
+    assert len(seen) == 1
+    outcome = outcome_for(seen[0])
+    assert outcome is not None, "halted-arm interrupt escaped without a settlement stamp"
+    assert outcome.status is CaptureStatus.FAILED
+    assert outcome.origin is FailureOrigin.INTERRUPT
+    assert "interrupted during halted finalization" in (outcome.settlement_note or "")
+
+
+def test_hand_built_partial_wrapper_around_settled_trace_still_refuses_save(tmp_path) -> None:
+    """The outcome delegation must not open tl.save to hand-built wrappers: a
+    PartialTrace around a COMPLETE trace previously fail-closed only by
+    ACCIDENT (gate read the wrapper's empty ``__dict__`` as UNKNOWN); it must
+    refuse typed, never proceed into Trace save machinery and crash."""
+
+    from torchlens.partial import PartialTrace
+
+    complete = tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    assert complete.outcome.status is CaptureStatus.COMPLETE
+    wrapper = PartialTrace(trace=complete, original_exception=RuntimeError("hand-built"))
+    with pytest.raises(CaptureOutcomeError) as exc_info:
+        tl.save(wrapper, tmp_path / "wrapper.tlspec", overwrite=True)
+    assert exc_info.value.fields["code"] == "N1"
+
+
 def test_partial_lookup_error_is_typed_and_valueerror() -> None:
     from torchlens.errors import PartialCaptureLookupError
 

@@ -116,3 +116,36 @@ def test_runnable_capture_uses_existing_witness_without_plain_warning() -> None:
     assert not [record for record in warning_records if record.category is ScalarEscapeWarning]
     assert trace.completeness_witness_mode == "off"
     assert not hasattr(trace, "scalar_escape_count")
+
+
+class _EscapeThenBoom(nn.Module):
+    """Read a scalar escape, then fail the forward."""
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Escape one Python scalar and raise."""
+        scalar = inputs.sum().item()
+        raise ValueError(f"boom after escape {scalar}")
+
+
+@pytest.mark.smoke
+def test_escape_advisory_never_replaces_inflight_capture_exception() -> None:
+    """b3-sol rollup of R07-1: the aggregate advisory used to fire from an
+    unconditional ``finally``, so a warnings-as-error filter raised it during
+    unwind and REPLACED the real in-flight capture failure (cascading with the
+    terminal capture-failed advisory). The user's exception must propagate."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.filterwarnings("error", category=ScalarEscapeWarning)
+        with pytest.raises(ValueError, match="boom after escape"):
+            tl.trace(_EscapeThenBoom(), torch.ones(2))
+
+
+@pytest.mark.smoke
+def test_escape_advisory_still_raises_on_success_path_under_error_filter() -> None:
+    """With no in-flight exception, an as-error filter legitimately surfaces
+    the advisory as the raised error -- nothing is being masked."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.filterwarnings("error", category=ScalarEscapeWarning)
+        with pytest.raises(ScalarEscapeWarning):
+            tl.trace(_ItemScale(), torch.ones(2))

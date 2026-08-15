@@ -195,18 +195,25 @@ def test_every_settleable_status_round_trips_through_the_strict_codec() -> None:
 
 
 def test_contradictory_payload_degrades_to_unknown_with_one_warning() -> None:
-    """The load path warns and degrades; it never adopts or crashes."""
+    """The load path warns and degrades; it never adopts or crashes.
+
+    b8-sol: this payload violates the CROSS-FIELD layer (COMPLETE carrying
+    FAILED-only fields) while its structural evidence (halted=False,
+    finished=True) is perfectly consistent with COMPLETE. The refusal must
+    name the internal contradiction, never blame the structural evidence."""
 
     state = {
         "_capture_outcome": dict(_CONTRADICTORY_COMPLETE),
         "halted": False,
         "_tracing_finished": True,
     }
-    with pytest.warns(RuntimeWarning, match="contradicts this artifact"):
+    with pytest.warns(RuntimeWarning, match="internally contradictory") as records:
         resolved = resolve_loaded_outcome(state)
     assert resolved.status is CaptureStatus.UNKNOWN
     assert resolved.derived is True
     assert "attestation_incoherent" in (resolved.settlement_note or "")
+    assert "FAILED-only field" in (resolved.settlement_note or "")
+    assert not any("structural evidence" in str(record.message) for record in records)
 
 
 def test_unknown_key_payload_degrades_to_unknown_with_one_warning() -> None:

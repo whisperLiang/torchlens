@@ -603,28 +603,58 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
     except BaseException:
         _restore_scalar_belt()
         raise
+
+    def _warn_escapes() -> None:
+        """Emit the one per-capture escape aggregate warning when armed."""
+        if not state.count:
+            return
+        location = (
+            f"{state.first_file}:{state.first_line}"
+            if state.first_file is not None and state.first_line is not None
+            else "an unknown user source location"
+        )
+        warnings.warn(
+            ScalarEscapeWarning(
+                "TorchLens observed "
+                f"{state.count} tensor-to-Python scalar escape(s) during capture; "
+                f"first at {location}. Keep it as a tensor or pass the value as an "
+                "explicit input; the dependence is not captured.",
+                file_path=state.first_file,
+                line_no=state.first_line,
+                count=state.count,
+            ),
+            stacklevel=_external_warning_stacklevel(),
+        )
+
     try:
         yield
-    finally:
+    except BaseException as inflight:
         _restore_scalar_belt()
-        if state.count:
-            location = (
-                f"{state.first_file}:{state.first_line}"
-                if state.first_file is not None and state.first_line is not None
-                else "an unknown user source location"
-            )
-            warnings.warn(
-                ScalarEscapeWarning(
-                    "TorchLens observed "
-                    f"{state.count} tensor-to-Python scalar escape(s) during capture; "
-                    f"first at {location}. Keep it as a tensor or pass the value as an "
-                    "explicit input; the dependence is not captured.",
-                    file_path=state.first_file,
-                    line_no=state.first_line,
-                    count=state.count,
-                ),
-                stacklevel=_external_warning_stacklevel(),
-            )
+        # b3-sol (R07 filter-hazard rollup): this advisory used to fire from an
+        # unconditional ``finally``, so a warnings-as-error filter raised it
+        # DURING UNWIND and replaced the real in-flight capture failure
+        # (cascading into the terminal capture-failed advisory). On the
+        # exception path the advisory degrades to a note; the success path
+        # below keeps full filter semantics.
+        # NOTE: only names present in completeness_witness's namespace may be
+        # used here -- this contextmanager executes REBOUND into that module's
+        # globals() (rebind_contextmanager), so a _completeness_storage-only
+        # import raises NameError at call time.
+        try:
+            _warn_escapes()
+        except Exception:
+            try:
+                inflight.add_note(
+                    "TorchLens scalar-escape advisory suppressed (a warnings "
+                    f"filter raised it): {state.count} tensor-to-Python scalar "
+                    "escape(s) were observed during this failed capture."
+                )
+            except Exception:
+                pass
+        raise
+    else:
+        _restore_scalar_belt()
+        _warn_escapes()
 
 
 def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessState) -> Any:

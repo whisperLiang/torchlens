@@ -333,10 +333,30 @@ def safe_exception_repr(exc: BaseException) -> str:
 
 
 def outcome_for(trace: object) -> CaptureOutcome | None:
-    """Return the settled outcome sidecar attached to ``trace``, if any."""
+    """Return the settled outcome sidecar attached to ``trace``, if any.
+
+    A wrapper product that carries no sidecar of its own may declare ONE
+    sanctioned delegation hop via the ``_OUTCOME_DELEGATE_FIELD`` class
+    attribute naming the attribute that holds the settled inner product
+    (``PartialTrace.trace``). Without it every capability gate read the
+    WRAPPER's empty ``__dict__`` and treated a shipped FAILED partial as
+    UNKNOWN with a false hand-built-object warning, while ``p.outcome``
+    forwarded the inner trace's FAILED stamp -- two answers for one product
+    (b1-opus-R06-1). The hop is single-level by construction: the delegate is
+    read through its own ``__dict__`` only, never recursed.
+    """
 
     outcome = getattr(trace, "__dict__", {}).get("_capture_outcome")
-    return outcome if isinstance(outcome, CaptureOutcome) else None
+    if isinstance(outcome, CaptureOutcome):
+        return outcome
+    delegate_field = getattr(type(trace), "_OUTCOME_DELEGATE_FIELD", None)
+    if isinstance(delegate_field, str):
+        inner = getattr(trace, delegate_field, None)
+        if inner is not None and inner is not trace:
+            inner_outcome = getattr(inner, "__dict__", {}).get("_capture_outcome")
+            if isinstance(inner_outcome, CaptureOutcome):
+                return inner_outcome
+    return None
 
 
 def require_capture_capability(
@@ -557,8 +577,8 @@ def parse_outcome_payload(payload: object) -> CaptureOutcome:
     )
 
 
-def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
-    """Return whether one attestation is internally self-consistent (B1-07a).
+def _cross_field_incoherence(outcome: CaptureOutcome) -> str | None:
+    """Return the first internal-contradiction rule one attestation violates (B1-07a).
 
     Parameters
     ----------
@@ -567,14 +587,21 @@ def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
 
     Returns
     -------
-    bool
-        False when the record carries evidence its own status forbids.
+    str | None
+        A description of the violated cross-field rule, or ``None`` when the
+        record is internally self-consistent. The description names the ACTUAL
+        rule so the load-time refusal never misattributes an internal
+        contradiction to the artifact's structural evidence (b8-sol).
     """
 
-    if outcome.status is not CaptureStatus.FAILED and any(
-        getattr(outcome, field_name) is not None for field_name in _FAILED_ONLY_OUTCOME_FIELDS
-    ):
-        return False
+    if outcome.status is not CaptureStatus.FAILED:
+        forbidden = [
+            field_name
+            for field_name in _FAILED_ONLY_OUTCOME_FIELDS
+            if getattr(outcome, field_name) is not None
+        ]
+        if forbidden:
+            return f"carries FAILED-only field(s) {forbidden} on a non-FAILED status"
     # ``derived`` is provenance only the derivation lattices write, and they
     # emit HALTED / UNATTESTED / UNKNOWN exclusively; every settle stamp
     # writes ``derived=False``. A derived COMPLETE / ABORTED_NONFINITE /
@@ -584,21 +611,28 @@ def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
         CaptureStatus.ABORTED_NONFINITE,
         CaptureStatus.FAILED,
     ):
-        return False
+        return "claims derived=True for a status no derivation lattice emits"
     # ``settle_completed`` writes neither a reason nor the fastlog
     # disk-recovery marker; a COMPLETE payload carrying either forges
     # provenance no writer can produce (R06).
     if outcome.status is CaptureStatus.COMPLETE and (
         outcome.reason is not None or outcome.recovered
     ):
-        return False
-    carries_boundary_evidence = any(
-        getattr(outcome, field_name) is not None for field_name in _NO_BOUNDARY_OUTCOME_FIELDS
-    )
-    return not (
-        outcome.status in (CaptureStatus.COMPLETE, CaptureStatus.UNATTESTED)
-        and carries_boundary_evidence
-    )
+        return "carries a reason or recovered marker no COMPLETE writer produces"
+    boundary_evidence = [
+        field_name
+        for field_name in _NO_BOUNDARY_OUTCOME_FIELDS
+        if getattr(outcome, field_name) is not None
+    ]
+    if outcome.status in (CaptureStatus.COMPLETE, CaptureStatus.UNATTESTED) and boundary_evidence:
+        return f"carries stop-boundary field(s) {boundary_evidence} on a no-boundary status"
+    return None
+
+
+def _cross_field_coherent(outcome: CaptureOutcome) -> bool:
+    """Return whether one attestation is internally self-consistent (B1-07a)."""
+
+    return _cross_field_incoherence(outcome) is None
 
 
 def attestation_coherent(
@@ -715,6 +749,28 @@ def resolve_loaded_outcome(state: Mapping[str, Any]) -> CaptureOutcome:
         )
     halted = bool(state.get("halted"))
     finished = bool(state.get("_tracing_finished"))
+    # b8-sol: the refusal names the rule that ACTUALLY failed. An internally
+    # contradictory record (cross-field layer) used to be blamed on the
+    # artifact's structural evidence even when halted/finished were perfectly
+    # consistent with the claimed status -- the wrong rule for the operator
+    # debugging the artifact.
+    internal_violation = _cross_field_incoherence(outcome)
+    if internal_violation is not None:
+        warnings.warn(
+            "TorchLens found an internally contradictory capture-outcome "
+            f"attestation ({outcome.status.value!r}): it {internal_violation}; "
+            "treating the capture outcome as UNKNOWN (fail-closed).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return CaptureOutcome(
+            status=CaptureStatus.UNKNOWN,
+            derived=True,
+            settlement_note=(
+                f"attestation_incoherent_internal: status={outcome.status.value} "
+                f"{internal_violation}"
+            ),
+        )
     if not attestation_coherent(outcome, halted=halted, finished=finished):
         warnings.warn(
             "TorchLens found an attested capture outcome "

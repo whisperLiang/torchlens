@@ -1223,6 +1223,44 @@ def _extract_and_mark_outputs(
     return list(output_tensors), output_tensor_addresses
 
 
+def _settle_interrupted_halted_arm(
+    trace: "Trace",
+    capture_session: Any,
+    interrupt_exc: BaseException,
+    halt_exc: HaltSignal,
+) -> None:
+    """Stamp an interrupt that escaped the halted arm, never masking it.
+
+    Mirrors the outer ``except BaseException`` arm's guarded settlement: the
+    stamp is FAILED/interrupted with the halt boundary disclosed, and an
+    ordinary settlement/scrub failure attaches as a note instead of replacing
+    the unwinding KeyboardInterrupt/SystemExit (B8-23 discipline).
+    """
+
+    try:
+        settle_failed(
+            trace,
+            capture_session,
+            interrupt_exc,
+            interrupted=True,
+            settlement_note=(
+                "interrupted during halted finalization after halt at "
+                f"{getattr(halt_exc, 'reason', '')!r}"
+            ),
+        )
+        _scrub_failed_capture_transients(trace)
+    except Exception as settle_exc:
+        note = (
+            "TorchLens settlement/scrub also failed while handling this "
+            f"interrupt: {type(settle_exc).__name__}: {safe_exception_str(settle_exc)}"
+        )
+        add_note = getattr(interrupt_exc, "add_note", None)
+        if add_note is not None:
+            add_note(note)
+        else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+            warnings.warn(note, RuntimeWarning, stacklevel=2)
+
+
 def _finalize_halted_trace(
     self: "Trace",
     backend: CaptureBackend,
@@ -1823,6 +1861,15 @@ def run_and_log_inputs_through_model(
                 )
                 _scrub_failed_capture_transients(self)
                 raise
+            except BaseException as halt_interrupt_exc:
+                # Halted-arm interrupt: ``except Exception`` above cannot see a
+                # KeyboardInterrupt/SystemExit, which used to escape with NO
+                # settlement stamp -- the product read UNKNOWN only through the
+                # fail-closed no-sidecar default instead of a settled record.
+                # Stamp FAILED/interrupted like the outer BaseException arm.
+                self.__dict__.pop("_capture_producer_policy", None)
+                _settle_interrupted_halted_arm(self, capture_session, halt_interrupt_exc, halt_exc)
+                raise
             self.__dict__.pop("_capture_producer_policy", None)
             settle_halted(
                 self,
@@ -1854,6 +1901,13 @@ def run_and_log_inputs_through_model(
                 ),
             )
             _scrub_failed_capture_transients(self)
+            raise
+        except BaseException as halt_interrupt_exc:
+            # Same halted-arm interrupt stamp as the finalize path above: the
+            # seal/cleanup seam's ``except Exception`` cannot see an interrupt,
+            # which used to escape unsettled.
+            self.__dict__.pop("_capture_producer_policy", None)
+            _settle_interrupted_halted_arm(self, capture_session, halt_interrupt_exc, halt_exc)
             raise
         self.__dict__.pop("_capture_producer_policy", None)
         settle_halted(
