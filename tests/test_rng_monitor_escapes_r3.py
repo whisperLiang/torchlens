@@ -341,3 +341,17 @@ def test_raw_thread_hook_install_does_not_trip_swap_detector() -> None:
     assert not any(
         detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
     ), sorted(result.uncertain_detail)
+
+
+@pytest.mark.smoke
+def test_in_window_thread_start_does_not_trip_swap_detector() -> None:
+    """Thread._bootstrap_inner re-installs the window's own threading hook via
+    sys.setprofile on every in-window thread start: machinery, never a swap."""
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        worker = threading.Thread(target=lambda: None)
+        worker.start()
+        worker.join(timeout=10.0)
+    assert not any(
+        detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)

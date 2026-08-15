@@ -4879,6 +4879,15 @@ class host_nondeterminism_monitor:
         def wrapper(function: Any) -> Any:
             """Flag the unprovable sub-window, then delegate the slot write."""
 
+            if function is not None and (
+                function is self._sys_hook or function is self._threading_hook
+            ):
+                # Installing THIS monitor's own hook is machinery, not a
+                # swap: ``Thread._bootstrap_inner`` re-installs the window's
+                # threading hook (``sys.setprofile(threading._profile_hook)``)
+                # on every in-window thread start, and a user restoring our
+                # hook closes, not opens, a blind window.
+                return original(function)
             self._flag_uncertain(f"profile_slot_swapped_in_window:{channel}")
             return original(function)
 
