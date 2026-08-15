@@ -591,8 +591,9 @@ the code touched; smoke is the commit-level gate, `not rare and not slow and not
 the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
 must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
 `tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow` fails
-(markers are additive — the test would still run under `-m smoke`), and any smoke test
-exceeding a 15s runtime budget fails the session it ran in. `pytest -n auto` requires the
+(markers are additive — the test would still run under `-m smoke`), and any smoke or
+UNMARKED test exceeding the 5s budget (heavy: 20s; both load-scaled up to 4x under CPU
+oversubscription; `slow`/`rare`/`serial` exempt) fails the session it ran in. `pytest -n auto` requires the
 optional `pytest-xdist` plugin, which is not installed by TorchLens's declared test extra.
 When xdist is installed separately, measure before relying on it: torch intra-op threads can
 oversubscribe workers, and fixture/import setup may dominate.
