@@ -14,6 +14,7 @@ from torch import nn
 
 from . import _state
 from ._runnable_execution import (
+    _HOST_RNG_SOURCE_KIND,
     _INPUT_CHECK_UNAVAILABLE,
     _VIEW_OP_QUALNAMES,
     _ambient_execution_context_restored,
@@ -640,6 +641,23 @@ class _FastSparseSession:
         """Bind produced tensors and enforce the per-call static guard."""
 
         call = compiled.descriptor
+        if len(call.output_slot_ids) != len(call.op_labels):
+            # The slow path pins this arity inside its structure check; the
+            # fast zip below is shortest-wins, so an under-counted op_labels
+            # tuple silently skipped every check on the surplus slots.
+            return (
+                _contract_check(
+                    f"fast_output_structure:{call.call_id}",
+                    False,
+                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                    f"Fast call {call.call_id!r} op labels disagree with its output slots.",
+                    affected_op_labels=call.op_labels,
+                    details=(
+                        ("output_slot_ids", repr(call.output_slot_ids)),
+                        ("op_labels", repr(call.op_labels)),
+                    ),
+                ),
+            )
         expected_paths = tuple(
             self.slots_by_id[slot_id].output_path or () for slot_id in call.output_slot_ids
         )
@@ -1378,6 +1396,15 @@ class _FastLiveSession:
         # ordinary provider would settle on the same trace.
         lossy = _container_spec_reconstruction_lossy(_output_container_spec(self.trace))
         provisional = PathFaithfulness.UNVERIFIABLE if lossy else PathFaithfulness.VERIFIED
+        # Same declaration contract as the ordinary live provider (deephunt
+        # F2): a host-RNG capture's fast report must not read as a
+        # deterministic-looking empty tuple next to VERIFIED.
+        runnable_seam = getattr(self.trace, "_runnable", None)
+        nondeterministic_sources: tuple[str, ...] = (
+            (_HOST_RNG_SOURCE_KIND,)
+            if runnable_seam is not None and bool(runnable_seam.host_rng_consumed)
+            else ()
+        )
         return _finalize_provider_run(
             fork=self.trace,
             output=output,
@@ -1391,6 +1418,7 @@ class _FastLiveSession:
             provisional_mismatch=None,
             numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
             divergence_policy=DivergencePolicy.RAISE,
+            nondeterministic_sources=nondeterministic_sources,
             # The fast-live "fork" IS the user's live Trace: an inherited
             # divergence must raise without evicting it from the registry.
             unregister_fork_on_divergence=False,

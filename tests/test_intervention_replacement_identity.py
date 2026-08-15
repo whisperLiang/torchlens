@@ -114,3 +114,34 @@ def test_inplace_mutating_hook_records_replaced_true() -> None:
     fire_records = list(op.interventions)
     assert fire_records and fire_records[-1].replaced is True
     assert bool((op.out == 0).all())
+
+
+def test_data_alias_mutating_hook_records_replaced_true() -> None:
+    """A hook mutating through the ``.data`` alias is still a REPLACEMENT.
+
+    grind-p5 rollup (incomplete 2289e56c): ``.data`` returns a storage-sharing
+    alias with a FRESH version counter, so ``out.data.mul_(0); return out``
+    changed execution and the saved payload while the ``_version`` witness read
+    "no mutation" and minted ``replaced=False`` -- the exact false
+    no-replacement claim the version-counter fix closed for direct in-place
+    mutation.
+    """
+
+    def data_alias_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+        """Zero the output through the autograd-invisible ``.data`` channel."""
+
+        del hook
+        out.data.mul_(0)
+        return out
+
+    model = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    log = tl.trace(
+        model,
+        torch.randn(2, 3),
+        intervene=tl.when(tl.func("relu"), data_alias_hook),
+    )
+    op = log["relu_1_2"]
+    assert op.intervention_replaced is True
+    fire_records = list(op.interventions)
+    assert fire_records and fire_records[-1].replaced is True
+    assert bool((op.out == 0).all())

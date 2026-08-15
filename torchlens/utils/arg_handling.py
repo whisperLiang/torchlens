@@ -8,13 +8,13 @@ the ``list`` form expected by ``model(*input_args)``.
 
 import copy
 import inspect
-from collections import defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from typing import Any, cast
 
 import torch
 from torch import nn
 
-from .._input_walk import INPUT_TREE_MAX_DEPTH
+from .._input_walk import INPUT_TREE_MAX_DEPTH, _inspect_instance_state_items
 from .tensor_utils import (
     TensorByteFootprint,
     _clone_tensor_payload,
@@ -141,6 +141,157 @@ def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
     return None
 
 
+_PY_TPFLAGS_HEAPTYPE = 1 << 9
+"""``Py_TPFLAGS_HEAPTYPE``: set on Python-defined classes, clear on static C types."""
+
+_TRUSTED_MAPPING_BASES = (dict, OrderedDict, defaultdict, Counter)
+"""Stock dict-backed bases whose C-level extras the rebuild ladder handles by name."""
+
+
+def _inert_state_enumeration_total(cls: type[Any], trusted_bases: tuple[type[Any], ...]) -> bool:
+    """Return whether ``__dict__``/slots enumeration provably covers ``cls`` state.
+
+    A static (C-extension) base outside ``trusted_bases`` can carry C-level
+    instance state (a ``defaultdict.default_factory`` analogue) that the inert
+    inspector cannot enumerate; rebuilding such a class from ``__dict__`` +
+    slots would silently RESET that state -- the exact substitution class the
+    inert-rebuild contract exists to prevent. Python-defined classes (heap
+    types) keep all their state in ``__dict__``/slots by construction.
+    """
+
+    for base in cls.__mro__:
+        if base is object or base in trusted_bases:
+            continue
+        if not (base.__flags__ & _PY_TPFLAGS_HEAPTYPE):
+            return False
+    return True
+
+
+def _copy_instance_state_inertly(original: Any, rebuilt: Any) -> bool:
+    """Copy ``original``'s enumerable instance state onto ``rebuilt`` verbatim.
+
+    Mirrors the dataclass device-move arm: raw-channel enumeration through
+    :func:`torchlens._input_walk._inspect_instance_state_items` and
+    ``object.__setattr__`` writes, never a live attribute protocol. Also copies
+    the one trusted C-level extra the ladder knows by name
+    (``defaultdict.default_factory``, via its member descriptor). Returns
+    ``False`` when the enumeration cannot be inertly proven total.
+    """
+
+    state_items = _inspect_instance_state_items(original)
+    if state_items is None:
+        return False
+    try:
+        if isinstance(original, defaultdict):
+            # Member-descriptor channel: ``default_factory`` is C-level state
+            # the ``__dict__``/slots enumeration cannot see.
+            descriptor = cast(Any, defaultdict).__dict__["default_factory"]
+            descriptor.__set__(rebuilt, descriptor.__get__(original, type(original)))
+        for name, value in state_items.items():
+            object.__setattr__(rebuilt, name, value)
+    except Exception:
+        return False
+    return True
+
+
+def allocate_mapping_like(cls: type[Any]) -> Any | None:
+    """Allocate an EMPTY instance of a ``dict``-backed mapping class inertly.
+
+    Uses the trusted base-type allocator (``OrderedDict.__new__`` for od-backed
+    classes so the C linked list exists, else ``dict.__new__``) -- never the
+    user's ``__new__``/``__init__``. Returns ``None`` when the class is not
+    ``dict``-backed or carries static C bases the inert ladder cannot prove
+    state-total (callers fall back without crashing).
+    """
+
+    if not issubclass(cls, dict) or not _inert_state_enumeration_total(cls, _TRUSTED_MAPPING_BASES):
+        return None
+    try:
+        if issubclass(cls, OrderedDict):
+            shell = OrderedDict.__new__(cast(Any, cls))
+        else:
+            shell = dict.__new__(cast(Any, cls))
+    except Exception:
+        return None
+    return shell if type(shell) is cls else None
+
+
+def mapping_like_set_item(shell: Any, key: Any, value: Any) -> None:
+    """Write one item into an :func:`allocate_mapping_like` shell physically.
+
+    ``OrderedDict.__setitem__`` maintains both the dict storage and the od
+    linked list; every other dict-backed shell writes through
+    ``dict.__setitem__``. Never dispatches a user override.
+    """
+
+    if isinstance(shell, OrderedDict):
+        OrderedDict.__setitem__(shell, key, value)
+    else:
+        dict.__setitem__(shell, key, value)
+
+
+def rebuild_mapping_like(original: Any, pairs: list[tuple[Any, Any]]) -> Any | None:
+    """Inertly rebuild a ``dict``-backed mapping subclass carrying ``pairs``.
+
+    The mapping sibling of :func:`rebuild_tuple_like` and the dataclass
+    device-move arm's INERT rebuild: trusted base-type allocation, physical
+    item writes, then verbatim instance-state copy -- the user's
+    ``__new__``/``__init__`` never runs, so ctor side effects cannot enter the
+    captured program and same-class instance state is never RESET
+    (grind-p5 b3-opus-R12-2). Returns ``None`` when the rebuild cannot be
+    proven faithful (callers keep the original and fail loudly downstream).
+    """
+
+    cls = type(original)
+    shell = allocate_mapping_like(cls)
+    if shell is None:
+        return None
+    try:
+        for key, value in pairs:
+            mapping_like_set_item(shell, key, value)
+    except Exception:
+        return None
+    if not _copy_instance_state_inertly(original, shell):
+        return None
+    return shell
+
+
+def allocate_list_like(cls: type[Any]) -> Any | None:
+    """Allocate an EMPTY instance of a ``list`` subclass inertly, or ``None``.
+
+    Same contract as :func:`allocate_mapping_like`, over ``list.__new__``.
+    """
+
+    if not issubclass(cls, list) or not _inert_state_enumeration_total(cls, (list,)):
+        return None
+    try:
+        shell = list.__new__(cls)
+    except Exception:
+        return None
+    return shell if type(shell) is cls else None
+
+
+def rebuild_list_like(original: Any, items: list[Any]) -> Any | None:
+    """Inertly rebuild a ``list`` subclass carrying ``items``.
+
+    The sequence sibling of :func:`rebuild_mapping_like`: ``list.__new__``
+    allocation, ``list.extend`` population, verbatim instance-state copy;
+    the user's ``__new__``/``__init__`` never runs (grind-p5 b3-opus-R12-2).
+    Returns ``None`` when the rebuild cannot be proven faithful.
+    """
+
+    shell = allocate_list_like(type(original))
+    if shell is None:
+        return None
+    try:
+        list.extend(shell, items)
+    except Exception:
+        return None
+    if not _copy_instance_state_inertly(original, shell):
+        return None
+    return shell
+
+
 def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: int = 0) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
@@ -221,33 +372,58 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         from .._input_walk import raise_input_tree_depth_refusal
 
         raise_input_tree_depth_refusal(depth=_depth)
-    if isinstance(arg, defaultdict):
-        # defaultdict(factory, {k: v, ...}) — preserve the default_factory (#127).
-        # A plain dict() constructor would lose default_factory.
-        copied: Any = defaultdict(arg.default_factory)
+    if isinstance(arg, dict):
+        # INERT rebuild ladder (grind-p5 b3-opus-R12-2 sibling): the historical
+        # ``type(arg)()`` re-ran the user's constructor (resetting same-class
+        # instance state), read children through the overridable ``items()``
+        # protocol (a lying override shrank the copy refusal-free), and the
+        # ``defaultdict`` arm substituted the exact stock class for any
+        # subclass. Population happens after registering so a cyclic value can
+        # point back at this copy; ``default_factory`` is preserved through the
+        # member-descriptor channel (#127).
+        arg_type = type(arg)
+        copied: Any
+        if arg_type is dict:
+            copied = {}
+        else:
+            copied = allocate_mapping_like(arg_type)
+            if copied is None:
+                # Unreconstructable subclass: pass by reference like other
+                # custom wrappers rather than substituting a different program.
+                return arg
         _in_progress[arg_id] = copied
-        for key, value in arg.items():
-            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
-        return copied
-    elif isinstance(arg, dict):
-        # type(arg)() preserves OrderedDict and other dict subclasses; populate
-        # after registering so a cyclic value can point back at this copy.
-        copied = type(arg)()
-        _in_progress[arg_id] = copied
-        for key, value in arg.items():
-            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
+        for key, value in dict.items(arg):
+            mapping_like_set_item(copied, key, copy_arg_tree(value, _in_progress, _depth + 1))
+        if arg_type is not dict and not _copy_instance_state_inertly(arg, copied):
+            del _in_progress[arg_id]
+            return arg
         return copied
     elif isinstance(arg, list):
-        copied = type(arg)()
+        list_type = type(arg)
+        if list_type is list:
+            copied = []
+        else:
+            copied = allocate_list_like(list_type)
+            if copied is None:
+                return arg
         _in_progress[arg_id] = copied
-        for item in arg:
-            copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
+        for index in range(list.__len__(arg)):
+            list.append(
+                copied, copy_arg_tree(list.__getitem__(arg, index), _in_progress, _depth + 1)
+            )
+        if list_type is not list and not _copy_instance_state_inertly(arg, copied):
+            del _in_progress[arg_id]
+            return arg
         return copied
     elif isinstance(arg, tuple):
         # Tuples are immutable and cannot self-reference directly; any cycle
         # through a tuple passes through a mutable container that is already
-        # registered above, so recursing eagerly here is safe.
-        items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
+        # registered above, so recursing eagerly here is safe. Children read
+        # through the concrete builtin slots (inert descent).
+        items = [
+            copy_arg_tree(tuple.__getitem__(arg, index), _in_progress, _depth + 1)
+            for index in range(tuple.__len__(arg))
+        ]
         # Memoized after construction (immutable, so no cycle can pass through
         # the tuple itself) so tuple-shaped DAGs are O(nodes). Subclass
         # reconstruction goes through the verified ladder (T11.7): _fields
@@ -303,111 +479,223 @@ def safe_copy_kwargs(kwargs: dict[Any, Any]) -> dict[Any, Any]:
     return {key: copy_arg_tree(val) for key, val in kwargs.items()}
 
 
-def _prepare_input_deepcopy_memo(
+def _copy_input_tree_node(
     value: Any,
     *,
     path: str,
+    depth: int,
     memo: dict[int, Any],
-    visited: set[int],
+    in_progress: set[int],
     semantic_gaps: list[str],
     tensor_records: list[tuple[str, torch.Tensor, bool]],
-) -> None:
-    """Prepare a shared ``deepcopy`` memo for one input-tree value.
+) -> Any:
+    """Copy one input-tree node INERTLY, returning the copy (b3-opus-R12-1).
+
+    The historical implementation prepared a memo and handed the tree to
+    ``copy.deepcopy``, whose protocol runs USER code on container subclasses: a
+    ``__deepcopy__``/``__reduce_ex__`` override could return a DIFFERENT tree
+    (executed: forward captured over [5.0, 5.0] instead of [-3, -4]) and every
+    witness honestly described the SUBSTITUTED tree with zero refusals. This
+    walker copies the tree itself through the ``_input_walk`` inertness
+    contract: children read through concrete builtin slots, containers rebuilt
+    through the trusted base-type ladders (:func:`rebuild_tuple_like` identity
+    verification, :func:`allocate_mapping_like`/:func:`allocate_list_like`
+    allocation + verbatim state), and the ONLY third-party protocol invoked is
+    torch's own exact-``Tensor`` deepcopy (which preserves cross-tensor storage
+    topology through the shared ``memo``). Unknown wrappers keep the
+    established pass-by-reference contract; a container that cannot be copied
+    faithfully passes by reference WITH a semantic gap, so verification fails
+    closed instead of describing a substituted program.
 
     Parameters
     ----------
     value:
-        Input-tree value to inspect.
+        Input-tree node to copy.
     path:
         Human-readable location used for fail-closed diagnostics.
+    depth:
+        Current nesting depth, bounded by the shared input-boundary ceiling.
     memo:
-        Shared ``deepcopy`` memo for positional and keyword inputs.
-    visited:
-        Object identities already traversed while preparing the memo.
+        Shared identity memo: repeated objects copy ONCE and stay aliased.
+    in_progress:
+        Ancestor identities whose copies cannot be pre-registered (tuples);
+        a cycle closing through one refuses typed.
     semantic_gaps:
-        Accumulator for tensor kinds that cannot use PyTorch's topology-preserving
-        deepcopy protocol.
+        Accumulator for copies that cannot preserve the captured semantics.
     tensor_records:
-        Tensor paths, originals, and whether storage-preserving deepcopy remains
-        available for cross-tensor alias checks.
+        Tensor paths, originals, and whether storage-preserving deepcopy
+        remains available, for cross-tensor alias checks (one per PATH
+        occurrence, so repeated tensors keep every alias-pair site).
 
     Returns
     -------
-    None
-        Mutates ``memo``, ``visited``, and ``semantic_gaps`` in place.
+    Any
+        The copied node (or the original, for by-reference kinds).
     """
 
+    if depth >= INPUT_TREE_MAX_DEPTH:
+        from .._input_walk import raise_input_tree_depth_refusal
+
+        raise_input_tree_depth_refusal(depth=depth)
     if isinstance(value, torch.nn.Parameter):
-        value_id = id(value)
         tensor_records.append((path, value, False))
-        if value_id in visited:
-            return
-        visited.add(value_id)
+        if id(value) in memo:
+            return memo[id(value)]
         cloned = _clone_input_tensor_payload(value)
-        memo[value_id] = cloned
-        return
+        memo[id(value)] = cloned
+        return cloned
     if isinstance(value, torch.Tensor):
-        value_id = id(value)
         deepcopy_preserves_contract = (
             value.is_leaf and not value.requires_grad and type(value) is torch.Tensor
         )
         tensor_records.append((path, value, deepcopy_preserves_contract))
-        if value_id in visited:
-            return
-        visited.add(value_id)
-        if not deepcopy_preserves_contract:
-            cloned = _clone_input_tensor_payload(value)
-            memo[value_id] = cloned
-            try:
-                physical_metadata_changed = (
-                    tuple(cloned.shape) != tuple(value.shape)
-                    or tuple(cloned.stride()) != tuple(value.stride())
-                    or cloned.storage_offset() != value.storage_offset()
-                )
-            except (RuntimeError, TypeError, NotImplementedError):
-                physical_metadata_changed = True
-            if physical_metadata_changed:
-                semantic_gaps.append(
-                    f"{path}: grad-preserving tensor clone changed physical view metadata"
-                )
-        return
+        if id(value) in memo:
+            return memo[id(value)]
+        if deepcopy_preserves_contract:
+            # torch's own deepcopy protocol on an EXACT Tensor (trusted, not
+            # user-overridable): copies each underlying storage once through
+            # the shared memo, so views keep size/stride/offset and
+            # cross-tensor storage sharing.
+            return copy.deepcopy(value, memo)
+        cloned = _clone_input_tensor_payload(value)
+        memo[id(value)] = cloned
+        try:
+            physical_metadata_changed = (
+                tuple(cloned.shape) != tuple(value.shape)
+                or tuple(cloned.stride()) != tuple(value.stride())
+                or cloned.storage_offset() != value.storage_offset()
+            )
+        except (RuntimeError, TypeError, NotImplementedError):
+            physical_metadata_changed = True
+        if physical_metadata_changed:
+            semantic_gaps.append(
+                f"{path}: grad-preserving tensor clone changed physical view metadata"
+            )
+        return cloned
     value_id = id(value)
-    if value_id in visited:
-        return
-    visited.add(value_id)
+    if value_id in memo:
+        return memo[value_id]
+    if value_id in in_progress:
+        from .._input_walk import raise_input_tree_cycle_refusal
+
+        raise_input_tree_cycle_refusal(kind="sequence" if isinstance(value, tuple) else "mapping")
+
+    def _child(child: Any, child_path: str) -> Any:
+        """Recurse into one child with the shared walk state."""
+
+        return _copy_input_tree_node(
+            child,
+            path=child_path,
+            depth=depth + 1,
+            memo=memo,
+            in_progress=in_progress,
+            semantic_gaps=semantic_gaps,
+            tensor_records=tensor_records,
+        )
+
+    def _reference_with_gap(reason: str) -> Any:
+        """Disclose an uncopyable container and pass it by reference."""
+
+        semantic_gaps.append(f"{path}: {reason}")
+        memo[value_id] = value
+        return value
+
     if isinstance(value, dict):
-        for index, (key, child) in enumerate(value.items()):
-            _prepare_input_deepcopy_memo(
-                key,
-                path=f"{path}.<key:{index}>",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
+        cls = type(value)
+        state_items: dict[str, Any] | None = None
+        if cls is dict:
+            shell: Any = {}
+        else:
+            state_items = _inspect_instance_state_items(value)
+            shell = None if state_items is None else allocate_mapping_like(cls)
+            if shell is None:
+                return _reference_with_gap(
+                    f"mapping subclass {cls.__name__} cannot be copied inertly; passed by reference"
+                )
+        memo[value_id] = shell
+        for index, (key, child) in enumerate(dict.items(value)):
+            mapping_like_set_item(
+                shell,
+                _child(key, f"{path}.<key:{index}>"),
+                _child(child, f"{path}.<value:{index}>"),
             )
-            _prepare_input_deepcopy_memo(
-                child,
-                path=f"{path}.<value:{index}>",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
-            )
-        return
-    if isinstance(value, (list, tuple)):
-        for index, child in enumerate(value):
-            _prepare_input_deepcopy_memo(
-                child,
-                path=f"{path}.{index}",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
-            )
-        return
+        if state_items:
+            copied_state = {
+                name: _child(state_items[name], f"{path}.<state:{name}>") for name in state_items
+            }
+        else:
+            copied_state = {}
+        if cls is not dict:
+            try:
+                if isinstance(value, defaultdict):
+                    descriptor = cast(Any, defaultdict).__dict__["default_factory"]
+                    descriptor.__set__(shell, descriptor.__get__(value, cls))
+                for name, copied_value in copied_state.items():
+                    object.__setattr__(shell, name, copied_value)
+            except Exception:
+                del memo[value_id]
+                return _reference_with_gap(
+                    f"mapping subclass {cls.__name__} instance state cannot be "
+                    "copied inertly; passed by reference"
+                )
+        return shell
+    if isinstance(value, list):
+        list_cls = type(value)
+        state_items = None
+        if list_cls is list:
+            shell = []
+        else:
+            state_items = _inspect_instance_state_items(value)
+            shell = None if state_items is None else allocate_list_like(list_cls)
+            if shell is None:
+                return _reference_with_gap(
+                    f"sequence subclass {list_cls.__name__} cannot be copied inertly; "
+                    "passed by reference"
+                )
+        memo[value_id] = shell
+        for index in range(list.__len__(value)):
+            list.append(shell, _child(list.__getitem__(value, index), f"{path}.{index}"))
+        if list_cls is not list and state_items is not None:
+            copied_state = {
+                name: _child(state_items[name], f"{path}.<state:{name}>") for name in state_items
+            }
+            try:
+                for name, copied_value in copied_state.items():
+                    object.__setattr__(shell, name, copied_value)
+            except Exception:
+                del memo[value_id]
+                return _reference_with_gap(
+                    f"sequence subclass {list_cls.__name__} instance state cannot be "
+                    "copied inertly; passed by reference"
+                )
+        return shell
+    if isinstance(value, tuple):
+        # Immutable: children first (a cycle strictly through tuples cannot be
+        # constructed; one through a mutable ancestor resolves via its memo
+        # shell, and an unresolvable close refuses typed via ``in_progress``).
+        in_progress.add(value_id)
+        try:
+            items = [
+                _child(tuple.__getitem__(value, index), f"{path}.{index}")
+                for index in range(tuple.__len__(value))
+            ]
+        finally:
+            in_progress.discard(value_id)
+        if type(value) is tuple:
+            copied: Any = tuple(items)
+        else:
+            copied = rebuild_tuple_like(type(value), items)
+            if copied is None:
+                return _reference_with_gap(
+                    f"tuple subclass {type(value).__name__} cannot be rebuilt "
+                    "faithfully; passed by reference"
+                )
+        memo[value_id] = copied
+        return copied
     # Preserve the established contract for custom wrappers: pass them by
-    # reference rather than following arbitrary attributes through deepcopy.
+    # reference rather than following arbitrary attributes.
     memo[value_id] = value
+    return value
 
 
 def _record_unpreserved_tensor_aliases(
@@ -581,12 +869,19 @@ def safe_copy_input_tree(
 ) -> tuple[list[Any], dict[Any, Any], tuple[str, ...]]:
     """Copy one complete model-input graph while preserving tensor topology.
 
-    Positional and keyword inputs share one ``deepcopy`` memo. For ordinary leaf
+    Positional and keyword inputs share one identity memo. For ordinary leaf
     tensors without autograd history, PyTorch's deepcopy protocol copies each
     underlying storage once and rebuilds every view with its original size,
     stride, and storage offset. Grad-tracked tensors use the historical clone
     path so gradients still reach the caller's input. Every path shares one memo,
     so the same tensor repeated at multiple call sites remains one object.
+
+    The tree walk itself is INERT (b3-opus-R12-1): containers are copied by
+    :func:`_copy_input_tree_node` through the ``_input_walk`` contract, never
+    by handing the tree to ``copy.deepcopy`` -- whose protocol let a user
+    ``__deepcopy__``/``__reduce_ex__`` SUBSTITUTE the tree the capture then
+    honestly witnessed. Torch's exact-``Tensor`` deepcopy is the one trusted
+    protocol still invoked, for storage-topology preservation.
 
     Parameters
     ----------
@@ -603,46 +898,58 @@ def safe_copy_input_tree(
     tuple[list[Any], dict[Any, Any], tuple[str, ...]]
         Copied positional inputs, copied keyword inputs, and semantic gaps that
         require capture verification to fail closed. Distinct overlapping
-        grad-tracked views and unexpected deepcopy failures use the historical
-        clone fallback but are explicitly reported as unverifiable.
+        grad-tracked views, containers that cannot be copied inertly, and
+        unexpected copy failures use the historical clone/by-reference
+        fallbacks but are explicitly reported as unverifiable.
     """
 
+    from .._errors import InvalidArgumentError
+    from .._state import pause_logging
+
     memo: dict[int, Any] = {}
-    visited: set[int] = set()
+    in_progress: set[int] = set()
     semantic_gaps: list[str] = []
     tensor_records: list[tuple[str, torch.Tensor, bool]] = []
-    _prepare_input_deepcopy_memo(
-        args,
-        path="input.args",
-        memo=memo,
-        visited=visited,
-        semantic_gaps=semantic_gaps,
-        tensor_records=tensor_records,
-    )
-    _prepare_input_deepcopy_memo(
-        kwargs,
-        path="input.kwargs",
-        memo=memo,
-        visited=visited,
-        semantic_gaps=semantic_gaps,
-        tensor_records=tensor_records,
-    )
+    try:
+        with pause_logging():
+            copied_args = _copy_input_tree_node(
+                args,
+                path="input.args",
+                depth=0,
+                memo=memo,
+                in_progress=in_progress,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+            copied_kwargs = _copy_input_tree_node(
+                kwargs,
+                path="input.kwargs",
+                depth=0,
+                memo=memo,
+                in_progress=in_progress,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+    except RecursionError as exc:
+        from .._input_walk import raise_input_tree_stack_refusal
+
+        raise_input_tree_stack_refusal(exc)
+        raise  # unreachable: the refusal always raises
+    except InvalidArgumentError:
+        # Typed depth/cycle refusals from the shared input-boundary contract
+        # propagate; a clone fallback would just re-walk the same tree.
+        raise
+    except Exception as exc:
+        semantic_gaps.append(
+            f"input: topology-preserving copy failed with {type(exc).__name__}: {exc}"
+        )
+        copied_args = safe_copy_args(args)
+        copied_kwargs = safe_copy_kwargs(kwargs)
     _record_unpreserved_tensor_aliases(
         tensor_records,
         semantic_gaps,
         require_distinct_tensor_sites=require_distinct_tensor_sites,
     )
-    try:
-        from .._state import pause_logging
-
-        with pause_logging():
-            copied_args, copied_kwargs = copy.deepcopy((args, kwargs), memo)
-    except Exception as exc:
-        semantic_gaps.append(
-            f"input: topology-preserving deepcopy failed with {type(exc).__name__}: {exc}"
-        )
-        copied_args = safe_copy_args(args)
-        copied_kwargs = safe_copy_kwargs(kwargs)
     return copied_args, copied_kwargs, tuple(semantic_gaps)
 
 

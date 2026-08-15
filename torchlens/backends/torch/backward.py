@@ -383,8 +383,11 @@ def _close_implicit_backward_pass_if_open(trace: Any) -> None:
     )
     trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), int(pass_index))
     trace.__dict__.pop("_active_backward_pass_index", None)
-    _clear_pending_accumulate_grad_records(trace)
+    # Close the open-pass flag BEFORE the fallible record clear (R14-1 sibling
+    # ordering): a clear failure propagates loudly either way, but must not
+    # strand the implicit pass marked open after its End event was journaled.
     trace._implicit_backward_pass_open = False
+    _clear_pending_accumulate_grad_records(trace)
     # Fence in-flight cpu_async D2H grad copies before projections make the
     # payloads reachable: the forward finalize seam already ran, so backward
     # is the only remaining producer of pending non_blocking copies.
@@ -3118,11 +3121,23 @@ def _run_backward_with_capture(
                 _materialize_backward_projections(trace)
             raise rewalk_error
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
-        _clear_pending_accumulate_grad_records(trace)
+        # Fenced like the rewalk-error arm above (b3-sol-R14-1): an unfenced
+        # failure in the pending-record clear stranded every grad-fn hook and
+        # strong forward graph ref registered by the walk. Each cleanup step
+        # runs regardless of its siblings; the FIRST failure still propagates
+        # at the end of the tail (never silently swallowed).
+        cleanup_error: BaseException | None = None
+        try:
+            _clear_pending_accumulate_grad_records(trace)
+        except BaseException as exc:
+            cleanup_error = exc
         for handle in handles:
             with contextlib.suppress(BaseException):
                 handle.remove()
-        _clear_forward_grad_fn_refs(trace)
+        try:
+            _clear_forward_grad_fn_refs(trace)
+        except BaseException as exc:
+            cleanup_error = cleanup_error if cleanup_error is not None else exc
         trace.backward_memory_backend = backend
         trace.backward_peak_memory += Bytes(peak_delta)
         trace.backward_durations.append(Duration(duration))
@@ -3138,6 +3153,11 @@ def _run_backward_with_capture(
         _materialize_backward_projections(trace)
         if status == "ok":
             _warn_zero_match_backward_interventions(trace)
+        if cleanup_error is not None:
+            # Pre-fence, the pending-clear failure raised here-abouts anyway
+            # (before the later memory raise), so first-cleanup-error keeps
+            # precedence over the snapshot error.
+            raise cleanup_error
         if memory_error is not None:
             raise memory_error
     return result

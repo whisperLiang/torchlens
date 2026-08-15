@@ -613,3 +613,60 @@ def test_rerun_rejects_fsdp_when_constructible() -> None:
 
     with pytest.raises(RuntimeError, match="FullyShardedDataParallel"):
         log.run(fsdp_model, x)
+
+
+def test_colliding_plan_identifiers_get_per_entry_occurrence_ids() -> None:
+    """One entry's fires can never mask a colliding entry's total miss.
+
+    grind-p5 3.3 rollup pin (b3p3-sol R15-1 / opus complementary): the
+    identifier fallback ladder (helper name / callable qualname) collides
+    across entries with different targets, and the fire audit compares
+    Counter values keyed by that string -- two fires of entry ``a`` used to
+    satisfy the whole bucket while entry ``b`` never fired
+    (``fired=2, unfired=(), warnings=0``). ``_assign_unique_plan_ids`` stamps
+    per-entry occurrence ids and ``_reconcile_rerun_hook_fires`` accounts
+    per entry, with the FireRecord-only fallback pool capped at the
+    shortfall.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.intervention.hooks import NormalizedHookEntry
+    from torchlens.intervention.rerun import (
+        _assign_unique_plan_ids,
+        _reconcile_rerun_hook_fires,
+    )
+
+    def shared_callable(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+        """One callable shared by two differently-targeted entries."""
+
+        return out
+
+    plan = _assign_unique_plan_ids(
+        [
+            NormalizedHookEntry(
+                site_target="a",
+                normalized_callable=shared_callable,
+                helper_spec=None,
+                metadata={},
+            ),
+            NormalizedHookEntry(
+                site_target="b",
+                normalized_callable=shared_callable,
+                helper_spec=None,
+                metadata={},
+            ),
+        ]
+    )
+    ids = [entry.metadata.get("plan_id") for entry in plan]
+    assert len(set(ids)) == 2 and all(ids), ids
+
+    fired_twice = SimpleNamespace(
+        fire_results=(SimpleNamespace(plan_id=ids[0]), SimpleNamespace(plan_id=ids[0])),
+        interventions=(),
+    )
+    log = SimpleNamespace(layer_list=[fired_twice])
+    with pytest.warns(UserWarning, match="fired at zero sites"):
+        total, unfired = _reconcile_rerun_hook_fires(log, plan)
+    assert total == 2
+    assert unfired == (ids[1],), "entry a's fires masked entry b's total miss"

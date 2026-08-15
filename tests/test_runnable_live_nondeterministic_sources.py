@@ -58,3 +58,32 @@ def test_live_run_deterministic_model_declares_no_sources() -> None:
     assert not bool(trace._runnable.host_rng_consumed)
     result = trace.run(inputs=value)
     assert result.report.nondeterministic_sources == ()
+
+
+@pytest.mark.smoke
+def test_fast_live_run_declares_host_rng_source() -> None:
+    """fast=True carries the same host-RNG declaration as the ordinary provider.
+
+    grind-p5 rollup: the fast-LIVE finalize call never passed
+    ``nondeterministic_sources``, so a host-RNG capture's fast report read as
+    a deterministic-looking empty tuple next to VERIFIED -- a contract
+    violation against the shared settlement finalizer.
+    """
+
+    model = HostRngModel()
+    value = torch.randn(2, 3)
+    trace = tl.trace(model, value, save=tl.func("mul"))
+    assert bool(trace._runnable.host_rng_consumed)
+    result = trace.run(inputs=value, fast=True)
+    assert result.report.nondeterministic_sources == ("host_rng",)
+
+
+@pytest.mark.smoke
+def test_fast_live_run_deterministic_model_declares_no_sources() -> None:
+    """A deterministic capture's fast-live report stays empty."""
+
+    model = DeterministicModel()
+    value = torch.randn(2, 3)
+    trace = tl.trace(model, value, save=tl.func("mul"))
+    result = trace.run(inputs=value, fast=True)
+    assert result.report.nondeterministic_sources == ()

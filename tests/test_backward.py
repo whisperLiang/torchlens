@@ -687,6 +687,61 @@ def test_rewalk_failure_removes_hooks_and_clears_refs(
     assert all(layer.grad_fn_handle is None for layer in trace.layer_list)
 
 
+def test_ordinary_tail_pending_clear_failure_still_removes_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ORDINARY finalization tail is fenced like the rewalk-error arm.
+
+    grind-p5 b3-sol-R14-1: the ordinary tail called
+    ``_clear_pending_accumulate_grad_records`` unfenced BEFORE the
+    handle-removal loop and the forward grad-fn ref clear -- an injected
+    failure there stranded every grad-fn hook and strong graph ref (the
+    unswept sibling of the fenced rewalk-error branch 20 lines up). The
+    failure must still propagate (never be silently swallowed), but every
+    later cleanup step must run first.
+    """
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+
+    class _Handle:
+        """Minimal removable hook-handle probe."""
+
+        removed = False
+
+        def remove(self) -> None:
+            """Record that cleanup reached this handle."""
+            self.removed = True
+
+    handle = _Handle()
+    real_walk = backward._walk_and_hook_backward_graph
+
+    def spy_walk(
+        trace_arg: tl.Trace,
+        loss_arg: torch.Tensor,
+        handles: list[object] | None = None,
+    ) -> list[object]:
+        """Run the real walk, then append one spy handle."""
+        result = real_walk(trace_arg, loss_arg, handles)
+        target = handles if handles is not None else result
+        target.append(handle)
+        return result
+
+    def fail_pending_clear(_trace: tl.Trace) -> None:
+        """Inject a pending-record clear failure in the ordinary tail."""
+        raise RuntimeError("injected pending-clear failure")
+
+    monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", spy_walk)
+    monkeypatch.setattr(backward, "_clear_pending_accumulate_grad_records", fail_pending_clear)
+    with pytest.raises(RuntimeError, match="injected pending-clear failure"):
+        trace.log_backward(_output_loss(trace))
+
+    assert handle.removed is True, "pending-clear failure stranded grad-fn hooks"
+    assert all(layer.grad_fn_handle is None for layer in trace.layer_list), (
+        "pending-clear failure stranded strong forward grad-fn refs"
+    )
+
+
 @pytest.mark.parametrize("entrypoint", ["log_backward", "recording_backward"])
 def test_backward_entrypoints_finalize_streaming_on_exception(
     monkeypatch: pytest.MonkeyPatch,

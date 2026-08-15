@@ -563,13 +563,20 @@ def test_fast_sparse_runs_post_execution_contract_checks(tmp_path: Path) -> None
 
 
 def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
-    """Every registry runtime consumer is reachable from the fast provider.
+    """Every registry runtime consumer is reachable from the fast SPARSE provider.
 
     The r71 registry-closure meta-test only asserts the consumer NAME exists;
     nothing gated the fast provider against the declared consumer set, so a
     family added to ``_post_execution_contract_checks`` could silently miss
     ``fast=True`` with no test failure (exactly how the input_structure/
     container/conditional_arm_entry gap shipped).
+
+    grind-p5 rollup hardening: the historical scan read the WHOLE module
+    source, so ANY mention anywhere (the live session, a comment, a dead
+    helper) satisfied it -- zero discriminating power. The scan is now scoped
+    to the ``_FastSparseSession`` class body plus the session-construction
+    helpers that provably feed it, and the behavioral companion below proves
+    the aggregator anchor actually EXECUTES on the fast path.
     """
 
     import inspect
@@ -577,7 +584,9 @@ def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
     import torchlens._fast_run as fast_run_module
     from torchlens.runnable import WITNESS_FAMILY_REGISTRY
 
-    source = inspect.getsource(fast_run_module)
+    # Scoped scan: the sparse session class body plus its constructor path
+    # (build/prepare seams live at module level but are called from build()).
+    source = inspect.getsource(fast_run_module._FastSparseSession)
     # Consumers reached transitively through helpers the fast provider calls:
     # the three structure-family checks run inside the shared
     # _post_execution_contract_checks aggregator, and state_metadata facts are
@@ -606,3 +615,94 @@ def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
         "witness families with no fast-provider consumer (add the consumer to "
         f"_FastSparseSession.run or declare its transitive anchor): {missing}"
     )
+
+
+def test_fast_sparse_post_execution_checks_execute_on_path(tmp_path: Path, monkeypatch) -> None:
+    """The contract-check aggregator EXECUTES during a fast-sparse run.
+
+    Behavioral companion to the source-scoped gate above: name presence in
+    the class body is necessary but not sufficient -- this leg proves the
+    ``_post_execution_contract_checks`` anchor (carrying the three
+    structure-family consumers) actually runs on the ``fast=True`` path.
+    """
+
+    import torchlens._fast_run as fast_run
+
+    model = _LinearReluModel().eval()
+    path = _saved_all_runnable(model, torch.ones(2, 3), tmp_path / "gate.tlspec")
+    loaded = tl.load(path)
+    # First fast=True call is the verify-once ORDINARY run (its aggregator call
+    # rides the transaction module); the compiled session executes from the
+    # second call on, which is the path this gate must prove.
+    loaded.run(inputs=torch.ones(2, 3), fast=True)
+    calls: list[int] = []
+    real = fast_run._post_execution_contract_checks
+
+    def _counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(fast_run, "_post_execution_contract_checks", _counting)
+    loaded.run(inputs=torch.ones(2, 3), fast=True)
+    assert calls, "_post_execution_contract_checks never executed on the fast path"
+
+
+def test_fast_bind_outputs_refuses_op_label_slot_arity_mismatch() -> None:
+    """The fast path contract-checks slot/op-label arity like the slow path.
+
+    grind-p5 rollup (b7 fable+opus, CARRIED): ``_bind_outputs`` zipped
+    ``output_slot_ids`` with ``op_labels`` shortest-wins, so a descriptor
+    whose ``op_labels`` under-counts its output slots silently skipped the
+    shape/dtype/device checks for the surplus slots -- the slow path pins
+    ``len(output_slot_ids) == len(op_labels)`` inside its structure check.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens._fast_run import _FastSparseSession
+    from torchlens.runnable import RunnableErrorCode
+
+    slots_by_id = {
+        "s1": SimpleNamespace(
+            output_path=(0,),
+            shape=(2,),
+            dtype="torch.float32",
+            device_type="cpu",
+            device_index=None,
+        ),
+        "s2": SimpleNamespace(
+            output_path=(1,),
+            shape=(999,),
+            dtype="torch.float32",
+            device_type="cpu",
+            device_index=None,
+        ),
+    }
+    fake_self = SimpleNamespace(
+        slots_by_id=slots_by_id,
+        version_alias_ids={},
+        escape_witness_slot_ids=frozenset(),
+        saved_labels=frozenset(),
+        target=None,
+    )
+    call = SimpleNamespace(
+        call_id="c1",
+        output_slot_ids=("s1", "s2"),
+        op_labels=("op_a",),  # under-counts the output slots
+        is_inplace=False,
+        control_obligations=(),
+    )
+    compiled = SimpleNamespace(descriptor=call)
+    output = (torch.ones(2), torch.ones(3))  # s2 shape disagrees with its slot
+    checks = _FastSparseSession._bind_outputs(
+        fake_self,
+        compiled,
+        output,
+        {},
+        ceiling=SimpleNamespace(guarded_clone=lambda value, **kwargs: value),
+        witness_source_snapshots={},
+    )
+    failing = [check for check in checks if not check.passed]
+    assert failing, "under-counted op_labels silently skipped surplus slot checks"
+    assert failing[0].diagnostic is not None
+    assert failing[0].diagnostic.code == RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH.value

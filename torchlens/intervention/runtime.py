@@ -367,6 +367,7 @@ def _apply_live_hooks(
         pre_hook_shape = tuple(current_out.shape)
         pre_hook_dtype = str(current_out.dtype)
         version_before = _tensor_version(current_out)
+        content_before = _tensor_content_probe(current_out)
         result = _execute_hook(
             normalized_entry.normalized_callable,
             current_out,
@@ -383,14 +384,18 @@ def _apply_live_hooks(
         if (
             not replaced
             and result is current_out
-            and version_before is not None
-            and _tensor_version(current_out) != version_before
+            and (
+                (version_before is not None and _tensor_version(current_out) != version_before)
+                or _content_probe_mutated(content_before, _tensor_content_probe(current_out))
+            )
         ):
             # An in-place-mutating HOOK (``out.mul_(0); return out``) is a
             # genuine value change: recording replaced=False minted ZERO
             # replacement evidence, so validation later failed forward replay
             # in a capture-bug shape on a genuine intervention, and an
-            # unvalidated trace carried the false no-replacement claim.
+            # unvalidated trace carried the false no-replacement claim. The
+            # content probe closes the ``.data``-alias channel the version
+            # counter cannot see (fresh counter on the alias impl).
             replaced = True
         record = _build_live_fire_record(
             normalized_entry,
@@ -451,6 +456,77 @@ def _tuple_versions(values: tuple[torch.Tensor | None, ...]) -> tuple[int | None
     """Version counters for one grad tuple, ``None`` per non-tensor slot."""
 
     return tuple(_tensor_version(value) for value in values)
+
+
+_CONTENT_PROBE_SAMPLES = 8
+"""Bounded per-fire sample width for the storage-alias mutation probe."""
+
+
+def _tensor_content_probe(value: Any) -> tuple[Any, ...] | None:
+    """Bounded strided content sample witnessing storage-alias mutations.
+
+    ``Tensor._version`` misses mutations routed through a DIFFERENT impl over
+    the same storage: ``.data`` mints a storage-sharing alias with a FRESH
+    version counter, so ``out.data.mul_(0); return out`` changed execution
+    with the counter witness reading "no mutation" (the incomplete half of
+    2289e56c). Identity returns therefore pair the counter with this O(1)
+    sample -- numel plus up to :data:`_CONTENT_PROBE_SAMPLES` evenly strided
+    elements. Wholesale in-place edits (zeroing, scaling) are caught; a
+    mutation confined to unsampled elements remains a documented residual,
+    with replay validation the fail-closed authority. ``None`` (non-tensor /
+    unreadable / exotic subclass) reads as "no evidence", never a refusal.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    from .._state import pause_logging
+
+    try:
+        with pause_logging():
+            numel = int(value.numel())
+            if numel == 0:
+                return (0, ())
+            flat = value.detach().reshape(-1)
+            count = min(_CONTENT_PROBE_SAMPLES, numel)
+            step = max(1, numel // count)
+            sample = flat[::step][:count].tolist()
+        return (numel, tuple(sample))
+    except Exception:
+        return None
+
+
+def _content_probe_mutated(before: tuple[Any, ...] | None, after: tuple[Any, ...] | None) -> bool:
+    """NaN-aware inequality between two content probes (missing = no evidence)."""
+
+    if before is None or after is None:
+        return False
+    numel_before, sample_before = before
+    numel_after, sample_after = after
+    if numel_before != numel_after or len(sample_before) != len(sample_after):
+        return True
+    for left, right in zip(sample_before, sample_after):
+        if left != right and not (left != left and right != right):  # NaN == NaN here
+            return True
+    return False
+
+
+def _tuple_content_probes(
+    values: tuple[torch.Tensor | None, ...],
+) -> tuple[tuple[Any, ...] | None, ...]:
+    """Content probes for one grad tuple, ``None`` per non-tensor slot."""
+
+    return tuple(_tensor_content_probe(value) for value in values)
+
+
+def _tuple_probes_mutated(
+    before: tuple[tuple[Any, ...] | None, ...],
+    after: tuple[tuple[Any, ...] | None, ...],
+) -> bool:
+    """Whether any grad-tuple slot's content probe changed (NaN-aware)."""
+
+    if len(before) != len(after):
+        return True
+    return any(_content_probe_mutated(left, right) for left, right in zip(before, after))
 
 
 def _apply_inplace_replacement_to_mutated_storage(
@@ -1332,6 +1408,7 @@ def _apply_live_backward_hooks(
             continue
         previous = current
         versions_before = _tuple_versions(current)
+        probes_before = _tuple_content_probes(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1349,7 +1426,8 @@ def _apply_live_backward_hooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
-                inplace_mutated=_tuple_versions(previous) != versions_before,
+                inplace_mutated=_tuple_versions(previous) != versions_before
+                or _tuple_probes_mutated(probes_before, _tuple_content_probes(previous)),
                 timing="post",
                 previous=previous,
                 current=current,
@@ -1404,6 +1482,7 @@ def _apply_live_backward_prehooks(
             continue
         previous = current
         versions_before = _tuple_versions(current)
+        probes_before = _tuple_content_probes(current)
         with HOOK_REENTRANCY_GUARD, pause_logging():
             result = normalized_entry.normalized_callable(
                 current,
@@ -1421,7 +1500,8 @@ def _apply_live_backward_prehooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
-                inplace_mutated=_tuple_versions(previous) != versions_before,
+                inplace_mutated=_tuple_versions(previous) != versions_before
+                or _tuple_probes_mutated(probes_before, _tuple_content_probes(previous)),
                 timing="pre",
                 previous=previous,
                 current=current,

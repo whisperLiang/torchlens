@@ -293,6 +293,42 @@ def test_grad_fn_hook_inplace_mutation_records_replaced() -> None:
     assert record.replaced is True
 
 
+def test_grad_fn_hook_data_alias_mutation_records_replaced() -> None:
+    """A backward hook mutating a grad slot through ``.data`` records replaced.
+
+    grind-p5 rollup (incomplete 2289e56c): ``.data`` mints a storage-sharing
+    alias with a FRESH version counter, so the tuple-version witness read a
+    ``grad_input[0].data.mul_(0)`` edit as "no mutation" -- the same false
+    no-replacement claim the counter fix closed for direct in-place edits.
+    """
+
+    trace_stub, grad_fn_handle = _hook_trace()
+
+    def mutate_via_data_alias(
+        grad_input: tuple[torch.Tensor, ...],
+        *,
+        grad_output: tuple[torch.Tensor, ...],
+        grad_fn_handle: object,
+        call_index: int,
+        run_ctx: object,
+    ) -> None:
+        """Zero the first grad slot through the ``.data`` channel."""
+
+        del grad_output, grad_fn_handle, call_index, run_ctx
+        grad_input[0].data.mul_(0)
+        return None
+
+    mutate_via_data_alias.direction = "backward"
+    _state._active_hook_plan = normalize_hook_plan(tl.grad_fn(type="relu"), mutate_via_data_alias)
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    hook((torch.ones(1),), (torch.ones(1),))
+
+    record = grad_fn_handle.calls[0].intervention_fire_ref
+    assert isinstance(record, FireRecord)
+    assert record.replaced is True
+
+
 def test_composite_backward_target_specs_match_live_hooks() -> None:
     """Composite selector target specs reconstruct recursively for live hooks."""
 
