@@ -31,6 +31,7 @@ import difflib
 import inspect
 import json
 import pickle
+import re
 import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -394,6 +395,10 @@ def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
     raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}")
 
 
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]+")
+"""Matches CPython object/function ``repr`` heap addresses (``at 0x7f...``)."""
+
+
 def _scrubbed_transform_repr(fn: Any) -> str | None:
     """Return a persistence-safe repr of an activation-transform callable.
 
@@ -425,7 +430,13 @@ def _scrubbed_transform_repr(fn: Any) -> str | None:
         parts.extend("<scrubbed>" for _ in fn.args)
         parts.extend(f"{key}=<scrubbed>" for key in (fn.keywords or {}))
         return f"functools.partial({', '.join(parts)})"
-    return repr(fn)
+    # A plain callable's ``repr`` embeds a live heap address for anything using
+    # the default object/function repr (``<function f at 0x7f...>``,
+    # ``<Foo object at 0x...>``) -- a non-deterministic value (breaks
+    # byte-identical artifacts) and an ASLR heap-layout leak spliced into a
+    # persisted KEEP field (b3-opus, completing the B8-20 scrub). Redact any
+    # ``0x<hex>`` address before it is stored.
+    return _ADDRESS_RE.sub("0x<scrubbed>", repr(fn))
 
 
 @dataclass
