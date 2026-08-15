@@ -17,6 +17,7 @@ from __future__ import annotations
 import collections
 import collections.abc
 import dataclasses
+import typing
 from typing import Any
 
 import pytest
@@ -671,3 +672,128 @@ def test_copy_arg_tree_lying_iteration_reads_physical_storage() -> None:
     hiding_list = HidingList([torch.ones(2), torch.ones(3)])
     copied_list = copy_arg_tree(hiding_list)
     assert list.__len__(copied_list) == 2, "lying __iter__ shrank the copy"
+
+
+# --- grind-p5 b3-opus-R12-1: the input-copy walker never runs user copy protocols ------
+
+
+def test_safe_copy_input_tree_ignores_user_deepcopy_substitution() -> None:
+    """A user ``__deepcopy__`` cannot substitute the captured program.
+
+    The FIRST walker over the user's input tree was ``copy.deepcopy``: a
+    container subclass's ``__deepcopy__``/``__reduce_ex__`` ran user code that
+    could return a DIFFERENT tree (executed: forward captured over [5.0, 5.0]
+    instead of [-3, -4]), and every witness honestly described the SUBSTITUTED
+    tree -- zero refusals.
+    """
+
+    from torchlens.utils.arg_handling import safe_copy_input_tree
+
+    protocol_calls: list[str] = []
+
+    class SwappingList(list):
+        """List subclass whose deepcopy protocol substitutes the payload."""
+
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            protocol_calls.append("deepcopy")
+            return SwappingList([torch.tensor([5.0, 5.0])])
+
+        def __reduce_ex__(self, protocol: int) -> Any:
+            protocol_calls.append("reduce")
+            return (SwappingList, ([torch.tensor([5.0, 5.0])],))
+
+    original = SwappingList([torch.tensor([-3.0, -4.0])])
+    copied_args, _, gaps = safe_copy_input_tree([original], {})
+    copied = copied_args[0]
+    assert protocol_calls == [], "user copy protocol ran during input copy"
+    assert type(copied) is SwappingList
+    assert torch.equal(list.__getitem__(copied, 0), torch.tensor([-3.0, -4.0])), (
+        "user __deepcopy__ SUBSTITUTED the captured input tree"
+    )
+
+
+def test_safe_copy_input_tree_dict_subclass_state_kept_no_ctor() -> None:
+    """Dict-subclass inputs copy inertly: no ctor re-run, state preserved."""
+
+    from torchlens.utils.arg_handling import safe_copy_input_tree
+
+    class ModeBox(dict):
+        """Dict subclass whose ctor observably resets a mode attribute."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.mode = "ctor-default"
+
+    box = ModeBox({"x": torch.ones(2)})
+    box.mode = "user-set"
+    copied_args, _, _ = safe_copy_input_tree([box], {})
+    copied = copied_args[0]
+    assert type(copied) is ModeBox
+    assert copied is not box
+    assert copied.mode == "user-set"
+    assert torch.equal(copied["x"], box["x"]) and copied["x"] is not box["x"]
+
+
+def test_trace_captures_original_values_despite_hostile_deepcopy() -> None:
+    """End to end: the forward runs over the ORIGINAL values, not a substitute.
+
+    Executed repro of the b3-opus-R12-1 headline: on the deepcopy-era walker
+    this capture ran the forward over ``[5.0, 5.0]`` instead of
+    ``[-3.0, -4.0]`` and every witness honestly described the substituted
+    tree. The container is a namedtuple subclass (a fully supported input
+    kind); its ``__deepcopy__`` must never be consulted.
+    """
+
+    class Box(typing.NamedTuple):
+        """Declared one-field schema carrying the payload."""
+
+        x: torch.Tensor
+
+    class SwappingBox(Box):
+        """Namedtuple subclass whose deepcopy protocol substitutes the payload."""
+
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            return SwappingBox(torch.tensor([5.0, 5.0]))
+
+    class FirstElement(nn.Module):
+        """Model reading the wrapped payload physically."""
+
+        def forward(self, wrapped: Any) -> torch.Tensor:
+            return tuple.__getitem__(wrapped, 0) * 1.0
+
+    log = tl.trace(FirstElement(), [SwappingBox(torch.tensor([-3.0, -4.0]))])
+    assert torch.equal(log[-1].out, torch.tensor([-3.0, -4.0])), (
+        "capture ran the forward over the deepcopy-SUBSTITUTED input tree"
+    )
+
+
+def test_safe_copy_input_tree_preserves_view_topology_and_grad_paths() -> None:
+    """The inert rewrite keeps the deepcopy-era guarantees it replaced.
+
+    Contract tensors (leaf, no grad, exact Tensor) keep CROSS-TENSOR storage
+    sharing through the torch deepcopy protocol; grad-tracked tensors keep the
+    clone path plus the metadata gap ledger; repeated tensor identity stays one
+    object; unknown wrappers pass by reference.
+    """
+
+    from torchlens.utils.arg_handling import safe_copy_input_tree
+
+    base = torch.arange(6.0)
+    left, right = base[0:3], base[3:6]
+    shared = torch.ones(2)
+    grad_leaf = torch.ones(3, requires_grad=True)
+
+    class OpaqueWrapper:
+        """Non-container wrapper: passes by reference."""
+
+    wrapper = OpaqueWrapper()
+    copied_args, copied_kwargs, gaps = safe_copy_input_tree(
+        [left, right, {"a": shared}, wrapper], {"k": (shared, grad_leaf)}
+    )
+    copied_left, copied_right, copied_map, copied_wrapper = copied_args
+    assert copied_left.untyped_storage().data_ptr() == copied_right.untyped_storage().data_ptr()
+    assert copied_left.untyped_storage().data_ptr() != left.untyped_storage().data_ptr()
+    assert copied_map["a"] is copied_kwargs["k"][0]  # repeated identity stays one object
+    assert copied_wrapper is wrapper
+    copied_grad = copied_kwargs["k"][1]
+    assert copied_grad.requires_grad and copied_grad is not grad_leaf

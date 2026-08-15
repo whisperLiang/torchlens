@@ -479,111 +479,223 @@ def safe_copy_kwargs(kwargs: dict[Any, Any]) -> dict[Any, Any]:
     return {key: copy_arg_tree(val) for key, val in kwargs.items()}
 
 
-def _prepare_input_deepcopy_memo(
+def _copy_input_tree_node(
     value: Any,
     *,
     path: str,
+    depth: int,
     memo: dict[int, Any],
-    visited: set[int],
+    in_progress: set[int],
     semantic_gaps: list[str],
     tensor_records: list[tuple[str, torch.Tensor, bool]],
-) -> None:
-    """Prepare a shared ``deepcopy`` memo for one input-tree value.
+) -> Any:
+    """Copy one input-tree node INERTLY, returning the copy (b3-opus-R12-1).
+
+    The historical implementation prepared a memo and handed the tree to
+    ``copy.deepcopy``, whose protocol runs USER code on container subclasses: a
+    ``__deepcopy__``/``__reduce_ex__`` override could return a DIFFERENT tree
+    (executed: forward captured over [5.0, 5.0] instead of [-3, -4]) and every
+    witness honestly described the SUBSTITUTED tree with zero refusals. This
+    walker copies the tree itself through the ``_input_walk`` inertness
+    contract: children read through concrete builtin slots, containers rebuilt
+    through the trusted base-type ladders (:func:`rebuild_tuple_like` identity
+    verification, :func:`allocate_mapping_like`/:func:`allocate_list_like`
+    allocation + verbatim state), and the ONLY third-party protocol invoked is
+    torch's own exact-``Tensor`` deepcopy (which preserves cross-tensor storage
+    topology through the shared ``memo``). Unknown wrappers keep the
+    established pass-by-reference contract; a container that cannot be copied
+    faithfully passes by reference WITH a semantic gap, so verification fails
+    closed instead of describing a substituted program.
 
     Parameters
     ----------
     value:
-        Input-tree value to inspect.
+        Input-tree node to copy.
     path:
         Human-readable location used for fail-closed diagnostics.
+    depth:
+        Current nesting depth, bounded by the shared input-boundary ceiling.
     memo:
-        Shared ``deepcopy`` memo for positional and keyword inputs.
-    visited:
-        Object identities already traversed while preparing the memo.
+        Shared identity memo: repeated objects copy ONCE and stay aliased.
+    in_progress:
+        Ancestor identities whose copies cannot be pre-registered (tuples);
+        a cycle closing through one refuses typed.
     semantic_gaps:
-        Accumulator for tensor kinds that cannot use PyTorch's topology-preserving
-        deepcopy protocol.
+        Accumulator for copies that cannot preserve the captured semantics.
     tensor_records:
-        Tensor paths, originals, and whether storage-preserving deepcopy remains
-        available for cross-tensor alias checks.
+        Tensor paths, originals, and whether storage-preserving deepcopy
+        remains available, for cross-tensor alias checks (one per PATH
+        occurrence, so repeated tensors keep every alias-pair site).
 
     Returns
     -------
-    None
-        Mutates ``memo``, ``visited``, and ``semantic_gaps`` in place.
+    Any
+        The copied node (or the original, for by-reference kinds).
     """
 
+    if depth >= INPUT_TREE_MAX_DEPTH:
+        from .._input_walk import raise_input_tree_depth_refusal
+
+        raise_input_tree_depth_refusal(depth=depth)
     if isinstance(value, torch.nn.Parameter):
-        value_id = id(value)
         tensor_records.append((path, value, False))
-        if value_id in visited:
-            return
-        visited.add(value_id)
+        if id(value) in memo:
+            return memo[id(value)]
         cloned = _clone_input_tensor_payload(value)
-        memo[value_id] = cloned
-        return
+        memo[id(value)] = cloned
+        return cloned
     if isinstance(value, torch.Tensor):
-        value_id = id(value)
         deepcopy_preserves_contract = (
             value.is_leaf and not value.requires_grad and type(value) is torch.Tensor
         )
         tensor_records.append((path, value, deepcopy_preserves_contract))
-        if value_id in visited:
-            return
-        visited.add(value_id)
-        if not deepcopy_preserves_contract:
-            cloned = _clone_input_tensor_payload(value)
-            memo[value_id] = cloned
-            try:
-                physical_metadata_changed = (
-                    tuple(cloned.shape) != tuple(value.shape)
-                    or tuple(cloned.stride()) != tuple(value.stride())
-                    or cloned.storage_offset() != value.storage_offset()
-                )
-            except (RuntimeError, TypeError, NotImplementedError):
-                physical_metadata_changed = True
-            if physical_metadata_changed:
-                semantic_gaps.append(
-                    f"{path}: grad-preserving tensor clone changed physical view metadata"
-                )
-        return
+        if id(value) in memo:
+            return memo[id(value)]
+        if deepcopy_preserves_contract:
+            # torch's own deepcopy protocol on an EXACT Tensor (trusted, not
+            # user-overridable): copies each underlying storage once through
+            # the shared memo, so views keep size/stride/offset and
+            # cross-tensor storage sharing.
+            return copy.deepcopy(value, memo)
+        cloned = _clone_input_tensor_payload(value)
+        memo[id(value)] = cloned
+        try:
+            physical_metadata_changed = (
+                tuple(cloned.shape) != tuple(value.shape)
+                or tuple(cloned.stride()) != tuple(value.stride())
+                or cloned.storage_offset() != value.storage_offset()
+            )
+        except (RuntimeError, TypeError, NotImplementedError):
+            physical_metadata_changed = True
+        if physical_metadata_changed:
+            semantic_gaps.append(
+                f"{path}: grad-preserving tensor clone changed physical view metadata"
+            )
+        return cloned
     value_id = id(value)
-    if value_id in visited:
-        return
-    visited.add(value_id)
+    if value_id in memo:
+        return memo[value_id]
+    if value_id in in_progress:
+        from .._input_walk import raise_input_tree_cycle_refusal
+
+        raise_input_tree_cycle_refusal(kind="sequence" if isinstance(value, tuple) else "mapping")
+
+    def _child(child: Any, child_path: str) -> Any:
+        """Recurse into one child with the shared walk state."""
+
+        return _copy_input_tree_node(
+            child,
+            path=child_path,
+            depth=depth + 1,
+            memo=memo,
+            in_progress=in_progress,
+            semantic_gaps=semantic_gaps,
+            tensor_records=tensor_records,
+        )
+
+    def _reference_with_gap(reason: str) -> Any:
+        """Disclose an uncopyable container and pass it by reference."""
+
+        semantic_gaps.append(f"{path}: {reason}")
+        memo[value_id] = value
+        return value
+
     if isinstance(value, dict):
-        for index, (key, child) in enumerate(value.items()):
-            _prepare_input_deepcopy_memo(
-                key,
-                path=f"{path}.<key:{index}>",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
+        cls = type(value)
+        state_items: dict[str, Any] | None = None
+        if cls is dict:
+            shell: Any = {}
+        else:
+            state_items = _inspect_instance_state_items(value)
+            shell = None if state_items is None else allocate_mapping_like(cls)
+            if shell is None:
+                return _reference_with_gap(
+                    f"mapping subclass {cls.__name__} cannot be copied inertly; passed by reference"
+                )
+        memo[value_id] = shell
+        for index, (key, child) in enumerate(dict.items(value)):
+            mapping_like_set_item(
+                shell,
+                _child(key, f"{path}.<key:{index}>"),
+                _child(child, f"{path}.<value:{index}>"),
             )
-            _prepare_input_deepcopy_memo(
-                child,
-                path=f"{path}.<value:{index}>",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
-            )
-        return
-    if isinstance(value, (list, tuple)):
-        for index, child in enumerate(value):
-            _prepare_input_deepcopy_memo(
-                child,
-                path=f"{path}.{index}",
-                memo=memo,
-                visited=visited,
-                semantic_gaps=semantic_gaps,
-                tensor_records=tensor_records,
-            )
-        return
+        if state_items:
+            copied_state = {
+                name: _child(state_items[name], f"{path}.<state:{name}>") for name in state_items
+            }
+        else:
+            copied_state = {}
+        if cls is not dict:
+            try:
+                if isinstance(value, defaultdict):
+                    descriptor = cast(Any, defaultdict).__dict__["default_factory"]
+                    descriptor.__set__(shell, descriptor.__get__(value, cls))
+                for name, copied_value in copied_state.items():
+                    object.__setattr__(shell, name, copied_value)
+            except Exception:
+                del memo[value_id]
+                return _reference_with_gap(
+                    f"mapping subclass {cls.__name__} instance state cannot be "
+                    "copied inertly; passed by reference"
+                )
+        return shell
+    if isinstance(value, list):
+        list_cls = type(value)
+        state_items = None
+        if list_cls is list:
+            shell = []
+        else:
+            state_items = _inspect_instance_state_items(value)
+            shell = None if state_items is None else allocate_list_like(list_cls)
+            if shell is None:
+                return _reference_with_gap(
+                    f"sequence subclass {list_cls.__name__} cannot be copied inertly; "
+                    "passed by reference"
+                )
+        memo[value_id] = shell
+        for index in range(list.__len__(value)):
+            list.append(shell, _child(list.__getitem__(value, index), f"{path}.{index}"))
+        if list_cls is not list and state_items is not None:
+            copied_state = {
+                name: _child(state_items[name], f"{path}.<state:{name}>") for name in state_items
+            }
+            try:
+                for name, copied_value in copied_state.items():
+                    object.__setattr__(shell, name, copied_value)
+            except Exception:
+                del memo[value_id]
+                return _reference_with_gap(
+                    f"sequence subclass {list_cls.__name__} instance state cannot be "
+                    "copied inertly; passed by reference"
+                )
+        return shell
+    if isinstance(value, tuple):
+        # Immutable: children first (a cycle strictly through tuples cannot be
+        # constructed; one through a mutable ancestor resolves via its memo
+        # shell, and an unresolvable close refuses typed via ``in_progress``).
+        in_progress.add(value_id)
+        try:
+            items = [
+                _child(tuple.__getitem__(value, index), f"{path}.{index}")
+                for index in range(tuple.__len__(value))
+            ]
+        finally:
+            in_progress.discard(value_id)
+        if type(value) is tuple:
+            copied: Any = tuple(items)
+        else:
+            copied = rebuild_tuple_like(type(value), items)
+            if copied is None:
+                return _reference_with_gap(
+                    f"tuple subclass {type(value).__name__} cannot be rebuilt "
+                    "faithfully; passed by reference"
+                )
+        memo[value_id] = copied
+        return copied
     # Preserve the established contract for custom wrappers: pass them by
-    # reference rather than following arbitrary attributes through deepcopy.
+    # reference rather than following arbitrary attributes.
     memo[value_id] = value
+    return value
 
 
 def _record_unpreserved_tensor_aliases(
@@ -757,12 +869,19 @@ def safe_copy_input_tree(
 ) -> tuple[list[Any], dict[Any, Any], tuple[str, ...]]:
     """Copy one complete model-input graph while preserving tensor topology.
 
-    Positional and keyword inputs share one ``deepcopy`` memo. For ordinary leaf
+    Positional and keyword inputs share one identity memo. For ordinary leaf
     tensors without autograd history, PyTorch's deepcopy protocol copies each
     underlying storage once and rebuilds every view with its original size,
     stride, and storage offset. Grad-tracked tensors use the historical clone
     path so gradients still reach the caller's input. Every path shares one memo,
     so the same tensor repeated at multiple call sites remains one object.
+
+    The tree walk itself is INERT (b3-opus-R12-1): containers are copied by
+    :func:`_copy_input_tree_node` through the ``_input_walk`` contract, never
+    by handing the tree to ``copy.deepcopy`` -- whose protocol let a user
+    ``__deepcopy__``/``__reduce_ex__`` SUBSTITUTE the tree the capture then
+    honestly witnessed. Torch's exact-``Tensor`` deepcopy is the one trusted
+    protocol still invoked, for storage-topology preservation.
 
     Parameters
     ----------
@@ -779,46 +898,58 @@ def safe_copy_input_tree(
     tuple[list[Any], dict[Any, Any], tuple[str, ...]]
         Copied positional inputs, copied keyword inputs, and semantic gaps that
         require capture verification to fail closed. Distinct overlapping
-        grad-tracked views and unexpected deepcopy failures use the historical
-        clone fallback but are explicitly reported as unverifiable.
+        grad-tracked views, containers that cannot be copied inertly, and
+        unexpected copy failures use the historical clone/by-reference
+        fallbacks but are explicitly reported as unverifiable.
     """
 
+    from .._errors import InvalidArgumentError
+    from .._state import pause_logging
+
     memo: dict[int, Any] = {}
-    visited: set[int] = set()
+    in_progress: set[int] = set()
     semantic_gaps: list[str] = []
     tensor_records: list[tuple[str, torch.Tensor, bool]] = []
-    _prepare_input_deepcopy_memo(
-        args,
-        path="input.args",
-        memo=memo,
-        visited=visited,
-        semantic_gaps=semantic_gaps,
-        tensor_records=tensor_records,
-    )
-    _prepare_input_deepcopy_memo(
-        kwargs,
-        path="input.kwargs",
-        memo=memo,
-        visited=visited,
-        semantic_gaps=semantic_gaps,
-        tensor_records=tensor_records,
-    )
+    try:
+        with pause_logging():
+            copied_args = _copy_input_tree_node(
+                args,
+                path="input.args",
+                depth=0,
+                memo=memo,
+                in_progress=in_progress,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+            copied_kwargs = _copy_input_tree_node(
+                kwargs,
+                path="input.kwargs",
+                depth=0,
+                memo=memo,
+                in_progress=in_progress,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+    except RecursionError as exc:
+        from .._input_walk import raise_input_tree_stack_refusal
+
+        raise_input_tree_stack_refusal(exc)
+        raise  # unreachable: the refusal always raises
+    except InvalidArgumentError:
+        # Typed depth/cycle refusals from the shared input-boundary contract
+        # propagate; a clone fallback would just re-walk the same tree.
+        raise
+    except Exception as exc:
+        semantic_gaps.append(
+            f"input: topology-preserving copy failed with {type(exc).__name__}: {exc}"
+        )
+        copied_args = safe_copy_args(args)
+        copied_kwargs = safe_copy_kwargs(kwargs)
     _record_unpreserved_tensor_aliases(
         tensor_records,
         semantic_gaps,
         require_distinct_tensor_sites=require_distinct_tensor_sites,
     )
-    try:
-        from .._state import pause_logging
-
-        with pause_logging():
-            copied_args, copied_kwargs = copy.deepcopy((args, kwargs), memo)
-    except Exception as exc:
-        semantic_gaps.append(
-            f"input: topology-preserving deepcopy failed with {type(exc).__name__}: {exc}"
-        )
-        copied_args = safe_copy_args(args)
-        copied_kwargs = safe_copy_kwargs(kwargs)
     return copied_args, copied_kwargs, tuple(semantic_gaps)
 
 
