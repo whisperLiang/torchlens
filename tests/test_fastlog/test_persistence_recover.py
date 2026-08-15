@@ -319,8 +319,9 @@ def test_recover_oversized_index_refuses_typed(
     (bundle_path / "manifest.json").unlink()
     monkeypatch.setattr(recover_module, "_INDEX_MAX_BYTES", 8)
 
-    with pytest.raises(TorchLensIOError, match="ceiling"):
+    with pytest.raises(TorchLensIOError, match="ceiling") as excinfo:
         tl.fastlog.recover(bundle_path)
+    assert excinfo.value.fields["code"] == "fastlog_index_too_large"
 
 
 def test_recover_depth_bomb_metadata_degrades_to_empty_metadata(tmp_path: Path) -> None:

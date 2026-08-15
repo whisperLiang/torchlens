@@ -132,6 +132,7 @@ add names to the top-level `torchlens` namespace:
 | `load_path_symlink_rejected` | A load path (bundle, manifest, metadata, or blobs) is a symlink | Pass the resolved real path |
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
+| `fastlog_index_too_large` | Fastlog recovery index exceeds the byte ceiling | Treat as a hostile/implausible bundle; re-record |
 | `manifest_missing` | Bundle directory has no `manifest.json` | Pass the bundle directory produced by `tl.save()` |
 | `manifest_not_json_object` | Manifest root parses but is not a JSON object | Re-save the artifact; do not hand-edit the manifest |
 | `manifest_unreadable` | Manifest cannot be read or does not parse within bounds | Check permissions/integrity; re-save if truncated |
