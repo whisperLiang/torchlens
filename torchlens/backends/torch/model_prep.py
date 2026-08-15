@@ -533,27 +533,43 @@ def _normalize_held_torch_function_refs(module: nn.Module) -> None:
         replacement = _live_counterpart(attr_value)
         if replacement is not None:
             module.__dict__[attr_name] = replacement
-            continue
-        if isinstance(attr_value, list):
-            for index, item in enumerate(attr_value):
-                live = _live_counterpart(item)
-                if live is not None:
-                    attr_value[index] = live
+        elif isinstance(attr_value, (list, dict)):
+            _swap_live_refs_inplace(attr_value)
         elif isinstance(attr_value, tuple):
-            swapped = tuple(_live_counterpart(item) or item for item in attr_value)
-            if any(new is not old for new, old in zip(swapped, attr_value)):
+            swapped = _live_swapped_tuple(attr_value)
+            if swapped is not None:
                 module.__dict__[attr_name] = swapped
-        elif isinstance(attr_value, dict):
-            for key, item in tuple(attr_value.items()):
-                live = _live_counterpart(item)
-                if live is not None:
-                    attr_value[key] = live
         elif isinstance(attr_value, set):
-            for item in tuple(attr_value):
-                live = _live_counterpart(item)
-                if live is not None:
-                    attr_value.discard(item)
-                    attr_value.add(live)
+            _swap_live_refs_in_set(attr_value)
+
+
+def _swap_live_refs_inplace(container: list[Any] | dict[Any, Any]) -> None:
+    """Re-point epoch-mismatched refs inside one list/dict, preserving identity."""
+
+    items = enumerate(container) if isinstance(container, list) else container.items()
+    for key, item in tuple(items):
+        live = _live_counterpart(item)
+        if live is not None:
+            container[key] = live
+
+
+def _live_swapped_tuple(values: tuple[Any, ...]) -> tuple[Any, ...] | None:
+    """Return a live-ref rebuild of one tuple, or ``None`` when nothing changed."""
+
+    swapped = tuple(_live_counterpart(item) or item for item in values)
+    if any(new is not old for new, old in zip(swapped, values)):
+        return swapped
+    return None
+
+
+def _swap_live_refs_in_set(container: set[Any]) -> None:
+    """Re-point epoch-mismatched refs inside one set, preserving identity."""
+
+    for item in tuple(container):
+        live = _live_counterpart(item)
+        if live is not None:
+            container.discard(item)
+            container.add(live)
 
 
 def _prepare_model_once(model: nn.Module) -> None:

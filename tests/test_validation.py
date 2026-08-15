@@ -7258,7 +7258,7 @@ def test_corruption_plain_parent_witnessed_edge_drop_is_rejected() -> None:
             edges = truth.get(raw_label) if raw_label is not None else None
             if not edges:
                 continue
-            for arg_type, slot, parent_raw in edges:
+            for arg_type, _slot, parent_raw in edges:
                 if arg_type == "args" and op.parents:
                     target = (op, raw_label, parent_raw)
                     break
