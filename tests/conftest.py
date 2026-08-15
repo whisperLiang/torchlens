@@ -51,6 +51,10 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens.fastlog._storage_resolver", "_WARNED_REFERENCE_SAVE_MODE", False),
     ("torchlens.postprocess.ast_branches", "_source_drift_warned", set()),
     ("torchlens.utils._torch_compat", "_warned_missing_capabilities", set()),
+    # Capture-scoped CUDA RNG retry latch (grind p5, B2P3-16): re-armed per
+    # capture in the package, and reset per test here so a test that trips it
+    # via a direct log_current_rng_states() call cannot degrade later tests.
+    ("torchlens.utils.rng", "_cuda_rng_unusable", False),
     ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
     ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),
     ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),

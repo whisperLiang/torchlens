@@ -73,6 +73,12 @@ _SCOPED_CAPTURE_STATE = frozenset(
         # unwind -- a survivor past monitor exit is exactly the leak class this
         # row exists to catch (d327e3aa's non-LIFO restore bug).
         ("torchlens/utils/rng.py", "_PATCH_STACKS"),
+        # CUDA RNG snapshot retry latch: set by a failed generator read, RE-ARMED
+        # at every capture entry by set_random_seed (grind p5, B2P3-16). It was
+        # misfiled as an immutable capability memo, which contractually forbade
+        # ever recovering from a TRANSIENT read failure (busy device, momentary
+        # OOM) -- a capture-fidelity latch, not a fact of the torch build.
+        ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         # Accumulate/drain fence for in-flight cpu_async D2H copies (R36-1):
         # armed per copy on the wrapper hot path, drained at the capture
         # finalize seam and on the failure-scrub arms.
@@ -263,7 +269,6 @@ _CAPABILITY_PROBE_STATE = frozenset(
         # One-shot warm of torch's lazy torch._compile/torch._dynamo cascade,
         # fired by the RNG monitor BEFORE its window arms (hunt-b8 F1).
         ("torchlens/utils/_torch_compat.py", "_LAZY_TORCH_IMPORTS_WARMED"),
-        ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
         ("torchlens/utils/tensor_utils.py", "_cuda_available"),
     }
 )

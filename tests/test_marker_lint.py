@@ -214,11 +214,18 @@ def test_warn_once_sentinel_census_matches_autouse_reset(
     )
     configured = {(module_name, name) for module_name, name, _default in configured_specs}
     runtime_only = {("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED")}
-    assert configured == discovered | runtime_only, (
+    # Behavioral fidelity latches the NAME heuristic cannot discover (nothing
+    # "warned"-shaped in the identifier), declared here explicitly so the two
+    # ledgers (this census and the conftest reset list) can no longer disagree
+    # silently (grind p5, B2P3-16 / sol R76-2). A test that trips one of these
+    # degrades every later test in the session, so the reset is REQUIRED.
+    sticky_latches = {("torchlens.utils.rng", "_cuda_rng_unusable")}
+    expected = discovered | runtime_only | sticky_latches
+    assert configured == expected, (
         "Warn-once sentinel reset inventory drifted. Add/remove entries in "
         "tests/conftest.py::_WARN_ONCE_SENTINELS. "
-        f"Missing resets: {sorted(discovered - configured)}; "
-        f"stale resets: {sorted(configured - discovered - runtime_only)}"
+        f"Missing resets: {sorted(expected - configured)}; "
+        f"stale resets: {sorted(configured - expected)}"
     )
 
 

@@ -121,8 +121,13 @@ _CPU_CAPTURE_WITH_FAILING_INITIALIZED_CUDA = textwrap.dedent(
 
     log = tl.trace(M().train(), torch.randn(2, 4))
     assert len(list(log)) > 0, "no ops captured"
-    # Latched: the failing read is attempted once, not once per logged operation.
-    assert reads == ["get_rng_state_all"], f"CUDA RNG read not latched off: {reads}"
+    # Latched within the capture: the failing read is attempted only at the
+    # capture-level snapshot seams (the rescue snapshot, then the capture
+    # snapshot after set_random_seed re-arms the per-capture retry), never
+    # once per logged operation. Dropout consumes RNG per op, so an unlatched
+    # path would read once per op here.
+    assert 1 <= len(reads) <= 2, f"CUDA RNG read not latched off: {reads}"
+    assert len(list(log)) > len(reads), f"per-op CUDA RNG reads leaked: {reads}"
     print("OK", len(list(log)))
     """
 )
@@ -265,6 +270,48 @@ def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
     assert calls == ["read"]
     # A snapshot taken before the latch must not be written back to a dead CUDA RNG.
     tl_rng.set_rng_from_saved_states({"torch": torch.random.get_rng_state(), "torch_cuda_all": []})
+
+
+@pytest.mark.smoke
+def test_transient_cuda_rng_failure_rearms_at_next_capture_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TRANSIENT CUDA RNG read failure degrades one capture, not the process.
+
+    The latch used to be process-lifetime (and its inventory row said "must
+    never be reset"), so one busy-device/OOM moment silently downgraded the
+    replay fidelity of EVERY later capture (grind p5, B2P3-16). Every capture
+    runs ``set_random_seed`` at entry, which now re-arms the retry; a
+    recovered CUDA stack is snapshotted again.
+    """
+
+    attempts: list[str] = []
+    healthy = [torch.tensor([7], dtype=torch.uint8)]
+
+    def _transiently_broken() -> list[torch.Tensor]:
+        """Fail the first read (transient), succeed afterwards."""
+
+        attempts.append("read")
+        if len(attempts) == 1:
+            raise RuntimeError("simulated transient CUDA failure (busy device)")
+        return healthy
+
+    monkeypatch.setattr(tl_rng, "_cuda_rng_unusable", False)
+    monkeypatch.setattr(tl_rng, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", _transiently_broken)
+
+    with pytest.warns(UserWarning, match="Could not read CUDA RNG state"):
+        assert tl_rng._snapshot_cuda_rng_states() == []
+    # Within the same capture the latch holds: per-op cost stays bounded.
+    assert tl_rng._snapshot_cuda_rng_states() == []
+    assert attempts == ["read"]
+
+    # The next capture entry (every capture seeds at entry) re-arms the retry
+    # and the recovered stack is snapshotted again.
+    tl_rng.set_random_seed(11)
+    assert tl_rng._snapshot_cuda_rng_states() is healthy
+    assert attempts == ["read", "read"]
 
 
 @pytest.mark.smoke

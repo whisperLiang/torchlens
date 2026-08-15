@@ -476,6 +476,12 @@ def set_random_seed(seed: int) -> None:
     seed:
         Seed value to set.
     """
+    # Every capture seeds at entry, so this is the per-capture seam that
+    # re-arms the CUDA RNG snapshot retry latch: a transient generator-read
+    # failure (busy device, momentary OOM) degrades only the capture that hit
+    # it instead of latching the whole process to "no CUDA RNG snapshots".
+    global _cuda_rng_unusable
+    _cuda_rng_unusable = False
     # r65 CLUSTER Z: TorchLens-OWNED seeding is never model host nondeterminism.
     # Normally this runs pre-forward (outside any monitor window), but the bracket
     # keeps any in-window TorchLens-initiated reseed from marking the torch RNG
@@ -598,12 +604,16 @@ def _numpy_states_equal(a: Any, b: Any) -> bool:
 
 
 _cuda_rng_unusable: bool = False
-"""Sticky: a CUDA RNG snapshot raised once, so stop retrying it this process.
+"""Capture-scoped retry latch: a CUDA RNG snapshot raised, stop retrying for now.
 
-Set only by :func:`_snapshot_cuda_rng_states`.  A CUDA stack that fails a
-host-side generator read is broken for the lifetime of the process; retrying it
-per op would re-pay the failure cost and re-emit the warning on every logged
-operation.
+Set only by :func:`_snapshot_cuda_rng_states`; RE-ARMED by
+:func:`set_random_seed` (which every capture runs at entry). The snapshot is
+called per logged op, so within one capture the first failure latches — the
+failure cost and the warning are paid once, not per op. But the failure itself
+can be TRANSIENT (a busy device, a momentary OOM, a fork-context error), so a
+process-lifetime latch silently downgraded EVERY later capture's replay
+fidelity because of one bad moment (grind p5, B2P3-16). Re-arming at capture
+entry bounds the damage to the capture that actually hit the failure.
 """
 
 
@@ -618,7 +628,10 @@ def _snapshot_cuda_rng_states() -> list[Any]:
     (stale driver, mismatched build, one bad device in a multi-GPU box), the
     initialization raised and aborted the CPU capture outright.
 
-    Two guards, in order (both short-circuited once ``_cuda_rng_unusable`` latches):
+    Two guards, in order (both short-circuited while ``_cuda_rng_unusable`` is
+    latched; the latch is re-armed at every capture entry by
+    :func:`set_random_seed`, so a transient failure degrades only the capture
+    that hit it, never the whole process):
 
     1. If this process has never initialized CUDA, no CUDA generator can have
        produced a number that any captured op consumed, so there is no state to
