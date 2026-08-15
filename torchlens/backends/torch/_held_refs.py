@@ -32,12 +32,13 @@ def _live_counterpart(value: Any) -> Any | None:
     touched.
     """
 
+    decorated_to_orig, orig_to_decorated = _state.wrap_epoch_ledgers()
     wrapper: Any = None
     if callable(value):
-        if id(value) in _state._decorated_to_orig:
+        if id(value) in decorated_to_orig:
             wrapper = value
-        elif id(value) in _state._orig_to_decorated:
-            wrapper = _state._orig_to_decorated[id(value)]
+        elif id(value) in orig_to_decorated:
+            wrapper = orig_to_decorated[id(value)]
     if wrapper is None:
         return None
     namespace_name = getattr(wrapper, "__module__", None)
@@ -55,9 +56,8 @@ def _live_counterpart(value: Any) -> Any | None:
     # Only the exact wrap-epoch counterpart qualifies: the held wrapper's own
     # original, or the wrapper installed over the held original.
     if (
-        _state._decorated_to_orig.get(id(current))
-        is _state._decorated_to_orig.get(id(value), value)
-        or _state._decorated_to_orig.get(id(value)) is current
+        decorated_to_orig.get(id(current)) is decorated_to_orig.get(id(value), value)
+        or decorated_to_orig.get(id(value)) is current
     ):
         return current
     return None
