@@ -426,31 +426,91 @@ def test_predicate_keys_cover_keyword_only_defaults() -> None:
     assert _stable_cache_fragment(low) == _stable_cache_fragment(namespace_same["predicate"])
 
 
-def test_accessor_caches_version_by_value_not_len(tmp_path: Path) -> None:
-    """Equal-length graph edits must invalidate the accessor memos (r1 row 13).
+def test_accessor_caches_invalidate_on_rebind_resize_and_invalidator(tmp_path: Path) -> None:
+    """Accessor-memo invalidation contract (r1 row 13, re-keyed in r3 R52-1).
 
-    ``trace.ops`` / ``trace.layers`` memoized on ``len(...)`` alone, so a
-    user's equal-length direct reassignment (or element swap) served a stale
-    accessor built over the OLD records.
+    The r1 fix keyed the ``trace.ops`` / ``trace.layers`` memos BY VALUE
+    (ordered label tuples) so even a direct equal-length in-place element
+    swap auto-invalidated -- but that priced every memo HIT at O(n), turned
+    hot ``trace.ops`` sweeps O(n^2), and measurably regressed ``tl.trace``
+    itself (r3 R52-1/R28-1, the round-3 fixplan prescribes the identity+len
+    key). The contract is now: REASSIGNMENT invalidates (identity), any
+    add/remove invalidates (length), the internal rename/refresh paths call
+    ``_invalidate_trace_op_layer_accessor_caches`` explicitly, and direct
+    equal-length in-place mutation of the build products requires that same
+    explicit invalidator.
     """
+
+    from torchlens.data_classes._trace_accessors import (
+        _invalidate_trace_op_layer_accessor_caches,
+    )
 
     model = nn.Sequential(nn.Linear(2, 2), nn.ReLU())
     trace = tl.trace(model, torch.ones(1, 2))
     ops_before = trace.ops
     first_two = list(trace.layer_list[:2])
 
-    # Equal-length in-place swap of the backing list.
+    # Unchanged containers re-serve the memo (identity-stable, O(1) key).
+    assert trace.ops is ops_before
+
+    # Equal-length in-place swap + the explicit invalidator (the supported
+    # spelling for direct in-place edits of trace build products).
     trace.layer_list[0], trace.layer_list[1] = trace.layer_list[1], trace.layer_list[0]
+    _invalidate_trace_op_layer_accessor_caches(trace)
     swapped = trace.ops
     assert swapped is not ops_before
     assert list(swapped)[:2] == [first_two[1], first_two[0]]
 
+    # Equal-length reassignment auto-invalidates via container identity.
     layers_before = trace.layers
-    # Equal-length reassignment with a different insertion order.
     items = list(trace.layer_logs.items())
     trace.layer_logs = dict(reversed(items))
     layers_after = trace.layers
     assert layers_after is not layers_before
+
+    # A size change auto-invalidates via the length axis.
+    ops_full = trace.ops
+    removed = trace.layer_list.pop()
+    try:
+        assert trace.ops is not ops_full
+    finally:
+        trace.layer_list.append(removed)
+
     # Unchanged content still re-serves the memo (no per-access rebuilds).
     assert trace.layers is layers_after
-    assert trace.ops is swapped
+
+
+def test_ops_memo_hit_is_o1_no_label_reads(tmp_path: Path) -> None:
+    """A memo HIT must not touch per-op labels (r3 R52-1 O(n^2) kill).
+
+    The r3 by-value key rebuilt the full O(n) label tuple on EVERY
+    ``trace.ops`` / ``trace.layers`` access, so an n-op sweep that resolved
+    ops through the accessor property cost O(n^2) label reads (measured
+    exponent ~2.1, 9.6ms -> 138.5ms over 102 -> 402 ops).
+    """
+
+    from torchlens.data_classes.op import Op
+
+    model = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2))
+    trace = tl.trace(model, torch.ones(1, 2))
+    warm = trace.ops
+    assert trace.layers is trace.layers
+
+    label_descriptor = Op.label
+    reads = {"count": 0}
+
+    def _counting_label(op_self):
+        reads["count"] += 1
+        return label_descriptor.__get__(op_self, Op)
+
+    Op.label = property(_counting_label)  # type: ignore[assignment]
+    try:
+        for _ in range(32):
+            assert trace.ops is warm
+            trace.layers
+    finally:
+        Op.label = label_descriptor  # type: ignore[assignment]
+
+    assert reads["count"] == 0, (
+        f"memo hits must be O(1): {reads['count']} label reads across 32 accesses"
+    )

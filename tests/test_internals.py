@@ -824,6 +824,82 @@ class TestDeferredRegistryPruneAmortization:
             tu._DEFER_PENDING.update(saved_pending)
             tu._defer_prune_watermark = saved_watermark
 
+    def test_dead_entries_force_prune_below_watermark(self) -> None:
+        """A mostly-dead registry BELOW the doubled watermark must still sweep.
+
+        r3 bounds gap in the doubling watermark: after one large capture
+        pushed the watermark up, a registry whose aliases then all died sat
+        below the doubled key-count watermark forever -- the dead entries
+        (and their key tuples) stayed pinned indefinitely because nothing
+        ever decayed the watermark. Alias deaths are now counted O(1) by
+        weakref callback and crossing the threshold forces a sweep.
+        """
+
+        import gc
+        import weakref
+        from types import SimpleNamespace
+
+        from torchlens.utils import tensor_utils as tu
+
+        class _Referent:
+            """Weak-referenceable stand-in for a pending alias."""
+
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_watermark = tu._defer_prune_watermark
+        saved_dead = tu._defer_dead_alias_count
+        try:
+            tu._DEFER_PENDING.clear()
+            tu._defer_dead_alias_count = 0
+            # Simulate the post-large-capture state: watermark doubled high.
+            tu._defer_prune_watermark = 100_000
+            for index in range(tu._DEFER_PRUNE_THRESHOLD + 10):
+                dead = _Referent()
+                tu._DEFER_PENDING[("dead", index)] = [
+                    SimpleNamespace(ref=weakref.ref(dead, tu._note_dead_deferred_alias))
+                ]
+                del dead
+            gc.collect()
+            assert tu._defer_dead_alias_count > tu._DEFER_PRUNE_THRESHOLD
+            tu.arm_deferred_payload_window(frozenset())
+            tu.disarm_deferred_payload_window()
+            # RED before the fix: the doubled watermark suppressed the sweep.
+            assert len(tu._DEFER_PENDING) == 0
+            assert tu._defer_dead_alias_count == 0
+            # And the watermark decayed back to the floor for the now-empty
+            # registry.
+            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
+        finally:
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_prune_watermark = saved_watermark
+            tu._defer_dead_alias_count = saved_dead
+
+    def test_real_registration_counts_alias_death(self) -> None:
+        """The production registration path wires the death callback."""
+
+        import torch as _torch
+
+        from torchlens.utils import tensor_utils as tu
+
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_dead = tu._defer_dead_alias_count
+        try:
+            tu._DEFER_PENDING.clear()
+            tu.arm_deferred_payload_window(frozenset())
+            try:
+                source = _torch.ones(4)
+                alias = tu._try_defer_payload_alias(source)
+                assert alias is not None
+                before = tu._defer_dead_alias_count
+                del alias
+                assert tu._defer_dead_alias_count == before + 1
+            finally:
+                tu.disarm_deferred_payload_window()
+        finally:
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_dead_alias_count = saved_dead
+
 
 class TestAliasContractPositionScan:
     def test_contract_lookup_semantics_unchanged(self) -> None:

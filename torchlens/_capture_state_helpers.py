@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import types
@@ -1487,19 +1488,30 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
         move or a freeze between ``cache=True`` runs changes ``device_ref``,
         timing/memory, and grad_fn metadata on the capture, so it must be a
         cache miss even though the bytes match.
+
+        The digest frames the LOGICAL dtype, captured before the
+        bf16 -> float32 transport upcast numpy requires: framing the
+        post-upcast dtype made a bfloat16 tensor collide with the float32
+        tensor of the same values, so ``cache=True`` could serve the WRONG
+        trace across dtypes (same fix as ``op.py::_tensor_content_hash``).
     """
 
     with _state.pause_logging():
         cpu = to_cpu_contiguous(tensor)
+        logical_dtype = str(cpu.dtype)
         if cpu.dtype is torch.bfloat16:
             cpu = cpu.to(torch.float32)
-        payload = cpu.numpy().tobytes()
+        # Byte-reinterpreting uint8 view: covers dtypes numpy cannot
+        # transport directly (float8 and friends), so content-bearing
+        # exotic-dtype state hashes by CONTENT instead of falling back to
+        # a content-blind fragment.
+        payload = cpu.reshape(-1).view(torch.uint8).numpy().tobytes()
     hasher = hashlib.sha256()
     hasher.update(
         repr(
             (
                 tuple(cpu.shape),
-                str(cpu.dtype),
+                logical_dtype,
                 str(tensor.device),
                 bool(tensor.requires_grad),
             )
@@ -1617,6 +1629,14 @@ def _callable_code_digest(func: Any) -> str:
 _ATTRIBUTE_FRAGMENT_DEPTH_CEILING = 4
 _ATTRIBUTE_FRAGMENT_ITEM_CEILING = 256
 
+# Per-process salt + counter minting NEVER-MATCHING fragments for tensor
+# attributes whose content cannot be read. A stable content-blind fragment
+# here would false-HIT on changed values, which the key contract forbids;
+# the salt keeps the token unique across processes (and across pid reuse),
+# the counter within this process.
+_ATTRIBUTE_MISS_SALT = os.urandom(8).hex()
+_ATTRIBUTE_MISS_COUNTER = itertools.count()
+
 
 def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     """Return a bounded, address-free key fragment for one instance attribute.
@@ -1637,14 +1657,30 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return value
     if isinstance(value, torch.Tensor):
-        try:
-            return ("tensor", _hash_tensor_content(value))
-        except Exception:
+        if value.is_meta:
+            # Meta tensors carry NO bytes: shape/dtype/device metadata IS
+            # their entire observable content, so a stable metadata fragment
+            # cannot be content-blind for them.
             return (
                 "tensor-meta",
                 tuple(value.shape),
                 str(value.dtype),
                 str(value.device),
+            )
+        try:
+            return ("tensor", _hash_tensor_content(value))
+        except Exception:
+            # Content-unreadable tensor (sparse/exotic layout or backend):
+            # degrading to a stable shape/dtype fragment made two
+            # DIFFERENT-content tensors key identically -- a false cache HIT,
+            # inverting this signature's "false hits never" contract. Mint a
+            # never-matching token instead: this capture can never hit any
+            # other entry (conservative always-miss, cache utility traded for
+            # correctness).
+            return (
+                "tensor-unhashable",
+                _ATTRIBUTE_MISS_SALT,
+                next(_ATTRIBUTE_MISS_COUNTER),
             )
     if isinstance(value, (torch.dtype, torch.device, torch.Size)):
         return ("torch-value", str(value))
@@ -1761,18 +1797,49 @@ def _global_hook_signature() -> tuple[object, ...]:
     return tuple(signature)
 
 
+_MODULE_BASELINE_INSTANCE_ATTRS: frozenset[str] | None = None
+
+
+def _module_baseline_instance_attrs() -> frozenset[str]:
+    """Instance attributes a bare ``nn.Module()`` owns on this torch build.
+
+    Computed once per process from a real bare module, so the exclusion list
+    tracks the running torch version instead of a hardcoded roster.
+    """
+
+    global _MODULE_BASELINE_INSTANCE_ATTRS
+    if _MODULE_BASELINE_INSTANCE_ATTRS is None:
+        _MODULE_BASELINE_INSTANCE_ATTRS = frozenset(nn.Module().__dict__)
+    return _MODULE_BASELINE_INSTANCE_ATTRS
+
+
 def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, Any]]:
     """Yield the user-visible plain instance attributes of one module.
 
-    Skips torch-internal underscore state (parameters, buffers, hook dicts --
-    hooks are fingerprinted separately), TorchLens instrumentation (``tl_*``
-    attributes survive across captures by design and must not churn the key),
-    ``training`` (already folded by the content fingerprint), and instance
-    ``forward`` overrides (folded with instrumentation filtering above).
+    Skips torch-internal state by EXACT baseline-attribute name (parameters,
+    buffers, hook dicts -- hooks are fingerprinted separately), TorchLens
+    instrumentation (``tl_*`` attributes survive across captures by design
+    and must not churn the key), ``training`` (already folded by the content
+    fingerprint), and instance ``forward`` overrides (folded with
+    instrumentation filtering above).
+
+    A blanket leading-underscore skip is WRONG here: user underscore
+    attributes (``self._num_layers``) routinely determine the traced program,
+    and skipping them served the wrong cached trace across a changed
+    ``self._n`` (r3 b4-opus-R39-1, reopened through the bfcdde2d fix's own
+    filter). Only the exact bare-``nn.Module`` baseline names are excluded;
+    class-specific torch-internal extras (RNN ``_flat_weights``,
+    MultiheadAttention ``_qkv_same_embed_dim``) participate harmlessly --
+    they are deterministic functions of state the key already covers.
     """
 
+    baseline = _module_baseline_instance_attrs()
     for attr_name in sorted(module.__dict__):
-        if attr_name.startswith(("_", "tl_")) or attr_name in ("training", "forward"):
+        if (
+            attr_name in baseline
+            or attr_name.startswith("tl_")
+            or attr_name in ("training", "forward")
+        ):
             continue
         yield attr_name, module.__dict__[attr_name]
 

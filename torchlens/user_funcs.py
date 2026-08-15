@@ -24,6 +24,7 @@ import pickle
 import re
 import stat
 import tempfile
+import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
@@ -542,6 +543,37 @@ def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: b
     return True
 
 
+#: Age (seconds since last mtime) after which an orphaned ``.tmp.`` staging
+#: file counts as hard-crash debris. An IN-FLIGHT writer's temp file keeps a
+#: fresh mtime while ``pickle.dump`` streams into it, so an hour of mtime
+#: silence cannot be a live store.
+_CAPTURE_CACHE_TEMP_DEBRIS_AGE_SECONDS = 3600.0
+
+
+def _sweep_stale_capture_cache_temp_files(cache_root: Path) -> None:
+    """Remove orphaned ``mkstemp`` staging debris left by hard crashes.
+
+    ``_store_authenticated_capture_cache`` unlinks its temp file on every
+    EXCEPTION path, but a hard crash (SIGKILL, power loss) between
+    ``mkstemp`` and the atomic ``os.replace`` strands ``.<name>.tmp.<rand>``
+    files that no glob over ``*.pkl`` ever sees: they were invisible to both
+    eviction accounting and ``clear_capture_cache``, accumulating without
+    bound. The sweep is age-gated so a concurrent in-flight store is never
+    raced.
+    """
+
+    now = time.time()
+    for temp_path in cache_root.glob(".*.tmp.*"):
+        if temp_path.is_symlink():
+            continue
+        try:
+            temp_stat = temp_path.stat()
+        except OSError:
+            continue
+        if now - temp_stat.st_mtime > _CAPTURE_CACHE_TEMP_DEBRIS_AGE_SECONDS:
+            temp_path.unlink(missing_ok=True)
+
+
 def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
     """Enforce capture-cache entry and byte limits using mtime LRU order.
 
@@ -553,6 +585,7 @@ def _evict_capture_cache(cache_root: Path, *, keep: Path) -> None:
         Just-written entry, which is never evicted in the same operation.
     """
 
+    _sweep_stale_capture_cache_temp_files(cache_root)
     entries: list[tuple[int, int, Path, Path]] = []
     for payload in cache_root.glob("*.pkl"):
         # Legacy pair-format ``.hmac`` sidecars are unreadable debris under the
@@ -609,6 +642,7 @@ def clear_capture_cache(cache_dir: str | Path | None = None) -> int:
         return 0
     if cache_root.is_symlink() or not cache_root.is_dir():
         raise _capture_cache_io_error(f"Refusing non-directory capture cache {cache_root}.")
+    _sweep_stale_capture_cache_temp_files(cache_root)
     removed = 0
     for payload in cache_root.glob("*.pkl"):
         if payload.is_symlink():
