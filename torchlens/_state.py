@@ -871,8 +871,8 @@ class _BackwardCapturePublication:
         self,
         prev_trace: "Trace | None",
         prev_owner: int | None,
-        prev_plan: object,
-        prev_spec: object,
+        prev_plan: Any,
+        prev_spec: "InterventionSpec | None",
     ) -> None:
         """Snapshot the previous owner globals (caller holds the admission lock)."""
 
@@ -902,8 +902,8 @@ class _BackwardCapturePublication:
 def publish_backward_capture(
     trace: "Trace",
     *,
-    hook_plan: object,
-    intervention_spec: object,
+    hook_plan: Any,
+    intervention_spec: "InterventionSpec | None",
 ) -> _BackwardCapturePublication:
     """Publish a backward capture window; refuse a foreign live window typed.
 
