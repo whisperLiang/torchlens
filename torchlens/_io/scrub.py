@@ -10,6 +10,8 @@ are dropped or stringified before writing ``metadata.pkl``.
 from __future__ import annotations
 
 import copy
+import functools
+import inspect
 import logging
 import pickle
 import re
@@ -994,6 +996,19 @@ def _scrub_value(
         if owner_is_trace and _is_runtime_only_trace_field(field_name):
             continue
         if field_name not in spec:
+            # A ``functools.cached_property`` read caches its value in the
+            # instance ``__dict__`` under the property's own name (e.g. the
+            # public ``Trace.intervention_spec`` accessor). Those cells are
+            # DERIVED state that rebuilds on access, never portable fields,
+            # and they appear only after a read -- refusing them here made a
+            # read-only public property poison every later ``tl.save``
+            # (B3R4-R10-1). Skip the whole class structurally; the check runs
+            # only on the refusal path, so the hot field loop pays nothing.
+            if isinstance(
+                inspect.getattr_static(type(value), field_name, None),
+                functools.cached_property,
+            ):
+                continue
             raise TorchLensIOError(
                 f"{type(value).__name__}.{field_name} is missing from PORTABLE_STATE_SPEC."
             )
