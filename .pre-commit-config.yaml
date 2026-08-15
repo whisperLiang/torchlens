@@ -1,3 +1,10 @@
+# A bare `pre-commit install` must arm ALL THREE stages this config declares.
+# Without this, only the pre-commit stage is installed and the commit-msg +
+# pre-push no-breaking-markers hooks below exist as config-only dead letters --
+# 2 of the 3 never-ship-a-major defense layers were inert for months while
+# tests/test_repo_hooks_armed.py stayed green (grind r3, R61/B27).
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     # v6.0.0 removed check-byte-order-marker and fix-encoding-pragma and raised the
