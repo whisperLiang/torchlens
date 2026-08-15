@@ -7,6 +7,7 @@ from fractions import Fraction
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -23,14 +24,8 @@ from torchlens.receptive_field._types import ReceptiveFieldDirection, ReceptiveF
 def isolated_rule_registry() -> Iterator[None]:
     """Restore custom rule changes while retaining the installed built-in pack."""
 
-    saved_rules = dict(_rules._RF_RULES)
-    saved_epoch = _rules._RF_RULES_EPOCH
-    try:
+    with preserved_rf_registry(clear=False):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(saved_rules)
-        _rules._RF_RULES_EPOCH = saved_epoch
 
 
 def _spatial_bounds(box: object) -> tuple[int | None, int | None]:

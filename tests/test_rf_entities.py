@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -32,12 +33,8 @@ from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleRes
 def isolated_rule_registry() -> Iterator[None]:
     """Restore the process-global receptive-field registry after every test."""
 
-    saved_rules = dict(_rules._RF_RULES)
-    saved_epoch = _rules._RF_RULES_EPOCH
-    yield
-    _rules._RF_RULES.clear()
-    _rules._RF_RULES.update(saved_rules)
-    _rules._RF_RULES_EPOCH = saved_epoch
+    with preserved_rf_registry(clear=False):
+        yield
 
 
 def _register_rules() -> None:

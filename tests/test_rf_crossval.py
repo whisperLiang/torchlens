@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Iterator
 
 import pytest
 import torch
 import torch.nn.functional as functional
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -16,31 +16,13 @@ from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleRes
 from torchlens.receptive_field._types import ReceptiveFieldValidationStatus
 from torchlens.receptive_field._validation import cross_validate, validate_receptive_field_trace
 
-_PACK: dict[str, object] | None = None
-
 
 @pytest.fixture(autouse=True)
 def built_in_rule_pack() -> Iterator[None]:
     """Install the built-in RF rules while preserving registry isolation."""
 
-    global _PACK
-    original = dict(_rules._RF_RULES)
-    original_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    if _PACK is None:
-        module = importlib.import_module("torchlens.receptive_field.rules")
-        if not _rules._RF_RULES:
-            for name in module.__all__:
-                importlib.reload(getattr(module, name))
-        _PACK = dict(_rules._RF_RULES)
-    else:
-        _rules._RF_RULES.update(_PACK)
-    try:
+    with preserved_rf_registry(install_builtin=True):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(original)
-        _rules._RF_RULES_EPOCH = original_epoch
 
 
 def _op(trace: object, name: str) -> object:

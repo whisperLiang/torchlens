@@ -7,6 +7,7 @@ from fractions import Fraction
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -29,14 +30,8 @@ from torchlens.receptive_field._types import (
 def isolated_rule_registry() -> Iterator[None]:
     """Restore the process-global RF rule registry after every projective golden."""
 
-    saved_rules = dict(_rules._RF_RULES)
-    saved_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    _rules._RF_RULES_EPOCH += 1
-    yield
-    _rules._RF_RULES.clear()
-    _rules._RF_RULES.update(saved_rules)
-    _rules._RF_RULES_EPOCH = saved_epoch
+    with preserved_rf_registry(bump_epoch=True):
+        yield
 
 
 def _register_exact_rules() -> None:
