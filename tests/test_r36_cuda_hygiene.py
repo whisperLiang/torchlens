@@ -46,6 +46,128 @@ def test_capture_touched_cuda_predicate_gates_on_trace_fact() -> None:
     assert capture_touched_cuda(SimpleNamespace()) is True
 
 
+def test_failed_drain_restores_unfenced_tail_and_retry_fences_it() -> None:
+    """A synchronize failure mid-drain never loses the unfenced tail (R36-1).
+
+    Regression (b6 S HIGH + O MED, round 5): the drain cleared the pending
+    registry BEFORE fencing, so a failing event dropped every remaining fence
+    and the retry drain no-opped at the empty-list guard -- un-fenced
+    ``non_blocking=True`` D2H copies could then never be fenced and a host
+    read could observe partial bytes with no diagnostic.
+    """
+
+    from torchlens.utils import tensor_utils as tu
+
+    class _FlakyEvent:
+        def __init__(self) -> None:
+            self.fail = True
+            self.synced = 0
+
+        def synchronize(self) -> None:
+            if self.fail:
+                raise RuntimeError("device fell off the bus")
+            self.synced += 1
+
+    class _HealthyEvent:
+        def __init__(self) -> None:
+            self.synced = 0
+
+        def synchronize(self) -> None:
+            self.synced += 1
+
+    flaky = _FlakyEvent()
+    healthy = _HealthyEvent()
+    assert tu._CPU_ASYNC_PENDING_EVENTS == []
+    try:
+        tu._CPU_ASYNC_PENDING_EVENTS.extend([flaky, healthy])
+        with pytest.raises(RuntimeError, match="fell off the bus"):
+            tu.synchronize_pending_cpu_async_copies()
+        # The failing entry AND the never-reached tail are both still pending.
+        assert [flaky, healthy] == tu._CPU_ASYNC_PENDING_EVENTS
+        assert healthy.synced == 0
+        # The retry drain is NOT a no-op: it fences the restored tail.
+        flaky.fail = False
+        tu.synchronize_pending_cpu_async_copies()
+        assert tu._CPU_ASYNC_PENDING_EVENTS == []
+        assert flaky.synced == 1
+        assert healthy.synced == 1
+    finally:
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+
+
+def test_failed_drain_keeps_tail_ahead_of_copies_recorded_since() -> None:
+    """Restored unfenced entries precede fences recorded after the failure (R36-1)."""
+
+    from torchlens.utils import tensor_utils as tu
+
+    class _Event:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+
+        def synchronize(self) -> None:
+            if self.fail:
+                raise RuntimeError("boom")
+
+    first = _Event(fail=True)
+    assert tu._CPU_ASYNC_PENDING_EVENTS == []
+    try:
+        tu._CPU_ASYNC_PENDING_EVENTS.append(first)
+        with pytest.raises(RuntimeError):
+            tu.synchronize_pending_cpu_async_copies()
+        later = _Event()
+        tu._CPU_ASYNC_PENDING_EVENTS.append(later)
+        assert [first, later] == tu._CPU_ASYNC_PENDING_EVENTS
+    finally:
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+
+
+def test_capture_touched_cuda_keys_on_recorded_op_devices() -> None:
+    """The empty_cache gate keys on observed op devices, both directions (R36 b6 pair).
+
+    False-negative half (fable): a CPU-homed model that moves tensors to CUDA
+    inside ``forward`` stamps backend ``"cpu"`` but records CUDA-deviced ops --
+    the gate must flush. Over-broad half (opus): a non-CUDA accelerator capture
+    whose backend fact reads ``"unknown"`` but whose recorded ops are provably
+    non-CUDA must NOT flush the caller's CUDA allocator.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.ir.refs import DeviceRef
+    from torchlens.utils.tensor_utils import capture_touched_cuda
+
+    def _trace(backend: str, device_names: list[str]) -> object:
+        ops = [SimpleNamespace(device_ref=DeviceRef.from_value(name)) for name in device_names]
+
+        class _FakeTrace:
+            forward_memory_backend = backend
+
+            def __iter__(self):
+                return iter(ops)
+
+        return _FakeTrace()
+
+    # False-negative half: cpu-stamped capture with a CUDA op -> flush.
+    assert capture_touched_cuda(_trace("cpu", ["cpu", "cuda:0", "cpu"])) is True
+    # Over-broad half: unknown-stamped capture, all ops provably non-CUDA -> no flush.
+    assert capture_touched_cuda(_trace("unknown", ["xpu:0", "xpu:0"])) is False
+    # Completed scans on plain cpu captures stay False; cuda fact stays True.
+    assert capture_touched_cuda(_trace("cpu", ["cpu"])) is False
+    assert capture_touched_cuda(_trace("cuda", [])) is True
+    # Zero scannable ops + unknown fact fails toward the historical flush.
+    assert capture_touched_cuda(_trace("unknown", [])) is True
+
+    # Ops WITHOUT device facts are no evidence: fall back to the stamped
+    # backend rule (unknown -> flush), never a false "provably non-CUDA".
+    class _NoRefTrace:
+        forward_memory_backend = "unknown"
+
+        def __iter__(self):
+            return iter([SimpleNamespace()])
+
+    assert capture_touched_cuda(_NoRefTrace()) is True
+
+
 def test_pure_view_probes_consume_no_global_rng() -> None:
     """The lazy-import _pure_view probes never draw from the user's generator (B8-7)."""
 

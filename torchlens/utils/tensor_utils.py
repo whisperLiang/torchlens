@@ -1377,6 +1377,13 @@ def synchronize_pending_cpu_async_copies() -> None:
     Called at the capture finalize seam and on the failure-scrub arms.
     Idempotent and cheap when nothing is pending; a completed copy's event
     synchronizes immediately.
+
+    A synchronize failure never loses the unfenced tail: entries are retired
+    one at a time as they are successfully fenced, and any failure restores
+    the not-yet-fenced remainder (the failing entry included) to the pending
+    registry ahead of copies recorded since the drain began, so a later drain
+    retries them instead of silently no-opping while un-fenced
+    ``non_blocking=True`` copies stay in flight.
     """
 
     if not _CPU_ASYNC_PENDING_EVENTS:
@@ -1384,25 +1391,67 @@ def synchronize_pending_cpu_async_copies() -> None:
     pending = list(_CPU_ASYNC_PENDING_EVENTS)
     _CPU_ASYNC_PENDING_EVENTS.clear()
     synced_devices: set[str] = set()
-    for entry in pending:
-        if isinstance(entry, torch.device):
-            key = str(entry)
-            if key not in synced_devices:
-                synced_devices.add(key)
-                torch_module = torch_attr(entry.type)
-                sync = getattr(torch_module, "synchronize", None)
-                if sync is not None:
-                    try:
-                        sync(entry)
-                    except TypeError:
-                        # torch.mps.synchronize() (and kin) take no device
-                        # argument. The unguarded call raised TypeError from
-                        # the drain — on the failure-scrub arms that masked
-                        # the ORIGINAL capture exception with a drain
-                        # traceback.
-                        sync()
-        else:
-            entry.synchronize()
+    fenced_through = 0
+    try:
+        for index, entry in enumerate(pending):
+            if isinstance(entry, torch.device):
+                key = str(entry)
+                if key not in synced_devices:
+                    torch_module = torch_attr(entry.type)
+                    sync = getattr(torch_module, "synchronize", None)
+                    if sync is not None:
+                        try:
+                            sync(entry)
+                        except TypeError:
+                            # torch.mps.synchronize() (and kin) take no device
+                            # argument. The unguarded call raised TypeError from
+                            # the drain — on the failure-scrub arms that masked
+                            # the ORIGINAL capture exception with a drain
+                            # traceback.
+                            sync()
+                    # Marked fenced only AFTER the synchronize succeeded, so a
+                    # failed device sync is retried for the device's later
+                    # entries on the retry drain.
+                    synced_devices.add(key)
+            else:
+                entry.synchronize()
+            fenced_through = index + 1
+    finally:
+        if fenced_through < len(pending):
+            _CPU_ASYNC_PENDING_EVENTS[0:0] = pending[fenced_through:]
+
+
+def _capture_observed_cuda_device(trace: Any) -> bool | None:
+    """Best-effort scan of recorded op device facts for a CUDA device (R36-3).
+
+    Parameters
+    ----------
+    trace:
+        Captured (possibly mid-postprocess) Trace, iterated for its op
+        records' ``device_ref`` facts.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when any recorded op ran on a CUDA device, ``False`` when at
+        least one op carried a device fact and none was CUDA, and ``None``
+        when the scan yields no evidence (non-iterable object, zero recorded
+        ops, no op with a device fact, or any scan failure) — the caller then
+        falls back to the stamped backend fact.
+    """
+
+    try:
+        saw_device_fact = False
+        for entry in trace:
+            ref = getattr(entry, "device_ref", None)
+            if ref is None:
+                continue
+            saw_device_fact = True
+            if getattr(ref, "backend", None) == "cuda":
+                return True
+        return False if saw_device_fact else None
+    except Exception:
+        return None
 
 
 def capture_touched_cuda(trace: Any) -> bool:
@@ -1411,9 +1460,16 @@ def capture_touched_cuda(trace: Any) -> bool:
     Gates the capture-lifecycle ``torch.cuda.empty_cache()`` calls on the
     CAPTURE having used CUDA, not on process-wide availability: a CPU-only
     trace inside a GPU training loop must not flush the caller's allocator.
-    Keyed on the trace-level ``forward_memory_backend`` fact stamped by the
-    forward peak-memory bracket from the model device; an unknown or missing
-    value fails toward the historical flush, never toward skipping it.
+
+    Keying decision (R36 b6 pair — one fix for both directions): the stamped
+    ``forward_memory_backend`` fact reflects the MODEL device only, so it is
+    a false negative for a CPU-homed model that moves tensors to CUDA inside
+    ``forward`` and over-broad for non-CUDA accelerator captures whose fact
+    reads ``"unknown"``. The recorded op ``device_ref`` facts are the
+    authoritative key: any CUDA-deviced op means the capture touched CUDA,
+    and a completed scan with none means it provably did not. When no op
+    facts are scannable, an unknown or missing backend fact fails toward the
+    historical flush, never toward skipping it.
 
     Parameters
     ----------
@@ -1423,10 +1479,15 @@ def capture_touched_cuda(trace: Any) -> bool:
     Returns
     -------
     bool
-        False only when the capture provably ran on a non-CUDA backend.
+        False only when the capture provably ran on non-CUDA devices.
     """
 
     backend = getattr(trace, "forward_memory_backend", None)
+    if backend == "cuda":
+        return True
+    observed = _capture_observed_cuda_device(trace)
+    if observed is not None:
+        return observed
     return backend not in ("cpu", "mps")
 
 
