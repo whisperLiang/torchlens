@@ -90,7 +90,13 @@ def test_rescue_restores_rng_to_capture_entry() -> None:
 
 
 def test_streaming_capture_skips_rescue(raw_cos: Any, tmp_path: Any) -> None:
-    """A disk-streamed capture is not re-runnable: escape reported, no rescue."""
+    """A disk-streamed capture is not re-runnable: escape DISCLOSED, no rescue.
+
+    grind-r4 b6-opus R16-1: this path formerly returned clean-capture fields
+    (verified=None / reason=None / rescue_rerun=None) with the escaped op
+    silently missing -- bit-indistinguishable from a genuinely clean capture.
+    Ineligibility must skip only the re-run, never the disclosure.
+    """
 
     wrap_torch()
     with pytest.warns(UserWarning, match="no graph/source provenance"):
@@ -100,7 +106,45 @@ def test_streaming_capture_skips_rescue(raw_cos: Any, tmp_path: Any) -> None:
             storage=tl.to_disk(str(tmp_path / "run.tlspec")),
         )
     assert "cos" not in [op.func_name for op in trace.ops]
-    assert trace.rescue_rerun is None
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
+    assert trace.rescue_rerun is not None
+    assert trace.rescue_rerun["recovered"] is False
+    assert trace.rescue_rerun["skipped_reason"] == "rescue_ineligible"
+    assert trace.rescue_rerun["forward_runs"] == 1
+
+
+def test_ineligible_capture_with_escape_signal_settles_disclosure() -> None:
+    """Driver-level R16-1 pin: eligible=False + live signal -> marked trace,
+    exactly ONE forward run, and the ineligibility warning."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    runs: list[int] = []
+
+    def run_capture() -> Any:
+        runs.append(1)
+        return _stub_trace(["relu"], signal=True)
+
+    with pytest.warns(UserWarning, match="skipped the rescue"):
+        trace = capture_with_rescue(run_capture, eligible=False)
+    assert len(runs) == 1
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
+    assert trace.rescue_rerun["skipped_reason"] == "rescue_ineligible"
+
+
+def test_ineligible_clean_capture_stays_clean() -> None:
+    """eligible=False with NO signal must not stamp any rescue field."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    def run_capture() -> Any:
+        return _stub_trace(["relu"], signal=False)
+
+    trace = capture_with_rescue(run_capture, eligible=False)
+    assert trace.capture_verification_reason is None
+    assert not hasattr(trace, "rescue_rerun") or trace.rescue_rerun is None
 
 
 def _stub_trace(
@@ -711,7 +755,10 @@ def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
         )
 
     assert calls["intervene"] == 1
-    assert trace.rescue_rerun is None
+    # R16-1: the refused re-run is DISCLOSED, never silent clean fields.
+    assert trace.rescue_rerun["skipped_reason"] == "rescue_ineligible"
+    assert trace.rescue_rerun["forward_runs"] == 1
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
 
 
 def test_transform_callables_never_double_fire_on_rescue(raw_cos: Any) -> None:
@@ -777,10 +824,11 @@ def test_transform_callables_never_double_fire_on_rescue(raw_cos: Any) -> None:
             grad_transform=lambda value, **kwargs: value,
         )
 
-    assert trace.rescue_rerun is None, (
-        "a capture with in-capture transform callables ran the rescue re-run: "
-        "their side effects double-apply"
+    assert trace.rescue_rerun["skipped_reason"] == "rescue_ineligible", (
+        "a capture with in-capture transform callables must refuse the rescue "
+        "re-run (side effects double-apply) and disclose the refusal"
     )
+    assert trace.rescue_rerun["forward_runs"] == 1
     assert calls["out"] == 1, f"output_transform fired {calls['out']}x (expected once)"
     # The escaped cos op is invisible to the primary, so the escape capture
     # saves at most the control's op count; strictly more means a second run.
@@ -835,3 +883,57 @@ def test_warning_recorder_leaves_a_user_installed_handler_in_place() -> None:
         assert warnings_module.showwarning is user_handler
     finally:
         warnings_module.showwarning = before
+
+
+def test_failed_rescue_rerun_still_restores_state_writes() -> None:
+    """R63: a rescue re-run that WRITES declared state and then RAISES must
+    still restore the snapshot -- the except arm formerly skipped it, leaving
+    the write double-applied on the user's model."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    model = nn.Linear(4, 4)
+    baseline = model.weight.detach().clone()
+    calls = {"n": 0}
+
+    def run_capture() -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _stub_trace(["relu"], signal=True)
+        with torch.no_grad():
+            model.weight.add_(1.0)  # the partial forward's state write
+        raise RuntimeError("rescue died mid-forward")
+
+    trace = capture_with_rescue(run_capture, model=model)
+    assert calls["n"] == 2
+    assert torch.equal(model.weight, baseline), (
+        "the failed rescue re-run's state write was not restored "
+        "(double-applied mutation left on the model)"
+    )
+    assert trace.capture_verification_reason == "escape_rescue_unrecovered"
+    assert "rescue died mid-forward" in trace.rescue_rerun["rescue_error"]
+
+
+def test_interrupted_rescue_rerun_still_restores_state_writes() -> None:
+    """R63 interrupt arm: KeyboardInterrupt mid-re-run propagates, but the
+    snapshot restore still runs on the way out."""
+
+    from torchlens.backends.torch.rescue import capture_with_rescue
+
+    model = nn.Linear(4, 4)
+    baseline = model.weight.detach().clone()
+    calls = {"n": 0}
+
+    def run_capture() -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _stub_trace(["relu"], signal=True)
+        with torch.no_grad():
+            model.weight.add_(1.0)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        capture_with_rescue(run_capture, model=model)
+    assert torch.equal(model.weight, baseline), (
+        "the interrupted rescue re-run's state write was not restored"
+    )

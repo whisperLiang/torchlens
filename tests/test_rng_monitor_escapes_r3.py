@@ -269,3 +269,89 @@ def test_library_rng_subclasses_do_not_over_trigger() -> None:
     trace = tl.trace(_Plain(), torch.randn(2, 4), capture=capture)
     assert trace._runnable.rng_monitor_uncertain is False
     assert trace._runnable.rng_monitor_uncertain_detail == ()
+
+
+@pytest.mark.smoke
+def test_balanced_in_window_setprofile_swap_flags_uncertain() -> None:
+    """grind-r4 b8 R57: a balanced in-window profile swap must not stay silent.
+
+    User code that saves the monitor's hook, installs its own profile
+    function, draws entropy, and restores the hook BEFORE window exit left no
+    teardown evidence -- the slot held our hook at exit -- so the draws in
+    the blind sub-window escaped uncertain=False (false-VERIFIED). The slot
+    write itself is now the witness.
+    """
+
+    import sys
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        saved = sys.getprofile()
+        sys.setprofile(None)  # the blind sub-window opens
+        sys.setprofile(saved)  # balanced: our hook is back before exit
+    assert result.uncertain is True, (
+        "a balanced in-window sys.setprofile swap opened an unwitnessed "
+        "sub-window with no uncertainty flag"
+    )
+    assert any(
+        detail.startswith("profile_slot_swapped_in_window:sys.setprofile")
+        for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)
+    # Exact restoration: the module attr holds the real builtin again.
+    assert sys.setprofile is not saved
+    assert "torchlens" not in getattr(sys.setprofile, "__module__", "")
+
+
+@pytest.mark.smoke
+def test_balanced_threading_setprofile_swap_flags_uncertain() -> None:
+    """Sibling slot: threading.setprofile blinds threads started after it."""
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        saved = threading._profile_hook if hasattr(threading, "_profile_hook") else None
+        threading.setprofile(None)
+        threading.setprofile(saved)
+    assert result.uncertain is True
+    assert any(
+        detail.startswith("profile_slot_swapped_in_window:threading.setprofile")
+        for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)
+
+
+@pytest.mark.smoke
+def test_swap_free_window_stays_certain() -> None:
+    """Control: the monitor's own installs/restores never trip the detector."""
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        pass
+    assert not any(
+        detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)
+
+
+@pytest.mark.smoke
+def test_raw_thread_hook_install_does_not_trip_swap_detector() -> None:
+    """The in-window raw-thread hook install is monitor-internal: no flag."""
+
+    import _thread
+
+    done = threading.Event()
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        _thread.start_new_thread(done.set, ())
+        assert done.wait(timeout=10.0), "raw thread never ran"
+    assert not any(
+        detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)
+
+
+@pytest.mark.smoke
+def test_in_window_thread_start_does_not_trip_swap_detector() -> None:
+    """Thread._bootstrap_inner re-installs the window's own threading hook via
+    sys.setprofile on every in-window thread start: machinery, never a swap."""
+
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        worker = threading.Thread(target=lambda: None)
+        worker.start()
+        worker.join(timeout=10.0)
+    assert not any(
+        detail.startswith("profile_slot_swapped_in_window") for detail in result.uncertain_detail
+    ), sorted(result.uncertain_detail)

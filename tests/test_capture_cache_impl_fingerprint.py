@@ -502,3 +502,88 @@ def test_underscore_attribute_unchanged_model_still_hits(tmp_path) -> None:
     assert first.capture_cache_hit is False
     second = tl.trace(model, x, capture=_cache_capture(tmp_path))
     assert second.capture_cache_hit is True
+
+
+def test_over_ceiling_containers_never_key_equal() -> None:
+    """Containers past the item ceiling always miss instead of truncating.
+
+    grind-r4 b4-opus F39-A': the dict/sequence/set fragments truncated at 256
+    items, so two containers identical up to the cut but differing PAST it
+    keyed identically and served the wrong cached trace (hit=True, no
+    warning). Over-ceiling containers now mint never-matching tokens.
+    """
+
+    from torchlens._capture_state_helpers import (
+        _ATTRIBUTE_FRAGMENT_ITEM_CEILING as ceiling,
+        _attribute_state_fragment,
+    )
+
+    n = ceiling + 40
+    seq_base = list(range(n))
+    seq_changed = list(seq_base)
+    seq_changed[ceiling + 10] = -1
+    assert _attribute_state_fragment(seq_base) != _attribute_state_fragment(seq_changed)
+
+    dict_base = {f"k{i}": i for i in range(n)}
+    dict_changed = dict(dict_base)
+    dict_changed[f"k{ceiling + 10}"] = -1
+    assert _attribute_state_fragment(dict_base) != _attribute_state_fragment(dict_changed)
+
+    set_base = {f"m{i:04d}" for i in range(n)}
+    set_changed = (set_base - {f"m{ceiling + 10:04d}"}) | {"zzzz-tail-swap"}
+    assert _attribute_state_fragment(set_base) != _attribute_state_fragment(set_changed)
+
+    # The documented trade: even EQUAL over-ceiling containers never match
+    # (conservative always-miss, cache utility traded for correctness) ...
+    assert _attribute_state_fragment(seq_base) != _attribute_state_fragment(list(seq_base))
+    # ... while in-ceiling containers keep stable equal-content fragments.
+    assert _attribute_state_fragment(list(range(10))) == _attribute_state_fragment(list(range(10)))
+
+
+def test_over_ceiling_dict_tail_difference_is_a_cache_miss(tmp_path) -> None:
+    """End-to-end F39-A' probe: a config value past the 256-item cut steers
+    the traced program; hitting the stale entry serves the WRONG trace."""
+
+    class _DictLoop(nn.Module):
+        def __init__(self, num_layers: int) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            config = {f"pad_{i}": i for i in range(280)}
+            config["num_layers"] = num_layers  # inserted past the cut
+            self.config = config
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for _ in range(self.config["num_layers"]):
+                x = torch.relu(self.lin(x))
+            return x
+
+    x = torch.randn(1, 4)
+    shallow = _DictLoop(1)
+    first = tl.trace(shallow, x, capture=_cache_capture(tmp_path))
+    assert first.capture_cache_hit is False
+    assert first["relu_1_2"].num_passes == 1
+
+    deep = _DictLoop(5)
+    deep.load_state_dict(shallow.state_dict())
+    second = tl.trace(deep, x, capture=_cache_capture(tmp_path))
+    assert second.capture_cache_hit is False, (
+        "a config difference past the container item ceiling must not hit the stale cached trace"
+    )
+    assert second["relu_1_2"].num_passes == 5
+
+
+def test_depth_ceiling_difference_never_keys_equal() -> None:
+    """Depth-ceiling sibling of F39-A': a difference BELOW the depth ceiling
+    must not key equal through a stable ceiling token."""
+
+    from torchlens._capture_state_helpers import _attribute_state_fragment
+
+    def nest(leaf: object, levels: int) -> list:
+        value: list = [leaf]
+        for _ in range(levels):
+            value = [value]
+        return value
+
+    deep_a = nest({"num_layers": 1}, 8)
+    deep_b = nest({"num_layers": 5}, 8)
+    assert _attribute_state_fragment(deep_a) != _attribute_state_fragment(deep_b)

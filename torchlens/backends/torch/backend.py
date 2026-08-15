@@ -872,10 +872,16 @@ class TorchBackend:
                     continue
                 from ..._errors import OutputAttributionError
 
+                try:
+                    shape_text = str(tuple(t.shape))
+                except RuntimeError:
+                    # Nested tensors raise from ``.shape``; the refusal must
+                    # stay typed instead of crashing on its own message (R65).
+                    shape_text = "<unavailable: nested>" if t.is_nested else "<unavailable>"
                 raise OutputAttributionError(
                     "TorchLens could not attribute a model output tensor to any traced op "
                     f"(output address {output_address!r}, "
-                    f"shape={tuple(t.shape)}, dtype={t.dtype}). This may indicate an opaque "
+                    f"shape={shape_text}, dtype={t.dtype}). This may indicate an opaque "
                     "execution boundary or a pre-bound torch function that escaped wrapping. "
                     "Use ordinary torch module attributes during forward, or bind/import torch "
                     "functions after TorchLens has wrapped torch."
@@ -1417,13 +1423,16 @@ def _same_tensor_storage_identity(left: torch.Tensor, right: torch.Tensor) -> bo
         return True
     if left.dtype != right.dtype or left.device != right.device:
         return False
-    if tuple(left.shape) != tuple(right.shape) or tuple(left.stride()) != tuple(right.stride()):
-        return False
-    if left.storage_offset() != right.storage_offset():
-        return False
     try:
+        if tuple(left.shape) != tuple(right.shape) or tuple(left.stride()) != tuple(right.stride()):
+            return False
+        if left.storage_offset() != right.storage_offset():
+            return False
         return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
     except RuntimeError:
+        # Nested tensors raise from shape/stride/storage reads; a tensor whose
+        # layout metadata is unreadable cannot be structurally proven to be a
+        # marked input, so identity attribution conservatively says no (R65).
         return False
 
 

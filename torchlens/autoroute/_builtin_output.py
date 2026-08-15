@@ -59,6 +59,37 @@ def decode_outputs_for_trace(
         Optional user-requested output head name/path.
     """
 
+    try:
+        _decode_outputs_for_trace_unguarded(
+            trace, outputs, output_style=output_style, output_head=output_head
+        )
+    except Exception as exc:
+        # The output decode is an opportunistic post-capture nicety; a
+        # heuristic sniffer must never abort an otherwise-successful capture
+        # (R65: nested-tensor outputs raised raw RuntimeError from shape
+        # reads). Degrade to "no decode" with a disclosed warning.
+        import warnings
+
+        from torchlens.errors import TorchLensWarning
+
+        warnings.warn(
+            "Semantic output decode skipped: the output detector raised "
+            f"{type(exc).__name__}: {exc}. The capture itself is unaffected; "
+            "no decoded_output/output_postprocessor was attached.",
+            TorchLensWarning,
+            stacklevel=2,
+        )
+
+
+def _decode_outputs_for_trace_unguarded(
+    trace: Trace,
+    outputs: Any,
+    *,
+    output_style: str | None,
+    output_head: str | None,
+) -> None:
+    """Run the output decode without the capture-protecting belt."""
+
     meta = _build_output_meta(trace, output_style=output_style, output_head=output_head)
     resolved = _resolve_postprocessor(outputs, meta)
     if resolved is None:
@@ -278,7 +309,7 @@ def imagenet_verified(outputs: Any, meta: dict[str, Any]) -> ResolvedPostprocess
     logits = _select_tensor_by_head(outputs, meta.get("output_head"))
     if logits is None and isinstance(outputs, torch.Tensor):
         logits = outputs
-    if logits is None or logits.ndim < 1 or logits.shape[-1] != 1000:
+    if logits is None or _safe_last_dim(logits) != 1000:
         return None
     metadata = meta.get("model_metadata")
     if not isinstance(metadata, dict):
@@ -451,10 +482,35 @@ def _tensor_candidates(
     else:
         iterable = []
     for name, value in iterable:
-        if isinstance(value, torch.Tensor) and value.ndim >= 2:
-            if expected_width is None or value.shape[-1] == expected_width:
-                candidates.append((value, name))
+        if not isinstance(value, torch.Tensor):
+            continue
+        try:
+            if value.is_nested or value.ndim < 2:
+                continue
+            width = int(value.shape[-1])
+        except Exception:
+            # Exotic tensor subclasses may refuse metadata reads; they are
+            # not logits candidates and must never abort the sniff (R65).
+            continue
+        if expected_width is None or width == expected_width:
+            candidates.append((value, name))
     return candidates
+
+
+def _safe_last_dim(tensor: torch.Tensor) -> int | None:
+    """Return the last-dimension size, or ``None`` when unreadable.
+
+    Nested tensors raise ``RuntimeError`` from ``.shape`` and other exotic
+    subclasses may refuse metadata reads entirely; an opportunistic output
+    sniffer treats those as "not logits" rather than aborting capture (R65).
+    """
+
+    try:
+        if tensor.is_nested or tensor.ndim < 1:
+            return None
+        return int(tensor.shape[-1])
+    except Exception:
+        return None
 
 
 def _decode_classification(

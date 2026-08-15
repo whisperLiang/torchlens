@@ -233,6 +233,63 @@ def test_persisted_equivalence_class_keys_are_canonically_ordered(tmp_path: Path
     assert checked > 0, "no multi-param equivalence keys were exercised"
 
 
+class _NestedMultiOutputParamModel(nn.Module):
+    """Nested LSTM so multi-output param-group keys carry `_outindex{N}` (R21)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rnn = nn.LSTM(4, 4, batch_first=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.rnn(x)
+        return out
+
+
+def test_persisted_equivalence_keys_preserve_outindex_suffix(tmp_path: Path) -> None:
+    """Multi-output param-op equivalence groups survive save with distinct keys.
+
+    Fail-before (R21 fix-introduced regression, 6ff95fbc): canonical ordering of
+    the `param_NNNNNN` run rebuilt the key as prefix + sorted tokens, DISCARDING
+    the trailing `_outindex{N}` that disambiguates the outputs of a multi-output
+    parameterized op (e.g. LSTM's output/h/c). All N keys collided into one and
+    the dict rebuild silently kept only the last group.
+    """
+
+    import pickle
+    import re
+
+    trace = tl.trace(
+        _NestedMultiOutputParamModel().eval(), torch.randn(2, 3, 4), layers_to_save="all"
+    )
+    live_groups = dict(trace.op_equivalence_classes)
+    live_outindex_keys = {key for key in live_groups if "_outindex" in key}
+    assert len(live_outindex_keys) >= 2, "expected multi-output param groups in-memory"
+
+    spec = tmp_path / "lstm_outindex.tlspec"
+    tl.save(trace, str(spec))
+    persisted = pickle.loads((spec / "metadata.pkl").read_bytes()).get("op_equivalence_classes")
+    assert persisted is not None
+
+    persisted_outindex_keys = {key for key in persisted if "_outindex" in key}
+    suffix = re.compile(r"_outindex\d+$")
+    live_suffixes = sorted(suffix.search(key).group(0) for key in live_outindex_keys)
+    persisted_suffixes = sorted(
+        match.group(0) for match in (suffix.search(key) for key in persisted_outindex_keys) if match
+    )
+    assert persisted_suffixes == live_suffixes, (
+        "outindex-suffixed equivalence groups were collapsed at save: "
+        f"live={live_suffixes} persisted={persisted_suffixes}"
+    )
+    assert len(persisted) == len(live_groups), (
+        f"equivalence groups dropped at save: live={len(live_groups)} persisted={len(persisted)}"
+    )
+    param_token = re.compile(r"param_\d{6}")
+    for key in persisted:
+        tokens = param_token.findall(key)
+        if len(tokens) >= 2:
+            assert tokens == sorted(tokens), f"non-canonical equivalence key persisted: {key}"
+
+
 # --------------------------------------------------------------------------- #
 # B8-19: git-commit provenance follows include_source                          #
 # --------------------------------------------------------------------------- #

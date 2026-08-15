@@ -511,8 +511,43 @@ def capture_with_rescue(
         no signal fired.
     """
 
-    if _rescue_is_active() or not eligible:
+    if _rescue_is_active():
         return run_capture()
+    if not eligible:
+        # R16-1: ineligibility skips the RE-RUN, never the DISCLOSURE. This
+        # path formerly returned the primary with clean-capture fields
+        # (verified=None / reason=None) even when an escape signal fired --
+        # bit-indistinguishable from a genuinely clean capture across all
+        # nine ineligible channels. Settle the escape on the trace exactly
+        # like a refused re-run does.
+        ineligible_trace = run_capture()
+        signal = _escape_signal(ineligible_trace)
+        if signal is not None:
+            warnings.warn(
+                "TorchLens detected an escape signal but skipped the rescue "
+                "re-run: this capture uses a channel the re-run would invoke "
+                "a second time (streaming/sink storage, disk grad storage, "
+                "halt or intervention predicates, hooks, or a user transform "
+                "callable). The escape stands unrecovered; fix the stale "
+                "torch reference (or re-capture without the non-re-runnable "
+                "channel) to recover the escaped ops.",
+                UserWarning,
+                stacklevel=3,
+            )
+            _mark(
+                ineligible_trace,
+                "escape_rescue_unrecovered",
+                _disclosure(
+                    trigger=signal,
+                    recovered=False,
+                    primary_escape_diagnostics=tuple(
+                        getattr(ineligible_trace, "escape_diagnostics", ()) or ()
+                    ),
+                    skipped_reason="rescue_ineligible",
+                    forward_runs=1,
+                ),
+            )
+        return ineligible_trace
 
     rng_snapshot = log_current_rng_states()
     primary: Trace | None = None
@@ -613,6 +648,8 @@ def capture_with_rescue(
     state_snapshot = _snapshot_declared_state(model)
 
     rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
+    rescue_exc: Exception | None = None
+    changed_state: tuple[str, ...] = ()
     try:
         # Armed INSIDE the try (the house set-inside-try standard): a
         # KeyboardInterrupt between an outside arm and the try's first line
@@ -630,6 +667,18 @@ def capture_with_rescue(
         ):
             rescued = run_capture()
     except Exception as exc:
+        rescue_exc = exc
+    finally:
+        _thread_local.rescue_active = False
+        # R63: the snapshot restore runs on EVERY exit — success, rescue
+        # failure, and interrupt (KeyboardInterrupt propagates through this
+        # finally). A failed or interrupted re-run may have already written
+        # declared state before dying; skipping the restore left those
+        # writes double-applied on the user's model.
+        if state_snapshot is not None:
+            changed_state = _restore_changed_state(model, state_snapshot)
+
+    if rescue_exc is not None:
         if primary_error is not None:
             # The primary's failure propagates with its diagnostics attached,
             # so its parked advisory is truthful again — re-emit it.
@@ -643,15 +692,12 @@ def capture_with_rescue(
                 trigger=trigger,
                 recovered=False,
                 primary_escape_diagnostics=tuple(getattr(primary, "escape_diagnostics", ()) or ()),
-                rescue_error=f"{type(exc).__name__}: {exc}",
+                rescue_error=f"{type(rescue_exc).__name__}: {rescue_exc}",
             ),
         )
         return primary
-    finally:
-        _thread_local.rescue_active = False
 
     if state_snapshot is not None:
-        changed_state = _restore_changed_state(model, state_snapshot)
         if changed_state:
             # The rescue forward WROTE declared state, so the primary wrote it
             # too and the writes were double-applied. The snapshot restore

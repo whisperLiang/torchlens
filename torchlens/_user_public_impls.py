@@ -84,6 +84,17 @@ def release_model(model: nn.Module) -> None:
     complete model object must be serialized with :func:`torch.save` or
     :mod:`pickle`. Saving ``model.state_dict()`` is unaffected by preparation
     and does not require release.
+
+    Plain module attributes holding torch function references captured in the
+    other wrap state (``self.act = F.relu`` grabbed before wrapping, pickled
+    while wrapped -- or the reverse) fail pickle's by-reference identity
+    check. ``release_model`` normalizes such attributes (including one level
+    of builtin list/tuple/dict/set nesting) to the values currently live at
+    their public torch names, so serialization succeeds at release time and a
+    fresh-process load resolves the pristine torch function. Call it again
+    after any later wrap-state change before re-serializing. References held
+    inside closures, ``functools.partial`` objects, or custom containers --
+    and bare references held outside the model -- remain outside the sweep.
     """
     from .backends.torch.model_prep import release_model as release_torch_model
 

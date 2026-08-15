@@ -1653,13 +1653,21 @@ def _callable_code_digest(func: Any) -> str:
 _ATTRIBUTE_FRAGMENT_DEPTH_CEILING = 4
 _ATTRIBUTE_FRAGMENT_ITEM_CEILING = 256
 
-# Per-process salt + counter minting NEVER-MATCHING fragments for tensor
-# attributes whose content cannot be read. A stable content-blind fragment
-# here would false-HIT on changed values, which the key contract forbids;
-# the salt keeps the token unique across processes (and across pid reuse),
-# the counter within this process.
+# Per-process salt + counter minting NEVER-MATCHING fragments for values the
+# key cannot soundly cover: tensor attributes whose content cannot be read,
+# and containers whose size exceeds the item ceiling (truncating them would
+# make two containers differing only past the cut key identically). A stable
+# content-blind fragment in either case would false-HIT on changed values,
+# which the key contract forbids; the salt keeps the token unique across
+# processes (and across pid reuse), the counter within this process.
 _ATTRIBUTE_MISS_SALT = os.urandom(8).hex()
 _ATTRIBUTE_MISS_COUNTER = itertools.count()
+
+
+def _never_matching_fragment(kind: str) -> object:
+    """Mint a fragment that can never equal any other fragment (always-miss)."""
+
+    return (kind, _ATTRIBUTE_MISS_SALT, next(_ATTRIBUTE_MISS_COUNTER))
 
 
 def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
@@ -1669,15 +1677,20 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
     (``self.num_layers``, ``self.scale``, ``self.use_checkpoint``), so they
     must participate in the capture-cache key. Values are reduced to stable
     primitives: scalars by value, tensors/arrays by content hash, callables by
-    code digest, containers element-wise under depth/size ceilings, and any
-    other object by TYPE identity only -- an opaque object's internal state is
-    a documented boundary of the signature (changing it without changing type
-    keeps the key; conservative for false hits on the covered kinds, never
-    address-churning).
+    code digest, containers element-wise under the depth ceiling (containers
+    larger than the item ceiling mint a never-matching token -- always-miss,
+    never a truncated fragment that could false-HIT on a tail difference),
+    and any other object by TYPE identity only -- an opaque object's internal
+    state is a documented boundary of the signature (changing it without
+    changing type keeps the key; conservative for false hits on the covered
+    kinds, never address-churning).
     """
 
     if depth > _ATTRIBUTE_FRAGMENT_DEPTH_CEILING:
-        return "<attr-depth-ceiling>"
+        # Same rule as the item ceiling: a STABLE ceiling token would make two
+        # attributes identical down to the ceiling but differing BELOW it key
+        # identically (false HIT). Never-match instead.
+        return _never_matching_fragment("<attr-depth-ceiling>")
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return value
     if isinstance(value, torch.Tensor):
@@ -1701,18 +1714,20 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
             # never-matching token instead: this capture can never hit any
             # other entry (conservative always-miss, cache utility traded for
             # correctness).
-            return (
-                "tensor-unhashable",
-                _ATTRIBUTE_MISS_SALT,
-                next(_ATTRIBUTE_MISS_COUNTER),
-            )
+            return _never_matching_fragment("tensor-unhashable")
     if isinstance(value, (torch.dtype, torch.device, torch.Size)):
         return ("torch-value", str(value))
     if isinstance(value, nn.Module):
         cls = type(value)
         return ("module", f"{cls.__module__}.{cls.__qualname__}")
     if isinstance(value, dict):
-        items = list(value.items())[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        # Truncating an over-ceiling container would leave items past the cut
+        # OUT of the key, so two dicts differing only there would key
+        # identically and serve each other's cached trace (false HIT, proven:
+        # a 300-key config dict differing at insertion position 258 hit the
+        # stale entry). Over-ceiling containers therefore always miss.
+        if len(value) > _ATTRIBUTE_FRAGMENT_ITEM_CEILING:
+            return _never_matching_fragment("dict-over-item-ceiling")
         return (
             "dict",
             len(value),
@@ -1722,21 +1737,22 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
                         repr(_attribute_state_fragment(key, depth + 1)),
                         repr(_attribute_state_fragment(item, depth + 1)),
                     )
-                    for key, item in items
+                    for key, item in value.items()
                 )
             ),
         )
     if isinstance(value, (list, tuple)):
-        items = list(value)[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        if len(value) > _ATTRIBUTE_FRAGMENT_ITEM_CEILING:
+            return _never_matching_fragment("sequence-over-item-ceiling")
         return (
             "sequence",
             len(value),
-            tuple(_attribute_state_fragment(item, depth + 1) for item in items),
+            tuple(_attribute_state_fragment(item, depth + 1) for item in value),
         )
     if isinstance(value, (set, frozenset)):
-        member_reprs = sorted(
-            (repr(_attribute_state_fragment(item, depth + 1)) for item in value),
-        )[:_ATTRIBUTE_FRAGMENT_ITEM_CEILING]
+        if len(value) > _ATTRIBUTE_FRAGMENT_ITEM_CEILING:
+            return _never_matching_fragment("set-over-item-ceiling")
+        member_reprs = sorted(repr(_attribute_state_fragment(item, depth + 1)) for item in value)
         return ("set", len(value), tuple(member_reprs))
     if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
         try:
