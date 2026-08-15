@@ -596,6 +596,17 @@ def warn_parallel() -> None:
     # (and the wrapped-torch toggle state that makes their captures unsafe).
     process = mp.current_process()
     if mp.parent_process() is None and os.getpid() == _WARN_PARALLEL_IMPORT_PID:
+        # r5 b6-fable R40 (4th round): stamp rank ownership on THIS return
+        # too. The early-return skipped the stamp, so a MAIN-process rank
+        # that captured first never claimed it -- a raw ``os.fork()`` child
+        # then setdefault'ed its OWN pid below and was accepted as a rank.
+        try:
+            import torch.distributed as dist
+
+            if not process.daemon and dist.is_available() and dist.is_initialized():
+                _DIST_GROUP_OBSERVED_PID.setdefault("pid", os.getpid())
+        except Exception:
+            pass
         return
     try:
         import torch.distributed as dist

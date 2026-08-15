@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import inspect
-import os
 import re
 import subprocess
 from collections import Counter
@@ -272,18 +271,18 @@ def _probe_graphviz() -> DoctorCheck:
 
     python_graphviz = _module_is_installed("graphviz")
     try:
-        completed = subprocess.run(
+        # R40: routed through the ONE bounded spawn seam. subprocess.run's
+        # timeout killed only the direct child, so a wedged ``dot`` wrapper's
+        # grandchild survived the "bounded" probe for the life of the box;
+        # the shared runner tears down the whole process group.
+        from ._subprocess import run_bounded_subprocess
+
+        completed = run_bounded_subprocess(
             ["dot", "-V"],
             check=False,
             capture_output=True,
             text=True,
             timeout=5,
-            # r3 b6-opus R40 finding 2: subprocess.run's timeout kills only
-            # the direct child and then blocks in communicate() while any
-            # grandchild (a ``dot`` wrapper script) holds the inherited pipe.
-            # A fresh session lets the timeout actually bound this probe,
-            # matching the bounded-runner discipline every render spawn uses.
-            start_new_session=hasattr(os, "setsid"),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return DoctorCheck(
