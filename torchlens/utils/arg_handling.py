@@ -8,13 +8,13 @@ the ``list`` form expected by ``model(*input_args)``.
 
 import copy
 import inspect
-from collections import defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from typing import Any, cast
 
 import torch
 from torch import nn
 
-from .._input_walk import INPUT_TREE_MAX_DEPTH
+from .._input_walk import INPUT_TREE_MAX_DEPTH, _inspect_instance_state_items
 from .tensor_utils import (
     TensorByteFootprint,
     _clone_tensor_payload,
@@ -141,6 +141,157 @@ def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
     return None
 
 
+_PY_TPFLAGS_HEAPTYPE = 1 << 9
+"""``Py_TPFLAGS_HEAPTYPE``: set on Python-defined classes, clear on static C types."""
+
+_TRUSTED_MAPPING_BASES = (dict, OrderedDict, defaultdict, Counter)
+"""Stock dict-backed bases whose C-level extras the rebuild ladder handles by name."""
+
+
+def _inert_state_enumeration_total(cls: type[Any], trusted_bases: tuple[type[Any], ...]) -> bool:
+    """Return whether ``__dict__``/slots enumeration provably covers ``cls`` state.
+
+    A static (C-extension) base outside ``trusted_bases`` can carry C-level
+    instance state (a ``defaultdict.default_factory`` analogue) that the inert
+    inspector cannot enumerate; rebuilding such a class from ``__dict__`` +
+    slots would silently RESET that state -- the exact substitution class the
+    inert-rebuild contract exists to prevent. Python-defined classes (heap
+    types) keep all their state in ``__dict__``/slots by construction.
+    """
+
+    for base in cls.__mro__:
+        if base is object or base in trusted_bases:
+            continue
+        if not (base.__flags__ & _PY_TPFLAGS_HEAPTYPE):
+            return False
+    return True
+
+
+def _copy_instance_state_inertly(original: Any, rebuilt: Any) -> bool:
+    """Copy ``original``'s enumerable instance state onto ``rebuilt`` verbatim.
+
+    Mirrors the dataclass device-move arm: raw-channel enumeration through
+    :func:`torchlens._input_walk._inspect_instance_state_items` and
+    ``object.__setattr__`` writes, never a live attribute protocol. Also copies
+    the one trusted C-level extra the ladder knows by name
+    (``defaultdict.default_factory``, via its member descriptor). Returns
+    ``False`` when the enumeration cannot be inertly proven total.
+    """
+
+    state_items = _inspect_instance_state_items(original)
+    if state_items is None:
+        return False
+    try:
+        if isinstance(original, defaultdict):
+            # Member-descriptor channel: ``default_factory`` is C-level state
+            # the ``__dict__``/slots enumeration cannot see.
+            descriptor = cast(Any, defaultdict).__dict__["default_factory"]
+            descriptor.__set__(rebuilt, descriptor.__get__(original, type(original)))
+        for name, value in state_items.items():
+            object.__setattr__(rebuilt, name, value)
+    except Exception:
+        return False
+    return True
+
+
+def allocate_mapping_like(cls: type[Any]) -> Any | None:
+    """Allocate an EMPTY instance of a ``dict``-backed mapping class inertly.
+
+    Uses the trusted base-type allocator (``OrderedDict.__new__`` for od-backed
+    classes so the C linked list exists, else ``dict.__new__``) -- never the
+    user's ``__new__``/``__init__``. Returns ``None`` when the class is not
+    ``dict``-backed or carries static C bases the inert ladder cannot prove
+    state-total (callers fall back without crashing).
+    """
+
+    if not issubclass(cls, dict) or not _inert_state_enumeration_total(cls, _TRUSTED_MAPPING_BASES):
+        return None
+    try:
+        if issubclass(cls, OrderedDict):
+            shell = OrderedDict.__new__(cast(Any, cls))
+        else:
+            shell = dict.__new__(cast(Any, cls))
+    except Exception:
+        return None
+    return shell if type(shell) is cls else None
+
+
+def mapping_like_set_item(shell: Any, key: Any, value: Any) -> None:
+    """Write one item into an :func:`allocate_mapping_like` shell physically.
+
+    ``OrderedDict.__setitem__`` maintains both the dict storage and the od
+    linked list; every other dict-backed shell writes through
+    ``dict.__setitem__``. Never dispatches a user override.
+    """
+
+    if isinstance(shell, OrderedDict):
+        OrderedDict.__setitem__(shell, key, value)
+    else:
+        dict.__setitem__(shell, key, value)
+
+
+def rebuild_mapping_like(original: Any, pairs: list[tuple[Any, Any]]) -> Any | None:
+    """Inertly rebuild a ``dict``-backed mapping subclass carrying ``pairs``.
+
+    The mapping sibling of :func:`rebuild_tuple_like` and the dataclass
+    device-move arm's INERT rebuild: trusted base-type allocation, physical
+    item writes, then verbatim instance-state copy -- the user's
+    ``__new__``/``__init__`` never runs, so ctor side effects cannot enter the
+    captured program and same-class instance state is never RESET
+    (grind-p5 b3-opus-R12-2). Returns ``None`` when the rebuild cannot be
+    proven faithful (callers keep the original and fail loudly downstream).
+    """
+
+    cls = type(original)
+    shell = allocate_mapping_like(cls)
+    if shell is None:
+        return None
+    try:
+        for key, value in pairs:
+            mapping_like_set_item(shell, key, value)
+    except Exception:
+        return None
+    if not _copy_instance_state_inertly(original, shell):
+        return None
+    return shell
+
+
+def allocate_list_like(cls: type[Any]) -> Any | None:
+    """Allocate an EMPTY instance of a ``list`` subclass inertly, or ``None``.
+
+    Same contract as :func:`allocate_mapping_like`, over ``list.__new__``.
+    """
+
+    if not issubclass(cls, list) or not _inert_state_enumeration_total(cls, (list,)):
+        return None
+    try:
+        shell = list.__new__(cls)
+    except Exception:
+        return None
+    return shell if type(shell) is cls else None
+
+
+def rebuild_list_like(original: Any, items: list[Any]) -> Any | None:
+    """Inertly rebuild a ``list`` subclass carrying ``items``.
+
+    The sequence sibling of :func:`rebuild_mapping_like`: ``list.__new__``
+    allocation, ``list.extend`` population, verbatim instance-state copy;
+    the user's ``__new__``/``__init__`` never runs (grind-p5 b3-opus-R12-2).
+    Returns ``None`` when the rebuild cannot be proven faithful.
+    """
+
+    shell = allocate_list_like(type(original))
+    if shell is None:
+        return None
+    try:
+        list.extend(shell, items)
+    except Exception:
+        return None
+    if not _copy_instance_state_inertly(original, shell):
+        return None
+    return shell
+
+
 def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: int = 0) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
@@ -221,33 +372,58 @@ def copy_arg_tree(arg: Any, _in_progress: dict[int, Any] | None = None, _depth: 
         from .._input_walk import raise_input_tree_depth_refusal
 
         raise_input_tree_depth_refusal(depth=_depth)
-    if isinstance(arg, defaultdict):
-        # defaultdict(factory, {k: v, ...}) — preserve the default_factory (#127).
-        # A plain dict() constructor would lose default_factory.
-        copied: Any = defaultdict(arg.default_factory)
+    if isinstance(arg, dict):
+        # INERT rebuild ladder (grind-p5 b3-opus-R12-2 sibling): the historical
+        # ``type(arg)()`` re-ran the user's constructor (resetting same-class
+        # instance state), read children through the overridable ``items()``
+        # protocol (a lying override shrank the copy refusal-free), and the
+        # ``defaultdict`` arm substituted the exact stock class for any
+        # subclass. Population happens after registering so a cyclic value can
+        # point back at this copy; ``default_factory`` is preserved through the
+        # member-descriptor channel (#127).
+        arg_type = type(arg)
+        copied: Any
+        if arg_type is dict:
+            copied = {}
+        else:
+            copied = allocate_mapping_like(arg_type)
+            if copied is None:
+                # Unreconstructable subclass: pass by reference like other
+                # custom wrappers rather than substituting a different program.
+                return arg
         _in_progress[arg_id] = copied
-        for key, value in arg.items():
-            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
-        return copied
-    elif isinstance(arg, dict):
-        # type(arg)() preserves OrderedDict and other dict subclasses; populate
-        # after registering so a cyclic value can point back at this copy.
-        copied = type(arg)()
-        _in_progress[arg_id] = copied
-        for key, value in arg.items():
-            copied[key] = copy_arg_tree(value, _in_progress, _depth + 1)
+        for key, value in dict.items(arg):
+            mapping_like_set_item(copied, key, copy_arg_tree(value, _in_progress, _depth + 1))
+        if arg_type is not dict and not _copy_instance_state_inertly(arg, copied):
+            del _in_progress[arg_id]
+            return arg
         return copied
     elif isinstance(arg, list):
-        copied = type(arg)()
+        list_type = type(arg)
+        if list_type is list:
+            copied = []
+        else:
+            copied = allocate_list_like(list_type)
+            if copied is None:
+                return arg
         _in_progress[arg_id] = copied
-        for item in arg:
-            copied.append(copy_arg_tree(item, _in_progress, _depth + 1))
+        for index in range(list.__len__(arg)):
+            list.append(
+                copied, copy_arg_tree(list.__getitem__(arg, index), _in_progress, _depth + 1)
+            )
+        if list_type is not list and not _copy_instance_state_inertly(arg, copied):
+            del _in_progress[arg_id]
+            return arg
         return copied
     elif isinstance(arg, tuple):
         # Tuples are immutable and cannot self-reference directly; any cycle
         # through a tuple passes through a mutable container that is already
-        # registered above, so recursing eagerly here is safe.
-        items = [copy_arg_tree(item, _in_progress, _depth + 1) for item in arg]
+        # registered above, so recursing eagerly here is safe. Children read
+        # through the concrete builtin slots (inert descent).
+        items = [
+            copy_arg_tree(tuple.__getitem__(arg, index), _in_progress, _depth + 1)
+            for index in range(tuple.__len__(arg))
+        ]
         # Memoized after construction (immutable, so no cycle can pass through
         # the tuple itself) so tuple-shaped DAGs are O(nodes). Subclass
         # reconstruction goes through the verified ladder (T11.7): _fields

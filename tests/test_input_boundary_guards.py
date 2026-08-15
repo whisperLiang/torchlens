@@ -441,3 +441,233 @@ def test_device_move_walker_descends_registered_containers() -> None:
     moved = _move_tensors_to_device(wrapped, "meta")
     assert moved is not wrapped
     assert moved.tensor.device.type == "meta"
+
+
+# --- grind-p5 b3-opus-R12-2: mapping/list-subclass device-move rebuilds are INERT ------
+
+
+def test_device_move_dict_subclass_rebuild_never_reruns_ctor_and_keeps_state() -> None:
+    """The dict-subclass device-move rebuild is inert (no user ctor, state kept).
+
+    The 66263de1 inert-rebuild fix landed only on the dataclass arm: the Mapping
+    arm still called ``type(obj)(moved_mapping)``, re-running the user's
+    ``__init__`` and RESETTING same-class instance state -- which the
+    instance-state witness then recorded with zero refusals.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class ModeBox(dict):
+        """Dict subclass whose ctor observably resets a mode attribute."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.mode = "ctor-default"
+            self.ctor_runs = getattr(self, "ctor_runs", 0) + 1
+
+    box = ModeBox({"x": torch.ones(2)})
+    box.mode = "user-set"
+    moved = _move_tensors_to_device(box, "meta")
+    assert moved is not box
+    assert type(moved) is ModeBox
+    assert moved["x"].device.type == "meta"
+    assert moved.mode == "user-set", "user ctor re-ran and RESET instance state"
+    assert moved.ctor_runs == 1
+
+
+def test_device_move_list_subclass_rebuild_never_reruns_ctor_and_keeps_state() -> None:
+    """The list-subclass device-move rebuild is inert (no user ctor, state kept)."""
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class TaggedList(list):
+        """List subclass whose ctor observably resets a tag attribute."""
+
+        def __init__(self, *args: Any) -> None:
+            super().__init__(*args)
+            self.tag = "ctor-default"
+
+    tagged = TaggedList([torch.ones(2)])
+    tagged.tag = "user-set"
+    moved = _move_tensors_to_device(tagged, "meta")
+    assert moved is not tagged
+    assert type(moved) is TaggedList
+    assert moved[0].device.type == "meta"
+    assert moved.tag == "user-set", "user ctor re-ran and RESET instance state"
+
+
+def test_device_move_defaultdict_moves_and_keeps_factory() -> None:
+    """``defaultdict`` inputs actually MOVE (the ctor TypeError was swallowed).
+
+    ``type(obj)(moved_mapping)`` on a defaultdict put the mapping in the
+    ``default_factory`` slot, raised TypeError, and the except arm returned
+    ``_UNMOVED`` -- so defaultdict inputs were silently never device-moved.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    source: collections.defaultdict[str, Any] = collections.defaultdict(list)
+    source["x"] = torch.ones(2)
+    moved = _move_tensors_to_device(source, "meta")
+    assert moved is not source
+    assert type(moved) is collections.defaultdict
+    assert moved["x"].device.type == "meta"
+    assert moved.default_factory is list
+
+
+def test_device_move_ordereddict_subclass_keeps_order_and_state() -> None:
+    """OrderedDict subclasses rebuild through the od physical channel, in order."""
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class OdBox(collections.OrderedDict):
+        """OrderedDict subclass carrying one extra instance attribute."""
+
+    box = OdBox([("b", torch.ones(2)), ("a", torch.zeros(2))])
+    box.note = "kept"
+    moved = _move_tensors_to_device(box, "meta")
+    assert moved is not box
+    assert type(moved) is OdBox
+    assert list(moved.keys()) == ["b", "a"]
+    assert moved["b"].device.type == "meta"
+    assert moved.note == "kept"
+    moved.move_to_end("b")
+    assert list(moved.keys()) == ["a", "b"]  # od linked list is coherent
+
+
+def test_device_move_dict_subclass_lying_keys_reads_physical_storage() -> None:
+    """A ``keys()``/``__iter__`` override cannot hide children from the move.
+
+    The mapping arm iterated ``obj.keys()`` -- overridable user code -- so a
+    lying ``keys()`` shrank the rebuilt container refusal-free and hid tensor
+    children from the device move.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class HidingDict(dict):
+        """Dict subclass whose ``keys()``/``__iter__`` hide one key."""
+
+        def keys(self) -> Any:  # type: ignore[override]
+            return [key for key in dict.keys(self) if key != "hidden"]
+
+        def __iter__(self) -> Any:
+            return iter(self.keys())
+
+    hiding = HidingDict({"seen": torch.ones(2), "hidden": torch.ones(2)})
+    moved = _move_tensors_to_device(hiding, "meta")
+    assert moved is not hiding
+    assert dict.__len__(moved) == 2, "lying keys() shrank the rebuilt container"
+    assert dict.__getitem__(moved, "hidden").device.type == "meta"
+
+
+def test_device_move_list_subclass_lying_iter_reads_physical_storage() -> None:
+    """A list-subclass ``__iter__`` override cannot hide children from the move."""
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class HidingList(list):
+        """List subclass whose ``__iter__`` truncates to the first element."""
+
+        def __iter__(self) -> Any:
+            return iter([list.__getitem__(self, 0)])
+
+    hiding = HidingList([torch.ones(2), torch.ones(3)])
+    moved = _move_tensors_to_device(hiding, "meta")
+    assert moved is not hiding
+    assert list.__len__(moved) == 2, "lying __iter__ shrank the rebuilt container"
+    assert list.__getitem__(moved, 1).device.type == "meta"
+
+
+def test_device_move_userdict_moves_via_instance_state_without_protocol() -> None:
+    """Non-dict Mappings move through their INSTANCE STATE, dataclass-style.
+
+    The historical arm ran the user's constructor over a protocol read; the
+    inert arm descends the enumerable instance state (``UserDict.data``),
+    rebuilds via allocation + verbatim state, and never runs user ctor code.
+    """
+
+    from torchlens._capture_state_helpers import _move_tensors_to_device
+
+    class Batch(collections.UserDict):
+        """UserDict subclass whose ctor observably resets a mode attribute."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.mode = "ctor-default"
+
+    batch = Batch({"x": torch.ones(2)})
+    batch.mode = "user-set"
+    moved = _move_tensors_to_device(batch, "meta")
+    assert moved is not batch
+    assert type(moved) is Batch
+    assert moved["x"].device.type == "meta"
+    assert moved.mode == "user-set", "user ctor re-ran and RESET instance state"
+
+
+def test_copy_arg_tree_dict_subclass_inert_rebuild_keeps_state_no_ctor() -> None:
+    """``copy_arg_tree`` rebuilds dict subclasses inertly (sibling of the mover fix).
+
+    The dict arm called ``type(arg)()`` -- the user's constructor -- and read
+    children through the overridable ``items()`` protocol; the defaultdict arm
+    additionally SUBSTITUTED exact ``defaultdict`` for any subclass.
+    """
+
+    class ModeBox(dict):
+        """Dict subclass whose ctor observably resets a mode attribute."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.mode = "ctor-default"
+
+    box = ModeBox({"x": torch.ones(2)})
+    box.mode = "user-set"
+    copied = copy_arg_tree(box)
+    assert copied is not box
+    assert type(copied) is ModeBox
+    assert copied.mode == "user-set", "user ctor re-ran and RESET instance state"
+    assert torch.equal(copied["x"], box["x"]) and copied["x"] is not box["x"]
+
+
+def test_copy_arg_tree_defaultdict_subclass_keeps_type_and_factory() -> None:
+    """A defaultdict SUBCLASS copies to the same class, factory preserved."""
+
+    class TrackingDefaults(collections.defaultdict):
+        """Defaultdict subclass (the historical arm substituted exact defaultdict)."""
+
+    source = TrackingDefaults(list)
+    source["x"] = torch.ones(2)
+    copied = copy_arg_tree(source)
+    assert type(copied) is TrackingDefaults
+    assert copied.default_factory is list
+    assert torch.equal(copied["x"], source["x"])
+
+
+def test_copy_arg_tree_lying_iteration_reads_physical_storage() -> None:
+    """Lying ``keys()``/``__iter__`` overrides cannot shrink the copy."""
+
+    class HidingDict(dict):
+        """Dict subclass whose ``keys()``/``items()`` hide one key."""
+
+        def keys(self) -> Any:  # type: ignore[override]
+            return [key for key in dict.keys(self) if key != "hidden"]
+
+        def items(self) -> Any:  # type: ignore[override]
+            return [(key, dict.__getitem__(self, key)) for key in self.keys()]
+
+        def __iter__(self) -> Any:
+            return iter(self.keys())
+
+    class HidingList(list):
+        """List subclass whose ``__iter__`` truncates to the first element."""
+
+        def __iter__(self) -> Any:
+            return iter([list.__getitem__(self, 0)])
+
+    hiding_dict = HidingDict({"seen": torch.ones(2), "hidden": torch.ones(2)})
+    copied_dict = copy_arg_tree(hiding_dict)
+    assert dict.__len__(copied_dict) == 2, "lying keys() shrank the copy"
+
+    hiding_list = HidingList([torch.ones(2), torch.ones(3)])
+    copied_list = copy_arg_tree(hiding_list)
+    assert list.__len__(copied_list) == 2, "lying __iter__ shrank the copy"

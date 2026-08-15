@@ -2287,6 +2287,7 @@ def _move_tensors_to_device_inner(
     """
 
     import dataclasses as _dataclasses
+    import types as _types
 
     from torchlens._input_walk import (
         _UNSET_FIELD,
@@ -2364,7 +2365,9 @@ def _move_tensors_to_device_inner(
         if isinstance(obj, tuple) and not (
             is_dataclass_instance and not declares_namedtuple_fields(obj)
         ):
-            moved_sequence, changed = _children(obj)
+            moved_sequence, changed = _children(
+                tuple.__getitem__(obj, index) for index in range(tuple.__len__(obj))
+            )
             if not changed:
                 return _UNMOVED
             obj_type = type(obj)
@@ -2411,27 +2414,71 @@ def _move_tensors_to_device_inner(
         if is_mapping:
             # Handles dict, UserDict, BatchEncoding, OrderedDict, MappingProxyType, and
             # any read-only custom Mapping (the last three used to be skipped entirely).
-            keys = list(obj.keys())
-            moved_values, changed = _children(obj[key] for key in keys)
+            # Every arm is INERT (b3-opus-R12-2): the historical
+            # ``type(obj)(moved_mapping)`` re-ran the user's constructor (whose
+            # side effects entered the captured program) and RESET same-class
+            # instance state, which the instance-state witness then honestly
+            # recorded; it also read children through overridable
+            # ``keys()``/``__getitem__`` (a lying override shrank the rebuilt
+            # container refusal-free) and never moved a ``defaultdict`` at all
+            # (the ctor TypeError was swallowed to ``_UNMOVED``).
+            if type(obj) is _types.MappingProxyType:
+                # Stock read-only proxy: rebuild through the trusted C ctor
+                # over a fresh dict (the pre-existing supported path).
+                proxy_keys = list(obj.keys())
+                moved_values, changed = _children(obj[key] for key in proxy_keys)
+                if not changed:
+                    return _UNMOVED
+                return _types.MappingProxyType(dict(zip(proxy_keys, moved_values)))
+            if isinstance(obj, dict):
+                pairs = list(dict.items(obj))  # physical read, never a user override
+                moved_values, changed = _children(value for _, value in pairs)
+                if not changed:
+                    return _UNMOVED
+                moved_pairs = [(key, moved) for (key, _), moved in zip(pairs, moved_values)]
+                if type(obj) is dict:
+                    return dict(moved_pairs)
+                from torchlens.utils.arg_handling import rebuild_mapping_like
+
+                rebuilt = rebuild_mapping_like(obj, moved_pairs)
+                return rebuilt if rebuilt is not None else _UNMOVED
+            # A non-``dict`` Mapping keeps its content in instance state
+            # (``UserDict.data``, ``BatchEncoding.data``/``_encodings``, ...):
+            # descend THAT, dataclass-style, instead of the overridable mapping
+            # protocol, and rebuild by allocation + verbatim moved state.
+            state_items = _inspect_instance_state_items(obj)
+            if state_items is None:
+                return _UNMOVED
+            state_names = list(state_items)
+            moved_state, changed = _children(state_items[name] for name in state_names)
             if not changed:
                 return _UNMOVED
-            moved_mapping = dict(zip(keys, moved_values))
-            if type(obj) is dict:
-                return moved_mapping
+            from torchlens.utils.arg_handling import _inert_state_enumeration_total
+
+            if not _inert_state_enumeration_total(type(obj), ()):
+                return _UNMOVED
             try:
-                rebuilt = cast(Any, type(obj))(moved_mapping)
+                rebuilt = object.__new__(type(obj))
+                for name, value in zip(state_names, moved_state):
+                    object.__setattr__(rebuilt, name, value)
             except Exception:
                 return _UNMOVED
-            return rebuilt if type(rebuilt) is type(obj) else _UNMOVED
+            return rebuilt
 
-        # A plain list (or list subclass); tuples were handled above.
-        moved_sequence, changed = _children(obj)
+        # A plain list (or list subclass); tuples were handled above. Children
+        # read through the concrete builtin slots (a lying ``__iter__`` cannot
+        # shrink the rebuild) and subclasses take the INERT rebuild ladder.
+        moved_sequence, changed = _children(
+            list.__getitem__(obj, index) for index in range(list.__len__(obj))
+        )
         if not changed:
             return _UNMOVED
         obj_type = type(obj)
-        try:
-            return obj_type(moved_sequence)
-        except Exception:
-            return list(moved_sequence) if obj_type is list else _UNMOVED
+        if obj_type is list:
+            return list(moved_sequence)
+        from torchlens.utils.arg_handling import rebuild_list_like
+
+        rebuilt = rebuild_list_like(obj, moved_sequence)
+        return rebuilt if rebuilt is not None else _UNMOVED
     finally:
         _in_progress.discard(obj_id)
