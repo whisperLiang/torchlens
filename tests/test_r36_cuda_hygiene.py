@@ -31,6 +31,53 @@ def test_cpu_async_pending_events_drain_and_clear() -> None:
     assert _CPU_ASYNC_PENDING_EVENTS == []
 
 
+def test_failed_fence_preserves_the_unfenced_tail_and_retries() -> None:
+    """A mid-drain fence failure must not lose the copies behind it (R36-1).
+
+    The drain used to clear the pending list BEFORE fencing, so any
+    non-TypeError synchronize failure permanently dropped every remaining
+    entry and the retry returned at the empty-list guard -- a silent D2H
+    loss. The failing entry and the tail must stay pending for retry.
+    """
+
+    from torchlens.utils import tensor_utils as tu
+
+    class _FakeEvent:
+        def __init__(self) -> None:
+            self.failures_left = 1
+            self.synchronized = False
+
+        def synchronize(self) -> None:
+            if self.failures_left:
+                self.failures_left -= 1
+                raise RuntimeError("device fell off the bus")
+            self.synchronized = True
+
+    class _HealthyEvent:
+        def __init__(self) -> None:
+            self.synchronized = False
+
+        def synchronize(self) -> None:
+            self.synchronized = True
+
+    failing = _FakeEvent()
+    healthy = _HealthyEvent()
+    assert tu._CPU_ASYNC_PENDING_EVENTS == []
+    try:
+        tu._CPU_ASYNC_PENDING_EVENTS.extend([failing, healthy])
+        with pytest.raises(RuntimeError, match="fell off the bus"):
+            tu.synchronize_pending_cpu_async_copies()
+        # Both the failing entry and the never-reached tail stay pending.
+        assert [failing, healthy] == tu._CPU_ASYNC_PENDING_EVENTS
+        # The retry is a real drain, not a no-op: everything fences.
+        tu.synchronize_pending_cpu_async_copies()
+        assert tu._CPU_ASYNC_PENDING_EVENTS == []
+        assert failing.synchronized
+        assert healthy.synchronized
+    finally:
+        tu._CPU_ASYNC_PENDING_EVENTS.clear()
+
+
 def test_capture_touched_cuda_predicate_gates_on_trace_fact() -> None:
     """The empty_cache gate keys on the capture's backend fact (R36-3)."""
 

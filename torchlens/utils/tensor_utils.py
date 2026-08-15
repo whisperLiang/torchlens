@@ -1384,25 +1384,36 @@ def synchronize_pending_cpu_async_copies() -> None:
     pending = list(_CPU_ASYNC_PENDING_EVENTS)
     _CPU_ASYNC_PENDING_EVENTS.clear()
     synced_devices: set[str] = set()
-    for entry in pending:
-        if isinstance(entry, torch.device):
-            key = str(entry)
-            if key not in synced_devices:
-                synced_devices.add(key)
-                torch_module = torch_attr(entry.type)
-                sync = getattr(torch_module, "synchronize", None)
-                if sync is not None:
-                    try:
-                        sync(entry)
-                    except TypeError:
-                        # torch.mps.synchronize() (and kin) take no device
-                        # argument. The unguarded call raised TypeError from
-                        # the drain — on the failure-scrub arms that masked
-                        # the ORIGINAL capture exception with a drain
-                        # traceback.
-                        sync()
-        else:
-            entry.synchronize()
+    index = 0
+    try:
+        while index < len(pending):
+            entry = pending[index]
+            if isinstance(entry, torch.device):
+                key = str(entry)
+                if key not in synced_devices:
+                    torch_module = torch_attr(entry.type)
+                    sync = getattr(torch_module, "synchronize", None)
+                    if sync is not None:
+                        try:
+                            sync(entry)
+                        except TypeError:
+                            # torch.mps.synchronize() (and kin) take no device
+                            # argument. The unguarded call raised TypeError from
+                            # the drain — on the failure-scrub arms that masked
+                            # the ORIGINAL capture exception with a drain
+                            # traceback.
+                            sync()
+                    synced_devices.add(key)
+            else:
+                entry.synchronize()
+            index += 1
+    finally:
+        if index < len(pending):
+            # A failed fence must not lose the copies behind it: restore the
+            # unfenced tail (failing entry included) so a later drain retries
+            # instead of returning at the empty-list guard while
+            # ``non_blocking=True`` copies are still in flight.
+            _CPU_ASYNC_PENDING_EVENTS[:0] = pending[index:]
 
 
 def capture_touched_cuda(trace: Any) -> bool:
