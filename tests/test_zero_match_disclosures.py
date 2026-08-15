@@ -109,3 +109,61 @@ def test_tf_zero_fire_site_warns_in_reachability_audit() -> None:
         warnings.simplefilter("always")
         audit_tf_site_reachability(plan, session)
     assert not any("fired at zero sites" in str(item.message) for item in caught)
+
+
+def test_zero_match_selectors_leave_a_persisted_trace_record(tmp_path) -> None:
+    """A requested-but-unfired selector is recorded ON the trace (B3R4-R15-1).
+
+    The transient UserWarning was the ONLY disclosure: the returned (and
+    saved) Trace was indistinguishable from one where no intervention was
+    requested, so an ablation sweep with one typo'd layer name read as
+    "this layer does not matter". The zero-match fact now persists in
+    ``trace.annotations["unmatched_capture_selectors"]``.
+    """
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        log = tl.trace(
+            _model(),
+            torch.randn(2, 3),
+            intervene=tl.when(tl.func("nosuchopzzz"), tl.zero_ablate()),
+        )
+
+    records = log.annotations.get("unmatched_capture_selectors")
+    assert records, "zero-match intervention left no trace-side record"
+    slots = {record["slot"] for record in records}
+    assert "intervene" in slots
+    entry = next(record for record in records if record["slot"] == "intervene")
+    assert "nosuchopzzz" in entry["selector"]
+
+    # The fact survives save/load: a re-analysis of the artifact can see it.
+    path = tmp_path / "zero_match.tlspec"
+    tl.save(log, str(path))
+    loaded = tl.load(str(path))
+    loaded_records = loaded.annotations.get("unmatched_capture_selectors")
+    assert loaded_records
+    assert any(record["slot"] == "intervene" for record in loaded_records)
+
+    # Control: a FIRING intervention leaves no zero-match record.
+    fired = tl.trace(
+        _model(),
+        torch.randn(2, 3),
+        intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+    )
+    assert not (fired.annotations or {}).get("unmatched_capture_selectors")
+
+
+def test_zero_match_halt_and_save_record_their_slots() -> None:
+    """The halt and save selector slots persist the same zero-match fact."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        log = tl.trace(
+            _model(),
+            torch.randn(2, 3),
+            save=tl.func("nosuchopzzz"),
+            halt=tl.func("nosuchopyyy"),
+        )
+    records = log.annotations.get("unmatched_capture_selectors") or ()
+    slots = {record["slot"] for record in records}
+    assert slots == {"save", "halt"}
