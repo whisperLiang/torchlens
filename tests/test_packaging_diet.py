@@ -311,6 +311,52 @@ def test_third_party_actions_are_sha_pinned() -> None:
     assert pinned_count > 0, "expected to find SHA-pinned action refs"
 
 
+def test_release_job_python_stack_is_hash_locked() -> None:
+    """The release job installs its Python deps hash-verified, wheels-only.
+
+    r4 b2-sol R61 (HIGH): the job exact-pinned python-semantic-release but
+    resolved its TRANSITIVES unpinned and unhashed, then ran the stack with
+    the repo-write App token — a compromised or dependency-confused
+    transitive could push with that token. The job must install from the
+    committed lock with ``--require-hashes`` (every requirement carries
+    ``--hash``) and ``--only-binary :all:`` (no sdist code execution at
+    install time).
+    """
+
+    repo_root = Path(__file__).resolve().parent.parent
+    release_yml = (repo_root / ".github" / "workflows" / "release.yml").read_text()
+
+    assert "--require-hashes" in release_yml, (
+        "release.yml no longer installs with --require-hashes; the "
+        "semantic-release stack runs with the repo-write token and must be "
+        "byte-audited"
+    )
+    assert "--only-binary :all:" in release_yml
+    assert "release-requirements.txt" in release_yml
+    assert 'pip install "python-semantic-release' not in release_yml, (
+        "release.yml regained a bare unhashed pip install"
+    )
+
+    lock_path = repo_root / ".github" / "workflows" / "release-requirements.txt"
+    lock_text = lock_path.read_text()
+    requirement_lines = [
+        line for line in lock_text.splitlines() if re.match(r"^[A-Za-z0-9_.-]+==", line)
+    ]
+    assert requirement_lines, "release lock lost its pinned requirements"
+    assert any(line.startswith("python-semantic-release==") for line in requirement_lines)
+
+    # Every pinned requirement must carry at least one hash: pip refuses
+    # mixed hashed/unhashed input under --require-hashes, but the lock is
+    # ALSO the review surface, so enforce it directly.
+    blocks = re.split(r"\n(?=[A-Za-z0-9_.-]+==)", lock_text)
+    unhashed = [
+        block.splitlines()[0]
+        for block in blocks
+        if re.match(r"^[A-Za-z0-9_.-]+==", block) and "--hash=sha256:" not in block
+    ]
+    assert not unhashed, f"release lock entries without hashes: {unhashed}"
+
+
 @pytest.mark.slow
 def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     """Assert the built wheel's manifest: schemas in, py.typed in, menagerie OUT.
