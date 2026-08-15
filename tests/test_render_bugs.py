@@ -370,6 +370,44 @@ def _write_zero_byte_output(args: Sequence[str], **kwargs: Any) -> subprocess.Co
     return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
 
+def test_draw_bool_flag_kwarg_refuses_non_bool_typed(
+    forward_trace: Trace,
+    tmp_path: Path,
+) -> None:
+    """Bool-typed draw kwargs refuse strings with the stable code (R64-F3).
+
+    ``order_siblings='no'`` used to be silently truthy — OFF spelled as a
+    string meant ON.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="order_siblings") as excinfo:
+        forward_trace.draw(
+            vis_outpath=str(tmp_path / "bool_flag"),
+            vis_save_only=True,
+            order_siblings="no",  # type: ignore[arg-type]
+        )
+    assert excinfo.value.fields["code"] == "visualization_bool_option_invalid"
+
+
+def test_draw_show_containers_vocabulary_refuses_typed(
+    forward_trace: Trace,
+    tmp_path: Path,
+) -> None:
+    """``show_containers`` outside its closed vocabulary refuses typed."""
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="show_containers") as excinfo:
+        forward_trace.draw(
+            vis_outpath=str(tmp_path / "containers_vocab"),
+            vis_save_only=True,
+            show_containers="everything",  # type: ignore[arg-type]
+        )
+    assert excinfo.value.fields["code"] == "visualization_show_containers_invalid"
+
+
 def test_forward_render_timeout_raises_typed_error(
     forward_trace: Trace,
     tmp_path: Path,

@@ -461,6 +461,23 @@ def test_count_compiles_verifies_the_coexistence_contract() -> None:
     assert during.frames_compiled == frozen
 
 
+def test_count_compiles_missing_counters_refuses_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A torch runtime without Dynamo counters refuses with the stable code."""
+
+    from torchlens.debug import CompileCountsUnavailableError
+
+    monkeypatch.setattr(
+        _torch_compat, "get_dynamo_compile_counters", lambda force_probe=False: None
+    )
+
+    with pytest.raises(CompileCountsUnavailableError, match="unavailable") as excinfo:
+        with tl.debug.count_compiles():
+            pass
+    assert excinfo.value.fields["code"] == "compile_counts_unavailable"
+
+
 def test_compat_row_states_the_coexistence_contract_under_stance() -> None:
     """The torch.compile row documents the contract instead of a scope refusal."""
 
