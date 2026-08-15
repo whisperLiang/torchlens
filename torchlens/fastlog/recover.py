@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Literal
 
 from safetensors import SafetensorError
-from safetensors.torch import load as load_safetensors
+from safetensors.torch import load_file as load_safetensors_file
 
 from .._io import TorchLensIOError
 from .._io._json import _MAX_JSON_BYTES, loads_bounded, read_bounded
@@ -335,25 +334,37 @@ def _validate_blob_metadata(
 
 
 def _load_verified_blob_tensor(blob_path: Path, expected_sha256: str) -> Any:
-    """Read, verify, and materialize one fastlog blob in a single pass."""
+    """Verify one fastlog blob's digest, then materialize it.
+
+    The digest is computed by a CHUNKED streaming hash over the on-disk bytes
+    (``sha256_of_file``), never ``read_bytes()``: the prior code read the ENTIRE
+    attacker-controlled blob into memory BEFORE the digest check, so a hostile
+    bundle whose blob does not even match its claimed hash still forced a full
+    allocation (KNOWN HIGH, never closed -- ee29700f bounded only the JSON reads).
+    A hash mismatch is now rejected in constant memory, and the tensor is
+    materialized through the mmap-backed safetensors file loader (matching the
+    main bundle path's ``sha256_of_file`` + ``load_file`` discipline).
+    """
+
+    from .._io.manifest import sha256_of_file
 
     try:
-        payload = blob_path.read_bytes()
+        observed_sha256 = sha256_of_file(blob_path)
     except OSError as exc:
         raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
-    observed_sha256 = hashlib.sha256(payload).hexdigest()
     if observed_sha256 != expected_sha256:
         raise TorchLensIOError(f"Checksum mismatch for fastlog blob at {blob_path}.")
-    return _load_blob_tensor_from_bytes(payload, blob_path)
+    return _load_blob_tensor_from_file(blob_path)
 
 
-def _load_blob_tensor_from_bytes(payload: bytes, blob_path: Path) -> Any:
+def _load_blob_tensor_from_file(blob_path: Path) -> Any:
     """Load the single tensor stored in one fastlog safetensors blob.
 
     Fastlog blobs are always written with exactly one tensor per file (see
     ``BundleStreamWriter._write_tensor_blob``), so the blob's sole value is the
     materialized payload; the storage key itself is not part of the public
-    contract.
+    contract. The mmap-backed file loader never fully pre-copies the blob into a
+    bytes object.
 
     Raises
     ------
@@ -363,7 +374,7 @@ def _load_blob_tensor_from_bytes(payload: bytes, blob_path: Path) -> Any:
     """
 
     try:
-        tensor_map = load_safetensors(payload)
+        tensor_map = load_safetensors_file(str(blob_path))
     except ImportError as exc:
         raise TorchLensIOError(
             "Fastlog bundle payload materialization requires the safetensors "
