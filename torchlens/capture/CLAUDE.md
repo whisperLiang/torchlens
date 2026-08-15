@@ -61,8 +61,9 @@ cleanup model session, then postprocess.
   `active_recording_state()`).
 - `_build_record_context()` / `_record_context_from_event()` - predicate-visible
   `RecordContext` construction for live capture and event replay.
-- `_event_from_record()` / `append_projected_event()` - sparse `OpEvent` emission for the
-  predicate path.
+- `append_projected_event()` - sparse `OpEvent` emission for the predicate path
+  (`_record_from_record_context()` builds the event payload; the old `_event_from_record()`
+  was deleted in P7).
 - `sync_recording_grad_records_from_sidecar()` - rebuilds fastlog gradient records from the
   unified backward sidecar.
 

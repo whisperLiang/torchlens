@@ -136,6 +136,7 @@ def _prescan_depth(text: str, *, max_depth: int, max_nodes: int = _MAX_JSON_NODE
     in_string = False
 
     def _too_many_nodes() -> json.JSONDecodeError:
+        """Build the typed refusal for a manifest exceeding the node budget."""
         return _refuse(f"manifest JSON node count exceeds the maximum of {max_nodes}", text)
 
     if "\\" not in text:

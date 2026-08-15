@@ -241,7 +241,8 @@ tables. The memory contract is forward-pass peak only: final saved activations a
 and retained according to `save=`, and preprocessing still sees the full batch if `transform=`
 materializes it. Disk-backed chunk accumulation is a future item.
 
-For activation extraction without a `Trace`, use `tl.batched_extract(...)`; that path returns
+For activation extraction without a `Trace`, use `tl.extract_dataset(...)` (the old
+`tl.batched_extract` spelling is a deprecated alias that warns); that path returns
 tensors or `.pt` files rather than accumulated graph metadata. `chunk_size=` covers the remaining
 "dataloader wrapper" case for stacked multi-pass trace capture.
 

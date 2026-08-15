@@ -2535,6 +2535,7 @@ def _install_fork_capture_hygiene() -> None:
         return
 
     def _clear_inherited_capture_state() -> None:
+        """Reset capture globals inherited across ``fork`` in the child process."""
         _state._logging_enabled = False
         _state._active_trace = None
 
