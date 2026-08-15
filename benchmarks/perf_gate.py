@@ -43,6 +43,8 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from benchmarks.op_ownership import is_torchlens_operation
+
 SCHEMA = "torchlens.perf_gate.v1"
 DEFAULT_REL_TOLERANCE = 0.10
 DEFAULT_IQR_MULTIPLIER = 2.0
@@ -424,34 +426,10 @@ def _compare_row(
     }
 
 
-def _is_torchlens_operation(operation: str) -> bool:
-    """Return whether an operation is owned by TorchLens.
-
-    Parameters
-    ----------
-    operation:
-        Benchmark operation identifier.
-
-    Returns
-    -------
-    bool
-        True when failures should be gate-blocking.
-    """
-
-    return operation.startswith(
-        (
-            "aux_",
-            "fastlog_",
-            "first_capture",
-            "global_wrap",
-            "raw_global",
-            "raw_target",
-            "raw_tl",
-            "rerun_",
-            "tl_",
-            "trace_",
-        )
-    )
+# Ownership classification lives in ONE module (b2 R41 round 5: this file
+# and perf_suite.py carried divergence-prone copies while the classifier
+# gates every blocking axis).
+_is_torchlens_operation = is_torchlens_operation
 
 
 def parse_args() -> argparse.Namespace:

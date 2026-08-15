@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.op_ownership import is_torchlens_operation  # noqa: E402
 from benchmarks.perf_gate import (  # noqa: E402
     compare_gate_payloads,
     load_gate_json,
@@ -399,34 +400,10 @@ def _run_cell(
     return payload
 
 
-def _is_torchlens_operation(operation: str) -> bool:
-    """Return whether an operation exercises TorchLens code.
-
-    Parameters
-    ----------
-    operation:
-        Benchmark operation identifier.
-
-    Returns
-    -------
-    bool
-        True for TorchLens-owned rows.
-    """
-
-    return operation.startswith(
-        (
-            "aux_",
-            "fastlog_",
-            "first_capture",
-            "global_wrap",
-            "raw_global",
-            "raw_target",
-            "raw_tl",
-            "rerun_",
-            "tl_",
-            "trace_",
-        )
-    )
+# Ownership classification lives in ONE module (b2 R41 round 5: this file
+# and perf_gate.py carried divergence-prone copies while the classifier
+# gates every blocking axis).
+_is_torchlens_operation = is_torchlens_operation
 
 
 def _assert_torchlens_cells_ok(cells: list[dict[str, Any]]) -> None:
