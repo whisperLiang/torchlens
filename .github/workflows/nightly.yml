@@ -5,6 +5,11 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: false
@@ -115,7 +120,74 @@ jobs:
           # re-select rare-but-not-slow tests that the `rare` marker documents as
           # "always excluded unless explicitly requested". Conjoin `not rare` to
           # preserve that contract.
-          pytest tests/ -m "not slow and not rare" --tb=short
+          pytest tests/ -m "not slow and not rare" --tb=short \
+            --junitxml="${{ runner.temp }}/fast-tier.junit.xml"
+
+      - name: Fail on an under-executed fast tier
+        # Executed-floor attestation (grind r3, R82): the full fast tier is
+        # the widest unattended selection (12004 collected, counted
+        # 2026-08-15); the floor is roughly half so collection drift or an
+        # importorskip cascade goes red while normal churn never trips.
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/fast-tier.junit.xml" 6000
+
+  coverage:
+    name: Coverage floor (smoke tier)
+    runs-on: ubuntu-latest
+    # First measured coverage gate (grind r3, SF-19: four consecutive review
+    # passes found NO coverage job anywhere). The smoke tier under
+    # branch-coverage instrumentation measured 64% total on 2026-08-15; the
+    # floor sits at 55 so environment variance and per-version skips never
+    # trip it while a mass-hollowing regression (a subsystem's tests skipping
+    # or a package dropping out of the suite) always does. Raise the floor
+    # deliberately as coverage grows; never lower it to pass (tripwire).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Run the smoke tier under coverage with a floor
+        # The ONE deselect is the smoke-duration budget guard: it asserts
+        # wall-clock runtime, and coverage instrumentation slows tests by
+        # design, so the assertion is provably outside its contract here (it
+        # still enforces on every uninstrumented leg). No other test is
+        # excluded.
+        run: |
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
+            --deselect tests/test_marker_lint.py::test_smoke_tests_stay_within_duration_budget \
+            --cov=torchlens --cov-branch \
+            --cov-report=term --cov-report=xml:"${{ runner.temp }}/coverage.xml" \
+            --cov-fail-under=55 \
+            --tb=short -q
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-coverage
+          path: ${{ runner.temp }}/coverage.xml
 
   capture-byte-oracle:
     name: Capture-characterization byte oracle (torch 2.13.0, py 3.10)
@@ -273,9 +345,42 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Build wheel
+        # PIN AUTHORITY: build== must equal the pin inside pyproject.toml's
+        # [tool.semantic_release] build_command -- the nightly gate below only
+        # attests reproducibility for the builder the release actually uses.
+        # The dirty-tree guard makes the packaging provenance explicit: a
+        # wheel must only ever attest the COMMITTED tree (grind r3, R84 LOW),
+        # and any stale build/ dir is removed because bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build.
         run: |
-          uv pip install --system build
-          python -m build --wheel --outdir "${{ runner.temp }}/dist"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "refusing to package a dirty tree"
+            git status --short
+            exit 1
+          fi
+          rm -rf build
+          uv pip install --system "build==1.5.0"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --wheel --outdir "${{ runner.temp }}/dist"
+
+      - name: Fail on a non-reproducible wheel (double-build gate)
+        # Same commit + same SOURCE_DATE_EPOCH must give a byte-identical
+        # wheel (grind r3, R86: six dist-info timestamps used to differ on
+        # every rebuild, so no artifact could be independently verified).
+        # The stale local build/ tree is removed first: bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build. The sdist stays out of this gate -- its gzip envelope is not
+        # yet reproducible under setuptools (disclosed residual).
+        run: |
+          rm -rf build
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --wheel --outdir "${{ runner.temp }}/dist-rebuild"
+          first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.whl | cut -d' ' -f1)"
+          second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl | cut -d' ' -f1)"
+          echo "build 1: $first"
+          echo "build 2: $second"
+          test "$first" = "$second"
 
       - name: Install wheel in a clean venv
         run: |
@@ -287,6 +392,24 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           wheel-venv/bin/python -c "import torch, torchlens as tl; from torch import nn; from torchlens.validation import validate_tlspec; path='wheel-smoke.tlspec'; trace=tl.trace(nn.Linear(2, 1), torch.randn(1, 2), layers_to_save='none'); trace.save(path); validate_tlspec(path); loaded=tl.load(path); assert loaded.num_ops == trace.num_ops"
+
+      - name: PEP 561 consumer smoke (installed wheel exposes its types)
+        # Red-capable in BOTH directions (grind r3, R84 LOW: py.typed shipped
+        # with no consumer-side proof it works): if py.typed were missing,
+        # mypy refuses the import in the well-typed consumer (import-untyped)
+        # AND stops seeing the deliberate type error in the ill-typed one.
+        # mypy version matches the dev-extra pin; --follow-imports=silent
+        # keeps third-party stub noise inside torchlens out of the verdict.
+        working-directory: ${{ runner.temp }}
+        run: |
+          wheel-venv/bin/python -m pip install "mypy==2.1.0"
+          printf 'import torchlens as tl\nx: str = tl.__version__\n' > consumer_good.py
+          printf 'import torchlens as tl\ny: int = tl.__version__\n' > consumer_bad.py
+          wheel-venv/bin/python -m mypy --follow-imports=silent consumer_good.py
+          if wheel-venv/bin/python -m mypy --follow-imports=silent consumer_bad.py; then
+            echo "mypy accepted an ill-typed consumer: the wheel's types are invisible"
+            exit 1
+          fi
 
       - name: Run the packaging manifest tripwires
         # The wheel-diet and sdist-governance tests are slow-marked, so the

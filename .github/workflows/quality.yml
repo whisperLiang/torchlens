@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [main]
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: "${{ github.head_ref || github.ref }}-quality"
   cancel-in-progress: true
@@ -38,9 +43,14 @@ jobs:
       - name: Run mypy
         run: mypy torchlens/
 
-  dep-audit:
-    name: Dependency audit
+  packaging:
+    name: Packaging manifest tripwires
     runs-on: ubuntu-24.04
+    # PR-BLOCKING copy of the wheel-diet + sdist-governance gates (grind r3,
+    # R82): they previously ran only in the nightly wheel job, so a revert of
+    # the MANIFEST.in / exclude-package-data wiring merged green and shipped
+    # for up to a day before the scheduled leg went red. Both tests build the
+    # real artifacts (~2 min), well inside the PR budget.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -58,21 +68,58 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.13.0+cpu"
+          uv pip check
+
+      - name: Run the packaging manifest tripwires
+        run: |
+          pytest \
+            "tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet" \
+            "tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed" \
+            --tb=short -q
+
+  dep-audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install dependencies
+        # pip>=26.1 and setuptools>=83 are installed EXPLICITLY so both
+        # previously suppressed advisories are FIXED in the audited
+        # environment instead of ignored (grind r3, R61/b2:B5):
+        #   * CVE-2026-3219 (pip < 26.1: concatenated zip/tar confusion) --
+        #     the runner-image pip is upgraded to the fixed release.
+        #   * PYSEC-2026-3447 (setuptools < 83: MANIFEST.in exclude Unicode-
+        #     normalization bypass packs NFD-named files into sdists) -- this
+        #     targets exactly this project's MANIFEST-governed sdist path, so
+        #     it was never a justifiable suppression; the build-system floor
+        #     in pyproject.toml is raised to match.
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
             -e . \
             "torch==2.13.0+cpu" \
-            "pip-audit==2.10.1"
+            "pip-audit==2.10.1" \
+            "pip>=26.1" \
+            "setuptools>=83"
           uv pip check
           python -c 'import torch; assert torch.__version__ == "2.13.0+cpu"; print(torch.__version__)'
 
       - name: Run pip-audit
-        # Two advisory IDs are suppressed below:
-        #   * CVE-2026-3219 -- affects pip itself (the package on the GitHub
-        #     runner image), which is outside this project's dependency surface
-        #     and not actionable from pyproject.toml. Remove once a pip release
-        #     with the fix is generally available.
-        #   * PYSEC-2026-3447 -- suppression inherited without a recorded
-        #     justification; its advisory target has NOT been re-verified here
-        #     (that needs the advisory DB / network). FLAGGED for owner review:
-        #     confirm it targets a non-actionable or transitive dependency, or
-        #     drop this ignore so the advisory surfaces.
-        run: pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-3447
+        # NO suppressions: both former --ignore-vuln entries are resolved by
+        # installing the fixed releases above. A new advisory must be FIXED or
+        # get a justified, expiring suppression reviewed by the owner -- never
+        # an inherited unexplained ignore.
+        run: pip-audit

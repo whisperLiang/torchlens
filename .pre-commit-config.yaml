@@ -1,3 +1,10 @@
+# A bare `pre-commit install` must arm ALL THREE stages this config declares.
+# Without this, only the pre-commit stage is installed and the commit-msg +
+# pre-push no-breaking-markers hooks below exist as config-only dead letters --
+# 2 of the 3 never-ship-a-major defense layers were inert for months while
+# tests/test_repo_hooks_armed.py stayed green (grind r3, R61/B27).
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     # v6.0.0 removed check-byte-order-marker and fix-encoding-pragma and raised the
@@ -5,13 +12,41 @@ repos:
     # and the local hooks already use the non-deprecated `stages` names v5 required.
     rev: v6.0.0
     hooks:
+      # The two FORMATTERS exclude generator-owned artifacts (oracle/snapshot
+      # goldens are byte-compared to fresh generator output, crawler records
+      # and rendered images are corpus data): a formatter "fixing" a missing
+      # trailing newline there breaks the byte oracles or silently rewrites
+      # corpus files. Same generated-data doctrine as the ruff extend-exclude
+      # in pyproject.toml and the exclusions below. Surfaced by the CI
+      # `pre-commit run --all-files` job (grind r3, R87): the staged-file-only
+      # runs had never touched these trees.
       - id: trailing-whitespace
+        exclude: &generated_artifacts >-
+          (?x)^(
+            tests/surface_oracle/goldens/|
+            tests/capture_oracle/goldens/|
+            tests/godobject_oracle/goldens/|
+            tests/snapshots/|
+            menagerie/crawler/records/|
+            menagerie/data/|
+            docs/images/
+          )
       - id: end-of-file-fixer
+        exclude: *generated_artifacts
       - id: check-yaml
       - id: check-added-large-files
         # canonical perf baselines + the menagerie catalog are intentional large data artifacts
         exclude: ^(benchmarks/perf_baselines/.*\.json|menagerie/data/master_catalog\.jsonl|menagerie/data/routing_manifest\.tsv|menagerie/data/stable_ids\.jsonl|menagerie/data/crawl_roster\.jsonl)$
       - id: detect-private-key
+  - repo: https://github.com/gitleaks/gitleaks
+    # Repo-portable secret scanning: this is what makes .gitleaks.toml (the
+    # repo-root config gitleaks auto-discovers) actually referenced by the
+    # repo itself — previously only a machine-side global hook ran gitleaks,
+    # so fresh clones inherited the allowlist but no scanner (grind r3, R61).
+    # The CI `pre-commit` job runs this over the full tree on every PR.
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
@@ -24,8 +59,21 @@ repos:
         # test fixtures full of deterministic per-op barcodes and source-ids
         # (high-entropy hex) that are regenerated on every reviewed rebaseline;
         # no credentials ever belong in them either. Excluded like the other
-        # generated data catalogs.
-        exclude: ^(menagerie/data/crawl_roster\.jsonl|tests/surface_oracle/goldens/.*|tests/capture_oracle/goldens/.*)$
+        # generated data catalogs. The godobject-oracle goldens, module-
+        # containment snapshots, and crawler records/tests are the same
+        # deterministic-fixture class (tlspec manifests are FULL of sha256
+        # digests by design), surfaced when the CI all-files job first
+        # scanned the whole tree (grind r3, R87).
+        exclude: >-
+          (?x)^(
+            menagerie/data/crawl_roster\.jsonl|
+            menagerie/crawler/records/.*|
+            menagerie/crawler/tests/.*|
+            tests/surface_oracle/goldens/.*|
+            tests/capture_oracle/goldens/.*|
+            tests/godobject_oracle/goldens/.*|
+            tests/snapshots/.*
+          )$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # PIN AUTHORITY: this rev MUST equal the `ruff==` pin in pyproject.toml's dev
     # extra and in .github/workflows/lint.yml. The formatter that WRITES the code

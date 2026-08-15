@@ -5,11 +5,23 @@
 # the importable package plus licensing/build metadata, nothing more. Tests,
 # docs, the menagerie corpus, and the dev tooling live in the repo checkout.
 # Enforced by tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed.
+#
+# Data includes are ENUMERATED per directory, not blanket recursive-include
+# patterns: the round-1 blanket `recursive-include torchlens ... *.md` shipped
+# every CLAUDE.md/AGENTS.md agent doc (32 files, ~135 kB, carrying private
+# sprint IDs) into the sdist AND — via setuptools' include_package_data
+# default — into every installed wheel (grind r3, R84 regression-by-fix).
+# The enumerated set mirrors [tool.setuptools.package-data] in pyproject.toml.
 include LICENSE
 include NOTICE
 include README.md
 include pyproject.toml
-recursive-include torchlens *.py py.typed *.json *.md
+recursive-include torchlens *.py
+include torchlens/py.typed
+recursive-include torchlens/autoroute/data *.json *.md
+recursive-include torchlens/schemas *.json
+# Belt: agent docs must never ship even if a blanket include returns.
+recursive-exclude torchlens CLAUDE.md AGENTS.md
 prune tests
 prune menagerie
 prune docs

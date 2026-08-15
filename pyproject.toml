@@ -1,5 +1,11 @@
 [build-system]
-requires = ["setuptools>=77"]
+# >=83: PYSEC-2026-3447 / CVE-2026-59890 -- older setuptools applied
+# MANIFEST.in exclude/prune directives without Unicode normalization, so on
+# macOS filesystems an NFD-named file could bypass an NFC exclusion and be
+# packed into the sdist. This project's sdist governance is exactly that
+# MANIFEST machinery, so the fixed release is a build-time floor, not an
+# audit suppression (grind r3, R61/b2:B5). >=77 was the PEP 639 license floor.
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -35,15 +41,28 @@ dependencies = [
     # to the legacy per-device autocast helpers on torch 2.1-2.3. Lowering the floor
     # to 2.1 unblocks frameworks pinned to older torch (e.g. the OpenMMLab stack,
     # which caps mmcv<2.2 -> prebuilt wheels only for torch<=2.1).
-    "torch>=2.1",
+    #
+    # The floor is PYTHON-CONDITIONED because a bare torch>=2.1 is UNSATISFIABLE
+    # on newer interpreters (grind r3, R85/SF-16, measured): the first torch with
+    # cp312 wheels is 2.2.0 and the first with cp313 wheels is 2.6.0, so on
+    # py3.12/3.13 the resolver either fails or falls back to a source build that
+    # cannot succeed. The support floor is unchanged (2.1 wherever 2.1 exists);
+    # these markers only state where each interpreter's real floor sits.
+    "torch>=2.1; python_version < '3.12'",
+    "torch>=2.2; python_version == '3.12'",
+    "torch>=2.6; python_version >= '3.13'",
     "safetensors>=0.4",
     "tqdm",
     "graphviz",
     # typing_extensions.Self is used for Python 3.10 (typing.Self is 3.11+).
     "typing_extensions>=4.0",
-    # Pillow is imported at module load by the viz / repgeom image-rendering
-    # surfaces (node images, input montages, MDS/feature-map thumbnails), which
-    # torchlens.__init__ imports eagerly, so it is a hard import-time dependency.
+    # Pillow backs the viz / repgeom image-rendering surfaces (node images,
+    # input montages, MDS/feature-map thumbnails). It is resolved at CALL time,
+    # not import time -- `import torchlens` succeeds with PIL absent (probed
+    # 2026-08-15; the old "hard import-time dependency" rationale was false,
+    # grind r3 SF-15). It stays a base dependency so the default drawing
+    # surface works out of the box; moving it to an extra is a queued owner
+    # decision, not a hygiene fix.
     "pillow>=9",
 ]
 
@@ -60,7 +79,10 @@ sae = ["sae-lens~=6.45; python_version >= '3.10'"]
 profiler = []
 lightning = ["lightning~=2.4"]
 wandb = ["wandb>=0.16"]
-mlx = ["mlx>=0.26,<0.27"]
+# 0.26.5 is excluded because its manylinux wheel ships without libmlx.so (the
+# nightly preview-backend leg pins 0.26.3 for the same reason): the extra must
+# not admit a version the CI matrix documents as import-broken on Linux.
+mlx = ["mlx>=0.26,<0.27,!=0.26.5"]
 jax = ["jax[cpu]", "equinox", "flax"]
 tinygrad = ["tinygrad>=0.13,<0.14; python_version >= '3.11'"]
 paddle = ["paddlepaddle>=3.3,<3.4"]
@@ -101,12 +123,17 @@ all-stretch = [
     "lovely-tensors~=0.1.18",
 ]
 dev = [
+    # Tooling floors are BOUNDED at the next major (grind r3, b2:B6): these
+    # tools' majors routinely change verdicts (pytest collection rules,
+    # pre-commit config schema, jsonschema validator API), so an unbounded
+    # floor lets a future major silently change what the gates enforce. Exact
+    # pins stay reserved for the verdict-defining trio (ruff/mypy/pip-audit).
     "ruff==0.15.4",
-    "pytest",
-    "pytest-cov",
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
     "mypy==2.1.0",
     "pip-audit==2.10.1",
-    "pre-commit",
+    "pre-commit>=4,<5",
     # jsonschema/referencing back the menagerie crawler's payload validation
     # (menagerie/crawler/schema.py: Draft202012Validator + a referencing Registry).
     # This is internal contributor/automation tooling, not a torchlens runtime
@@ -114,8 +141,8 @@ dev = [
     # in `test` (ML-framework test deps) or core `dependencies` (shipped library
     # surface). `registry=` on Draft202012Validator needs jsonschema>=4.18, the
     # version that adopted the `referencing` library for $ref resolution.
-    "jsonschema>=4.18",
-    "referencing>=0.28",
+    "jsonschema>=4.18,<5",
+    "referencing>=0.28,<1",
 ]
 test = [
     "lightning",
@@ -161,7 +188,8 @@ Repository = "https://github.com/johnmarktaylor91/torchlens"
 # torchlens rather than the reverse, nothing in torchlens imports it, and
 # including it shipped 2886 of the wheel's 3316 members (~13.5 MB) into every
 # `pip install torchlens` while squatting `menagerie` as a top-level import name.
-# It stays in the repo and the sdist-from-git; consumers use it from a checkout.
+# It stays in the repo ONLY: MANIFEST.in prunes it from the sdist too (the old
+# "sdist-from-git" wording predated that prune), so consumers use a checkout.
 # Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
 include = ["torchlens*"]
 
@@ -174,6 +202,16 @@ torchlens = [
     "autoroute/data/*.md",
     "schemas/*.json",
 ]
+
+[tool.setuptools.exclude-package-data]
+# WHEEL authority for the agent-doc exclusion. MANIFEST.in excludes govern the
+# sdist only: building a wheel from the source tree collects package data
+# through include-package-data (default true for pyproject builds), which does
+# NOT re-apply MANIFEST.in exclude directives — the round-1 blanket `*.md`
+# include shipped 32 CLAUDE.md/AGENTS.md agent docs (~135 kB, private sprint
+# IDs) into every `pip install torchlens` (grind r3, R84 regression-by-fix).
+# Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
+"*" = ["CLAUDE.md", "AGENTS.md"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -461,7 +499,12 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
-build_command = "pip install build && python -m build"
+# build== is PINNED (the old unpinned install resolved arbitrary code while
+# the release App token sat on disk from checkout) and SOURCE_DATE_EPOCH is
+# set from the released commit so the shipped wheel is bit-reproducible from
+# its tag (grind r3, R86). PIN AUTHORITY: keep equal to the nightly wheel
+# job's `build==` pin, whose double-build gate attests exactly this builder.
+build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)

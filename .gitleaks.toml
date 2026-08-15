@@ -12,8 +12,12 @@
 useDefault = true
 
 [allowlist]
-description = "Auto-generated oracle test-fixture goldens (deterministic barcodes/source-ids, never credentials)."
+description = "Auto-generated oracle test-fixture goldens (deterministic barcodes/source-ids, never credentials) plus detect-secrets' own audited hash ledger (SHA1 hashes OF the known fixtures -- flagging it is scanner-on-scanner recursion)."
 paths = [
   '''tests/surface_oracle/goldens/.*''',
   '''tests/capture_oracle/goldens/.*''',
+  '''tests/godobject_oracle/goldens/.*''',
+  '''tests/snapshots/.*''',
+  '''menagerie/crawler/records/.*''',
+  '''\.secrets\.baseline''',
 ]

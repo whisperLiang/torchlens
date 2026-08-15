@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [main]
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: "${{ github.head_ref || github.ref }}-lint"
   cancel-in-progress: true
@@ -46,6 +51,29 @@ jobs:
       - name: Ruff check
         run: ruff check torchlens tests scripts tools benchmarks examples notebooks
 
+  # Full-tree pre-commit parity gate (grind r3, R87): a PUBLIC repo with a
+  # LOCKED privacy policy previously ran its hook chain only on locally staged
+  # files, so fresh clones and CI never executed the secret scanners or
+  # formatters at all, and .gitleaks.toml was referenced by nothing in-repo.
+  # This is the same hook set contributors run locally -- one verdict.
+  pre-commit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - run: uv pip install --system "pre-commit>=4,<5"
+
+      - name: Run every pre-commit hook over the full tree
+        run: pre-commit run --all-files --show-diff-on-failure
+
   # Workflow-file lint authority (schema, expressions, embedded shell via
   # shellcheck). Advisory CI job for now: whether it becomes a REQUIRED status
   # check is the queued R82-4 repo-settings decision (disputed-r2 b10/R82).
@@ -65,3 +93,32 @@ jobs:
 
       - name: Run actionlint on all workflow files
         run: ./actionlint -color
+
+      - name: Newest-admitted torch literal lockstep across workflows
+        # The newest-admitted torch version is inlined in quality.yml (mypy +
+        # dep-audit envs) and repeatedly in tests.yml's matrix with nothing
+        # keeping them equal (grind r3, R85 LOW: 11 inlined copies, zero
+        # tripwires) -- a matrix bump that skips quality.yml silently
+        # type-checks and audits an older torch. The authority is tests.yml's
+        # maximum matrix version; every quality.yml literal must equal it.
+        # (The nightly capture-byte-oracle pin deliberately tracks the golden
+        # ENV marker instead and is lockstepped by test_ci_packaging_gates.)
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          # tests.yml declares versions as matrix values (torch: "X.Y.Z+cpu");
+          # quality.yml inlines them as pip specs (torch==X.Y.Z+cpu).
+          torch_re = re.compile(r"torch(?:==|: \")(\d+\.\d+\.\d+)\+cpu")
+          tests = torch_re.findall(pathlib.Path(".github/workflows/tests.yml").read_text())
+          quality = torch_re.findall(pathlib.Path(".github/workflows/quality.yml").read_text())
+          assert tests and quality, "expected torch==X.Y.Z+cpu literals in tests.yml and quality.yml"
+          newest = max(tests, key=lambda v: tuple(map(int, v.split("."))))
+          stale = sorted(set(quality) - {newest})
+          assert not stale, (
+              f"quality.yml pins torch {stale} but tests.yml's newest-admitted row is {newest}: "
+              "bump them together so type-check/audit run on the newest admitted torch"
+          )
+          print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
+          PY

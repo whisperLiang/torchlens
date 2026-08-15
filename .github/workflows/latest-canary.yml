@@ -5,6 +5,11 @@ on:
     - cron: "17 9 * * *"
   workflow_dispatch:
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: latest-torch-canary
   cancel-in-progress: true
@@ -64,5 +69,14 @@ jobs:
           # auto-skip and needs these explicit --ignore flags to avoid a
           # collection ModuleNotFoundError. No smoke coverage is lost (no
           # menagerie or crawler test is smoke-marked).
-          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler --tb=short -q
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler --tb=short -q \
+            --junitxml="${{ runner.temp }}/canary-smoke.junit.xml"
           pytest tests/test_torch_compat.py --tb=short -q
+
+      - name: Fail on an under-executed canary suite
+        # Same executed-floor attestation as every tests.yml smoke row: an
+        # unattended leg where a new torch mass-skips or hollows collection
+        # must go red, not green (grind r3, R82). Floor is roughly half the
+        # ~3900-test smoke selection.
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/canary-smoke.junit.xml" 1900
