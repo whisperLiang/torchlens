@@ -581,19 +581,28 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost: `smoke` selects ~4.6k tests (4,644/12,430 collect-only, measured 2026-08-15).
+Tiers by cost: `smoke` selects ~4.8k tests (4,796/12,651 collect-only, measured 2026-08-15).
 The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
 devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
-(~500s on a quieter box earlier the same sprint); budget at least that at today's ~40%
+(~500s on a quieter box earlier the same sprint); budget at least that at today's ~50%
 larger selection. Smoke is NOT
 sub-minute and NOT a per-step gate — per-step verification is the targeted test files for
 the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
-the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
+the mid backstop, and `not slow` the phase-boundary backstop. COMPOSITION HONESTY
+(measured 2026-08-15): the majority of tests — 7,334 of 12,651, 58%, carrying NO tier
+marker — do NOT run at the commit gate; they run only in the two backstops, though the
+runtime tripwire budgets them at the same <5s tier as smoke. Whether unmarked tests
+should join the commit gate is an open tier-design question (queued fork), not an
+accident. BACKSTOP COST: neither backstop has a measured wall figure; `--collect-only`
+ALONE measured 237s for the full selection (116s for smoke) on the 2026-08-15 box, and
+the mid backstop selects ~2.5x smoke's tests — treat both backstops as multi-hour-class
+runs, never per-phase gates. Partition: `smoke` tests
 must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
 `tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow`/`serial`/`rare`
 fails (markers are additive — the test would still run under `-m smoke`), and the runtime
 tripwire holds smoke/unmarked tests to budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s
-boundary-noise grace, charged on min(wall, cpu)) — an offender fails the session it ran in. `pytest -n auto` requires the
+boundary-noise grace, charged on min(wall, cpu)) — an offender fails the session it ran in.
+`serial` is NOT a budget exemption (it only claims load-isolation); only `slow`/`rare` are. `pytest -n auto` requires the
 optional `pytest-xdist` plugin, which is not installed by TorchLens's declared test extra.
 When xdist is installed separately, measure before relying on it: torch intra-op threads can
 oversubscribe workers, and fixture/import setup may dominate.
