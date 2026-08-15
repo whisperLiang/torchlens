@@ -480,6 +480,29 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
                 setattr(module, name, prior)
 
 
+_CAPABILITY_DEPENDENT_CACHES: tuple[tuple[str, str], ...] = (
+    # Second-layer lru_caches whose cached value DERIVES from a lazy HAS_*
+    # capability probe (grind p5 §3.9: the b7fe953e class one layer down).
+    # Restoring the _torch_compat latches alone leaves a value computed under
+    # a stubbed runtime frozen in these caches for the whole process, so the
+    # probe restore must clear them too. The census in
+    # tests/test_marker_lint.py::test_capability_dependent_caches_are_cleared
+    # keeps this list complete.
+    ("torchlens._runnable_state_context", "_fake_tensor_mode_class"),
+    ("torchlens._runnable_state_context", "_count_bounded_fake_tensor_mode_class"),
+)
+
+
+def _clear_capability_dependent_caches() -> None:
+    """Clear every registered probe-derived lru_cache (loaded modules only)."""
+
+    for module_name, attr in _CAPABILITY_DEPENDENT_CACHES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        getattr(module, attr).cache_clear()
+
+
 @pytest.fixture(autouse=True)
 def _restore_lazy_capability_probes() -> Iterator[None]:
     """Restore lazy ``HAS_*`` capability latches to their pre-test state.
@@ -490,7 +513,10 @@ def _restore_lazy_capability_probes() -> Iterator[None]:
     incident class, previously patched per-test rather than systemically.
     Snapshotting before and restoring after every test bounds any mis-latch to
     the test that caused it; an un-latched probe simply re-probes on its next
-    use, which is cheap and hits the real runtime.
+    use, which is cheap and hits the real runtime. Second-layer caches built
+    FROM a probed capability (``_CAPABILITY_DEPENDENT_CACHES``) are cleared in
+    the same breath -- restoring the flag while a derived cache keeps the
+    poisoned value would just move the incident one layer down.
     """
 
     from torchlens.utils import _torch_compat
@@ -500,6 +526,7 @@ def _restore_lazy_capability_probes() -> Iterator[None]:
         yield
     finally:
         _torch_compat.restore_capability_probes(snapshot)
+        _clear_capability_dependent_caches()
 
 
 @pytest.fixture(autouse=True)

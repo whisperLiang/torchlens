@@ -790,3 +790,101 @@ def test_strict_trace_fixture_scanner_is_red_capable(snippet: str, expected: lis
     """
 
     assert _strict_trace_fixture_violations_in_source(snippet, "planted.py") == expected
+
+
+def _lru_cached_functions(package_root: Path) -> dict[tuple[str, str], str]:
+    """Collect ``lru_cache``/``cache``-decorated module functions and their source.
+
+    Parameters
+    ----------
+    package_root:
+        Root of the ``torchlens`` package.
+
+    Returns
+    -------
+    dict[tuple[str, str], str]
+        ``(module_name, function_name)`` -> function source segment.
+    """
+
+    cached: dict[tuple[str, str], str] = {}
+    for path in package_root.rglob("*.py"):
+        module_parts = path.relative_to(package_root.parent).with_suffix("").parts
+        if module_parts[-1] == "__init__":
+            module_parts = module_parts[:-1]
+        module_name = ".".join(module_parts)
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for statement in tree.body:
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorated = ast.unparse(statement.decorator_list) if statement.decorator_list else ""
+            if "lru_cache" in decorated or "functools.cache" in decorated:
+                cached[(module_name, statement.name)] = (
+                    ast.get_source_segment(source, statement) or ""
+                )
+    return cached
+
+
+def test_capability_dependent_caches_are_cleared() -> None:
+    """Every probe-derived lru_cache must be in the conftest clear list.
+
+    Restoring the lazy ``HAS_*`` capability latches un-poisons the b7fe953e
+    incident class at the first layer only: an ``lru_cache`` whose value was
+    computed FROM a poisoned probe keeps the poisoned result for the process
+    (grind p5 §3.9, the class one layer down). This census flags every
+    module-level cached function that references ``_torch_compat`` / a
+    ``HAS_*`` flag -- directly or through another flagged cache -- and
+    requires it in ``tests/conftest.py::_CAPABILITY_DEPENDENT_CACHES`` so the
+    autouse probe-restore clears it. Deliberately process-frozen caches
+    (torch-version-fixed inventories) do not reference probes and stay out.
+    """
+
+    import re
+
+    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES
+
+    package_root = Path(__file__).resolve().parents[1] / "torchlens"
+    cached = _lru_cached_functions(package_root)
+    probe_pattern = re.compile(r"_torch_compat|\bHAS_[A-Z_]+\b")
+    dependent: set[tuple[str, str]] = {
+        key for key, body in cached.items() if probe_pattern.search(body)
+    }
+    # Fixpoint: a cache calling another dependent cache is dependent too.
+    while True:
+        names = {name for _, name in dependent}
+        grown = dependent | {
+            key
+            for key, body in cached.items()
+            if key not in dependent and any(re.search(rf"\b{name}\s*\(", body) for name in names)
+        }
+        if grown == dependent:
+            break
+        dependent = grown
+    declared = set(_CAPABILITY_DEPENDENT_CACHES)
+    assert dependent <= declared, (
+        "lru_cached functions derive from a capability probe but are missing from "
+        "tests/conftest.py::_CAPABILITY_DEPENDENT_CACHES (the probe restore cannot "
+        f"clear them): {sorted(dependent - declared)}"
+    )
+    assert declared <= set(cached), (
+        "stale _CAPABILITY_DEPENDENT_CACHES rows (no such cached function): "
+        f"{sorted(declared - set(cached))}"
+    )
+
+
+def test_capability_dependent_cache_clear_actually_clears() -> None:
+    """The conftest clear helper empties every declared probe-derived cache."""
+
+    import importlib
+
+    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES, _clear_capability_dependent_caches
+
+    primed = []
+    for module_name, attr in _CAPABILITY_DEPENDENT_CACHES:
+        function = getattr(importlib.import_module(module_name), attr)
+        function()  # prime
+        assert function.cache_info().currsize >= 1
+        primed.append(function)
+    _clear_capability_dependent_caches()
+    for function in primed:
+        assert function.cache_info().currsize == 0, f"{function} survived the probe restore"
