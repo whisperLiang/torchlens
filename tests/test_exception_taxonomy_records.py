@@ -196,6 +196,34 @@ def test_recorder_option_refusals_carry_codes_and_remedies(
     _assert_contract(exc_info.value, expected_code, builtin)
 
 
+TRACE_PREDICATE_DOOR_CASES: tuple[tuple[str, type[BaseException], dict[str, Any]], ...] = (
+    ("intervention_predicate_type_invalid", TypeError, {"intervene": "not-callable"}),
+    ("halt_predicate_type_invalid", TypeError, {"halt": "not-callable"}),
+)
+
+
+@pytest.mark.parametrize(
+    ("expected_code", "builtin", "kwargs"),
+    TRACE_PREDICATE_DOOR_CASES,
+    ids=[case[0] for case in TRACE_PREDICATE_DOOR_CASES],
+)
+def test_trace_predicate_type_doors_carry_codes_and_remedies(
+    expected_code: str,
+    builtin: type[BaseException],
+    kwargs: dict[str, Any],
+) -> None:
+    """The tl.trace() non-callable intervene/halt doors expose codes and remedies.
+
+    Trace-side twins of the ``recording_*_predicate_type_invalid`` fastlog
+    doors above (new vocabulary must ship provoked).
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        tl.trace(model, torch.randn(1, 4), **kwargs)
+    _assert_contract(exc_info.value, expected_code, builtin)
+
+
 def test_intervention_doors_carry_codes_and_remedies() -> None:
     """Converted intervention-family doors expose codes and remedies."""
 
