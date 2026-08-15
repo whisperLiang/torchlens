@@ -70,6 +70,11 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/capture/projections.py", "_active_recording_state"),
         ("torchlens/capture/trace.py", "_ACTIVE_CAPTURE_BACKEND"),
         ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
+        # Live active_intervention_context publication stack (fixwave-5):
+        # entries are pushed at context entry and spliced out on unwind, so a
+        # survivor past the last context is exactly the leak class this
+        # ledger catches.
+        ("torchlens/intervention/runtime.py", "_CONTEXT_ENTRIES"),
         ("torchlens/utils/introspection.py", "_FUNC_CALL_LOCATION"),
         ("torchlens/utils/rng.py", "_ACTIVE_MONITOR"),
         # Live monitor patches per (id(holder), name), spliced back on window
@@ -120,7 +125,21 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         # F3b's lazy public-impl metadata sync (3c7ed93e): a one-way
         # synced-yet? sentinel flipped on first successful wrap, install-class.
         ("torchlens/user_funcs.py", "_public_impl_metadata_synced"),
+        # Released-model registry (fixwave-5): wrap_torch()/unwrap_torch()
+        # re-normalize held torch-function refs on every registered model, so
+        # the registration rides the wrapper install lifecycle (WeakSet -- a
+        # registration never pins the released model; row also in
+        # _WEAKLY_HELD).
+        ("torchlens/backends/torch/_held_refs.py", "_RELEASED_MODELS"),
         ("torchlens/backends/torch/backward.py", "_AUTOGRAD_WRAPPERS_INSTALLED"),
+        # Installed-wrapper identity snapshots (fixwave-5, grind-r5 b8 R56):
+        # teardown restores a slot only when it still holds OUR wrapper, so
+        # the installed identities are wrapper-lifecycle state exactly like
+        # their _ORIGINAL_* companions.
+        ("torchlens/backends/torch/backward.py", "_INSTALLED_AUTOGRAD_BACKWARD"),
+        ("torchlens/backends/torch/backward.py", "_INSTALLED_AUTOGRAD_GRAD"),
+        ("torchlens/backends/torch/backward.py", "_INSTALLED_SAVED_TENSORS_HOOKS_ENTER"),
+        ("torchlens/backends/torch/backward.py", "_INSTALLED_SAVED_TENSORS_HOOKS_INIT"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_AUTOGRAD_BACKWARD"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_AUTOGRAD_GRAD"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_SAVED_TENSORS_HOOKS_ENTER"),
@@ -130,11 +149,9 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/backends/torch/belt.py", "_member_map"),
         ("torchlens/backends/torch/belt.py", "_report"),
         ("torchlens/backends/torch/belt.py", "_swept_module_ids"),
-        # Sweep-epoch bookkeeping companions to _swept_module_ids (8ba75e99):
-        # a dead-weakref dirty bit and the sys.modules size at the last
-        # complete sweep, reset with the belt install state.
-        ("torchlens/backends/torch/belt.py", "_swept_modules_dirty"),
-        ("torchlens/backends/torch/belt.py", "_swept_sys_modules_size"),
+        # The 8ba75e99 sweep-epoch companions (_swept_modules_dirty,
+        # _swept_sys_modules_size) were deleted with the sys.modules crawler
+        # in fixwave-5; their rows left this ledger shrink-only.
         ("torchlens/backends/torch/completeness_witness.py", "_AUTHORIZED_INTERNAL_CALLER_CODE"),
         (
             "torchlens/backends/torch/completeness_witness.py",
@@ -427,6 +444,11 @@ _PROCESS_CACHES = frozenset(
         ("torchlens/_io/runnable.py", "_TORCH_SYMBOL_NAMESPACE_SIZE"),
         ("torchlens/_io/scrub.py", "_SCRUB_VALUE_KINDS"),
         ("torchlens/_io/state_keys.py", "_CACHE_GENERATION"),
+        # Per-class static-attr / shadow-verdict memos (fixwave-5): pure
+        # memoization of MRO walks, fingerprint-validated per load generation;
+        # weakly keyed by the class (rows also in _WEAKLY_HELD).
+        ("torchlens/_io/state_keys.py", "_SHADOW_VERDICT_MEMO"),
+        ("torchlens/_io/state_keys.py", "_STATIC_ATTR_MEMO"),
         ("torchlens/_state.py", "_arg_names"),
         ("torchlens/_state.py", "_dir_cache"),
         ("torchlens/_state.py", "_dynamic_arg_specs"),
@@ -1011,10 +1033,18 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/_io/runnable.py", "_DATACLASS_FIELD_NAMES"),
         ("torchlens/_io/runnable.py", "_SPARSE_CORE_NODE_KINDS"),
         ("torchlens/_io/scrub.py", "_SCRUB_VALUE_KINDS"),
+        # Shadow-verdict and static-attr memos re-keyed weakly by TYPE
+        # (WeakKeyDictionary) in fixwave-5 concmem so dynamic classes stay
+        # collectable; verified weakref.WeakKeyDictionary initializers.
+        ("torchlens/_io/state_keys.py", "_SHADOW_VERDICT_MEMO"),
+        ("torchlens/_io/state_keys.py", "_STATIC_ATTR_MEMO"),
         ("torchlens/_state.py", "_log_registry"),
         ("torchlens/_state.py", "_prepared_models"),
         ("torchlens/_state.py", "_prepared_root_by_module"),
         ("torchlens/_state.py", "_stale_prepared_roots"),
+        # Released-model registry became a WeakSet in fixwave-5 concmem: a
+        # release registration must never pin the released model itself.
+        ("torchlens/backends/torch/_held_refs.py", "_RELEASED_MODELS"),
         ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
         ("torchlens/backends/torch/buffer_writes.py", "_PARAM_BYTE_WITNESS_NOT_ARMED"),
         ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
