@@ -350,6 +350,26 @@ def test_write_provenance_appends_full_history(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
+def test_write_provenance_records_source_identity(tmp_path: Path) -> None:
+    """Every PROVENANCE record ties the rebaseline to a HEAD sha + tree state.
+
+    Without the source line a reviewed rebaseline could not be mechanically
+    tied to the code that emitted it, and a dirty-tree generation went
+    undisclosed (b10 R78 round 5).
+    """
+
+    import re as _re
+
+    write_provenance(tmp_path, "family_a", "TORCHLENS_UPDATE_A", "source-identity probe")
+    content = (tmp_path / "PROVENANCE").read_text()
+    match = _re.search(r"^source: (.+)$", content, flags=_re.MULTILINE)
+    assert match, f"PROVENANCE record carries no source line:\n{content}"
+    assert _re.fullmatch(
+        r"[0-9a-f]{40} \((clean|dirty)\)|unknown \(git unavailable\)", match.group(1)
+    ), match.group(1)
+
+
+@pytest.mark.smoke
 def test_wrap_state_guard_refuses_wrapped_torch(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process golden generation refuses to start on wrapped torch (SF-53)."""
 
