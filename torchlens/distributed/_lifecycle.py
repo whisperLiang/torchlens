@@ -387,6 +387,42 @@ _CREATE_WRAP_TARGETS = ("init_process_group", "new_group", "split_group")
 _DESTROY_WRAP_TARGETS = ("destroy_process_group", "_abort_process_group")
 
 
+def restore_wrapped_attr(module: Any, name: str, original: Any) -> None:
+    """Restore one wrapped attribute WITHOUT clobbering a foreign patch.
+
+    Every distributed teardown used to ``setattr`` the pristine original
+    blindly: a third-party library (or user code) that patched the same
+    attribute AFTER TorchLens wrapped it had its patch silently destroyed at
+    disarm/rollback time. When the live attribute is not the TorchLens wrap
+    recorded for ``original`` (marker + exact ``__wrapped__`` identity), the
+    foreign patch is left in place with a warning -- the TorchLens shim
+    underneath is an inert passthrough once the armed state is gone, so
+    correctness never depended on peeling it.
+
+    Raises whatever ``setattr`` raises when the restore itself fails.
+    """
+
+    current = getattr(module, name, None)
+    if current is original:
+        # Already pristine: an arm that failed between recording the original
+        # and installing the wrap has nothing to peel.
+        return
+    ours = getattr(current, "__tl_distributed_wrap__", False) and (
+        getattr(current, "__wrapped__", None) is original
+    )
+    if not ours:
+        warnings.warn(
+            f"torchlens.distributed left {getattr(module, '__name__', module)}."
+            f"{name} untouched at teardown: the attribute was re-patched by a "
+            "third party after TorchLens wrapped it, and restoring the "
+            "pristine function would destroy that patch. The TorchLens shim "
+            "beneath it is an inert passthrough while disarmed.",
+            stacklevel=3,
+        )
+        return
+    setattr(module, name, original)
+
+
 def _patch_modules() -> list[Any]:
     """Modules whose lifecycle-function attributes are patched at arm time."""
 
@@ -431,6 +467,7 @@ def _install_lifecycle_wraps(state: _ArmedState) -> None:
 
         wrapped.__wrapped__ = original  # type: ignore[attr-defined]
         wrapped.__name__ = getattr(original, "__name__", "wrapped")
+        wrapped.__tl_distributed_wrap__ = True  # type: ignore[attr-defined]
         return wrapped
 
     def make_destroy_wrap(original: Any) -> Any:
@@ -450,6 +487,7 @@ def _install_lifecycle_wraps(state: _ArmedState) -> None:
 
         wrapped.__wrapped__ = original  # type: ignore[attr-defined]
         wrapped.__name__ = getattr(original, "__name__", "wrapped")
+        wrapped.__tl_distributed_wrap__ = True  # type: ignore[attr-defined]
         return wrapped
 
     for module in _patch_modules():
@@ -525,7 +563,7 @@ def _arm(source: str) -> ArmingRecord:
             restore_error: Exception | None = None
             for (module, name), original in list(state.originals.items()):
                 try:
-                    setattr(module, name, original)
+                    restore_wrapped_attr(module, name, original)
                 except Exception as exc:
                     if restore_error is None:
                         restore_error = exc
@@ -628,7 +666,7 @@ def disarm() -> None:
         first_failure: Exception | None = None
         for (module, name), original in list(state.originals.items()):
             try:
-                setattr(module, name, original)
+                restore_wrapped_attr(module, name, original)
             except Exception as exc:
                 if first_failure is None:
                     first_failure = exc

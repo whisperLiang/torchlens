@@ -147,6 +147,12 @@ class TestLifecycleFailureAtomicity:
 
         original = object()
 
+        def installed_wrap() -> object:
+            """Live TorchLens wrap over ``original`` (so restore is attempted)."""
+
+        installed_wrap.__tl_distributed_wrap__ = True
+        installed_wrap.__wrapped__ = original
+
         class RefusingModule:
             """Module-like object that rejects restoration of one attribute."""
 
@@ -158,7 +164,7 @@ class TestLifecycleFailureAtomicity:
                 object.__setattr__(self, name, value)
 
         module = RefusingModule()
-        module.all_reduce = object()
+        module.all_reduce = installed_wrap
         state = lifecycle._ArmedState(
             arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
             recognizer=object(),
@@ -462,6 +468,76 @@ class TestArmingAndSeeding:
         assert not lifecycle.is_armed()
 
 
+class TestTeardownClobberSafety:
+    """b8 KNOWN-held (p5 3.15 rollup): teardown must not clobber foreign patches.
+
+    Fail-before: ``disarm()`` / ``remove_collective_wraps()`` / the arm
+    rollback ``setattr``'d the pristine original blindly, so a third-party
+    library that patched the same c10d attribute AFTER TorchLens wrapped it
+    had its patch silently destroyed at teardown.
+    """
+
+    def test_restore_helper_skips_foreign_patch_and_warns(self):
+        original = object()
+
+        def our_wrap():
+            """Stand-in for an installed TorchLens wrap."""
+
+        our_wrap.__tl_distributed_wrap__ = True
+        our_wrap.__wrapped__ = original
+
+        class Module:
+            __name__ = "fake_module"
+
+        module = Module()
+        module.f = our_wrap
+        lifecycle.restore_wrapped_attr(module, "f", original)
+        assert module.f is original
+
+        def foreign():
+            """A third-party patch layered over (or replacing) our wrap."""
+
+        module.f = foreign
+        with pytest.warns(UserWarning, match="re-patched by a third party"):
+            lifecycle.restore_wrapped_attr(module, "f", original)
+        assert module.f is foreign
+
+    def test_disarm_leaves_foreign_patches_intact(self, unarmed):
+        dist = unarmed
+        pristine_all_reduce = dist.all_reduce
+        pristine_new_group = dist.new_group
+        pristine_broadcast = dist.broadcast
+        lifecycle.arm()
+        try:
+            shim_all_reduce = dist.all_reduce
+            assert getattr(shim_all_reduce, "__tl_distributed_wrap__", False)
+
+            def third_party_all_reduce(*args, **kwargs):
+                return shim_all_reduce(*args, **kwargs)
+
+            shim_new_group = dist.new_group
+
+            def third_party_new_group(*args, **kwargs):
+                return shim_new_group(*args, **kwargs)
+
+            dist.all_reduce = third_party_all_reduce
+            dist.new_group = third_party_new_group
+            with pytest.warns(UserWarning, match="re-patched by a third party"):
+                lifecycle.disarm()
+            # Both wrap families' foreign patches survive teardown...
+            assert dist.all_reduce is third_party_all_reduce
+            assert dist.new_group is third_party_new_group
+            # ...the un-patched site restored pristine, and the shims under
+            # the foreign patches are inert passthroughs (state retired).
+            assert dist.broadcast is pristine_broadcast
+            assert lifecycle.armed_state() is None
+        finally:
+            lifecycle.disarm()
+            dist.all_reduce = pristine_all_reduce
+            dist.new_group = pristine_new_group
+            dist.broadcast = pristine_broadcast
+
+
 class TestC10dGroupSeqCompatRouting:
     """Deep-hunt F8: the private group-seq probe routes through _torch_compat.
 
@@ -610,8 +686,15 @@ class TestBrokenArmPoisoning:
 
         module = RefusingModule()
 
+        def installed_wrap() -> object:
+            """Live TorchLens wrap over ``original`` (so rollback restores)."""
+
+        installed_wrap.__tl_distributed_wrap__ = True
+        installed_wrap.__wrapped__ = original
+
         def failing_install(state):
             state.originals[(module, "f")] = original
+            module.f = installed_wrap
             raise RuntimeError("install failed")
 
         monkeypatch.setattr(lifecycle, "_install_lifecycle_wraps", failing_install)

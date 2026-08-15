@@ -770,6 +770,7 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
         return result
 
     wrapped_collective.__wrapped__ = original  # type: ignore[attr-defined]
+    wrapped_collective.__tl_distributed_wrap__ = True  # type: ignore[attr-defined]
     return wrapped_collective
 
 
@@ -797,13 +798,20 @@ def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
 
 def remove_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
-    """Restore pristine collective functions recorded at install time."""
+    """Restore pristine collective functions recorded at install time.
+
+    A site re-patched by a third party after installation is left in place
+    with a warning instead of being clobbered back to the pristine function
+    (see :func:`torchlens.distributed._lifecycle.restore_wrapped_attr`).
+    """
+
+    from torchlens.distributed._lifecycle import restore_wrapped_attr
 
     first_failure: Exception | None = None
     for (module, attr), original in list(originals.items()):
         if any(attr == site.attr for site in COLLECTIVE_SITES):
             try:
-                setattr(module, attr, original)
+                restore_wrapped_attr(module, attr, original)
             except Exception as exc:
                 if first_failure is None:
                     first_failure = exc
