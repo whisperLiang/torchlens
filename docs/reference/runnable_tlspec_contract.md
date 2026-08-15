@@ -817,7 +817,16 @@ under-declaration.
    semantic-typed scalar VALUE leaves (section 2, reason `semantic_scalar_type`), and
    undeclared per-instance container state REFUSE at runnable save through the EXISTING
    `missing_input_container_contract` (no new enum), with the SYMMETRIC bind-side check
-   refusing runtime-added undeclared state. Undeclared instance state is judged by ONE inert
+   refusing runtime-added undeclared state. A `dict`-backed mapping whose `items()`
+   protocol view disagrees with the physical `dict.__len__` storage (a lying
+   `items()`/`keys()` override hiding or padding entries) refuses through the same
+   disposition with reason `mapping_protocol_not_total` -- the ordered-key fact and the
+   child descent both read the protocol, so an untotal view would otherwise witness the
+   same shrunken structure identically at capture and runtime (a false-VERIFIED shape;
+   the sequence/namedtuple arms close the same forgery lane through
+   `physical_sequence_len`). Non-`dict` Mappings have no builtin-backed physical storage
+   distinct from their methods and keep the instance protocol; their hidden-state honesty
+   stays owned by the instance-state proofs. Undeclared instance state is judged by ONE inert
    inspector (r69 C; **fail-closed r71 C**): `inspect_instance_state` returns one typed result
    (`names` / `complete` / closed `reason`) -- uncertainty is NEVER an empty set. The instance
    `__dict__` descriptor is resolved by RAW-MRO class-dict lookup (NEVER a live
