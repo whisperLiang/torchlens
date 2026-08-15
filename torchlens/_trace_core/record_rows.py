@@ -148,7 +148,18 @@ def record_state_items(record: Any) -> Iterator[tuple[str, Any]]:
     store = instance_dict.get(CORE_KEY)
     declared = type(record)._TL_LAYOUT.fid_by_name
     if store is not None:
-        yield from store.items(instance_dict[ROW_KEY])
+        row = instance_dict[ROW_KEY]
+        for name, value in store.items(row):
+            # Decode the M14 storage encodings exactly like the cell
+            # descriptor does: pickle state must carry real containers, never
+            # a raw PooledCell (restore refuses it as corrupted state) or a
+            # compacted singleton-label str (restore would coerce it to a
+            # list of CHARACTERS where a label list is declared).
+            if value.__class__ is PooledCell:
+                value = value.hydrate()
+            elif value.__class__ is str and store.compacted_singleton(row, declared[name], value):
+                value = [value]
+            yield name, value
     for name, value in instance_dict.items():
         if name is CORE_KEY or name is ROW_KEY or name in declared:
             continue

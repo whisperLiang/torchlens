@@ -379,8 +379,14 @@ def _materialize_conditional_records(
             function_span=record.function_span,
             if_stmt_span=record.if_stmt_span,
             test_span=record.test_span,
-            branch_ranges=record.branch_ranges,
-            branch_test_spans=record.branch_test_spans,
+            # Copies, never aliases: the record lives in ast_branches' process-
+            # global file cache, so handing its dicts to the event verbatim let
+            # any caller mutating trace metadata poison every later capture of
+            # the same file (fw3settle: invariant-7's elif-key edit surfaced as
+            # a clean-capture invariant failure in a later test). Span values
+            # are immutable tuples, so a shallow copy is a full fence.
+            branch_ranges=dict(record.branch_ranges),
+            branch_test_spans=dict(record.branch_test_spans),
             call_depth=record.call_depth,
             parent_conditional_id=None,
             parent_branch_kind=record.parent_branch_kind,
