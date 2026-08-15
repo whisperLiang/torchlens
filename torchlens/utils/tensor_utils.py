@@ -1089,7 +1089,9 @@ def _try_defer_payload_alias(
         version = int(alias._version)
     except Exception:
         return None
-    _DEFER_PENDING.setdefault(key, []).append(_PendingPayloadAlias(weakref.ref(alias), version))
+    _DEFER_PENDING.setdefault(key, []).append(
+        _PendingPayloadAlias(weakref.ref(alias, _note_dead_deferred_alias), version)
+    )
     return alias
 
 
@@ -1222,9 +1224,25 @@ _DEFER_PRUNE_THRESHOLD = 2048
 # A fixed threshold alone is quadratic on large captures: once the LIVE
 # pending population crosses it, every per-op window arming re-swept the
 # whole registry and removed nothing (measured O(n^2), the dominant term at
-# 4k ops). Doubling makes total prune work linear in total insertions while
-# a mostly-dead registry still prunes and resets the watermark back down.
+# 4k ops). Doubling makes total prune work linear in total insertions.
 _defer_prune_watermark = _DEFER_PRUNE_THRESHOLD
+
+# Registered-alias deaths since the last sweep, counted O(1) by weakref
+# callback. The doubling watermark alone never DECAYS: after one large
+# capture pushed it up, a registry that then went mostly DEAD but sat below
+# the doubled key-count watermark was never re-swept, pinning the dead
+# entries (and their key tuples) indefinitely (r3 bounds-gap finding on the
+# wave's own O(n^2)-kill). Crossing _DEFER_PRUNE_THRESHOLD dead entries
+# forces a sweep regardless of the watermark; the post-sweep watermark
+# reset (2x the now-live population) then decays back down. Amortization
+# holds: each forced sweep requires THRESHOLD fresh deaths.
+_defer_dead_alias_count = 0
+
+
+def _note_dead_deferred_alias(_ref: "weakref.ref[torch.Tensor]") -> None:
+    """Weakref callback: count one registered alias death (O(1))."""
+    global _defer_dead_alias_count
+    _defer_dead_alias_count += 1
 
 
 def prune_dead_deferred_entries() -> None:
@@ -1234,6 +1252,8 @@ def prune_dead_deferred_entries() -> None:
     this bounded sweep keeps the registry sized to the live pending
     population.
     """
+    global _defer_dead_alias_count
+    _defer_dead_alias_count = 0
     for key in list(_DEFER_PENDING.keys()):
         entries = _DEFER_PENDING.get(key)
         if not entries:
@@ -1250,7 +1270,10 @@ def prune_dead_deferred_entries() -> None:
 def arm_deferred_payload_window(state_storage_ptrs: frozenset[int]) -> None:
     """Arm the clone-on-write payload window (wrapper-managed, nestable)."""
     global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS, _defer_prune_watermark
-    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _defer_prune_watermark:
+    if _DEFER_WINDOW_DEPTH == 0 and (
+        len(_DEFER_PENDING) > _defer_prune_watermark
+        or _defer_dead_alias_count > _DEFER_PRUNE_THRESHOLD
+    ):
         prune_dead_deferred_entries()
         _defer_prune_watermark = max(_DEFER_PRUNE_THRESHOLD, 2 * len(_DEFER_PENDING))
     _DEFER_WINDOW_DEPTH += 1

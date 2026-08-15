@@ -426,6 +426,11 @@ _PROCESS_CACHES = frozenset(
         ("torchlens/capture/projectors.py", "_REFRESH_SOURCES"),
         ("torchlens/capture/salient_args.py", "_EXTRACTORS"),
         ("torchlens/constants.py", "_TORCHVISION_FUNCS_CACHE"),
+        # Lazy once-per-process snapshot of a bare nn.Module()'s instance
+        # attributes (the capture-cache attr filter's torch-internal
+        # exclusion set, r3 R39-1). Clearing only re-derives from the running
+        # torch build; a pure memo, not capability state.
+        ("torchlens/_capture_state_helpers.py", "_MODULE_BASELINE_INSTANCE_ATTRS"),
         ("torchlens/data_classes/op.py", "_RELATION_CELL_ENCODINGS"),
         ("torchlens/data_classes/trace.py", "_MODEL_LOG_DEFAULT_FILL"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_REGISTRY"),
@@ -444,6 +449,11 @@ _PROCESS_CACHES = frozenset(
         # population; resets down after a mostly-dead sweep). Clearing it back
         # to the threshold only costs extra sweeps, never correctness.
         ("torchlens/utils/tensor_utils.py", "_defer_prune_watermark"),
+        # Companion dead-alias counter (r3 bounds-gap fix): weakref-callback
+        # tally of registered alias deaths since the last sweep; crossing the
+        # threshold forces a sweep a stuck-high watermark would suppress.
+        # Clearing it only delays one sweep, never correctness.
+        ("torchlens/utils/tensor_utils.py", "_defer_dead_alias_count"),
         # Fork-inheritance discriminator for warn_parallel (r-b6 R40-3b): the
         # PID that first observed an initialized process group. Clearing it
         # only re-stamps on the next capture entry; it never steers anything
