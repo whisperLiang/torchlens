@@ -797,3 +797,31 @@ def test_safe_copy_input_tree_preserves_view_topology_and_grad_paths() -> None:
     assert copied_wrapper is wrapper
     copied_grad = copied_kwargs["k"][1]
     assert copied_grad.requires_grad and copied_grad is not grad_leaf
+
+
+def test_snapshot_mapping_protocol_totality_refusal() -> None:
+    """A dict-backed mapping whose protocol hides physical entries refuses.
+
+    grind-p5 rollup: the mapping arm derived its ordered-key fact and child
+    descent purely from the instance ``items()`` protocol and recorded no
+    physical-arity fact -- a lying ``items()``/``keys()`` shrank the witnessed
+    structure identically on the capture and runtime snapshots (a
+    false-VERIFIED shape, the exact class ``physical_sequence_len`` guards on
+    sequences and namedtuples). Dict-backed mappings now refuse when the
+    protocol view is not total over the physical storage.
+    """
+
+    class HidingDict(dict):
+        """Dict subclass whose protocol hides one physical entry."""
+
+        def items(self) -> Any:  # type: ignore[override]
+            return [(k, dict.__getitem__(self, k)) for k in dict.keys(self) if k != "hidden"]
+
+    hiding = HidingDict({"seen": 1.0, "hidden": torch.ones(2)})
+    snapshot = snapshot_input_boundary({"box": hiding})
+    reasons = {refusal["reason"] for refusal in snapshot["refusals"]}
+    assert "mapping_protocol_not_total" in reasons
+
+    honest = snapshot_input_boundary({"box": {"seen": 1.0, "hidden": torch.ones(2)}})
+    honest_reasons = {refusal["reason"] for refusal in honest["refusals"]}
+    assert "mapping_protocol_not_total" not in honest_reasons

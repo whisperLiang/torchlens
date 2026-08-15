@@ -1367,15 +1367,26 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
                 refusals.append({"path": list(path), "reason": "instance_state_uninspectable"})
             elif state_facts:
                 node["instance_state"] = state_facts
-            keys: list[Any] = []
-            encodable = True
             # Derive the ordered-key fact from the SAME ``items()`` traversal that
             # descends the children. Reading ``keys()`` here while the children came
             # from ``items()`` meant a Mapping whose ``keys()`` is defined independently
             # of ``__iter__`` persisted an "ordered keys" witness in a different order
             # from the one the model actually iterates -- and the order-insensitive
             # child-path set could not detect it.
-            for key in (entry[0] for entry in item.items()):
+            entries = list(item.items())
+            if isinstance(item, dict) and len(entries) != physical_sequence_len(item):
+                # The protocol view is not TOTAL over the physical dict storage:
+                # a lying ``items()``/``keys()`` shrank (or padded) the witnessed
+                # structure identically on the capture and runtime snapshots -- a
+                # false-VERIFIED shape, the same forgery lane
+                # ``physical_sequence_len`` closes for sequences and namedtuples.
+                # A refusal (not a node fact) keeps persisted snapshot shapes
+                # byte-stable for existing artifacts while failing closed on
+                # both the save and runtime sides.
+                refusals.append({"path": list(path), "reason": "mapping_protocol_not_total"})
+            keys: list[Any] = []
+            encodable = True
+            for key in (entry[0] for entry in entries):
                 try:
                     keys.append(encode_mapping_key(key))
                 except ValueError:
@@ -1394,7 +1405,7 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             node["keys"] = keys if encodable else []
             nodes.append(node)
             if encodable:
-                for key, child in item.items():
+                for key, child in entries:
                     _descend(child, (*path, encode_mapping_key(key)))
             return
         if kind == "sequence":
