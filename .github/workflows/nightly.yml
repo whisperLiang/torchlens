@@ -122,6 +122,64 @@ jobs:
           # preserve that contract.
           pytest tests/ -m "not slow and not rare" --tb=short
 
+  coverage:
+    name: Coverage floor (smoke tier)
+    runs-on: ubuntu-latest
+    # First measured coverage gate (grind r3, SF-19: four consecutive review
+    # passes found NO coverage job anywhere). The smoke tier under
+    # branch-coverage instrumentation measured 64% total on 2026-08-15; the
+    # floor sits at 55 so environment variance and per-version skips never
+    # trip it while a mass-hollowing regression (a subsystem's tests skipping
+    # or a package dropping out of the suite) always does. Raise the floor
+    # deliberately as coverage grows; never lower it to pass (tripwire).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Run the smoke tier under coverage with a floor
+        # The ONE deselect is the smoke-duration budget guard: it asserts
+        # wall-clock runtime, and coverage instrumentation slows tests by
+        # design, so the assertion is provably outside its contract here (it
+        # still enforces on every uninstrumented leg). No other test is
+        # excluded.
+        run: |
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
+            --deselect tests/test_marker_lint.py::test_smoke_tests_stay_within_duration_budget \
+            --cov=torchlens --cov-branch \
+            --cov-report=term --cov-report=xml:"${{ runner.temp }}/coverage.xml" \
+            --cov-fail-under=55 \
+            --tb=short -q
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-coverage
+          path: ${{ runner.temp }}/coverage.xml
+
   capture-byte-oracle:
     name: Capture-characterization byte oracle (torch 2.13.0, py 3.10)
     runs-on: ubuntu-24.04
