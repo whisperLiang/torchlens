@@ -415,3 +415,21 @@ def test_metadata_pkl_non_mapping_payload_refuses_typed(tmp_path: Path) -> None:
     with pytest.raises(TorchLensIOError, match="not a metadata mapping") as excinfo:
         tl.load(str(spec))
     assert excinfo.value.fields["code"] == "metadata_payload_not_a_mapping"
+
+
+def test_bundle_save_failure_names_cause_and_code(tmp_path: Path, monkeypatch) -> None:
+    """R65: the highest-traffic save door names its cause, code, and remedy.
+
+    Fail-before: every non-typed save failure became the content-free
+    ``TorchLensIOError: Failed to save bundle at <path>.`` with empty fields.
+    """
+
+    def _boom(state, handle) -> None:
+        raise TypeError("cannot pickle '_thread.lock' object")
+
+    monkeypatch.setattr(bundle_mod, "dump_canonical_metadata", _boom)
+    with pytest.raises(TorchLensIOError, match="cannot pickle") as excinfo:
+        _save(tmp_path)
+    assert excinfo.value.fields["code"] == "bundle_save_failed"
+    assert excinfo.value.fields["cause_type"] == "TypeError"
+    assert "Remedy:" in str(excinfo.value)

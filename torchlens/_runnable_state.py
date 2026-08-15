@@ -2529,8 +2529,19 @@ def _binding_error(diagnostics: tuple[RunnableDiagnostic, ...]) -> StateBindingE
     """Build one structured strict state-binding exception."""
 
     codes = tuple(diagnostic.code.value for diagnostic in diagnostics)
+    # Surface the per-diagnostic detail in the message (R65: the aggregate used
+    # to name only the codes, hiding the slot names / shapes the diagnostics
+    # already carry). Bounded to the first few so a mass mismatch stays legible.
+    shown = diagnostics[:5]
+    detail_lines = "".join(
+        f"\n  - {diagnostic.code.value}: {diagnostic.message}" for diagnostic in shown
+    )
+    if len(diagnostics) > len(shown):
+        detail_lines += (
+            f"\n  ... and {len(diagnostics) - len(shown)} more (see .fields['diagnostics'])."
+        )
     return StateBindingError(
-        f"Strict state binding failed with {len(diagnostics)} diagnostic(s): {', '.join(codes)}.",
+        f"Strict state binding failed with {len(diagnostics)} diagnostic(s):{detail_lines}",
         diagnostics=diagnostics,
         codes=codes,
     )

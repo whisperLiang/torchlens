@@ -377,3 +377,32 @@ def test_vetted_inert_helper_set_admitted() -> None:
     for module, qualname in _VETTED_INERT_FIRST_PARTY:
         obj = _load_ref(module, qualname)
         assert is_inert_first_party_callable(obj), f"{module}:{qualname} not admitted"
+
+
+def test_untrusted_callable_refusals_carry_code_and_subject() -> None:
+    """R65: every trust-gate refusal names its code and the denied import."""
+
+    from torchlens.intervention.resolver import resolve_import_ref
+
+    with pytest.raises(UntrustedCallableError) as untrusted:
+        resolve_import_ref("somemod:some_fn")
+    assert untrusted.value.fields["code"] == "custom_callable_untrusted"
+    assert untrusted.value.fields["module"] == "somemod"
+    assert untrusted.value.fields["import_path"] == "somemod:some_fn"
+
+    with pytest.raises(UntrustedCallableError) as denied:
+        resolve_import_ref("os:system", trust_custom_callables=True)
+    assert denied.value.fields["code"] == "custom_callable_module_denied"
+    assert denied.value.fields["module"] == "os"
+
+    with pytest.raises(UntrustedCallableError) as not_listed:
+        resolve_import_ref("somemod:some_fn", allowed_custom_callable_modules={"othermod"})
+    assert not_listed.value.fields["code"] == "custom_callable_module_not_allowlisted"
+
+    with pytest.raises(UntrustedCallableError) as private:
+        resolve_import_ref("torchlens.utils:_module_is_installed")
+    assert private.value.fields["code"] == "custom_callable_private_first_party"
+
+    with pytest.raises(UntrustedCallableError) as impure:
+        resolve_import_ref("torch:from_file", trust_custom_callables=True)
+    assert impure.value.fields["code"] == "custom_callable_not_pure"

@@ -76,7 +76,9 @@ def test_view_rendered_file_silent_in_notebook(
 
 
 @pytest.mark.smoke
-def test_missing_graphviz_binary_refuses_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_graphviz_binary_refuses_typed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A missing Graphviz binary names Graphviz and the install remedy (R65).
 
     Fail-before: ``Trace.draw()`` escaped as raw ``FileNotFoundError: [Errno 2]
@@ -92,11 +94,11 @@ def test_missing_graphviz_binary_refuses_typed(monkeypatch: pytest.MonkeyPatch) 
     log = tl.trace(nn.Linear(3, 2), torch.ones(1, 3))
     monkeypatch.setenv("PATH", "/nonexistent")
     with pytest.raises(GraphvizRenderError, match="apt install graphviz"):
-        log.draw(vis_save_only=True)
+        log.draw(vis_save_only=True, vis_outpath=str(tmp_path / "modelgraph"))
 
 
 @pytest.mark.smoke
-def test_vis_mode_refuses_typed_on_forward_draw() -> None:
+def test_vis_mode_refuses_typed_on_forward_draw(tmp_path: Path) -> None:
     """The flagship draw option validates typed like its backward sibling (R65)."""
 
     import torch
@@ -107,5 +109,5 @@ def test_vis_mode_refuses_typed_on_forward_draw() -> None:
 
     log = tl.trace(nn.Linear(3, 2), torch.ones(1, 3))
     with pytest.raises(InvalidArgumentError, match="rolled") as exc_info:
-        log.draw(vis_mode="bogus", vis_save_only=True)
+        log.draw(vis_mode="bogus", vis_save_only=True, vis_outpath=str(tmp_path / "modelgraph"))
     assert exc_info.value.fields["code"] == "visualization_mode_invalid"

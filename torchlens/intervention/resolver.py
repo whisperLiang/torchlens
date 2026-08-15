@@ -588,7 +588,10 @@ def resolve_function_registry_key(
                         "C-level tensor method such as resize_/set_/apply_/map_ or a "
                         "side-effecting torch builtin -- that is not a pure forward/tensor "
                         "op; only pure forward/tensor ops resolve from the torch namespace "
-                        "or a module-less C callable, even under trust."
+                        "or a module-less C callable, even under trust.",
+                        code="custom_callable_not_pure",
+                        module=real_owner or module_name,
+                        import_path=f"{module_name}:{qualname}",
                     )
 
             # OPERATOR GADGET name-scope (r33, A-R32-1). The ``operator`` /
@@ -608,7 +611,10 @@ def resolve_function_registry_key(
                     f"{module_name}:{qualname}: it resolves to a generic operator gadget "
                     f"({unsafe_callable_reason(obj)}); only the pure arithmetic / "
                     "comparison / bitwise / index operators resolve from "
-                    "operator/_operator, even under trust."
+                    "operator/_operator, even under trust.",
+                    code="custom_callable_not_pure",
+                    module="operator",
+                    import_path=f"{module_name}:{qualname}",
                 )
             if not callable(obj):
                 raise TypeError(f"{key.import_path!r} resolved to non-callable {obj!r}")

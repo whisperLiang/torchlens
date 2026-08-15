@@ -666,7 +666,14 @@ def save(
         _mark_partial(tmp_path, reason=type(exc).__name__)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
-        raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+        raise TorchLensIOError(
+            f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+            "Remedy: the staging directory was marked PARTIAL (sweepable by "
+            "cleanup) and any pre-overwrite bundle was restored; fix the named "
+            "cause and re-save.",
+            code="bundle_save_failed",
+            cause_type=type(exc).__name__,
+        ) from exc
     except BaseException as exc:
         # Safety-net catch-all that closes the whole *class* of bug the
         # branches above were built to fix one exception type at a time
@@ -690,7 +697,14 @@ def save(
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         if isinstance(exc, Exception):
-            raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+            raise TorchLensIOError(
+                f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+                "Remedy: the staging directory was marked PARTIAL (sweepable by "
+                "cleanup) and any pre-overwrite bundle was restored; fix the named "
+                "cause and re-save.",
+                code="bundle_save_failed",
+                cause_type=type(exc).__name__,
+            ) from exc
         raise
 
 
@@ -2505,9 +2519,14 @@ def _read_manifest_object(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             data = _json.load_bounded(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise TorchLensIOError(f"Failed to read manifest at {path}.") from exc
+        raise TorchLensIOError(
+            f"Failed to read manifest at {path}: {type(exc).__name__}: {exc}.",
+            code="manifest_unreadable",
+        ) from exc
     if not isinstance(data, dict):
-        raise TorchLensIOError("Manifest root must be a JSON object.")
+        raise TorchLensIOError(
+            "Manifest root must be a JSON object.", code="manifest_not_json_object"
+        )
     return data
 
 

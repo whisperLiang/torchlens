@@ -51,6 +51,7 @@ add names to the top-level `torchlens` namespace:
 | `backend_mismatch` | Explicit backend cannot handle the model or inputs | Select the owning backend |
 | `bundle_load_failed` | Bundle load failed on torch/codec drift or a missing dependency | Inspect the chained cause; restore the missing dependency or re-save |
 | `bundle_metadata_integrity_refused` | Bundle metadata pickle is denylisted, corrupt, or truncated | Treat as tamper/corruption; re-save from the source capture |
+| `bundle_save_failed` | Bundle save failed; the staging dir was marked PARTIAL and any pre-overwrite bundle restored | Fix the chained cause named in the message and re-save |
 | `backend_payload_unsupported` | Backend payload has no supported codec | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
 | `backend_unsupported` | Backend does not implement the requested capability | Omit it or use another backend |
@@ -67,6 +68,11 @@ add names to the top-level `torchlens` namespace:
 | `code_panel_option_invalid` | Code panel mode literal is unknown (`InvalidArgumentError`) | Pass a documented mode or a callable |
 | `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
 | `custom_callable_import_path_missing` | Custom function registry key lacks its `import_path` reference (`InvalidArgumentError`) | Supply `import_path='module:qualname'` on the registry key entry |
+| `custom_callable_module_denied` | Custom callable resolves from a dangerous or stdlib/builtin module; denied even under trust (`UntrustedCallableError`) | Ship the recipe in a user module; dangerous modules never resolve |
+| `custom_callable_module_not_allowlisted` | Custom callable's module is not in `allowed_custom_callable_modules` (`UntrustedCallableError`) | Add the named module to the allowlist if trusted |
+| `custom_callable_not_pure` | Bundle-supplied callable is not a pure forward/tensor op (`UntrustedCallableError`) | Use pure forward/tensor ops in portable specs |
+| `custom_callable_private_first_party` | Torchlens-owned callable is private or side-effecting; only vetted-inert public helpers auto-trust (`UntrustedCallableError`) | Reference a public facet recipe/transform/intervention helper |
+| `custom_callable_untrusted` | Foreign custom callable resolution was not trusted (`UntrustedCallableError`) | Pass `allowed_custom_callable_modules={<named module>}` for a trusted spec |
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `cleanup_during_active_capture` | `Trace.cleanup()` on the trace a live capture window is writing into | Let the capture or backward projection finish first |
@@ -126,8 +132,11 @@ add names to the top-level `torchlens` namespace:
 | `load_path_symlink_rejected` | A load path (bundle, manifest, metadata, or blobs) is a symlink | Pass the resolved real path |
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
+| `manifest_missing` | Bundle directory has no `manifest.json` | Pass the bundle directory produced by `tl.save()` |
 | `manifest_not_json_object` | Manifest root parses but is not a JSON object | Re-save the artifact; do not hand-edit the manifest |
-| `manifest_unreadable` | Manifest is missing, unreadable, or over the parse limits | Check the path and file integrity; re-save if truncated |
+| `manifest_unreadable` | Manifest cannot be read or does not parse within bounds | Check permissions/integrity; re-save if truncated |
+| `metadata_object_count_exceeded` | `metadata.pkl` opcode count exceeds the allocation ceiling | Treat as a hostile/implausible artifact; re-save from source |
+| `metadata_payload_not_a_mapping` | `metadata.pkl` payload is not a metadata mapping | The artifact is corrupt or hand-edited; re-save with `tl.save()` |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
 | `max_pairs_invalid` | Bundle diff pair budget is below one | Pass `max_pairs >= 1` or None |
 | `max_predicate_failures_invalid` | Predicate failure budget is not a non-negative int | Pass a non-negative integer |
