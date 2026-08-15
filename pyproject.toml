@@ -172,7 +172,14 @@ dev = [
 ]
 test = [
     "lightning",
-    "pydot",
+    # PIN AUTHORITY for pydot: the DOT-render goldens embed the pydot version as
+    # a fingerprint KEY, so an environment that resolves pydot freely (nightly/
+    # weekly install .[test]) drifts off the goldens' recording environment and
+    # surfaces as confusing scheduled-only render failures (grind r4, R83-6).
+    # Keep equal to the inline pins in tests.yml / latest-canary.yml (their lean
+    # .[dev,tabular] envs cannot see this extra); the Lint workflow's
+    # pin-lockstep step asserts the equality.
+    "pydot==4.0.1",
     "pillow",
     "pytest",
     # Order-isolation infra: every `-p no:randomly` in the suite/drivers and
