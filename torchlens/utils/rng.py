@@ -1523,6 +1523,62 @@ class _NotADigestableRng(Exception):
     """Internal sentinel: the value is not a digestable numpy/`random` generator."""
 
 
+_RNG_TRUSTED_DEFINER_TOPS: frozenset[str] = frozenset({"random", "_random", "numpy", "builtins"})
+"""Top-level modules whose classes may define an RNG's witnessed draw/state surface.
+
+The monitor's three witnesses (base-class method patches, ``c_call`` receiver
+classification, C-state digests) all assume the draw/state methods are the
+LIBRARY'S. Library-shipped subclasses keep that true (``SystemRandom`` routes
+through the patched primitives; numpy's ``PCG64``/``MT19937``/... advance the
+digested C state), so any method first defined by a class from these modules is
+witnessable. A method first defined by a class from anywhere else is user code
+the witnesses cannot see.
+"""
+
+
+def _untrusted_rng_override(holder_type: type) -> str | None:
+    """Return the first draw/state method a USER class overrides, or ``None``.
+
+    Parameters
+    ----------
+    holder_type:
+        Concrete type of a digestable RNG holder (``random.Random`` or numpy
+        ``Generator``/``RandomState``/``BitGenerator`` lineage).
+
+    Returns
+    -------
+    str | None
+        Name of the first witnessed-surface method whose defining class is not
+        library code, or ``None`` when the whole surface is library-defined.
+        The surface is every non-dunder attribute of the recognized library
+        bases present in the MRO -- draw helpers included, because a helper
+        overridden in user code can draw without ever reaching the patched
+        primitives or advancing the digested C state.
+    """
+
+    if holder_type in (
+        random.Random,
+        random.SystemRandom,
+        np.random.Generator,
+        np.random.RandomState,
+    ):
+        return None
+    base_names: set[str] = set()
+    trusted_bases = (random.Random, np.random.Generator, np.random.RandomState)
+    for base in trusted_bases:
+        if issubclass(holder_type, base):
+            base_names.update(name for name in dir(base) if not name.startswith("_"))
+    if issubclass(holder_type, np.random.BitGenerator):
+        base_names.update(name for name in dir(np.random.BitGenerator) if not name.startswith("_"))
+    for name in sorted(base_names):
+        for cls in holder_type.__mro__:
+            if name in vars(cls):
+                if cls.__module__.split(".", 1)[0] not in _RNG_TRUSTED_DEFINER_TOPS:
+                    return name
+                break
+    return None
+
+
 _UNCERTAIN_DETAIL_CAP: int = 64
 """Max DISTINCT ``uncertain_detail`` reasons retained per monitoring window.
 
@@ -2145,6 +2201,12 @@ class host_nondeterminism_monitor:
         # during the monitoring window and an internal structural twin cannot suppress
         # the digest for a user frame.
         self._numpy_frame_digest_scope_cache: dict[int, tuple[CodeType, bool]] = {}
+        # Per-window cache: RNG holder type -> the first untrusted draw/state
+        # override found on it, or None when the type's witnessed surface is
+        # entirely library-defined (see ``_digest_rng_witnessable``). Window-
+        # scoped (not module-level) so it never joins the process-global state
+        # census.
+        self._rng_override_cache: dict[type, str | None] = {}
         # r49 hon1_1: re-entrancy depth for monitor-INTERNAL probes. While > 0 the monitor is
         # reading through its OWN inventory probe, so any channel a probe transitively touches
         # must NOT be marked as a model host read. Guarded at the single ``_mark`` choke point
@@ -2755,7 +2817,7 @@ class host_nondeterminism_monitor:
                     continue
                 seen_ids.add(id(holder))
                 try:
-                    snapshots.append((holder, self._digest_rng_instance(holder)))
+                    snapshots.append((holder, self._digest_rng_witnessable(holder)))
                 except Exception:
                     self._flag_uncertain("profile_rng_state_read_failed")
         local_candidates = list(frame.f_locals.values())
@@ -2774,7 +2836,7 @@ class host_nondeterminism_monitor:
                 continue
             seen_ids.add(id(holder))
             try:
-                snapshots.append((holder, self._digest_rng_instance(holder)))
+                snapshots.append((holder, self._digest_rng_witnessable(holder)))
             except Exception:
                 self._flag_uncertain("profile_rng_state_read_failed")
         if snapshots:
@@ -2799,7 +2861,7 @@ class host_nondeterminism_monitor:
         snapshots = self._numpy_frame_rng_states.pop(id(frame), ())
         for holder, before in snapshots:
             try:
-                changed = self._digest_rng_instance(holder) != before
+                changed = self._digest_rng_witnessable(holder) != before
             except Exception:
                 self._flag_uncertain("profile_rng_state_read_failed")
                 continue
@@ -2842,7 +2904,7 @@ class host_nondeterminism_monitor:
                 continue
             seen_ids.add(id(holder))
             try:
-                snapshots.append((holder, self._digest_rng_instance(holder)))
+                snapshots.append((holder, self._digest_rng_witnessable(holder)))
             except Exception:
                 self._flag_uncertain("profile_rng_state_read_failed")
         if not snapshots:
@@ -3726,7 +3788,7 @@ class host_nondeterminism_monitor:
                 if id(value) in self._exempt_ids:
                     continue
                 try:
-                    digest = self._digest_rng_instance(value)
+                    digest = self._digest_rng_witnessable(value)
                 except _NotADigestableRng:
                     if id(value) in seen_container_ids:
                         continue
@@ -3822,6 +3884,37 @@ class host_nondeterminism_monitor:
             )
             return f"{type(state).__name__}({rendered})"
         return repr(state)
+
+    def _digest_rng_witnessable(self, holder: Any) -> str:
+        """Digest one RNG holder, fail-closing on an unwitnessable subclass.
+
+        A ``random.Random`` / numpy-RNG SUBCLASS that overrides a draw or
+        state method in USER code escapes every witness the monitor has: the
+        class patches sit on the library base (shadowed by the override), the
+        ``c_call`` profile classifier never fires for a pure-Python method,
+        and the C-state digest does not advance when the override draws from
+        its own attributes -- a probe-proven FALSE-CLEAN (grind p5 §3.9,
+        rng-subclass-override). Possession of such an engine therefore
+        downgrades completeness (``uncertain``, never "no consumption"),
+        exactly like the opaque-queue and inventory-failure paths. Library-
+        defined subclasses (``SystemRandom``, numpy's ``PCG64``/``MT19937``/
+        ... bit generators) stay trusted by defining module, so no shipped
+        type over-triggers; the deliberate trade is that HOLDING a user-
+        overridden engine ceilings to ``unverifiable`` even undrawn, because
+        unlike ``SystemRandom`` (whose draws the class patches still witness)
+        a draw here would be invisible.
+        """
+
+        holder_type = type(holder)
+        if holder_type not in self._rng_override_cache:
+            self._rng_override_cache[holder_type] = _untrusted_rng_override(holder_type)
+        override = self._rng_override_cache[holder_type]
+        if override is not None:
+            self._flag_uncertain(
+                "rng_subclass_override_unwitnessable:"
+                f"{holder_type.__module__}.{holder_type.__qualname__}.{override}"
+            )
+        return self._digest_rng_instance(holder)
 
     @staticmethod
     def _digest_rng_instance(holder: Any) -> str:
@@ -4033,7 +4126,7 @@ class host_nondeterminism_monitor:
                     if id(value) in self._exempt_ids:
                         continue
                     try:
-                        snapshots.append((value, self._digest_rng_instance(value)))
+                        snapshots.append((value, self._digest_rng_witnessable(value)))
                     except Exception:
                         self._flag_uncertain("inventory_state_read_failed")
                     continue
@@ -4046,7 +4139,7 @@ class host_nondeterminism_monitor:
                     ):
                         seen_ids.add(id(receiver))
                         try:
-                            snapshots.append((receiver, self._digest_rng_instance(receiver)))
+                            snapshots.append((receiver, self._digest_rng_witnessable(receiver)))
                         except Exception:
                             self._flag_uncertain("inventory_state_read_failed")
                     continue
@@ -4463,13 +4556,13 @@ class host_nondeterminism_monitor:
         try:
             for holder, before in self._generator_states:
                 try:
-                    if self._digest_rng_instance(holder) != before:
+                    if self._digest_rng_witnessable(holder) != before:
                         self._mark("model_attribute_generator")
                 except Exception:
                     self._flag_uncertain("inventory_compare_failed")
             for holder, before in self._deep_generator_states:
                 try:
-                    if self._digest_rng_instance(holder) != before:
+                    if self._digest_rng_witnessable(holder) != before:
                         self._mark("frame_reachable_generator")
                 except Exception:
                     self._flag_uncertain("inventory_compare_failed")
