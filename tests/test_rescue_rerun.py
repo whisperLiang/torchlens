@@ -714,6 +714,82 @@ def test_intervened_capture_never_reruns_user_callables(raw_cos: Any) -> None:
     assert trace.rescue_rerun is None
 
 
+def test_transform_callables_never_double_fire_on_rescue(raw_cos: Any) -> None:
+    """b6-opus-R16-1 reopen: the transform channels must gate rescue eligibility.
+
+    The eligibility gate refused ``intervene=``/hooks for double-invocation
+    side effects but let ``activation_transform``/``grad_transform``/
+    ``output_transform`` through -- and they DID run twice on a recovered
+    rescue (measured: activation 2x per saved op, output once per forward
+    x2). A transform that appends to a list, writes a file, or accumulates
+    statistics silently double-applied. All in-capture user-callable channels
+    now refuse the re-run fail-closed, exactly like ``intervene=``.
+    """
+
+    calls = {"act": 0, "out": 0}
+
+    def counting_act(value: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        calls["act"] += 1
+        return value
+
+    def counting_out(value: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        calls["out"] += 1
+        return value
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return self.lin(raw_cos(v))
+
+    wrap_torch()
+
+    # Control: identical capture shape with no escape fixes the single-run
+    # activation-transform count.
+    class Control(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            return self.lin(torch.cos(v))
+
+    tl.trace(
+        Control(),
+        torch.randn(3, 4),
+        layers_to_save="all",
+        activation_transform=counting_act,
+        output_transform=counting_out,
+    )
+    control_act, control_out = calls["act"], calls["out"]
+    assert control_out == 1
+    calls["act"] = calls["out"] = 0
+
+    with pytest.warns(UserWarning, match="no graph/source provenance"):
+        trace = tl.trace(
+            Model(),
+            torch.randn(3, 4),
+            layers_to_save="all",
+            activation_transform=counting_act,
+            output_transform=counting_out,
+            grad_transform=lambda value, **kwargs: value,
+        )
+
+    assert trace.rescue_rerun is None, (
+        "a capture with in-capture transform callables ran the rescue re-run: "
+        "their side effects double-apply"
+    )
+    assert calls["out"] == 1, f"output_transform fired {calls['out']}x (expected once)"
+    # The escaped cos op is invisible to the primary, so the escape capture
+    # saves at most the control's op count; strictly more means a second run.
+    assert calls["act"] <= control_act, (
+        f"activation_transform fired {calls['act']}x vs {control_act}x on the "
+        "no-escape control: the rescue re-ran the user callable"
+    )
+
+
 def test_recovered_rescue_preserves_specific_verification_reasons() -> None:
     """A recovered rescue must not demote a specific verdict to the generic stamp.
 
