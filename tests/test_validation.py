@@ -7929,3 +7929,60 @@ def test_func_call_id_exemption_is_scoped_to_genuine_replacement() -> None:
         **base,
     )
     assert _is_func_call_id_exempt(internal) is False
+
+
+def test_validation_teardown_is_per_step_fenced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising early teardown restore must not skip the later restores (R07).
+
+    The pre-fix teardown was a straight-line block: a raise in the determinism
+    restore skipped the thread-count restore, the state_dict restore, the plain
+    attribute restore, AND the trace session cleanup. Every step must run and
+    the first failure must still propagate.
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4)).eval()
+    x = torch.randn(2, 4)
+
+    real_uda = torch.use_deterministic_algorithms
+    prior_enabled = torch.are_deterministic_algorithms_enabled()
+    prior_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    prior_threads = torch.get_num_threads()
+
+    cleanups: list[bool] = []
+    original_cleanup = tl.Trace.cleanup
+
+    def spying_cleanup(self: Any, *args: Any, **kwargs: Any) -> Any:
+        cleanups.append(True)
+        return original_cleanup(self, *args, **kwargs)
+
+    fired: list[bool] = []
+
+    def flaky_uda(mode: bool, *, warn_only: bool = False) -> None:
+        # Perform the real restore, then fail exactly once on the teardown-
+        # shaped call (the restore of the pinned OFF state below; the autouse
+        # RNG fixture turns determinism ON per test, so the pin -- not the
+        # test-entry prior -- is what the harness saves and restores).
+        real_uda(mode, warn_only=warn_only)
+        if mode is False and warn_only is False and not fired:
+            fired.append(True)
+            raise RuntimeError("injected determinism-restore failure")
+
+    try:
+        # Pin a known prior so the entry call (True/warn_only=True) can never
+        # collide with the restore-shaped call.
+        real_uda(False, warn_only=False)
+        monkeypatch.setattr(tl.Trace, "cleanup", spying_cleanup)
+        monkeypatch.setattr(torch, "use_deterministic_algorithms", flaky_uda)
+
+        with pytest.raises(RuntimeError, match="injected determinism-restore failure"):
+            user_funcs._validate_forward_pass_torch(model, (x,), num_threads=1)
+
+        monkeypatch.undo()
+        # The raising first step must not have skipped the later restores:
+        # the explicit num_threads=1 pin came back off ...
+        assert torch.get_num_threads() == prior_threads
+        # ... and the trace session cleanup still ran.
+        assert cleanups, "trace.cleanup() was skipped by the raising teardown step"
+    finally:
+        real_uda(prior_enabled, warn_only=prior_warn_only)
+        torch.set_num_threads(prior_threads)

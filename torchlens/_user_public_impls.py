@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 import warnings
@@ -972,9 +973,12 @@ def _restore_validation_replay_state(
         Optional snapshot of plain Python attributes to restore.
     """
 
-    model.load_state_dict(state_dict)
-    if plain_attr_snapshot is not None:
-        plain_attr_snapshot.restore_changed_attrs()
+    # R07: both restores always run; a raising load_state_dict must not skip
+    # the plain-attribute restore (first failure re-raises, later ones chain).
+    with contextlib.ExitStack() as restores:
+        if plain_attr_snapshot is not None:
+            restores.callback(plain_attr_snapshot.restore_changed_attrs)
+        restores.callback(model.load_state_dict, state_dict)
 
 
 def _first_reproducibility_divergence(left: Trace, right: Trace) -> str | None:
@@ -1576,14 +1580,26 @@ def _validate_forward_pass_torch(
         if _trace_observer is not None:
             _trace_observer(trace)
     finally:
-        torch.use_deterministic_algorithms(prior_deterministic, warn_only=prior_warn_only)
-        if num_threads is not None:
-            torch.set_num_threads(prior_num_threads)
-        model.load_state_dict(state_dict)
-        if "plain_attr_snapshot" in locals() and plain_attr_snapshot is not None:
-            plain_attr_snapshot.restore_changed_attrs()
-        if trace is not None:
-            trace.cleanup()
+        # R07: per-step fenced teardown. One raising restore (determinism
+        # flag, thread count, state_dict, plain attrs, trace cleanup) must not
+        # skip the later steps -- the pre-fix straight-line block left user
+        # model params unrestored and wrapper-session state uncleaned when an
+        # early restore raised. ExitStack runs EVERY callback and re-raises
+        # the first failure (later failures chain); callbacks are pushed in
+        # reverse so execution keeps the original step order.
+        with contextlib.ExitStack() as teardown:
+            if trace is not None:
+                teardown.callback(trace.cleanup)
+            if "plain_attr_snapshot" in locals() and plain_attr_snapshot is not None:
+                teardown.callback(plain_attr_snapshot.restore_changed_attrs)
+            teardown.callback(model.load_state_dict, state_dict)
+            if num_threads is not None:
+                teardown.callback(torch.set_num_threads, prior_num_threads)
+            teardown.callback(
+                torch.use_deterministic_algorithms,
+                prior_deterministic,
+                warn_only=prior_warn_only,
+            )
     return outs_are_valid
 
 
