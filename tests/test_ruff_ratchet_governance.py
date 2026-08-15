@@ -228,7 +228,8 @@ def test_ignored_codes_all_carry_ceilings() -> None:
     )
 
 
-#: File-level blanket `# ruff: noqa` directives in torchlens/ (b9 R70 round
+#: File-level blanket ruff-noqa directives ("# ruff" + ": noqa") in
+#: torchlens/ (b9 R70 round
 #: 5, F/O pair): each one is a whole-file blind spot no per-code ceiling can
 #: see — a NEW dead import in ops.py / _runnable_execution.py /
 #: completeness_witness.py (three of the most change-heavy capture files) is
@@ -245,10 +246,10 @@ def test_blanket_noqa_directives_never_grow() -> None:
     blanket = sorted(
         str(path.relative_to(_PROJECT_ROOT))
         for path in (_PROJECT_ROOT / "torchlens").rglob("*.py")
-        if re.search(r"^# ruff: noqa", path.read_text(encoding="utf-8"), re.MULTILINE)
+        if re.search("^" + "# ruff" + ": noqa", path.read_text(encoding="utf-8"), re.MULTILINE)
     )
     assert len(blanket) <= _BLANKET_NOQA_CEILING, (
-        f"file-level blanket noqa grew to {len(blanket)} (ceiling "
+        f"file-level blanket ruff-noqa directives grew to {len(blanket)} (ceiling "
         f"{_BLANKET_NOQA_CEILING}): {blanket} — use per-line noqa so F401 "
         "stays armed for genuinely dead code"
     )
