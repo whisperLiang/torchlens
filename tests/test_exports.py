@@ -516,11 +516,14 @@ def test_hub_push_uploads_real_bundle_not_metadata_stub(export_log: Any) -> None
     """push_to_hub must upload the real scrubbed artifact, never a JSON stub.
 
     ``push_to_hub`` previously fell back to a ~240-byte JSON manifest for
-    backward-eligible captures while still reporting ``dry_run: False`` success
-    (the raw Trace was then unpicklable; it is now picklable via GradFn weakref
-    serialization, so the old naive-pickle-fails precondition no longer holds).
-    This asserts the uploaded payload is the real, larger, non-JSON
-    portable-bundle archive.
+    backward-eligible captures while still reporting ``dry_run: False`` success.
+    This asserts the uploaded payload is the real, larger, non-JSON artifact.
+
+    R62-1 rebaseline (privacy): a ``Trace`` is now ALWAYS serialized through the
+    privacy-scrubbed portable ``.tlspec`` bundle (a gzipped tar), never raw
+    ``pickle.dumps`` -- raw pickle embeds ``$HOME``, the username, and absolute
+    source paths, leaking them to a PUBLIC hub. This test previously asserted the
+    raw-pickle opcode ``0x80``; it now asserts the scrubbed tar.gz artifact.
     """
 
     api = _FakeHubApi()
@@ -536,10 +539,45 @@ def test_hub_push_uploads_real_bundle_not_metadata_stub(export_log: Any) -> None
     assert uploaded["size_bytes"] > 1000
     assert not payload.lstrip().startswith(b"{"), "expected a real artifact, not a JSON stub"
 
-    # The Trace is picklable (GradFn weakref serialization), so push_to_hub
-    # uploads the real pickled artifact (pickle protocol opcode 0x80), never a
-    # JSON stub and not the bundle-scrub fallback.
-    assert payload[:1] == b"\x80", "expected a real pickle artifact, not a JSON stub"
+    # The scrubbed portable bundle is uploaded as a gzip tar (magic 0x1f 0x8b),
+    # never a raw pickle (0x80) that would leak local paths.
+    assert uploaded["format"] == "tar.gz"
+    assert payload[:2] == b"\x1f\x8b", "expected a scrubbed gzip-tar bundle, not raw pickle"
+    assert payload[:1] != b"\x80", "raw pickle would leak $HOME / username / source paths"
+
+
+def test_hub_push_scrubs_local_paths_from_uploaded_trace(export_log: Any) -> None:
+    """R62-1: the uploaded artifact must not contain $HOME / username / abs paths.
+
+    Raw ``pickle.dumps`` of a Trace embeds the local home directory, the OS
+    username, and absolute source-file paths. ``push_to_hub`` routes through the
+    privacy scrub so none of those local identifiers reach the public hub.
+    """
+
+    api = _FakeHubApi()
+    tl.bridge.huggingface.push_to_hub(export_log, "example/repo", api=api)
+    payload = api.uploaded_bytes[-1]
+
+    # Decompress the gzip-tar and scan the actual member bytes: a compressed
+    # payload would hide a plaintext leak, so the raw archive bytes are not a
+    # sufficient check.
+    import io as _io
+    import tarfile as _tarfile
+
+    contents = b""
+    with _tarfile.open(fileobj=_io.BytesIO(payload), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            contents += member.name.encode("utf-8", "replace")
+            if member.isfile():
+                extracted = tar.extractfile(member)
+                if extracted is not None:
+                    contents += extracted.read()
+
+    home = os.path.expanduser("~")
+    assert home.encode() not in contents, "uploaded artifact leaked $HOME"
+    user = os.environ.get("USER")
+    if user and len(user) >= 3:
+        assert user.encode() not in contents, "uploaded artifact leaked the username"
 
 
 def test_depyf_bridge_fails_soft_when_extra_missing() -> None:

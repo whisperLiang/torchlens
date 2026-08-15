@@ -171,6 +171,36 @@ def test_partial_activation_transform_repr_does_not_leak_bound_values(tmp_path: 
     assert secret not in saved_repr
 
 
+def test_transform_repr_redacts_heap_addresses() -> None:
+    """b3-opus (B8-20 completion): a callable repr's heap address is not persisted.
+
+    A callable using the default object/function repr (a lambda, or a callable
+    instance) embeds a live ``0x<hex>`` heap address, which is non-deterministic
+    (breaks byte-identical artifacts) and an ASLR-layout leak. The scrub redacts
+    it, directly and through a ``functools.partial`` wrapper.
+    """
+
+    import functools
+
+    from torchlens.data_classes.trace import _scrubbed_transform_repr
+
+    class _CallableWithDefaultRepr:
+        def __call__(self, t: torch.Tensor) -> torch.Tensor:
+            return t
+
+    instance = _CallableWithDefaultRepr()
+    assert "0x" in repr(instance), "test precondition: default repr has a heap address"
+
+    direct = _scrubbed_transform_repr(instance)
+    assert direct is not None
+    assert "0x<scrubbed>" in direct
+    assert "0x" not in direct.replace("0x<scrubbed>", "")
+
+    wrapped = _scrubbed_transform_repr(functools.partial(instance))
+    assert wrapped is not None
+    assert "0x" not in wrapped.replace("0x<scrubbed>", "")
+
+
 def test_portable_state_specs_cover_every_live_attribute() -> None:
     """Each target class must map every live attribute to a scrub policy."""
 

@@ -196,6 +196,44 @@ def test_corrupt_metadata_pickle_raises_with_metadata_path(tmp_path: Path) -> No
         load(bundle_path)
 
 
+def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
+    """R65: the tl.load front-door causes carry distinct ``fields['code']`` values.
+
+    A caller could only tell the six front-door failure causes apart by parsing one
+    content-free message. Each now carries a stable code to branch on.
+    """
+
+    # (1) symlinked load path.
+    real = _save_bundle(tmp_path, "real.tl")
+    link = tmp_path / "link.tl"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(TorchLensIOError) as sym:
+        load(link)
+    assert sym.value.fields.get("code") == "load_path_symlink_rejected"
+
+    # (2) unreadable / missing manifest.
+    empty = tmp_path / "empty.tl"
+    empty.mkdir()
+    with pytest.raises(TorchLensIOError) as missing:
+        load(empty)
+    assert missing.value.fields.get("code") == "manifest_unreadable"
+
+    # (3) manifest root is not a JSON object.
+    not_object = tmp_path / "notobj.tl"
+    not_object.mkdir()
+    (not_object / "manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(TorchLensIOError) as scalar:
+        load(not_object)
+    assert scalar.value.fields.get("code") == "manifest_not_json_object"
+
+    # (4) metadata-integrity refusal (corrupt / denylisted pickle stream).
+    integrity = _save_bundle(tmp_path, "integrity.tl")
+    (integrity / "metadata.pkl").write_bytes(b"not a pickle")
+    with pytest.raises(TorchLensIOError) as bad_pickle:
+        load(integrity)
+    assert bad_pickle.value.fields.get("code") == "bundle_metadata_integrity_refused"
+
+
 def test_tampered_manifest_field_raises_with_field_name(tmp_path: Path) -> None:
     """Tampered manifest tensor metadata should fail load with the offending field."""
 

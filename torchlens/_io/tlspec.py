@@ -35,6 +35,26 @@ def _reject_symlink_path(path: Path, *, context: str) -> None:
     )
 
 
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a written ``.tlspec`` path's permissions (POSIX only).
+
+    Permission parity with ``_io/bundle.py::_restrict_mode`` and the streaming
+    writer (R59): ``mkdir`` / file writes honor the ambient umask, so under
+    umask 002 the bundle directory and its sidecars were left group-writable
+    while the core bundle writer tightens them. The publish rename preserves
+    ``tmp_path``'s mode, so tightening the staged directory tightens the
+    published bundle. Best-effort: a filesystem that ignores mode bits is not a
+    save failure.
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
 # NOTE: ``TLSPEC_VERSION`` is imported (not redefined) from ``torchlens._io``
 # so there is a single source of truth for the on-disk ``tlspec_version``
 # manifest field. It previously had a second, independent definition here
@@ -242,6 +262,7 @@ class _TlSpecWriter:
             if target_path.exists() and not overwrite:
                 raise FileExistsError(f"Bundle path already exists: {target_path}")
             tmp_path.mkdir(parents=True)
+            _restrict_mode(tmp_path, 0o700)
             save_file({}, str(tmp_path / body_filename))
             member_records = cls._write_bundle_members(bundle, tmp_path=tmp_path, save_level=level)
             cls.write_json(
@@ -271,6 +292,9 @@ class _TlSpecWriter:
                 }
             ]
             cls.write_json(tmp_path / TLSPEC_MANIFEST_FILENAME, manifest)
+            _restrict_mode(tmp_path / body_filename, 0o600)
+            _restrict_mode(tmp_path / "bundle.json", 0o600)
+            _restrict_mode(tmp_path / TLSPEC_MANIFEST_FILENAME, 0o600)
             # Durability before publish: fsync every written file and
             # directory so a power/OS crash after the rename below cannot
             # publish a bundle holding zero-length or partial members.
@@ -286,6 +310,15 @@ class _TlSpecWriter:
             # machine in ``torchlens/_io/bundle.py`` (``_make_backup_path`` /
             # ``_restore_backup``).
             if target_path.exists():
+                # Re-check overwrite at swap time, not just at save start
+                # (R59 TOCTOU): under ``overwrite=False`` a concurrent writer
+                # could have created ``target_path`` AFTER the start-of-save
+                # check passed, and the unconditional swap below would then
+                # back it aside and destroy it (the backup is rmtree'd on
+                # success). Mirror ``torchlens/_io/bundle.py`` and refuse
+                # instead of live-destroying a concurrently-published artifact.
+                if not overwrite:
+                    raise FileExistsError(f"Bundle path already exists: {target_path}")
                 backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
                 os.replace(target_path, backup_path)
             os.replace(tmp_path, target_path)

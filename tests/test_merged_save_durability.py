@@ -107,3 +107,39 @@ def test_honest_save_round_trips(tmp_path: Path) -> None:
     loaded = load_merged(art)
     assert loaded.value_status.value == "attested_complete"
     assert loaded.rank_ids == (0, 1)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlinks")
+def test_save_does_not_dereference_symlinks_into_the_artifact(tmp_path: Path) -> None:
+    """b4:R38-5: save_merged must not copy a symlink's TARGET into the artifact.
+
+    A path-backed rank core containing a symlink to a private file outside the
+    core would, under ``copytree(symlinks=False)``, have that file's CONTENTS
+    dereferenced and copied INTO the shareable merged artifact (exfiltration).
+    ``symlinks=True`` copies the link itself, which the tree-hash guard then
+    refuses -- so a symlinked rank core fails the save instead of leaking.
+    """
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET-EXFIL-CANARY", encoding="utf-8")
+
+    core0 = tmp_path / "rank0.tlspec"
+    core1 = tmp_path / "rank1.tlspec"
+    tl.save(_rank_trace(0), core0)
+    tl.save(_rank_trace(1), core1)
+    # Plant a symlink inside rank 0's core pointing at the private file.
+    (core0 / "leak.link").symlink_to(secret)
+
+    merged = tl.merge_ranks([core0, core1])
+    out = tmp_path / "merged.tlspec"
+    with pytest.raises(MergedArtifactError) as caught:
+        merged.save(out)
+    assert caught.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+    assert "symlink" in str(caught.value).lower()
+
+    # Nothing published, and the canary bytes never landed anywhere under the
+    # output tree (no dereferenced copy leaked into a staged/published member).
+    assert not out.exists()
+    for path in tmp_path.rglob("*"):
+        if path.is_file() and not path.is_symlink() and path != secret:
+            assert b"TOP-SECRET-EXFIL-CANARY" not in path.read_bytes(), path

@@ -260,6 +260,11 @@ def test_refusal_message_names_footprint_site_and_remedies() -> None:
     assert "save=tl.func" in message
     assert "storage=tl.to_disk" in message
     assert "save_budget=None" in message
+    # R65 reopened: the remedy must not recommend the REFUSED save='all' spelling
+    # (raises ArgumentTypeError) or the deprecated bare layers_to_save= kwarg.
+    assert "save='all'" not in message
+    assert "layers_to_save='none' (the graph" not in message
+    assert "capture=tl.options.CaptureOptions(layers_to_save='none')" in message
 
 
 def test_refusal_names_the_configured_source_not_a_bare_number() -> None:

@@ -37,15 +37,29 @@ _MAX_JSON_DEPTH = 200
 # worst-case cost and rejects an absurd artifact before it is read into memory.
 _MAX_JSON_BYTES = 512 * 1024 * 1024
 
+# Object-count ceiling (R60-1). The byte + depth ceilings do NOT bound the number
+# of Python objects ``json.loads`` allocates: a manifest well under the byte cap
+# but packed with tiny values (``[0,0,0,...]`` / ``{}`` runs) expands ~16x into RSS
+# BEFORE any downstream body-index cross-check can refuse it (an 81 MiB such
+# manifest measured 1.24 GiB RSS; ~8 GiB projected at the byte cap). The prescan
+# already walks every structural character, so it counts value-producing tokens
+# (container opens + value separators, an upper bound on the node count) and
+# refuses BEFORE the recursive decoder allocates anything. 64M nodes caps the
+# worst case near ~2 GiB while sitting far above any real body-index-bounded
+# manifest (which is orders of magnitude smaller).
+_MAX_JSON_NODES = 64_000_000
+
 _OPEN_BRACKETS = frozenset("[{")
 _CLOSE_BRACKETS = frozenset("]}")
 
-# The prescan's state machine only ever transitions on a quote, a backslash, or a
-# bracket; every other character is inert. Both patterns below let the C regex
-# engine skip the inert bulk (a multi-MB manifest is >90% inert) instead of paying
-# one Python loop iteration per character.
-_QUOTE_OR_BRACKET = re.compile(r'["\[\]{}]')
-_ESCAPE_RELEVANT = re.compile(r'["\\\[\]{}]')
+# The prescan's state machine only ever transitions on a quote, a backslash, a
+# bracket, or a value-separating comma; every other character is inert. Both
+# patterns below let the C regex engine skip the inert bulk (a multi-MB manifest is
+# >90% inert) instead of paying one Python loop iteration per character. Commas are
+# scanned only for the node-count bound; a comma inside a string never counts (the
+# state machine is quote-aware).
+_QUOTE_OR_BRACKET = re.compile(r'["\[\]{},]')
+_ESCAPE_RELEVANT = re.compile(r'["\\\[\]{},]')
 
 # Reduce/scan in bounded slices so a nesting bomb is still refused after roughly
 # one chunk rather than after a full-payload reduction (the original per-character
@@ -94,28 +108,36 @@ def _bounded_read_bytes(handle: IO[bytes], max_bytes: int) -> bytes:
     return data
 
 
-def _prescan_depth(text: str, *, max_depth: int) -> None:
-    """Refuse over-nested JSON via a single-pass, string-aware bracket-depth scan.
+def _prescan_depth(text: str, *, max_depth: int, max_nodes: int = _MAX_JSON_NODES) -> None:
+    """Refuse over-nested OR over-populated JSON via a single-pass, string-aware scan.
 
     Zero recursion: a running bracket depth that never enters ``json``'s recursive
-    decoder. Quote/escape aware so brackets inside string literals do not count.
-    The scan bails as soon as the running depth exceeds the ceiling, so a nesting
-    bomb whose brackets are front-loaded is refused within the FIRST chunk rather
-    than after scanning the whole payload. Note the bail is not per-character:
-    ``findall`` first materializes the matches for the current
-    ``_PRESCAN_CHUNK_CHARS`` slice, so up to one chunk's quotes/brackets are
-    collected before the depth check can fire.
+    decoder. Quote/escape aware so brackets and commas inside string literals do
+    not count. The scan bails as soon as the running depth exceeds the depth
+    ceiling OR the running node count (container opens + value separators, an upper
+    bound on the number of Python objects the decoder would allocate) exceeds the
+    object-count ceiling, so a nesting bomb whose brackets are front-loaded and an
+    object-count bomb whose commas are front-loaded are both refused within the
+    FIRST chunk rather than after scanning the whole payload. Note the bail is not
+    per-character: ``findall`` first materializes the matches for the current
+    ``_PRESCAN_CHUNK_CHARS`` slice, so up to one chunk's structural characters are
+    collected before either check can fire.
 
     The scan is the same state machine as a naive per-character loop, but the
     inert characters are skipped by the regex engine. When the payload carries no
     backslash at all the escape branch is unreachable, so each chunk is reduced to
-    just its quotes/brackets before the Python loop runs; otherwise the scan walks
-    only the escape-relevant character positions (a backslash's effect on the very
-    next character is recovered from the match offsets).
+    just its structural characters before the Python loop runs; otherwise the scan
+    walks only the escape-relevant character positions (a backslash's effect on the
+    very next character is recovered from the match offsets).
     """
 
     depth = 0
+    nodes = 0
     in_string = False
+
+    def _too_many_nodes() -> json.JSONDecodeError:
+        return _refuse(f"manifest JSON node count exceeds the maximum of {max_nodes}", text)
+
     if "\\" not in text:
         for start in range(0, len(text) or 1, _PRESCAN_CHUNK_CHARS):
             for char in _QUOTE_OR_BRACKET.findall(text[start : start + _PRESCAN_CHUNK_CHARS]):
@@ -127,13 +149,21 @@ def _prescan_depth(text: str, *, max_depth: int) -> None:
                     in_string = True
                 elif char in _OPEN_BRACKETS:
                     depth += 1
+                    nodes += 1
                     if depth > max_depth:
                         raise _refuse(
                             f"manifest JSON nesting exceeds the maximum depth of {max_depth}",
                             text,
                         )
-                elif depth > 0:
-                    depth -= 1
+                    if nodes > max_nodes:
+                        raise _too_many_nodes()
+                elif char == ",":
+                    nodes += 1
+                    if nodes > max_nodes:
+                        raise _too_many_nodes()
+                elif char in _CLOSE_BRACKETS:
+                    if depth > 0:
+                        depth -= 1
         return
 
     # ``escaped_at`` is the absolute offset of the character a backslash escapes.
@@ -159,10 +189,17 @@ def _prescan_depth(text: str, *, max_depth: int) -> None:
             in_string = True
         elif char in _OPEN_BRACKETS:
             depth += 1
+            nodes += 1
             if depth > max_depth:
                 raise _refuse(
                     f"manifest JSON nesting exceeds the maximum depth of {max_depth}", text
                 )
+            if nodes > max_nodes:
+                raise _too_many_nodes()
+        elif char == ",":
+            nodes += 1
+            if nodes > max_nodes:
+                raise _too_many_nodes()
         elif char in _CLOSE_BRACKETS:
             if depth > 0:
                 depth -= 1
@@ -173,12 +210,13 @@ def loads_bounded(
     *,
     max_depth: int = _MAX_JSON_DEPTH,
     max_bytes: int = _MAX_JSON_BYTES,
+    max_nodes: int = _MAX_JSON_NODES,
 ) -> Any:
-    """Parse a JSON string after a byte-size ceiling and a depth prescan.
+    """Parse a JSON string after byte-size, depth, and object-count prescans.
 
-    Raises ``json.JSONDecodeError`` on an over-size or over-nested payload (so the
-    existing boundary handlers catch it), and re-raises a ``RecursionError`` from
-    the stdlib decoder as a ``json.JSONDecodeError`` belt.
+    Raises ``json.JSONDecodeError`` on an over-size, over-nested, or over-populated
+    payload (so the existing boundary handlers catch it), and re-raises a
+    ``RecursionError`` from the stdlib decoder as a ``json.JSONDecodeError`` belt.
     """
 
     # ``len(text.encode("utf-8"))`` allocates a full extra copy of the payload just
@@ -189,7 +227,7 @@ def loads_bounded(
     # multibyte inflation push the byte count over, so the encode runs only there.
     if len(text) > max_bytes or len(text.encode("utf-8")) > max_bytes:
         raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
-    _prescan_depth(text, max_depth=max_depth)
+    _prescan_depth(text, max_depth=max_depth, max_nodes=max_nodes)
 
     def _reject_constant(name: str) -> Any:
         """Refuse the non-finite JSON constant ``name`` at parse time.
@@ -214,8 +252,9 @@ def load_bounded(
     *,
     max_depth: int = _MAX_JSON_DEPTH,
     max_bytes: int = _MAX_JSON_BYTES,
+    max_nodes: int = _MAX_JSON_NODES,
 ) -> Any:
-    """Read a JSON object from a text handle with a bounded size and nesting depth.
+    """Read a JSON object from a text handle with bounded size, nesting, and count.
 
     Reads at most ``max_bytes + 1`` bytes so an oversize file is rejected without
     being fully loaded into memory, then delegates to :func:`loads_bounded`.
@@ -235,7 +274,7 @@ def load_bounded(
         text = handle.read((size + 1) if size is not None else (max_bytes + 1))
         if len(text.encode("utf-8")) > max_bytes:
             raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
-    return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes)
+    return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes, max_nodes=max_nodes)
 
 
 def read_bounded(
@@ -244,6 +283,7 @@ def read_bounded(
     encoding: str = "utf-8",
     max_depth: int = _MAX_JSON_DEPTH,
     max_bytes: int = _MAX_JSON_BYTES,
+    max_nodes: int = _MAX_JSON_NODES,
 ) -> Any:
     """Read and parse a JSON file without ever allocating the whole file first.
 
@@ -278,7 +318,9 @@ def read_bounded(
 
     with path.open("rb") as handle:
         data = _bounded_read_bytes(handle, max_bytes)
-    return loads_bounded(data.decode(encoding), max_depth=max_depth, max_bytes=max_bytes)
+    return loads_bounded(
+        data.decode(encoding), max_depth=max_depth, max_bytes=max_bytes, max_nodes=max_nodes
+    )
 
 
 def read_bytes_bounded(path: Path, *, max_bytes: int = _MAX_JSON_BYTES) -> bytes:

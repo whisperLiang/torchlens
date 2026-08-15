@@ -80,3 +80,45 @@ def test_oversize_index_refuses_typed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(recover_module, "_INDEX_MAX_BYTES", 1024)
     with pytest.raises(TorchLensIOError, match="index"):
         tl.fastlog.recover(bundle)
+
+
+def _write_blob(path: Path):
+    """Write a single-tensor safetensors blob and return (path, sha256)."""
+
+    import torch
+    from safetensors.torch import save_file
+
+    from torchlens._io.manifest import sha256_of_file
+
+    save_file({"payload": torch.arange(8, dtype=torch.float32)}, str(path))
+    return path, sha256_of_file(path)
+
+
+def test_blob_verify_never_reads_whole_file_before_digest(tmp_path, monkeypatch) -> None:
+    """R60/reopened HIGH: the blob digest is a chunked stream, never a full read.
+
+    ``_load_verified_blob_tensor`` previously did ``blob_path.read_bytes()`` --
+    fully materializing an attacker-controlled blob BEFORE the digest check. It
+    now hashes via the chunked ``sha256_of_file`` and materializes through the
+    mmap-backed safetensors loader, so ``Path.read_bytes`` is never called. Ban it
+    and prove a valid blob still verifies + loads.
+    """
+
+    import torch
+
+    blob_path, digest = _write_blob(tmp_path / "blob.safetensors")
+
+    def _banned(self, *args, **kwargs):
+        raise AssertionError("blob verification must not read the whole file at once")
+
+    monkeypatch.setattr(Path, "read_bytes", _banned)
+    tensor = recover_module._load_verified_blob_tensor(blob_path, digest)
+    assert torch.equal(tensor, torch.arange(8, dtype=torch.float32))
+
+
+def test_blob_hash_mismatch_refuses_typed(tmp_path) -> None:
+    """A tampered blob (digest mismatch) still refuses typed."""
+
+    blob_path, _digest = _write_blob(tmp_path / "blob.safetensors")
+    with pytest.raises(TorchLensIOError, match="Checksum mismatch"):
+        recover_module._load_verified_blob_tensor(blob_path, "0" * 64)

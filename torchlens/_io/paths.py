@@ -17,6 +17,7 @@ def reject_symlink_path(
     exc_type: ExceptionType = TorchLensIOError,
     message_prefix: str = "Refusing symlinked",
     trailing_period: bool = True,
+    code: str | None = None,
 ) -> None:
     """Reject symlink paths with a caller-chosen exception policy.
 
@@ -32,6 +33,10 @@ def reject_symlink_path(
         Prefix text used before the contextual path description.
     trailing_period:
         Whether to end the message with ``"."``.
+    code:
+        Optional stable ``fields["code"]`` for callers that branch on the cause
+        (R65). Attached only when ``exc_type`` is a ``TorchLensError`` subclass,
+        which accepts structured payload; ignored for foreign exception types.
 
     Returns
     -------
@@ -46,7 +51,12 @@ def reject_symlink_path(
 
     if path.is_symlink():
         suffix = "." if trailing_period else ""
-        raise exc_type(f"{message_prefix} {context}: {path}{suffix}")
+        message = f"{message_prefix} {context}: {path}{suffix}"
+        from ..errors._base import TorchLensError
+
+        if code is not None and isinstance(exc_type, type) and issubclass(exc_type, TorchLensError):
+            raise exc_type(message, code=code)
+        raise exc_type(message)
 
 
 def resolve_bundle_blobs_dir(bundle_root: Path) -> Path:

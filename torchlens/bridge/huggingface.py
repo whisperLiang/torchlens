@@ -138,39 +138,33 @@ def _artifact_bytes(
     Returns
     -------
     tuple[bytes, str]
-        The serialized bytes and a format tag. The tag is ``"pickle"`` when the
-        object pickles directly. When direct pickling fails (for example a
-        ``Trace``/``Bundle`` retaining live ``grad_fn`` references, which is the
-        default for any backward-eligible capture), this scrubs the artifact
-        through the same real ``.tlspec`` portable bundle path used by
-        :func:`torchlens.save`/``Bundle.save`` -- i.e. the grad_fn/live-callable
-        scrub is real, not a metadata stand-in -- and returns the resulting bundle
-        directory packed as a gzipped tar archive with the tag ``"tar.gz"``. This
-        never silently substitutes a metadata-only stub for genuine artifact
-        content.
+        The serialized bytes and a format tag. A ``Trace``/``Bundle`` -- which
+        raw ``pickle.dumps`` would embed ``$HOME``, the username, and absolute
+        source/bundle/visualizer paths into (R62-1: a privacy leak to the one
+        PUBLIC sharing surface) -- is ALWAYS serialized through the same real,
+        privacy-scrubbed ``.tlspec`` portable bundle path used by
+        :func:`torchlens.save`/``Bundle.save`` and returned as a gzipped tar
+        archive with the tag ``"tar.gz"``. The scrub is real, not a metadata
+        stand-in. Only an object with NO portable-bundle save path (e.g. a plain
+        dict of user data the caller chose to push) is pickled directly and
+        tagged ``"pickle"``.
 
     Raises
     ------
     TorchLensIOError
-        If the artifact cannot be serialized at all (direct pickling fails
-        and no portable-bundle path applies, or the portable-bundle path
-        itself fails).
+        If the artifact cannot be serialized at all (the portable-bundle path
+        itself fails, or a no-bundle object fails to pickle).
     """
 
-    try:
-        return pickle.dumps(log_or_bundle_or_spec), "pickle"
-    except Exception as direct_pickle_error:
-        from .._io import TorchLensIOError
+    from .._io import TorchLensIOError
 
-        saver = _resolve_bundle_saver(log_or_bundle_or_spec)
-        if saver is None:
-            raise TorchLensIOError(
-                "push_to_hub could not serialize this "
-                f"{type(log_or_bundle_or_spec).__name__} artifact for upload "
-                f"({direct_pickle_error!r}) and it has no portable `.tlspec` bundle "
-                "save path to fall back to. Refusing to silently upload a metadata-only "
-                "stub instead of the real artifact."
-            ) from direct_pickle_error
+    # Privacy-first (R62-1): any artifact with a portable-bundle save path
+    # (Trace/Bundle) is serialized through the SCRUBBED bundle path, never raw
+    # ``pickle.dumps`` -- raw pickle leaks $HOME, the username, and absolute
+    # source paths to a public hub. Raw pickle is reserved for objects that have
+    # no bundle save path and thus carry no scrubbable TorchLens internals.
+    saver = _resolve_bundle_saver(log_or_bundle_or_spec)
+    if saver is not None:
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 bundle_dir = Path(tmpdir) / "bundle"
@@ -182,11 +176,22 @@ def _artifact_bytes(
         except Exception as bundle_error:
             raise TorchLensIOError(
                 "push_to_hub could not serialize this "
-                f"{type(log_or_bundle_or_spec).__name__} artifact for upload: direct "
-                f"pickling failed ({direct_pickle_error!r}) and the portable `.tlspec` "
-                f"bundle path also failed ({bundle_error!r}). Refusing to silently "
-                "upload a metadata-only stub instead of the real artifact."
+                f"{type(log_or_bundle_or_spec).__name__} artifact for upload through "
+                f"the privacy-scrubbed portable `.tlspec` bundle path ({bundle_error!r}). "
+                "Refusing to fall back to raw pickle (which would leak local paths) or "
+                "to silently upload a metadata-only stub instead of the real artifact."
             ) from bundle_error
+
+    try:
+        return pickle.dumps(log_or_bundle_or_spec), "pickle"
+    except Exception as direct_pickle_error:
+        raise TorchLensIOError(
+            "push_to_hub could not serialize this "
+            f"{type(log_or_bundle_or_spec).__name__} artifact for upload "
+            f"({direct_pickle_error!r}) and it has no portable `.tlspec` bundle "
+            "save path to fall back to. Refusing to silently upload a metadata-only "
+            "stub instead of the real artifact."
+        ) from direct_pickle_error
 
 
 def _resolve_bundle_saver(log_or_bundle_or_spec: Any) -> Any | None:

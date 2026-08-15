@@ -129,6 +129,31 @@ def test_fork_chain_owners_all_counted() -> None:
 
 
 @pytest.mark.smoke
+def test_loaded_trace_fork_death_does_not_evict_parent_payloads(tmp_path) -> None:
+    """R37-1: a loaded trace's core must register as a payload owner.
+
+    A loaded (rehydrated) trace's core seals its op store but historically never
+    called ``adopt_payload_owner``, so its owner count stayed 0. Forking it (the
+    fork DOES adopt: 0 -> 1) and then dropping the fork drove the count back to 0
+    and evicted the SEALED base -- silently NULLing the LIVE loaded parent's
+    saved activations. The fork's death must leave the loaded parent unharmed.
+    """
+
+    art = tmp_path / "payloads.tlspec"
+    tl.save(_capture(), art)
+    loaded = tl.load(art)
+    refs = _payload_refs(loaded)
+    assert len(refs) >= 2, "loaded trace should carry rehydrated tensor payloads"
+    fork = loaded.fork()
+    del fork
+    gc.collect()
+    gc.collect()
+    dead = sorted(label for label, ref in refs.items() if ref() is None)
+    assert not dead, f"fork GC evicted a LIVE loaded parent's payloads: {dead}"
+    assert isinstance(loaded["relu_1_2"].ops[0].out, torch.Tensor)
+
+
+@pytest.mark.smoke
 def test_no_handles_no_leak() -> None:
     """Guard: with no retained handles at all, everything collects."""
 

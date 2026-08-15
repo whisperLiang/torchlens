@@ -333,6 +333,17 @@ class BundleStreamWriter:
             self.abort(reason)
             raise TorchLensIOError(reason) from exc
 
+        # Re-check target absence at finalize, not just at __init__ (R59 TOCTOU):
+        # a streaming writer never overwrites, but a concurrent writer could have
+        # created ``final_path`` after the start-of-stream check. A bare rename
+        # would then replace an empty concurrent target or surface a confusing
+        # ENOTEMPTY; refuse it cleanly instead. (The narrow residual window
+        # between this check and the rename cannot be closed without an atomic
+        # exclusive-directory create, matching the other writers.)
+        if self.final_path.exists():
+            reason = f"Bundle path already exists: {self.final_path}"
+            self.abort(reason)
+            raise TorchLensIOError(reason)
         try:
             self.tmp_path.rename(self.final_path)
         except OSError as exc:

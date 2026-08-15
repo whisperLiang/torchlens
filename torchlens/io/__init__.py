@@ -110,7 +110,12 @@ def _reject_symlinked_metadata_path(path: Path) -> None:
     """
 
     if path.is_symlink():
-        raise TorchLensIOError(f"Refusing symlinked .tlspec format-detection path: {path}.")
+        # Same front-door cause as the bundle loader's symlink guards, so it
+        # carries the same stable code a caller branches on (R65).
+        raise TorchLensIOError(
+            f"Refusing symlinked .tlspec format-detection path: {path}.",
+            code="load_path_symlink_rejected",
+        )
 
 
 def _read_json_object_if_present(path: Path) -> dict[str, Any] | None:
