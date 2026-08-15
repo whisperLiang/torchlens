@@ -318,26 +318,47 @@ def _resolve_root(bound: dict[str, Any], group: Any, src_or_dst: str) -> int | N
     return None
 
 
-def _c10d_group_seq(group: Any) -> int | None:
-    """Best-effort read of c10d's private per-group sequence number.
+def _c10d_group_seq(group: Any) -> tuple[int | None, str | None]:
+    """Read c10d's private per-group sequence number, or disclose why not.
 
     Routed through ``_torch_compat`` (``HAS_C10D_GROUP_SEQ``, r-b4 R26-2
     shape): a private-API rename used to silently and permanently disable
     this redundant correlation cross-check -- the only in-band detector in
     the base-misalignment neighborhood -- with zero visibility in
     ``doctor()`` / ``compat.report()``.
+
+    Returns
+    -------
+    tuple[int | None, str | None]
+        ``(seq, disclosure)``. A getter that RAISES while the probed flag
+        claims the capability present used to swallow to a bare ``None`` --
+        indistinguishable downstream from honest capability absence, so the
+        only in-band base-misalignment cross-check vanished with zero
+        visibility. It now demotes the capability through the standard
+        degradation channel (visible in ``doctor()`` / ``compat.report()``)
+        and returns the ``"c10d_group_seq_read_failed"`` disclosure token for
+        the boundary record where the witness vanished.
     """
 
-    from torchlens.utils._torch_compat import probe_c10d_capabilities
+    from torchlens.utils._torch_compat import (
+        mark_torch_capability_missing,
+        probe_c10d_capabilities,
+    )
 
     if not probe_c10d_capabilities()["HAS_C10D_GROUP_SEQ"]:
-        return None
+        return None, None
     dist = torch.distributed
     try:
         target: Any = group if group is not None else dist.group.WORLD
-        return int(target._get_sequence_number_for_group())
-    except Exception:
-        return None
+        return int(target._get_sequence_number_for_group()), None
+    except Exception as exc:
+        mark_torch_capability_missing(
+            "HAS_C10D_GROUP_SEQ",
+            "the probed _get_sequence_number_for_group getter raised at read "
+            f"time ({type(exc).__name__}: {exc}); collective boundary records "
+            "omit the redundant c10d_group_seq cross-check field from here on",
+        )
+        return None, "c10d_group_seq_read_failed"
 
 
 def _build_payload(
@@ -403,6 +424,10 @@ def _build_payload(
 
     reduce_op = bound.get("op") if site.has_reduce_op else None
 
+    group_seq, group_seq_disclosure = _c10d_group_seq(group)
+    if group_seq_disclosure is not None:
+        disclosures.append(group_seq_disclosure)
+
     return {
         "schema": BOUNDARY_SCHEMA,
         "kind": site.kind,
@@ -434,7 +459,7 @@ def _build_payload(
             "install_epoch": arming.install_epoch,
             "arming_source": arming.source,
         },
-        "c10d_group_seq": _c10d_group_seq(group),
+        "c10d_group_seq": group_seq,
         "disclosures": disclosures,
         "op_node": not site.tensorless,
     }

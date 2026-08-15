@@ -488,7 +488,7 @@ class TestC10dGroupSeqCompatRouting:
                 Recording.called = True
                 return 41
 
-        assert collectives._c10d_group_seq(Recording()) is None
+        assert collectives._c10d_group_seq(Recording()) == (None, None)
         assert Recording.called is False
 
     def test_present_capability_reads_the_private_counter(self, monkeypatch):
@@ -501,7 +501,87 @@ class TestC10dGroupSeqCompatRouting:
             def _get_sequence_number_for_group(self):
                 return 41
 
-        assert collectives._c10d_group_seq(Fake()) == 41
+        assert collectives._c10d_group_seq(Fake()) == (41, None)
+
+    def test_getter_raise_demotes_capability_and_discloses(self, monkeypatch):
+        """b7-sol-R22-1: a raising getter must not silently vanish the witness.
+
+        Fail-before: with ``HAS_C10D_GROUP_SEQ`` probed True, every getter
+        exception was swallowed to a bare ``None`` while the flag stayed True
+        -- the only in-band base-misalignment cross-check silently vanished,
+        invisible to ``doctor()`` / ``compat.report()`` and indistinguishable
+        on the boundary record from honest capability absence.
+        """
+
+        import warnings as warnings_module
+
+        from torchlens.backends.torch import collectives
+        from torchlens.utils import _torch_compat as tc
+
+        monkeypatch.setattr(tc, "HAS_C10D_GROUP_SEQ", True)
+        monkeypatch.setattr(tc, "_C10D_GROUP_SEQ_PROBED", True)
+        monkeypatch.setattr(tc, "_warned_missing_capabilities", set())
+
+        class Raising:
+            def _get_sequence_number_for_group(self):
+                raise RuntimeError("private API drifted at read time")
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            value, disclosure = collectives._c10d_group_seq(Raising())
+        assert value is None
+        assert disclosure == "c10d_group_seq_read_failed"
+        # The degradation is now VISIBLE: the capability flag flipped through
+        # the standard channel, so doctor()/compat.report() report it.
+        assert tc.HAS_C10D_GROUP_SEQ is False
+        assert tc.probe_c10d_capabilities()["HAS_C10D_GROUP_SEQ"] is False
+        assert any(
+            issubclass(item.category, tc.TorchCapabilityWarning)
+            and "raised at read time" in str(item.message)
+            for item in caught
+        )
+
+    def test_payload_carries_the_read_failure_disclosure(self, monkeypatch):
+        """The boundary record where the witness vanished names the failure."""
+
+        from torchlens.backends.torch import collectives
+
+        monkeypatch.setattr(
+            collectives,
+            "_c10d_group_seq",
+            lambda group: (None, "c10d_group_seq_read_failed"),
+        )
+        site = next(s for s in collectives.COLLECTIVE_SITES if s.attr == "barrier")
+
+        class Identity:
+            membership_digest = "d" * 64
+            lifetime_ordinal = 0
+            ordinal_source = "wrapped"
+            global_ranks = (0,)
+            backend = "gloo"
+
+        class Arming:
+            install_epoch = "armed_before_any_group"
+            source = "explicit"
+
+        monkeypatch.setattr(torch.distributed, "get_rank", lambda *a, **k: 0, raising=False)
+        payload = collectives._build_payload(
+            site,
+            {},
+            Identity(),
+            "coll",
+            0,
+            Arming(),
+            None,
+            [],
+            [],
+            None,
+            False,
+            "none",
+            None,
+        )
+        assert payload["c10d_group_seq"] is None
+        assert "c10d_group_seq_read_failed" in payload["disclosures"]
 
 
 class TestBrokenArmPoisoning:
