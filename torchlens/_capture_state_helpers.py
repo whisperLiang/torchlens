@@ -1491,6 +1491,12 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
 
     with _state.pause_logging():
         cpu = to_cpu_contiguous(tensor)
+        # Frame the LOGICAL dtype captured BEFORE the numpy-transport
+        # bf16->float32 upcast (b5-opus-R35-1 twin; same rule as the op.py
+        # dedup digest): framing the post-upcast dtype made a bfloat16 input
+        # hash identically to the float32 tensor of the same values, so a
+        # dtype change was a capture-cache HIT serving the wrong trace.
+        logical_dtype = str(cpu.dtype)
         if cpu.dtype is torch.bfloat16:
             cpu = cpu.to(torch.float32)
         payload = cpu.numpy().tobytes()
@@ -1499,7 +1505,7 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
         repr(
             (
                 tuple(cpu.shape),
-                str(cpu.dtype),
+                logical_dtype,
                 str(tensor.device),
                 bool(tensor.requires_grad),
             )

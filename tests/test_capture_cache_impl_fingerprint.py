@@ -363,3 +363,22 @@ def test_sibling_package_forward_is_not_torchlens_instrumentation() -> None:
 
     interior = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "/wrapped.py")
     assert _is_torchlens_instrumentation(interior) is True
+
+
+def test_hash_tensor_content_frames_logical_dtype_before_bf16_upcast() -> None:
+    """A bf16 tensor and its float32 twin must not collide in the cache key.
+
+    grind-p5 3.16 reopen (b5-opus-R35-1 twin): the metadata tuple framed
+    ``cpu.dtype`` AFTER the numpy-transport bf16->float32 upcast, so a
+    bfloat16 input hashed identically to the float32 tensor of the same
+    values -- a capture-cache HIT across a dtype change served a trace whose
+    ``dtype_ref`` and grad metadata belong to the other capture (shipped
+    wrong-trace bug; the op.py dedup half was fixed this wave, this is the
+    unswept sibling).
+    """
+
+    from torchlens._capture_state_helpers import _hash_tensor_content
+
+    bf16 = torch.ones(4, dtype=torch.bfloat16)
+    fp32 = bf16.to(torch.float32)
+    assert _hash_tensor_content(bf16) != _hash_tensor_content(fp32)
