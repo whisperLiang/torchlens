@@ -33,6 +33,29 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _HAS_RANDOMLY = importlib.util.find_spec("pytest_randomly") is not None
 
+#: An importable full-[test]-extra sentinel (same idiom as the skip audit's
+#: FULL_TEST_EXTRA_SENTINEL): when the environment CLAIMS the full test extra,
+#: a missing pytest-randomly is INSTALL BREAKAGE, not a legitimate partial
+#: environment -- the live guards must then FAIL, never skip (3.16 reopened
+#: row: the declaration landed but every guard skipped everywhere, so the
+#: gate layer stayed unarmed even on full installs).
+_CLAIMS_FULL_TEST_EXTRA = importlib.util.find_spec("timm") is not None
+
+
+def _require_randomly_or_skip() -> None:
+    """Skip on genuine partial environments; FAIL on full-extra installs."""
+
+    if _HAS_RANDOMLY:
+        return
+    if _CLAIMS_FULL_TEST_EXTRA:
+        pytest.fail(
+            "this environment carries the full [test] extra (sentinel import "
+            "succeeded) but pytest-randomly is missing: the order-isolation "
+            "gate layer is silently unarmed on an environment that promised "
+            "it (R76 reopened, 3.16 #4). Reinstall the [test] extra."
+        )
+    pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+
 
 def _test_extra_deps(pyproject_text: str) -> list[str]:
     """Extract the [test] extra's dependency strings from pyproject source.
@@ -88,8 +111,7 @@ def test_pytest_randomly_declared_in_test_extra() -> None:
 def test_randomly_plugin_registration_matches_invocation(request: pytest.FixtureRequest) -> None:
     """When installed, the plugin must be live unless explicitly disabled."""
 
-    if not _HAS_RANDOMLY:
-        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+    _require_randomly_or_skip()
     disabled = any(
         arg == "no:randomly" for arg in request.config.invocation_params.args
     ) or "no:randomly" in getattr(request.config.option, "plugins", [])
@@ -145,8 +167,7 @@ def test_no_randomly_flag_actually_disables_shuffling() -> None:
     if shuffling itself is broken the seeded run matches definition order.
     """
 
-    if not _HAS_RANDOMLY:
-        pytest.skip("pytest-randomly not installed (partial environment); declaration guard ran")
+    _require_randomly_or_skip()
     # A blocked plugin contributes no CLI options, so the disabled runs carry
     # no seed flag: were the flag a no-op (plugin still live), each run would
     # draw a fresh time-based seed and the two orders would diverge.
