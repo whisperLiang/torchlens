@@ -562,8 +562,7 @@ def unwrap_compiled_submodules(model: nn.Module) -> Iterator[None]:
                 parent._modules[child_name] = orig_mod
                 traversal_queue.append(orig_mod)
     except BaseException:
-        for swap in reversed(swaps):
-            swap.parent._modules[swap.name] = swap.compiled_module
+        _restore_submodule_swaps(swaps)
         raise
 
     try:
@@ -571,8 +570,28 @@ def unwrap_compiled_submodules(model: nn.Module) -> Iterator[None]:
             _warn_compiled_model_unwrapped_once()
         yield
     finally:
-        for swap in reversed(swaps):
+        _restore_submodule_swaps(swaps)
+
+
+def _restore_submodule_swaps(swaps: list[_CompiledSubmoduleSwap]) -> None:
+    """Put every unwrapped compiled child back, fencing each swap independently.
+
+    Sibling of ``_restore_callable_swaps`` (the fixed 6896e8a9 unwind cluster):
+    a raising ``_modules`` item-set in the reversed restore loop used to skip
+    every REMAINING swap, stranding those children in their eager form for the
+    life of the process. Each restore is fenced; the first failure re-raises
+    once the whole unwind is complete.
+    """
+
+    first_error: BaseException | None = None
+    for swap in reversed(swaps):
+        try:
             swap.parent._modules[swap.name] = swap.compiled_module
+        except BaseException as error:  # noqa: PERF203 - per-item fence is the point
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 def _is_identity_stable_plain_attr(value: Any) -> bool:
