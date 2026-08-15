@@ -2022,7 +2022,14 @@ def test_child_condensed_flow_graph_mobilenet_v2_features_exact_chain() -> None:
     [
         ("resnet50", lambda: tvm.resnet50(weights=None), torch.randn(1, 3, 224, 224)),
         ("vit_b_16", lambda: tvm.vit_b_16(weights=None), torch.randn(1, 3, 224, 224)),
-        ("swin_s", lambda: tvm.swin_s(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): swin_s plan/SVG parity measures
+        # far beyond heavy's 20s ceiling.
+        pytest.param(
+            "swin_s",
+            lambda: tvm.swin_s(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
         ("mobilenet_v2", lambda: tvm.mobilenet_v2(weights=None), torch.randn(1, 3, 224, 224)),
         (
             "deeplabv3_resnet50",
@@ -2403,6 +2410,9 @@ def test_auto_collapse_fold_repeats_true_splits_run_around_odd_hidden_member() -
         trace.cleanup()
 
 
+# slow (r3settle2 budget lint): 24-stage uneven-depth trace + fold-plan
+# derivation measures >30s.
+@pytest.mark.slow
 def test_auto_collapse_run_fold_keeps_different_depth_stages_separate(tmp_path: Path) -> None:
     """Repeat-fold does not merge same-class sibling stages with different depths."""
 

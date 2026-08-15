@@ -261,7 +261,9 @@ def assert_artifact_current(path: Path, payload: str) -> None:
     )
 
 
-@pytest.mark.smoke
+# heavy, not smoke (r3settle2 budget lint): the full static re-scan of
+# both AST ledgers measures ~9-10s, inside heavy's 5-20s band.
+@pytest.mark.heavy
 def test_static_ledger_artifacts_are_current() -> None:
     """Commit-tier half: the AST-only ledger artifacts match their tracked state.
 
