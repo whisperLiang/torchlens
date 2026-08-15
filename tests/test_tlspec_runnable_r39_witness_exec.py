@@ -781,6 +781,13 @@ class _NoEscapePure(nn.Module):
         return self.lin(x).relu()
 
 
+# heavy (fixwave-3 budget lint): 0.2-0.8s per cell in isolation, but the
+# host-nondeterminism monitor's frame-reachable deep inventory walks whatever
+# session state has accumulated by the time these run — measured up to 8.5s
+# CPU for one cell late in a shuffled composition (30x its isolated cost).
+# The composition-scaling itself is relayed to the rng/monitor lane as a perf
+# observation; the tier reflects the measured worst case, per the partition.
+@pytest.mark.heavy
 @pytest.mark.parametrize(
     "factory,capture_x,run_x",
     [

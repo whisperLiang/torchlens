@@ -64,7 +64,7 @@ Markers are additive: a test carrying `smoke` together with `heavy`/`slow`/`seri
 still runs under `-m smoke`, so those combinations are forbidden — drop `smoke` instead
 (a per-parametrize-cell `slow` refinement of a `heavy` family is the one sanctioned combo).
 `tests/test_marker_lint.py` enforces the partition and the runtime tripwire: smoke/unmarked
-tests budget 5s and heavy 20s (load-scaled 1x-4x, charged on min(wall, cpu)), checked at
+tests budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s boundary-noise grace, charged on min(wall, cpu)), checked at
 the end of every session.
 
 ## Fixtures

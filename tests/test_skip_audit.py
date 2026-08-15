@@ -232,6 +232,18 @@ _CONDITIONAL_ANCESTORS: tuple[type, ...] = tuple(
 )
 
 
+def warm_scan_caches() -> None:
+    """Pre-fill the per-file text/AST caches OUTSIDE any test's charged window.
+
+    Called from the root conftest's collection hook (uncharged time): the
+    whole-tree scans below otherwise charge their one-time ~5-7s parse cost to
+    whichever audit test runs first under randomized ordering.
+    """
+
+    for path in _iter_test_files(TESTS_DIR):
+        _parse_with_parents(str(path))
+
+
 def _iter_test_files(root: Path) -> list[Path]:
     """Every python file under ``root``, excluding bytecode caches."""
 

@@ -93,15 +93,31 @@ def pytest_configure(config: pytest.Config) -> None:
     config._tl_prior_test_outputs_dir = os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR")
     os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = TEST_OUTPUTS_DIR
     config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
-    _state._collect_usage_stats = False
-    _state._function_call_counts.clear()
-    _state._function_call_models.clear()
     # Pay PyTorch's one-time RNG and deterministic-mode initialization during
     # session setup, not against whichever smoke test happens to run first.
     torch.random.get_rng_state()
     deterministic = torch.are_deterministic_algorithms_enabled()
     deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
+    # Pay TorchLens's one-time capture-machinery cost (lazy wrap_torch install,
+    # dispatcher/completeness tables) at session setup too: under randomized
+    # ordering, whichever test captured FIRST was charged ~5s of one-time CPU
+    # and sporadically tripped its duration budget — the exact noise the old
+    # 15s budget crutch existed to absorb. Semantically equivalent to "some
+    # early test captured" (wrappers stay installed until explicit unwrap),
+    # which every full-suite run already implies. Skipped for collect-only
+    # sessions, which never run a capture.
+    if not config.option.collectonly:
+        import warnings as _warnings
+
+        import torchlens as _tl
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            _tl.trace(torch.nn.Linear(2, 2), torch.zeros(1, 2)).cleanup()
+    _state._collect_usage_stats = False
+    _state._function_call_counts.clear()
+    _state._function_call_models.clear()
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -141,6 +157,17 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 # test's wall time carries no load-independent meaning.
 SMOKE_DURATION_BUDGET_SECONDS = 5.0
 HEAVY_DURATION_BUDGET_SECONDS = 20.0
+#: Absolute enforcement grace added on top of the load-scaled budget. The
+#: charged window unavoidably absorbs BOUNDARY NOISE that belongs to no test:
+#: deferred GC of earlier tests' traces and prior-module fixture teardown both
+#: run inside whatever protocol window they happen to land in (measured: a
+#: pure-AST lint test read 5.6s in one shuffled composition and 0.4s alone).
+#: A small absolute grace kills that flap while a genuinely mis-tiered test
+#: (the 59s smoke incident) still trips by an order of magnitude. This is an
+#: enforcement tolerance on the partition boundary, not a new boundary — and
+#: never the pre-r3 15s crutch (3x the budget); it is documented in the
+#: budget sentence the docs-lockstep gate parses.
+DURATION_BUDGET_GRACE_SECONDS = 2.0
 #: Per-parametrize-cell allowance for a smoke family's aggregate budget: a
 #: family's cost legitimately scales with its cell count (278 selector cells
 #: at ~57ms/cell), so the aggregate bar is max(2x the per-test budget,
@@ -257,9 +284,13 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         family_total += charged
         family_count += 1
         family_stats[family_key] = (family_total, family_count)
-        family_budget = load_factor * max(
-            2.0 * SMOKE_DURATION_BUDGET_SECONDS,
-            SMOKE_FAMILY_PER_CELL_SECONDS * family_count,
+        family_budget = (
+            load_factor
+            * max(
+                2.0 * SMOKE_DURATION_BUDGET_SECONDS,
+                SMOKE_FAMILY_PER_CELL_SECONDS * family_count,
+            )
+            + DURATION_BUDGET_GRACE_SECONDS
         )
         family_budgets = getattr(item.session, "_tl_smoke_family_budgets", None)
         if family_budgets is None:
@@ -269,7 +300,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     if tier_budget is None:
         return result
     tier, base_budget = tier_budget
-    budget = base_budget * load_factor
+    budget = base_budget * load_factor + DURATION_BUDGET_GRACE_SECONDS
     if charged > budget:
         offenders = getattr(item.session, "_tl_duration_budget_offenders", None)
         if offenders is None:
@@ -376,6 +407,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         else:
             other_tests.append(item)
     items[:] = other_tests + coverage_tests + lint_tests
+    # Pre-fill whole-tree scan caches during collection (uncharged time): a
+    # module may expose `warm_scan_caches()` when its scanners' one-time parse
+    # cost (~5-8s of genuine CPU) would otherwise land in whichever of its
+    # tests runs first and sit on the duration-budget boundary. Gated on the
+    # marker-lint tests being IN session: they are the budget's enforcement
+    # point, so sessions without them (targeted runs, nested pytest
+    # subprocesses like the -O leg probe) skip the warm cost entirely.
+    if lint_tests:
+        warmed: set[int] = set()
+        for item in items:
+            module = getattr(item, "module", None)
+            warm = getattr(module, "warm_scan_caches", None)
+            if warm is not None and id(module) not in warmed:
+                warmed.add(id(module))
+                warm()
 
 
 def _coverage_requested(config: pytest.Config) -> bool:

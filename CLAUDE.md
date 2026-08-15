@@ -592,8 +592,8 @@ the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke`
 must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
 `tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow`/`serial`/`rare`
 fails (markers are additive — the test would still run under `-m smoke`), and the runtime
-tripwire holds smoke/unmarked tests to budget 5s and heavy 20s (load-scaled 1x-4x, charged
-on min(wall, cpu)) — an offender fails the session it ran in. `pytest -n auto` requires the
+tripwire holds smoke/unmarked tests to budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s
+boundary-noise grace, charged on min(wall, cpu)) — an offender fails the session it ran in. `pytest -n auto` requires the
 optional `pytest-xdist` plugin, which is not installed by TorchLens's declared test extra.
 When xdist is installed separately, measure before relying on it: torch intra-op threads can
 oversubscribe workers, and fixture/import setup may dominate.

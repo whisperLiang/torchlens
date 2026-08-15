@@ -28,6 +28,7 @@ smoke/full-tier run and pass vacuously when this file is run alone.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,50 @@ def test_smoke_module_imports_stay_within_duration_budget(
     )
 
 
+def warm_scan_caches() -> None:
+    """Pre-fill the whole-tree parse caches OUTSIDE any test's charged window.
+
+    Called from the root conftest's collection hook when this module's tests
+    are collected: the tests/-tree and torchlens/-package parses cost ~5-8s
+    of genuine CPU, which would otherwise land in whichever lint test runs
+    first and sit exactly on the smoke budget boundary.
+    """
+
+    _parsed_test_trees()
+    _warn_once_declarations(Path(__file__).resolve().parents[1] / "torchlens")
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_test_trees() -> tuple[tuple[str, ast.Module], ...]:
+    """Parse every test-suite Python file ONCE per session.
+
+    The static lints below each used to re-parse the whole tree (~1300 files),
+    costing ~5s PER TEST and sitting exactly on the smoke budget boundary
+    under composition noise; one shared parse keeps each lint at ~0.1s.
+    """
+
+    tests_root = Path(__file__).resolve().parent
+    return tuple(
+        (
+            str(path.relative_to(tests_root)),
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)),
+        )
+        for path in sorted(tests_root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_root_test_trees() -> tuple[tuple[str, ast.Module], ...]:
+    """Root-level ``test*.py`` subset of :func:`_parsed_test_trees`."""
+
+    return tuple(
+        (relative, tree)
+        for relative, tree in _parsed_test_trees()
+        if "/" not in relative and relative.startswith("test")
+    )
+
+
 def _assigned_module_names(statement: ast.stmt) -> set[str]:
     """Return module names assigned by one top-level statement.
 
@@ -270,6 +315,7 @@ def _assigned_module_names(statement: ast.stmt) -> set[str]:
     return {target.id for target in targets if isinstance(target, ast.Name)}
 
 
+@functools.lru_cache(maxsize=1)
 def _warn_once_declarations(package_root: Path) -> set[tuple[str, str]]:
     """Collect warn-once module-global declarations from TorchLens sources.
 
@@ -397,9 +443,9 @@ def _module_trace_fixtures_without_yield(tests_root: Path) -> list[str]:
         Stable ``path::fixture`` violations.
     """
 
+    del tests_root
     violations: list[str] = []
-    for path in tests_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative, tree in _parsed_test_trees():
         functions = (
             node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
@@ -410,7 +456,7 @@ def _module_trace_fixtures_without_yield(tests_root: Path) -> list[str]:
                 continue
             if any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(function)):
                 continue
-            violations.append(f"{path.relative_to(tests_root)}::{function.name}")
+            violations.append(f"{relative}::{function.name}")
     return violations
 
 
@@ -452,13 +498,11 @@ def test_root_conftest_does_not_inject_repo_into_sys_path() -> None:
 def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     """Root tests must consume shared state without bare ``conftest`` imports."""
 
-    tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
-    for path in tests_root.glob("test*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative, tree in _parsed_root_test_trees():
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "conftest":
-                violations.append(f"{path.name}:{node.lineno}")
+                violations.append(f"{relative}:{node.lineno}")
     assert not violations, (
         "Root tests import the ambiguous bare `conftest` module; use the session output "
         f"environment or a real helper module instead: {violations}"
@@ -476,10 +520,10 @@ def test_no_module_level_facet_registration_in_tests() -> None:
     inside a module-scoped fixture that restores ``_REGISTRY`` on teardown.
     """
 
-    tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
-    for path in tests_root.rglob("test*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative, tree in _parsed_test_trees():
+        if not relative.rsplit("/", 1)[-1].startswith("test"):
+            continue
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -489,7 +533,7 @@ def test_no_module_level_facet_registration_in_tests() -> None:
                 if isinstance(func, ast.Attribute) and func.attr == "register":
                     base = func.value
                     if isinstance(base, ast.Attribute) and base.attr == "facets":
-                        violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
+                        violations.append(f"{relative}:{node.lineno}")
     assert not violations, (
         "module-level @tl.facets.register mutates the public registry at "
         f"collection time; register inside a restoring fixture: {violations}"
@@ -741,6 +785,12 @@ def _strict_trace_fixture_violations_in_source(source: str, label: str) -> list[
     """
 
     tree = ast.parse(source, filename=label)
+    return _strict_trace_fixture_violations_in_tree(tree, label)
+
+
+def _strict_trace_fixture_violations_in_tree(tree: ast.Module, label: str) -> list[str]:
+    """Tree-level core of the strict scanner (shared with the cached walk)."""
+
     helper_names = _module_local_trace_helper_names(tree)
     violations: list[str] = []
     for qualified_name, function in _iter_scoped_fixture_functions(tree):
@@ -765,12 +815,10 @@ def _strict_trace_fixture_violations(tests_root: Path) -> list[str]:
         Stable ``path::fixture`` violations.
     """
 
+    del tests_root
     violations: list[str] = []
-    for path in sorted(tests_root.rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        violations.extend(
-            _strict_trace_fixture_violations_in_source(source, str(path.relative_to(tests_root)))
-        )
+    for relative, tree in _parsed_test_trees():
+        violations.extend(_strict_trace_fixture_violations_in_tree(tree, relative))
     return violations
 
 

@@ -128,11 +128,22 @@ def test_randomly_plugin_registration_matches_invocation(request: pytest.Fixture
         )
 
 
-def _collect_order(extra_args: list[str]) -> list[str]:
-    """Return the collected node-id order of the marker-lint module.
+_MINI_SUITE = "".join(f"def test_case_{index}():\n    pass\n\n\n" for index in range(12))
+
+
+def _collect_order(suite_dir: Path, extra_args: list[str]) -> list[str]:
+    """Return the collected node-id order of a planted 12-test mini-suite.
+
+    The probe deliberately collects a MINI-SUITE outside the repo rather than
+    a real test module: collecting tests/ loads the root conftest (a full
+    torch import) and its collection-time scan-cache warmers — measured at
+    ~24s PER SUBPROCESS, 72s for the three probe runs. The property under
+    test is pytest-randomly's flag behavior, which is module-agnostic.
 
     Parameters
     ----------
+    suite_dir:
+        Directory holding the planted mini-suite (a ``test_probe.py``).
     extra_args:
         Ordering-relevant pytest flags for this collection run.
 
@@ -147,14 +158,16 @@ def _collect_order(extra_args: list[str]) -> list[str]:
             sys.executable,
             "-m",
             "pytest",
-            "tests/test_marker_lint.py",
+            "test_probe.py",
             "--collect-only",
             "-q",
+            "-p",
+            "no:cacheprovider",
             *extra_args,
         ],
         capture_output=True,
         text=True,
-        cwd=_REPO_ROOT,
+        cwd=suite_dir,
     )
     order = [line for line in proc.stdout.splitlines() if "::" in line]
     assert order, f"collection produced no items:\n{proc.stdout}\n{proc.stderr}"
@@ -162,7 +175,7 @@ def _collect_order(extra_args: list[str]) -> list[str]:
 
 
 @pytest.mark.heavy
-def test_no_randomly_flag_actually_disables_shuffling() -> None:
+def test_no_randomly_flag_actually_disables_shuffling(tmp_path: Path) -> None:
     """``-p no:randomly`` must stabilize order; the default must shuffle.
 
     Red-capable in both directions: if the flag is a silent no-op (the
@@ -171,17 +184,23 @@ def test_no_randomly_flag_actually_disables_shuffling() -> None:
     """
 
     _require_randomly_or_skip()
+    suite_dir = tmp_path
+    (suite_dir / "test_probe.py").write_text(_MINI_SUITE, encoding="utf-8")
     # A blocked plugin contributes no CLI options, so the disabled runs carry
     # no seed flag: were the flag a no-op (plugin still live), each run would
     # draw a fresh time-based seed and the two orders would diverge.
-    disabled_a = _collect_order(["-p", "no:randomly"])
-    disabled_b = _collect_order(["-p", "no:randomly"])
+    disabled_a = _collect_order(suite_dir, ["-p", "no:randomly"])
+    disabled_b = _collect_order(suite_dir, ["-p", "no:randomly"])
     assert disabled_a == disabled_b, (
         "-p no:randomly did not produce a stable order across runs — the "
         "disable flag is not actually disabling the plugin"
     )
-    shuffled = _collect_order(["--randomly-seed=1"])
+    shuffled = _collect_order(suite_dir, ["--randomly-seed=1"])
     assert sorted(shuffled) == sorted(disabled_a)
+    assert shuffled != disabled_a, (
+        "the seeded default run did not shuffle the mini-suite — randomized "
+        "ordering is silently inert"
+    )
     assert shuffled != disabled_a, (
         "a seeded default run produced definition order — shuffling is not "
         "actually happening (order-isolation coverage is fictional)"
