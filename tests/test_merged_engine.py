@@ -533,6 +533,132 @@ class TestBoundaryParseValidation:
         assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
 
 
+class TestRolesDeletionVacuousTruth:
+    """b6-opus-R18-1: uniform roles deletion must refuse, never render TOP.
+
+    Fail-before: deleting the ``roles`` record from EVERY member of a join
+    vacuously satisfied the set-of-shapes agreement (all ranks presented the
+    same EMPTY shape set) and the merge rendered the top verdict --
+    aligned / attested_complete with zero findings. Asymmetric deletion was
+    caught; uniform corruption, the merge threat model, was the escape.
+    """
+
+    def _extract(self, entry: dict) -> None:
+        extract_rank_evidence(
+            trace_for_boundaries([entry], seeded_ledger()),
+            "roles-tamper",
+        )
+
+    def _assert_refuses(self, entry: dict) -> None:
+        with pytest.raises(MergeInputError) as excinfo:
+            self._extract(entry)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_roles_key_deleted_refuses_typed(self):
+        entry = boundary(0, 0)
+        del entry["roles"]
+        self._assert_refuses(entry)
+
+    def test_tensor_kind_with_empty_roles_refuses_typed(self):
+        self._assert_refuses(boundary(0, 0, roles=[]))
+
+    def test_tensorless_kind_with_empty_roles_still_parses(self):
+        entry = boundary(0, 0, kind="barrier", reduce_op=None, roles=[])
+        self._extract(entry)
+
+    def test_uniform_roles_deletion_refuses_on_every_rank_core(self):
+        """The headline escape: BOTH rank cores tampered identically."""
+
+        for rank in (0, 1):
+            entry = boundary(rank, 0)
+            del entry["roles"]
+            with pytest.raises(MergeInputError) as excinfo:
+                extract_rank_evidence(
+                    trace_for_boundaries([entry], seeded_ledger()),
+                    f"uniform-tamper[{rank}]",
+                )
+            assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_engine_belt_flags_zero_role_entries_per_rank(self):
+        """Direct ``derive_merge`` callers bypass evidence parse; the relation
+        table still names every rank presenting zero roles for a
+        tensor-carrying kind instead of agreeing on the empty shape set."""
+
+        d = derive_merge(
+            {
+                0: evidence(0, [boundary(0, 0, roles=[])]),
+                1: evidence(1, [boundary(1, 0, roles=[])]),
+            }
+        )
+        zero_role = [
+            f
+            for f in d.findings
+            if f.kind == "relation_violation" and "zero tensor roles" in f.detail
+        ]
+        assert {f.detail.split("rank ")[1][0] for f in zero_role} == {"0", "1"}
+
+    def test_tensorless_kinds_mirror_capture_side_tensorless_flags(self):
+        """The evidence vocabulary tracks ``CollectiveSite.tensorless`` exactly."""
+
+        from torchlens.backends.torch.collectives import COLLECTIVE_SITES
+        from torchlens.merged._evidence import TENSORLESS_KINDS
+
+        assert {site.kind for site in COLLECTIVE_SITES if site.tensorless} == TENSORLESS_KINDS
+
+
+class TestSweepFieldValidation:
+    """p5 sibling sweep: the reduce-op and seq cross-check fields parse typed.
+
+    Fail-before: uniform ``reduce_op`` deletion from every rank core vacuously
+    satisfied the reduce-op agreement check (same escape class as roles
+    deletion), and a tampered non-integer ``c10d_group_seq`` crashed the
+    engine's delta arithmetic with a raw ``TypeError`` instead of the promised
+    typed refusal.
+    """
+
+    def _assert_refuses(self, entry: dict) -> None:
+        with pytest.raises(MergeInputError) as excinfo:
+            extract_rank_evidence(
+                trace_for_boundaries([entry], seeded_ledger()),
+                "sweep-tamper",
+            )
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    def test_reduce_op_deleted_on_reduce_kind_refuses_typed(self):
+        entry = boundary(0, 0)  # all_reduce
+        del entry["reduce_op"]
+        self._assert_refuses(entry)
+
+    def test_reduce_op_null_on_reduce_kind_refuses_typed(self):
+        self._assert_refuses(boundary(0, 0, reduce_op=None))
+
+    def test_reduce_op_null_on_non_reduce_kind_still_parses(self):
+        extract_rank_evidence(
+            trace_for_boundaries(
+                [boundary(0, 0, kind="broadcast", reduce_op=None)], seeded_ledger()
+            ),
+            "clean-broadcast",
+        )
+
+    def test_non_integer_c10d_group_seq_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["c10d_group_seq"] = "5"
+        self._assert_refuses(entry)
+
+    def test_bool_c10d_group_seq_refuses_typed(self):
+        entry = boundary(0, 0)
+        entry["c10d_group_seq"] = True
+        self._assert_refuses(entry)
+
+    def test_reduce_op_kinds_mirror_capture_side_has_reduce_op_flags(self):
+        """The evidence vocabulary tracks ``CollectiveSite.has_reduce_op`` exactly."""
+
+        from torchlens.backends.torch.collectives import COLLECTIVE_SITES
+        from torchlens.merged._evidence import REDUCE_OP_KINDS
+
+        assert {site.kind for site in COLLECTIVE_SITES if site.has_reduce_op} == REDUCE_OP_KINDS
+
+
 class TestRelationsAndCrossChecks:
     def test_kind_disagreement_at_joined_key_conflicts(self):
         d = derive_merge(

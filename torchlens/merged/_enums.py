@@ -24,6 +24,8 @@ __all__ = [
     "MergeAlignment",
     "MergeValueStatus",
     "MergedErrorCode",
+    "REDUCE_OP_KINDS",
+    "TENSORLESS_KINDS",
     "WITNESS_IDENTITY_KINDS",
     "WITNESS_NOT_APPLICABLE_KINDS",
     "WITNESS_SLICE_KINDS",
@@ -129,6 +131,35 @@ caps the EFFECTIVE alignment at load time (3.2).
 # not CI probes: torch documents all_reduce results bitwise identical across
 # processes, and the copy-semantics kinds are verdict-grade by definitional
 # data movement. Unknown kinds/backends are never guessed.
+
+TENSORLESS_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "barrier",
+        "all_gather_object",
+        "broadcast_object_list",
+        "gather_object",
+        "scatter_object_list",
+    }
+)
+"""Journal-only kinds that legitimately carry ZERO tensor roles.
+
+Mirrors the capture-side ``CollectiveSite.tensorless`` flags exactly: every
+other kind executes on at least one tensor argument (the real c10d call would
+have raised before the boundary was journaled otherwise), so a tensor-carrying
+boundary presenting zero roles is tamper or corruption, never honest evidence.
+"""
+
+REDUCE_OP_KINDS: Final[frozenset[str]] = frozenset(
+    {"all_reduce", "reduce", "reduce_scatter", "reduce_scatter_tensor"}
+)
+"""Kinds that always carry a ``ReduceOp`` (capture-side ``has_reduce_op``).
+
+A successful call of these kinds always records a non-null ``reduce_op``
+string (``apply_defaults`` materializes ``ReduceOp.SUM`` even when the caller
+omitted it), so a null or deleted record is tamper, not honest evidence --
+uniform deletion across every rank core used to vacuously satisfy the
+reduce-op agreement check exactly like the roles-deletion escape.
+"""
 
 WITNESS_IDENTITY_KINDS: Final[frozenset[str]] = frozenset(
     {"all_reduce", "all_gather", "all_gather_into_tensor", "broadcast"}

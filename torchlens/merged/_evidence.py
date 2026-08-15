@@ -17,13 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from ..distributed._ledger import GroupLifecycleLedger, membership_digest_for_ranks
-from ._enums import MergedErrorCode
+from ._enums import REDUCE_OP_KINDS, TENSORLESS_KINDS, MergedErrorCode
 from ._errors import MergeInputError
 
 __all__ = [
     "BOUNDARY_SCHEMA",
     "KNOWN_KINDS",
     "P2P_KINDS",
+    "REDUCE_OP_KINDS",
+    "TENSORLESS_KINDS",
     "RankEvidence",
     "extract_rank_evidence",
     "resolve_rank_inputs",
@@ -171,9 +173,24 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             f"recorded group membership {sorted(int(r) for r in global_ranks)}",
             source=source,
         )
-    roles = entry.get("roles", [])
+    roles = entry.get("roles")
     if not isinstance(roles, list):
-        raise _refuse(f"{where} roles is not a list", source=source)
+        raise _refuse(f"{where} has no roles list", source=source)
+    # Role cardinality vs boundary kind (b6-opus-R18-1): deleting the roles
+    # record from EVERY member of a join used to vacuously satisfy the
+    # set-of-shapes agreement checks (asymmetric deletion was caught; uniform
+    # corruption -- the merge threat model -- was the escape). Every
+    # tensor-carrying kind records at least one role on a successful call, so
+    # an empty record refuses here, at the one chokepoint merge time and load
+    # rederivation share.
+    if not roles and kind not in TENSORLESS_KINDS:
+        raise _refuse(
+            f"{where} is a tensor-carrying {kind} boundary with zero tensor "
+            "roles; a successful collective of this kind always records at "
+            "least one role, so an empty or deleted roles record is not "
+            "honest evidence",
+            source=source,
+        )
     for role_index, role in enumerate(roles):
         if not isinstance(role, dict):
             raise _refuse(f"{where} role entry {role_index} is not a mapping", source=source)
@@ -192,6 +209,25 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
                 "(a list of non-negative integers)",
                 source=source,
             )
+    # Reduce-op cardinality vs kind (sibling of the roles-deletion escape):
+    # uniform deletion of ``reduce_op`` from every rank core vacuously
+    # satisfied the reduce-op agreement check the same way.
+    if kind in REDUCE_OP_KINDS:
+        reduce_op = entry.get("reduce_op")
+        if not isinstance(reduce_op, str) or not reduce_op:
+            raise _refuse(
+                f"{where} is a {kind} boundary without its reduce_op record; "
+                "a successful call of this kind always records one",
+                source=source,
+            )
+    # A tampered non-integer seq crashed the engine's delta arithmetic with a
+    # raw TypeError instead of the promised typed refusal (the load-side
+    # descriptor check in _artifact already enforced this; parse now matches).
+    c10d_group_seq = entry.get("c10d_group_seq")
+    if c10d_group_seq is not None and (
+        isinstance(c10d_group_seq, bool) or not isinstance(c10d_group_seq, int)
+    ):
+        raise _refuse(f"{where} c10d_group_seq is not an integer or null", source=source)
     events = entry.get("events")
     if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)

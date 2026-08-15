@@ -147,6 +147,12 @@ class TestLifecycleFailureAtomicity:
 
         original = object()
 
+        def installed_wrap() -> object:
+            """Live TorchLens wrap over ``original`` (so restore is attempted)."""
+
+        installed_wrap.__tl_distributed_wrap__ = True
+        installed_wrap.__wrapped__ = original
+
         class RefusingModule:
             """Module-like object that rejects restoration of one attribute."""
 
@@ -158,7 +164,7 @@ class TestLifecycleFailureAtomicity:
                 object.__setattr__(self, name, value)
 
         module = RefusingModule()
-        module.all_reduce = object()
+        module.all_reduce = installed_wrap
         state = lifecycle._ArmedState(
             arming=lifecycle.ArmingRecord("seeded", "test", "explicit"),
             recognizer=object(),
@@ -462,6 +468,76 @@ class TestArmingAndSeeding:
         assert not lifecycle.is_armed()
 
 
+class TestTeardownClobberSafety:
+    """b8 KNOWN-held (p5 3.15 rollup): teardown must not clobber foreign patches.
+
+    Fail-before: ``disarm()`` / ``remove_collective_wraps()`` / the arm
+    rollback ``setattr``'d the pristine original blindly, so a third-party
+    library that patched the same c10d attribute AFTER TorchLens wrapped it
+    had its patch silently destroyed at teardown.
+    """
+
+    def test_restore_helper_skips_foreign_patch_and_warns(self):
+        original = object()
+
+        def our_wrap():
+            """Stand-in for an installed TorchLens wrap."""
+
+        our_wrap.__tl_distributed_wrap__ = True
+        our_wrap.__wrapped__ = original
+
+        class Module:
+            __name__ = "fake_module"
+
+        module = Module()
+        module.f = our_wrap
+        lifecycle.restore_wrapped_attr(module, "f", original)
+        assert module.f is original
+
+        def foreign():
+            """A third-party patch layered over (or replacing) our wrap."""
+
+        module.f = foreign
+        with pytest.warns(UserWarning, match="re-patched by a third party"):
+            lifecycle.restore_wrapped_attr(module, "f", original)
+        assert module.f is foreign
+
+    def test_disarm_leaves_foreign_patches_intact(self, unarmed):
+        dist = unarmed
+        pristine_all_reduce = dist.all_reduce
+        pristine_new_group = dist.new_group
+        pristine_broadcast = dist.broadcast
+        lifecycle.arm()
+        try:
+            shim_all_reduce = dist.all_reduce
+            assert getattr(shim_all_reduce, "__tl_distributed_wrap__", False)
+
+            def third_party_all_reduce(*args, **kwargs):
+                return shim_all_reduce(*args, **kwargs)
+
+            shim_new_group = dist.new_group
+
+            def third_party_new_group(*args, **kwargs):
+                return shim_new_group(*args, **kwargs)
+
+            dist.all_reduce = third_party_all_reduce
+            dist.new_group = third_party_new_group
+            with pytest.warns(UserWarning, match="re-patched by a third party"):
+                lifecycle.disarm()
+            # Both wrap families' foreign patches survive teardown...
+            assert dist.all_reduce is third_party_all_reduce
+            assert dist.new_group is third_party_new_group
+            # ...the un-patched site restored pristine, and the shims under
+            # the foreign patches are inert passthroughs (state retired).
+            assert dist.broadcast is pristine_broadcast
+            assert lifecycle.armed_state() is None
+        finally:
+            lifecycle.disarm()
+            dist.all_reduce = pristine_all_reduce
+            dist.new_group = pristine_new_group
+            dist.broadcast = pristine_broadcast
+
+
 class TestC10dGroupSeqCompatRouting:
     """Deep-hunt F8: the private group-seq probe routes through _torch_compat.
 
@@ -488,7 +564,7 @@ class TestC10dGroupSeqCompatRouting:
                 Recording.called = True
                 return 41
 
-        assert collectives._c10d_group_seq(Recording()) is None
+        assert collectives._c10d_group_seq(Recording()) == (None, None)
         assert Recording.called is False
 
     def test_present_capability_reads_the_private_counter(self, monkeypatch):
@@ -501,7 +577,87 @@ class TestC10dGroupSeqCompatRouting:
             def _get_sequence_number_for_group(self):
                 return 41
 
-        assert collectives._c10d_group_seq(Fake()) == 41
+        assert collectives._c10d_group_seq(Fake()) == (41, None)
+
+    def test_getter_raise_demotes_capability_and_discloses(self, monkeypatch):
+        """b7-sol-R22-1: a raising getter must not silently vanish the witness.
+
+        Fail-before: with ``HAS_C10D_GROUP_SEQ`` probed True, every getter
+        exception was swallowed to a bare ``None`` while the flag stayed True
+        -- the only in-band base-misalignment cross-check silently vanished,
+        invisible to ``doctor()`` / ``compat.report()`` and indistinguishable
+        on the boundary record from honest capability absence.
+        """
+
+        import warnings as warnings_module
+
+        from torchlens.backends.torch import collectives
+        from torchlens.utils import _torch_compat as tc
+
+        monkeypatch.setattr(tc, "HAS_C10D_GROUP_SEQ", True)
+        monkeypatch.setattr(tc, "_C10D_GROUP_SEQ_PROBED", True)
+        monkeypatch.setattr(tc, "_warned_missing_capabilities", set())
+
+        class Raising:
+            def _get_sequence_number_for_group(self):
+                raise RuntimeError("private API drifted at read time")
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            value, disclosure = collectives._c10d_group_seq(Raising())
+        assert value is None
+        assert disclosure == "c10d_group_seq_read_failed"
+        # The degradation is now VISIBLE: the capability flag flipped through
+        # the standard channel, so doctor()/compat.report() report it.
+        assert tc.HAS_C10D_GROUP_SEQ is False
+        assert tc.probe_c10d_capabilities()["HAS_C10D_GROUP_SEQ"] is False
+        assert any(
+            issubclass(item.category, tc.TorchCapabilityWarning)
+            and "raised at read time" in str(item.message)
+            for item in caught
+        )
+
+    def test_payload_carries_the_read_failure_disclosure(self, monkeypatch):
+        """The boundary record where the witness vanished names the failure."""
+
+        from torchlens.backends.torch import collectives
+
+        monkeypatch.setattr(
+            collectives,
+            "_c10d_group_seq",
+            lambda group: (None, "c10d_group_seq_read_failed"),
+        )
+        site = next(s for s in collectives.COLLECTIVE_SITES if s.attr == "barrier")
+
+        class Identity:
+            membership_digest = "d" * 64
+            lifetime_ordinal = 0
+            ordinal_source = "wrapped"
+            global_ranks = (0,)
+            backend = "gloo"
+
+        class Arming:
+            install_epoch = "armed_before_any_group"
+            source = "explicit"
+
+        monkeypatch.setattr(torch.distributed, "get_rank", lambda *a, **k: 0, raising=False)
+        payload = collectives._build_payload(
+            site,
+            {},
+            Identity(),
+            "coll",
+            0,
+            Arming(),
+            None,
+            [],
+            [],
+            None,
+            False,
+            "none",
+            None,
+        )
+        assert payload["c10d_group_seq"] is None
+        assert "c10d_group_seq_read_failed" in payload["disclosures"]
 
 
 class TestBrokenArmPoisoning:
@@ -530,8 +686,15 @@ class TestBrokenArmPoisoning:
 
         module = RefusingModule()
 
+        def installed_wrap() -> object:
+            """Live TorchLens wrap over ``original`` (so rollback restores)."""
+
+        installed_wrap.__tl_distributed_wrap__ = True
+        installed_wrap.__wrapped__ = original
+
         def failing_install(state):
             state.originals[(module, "f")] = original
+            module.f = installed_wrap
             raise RuntimeError("install failed")
 
         monkeypatch.setattr(lifecycle, "_install_lifecycle_wraps", failing_install)

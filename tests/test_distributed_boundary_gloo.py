@@ -275,8 +275,14 @@ class TestBoundaryNode:
                     raise RuntimeError("restore refused")
                 object.__setattr__(self, name, value)
 
+        def installed_wrap() -> object:
+            """Live TorchLens wrap over ``original`` (so restore is attempted)."""
+
+        installed_wrap.__tl_distributed_wrap__ = True
+        installed_wrap.__wrapped__ = original
+
         module = RefusingModule()
-        module.all_reduce = object()
+        module.all_reduce = installed_wrap
         originals = {(module, "all_reduce"): original}
         with pytest.raises(RuntimeError, match="restore refused"):
             remove_collective_wraps(originals)
