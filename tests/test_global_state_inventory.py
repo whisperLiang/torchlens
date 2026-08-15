@@ -154,6 +154,9 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         # One-way "decorate_all_once() ran to COMPLETION" sentinel; deliberately
         # never reset by unwrap_torch() (partial-decoration recovery keys on it).
         ("torchlens/backends/torch/wrappers.py", "_FULL_DECORATION_COMPLETED"),
+        # One-way "os.register_at_fork child-hygiene handler registered" latch;
+        # fork handlers cannot be unregistered, so the latch never resets.
+        ("torchlens/backends/torch/wrappers.py", "_AT_FORK_HYGIENE_INSTALLED"),
         ("torchlens/backends/torch/wrappers.py", "_torchvision_ops_ensured"),
         ("torchlens/capture/arg_positions.py", "_schema_corrections_applied"),
         ("torchlens/distributed/_lifecycle.py", "_STATE"),
@@ -1765,6 +1768,46 @@ def test_main_process_capture_is_never_refused() -> None:
     worker.start()
     worker.join(timeout=5.0)
     assert errors == [], f"a main-process worker thread was refused: {errors!r}"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork") or not hasattr(os, "register_at_fork"),
+    reason="fork hygiene needs os.fork + os.register_at_fork",
+)
+def test_fork_child_inherits_no_mid_capture_logging_state() -> None:
+    """b8-sol R56-8: a fork DURING a traced forward must not keep logging.
+
+    The forking thread's ident is preserved as the child's main thread, so an
+    inherited ``_logging_enabled=True`` + ``_active_trace`` passed the
+    owner-thread gate and child-side torch ops logged into the child's
+    inherited trace copy (child-local corruption; the parent is unaffected
+    through COW). The ``os.register_at_fork`` hygiene handler clears both in
+    the child; new captures in the child stay governed by the existing
+    child-process guards.
+    """
+
+    read_fd, write_fd = os.pipe()
+
+    class ForkInsideForward(nn.Module):
+        def forward(self, v: torch.Tensor) -> torch.Tensor:
+            pid = os.fork()
+            if pid == 0:  # child: observe inherited capture state, never log
+                try:
+                    clean = (not _state._logging_enabled) and (_state._active_trace is None)
+                    os.write(write_fd, b"1" if clean else b"0")
+                finally:
+                    os._exit(0)
+            os.waitpid(pid, 0)
+            return v + 1
+
+    tl.trace(ForkInsideForward(), torch.randn(2))
+    os.close(write_fd)
+    child_verdict = os.read(read_fd, 1)
+    os.close(read_fd)
+    assert child_verdict == b"1", (
+        "the fork child inherited _logging_enabled/_active_trace mid-capture: "
+        "child-side torch ops would log into the inherited trace copy"
+    )
 
 
 def test_interrupted_partial_diagnostics_still_restore_the_model(

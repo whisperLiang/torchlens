@@ -5,6 +5,7 @@ This module also patches detached torch references and torch transform boundarie
 """
 
 import inspect
+import os
 import sys
 import threading
 import time
@@ -2508,6 +2509,39 @@ def decorate_all_once() -> None:
     _fix_tensor_sequence_slot()
 
 
+_AT_FORK_HYGIENE_INSTALLED = False
+"""True once the fork-child capture-state clear is registered (per process)."""
+
+
+def _install_fork_capture_hygiene() -> None:
+    """Clear inherited capture state in ``os.fork()`` children, once per process.
+
+    b8-sol R56-8: a fork DURING a traced forward (e.g. a fork-start
+    ``DataLoader`` constructed inside ``forward``) inherits
+    ``_logging_enabled=True`` and ``_active_trace``, and -- because the
+    forking thread's ident is preserved as the child's main thread -- passes
+    the owner-thread gate, so child-side torch ops silently log into the
+    child's inherited trace copy (child-local corruption plus per-op
+    overhead; the parent is unaffected through COW). The child's inherited
+    mid-capture state can never be a capture the CHILD owns, so it is cleared
+    unconditionally. NEW captures in the child stay governed by the existing
+    guards (``warn_parallel``'s import-PID stamp; the sanctioned
+    distributed-rank path starts its own captures and is untouched -- ranks
+    fork/spawn BEFORE capturing, so they inherit no mid-capture state).
+    """
+
+    global _AT_FORK_HYGIENE_INSTALLED
+    if _AT_FORK_HYGIENE_INSTALLED or not hasattr(os, "register_at_fork"):
+        return
+
+    def _clear_inherited_capture_state() -> None:
+        _state._logging_enabled = False
+        _state._active_trace = None
+
+    os.register_at_fork(after_in_child=_clear_inherited_capture_state)
+    _AT_FORK_HYGIENE_INSTALLED = True
+
+
 #: ``torch._dynamo.trace_rules`` lru-caches whose keys are LIVE torch callables.
 #: The string-keyed siblings (``dynamo_dir``, ``get_mod_inlinelist``, ...) are
 #: identity-safe and deliberately excluded.
@@ -3138,6 +3172,10 @@ def _wrap_torch_locked(
     # Torch-only setup deferred out of arg_positions import time: the corrected
     # spec table must exist before any wrapper can build an op record.
     _ensure_schema_tensor_position_corrections()
+
+    # Fork children must never keep logging into an inherited mid-capture
+    # trace; registered once per process, on every install path.
+    _install_fork_capture_hygiene()
 
     _configure_escape_detector(escape_detector)
     _configure_completeness_witness(completeness_witness)
