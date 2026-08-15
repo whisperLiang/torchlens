@@ -36,7 +36,9 @@ TensorFlow preview backend. Tier-1 standalone spec (no `capture_backend`); the
   builds a `TFInterventionPlan` over two writable levels: module-boundary
   substitution (`apply_tf_module_intervention`) and the curated
   `_CURATED_WRAP_ENTRIES` tf.nn/tf.math functional wrap (`tf_intervention_wrap`).
-- Builtin helper adapters: `zero_ablate`, `scale`, `add`, `replace_with`.
+- Builtin helper adapters: `zero_ablate`, `scale`, `add` ONLY. Other helpers
+  (including `replace_with`) raise `BackendUnsupportedError`; pass a callable
+  action for custom replacements.
 - `audit_tf_site_reachability()` is FAIL-CLOSED: a selector matching
   callback-captured ops the wrap layer never presented raises
   `TFInterventionSiteUnreachableError` instead of silently not firing.
