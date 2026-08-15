@@ -105,7 +105,11 @@ def _find_triggers(text: str) -> list[str]:
 
 
 def _override_active() -> bool:
-    return os.environ.get(OVERRIDE_ENV, "").strip() not in ("", "0", "false", "False")
+    # Exact "1" only, matching the golden mutation-flag discipline (grind r5,
+    # b10 R86 probe): the former truthy parse authorized a major bump on
+    # OVERRIDE=FALSE, =no, or any templated junk — values a user sets to
+    # DISABLE the override — while the notice claimed "=1 active".
+    return os.environ.get(OVERRIDE_ENV, "").strip() == "1"
 
 
 def _emit_block(triggers: Iterable[str], location: str) -> None:
