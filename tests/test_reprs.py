@@ -168,3 +168,64 @@ def test_layer_repr_on_live_trace_unchanged() -> None:
     assert "Layer relu_1_2" in text
     assert "parents" in text
     assert "detached" not in text
+
+
+def test_op_repr_after_trace_collection_degrades_not_raises() -> None:
+    """repr/str on an Op whose Trace was collected must not raise (R52-B).
+
+    The r4 fix (1a2b715e) landed on ``Layer`` only; ``Op`` -- the more
+    numerous record class -- kept the identical type-lie: ``source_trace``
+    returned a bare ``None`` behind ``-> Trace`` and ``__str__`` silently
+    printed an unknown denominator (``operation 1/?``).
+    """
+
+    import gc
+
+    from torchlens._errors import RecordBindingError
+
+    op = tl.trace(_TwoStage(), torch.randn(2, 4))["relu_1_2"].ops[0]
+    gc.collect()
+
+    text = repr(op)
+    assert "relu_1_2" in text
+    assert "detached" in text
+    assert str(op) == text
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = op.source_trace
+    assert exc_info.value.fields["code"] == "trace_reference_collected"
+
+
+def test_op_standalone_pickle_accessors_refuse_typed() -> None:
+    """A standalone-pickled Op refuses relation getters TYPED, never TypeError (R52-B)."""
+
+    import pickle
+
+    from torchlens._errors import RecordBindingError
+
+    trace = tl.trace(_TwoStage(), torch.randn(2, 4))
+    restored = pickle.loads(pickle.dumps(trace["relu_1_2"].ops[0]))
+
+    text = repr(restored)
+    assert "detached" in text
+
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = restored.source_trace
+    assert exc_info.value.fields["code"] == "record_not_bound"
+    with pytest.raises(RecordBindingError) as children_exc:
+        restored.get_children()
+    assert children_exc.value.fields["code"] == "record_not_bound"
+    with pytest.raises(RecordBindingError) as parents_exc:
+        restored.get_parents()
+    assert parents_exc.value.fields["code"] == "record_not_bound"
+
+
+def test_op_repr_on_live_trace_unchanged() -> None:
+    """An Op bound to a live Trace keeps the full informative repr (R52-B)."""
+
+    trace = tl.trace(_TwoStage(), torch.randn(2, 4))
+    op = trace["relu_1_2"].ops[0]
+    text = repr(op)
+    assert "relu_1_2" in text
+    assert "detached" not in text
+    assert "/?" not in text  # denominator is the real op count, not unknown
+    assert op.get_parents() and op.get_children() is not None

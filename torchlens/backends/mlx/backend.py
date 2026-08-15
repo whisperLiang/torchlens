@@ -2781,7 +2781,7 @@ def _mlx_trace_intermediate_signatures(
 
     final_to_raw: dict[str, str] = {}
     for op in ops:
-        source_trace = getattr(op, "source_trace", None)
+        source_trace = op._source_trace_or_none()
         if source_trace is None:
             continue
         for trace_op in getattr(source_trace, "layer_list", ()):

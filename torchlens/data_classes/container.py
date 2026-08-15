@@ -326,7 +326,7 @@ class Container:
         """
 
         for op in self.leaves:
-            trace = getattr(op, "source_trace", None)
+            trace = op._source_trace_or_none()
             if trace is not None:
                 return trace
         return None
@@ -429,7 +429,7 @@ def output_containers_from_op(op: Op) -> tuple[Container, ...]:
         Registry-backed output containers, or the legacy single container view.
     """
 
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None or not hasattr(trace, "_containers"):
         container = container_from_op(op)
         return () if container is None else (container,)
@@ -490,7 +490,7 @@ def input_containers_from_op(op: Op) -> tuple[Container, ...]:
         Registry-backed input containers for ``op.func_call_id``.
     """
 
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None or not hasattr(trace, "_containers"):
         return ()
     func_call_id = getattr(op, "func_call_id", None)
@@ -508,7 +508,7 @@ def input_containers_from_op(op: Op) -> tuple[Container, ...]:
 def _container_from_registry(op: Op) -> Container | None:
     """Build the primary output container view from registry records when available."""
 
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None or not hasattr(trace, "_containers"):
         return None
     if getattr(op, "container_spec", None) is None:
@@ -684,7 +684,7 @@ def _root_kind_for_role(role: Role) -> ContainerRootKind:
 def _registry_sibling_leaves(op: Op, snapshot: ContainerSnapshot) -> tuple[Op, ...]:
     """Return leaf ops named by a registry snapshot."""
 
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None:
         return (op,)
     return _registry_sibling_leaves_from_trace(trace, snapshot) or (op,)
@@ -758,7 +758,7 @@ def _container_structure_capability(op: Op, role: Role) -> str:
         fails closed to ``"none"``.
     """
 
-    return _trace_container_capability(getattr(op, "source_trace", None), role)
+    return _trace_container_capability(op._source_trace_or_none(), role)
 
 
 def _output_container_structure_capability(op: Op) -> str:
@@ -953,7 +953,7 @@ def _sibling_leaves(
         Sibling leaves in trace order.
     """
 
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None:
         return (op,)
     candidates = trace.output_layers if root_kind == "final_output" else trace.layer_labels
@@ -988,7 +988,7 @@ def _op_is_final_output(op: Op) -> bool:
 
     if bool(getattr(op, "is_output", False)):
         return True
-    trace = getattr(op, "source_trace", None)
+    trace = op._source_trace_or_none()
     if trace is None:
         return False
     output_labels = set(getattr(trace, "output_layers", ()) or ())
