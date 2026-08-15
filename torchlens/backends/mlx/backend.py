@@ -1219,13 +1219,18 @@ class MLXBackend:
             cast(int, random_seed) if random_seed is not None else random.randint(1, 4294967294),
         )
         self.tensor_store.clear()
-        self.wrap(model, module_tree if use_object_module else None)
-        self.prepare_model_session(trace, model)
-        args = self._normalize_input_args(input_args)
-        kwargs = {} if input_kwargs is None else dict(input_kwargs)
-        self._label_source_arrays(trace, args, kwargs)
-        trace.capture_start_time = time.time()
+        # R07: the try owns the wrap call itself -- a raise anywhere between
+        # wrapper install and the forward (session prep, input normalization,
+        # source labeling) used to strand the process-global MLX wrappers
+        # because the unwrap-owning finally had not been entered yet.
+        # ``unwrap`` on a partially-installed (or empty) registry is safe.
         try:
+            self.wrap(model, module_tree if use_object_module else None)
+            self.prepare_model_session(trace, model)
+            args = self._normalize_input_args(input_args)
+            kwargs = {} if input_kwargs is None else dict(input_kwargs)
+            self._label_source_arrays(trace, args, kwargs)
+            trace.capture_start_time = time.time()
             halt_signal: HaltSignal | None = None
             try:
                 with self.active_logging(trace):

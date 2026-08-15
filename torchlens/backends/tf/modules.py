@@ -133,20 +133,35 @@ def patched_tf_module_stack(
         yield
         return
     originals: dict[type[Any], Any] = {}
-    keras_layer_class = _keras_layer_class(tf)
-    if keras_layer_class is not None:
-        _patch_class_call(keras_layer_class, tree, module_stack, originals, module_exit_hook)
-    for module_class in tree.modules_by_class:
-        if module_class is keras_layer_class:
-            continue
-        if "__call__" not in vars(module_class):
-            continue
-        _patch_class_call(module_class, tree, module_stack, originals, module_exit_hook)
+
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
+
+        for module_class, original in originals.items():
+            setattr(module_class, "__call__", original)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield, and Python never calls
+    # ``__exit__`` when ``__enter__`` raises -- a BaseException escaping the
+    # install used to strand every wrapper installed so far for the life of the
+    # process.
+    try:
+        keras_layer_class = _keras_layer_class(tf)
+        if keras_layer_class is not None:
+            _patch_class_call(keras_layer_class, tree, module_stack, originals, module_exit_hook)
+        for module_class in tree.modules_by_class:
+            if module_class is keras_layer_class:
+                continue
+            if "__call__" not in vars(module_class):
+                continue
+            _patch_class_call(module_class, tree, module_stack, originals, module_exit_hook)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original in originals.items():
-            setattr(module_class, "__call__", original)
+        _restore_installed()
 
 
 def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:

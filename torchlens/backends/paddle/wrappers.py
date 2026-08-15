@@ -239,15 +239,24 @@ class _PaddleWrapperRegistry:
         paddle, functional, tensor_cls = _import_paddle()
         wrapped: set[str] = set()
         denied: set[str] = set()
-        for owner, owner_name, name, _original, action in _iter_inventory_candidates(
-            paddle, functional, tensor_cls
-        ):
-            op_name = _op_name(owner_name, name)
-            if self.wrap_attr(owner, name, backend, op_name, action=action):
-                if action == "deny":
-                    denied.add(op_name)
-                else:
-                    wrapped.add(op_name)
+        # R07 (the L4 unwind standard): the install loop mutates process-global
+        # Paddle modules and classes; a BaseException escaping mid-install used
+        # to strand every wrapper already landed (nothing called ``unwrap``
+        # because the capture-side ``finally`` had not been entered yet).
+        # ``unwrap`` restores exactly the slots registered so far.
+        try:
+            for owner, owner_name, name, _original, action in _iter_inventory_candidates(
+                paddle, functional, tensor_cls
+            ):
+                op_name = _op_name(owner_name, name)
+                if self.wrap_attr(owner, name, backend, op_name, action=action):
+                    if action == "deny":
+                        denied.add(op_name)
+                    else:
+                        wrapped.add(op_name)
+        except BaseException:
+            self.unwrap()
+            raise
         self._inventory = PaddleInventory(tuple(sorted(wrapped)), tuple(sorted(denied)))
         self._wrapped = True
 

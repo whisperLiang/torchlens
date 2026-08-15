@@ -365,24 +365,38 @@ def tf_intervention_wrap(tf: Any, plan: TFInterventionPlan, session: Any) -> Ite
         return
     originals: list[tuple[Any, str, Any]] = []
     wrapper_by_original: dict[int, Any] = {}
-    for submodule_name, attr_name in _CURATED_WRAP_ENTRIES:
-        owner = tf if submodule_name == "" else getattr(tf, submodule_name, None)
-        if owner is None:
-            continue
-        original = getattr(owner, attr_name, None)
-        if original is None or not callable(original):
-            continue
-        wrapper = wrapper_by_original.get(id(original))
-        if wrapper is None:
-            wrapper = _wrap_entry_point(original, plan, session, tf)
-            wrapper_by_original[id(original)] = wrapper
-        originals.append((owner, attr_name, original))
-        setattr(owner, attr_name, wrapper)
+
+    def _restore_installed() -> None:
+        """Restore every curated entry-point patch that actually landed."""
+
+        for owner, attr_name, original in reversed(originals):
+            setattr(owner, attr_name, original)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # ``tf``/``tf.nn``/``tf.math`` attributes BEFORE the try that owns the
+    # yield; a BaseException escaping it used to strand every wrapper
+    # installed so far.
+    try:
+        for submodule_name, attr_name in _CURATED_WRAP_ENTRIES:
+            owner = tf if submodule_name == "" else getattr(tf, submodule_name, None)
+            if owner is None:
+                continue
+            original = getattr(owner, attr_name, None)
+            if original is None or not callable(original):
+                continue
+            wrapper = wrapper_by_original.get(id(original))
+            if wrapper is None:
+                wrapper = _wrap_entry_point(original, plan, session, tf)
+                wrapper_by_original[id(original)] = wrapper
+            originals.append((owner, attr_name, original))
+            setattr(owner, attr_name, wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for owner, attr_name, original in reversed(originals):
-            setattr(owner, attr_name, original)
+        _restore_installed()
 
 
 def _wrap_entry_point(
