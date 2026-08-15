@@ -1,5 +1,45 @@
 # backends/torch/ - Agent Notes
 
+## File Map
+
+Core capture path:
+- `wrappers.py` — lazy torch function wrapping for capture-time interception
+  (`wrap_torch()` / `unwrap_torch()`, DeviceContext handling).
+- `model_prep.py` — prepare `nn.Module` objects for capture sessions (permanent +
+  per-session).
+- `ops.py` — log tensors produced by decorated torch operations; its implementation is
+  split across the `_ops_*.py` family: `_ops_exhaustive.py` (exhaustive emission),
+  `_ops_emission.py` (output logging / live-hook dispatch), `_ops_arguments.py`
+  (argument templates and provenance), `_ops_activations.py` (activation persistence),
+  `_ops_retention.py` (save budgets, lookback), `_ops_capture_records.py` (record
+  freezing), `_ops_containers.py` / `_ops_container_base.py` (output containers),
+  `_ops_predicates.py` / `_ops_predicate_events.py` / `_ops_finalize.py` (predicate
+  path), `_ops_interventions.py` (live interventions), `_ops_autograd.py` (saved-tensor
+  stats), `_ops_shared_fields.py` (shared fields).
+- `sources.py` — log source tensors; `tensor_tracking.py` — provenance, family links,
+  equivalence classes; `module_stack.py` — module-call stack;
+  `prehook_provenance.py` — reversible forward-pre-hook input provenance;
+  `buffer_writes.py` — registered-buffer write capture; `backward.py` — backward
+  execution and autograd graph metadata.
+
+Safety net and honesty:
+- `belt.py` — the mechanical BELT: protocol-invisible stale-reference coverage
+  (derived per build).
+- `rescue.py` — the disclosed mode-rescue re-run recovering escaped ops with a
+  `TorchFunctionMode` net.
+- `escape_detection.py` — opt-in shadow detection for stale detached callable
+  invocations; `identity_shims.py` — keep torch-internal identity checks truthful;
+  `aliasing.py` — alias/mutation contract detection.
+- `completeness_witness.py` — opt-in aten-dispatch completeness witness, with its
+  implementation in the `_completeness_*.py` family (boundaries, cross-thread,
+  dispatch census + names, escape state, finalize, metadata, origins, patches,
+  storage, shared types).
+
+Backend integration:
+- `backend.py` — the torch `CaptureBackend` Protocol implementation;
+  `collectives.py` — explicit `torch.distributed` collective boundary capture;
+  `_tl.py` — private metadata namespace helpers.
+
 ## Wrapper Boundaries
 - `wrappers.py` owns persistent torch/function decoration. `_logging_enabled` must stay
   the runtime gate; wrappers remain installed after first capture.
