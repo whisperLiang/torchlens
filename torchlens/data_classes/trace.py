@@ -1798,7 +1798,7 @@ class Trace(
         self.graph_shape_hash: str | None = None
         self._intervention_spec: InterventionSpec | None = InterventionSpec()
         self.state_history: list[Any] = []
-        self.observer_spans: list[dict[str, Any]] = list(_state._active_record_spans)
+        self.observer_spans: list[dict[str, Any]] = list(_state._active_record_spans.get())
         self.last_run: Any | None = None
         self.append_history: list[dict[str, Any]] = []
         self._has_direct_writes = False
