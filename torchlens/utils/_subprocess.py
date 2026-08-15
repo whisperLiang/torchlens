@@ -93,7 +93,7 @@ def run_bounded_subprocess(
     check: bool = True,
     capture_output: bool = True,
     input: bytes | str | None = None,
-    cwd: str | None = None,
+    cwd: str | os.PathLike[str] | None = None,
     text: bool = False,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``cmd`` bounded by ``timeout``, killing its whole process group.

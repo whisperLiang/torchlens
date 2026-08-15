@@ -32,7 +32,9 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
-        ("torchlens/_state.py", "_active_record_spans"),
+        # _active_record_spans left this ledger in fixwave-5 (R54): it is now
+        # a never-rebound ContextVar holding an immutable tuple, so it is no
+        # longer process-global mutable state at all.
         ("torchlens/_state.py", "_active_trace"),
         ("torchlens/_state.py", "_capture_replay_templates"),
         # Pre-admission reservation: claimed before any capture-global side
@@ -213,6 +215,10 @@ happen.
 
 _CAPABILITY_PROBE_STATE = frozenset(
     {
+        # Lazy glibc malloc_trim probe (R33): False = unprobed, None =
+        # unavailable, else the resolved libc function. Probed once at the
+        # first cleanup(); never varies afterwards.
+        ("torchlens/data_classes/cleanup.py", "_MALLOC_TRIM"),
         ("torchlens/utils/_torch_compat.py", "HAS_C10D_ABORT_PG"),
         ("torchlens/utils/_torch_compat.py", "HAS_DISABLE_TORCH_FUNCTION"),
         ("torchlens/utils/_torch_compat.py", "HAS_DISPATCH_MODE_STACK_QUERY"),

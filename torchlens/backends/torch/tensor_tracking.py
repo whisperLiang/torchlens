@@ -1156,7 +1156,7 @@ def _append_arg_hash(arg: Any, prefix: str, args_to_hash: list[Any], _depth: int
         # processes, split recurrence grouping for per-call ``generator=``
         # objects, and collided for distinct objects at a reused address.
         # A structural fingerprint wants the TYPE of such an argument.
-        if type(arg).__repr__ is object.__repr__:
+        if type(arg).__repr__ is object.__repr__:  # type: ignore[comparison-overlap]
             args_to_hash.append(f"{prefix}_{type(arg).__module__}.{type(arg).__qualname__}")
             return
         token = f"{prefix}_{arg}"

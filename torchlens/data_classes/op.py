@@ -3434,12 +3434,6 @@ class Op:
             )
         return cast("Trace", obj)
 
-    def _source_trace_or_none(self) -> "Trace | None":
-        """Owning Trace, or ``None`` when detached (internal quiet spelling)."""
-        ref = self._slot("_source_trace_ref")
-        obj = ref() if ref is not None else None
-        return cast("Trace | None", obj)
-
     @source_trace.setter
     def source_trace(self, value: "Trace | None") -> None:
         """Set the owning Trace back-reference.
@@ -3450,6 +3444,12 @@ class Op:
             Owning model log, or ``None`` to clear the reference.
         """
         self._source_trace_ref = weakref.ref(value) if value is not None else None
+
+    def _source_trace_or_none(self) -> "Trace | None":
+        """Owning Trace, or ``None`` when detached (internal quiet spelling)."""
+        ref = self._slot("_source_trace_ref")
+        obj = ref() if ref is not None else None
+        return cast("Trace | None", obj)
 
     def _source_trace_or_error(self) -> "Trace":
         """Return the owning Trace, or raise a detached-log error.
