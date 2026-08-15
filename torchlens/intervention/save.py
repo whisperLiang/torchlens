@@ -8,7 +8,7 @@ import shutil
 import uuid
 import warnings
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields as dataclass_fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -861,7 +861,12 @@ def _serialize_fire_record(
         JSON-safe fire-record payload.
     """
 
-    data = asdict(record)
+    # R10-14: ``dataclasses.asdict`` deep-copies every field value first, so a
+    # graph-connected helper tensor arg raised torch's deepcopy error at save
+    # time for an intermediate about to be overwritten anyway. Build the
+    # payload shallowly: the two structured fields are serialized below and
+    # every other FireRecord field is a scalar/string.
+    data = {field.name: getattr(record, field.name) for field in dataclass_fields(record)}
     data["helper"] = _serialize_value(record.helper, save_level, state)
     data["container_path"] = _serialize_value(record.container_path, save_level, state)
     return data
@@ -1190,6 +1195,23 @@ def _serialize_callable(value: Callable[..., Any], save_level: SaveLevel) -> dic
         Callable payload.
     """
 
+    if isinstance(value, LazyImportRef):
+        # R10-12: load->resave round-trip. The loader mints LazyImportRef for
+        # import-ref callables precisely so execution-time trust gating can
+        # defer the import; the instance exposes no __module__/__qualname__,
+        # so the generic path below read None and refused a spec that
+        # legitimately saved executable. The ref IS its own import path --
+        # resolving it here would perform the import the laziness exists to
+        # avoid.
+        if save_level == SaveLevel.PORTABLE:
+            raise OpaqueCallableInExecutableSaveError(
+                f"Portable intervention specs cannot save import-ref callable {value.import_path}."
+            )
+        return {
+            "portability": "import_ref",
+            "import_path": value.import_path,
+            "repr": repr(value),
+        }
     import_path = _import_path_for_callable(value)
     if import_path is not None and _callable_round_trips(value, import_path):
         if save_level == SaveLevel.PORTABLE:

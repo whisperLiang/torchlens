@@ -433,3 +433,27 @@ def test_bundle_save_failure_names_cause_and_code(tmp_path: Path, monkeypatch) -
     assert excinfo.value.fields["code"] == "bundle_save_failed"
     assert excinfo.value.fields["cause_type"] == "TypeError"
     assert "Remedy:" in str(excinfo.value)
+
+
+def test_unverified_capture_disclosure_survives_save_and_load(tmp_path: Path) -> None:
+    """P7/R10: capture_verified=False must not launder to no-claim across save.
+
+    Fail-before: the disclosure triple was FieldPolicy.DROP, so a capture
+    TorchLens itself refused to bless loaded as verified=None / reason=None --
+    the round trip IMPROVED a verdict. The negative claim now persists as a
+    string-only row; True/None stay session-time so a loaded artifact can
+    never CLAIM verification.
+    """
+
+    trace = _trace()
+    trace.capture_verified = False
+    trace.capture_verification_reason = "escape_rescue_unrecovered"
+    spec = tmp_path / "unverified.tlspec"
+    tl.save(trace, str(spec))
+    loaded = tl.load(str(spec))
+    assert loaded.capture_verified is False
+    assert loaded.capture_verification_reason == "escape_rescue_unrecovered"
+
+    clean = _save(tmp_path, "clean.tlspec")
+    loaded_clean = tl.load(str(clean))
+    assert loaded_clean.capture_verified is None

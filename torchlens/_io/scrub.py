@@ -1067,6 +1067,18 @@ def _scrub_value(
         scrubbed_state["_activation_transform_repr"] = _scrubbed_transform_repr(
             value.activation_transform
         )
+        # P7/R10: a capture TorchLens itself refused to bless must not round-trip
+        # into "no claim". The NEGATIVE disclosure persists as a string-only row
+        # (mirroring _capture_outcome's treatment); True/None stay session-time,
+        # so a loaded artifact can never CLAIM verification -- the row can only
+        # ever worsen a verdict, preserving the monotonicity the runnable side
+        # enforces structurally. rescue_rerun stays session-time as documented.
+        if getattr(value, "capture_verified", None) is False:
+            reason = getattr(value, "capture_verification_reason", None)
+            scrubbed_state["_capture_verification"] = {
+                "verified": False,
+                "reason": str(reason) if reason is not None else None,
+            }
         scrubbed_state["tlspec_version"] = TLSPEC_VERSION
         _apply_source_metadata_policy(scrubbed_state, options)
         _apply_trace_blob_policy(scrubbed_state, options)

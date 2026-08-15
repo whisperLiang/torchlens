@@ -470,3 +470,23 @@ def test_disk_finalize_refuses_concurrently_created_target(
         )
 
     assert list(bundle_path.iterdir()) == []
+
+
+def test_recover_refuses_below_floor_bundle_instead_of_resurrecting(tmp_path: Path) -> None:
+    """R10-4 drop-not-resurrect: recover() honors the rehydration floor.
+
+    Fail-before: ``recover()`` swallowed the floor refusal with a bare pass and
+    salvaged the below-floor bundle through the index path as recovered=True --
+    resurrecting exactly what ``load()`` refuses.
+    """
+
+    from torchlens._io import ArtifactVersionBelowFloorError
+
+    bundle_path = tmp_path / "oldbundle.tlfast"
+    _write_bundle(bundle_path)
+    manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["tlspec_version"] = 5
+    (bundle_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactVersionBelowFloorError):
+        tl.fastlog.recover(bundle_path)
