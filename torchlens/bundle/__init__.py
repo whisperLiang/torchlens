@@ -2174,8 +2174,20 @@ def _output_layer_pairs(
     target_labels = list(getattr(target_log, "output_layers", []) or [])
     candidate_labels = list(getattr(candidate_log, "output_layers", []) or [])
     if target_labels and candidate_labels:
+        # grind-r5 b7 R23 (sol HIGH): a silent shortest-prefix zip reported
+        # only the surviving outputs' deltas, so a member that LOST an output
+        # compared clean. Arity mismatch is a structural divergence and must
+        # refuse, never truncate.
+        if len(target_labels) != len(candidate_labels):
+            raise BundleMemberError(
+                f"output comparison refused: the target trace has "
+                f"{len(target_labels)} output layers but the member has "
+                f"{len(candidate_labels)} ({target_labels!r} vs {candidate_labels!r}); "
+                "the graphs are structurally divergent, so a per-output delta "
+                "would silently ignore the missing/extra outputs."
+            )
         pairs: list[tuple[Any, Any]] = []
-        for target_label, candidate_label in zip(target_labels, candidate_labels):
+        for target_label, candidate_label in zip(target_labels, candidate_labels, strict=True):
             try:
                 pairs.append((target_log[target_label], candidate_log[candidate_label]))
             except (KeyError, IndexError):
