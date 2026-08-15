@@ -13,7 +13,9 @@ tests/AGENTS.md "Markers"):
 
 2. **Duration budget** (runtime tripwire). The conftest hook accounts for fixture
    setup, call, and teardown time, then checks both each item and each resolved
-   parametrized family against the documented 5s partition boundary.
+   parametrized family (smoke AND unmarked) against the documented 5s partition
+   boundary. The charged measure is ``min(wall, cpu)`` — load-robust and
+   threading-robust; see the budget-constant comment block in conftest.py.
 
 3. **State-isolation census** (static). Every warn-once module global must appear
    in the root autouse reset inventory, and every module-scoped fixture that
@@ -33,21 +35,105 @@ import pytest
 pytestmark = pytest.mark.smoke
 
 
+#: Markers that may never combine with ``smoke`` on one resolved item.
+#: ``heavy``/``slow``: additive markers keep the item in `-m smoke` despite the
+#: heavier tier. ``serial``/``rare`` (R41-2): both are duration-budget
+#: EXEMPTION channels, so a smoke+serial or smoke+rare item would sit in the
+#: commit gate with zero duration enforcement (and `-m smoke` overrides the
+#: default `-m 'not rare'`, so smoke+rare items DO run in the commit gate).
+_SMOKE_INCOMPATIBLE_MARKERS = ("heavy", "slow", "serial", "rare")
+
+
+def _tier_combo_violations(
+    marker_names: set[str], callspec_marker_names: set[str], nodeid: str
+) -> list[str]:
+    """Return tier-combination violations for one resolved item's markers.
+
+    Pure helper so the combination policy is unit-testable (red-capable)
+    without planting real mis-marked tests.
+
+    Policy:
+    - ``smoke`` may not combine with any of ``_SMOKE_INCOMPATIBLE_MARKERS``.
+    - ``heavy`` + ``slow`` is a partition contradiction (a test cannot be both
+      5-20s and >20s) UNLESS ``slow`` arrived as a per-parametrize-cell
+      refinement of a heavy family (``pytest.param(..., marks=slow)``), the
+      sanctioned shape for "this one cell measures beyond heavy's ceiling"
+      (R41-3). Budget enforcement already resolves the combo as slow-wins.
+
+    Parameters
+    ----------
+    marker_names:
+        All marker names on the resolved item.
+    callspec_marker_names:
+        Marker names contributed by the item's parametrize callspec.
+    nodeid:
+        Item node id used in violation strings.
+
+    Returns
+    -------
+    list[str]
+        Human-readable violation strings (empty when compliant).
+    """
+
+    violations = []
+    if "smoke" in marker_names:
+        for incompatible in _SMOKE_INCOMPATIBLE_MARKERS:
+            if incompatible in marker_names:
+                violations.append(f"{nodeid} [smoke + {incompatible}]")
+    if (
+        "heavy" in marker_names
+        and "slow" in marker_names
+        and "slow" not in callspec_marker_names
+        and "heavy" not in callspec_marker_names
+    ):
+        violations.append(f"{nodeid} [heavy + slow, not a per-cell refinement]")
+    return violations
+
+
+def _item_combo_violations(item: pytest.Item) -> list[str]:
+    """Apply the tier-combination policy to one collected pytest item."""
+
+    marker_names = {marker.name for marker in item.iter_markers()}
+    callspec = getattr(item, "callspec", None)
+    callspec_marker_names = {marker.name for marker in getattr(callspec, "marks", [])}
+    return _tier_combo_violations(marker_names, callspec_marker_names, item.nodeid)
+
+
 def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequest) -> None:
-    """No collected item may combine ``smoke`` with ``heavy`` or ``slow``."""
+    """No collected item may carry a contradictory tier-marker combination."""
 
     conflicted = []
     for item in request.session.items:
-        if item.get_closest_marker("smoke") is None:
-            continue
-        for heavier in ("heavy", "slow"):
-            if item.get_closest_marker(heavier) is not None:
-                conflicted.append(f"{item.nodeid} [smoke + {heavier}]")
+        conflicted.extend(_item_combo_violations(item))
     assert not conflicted, (
-        "Tests carry `smoke` together with a heavier tier marker, so `-m smoke` "
-        "still runs them despite the heavier mark. Drop `smoke` from each "
-        "(markers are additive):\n  " + "\n  ".join(conflicted)
+        "Tests carry contradictory tier-marker combinations (markers are "
+        "additive; exemption markers disarm duration budgets). Fix each "
+        "combination:\n  " + "\n  ".join(conflicted)
     )
+
+
+@pytest.mark.parametrize(
+    ("markers", "callspec_markers", "expected_fragments"),
+    [
+        pytest.param({"smoke", "heavy"}, set(), ["smoke + heavy"], id="smoke-heavy"),
+        pytest.param({"smoke", "slow"}, set(), ["smoke + slow"], id="smoke-slow"),
+        pytest.param({"smoke", "serial"}, set(), ["smoke + serial"], id="smoke-serial"),
+        pytest.param({"smoke", "rare"}, set(), ["smoke + rare"], id="smoke-rare"),
+        pytest.param({"heavy", "slow"}, set(), ["heavy + slow"], id="heavy-slow-decorators"),
+        pytest.param({"heavy", "slow"}, {"slow"}, [], id="heavy-family-slow-cell-ok"),
+        pytest.param({"smoke"}, set(), [], id="smoke-alone-ok"),
+        pytest.param({"heavy", "serial"}, set(), [], id="heavy-serial-ok"),
+    ],
+)
+def test_tier_combo_policy_is_red_capable(
+    markers: set[str], callspec_markers: set[str], expected_fragments: list[str]
+) -> None:
+    """The combination policy flags each banned shape and passes each sanctioned one."""
+
+    violations = _tier_combo_violations(markers, callspec_markers, "planted::node")
+    assert len(violations) == len(expected_fragments)
+    for fragment in expected_fragments:
+        assert any(fragment in violation for violation in violations), (fragment, violations)
 
 
 def test_bounded_tier_tests_stay_within_duration_budget(
@@ -57,10 +143,13 @@ def test_bounded_tier_tests_stay_within_duration_budget(
 
     The budget is TWO-directional (R41): ``smoke`` AND unmarked tests are held
     to the 5s partition boundary, ``heavy`` to its 20s ceiling (all
-    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. Budget
-    values live in ``tests/conftest.py`` and ride along on each recorded
-    offender -- a bare ``conftest`` import here would be ambiguous during
-    full-suite collection (nested conftests share the module name).
+    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. The
+    CHARGED time is ``min(wall, cpu)`` so neither orchestrator load (wall
+    inflation) nor torch intra-op threading (cpu inflation) can false-fail a
+    genuinely in-budget test (round-4 load-flake fix). Budget values live in
+    ``tests/conftest.py`` and ride along on each recorded offender -- a bare
+    ``conftest`` import here would be ambiguous during full-suite collection
+    (nested conftests share the module name).
 
     This test also asserts its own LAST-position ordering: the offender
     ledger only covers tests that already ran, so a reordering regression
@@ -88,8 +177,9 @@ def test_bounded_tier_tests_stay_within_duration_budget(
     }
     offenders = getattr(request.session, "_tl_duration_budget_offenders", [])
     lines = [
-        f"{nodeid} [{tier}]: {duration:.1f}s (budget {budget:.0f}s) -- {guidance[tier]}"
-        for nodeid, tier, duration, budget in offenders
+        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
+        f"(budget {budget:.0f}s on min(wall, cpu)) -- {guidance[tier]}"
+        for nodeid, tier, wall, cpu, budget in offenders
     ]
     assert not offenders, (
         "Tests exceeded their tier duration budget this session:\n  " + "\n  ".join(lines)
@@ -99,12 +189,14 @@ def test_bounded_tier_tests_stay_within_duration_budget(
 def test_smoke_parametrized_families_stay_within_duration_budget(
     request: pytest.FixtureRequest,
 ) -> None:
-    """Resolved smoke parameter families must stay within the aggregate budget.
+    """Resolved 5s-tier parameter families must stay within the aggregate budget.
 
-    A family of N parameters legitimately costs ~N single-test durations (the
-    selector matrix is 278 cells), so each family's budget scales with its
-    resolved cell count: load_factor * max(2x the per-test budget, the
-    per-cell allowance x n_cells). Genuine per-cell ballooning still trips.
+    Covers smoke AND unmarked families (R41-4: untiered families previously
+    had no aggregate bound). A family of N parameters legitimately costs ~N
+    single-test durations (the selector matrix is 278 cells), so each family's
+    budget scales with its resolved cell count: load_factor * max(2x the
+    per-test budget, the per-cell allowance x n_cells), charged on
+    min(wall, cpu). Genuine per-cell ballooning still trips.
     """
 
     family_stats = getattr(request.session, "_tl_smoke_family_stats", {})
@@ -127,7 +219,11 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
 def test_smoke_module_imports_stay_within_duration_budget(
     request: pytest.FixtureRequest,
 ) -> None:
-    """Smoke-bearing modules must import and collect within the 5s boundary."""
+    """Smoke-bearing modules must import and collect within the 5s boundary.
+
+    Charged on ``min(wall, cpu)`` like the per-test budgets, so parallel
+    orchestrator load cannot false-fail module imports either.
+    """
 
     budget = 5.0
     durations = getattr(request.session, "_tl_module_collection_durations", {})
@@ -137,9 +233,14 @@ def test_smoke_module_imports_stay_within_duration_budget(
         if item.get_closest_marker("smoke") is not None
     }
     offenders = [
-        (path, durations[path]) for path in sorted(smoke_paths) if durations.get(path, 0.0) > budget
+        (path, durations[path])
+        for path in sorted(smoke_paths)
+        if path in durations and min(durations[path]) > budget
     ]
-    lines = [f"{path}: {duration:.1f}s (budget {budget:.0f}s)" for path, duration in offenders]
+    lines = [
+        f"{path}: wall {wall:.1f}s / cpu {cpu:.1f}s (budget {budget:.0f}s on min)"
+        for path, (wall, cpu) in offenders
+    ]
     assert not offenders, (
         "Smoke-bearing modules exceeded the import/collection budget. Move expensive setup "
         "behind fixtures or re-tier the module:\n  " + "\n  ".join(lines)
