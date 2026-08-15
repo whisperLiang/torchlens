@@ -188,6 +188,76 @@ def test_skip_fn_omits_unrolled_skipped_node(tmp_path: Path) -> None:
     assert "relu_1_2" not in dot
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
+def test_bounded_render_child_dies_with_hard_parent_death(tmp_path: Path) -> None:
+    """SIGKILL of the parent must not leave a bounded render child running.
+
+    The spawn seam's group teardown only runs in parent exception handlers,
+    so hard parent death left the session-leading child alive with no
+    watchdog (b6 R40). The pdeathsig binding closes exactly that hole.
+    """
+
+    import os
+    import signal as signal_module
+    import time
+
+    parent_script = (
+        "import os, subprocess, sys, threading, time\n"
+        "from torchlens.visualization._render_utils import run_bounded_subprocess\n"
+        "t = threading.Thread(\n"
+        "    target=lambda: run_bounded_subprocess(['sleep', '30'], timeout=60),\n"
+        "    daemon=True,\n"
+        ")\n"
+        "t.start()\n"
+        "child = None\n"
+        "for _ in range(200):\n"
+        "    listing = subprocess.run(\n"
+        "        ['ps', '-o', 'pid=,comm=', '--ppid', str(os.getpid())],\n"
+        "        capture_output=True, text=True,\n"
+        "    ).stdout\n"
+        "    for line in listing.splitlines():\n"
+        "        pid_text, _, comm = line.strip().partition(' ')\n"
+        "        if comm.strip() == 'sleep':\n"
+        "            child = int(pid_text)\n"
+        "            break\n"
+        "    if child is not None:\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "print(child, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    worktree_root = str(Path(tl.__file__).resolve().parents[1])
+    env = {**os.environ, "PYTHONPATH": worktree_root}
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_script],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        line = parent.stdout.readline().strip()  # type: ignore[union-attr]
+        assert line and line != "None", "parent never spawned the bounded child"
+        child_pid = int(line)
+        os.kill(parent.pid, signal_module.SIGKILL)
+        parent.wait(timeout=5)
+        deadline = time.monotonic() + 3.0
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(child_pid, signal_module.SIGKILL)
+        assert not alive, "bounded render child survived hard parent death"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+
+
 def test_missing_graphviz_binary_refuses_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
