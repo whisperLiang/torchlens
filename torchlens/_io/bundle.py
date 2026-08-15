@@ -1294,8 +1294,14 @@ def _load_trace_payload(
                 f" Bundle was written with python_version={manifest.python_version} but runtime is "
                 f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}."
             )
+        # A guarded-unpickler denylist refusal or corrupt/truncated pickle stream
+        # is a bundle-INTEGRITY signal, not environmental drift: it is tagged with
+        # a stable code so a downstream loader (e.g. the merged-artifact rank-core
+        # loader, A-R58-1) can refuse it as tamper rather than laundering it into
+        # the "no longer parses on this runtime" degradation channel.
         raise TorchLensIOError(
-            f"Failed to load bundle metadata from {metadata_path}.{hint}"
+            f"Failed to load bundle metadata from {metadata_path}.{hint}",
+            code="bundle_metadata_integrity_refused",
         ) from exc
     except (OSError, AttributeError, ImportError, TypeError, ValueError) as exc:
         raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc

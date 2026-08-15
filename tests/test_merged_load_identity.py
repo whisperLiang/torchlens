@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -182,6 +183,54 @@ def test_non_rank_core_member_refuses_not_laundered(tmp_path: Path) -> None:
         load_merged(art)
     assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
     assert "not a valid rank capture" in str(excinfo.value) or "no coherent" in str(excinfo.value)
+
+
+def test_denylisted_member_pickle_refuses_not_laundered(tmp_path: Path) -> None:
+    """A-R58-1: a guarded-unpickler denylist refusal on a member core is TAMPER.
+
+    Plant a classic RCE gadget pickle (``__reduce__`` -> ``os.system``) as one
+    member's ``metadata.pkl`` and re-hash so the descriptor's tree hash matches
+    (the byte-integrity layer would otherwise refuse first). The guarded
+    unpickler denies the gadget with ``pickle.UnpicklingError``. Pre-fix,
+    ``load_merged``'s bare ``except Exception`` around ``load_bundle`` laundered
+    that denylist refusal into the "no longer parses on this runtime"
+    degradation channel and SUCCEEDED the merge off the honest member -- a tamper
+    signal silently downgraded. It must refuse typed as tamper instead.
+    """
+
+    import pickle as _pickle
+
+    class _Evil:
+        def __reduce__(self):  # pragma: no cover - never executed (denied at load)
+            return (os.system, ("echo pwned",))
+
+    art = _saved_two_rank(tmp_path)
+    metadata = art / "members" / "rank_0001.tlspec" / "metadata.pkl"
+    assert metadata.exists()
+    metadata.write_bytes(_pickle.dumps(_Evil()))
+    _rehash(art)
+    with pytest.raises(MergedArtifactError) as excinfo:
+        load_merged(art)
+    assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+    assert "bundle-integrity" in str(excinfo.value)
+
+
+def test_corrupt_member_pickle_stream_refuses_not_laundered(tmp_path: Path) -> None:
+    """A-R58-1 sibling: a truncated/garbage member pickle stream is TAMPER too.
+
+    Not every integrity failure is a denylist hit -- a corrupt or truncated
+    ``metadata.pkl`` also surfaces as ``pickle.UnpicklingError`` and was
+    laundered identically. Garbage bytes must refuse as tamper, never degrade.
+    """
+
+    art = _saved_two_rank(tmp_path)
+    metadata = art / "members" / "rank_0001.tlspec" / "metadata.pkl"
+    metadata.write_bytes(b"\x80\x05not-a-valid-pickle-stream\xff\xff")
+    _rehash(art)
+    with pytest.raises(MergedArtifactError) as excinfo:
+        load_merged(art)
+    assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+    assert "bundle-integrity" in str(excinfo.value)
 
 
 def test_shared_member_path_refuses_typed(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from torchlens.distributed._ledger import (
     GroupLifecycleEvent,
@@ -390,3 +391,145 @@ def test_duplicate_member_rank_refuses_typed(tmp_path: Path) -> None:
     with pytest.raises(MergedArtifactError) as caught:
         load_merged(root)
     assert caught.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+
+# --------------------------------------------------------------------------- #
+# A-R58-2: refuse-not-degrade at the member bundle-load entry point            #
+#                                                                             #
+# Every tamper test above stops at the descriptor/manifest/tree-hash layer;   #
+# NONE reached ``load_bundle(member_path)`` with a real rank core, so the     #
+# guarded-unpickler-refusal-laundered-as-degradation class (A-R58-1) had zero #
+# gadget coverage. These build a real two-rank artifact and corrupt one       #
+# member's ``metadata.pkl`` so ``load_bundle`` raises a guarded-unpickler /   #
+# corrupt-stream error, proving the failure refuses as TAMPER, never a merge  #
+# that silently succeeds at partial off the honest member.                    #
+# --------------------------------------------------------------------------- #
+
+
+def _real_two_rank_artifact(tmp_path: Path) -> Path:
+    """Build a real, honest two-rank merged artifact via the public API."""
+
+    from torch import nn
+
+    import torchlens as tl
+
+    def boundary(rank: int) -> dict[str, Any]:
+        return {
+            "schema": "collective_boundary_v1",
+            "kind": "all_reduce",
+            "func": "torch.distributed.all_reduce",
+            "correlation": {
+                "membership_digest": _DIGEST,
+                "lifetime_ordinal": 0,
+                "channel": "coll",
+                "seq": 0,
+            },
+            "group": {
+                "global_ranks": [0, 1],
+                "size": 2,
+                "backend": "gloo",
+                "my_global_rank": rank,
+                "my_group_rank": None,
+                "coord_provenance": "test",
+            },
+            "reduce_op": "RedOpType.SUM",
+            "peer": None,
+            "events": {"async_op": False, "completion_binding": "issue_sync"},
+            "roles": [
+                {
+                    "role": "contribution_destination",
+                    "index": 0,
+                    "shape": [2, 4],
+                    "logical_shape": None,
+                    "placements": None,
+                }
+            ],
+            "witness": {
+                "policy_resolved": "digest",
+                "contribution_digests": [hashlib.sha256(b"cc").hexdigest()],
+                "destination_digests": [hashlib.sha256(b"aa").hexdigest()],
+                "not_present_reason": None,
+            },
+            "lifetime_evidence": {
+                "ordinal_source": "seeded",
+                "install_epoch": "seeded",
+                "arming_source": "explicit",
+            },
+            "c10d_group_seq": None,
+            "disclosures": [],
+            "op_labels_raw": ["allreduce_1_raw"],
+            "op_node": True,
+        }
+
+    ledger = GroupLifecycleLedger()
+    ledger.append(GroupLifecycleEvent(0, "seed", _DIGEST, 0, "seeded", "seeded", 0))
+    ledger_payload = ledger.to_payload()
+
+    def rank_trace(rank: int):
+        torch.manual_seed(0)
+        log = tl.trace(nn.Linear(4, 4), torch.randn(2, 4))
+        log.annotations["distributed"] = {
+            "boundaries": [boundary(rank)],
+            "group_lifecycle_ledger": ledger_payload,
+            "install_epoch": "seeded",
+        }
+        return log
+
+    merged = tl.merge_ranks([rank_trace(0), rank_trace(1)])
+    art = tmp_path / "merged.tlspec"
+    merged.save(art)
+    return art
+
+
+def _rehash_artifact(art: Path) -> None:
+    """Recompute member tree hashes + descriptor checksum after a byte edit."""
+
+    from torchlens.merged._artifact import canonical_json_bytes, tree_hash
+
+    desc_path = art / "merge" / "descriptor.json"
+    descriptor = json.loads(desc_path.read_text())
+    for entry in descriptor["members"]:
+        entry["tree_sha256"] = tree_hash(art / entry["path"])
+    desc_bytes = canonical_json_bytes(descriptor)
+    desc_path.write_bytes(desc_bytes)
+
+    man_path = art / "manifest.json"
+    manifest = json.loads(man_path.read_text())
+    manifest["members"] = {
+        str(entry["rank"]): entry["tree_sha256"] for entry in descriptor["members"]
+    }
+    manifest["descriptor_sha256"] = hashlib.sha256(desc_bytes).hexdigest()
+    man_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def test_denylisted_member_pickle_is_tamper_not_degradation(tmp_path: Path) -> None:
+    """A member ``metadata.pkl`` denylist RCE gadget refuses as tamper (A-R58-1)."""
+
+    import os
+    import pickle
+
+    class _Evil:
+        def __reduce__(self):  # pragma: no cover - denied at load, never executed
+            return (os.system, ("echo pwned",))
+
+    art = _real_two_rank_artifact(tmp_path)
+    (art / "members" / "rank_0001.tlspec" / "metadata.pkl").write_bytes(pickle.dumps(_Evil()))
+    _rehash_artifact(art)
+    with pytest.raises(MergedArtifactError) as caught:
+        load_merged(art)
+    assert caught.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+    assert "bundle-integrity" in str(caught.value)
+
+
+def test_corrupt_member_pickle_is_tamper_not_degradation(tmp_path: Path) -> None:
+    """A corrupt member ``metadata.pkl`` stream refuses as tamper (A-R58-1)."""
+
+    art = _real_two_rank_artifact(tmp_path)
+    (art / "members" / "rank_0001.tlspec" / "metadata.pkl").write_bytes(
+        b"\x80\x05not-a-valid-pickle-stream\xff\xff"
+    )
+    _rehash_artifact(art)
+    with pytest.raises(MergedArtifactError) as caught:
+        load_merged(art)
+    assert caught.value.fields["code"] == MergedErrorCode.MERGED_DESCRIPTOR_TAMPER.value
+    assert "bundle-integrity" in str(caught.value)
