@@ -9,7 +9,7 @@ import heapq
 import itertools as it
 from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
@@ -2278,11 +2278,64 @@ def _merge_iso_groups_to_layers(
             ]
             if len(combination_nodes) < 2:
                 continue
+        # Bucketed candidate sweep instead of the historical full
+        # ``it.combinations(combination_nodes, 2)`` triangle. Every union arm
+        # below preconditions on subgraph adjacency (bare and anchored arms)
+        # or on the two subgraphs sharing parametric body content (the
+        # weight-tied arm, which alone may also union through ``_seed_reaches``
+        # without adjacency). A pair outside those buckets is a guaranteed
+        # ``continue`` in every branch, and the union order cannot change the
+        # partition (min-root union; the root-equality short-circuit is
+        # idempotent), so enumerating only the bucketed superset is
+        # output-identical. The full triangle made torch capture O(N^2) in
+        # the largest structurally-identical op group -- a plain param-free
+        # feed-forward chain walked all C(N,2) pairs (35% of capture CPU at
+        # 3200 ops) and gained zero grouping for it, because neither
+        # short-circuit can fire when no unions ever happen.
+        order_index = {node_label: index for index, node_label in enumerate(iso_nodes)}
+        nodes_by_subgraph: dict[str, list[str]] = defaultdict(list)
+        for node_label in combination_nodes:
+            nodes_by_subgraph[node_to_subgraph[node_label].starting_node].append(node_label)
+        candidate_sg_pairs: set[tuple[str, str]] = set()
+        for sg1 in nodes_by_subgraph:
+            self_adjacent = sg1 in adjacent_subgraphs and sg1 in adjacent_subgraphs[sg1]
+            if len(nodes_by_subgraph[sg1]) > 1 and (self_adjacent or sg_param_types.get(sg1)):
+                candidate_sg_pairs.add((sg1, sg1))
+            for sg2 in adjacent_subgraphs.get(sg1, ()):
+                if sg2 != sg1 and sg2 in nodes_by_subgraph:
+                    candidate_sg_pairs.add((min(sg1, sg2), max(sg1, sg2)))
+        subgraphs_by_param_type: dict[str, list[str]] = defaultdict(list)
+        for sg1 in nodes_by_subgraph:
+            for param_type in sg_param_types.get(sg1, frozenset()):
+                subgraphs_by_param_type[param_type].append(sg1)
+        for shared_subgraphs in subgraphs_by_param_type.values():
+            for sg1, sg2 in it.combinations(sorted(shared_subgraphs), 2):
+                candidate_sg_pairs.add((sg1, sg2))
+
+        def _bucketed_candidate_pairs(
+            candidate_sg_pairs: set[tuple[str, str]] = candidate_sg_pairs,
+            nodes_by_subgraph: dict[str, list[str]] = nodes_by_subgraph,
+            order_index: dict[str, int] = order_index,
+        ) -> Iterator[tuple[str, str]]:
+            """Yield candidate pairs oriented by capture order (earlier first)."""
+
+            for sg1, sg2 in sorted(candidate_sg_pairs):
+                if sg1 == sg2:
+                    members = sorted(nodes_by_subgraph[sg1], key=order_index.__getitem__)
+                    yield from it.combinations(members, 2)
+                    continue
+                for node1_label in nodes_by_subgraph[sg1]:
+                    for node2_label in nodes_by_subgraph[sg2]:
+                        if order_index[node1_label] < order_index[node2_label]:
+                            yield node1_label, node2_label
+                        else:
+                            yield node2_label, node1_label
+
         # strict=False is deliberate: the consecutive-pairs sliding window is
         # ragged by construction (see the cohort sweep above).
         pair_iter = it.chain(
             zip(iso_nodes, iso_nodes[1:], strict=False),
-            it.combinations(combination_nodes, 2),
+            _bucketed_candidate_pairs(),
         )
         for node1_label, node2_label in pair_iter:
             if find(node1_label) == find(node2_label):
