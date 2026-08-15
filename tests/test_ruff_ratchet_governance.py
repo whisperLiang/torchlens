@@ -81,11 +81,19 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     "BLE001": 511,
     "S110": 39,
     "S112": 35,
+    # grind-r5 b7 R24 (SF-23): every in-package assert strips under
+    # ``python -O``, so each new site is a potential optimized-mode semantic
+    # split (the roster contradiction guard was the proven instance --
+    # torch.tensor silently vanished from the wrapper roster). torchlens/
+    # only: tests legitimately assert.
+    "S101": 97,
 }
 
 #: Codes measured over torchlens/ only (see the D417 and complexity notes
 #: above).
-_PACKAGE_ONLY_CODES = frozenset({"D417", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915"})
+_PACKAGE_ONLY_CODES = frozenset(
+    {"D417", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "S101"}
+)
 
 _CI_SCOPE = ("torchlens", "tests", "scripts", "tools", "benchmarks", "examples", "notebooks")
 

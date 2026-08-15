@@ -1215,11 +1215,19 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
 
             # cannot be overridden by __torch_function__
             if func in ignored_funcs_set:
-                msg = (
-                    "{}.{} is in the tuple returned by torch._overrides.get_ignored_functions "
-                    "but still has an explicit override"
-                )
-                assert func not in testing_overrides_set, msg.format(namespace, func.__name__)
+                # A real ``raise``, never ``assert`` (grind-r5 b7 R24, the
+                # descriptor branch's twin): under ``python -O`` the assert
+                # stripped and the ``continue`` silently excluded the function
+                # from the wrapper roster -- fault-injection proved
+                # ``torch.tensor`` vanishing from the 3,350-entry roster with
+                # zero signal on exactly the future-torch drift this
+                # contradiction check exists to catch.
+                if func in testing_overrides_set:
+                    raise RuntimeError(
+                        f"{namespace}.{func.__name__} is in the tuple returned by "
+                        "torch._overrides.get_ignored_functions but still has an "
+                        "explicit override"
+                    )
                 continue
             func_names.append((f"{namespace_str}", func_name))
     return func_names
