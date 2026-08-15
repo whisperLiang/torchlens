@@ -273,6 +273,11 @@ def save_intervention(
             save_level=save_level.value,
         )
         _write_text_file(tmp_path / _README_FILE, _readme_text(spec_json, tensor_entries))
+        # Blob file data is fsynced at write time (_fsync_file), but directory
+        # ENTRIES must be flushed bottom-up: without fsyncing tensors/ first, a
+        # power crash just after publish can leave a durable spec.json whose
+        # tensors/*.safetensors entries were lost (R59; siblings use fsync_tree).
+        _fsync_directory(tmp_path / _TENSOR_DIR)
         _fsync_directory(tmp_path)
         if target_path.exists():
             # Re-check overwrite at swap time, not just at save start (R59

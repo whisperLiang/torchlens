@@ -2760,9 +2760,14 @@ def _apply_visualization_save_policy(
             scrubbed_layer.visualizer_path = None
             continue
         visualizer_dir.mkdir(parents=True, exist_ok=True)
+        # B8-10 parity: the sidecar tree must not escape the bundle's permission
+        # tightening -- copy2 preserves the scratch file's umask-derived mode and
+        # would leak on cp -a/tar or a relaxed bundle root.
+        _restrict_mode(visualizer_dir, 0o700)
         destination_name = f"{index:05d}_{source_path.name}"
         destination_path = visualizer_dir / destination_name
         shutil.copy2(source_path, destination_path)
+        _restrict_mode(destination_path, 0o600)
         # Persist a bundle-RELATIVE path (R59-6): the absolute final path embeds
         # $HOME/username, contradicting the scrub's basename-only PII policy, and
         # load re-anchors from the basename anyway (_reanchor_visualizer_paths),

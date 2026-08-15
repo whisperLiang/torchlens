@@ -113,7 +113,9 @@ def _reject_symlinked_metadata_path(path: Path) -> None:
         # Same front-door cause as the bundle loader's symlink guards, so it
         # carries the same stable code a caller branches on (R65).
         raise TorchLensIOError(
-            f"Refusing symlinked .tlspec format-detection path: {path}.",
+            f"Refusing symlinked .tlspec format-detection path: {path}. "
+            f"Remedy: pass the resolved bundle directory instead, e.g. "
+            f"tl.load(str(Path(path).resolve())).",
             code="load_path_symlink_rejected",
         )
 

@@ -346,14 +346,28 @@ def _load_verified_blob_tensor(blob_path: Path, expected_sha256: str) -> Any:
     main bundle path's ``sha256_of_file`` + ``load_file`` discipline).
     """
 
+    from .._io.lazy import _file_identity
     from .._io.manifest import sha256_of_file
 
+    # R59 TOCTOU (lazy.py discipline): the digest and the mmap-backed load are
+    # two opens of the same path, so bracket the hash with the file identity and
+    # re-check before loading -- a rename-replace in the window is refused
+    # rather than admitting bytes that were never hashed.
     try:
+        pre_hash_identity = _file_identity(blob_path.stat())
         observed_sha256 = sha256_of_file(blob_path)
     except OSError as exc:
         raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
     if observed_sha256 != expected_sha256:
         raise TorchLensIOError(f"Checksum mismatch for fastlog blob at {blob_path}.")
+    try:
+        pre_load_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
+    if pre_load_identity != pre_hash_identity:
+        raise TorchLensIOError(
+            f"Fastlog blob at {blob_path} changed between integrity check and load."
+        )
     return _load_blob_tensor_from_file(blob_path)
 
 

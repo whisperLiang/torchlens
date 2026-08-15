@@ -28,7 +28,7 @@ from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
 from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError
 from ._torch_symbols import torch_attr
 from .accessor_rebuild import rebuild_trace_accessors
-from .lazy import LazyActivationRef
+from .lazy import LazyActivationRef, _file_identity
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .paths import resolve_bundle_blob_path, resolve_bundle_blobs_dir
 from .payload_codec import materialize_transport_tensor
@@ -835,12 +835,27 @@ def _materialize_blob_ref(
     if not blob_path.exists():
         raise TorchLensIOError(f"Tensor blob not found at {blob_path}.")
 
+    # The digest and the load are two separate opens of the same path (the load
+    # is mmap-backed). Bracket the hash with the file identity and re-check it
+    # before the load -- the same R59 TOCTOU discipline as lazy.py -- so a
+    # rename-replace between integrity check and load is refused rather than
+    # admitting bytes that were never hashed.
+    try:
+        pre_hash_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
     observed_sha256 = sha256_of_file(blob_path)
     expected_sha256 = entry.sha256 if isinstance(entry, TensorEntry) else entry.get("sha256")
     if expected_sha256 is not None and observed_sha256 != expected_sha256:
         raise TorchLensIOError(
             f"blob at {blob_path} sha256 mismatch; expected {expected_sha256} got {observed_sha256}"
         )
+    try:
+        pre_load_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
+    if pre_load_identity != pre_hash_identity:
+        raise TorchLensIOError(f"blob at {blob_path} changed between integrity check and load.")
 
     tensor = _load_safetensors_tensor(blob_path, map_location, entry)
     return materialize_transport_tensor(
