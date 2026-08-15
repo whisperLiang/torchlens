@@ -125,13 +125,19 @@ def strict_collapse_checks_enabled() -> bool:
     duplicated byte-for-byte in ``auto_collapse`` and ``_render_dot``, a
     divergence hazard for a verification-arming knob).
 
+    Keyed ONLY on the torchlens-owned knob (r3 b7-opus R47-A): the old
+    ``PYTEST_CURRENT_TEST in os.environ`` arm meant a DOWNSTREAM project's
+    test suite rendering a TorchLens graph got an ``AssertionError`` on a
+    render that works in a script, from a knob it never set. The TorchLens
+    suite arms the tripwire explicitly in ``tests/conftest.py``.
+
     Returns
     -------
     bool
-        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
+        True when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
     """
 
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1"
 
 
 def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) -> str:

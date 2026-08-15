@@ -92,6 +92,13 @@ def pytest_configure(config: pytest.Config) -> None:
     VIS_OUTPUT_DIR = str(output_root / "visualizations")
     config._tl_prior_test_outputs_dir = os.environ.get("TORCHLENS_TEST_OUTPUTS_DIR")
     os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = TEST_OUTPUTS_DIR
+    # Arm the collapse/sibling-order verification tripwire for OUR suite.
+    # The library no longer keys strictness on the ambient PYTEST_CURRENT_TEST
+    # marker (r3 b7-opus R47-A: a downstream project's pytest rendering a
+    # TorchLens graph must never inherit our hard-assert mode), so the
+    # TorchLens suite opts in through the torchlens-owned knob explicitly.
+    config._tl_prior_collapse_strict = os.environ.get("TORCHLENS_COLLAPSE_STRICT")
+    os.environ.setdefault("TORCHLENS_COLLAPSE_STRICT", "1")
     config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
@@ -118,6 +125,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         os.environ.pop("TORCHLENS_TEST_OUTPUTS_DIR", None)
     else:
         os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = prior
+    prior_strict = getattr(config, "_tl_prior_collapse_strict", None)
+    if prior_strict is None:
+        os.environ.pop("TORCHLENS_COLLAPSE_STRICT", None)
+    else:
+        os.environ["TORCHLENS_COLLAPSE_STRICT"] = prior_strict
 
 
 # Tier duration budgets (see tests/test_marker_lint.py). The r3 re-tier
