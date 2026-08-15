@@ -68,10 +68,18 @@ def _pooled_cells_by_field(store) -> dict[str, int]:
     return counts
 
 
-def test_capture_pools_op_and_kind_cells(stack_trace: tl.Trace) -> None:
+def test_capture_pools_op_and_kind_cells() -> None:
     """A finished capture holds PooledCells for the allowlisted op fields
-    and the repetitive kind-table cells (the measured win exists)."""
+    and the repetitive kind-table cells (the measured win exists).
 
+    Captures its OWN trace instead of the shared module fixture: reads
+    hydrate PooledCells back into real containers (cached-back identity), so
+    under pytest-randomly's in-module shuffle any sibling test that reads
+    cells first legitimately lowers the shared trace's pooled count.
+    """
+
+    torch.manual_seed(0)
+    stack_trace = tl.trace(_Stack(), torch.zeros(1, 4))
     core = stack_trace.__dict__["_trace_core"]
     op_counts = _pooled_cells_by_field(core.ops)
     n_ops = len(stack_trace.ops.keys())

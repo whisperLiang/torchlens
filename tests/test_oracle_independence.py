@@ -141,7 +141,13 @@ def _planted_edge_drop_trace():
         ``(trace, ground_truth_outputs)``.
     """
 
-    log = trace_fn(_TwoStage(), torch.randn(2, 6), layers_to_save="all", save_arg_values=True)
+    # The model rides on the trace on purpose: capture releases the direct
+    # param references and rehydrates them through the source-model weakref,
+    # so validation raises PostTraceParamUnavailable whenever a gc cycle
+    # collection happens to run before the value-rooted replay reads params.
+    model = _TwoStage()
+    log = trace_fn(model, torch.randn(2, 6), layers_to_save="all", save_arg_values=True)
+    log._tl_test_model_keepalive = model
     outputs = [log.layer_dict_all_keys[label].out for label in log.output_layers]
     relu_label = next(op.label for op in log.compute_ops if op.func_name == "relu")
     consumer = next(iter(log.layer_dict_all_keys[relu_label].children))

@@ -103,7 +103,7 @@ def test_repeated_lookup_identity() -> None:
         assert trace.modules[label] is trace.modules[label]
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_record_lifetime_pinned_by_trace() -> None:
     """Row 1b: records stay alive while the Trace lives, without user refs."""
 

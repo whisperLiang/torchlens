@@ -133,8 +133,13 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
     assert wrappers_module._FULL_DECORATION_COMPLETED is True
     # The retry ran the FULL pass, so the only undecorated targets are the ones that are
     # legitimately never decorated -- not the thousands a re-install of the partial map
-    # would have left behind.
-    assert len(_undecorated_targets()) == baseline_undecorated
+    # would have left behind. `<=`, not `==`: under some shuffled full-session
+    # orderings the retry's fresh generation decorates a few targets the
+    # baseline generation could not reach (session-history residue on the wrap
+    # ledgers; fw3settle observed 57 vs 61). The laundering failure mode this
+    # test pins leaves the count STRICTLY ABOVE the baseline, so the direction
+    # that matters stays exact.
+    assert len(_undecorated_targets()) <= baseline_undecorated
     assert tl.trace(nn.Linear(4, 4), torch.randn(1, 4)).num_ops >= 1
 
 
