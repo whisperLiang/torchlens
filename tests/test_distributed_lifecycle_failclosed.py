@@ -152,6 +152,42 @@ class TestAutoArmProbeDisclosure:
             raise RuntimeError("torch probe blew up")
 
         monkeypatch.setattr(torch.distributed, "is_initialized", raising_is_initialized)
-        monkeypatch.setattr(lifecycle, "_AUTO_ARM_WARNED", False)
+        monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
         with pytest.warns(UserWarning, match="could not probe torch.distributed"):
             assert lifecycle.maybe_auto_arm() is None
+
+    def test_probe_exception_warns_on_every_capture_entry(self, clean_lifecycle, monkeypatch):
+        """p5 T-DISTRIBUTED: the disclosure must not latch away after capture 1.
+
+        Fail-before: ``_AUTO_ARM_WARNED`` latched once per process, so every
+        capture after the first silently skipped arming -- collectives
+        silently omitted with ZERO disclosure for the rest of the process.
+        """
+
+        def raising_is_initialized() -> bool:
+            raise RuntimeError("torch probe blew up")
+
+        monkeypatch.setattr(torch.distributed, "is_initialized", raising_is_initialized)
+        monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
+        with pytest.warns(UserWarning, match="could not probe torch.distributed"):
+            assert lifecycle.maybe_auto_arm() is None
+        # The SECOND degraded capture entry warns again.
+        with pytest.warns(UserWarning, match="could not probe torch.distributed"):
+            assert lifecycle.maybe_auto_arm() is None
+
+    def test_degradation_reason_is_introspectable_and_clears(self, clean_lifecycle, monkeypatch):
+        """The reason survives as in-band state, not just a stderr line."""
+
+        def raising_is_initialized() -> bool:
+            raise RuntimeError("torch probe blew up")
+
+        monkeypatch.setattr(torch.distributed, "is_initialized", raising_is_initialized)
+        monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
+        with pytest.warns(UserWarning):
+            lifecycle.maybe_auto_arm()
+        reason = lifecycle.auto_arm_degradation()
+        assert reason is not None and "probe_failed" in reason
+        # A later clean probe (distributed provably not in play) clears it.
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+        assert lifecycle.maybe_auto_arm() is None
+        assert lifecycle.auto_arm_degradation() is None

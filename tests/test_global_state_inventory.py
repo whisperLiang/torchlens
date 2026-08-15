@@ -189,7 +189,7 @@ _WARN_ONCE_STATE = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_OBSERVER_FAILED"),
         ("torchlens/backends/torch/ops.py", "_UNSUPPORTED_OUTPUT_CONTAINER_WARNED"),
         ("torchlens/data_classes/op.py", "_WARNED_REFERENCE_SAVE_MODE"),
-        ("torchlens/distributed/_lifecycle.py", "_AUTO_ARM_WARNED"),
+        ("torchlens/distributed/_lifecycle.py", "_AUTO_ARM_DEGRADATION"),
         ("torchlens/fastlog/_storage_resolver.py", "_WARNED_REFERENCE_SAVE_MODE"),
         # Once-per-file source-drift disclosure for the C4 pinned-digest refusal
         # (fix/postproc 7a58a021); reset row lives in tests/conftest.py.

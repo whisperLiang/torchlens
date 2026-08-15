@@ -56,6 +56,7 @@ __all__ = [
     "GroupIdentity",
     "arm",
     "armed_state",
+    "auto_arm_degradation",
     "disarm",
     "is_armed",
     "maybe_auto_arm",
@@ -127,7 +128,20 @@ class _ArmedState:
 
 _LOCK = threading.Lock()
 _STATE: _ArmedState | None = None
-_AUTO_ARM_WARNED = False
+_AUTO_ARM_DEGRADATION: str | None = None
+
+
+def auto_arm_degradation() -> str | None:
+    """Why the LAST lazy-arming attempt degraded to unarmed capture, if it did.
+
+    ``None`` when the last :func:`maybe_auto_arm` call armed, found
+    distributed provably not in play, or was never called. A non-``None``
+    reason means the process may be issuing collectives that captures are NOT
+    recording -- the durable, in-band answer to "why are my collective
+    boundary nodes missing?" that a stderr warning alone cannot give.
+    """
+
+    return _AUTO_ARM_DEGRADATION
 
 
 def is_armed() -> bool:
@@ -541,49 +555,61 @@ def maybe_auto_arm() -> ArmingRecord | None:
     Notes
     -----
     Explicit ``arm()`` raises on recognizer refusal; the lazy path degrades to
-    unarmed capture with a one-time warning instead, because refusing every
-    capture in a process that merely initialized a process group would break
-    previously-working dense captures that issue no collectives at all.
-    Unarmed capture records no collective boundaries -- the pre-tier-(b)
-    status quo -- and the warning names the typed finding.
+    unarmed capture instead, because refusing every capture in a process that
+    merely initialized a process group would break previously-working dense
+    captures that issue no collectives at all. Unarmed capture records no
+    collective boundaries -- the pre-tier-(b) status quo. Each degraded
+    capture entry warns (a once-per-process latch left every capture after
+    the first with ZERO disclosure; Python's default warning filter still
+    dedupes repeats for interactive users) and records its reason durably in
+    :func:`auto_arm_degradation`.
     """
 
-    global _AUTO_ARM_WARNED
+    global _AUTO_ARM_DEGRADATION
     # Already-armed fast path under the lock: the unlocked triple read of
     # _STATE raced disarm() (None between the check and the attribute read).
     with _LOCK:
         state = _STATE
         if state is not None:
             _refuse_if_broken(state)
+            _AUTO_ARM_DEGRADATION = None
             return state.arming
     try:
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            _AUTO_ARM_DEGRADATION = None
             return None
     except Exception as error:
         # Fail-open sibling of the arm-time history probe: a probe failure
         # must not SILENTLY skip arming in a process that may be issuing
         # collectives. Degrading to unarmed capture is the documented lazy
-        # path, but it is disclosed, not silent.
-        if not _AUTO_ARM_WARNED:
-            _AUTO_ARM_WARNED = True
-            warnings.warn(
-                "torchlens could not probe torch.distributed state at capture "
-                f"entry ({type(error).__name__}: {error}); lazy arming was "
-                "skipped and collective boundary nodes will NOT be recorded.",
-                stacklevel=3,
-            )
+        # path, but it is disclosed on EVERY degraded capture entry, not
+        # latched away after the first.
+        _AUTO_ARM_DEGRADATION = (
+            f"probe_failed: {type(error).__name__}: {error}; lazy arming was "
+            "skipped and collective boundary nodes are NOT recorded"
+        )
+        warnings.warn(
+            "torchlens could not probe torch.distributed state at capture "
+            f"entry ({type(error).__name__}: {error}); lazy arming was "
+            "skipped and collective boundary nodes will NOT be recorded.",
+            stacklevel=3,
+        )
         return None
     try:
-        return _arm(source="auto")
+        record = _arm(source="auto")
+        _AUTO_ARM_DEGRADATION = None
+        return record
     except UncapturedCollectiveOpError as error:
-        if not _AUTO_ARM_WARNED:
-            _AUTO_ARM_WARNED = True
-            warnings.warn(
-                "torchlens could not arm distributed collective capture on this "
-                "torch runtime (uncaptured_collective_op); collective boundary "
-                f"nodes will NOT be recorded. {error}",
-                stacklevel=3,
-            )
+        _AUTO_ARM_DEGRADATION = (
+            "uncaptured_collective_op: the arm-time recognizer refused this "
+            f"torch runtime; collective boundary nodes are NOT recorded. {error}"
+        )
+        warnings.warn(
+            "torchlens could not arm distributed collective capture on this "
+            "torch runtime (uncaptured_collective_op); collective boundary "
+            f"nodes will NOT be recorded. {error}",
+            stacklevel=3,
+        )
         return None
 
 
@@ -593,10 +619,11 @@ def disarm() -> None:
     Primarily for tests; ordinary programs stay armed for process lifetime.
     """
 
-    global _STATE, _AUTO_ARM_WARNED
+    global _STATE, _AUTO_ARM_DEGRADATION
     with _LOCK:
         state = _STATE
         if state is None:
+            _AUTO_ARM_DEGRADATION = None
             return
         first_failure: Exception | None = None
         for (module, name), original in list(state.originals.items()):
@@ -610,7 +637,7 @@ def disarm() -> None:
         if first_failure is not None:
             raise first_failure
         _STATE = None
-        _AUTO_ARM_WARNED = False
+        _AUTO_ARM_DEGRADATION = None
 
 
 def resolve_group_identity(group: Any) -> GroupIdentity:

@@ -39,6 +39,7 @@ from ._lifecycle import (
     ArmingRecord,
     GroupIdentity,
     arm,
+    auto_arm_degradation,
     disarm,
     is_armed,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "UncapturedCollectiveOpError",
     "arm",
     "audit_membership_lineages",
+    "auto_arm_degradation",
     "derive_collective_recognizer",
     "disarm",
     "is_armed",
