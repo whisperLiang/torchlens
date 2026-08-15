@@ -91,5 +91,6 @@ def test_pin_matches_live_wrapper_table():
     """The pin tracks the real inventory through a REVIEWED harness edit:
     when the subject's table legitimately changes, this test is the reviewed
     place that changes with it."""
-    wrappers = pytest.importorskip("torchlens.backends.torch.wrappers")
+    from torchlens.backends.torch import wrappers
+
     assert set(wrappers.funcs_not_to_log) == set(dc.PINNED_NOT_LOGGED)

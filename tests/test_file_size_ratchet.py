@@ -39,32 +39,37 @@ _NEW_FILE_LINE_CAP = 2000
 #: up to the next 50). SHRINK-ONLY DOCTRINE: lower a ceiling freely; raising
 #: one requires a stated reason in the same change. When a file drops to
 #: <= 2000 lines, DELETE its row (the staleness check below enforces this).
+#: 2026-08-15 fixwave-3 settle: nine ceilings re-rounded up (validation/core,
+#: utils/rng, _io/bundle, user_funcs, backends/torch/{backward,model_prep},
+#: visualization/auto_collapse, _capture_state_helpers, capture/trace) — the
+#: census was taken per-lane while 12 fix lanes merged in parallel, so each
+#: lane's fix growth landed after its territory's ceiling was frozen.
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5200,
+    "torchlens/validation/core.py": 5250,
     "torchlens/data_classes/op.py": 5050,
     "torchlens/_io/runnable.py": 5000,
-    "torchlens/utils/rng.py": 4750,
+    "torchlens/utils/rng.py": 4850,
     "torchlens/visualization/collapse_optimizer.py": 4550,
     "torchlens/backends/jax/backend.py": 4350,
-    "torchlens/_io/bundle.py": 4050,
+    "torchlens/_io/bundle.py": 4100,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 3700,
-    "torchlens/backends/torch/backward.py": 3650,
+    "torchlens/user_funcs.py": 3750,
+    "torchlens/backends/torch/backward.py": 3700,
     "torchlens/data_classes/trace.py": 3650,
     "torchlens/utils/_torch_compat.py": 3450,
     "torchlens/backends/torch/wrappers.py": 3350,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
     "torchlens/postprocess/_contracts.py": 3200,
-    "torchlens/backends/torch/model_prep.py": 3100,
+    "torchlens/backends/torch/model_prep.py": 3150,
     "torchlens/data_classes/module.py": 2950,
-    "torchlens/visualization/auto_collapse.py": 2950,
+    "torchlens/visualization/auto_collapse.py": 3000,
     "torchlens/validation/exemptions.py": 2700,
     "torchlens/backends/paddle/backend.py": 2700,
     "torchlens/_runnable_state.py": 2650,
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
-    "torchlens/_capture_state_helpers.py": 2550,
+    "torchlens/_capture_state_helpers.py": 2600,
     "torchlens/bundle/__init__.py": 2450,
     "torchlens/data_classes/layer.py": 2450,
     "torchlens/postprocess/loop_grouping_adapter.py": 2400,
@@ -80,7 +85,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
-    "torchlens/capture/trace.py": 2050,
+    "torchlens/capture/trace.py": 2100,
     "torchlens/backends/torch/completeness_witness.py": 2050,
 }
 
