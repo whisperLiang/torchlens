@@ -348,7 +348,18 @@ jobs:
         # PIN AUTHORITY: build== must equal the pin inside pyproject.toml's
         # [tool.semantic_release] build_command -- the nightly gate below only
         # attests reproducibility for the builder the release actually uses.
+        # The dirty-tree guard makes the packaging provenance explicit: a
+        # wheel must only ever attest the COMMITTED tree (grind r3, R84 LOW),
+        # and any stale build/ dir is removed because bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build.
         run: |
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "refusing to package a dirty tree"
+            git status --short
+            exit 1
+          fi
+          rm -rf build
           uv pip install --system "build==1.5.0"
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             python -m build --wheel --outdir "${{ runner.temp }}/dist"
@@ -381,6 +392,24 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           wheel-venv/bin/python -c "import torch, torchlens as tl; from torch import nn; from torchlens.validation import validate_tlspec; path='wheel-smoke.tlspec'; trace=tl.trace(nn.Linear(2, 1), torch.randn(1, 2), layers_to_save='none'); trace.save(path); validate_tlspec(path); loaded=tl.load(path); assert loaded.num_ops == trace.num_ops"
+
+      - name: PEP 561 consumer smoke (installed wheel exposes its types)
+        # Red-capable in BOTH directions (grind r3, R84 LOW: py.typed shipped
+        # with no consumer-side proof it works): if py.typed were missing,
+        # mypy refuses the import in the well-typed consumer (import-untyped)
+        # AND stops seeing the deliberate type error in the ill-typed one.
+        # mypy version matches the dev-extra pin; --follow-imports=silent
+        # keeps third-party stub noise inside torchlens out of the verdict.
+        working-directory: ${{ runner.temp }}
+        run: |
+          wheel-venv/bin/python -m pip install "mypy==2.1.0"
+          printf 'import torchlens as tl\nx: str = tl.__version__\n' > consumer_good.py
+          printf 'import torchlens as tl\ny: int = tl.__version__\n' > consumer_bad.py
+          wheel-venv/bin/python -m mypy --follow-imports=silent consumer_good.py
+          if wheel-venv/bin/python -m mypy --follow-imports=silent consumer_bad.py; then
+            echo "mypy accepted an ill-typed consumer: the wheel's types are invisible"
+            exit 1
+          fi
 
       - name: Run the packaging manifest tripwires
         # The wheel-diet and sdist-governance tests are slow-marked, so the

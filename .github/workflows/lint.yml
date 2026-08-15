@@ -93,3 +93,32 @@ jobs:
 
       - name: Run actionlint on all workflow files
         run: ./actionlint -color
+
+      - name: Newest-admitted torch literal lockstep across workflows
+        # The newest-admitted torch version is inlined in quality.yml (mypy +
+        # dep-audit envs) and repeatedly in tests.yml's matrix with nothing
+        # keeping them equal (grind r3, R85 LOW: 11 inlined copies, zero
+        # tripwires) -- a matrix bump that skips quality.yml silently
+        # type-checks and audits an older torch. The authority is tests.yml's
+        # maximum matrix version; every quality.yml literal must equal it.
+        # (The nightly capture-byte-oracle pin deliberately tracks the golden
+        # ENV marker instead and is lockstepped by test_ci_packaging_gates.)
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          # tests.yml declares versions as matrix values (torch: "X.Y.Z+cpu");
+          # quality.yml inlines them as pip specs (torch==X.Y.Z+cpu).
+          torch_re = re.compile(r"torch(?:==|: \")(\d+\.\d+\.\d+)\+cpu")
+          tests = torch_re.findall(pathlib.Path(".github/workflows/tests.yml").read_text())
+          quality = torch_re.findall(pathlib.Path(".github/workflows/quality.yml").read_text())
+          assert tests and quality, "expected torch==X.Y.Z+cpu literals in tests.yml and quality.yml"
+          newest = max(tests, key=lambda v: tuple(map(int, v.split("."))))
+          stale = sorted(set(quality) - {newest})
+          assert not stale, (
+              f"quality.yml pins torch {stale} but tests.yml's newest-admitted row is {newest}: "
+              "bump them together so type-check/audit run on the newest admitted torch"
+          )
+          print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
+          PY

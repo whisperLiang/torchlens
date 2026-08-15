@@ -69,7 +69,7 @@ jobs:
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
             -e ".[dev,tabular]" \
-            "torch==2.8.0+cpu"
+            "torch==2.13.0+cpu"
           uv pip check
 
       - name: Run the packaging manifest tripwires

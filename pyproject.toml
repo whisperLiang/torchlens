@@ -184,7 +184,8 @@ Repository = "https://github.com/johnmarktaylor91/torchlens"
 # torchlens rather than the reverse, nothing in torchlens imports it, and
 # including it shipped 2886 of the wheel's 3316 members (~13.5 MB) into every
 # `pip install torchlens` while squatting `menagerie` as a top-level import name.
-# It stays in the repo and the sdist-from-git; consumers use it from a checkout.
+# It stays in the repo ONLY: MANIFEST.in prunes it from the sdist too (the old
+# "sdist-from-git" wording predated that prune), so consumers use a checkout.
 # Asserted by tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet.
 include = ["torchlens*"]
 
