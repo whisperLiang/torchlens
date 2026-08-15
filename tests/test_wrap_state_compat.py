@@ -354,6 +354,42 @@ class TestWrapperPickleLadder:
         assert set(parameters) == {"args", "kwargs"}
 
 
+def test_wrapped_functional_warning_attribution_residual_shape():
+    """DISCLOSED RESIDUAL (b8-sol R56-4): warning attribution under wrappers.
+
+    The wrapper adds one Python frame, so every ``warnings.warn(...,
+    stacklevel=N)`` inside a wrapped Python functional (``F.softmax``
+    implicit-dim is torch's canonical case) is attributed to torch internals
+    (``functional.py``) instead of the user's call site. Because Python's
+    default-filter ``__warningregistry__`` dedup keys on the ATTRIBUTED
+    location, distinct user call sites additionally collapse into ONE warning
+    per process while wrappers are installed. The frame is inherent to
+    Python-level wrapping (no trivial fix); the shape is pinned here and
+    documented in ``docs/migration/scoped_detached_patching.md`` so a silent
+    change in either direction gets noticed.
+    """
+
+    import warnings
+
+    _ensure_wrapped()
+    if id(F.softmax) not in _state._decorated_to_orig:
+        pytest.skip("F.softmax not wrapped on this build")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        F.softmax(torch.randn(2, 3))
+    implicit_dim = [w for w in caught if "implicit dimension" in str(w.message).lower()]
+    if not implicit_dim:
+        pytest.skip("this torch no longer warns on implicit softmax dim")
+    attributed = implicit_dim[-1].filename
+    assert attributed.endswith("functional.py"), (
+        f"implicit-dim warning attributed to {attributed}: the wrapped-epoch "
+        "stacklevel residual changed shape -- if it now points at the caller, "
+        "the residual healed; update the scoped_detached_patching.md row and "
+        "this pin together"
+    )
+    assert not attributed.endswith("test_wrap_state_compat.py")
+
+
 # ---------------------------------------------------------------------------
 # 4. Override-table coherence (B8-4)
 # ---------------------------------------------------------------------------
