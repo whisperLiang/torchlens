@@ -156,6 +156,7 @@ def _flagged_torch_probe_calls(tree: ast.AST) -> list[ast.Call]:
     return offenders
 
 
+@pytest.mark.heavy
 def test_no_bare_getattr_torch_anywhere_in_package() -> None:
     """AST immunizer: no bare ``getattr(torch, <non-literal>)`` / ``hasattr(torch, <non-literal>)``
     survives ANYWHERE in ``torchlens/**/*.py`` (non-vacuous: >300 files, >=1 probe call visited)."""
@@ -274,6 +275,7 @@ def test_r49_torch_lazy_import_belt_resolver_key(hazard: str) -> None:
 
 
 @pytest.mark.parametrize("hazard", ["onnx", "_dynamo"])
+@pytest.mark.heavy
 def test_r49_torch_lazy_import_belt_runnable_registry_key(hazard: str, tmp_path: Path) -> None:
     """r49 secF_1 BEHAVIORAL belt (runnable callable-registry KEY): tampering a runnable bundle's
     ``run.callable_registry[*].key`` to ``namespace="torch"`` + a hazardous qualname yields NO
@@ -385,6 +387,7 @@ def test_torch_attr_hazardous_names_are_none_without_side_effect(name: str) -> N
 
 
 @pytest.mark.parametrize("hazard", ["onnx", "_dynamo", "has_cuda"])
+@pytest.mark.heavy
 def test_tampered_manifest_dtype_refuses_without_import(hazard: str, tmp_path: Path) -> None:
     """Behavioral belt (r44 secC_1 repro promoted to regression): tampering a portable ``.tlspec``
     manifest dtype to a hazardous torch name yields a typed refusal, NO ``torch.onnx`` /
@@ -449,6 +452,7 @@ def test_tampered_manifest_dtype_refuses_without_import(hazard: str, tmp_path: P
 
 
 @pytest.mark.parametrize("hazard", ["onnx", "_dynamo", "has_cuda"])
+@pytest.mark.heavy
 def test_tampered_run_slot_dtype_refuses_without_import(hazard: str, tmp_path: Path) -> None:
     """r47 secD_1/secF_1 behavioral belt: the ``.run()`` random-init path resolves a tensor-slot
     dtype via ``_runnable_state._torch_dtype`` (``_runnable_state.py:908``) -- a package-ROOT site

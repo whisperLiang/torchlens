@@ -342,6 +342,7 @@ def test_r39_adjacent_python_accessor_holders_stay_witnessed(factory: Any) -> No
 # ---------------------------------------------------------------------------------------
 
 
+@pytest.mark.heavy
 def test_r39_deep_inventory_budget_cap_stays_fail_closed(tmp_path: Path) -> None:
     """Budget exhaustion before the generator is found ceilings, never silent VERIFIED."""
 

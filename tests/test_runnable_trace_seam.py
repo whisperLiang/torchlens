@@ -8,6 +8,8 @@ from dataclasses import fields
 from pathlib import Path
 from types import MappingProxyType
 
+import pytest
+
 from torchlens._runnable_seam import (
     LEGACY_RUNNABLE_TRACE_FIELD_MAP,
     RUNNABLE_TRACE_PUBLIC_MEMBERS,
@@ -154,6 +156,7 @@ def test_runnable_coordinator_has_exactly_four_verbs() -> None:
     assert verbs == {"produce", "decode", "prepare", "execute"}
 
 
+@pytest.mark.heavy
 def test_trace_runnable_fields_are_collapsed_behind_the_seam() -> None:
     """Keep the collapsed state owner singular and legacy readers absent."""
 
