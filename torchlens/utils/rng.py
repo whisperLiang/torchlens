@@ -2126,6 +2126,8 @@ class host_nondeterminism_monitor:
         self._owner_thread = _threading_module.get_ident()
         self._previous_sys_profile: Any = None
         self._previous_threading_profile: Any = None
+        self._orig_sys_setprofile: Any = None
+        self._orig_threading_setprofile: Any = None
         self._sys_hook: Any = None
         self._threading_hook: Any = None
         self._sys_profile_installed = False
@@ -2425,7 +2427,10 @@ class host_nondeterminism_monitor:
 
                 hook = monitor._threading_hook
                 if hook is not None and not monitor._torn_down:
-                    _sys_module.setprofile(hook)
+                    # Held original: the module attr may hold a (this or a
+                    # later) window's swap-detection wrapper.
+                    setter = monitor._orig_sys_setprofile or _sys_module.setprofile
+                    setter(hook)
                 return function(*fargs, **fkwargs)
 
             return original(hooked_target, *rest, **spawn_kwargs)
@@ -3070,7 +3075,11 @@ class host_nondeterminism_monitor:
                 # uninstalling would tear down that successor's window too.
                 try:
                     if _sys_module.getprofile() is hook:
-                        _sys_module.setprofile(predecessor)
+                        # Held original: a LIVE later window may have its
+                        # swap-detection wrapper on the module attr, and this
+                        # dead-window self-uninstall must not flag it.
+                        setter = self._orig_sys_setprofile or _sys_module.setprofile
+                        setter(predecessor)
                 except Exception:
                     pass
                 if predecessor is not None:
@@ -4593,7 +4602,11 @@ class host_nondeterminism_monitor:
                 ):
                     self._flag_uncertain("threading_profile_replaced")
                 else:
-                    _threading_module.setprofile(
+                    # Held original: the swap-detection wrapper is still on
+                    # the module attr at this point (its _patch_attr restore
+                    # unwinds after this method returns).
+                    setter = self._orig_threading_setprofile or _threading_module.setprofile
+                    setter(
                         _skip_retired_hooks(
                             self._previous_threading_profile, "_previous_threading_profile"
                         )
@@ -4605,9 +4618,8 @@ class host_nondeterminism_monitor:
                 if _sys_module.getprofile() is not self._sys_hook:
                     self._flag_uncertain("sys_profile_replaced")
                 else:
-                    _sys_module.setprofile(
-                        _skip_retired_hooks(self._previous_sys_profile, "_previous_sys_profile")
-                    )
+                    setter = self._orig_sys_setprofile or _sys_module.setprofile
+                    setter(_skip_retired_hooks(self._previous_sys_profile, "_previous_sys_profile"))
             except Exception:
                 self._flag_uncertain("sys_profile_restore_failed")
 
@@ -4788,6 +4800,13 @@ class host_nondeterminism_monitor:
     def _install_profile_hooks(self) -> None:
         """Install the dual chained profile hooks -- ALWAYS the last step."""
 
+        # Held pre-patch setprofile originals: every MONITOR-internal slot
+        # write (teardown restore, raw-thread hook install, post-window hook
+        # self-uninstall) routes through these so it can never trip the
+        # swap-detection wrappers installed below -- including a LATER
+        # window's wrappers on an overlapping monitor.
+        self._orig_sys_setprofile = _sys_module.setprofile
+        self._orig_threading_setprofile = getattr(_threading_module, "setprofile", None)
         # BELT: dual chained profile hooks (owner thread + threads started in-window). These
         # are the r37/base mechanism (base runs them and is fast); the owner hook catches
         # owner-thread numpy Generator instance draws and the immutable ``datetime`` readers,
@@ -4823,3 +4842,44 @@ class host_nondeterminism_monitor:
                     spawn_name,
                     self._raw_thread_spawn_wrapper(getattr(_c_thread_module, spawn_name)),
                 )
+        # R57: a BALANCED in-window swap (user code saves our hook, installs
+        # its own profile function, restores ours before window exit) left NO
+        # teardown evidence -- the slot held our hook at exit -- so entropy/
+        # clock draws inside the swapped sub-window escaped uncertain=False:
+        # a false-VERIFIED (and, downstream, false-ATTESTED) window. Any
+        # in-window slot write by non-monitor code makes the window
+        # unprovable, so the setprofile entry points themselves are patched
+        # to flag uncertainty and pass through. Monitor-internal writes use
+        # the held originals above and never trip these. A pre-window
+        # ``from sys import setprofile`` alias or a C-level
+        # ``PyEval_SetProfile`` (cProfile.enable) bypasses the module attr;
+        # both fall in the held-ref alias residual class.
+        self._patch_attr(
+            _sys_module,
+            "setprofile",
+            self._profile_slot_swap_wrapper(self._orig_sys_setprofile, "sys.setprofile"),
+        )
+        if self._orig_threading_setprofile is not None:
+            self._patch_attr(
+                _threading_module,
+                "setprofile",
+                self._profile_slot_swap_wrapper(
+                    self._orig_threading_setprofile, "threading.setprofile"
+                ),
+            )
+
+    def _profile_slot_swap_wrapper(self, original: Any, channel: str) -> Any:
+        """Build a flagging passthrough for an in-window profile-slot write.
+
+        The write itself is honored untouched (the user's profiler works);
+        the window's completeness degrades because draws made while a foreign
+        profile function holds the slot are structurally unwitnessable.
+        """
+
+        def wrapper(function: Any) -> Any:
+            """Flag the unprovable sub-window, then delegate the slot write."""
+
+            self._flag_uncertain(f"profile_slot_swapped_in_window:{channel}")
+            return original(function)
+
+        return wrapper
