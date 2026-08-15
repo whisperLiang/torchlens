@@ -560,6 +560,61 @@ def test_env_governed_ledger_dirs_carry_env_markers() -> None:
     )
 
 
+#: Emitter-package usage per env-keyed family (b10 R78-2 round 5): the
+#: packages each family passes to ``resolve_env_golden`` / the update path.
+#: The marker DECLARATIONS in ``_ENV_GOVERNED_REQUIRED_MARKERS`` and the
+#: fingerprint EXTENSIONS the code actually keys on were previously untied:
+#: adding one emitter to a family (or dropping a marker row) silently moved
+#: the family off-canonical — CI skip, marker test still green. Each row is
+#: (family test file, goldens dir as declared in the marker table, packages).
+_EMITTER_PACKAGE_CENSUS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("test_viz_render_identity_oracle.py", "golden", ("graphviz", "pydot")),
+    ("test_rank_render_ir_semantic_goldens.py", "golden", ("graphviz", "pydot")),
+    ("godobject_oracle/test_viz_identity.py", "godobject_oracle/goldens", ("graphviz",)),
+    ("godobject_oracle/test_legacy_artifact.py", "godobject_oracle/goldens", ()),
+    ("test_state_keyset_contract.py", "godobject_oracle/goldens", ()),
+    ("surface_oracle/test_surface_oracle.py", "surface_oracle/goldens", ()),
+)
+
+_EMITTER_TUPLE_RE = re.compile(r"^_EMITTER_PACKAGES\s*=\s*\(([^)]*)\)", re.MULTILINE)
+
+
+def _declared_emitter_packages(source: str) -> tuple[str, ...]:
+    """Parse a family file's ``_EMITTER_PACKAGES`` literal ("" if absent)."""
+
+    match = _EMITTER_TUPLE_RE.search(source)
+    if match is None:
+        return ()
+    return tuple(part.strip().strip("'\"") for part in match.group(1).split(",") if part.strip())
+
+
+@pytest.mark.smoke
+def test_emitter_packages_match_declared_env_markers() -> None:
+    """Family emitter tuples and the marker table agree, both directions."""
+
+    sources = dict(_test_texts())
+    per_dir: dict[str, set[str]] = {}
+    for relpath, directory, packages in _EMITTER_PACKAGE_CENSUS:
+        source = sources.get(relpath)
+        assert source is not None, f"emitter census row for missing file {relpath}"
+        declared = _declared_emitter_packages(source)
+        assert declared == packages, (
+            f"{relpath} passes emitter packages {declared} but the census says "
+            f"{packages} — update _EMITTER_PACKAGE_CENSUS AND the family's "
+            "ENV-<pkg> markers together (b10 R78-2)"
+        )
+        per_dir.setdefault(directory, set()).update(packages)
+    for directory, packages in per_dir.items():
+        markers = _ENV_GOVERNED_REQUIRED_MARKERS.get(directory)
+        assert markers is not None, f"emitter census names undeclared dir {directory}"
+        marker_packages = {m.removeprefix("ENV-") for m in markers if m != "ENV"}
+        assert marker_packages == packages, (
+            f"{directory}: declared markers key on {sorted(marker_packages)} but "
+            f"the code keys on {sorted(packages)} — a mismatch moves the family "
+            "off-canonical with the marker test still green (b10 R78-2)"
+        )
+
+
 #: Golden GENERATION mode per update/regen flag (b10 R78-1 round 5, the
 #: wrap-state guard census). "subprocess" families construct and capture in a
 #: fresh ``_worker.py`` interpreter, so their bytes are pre-wrap by

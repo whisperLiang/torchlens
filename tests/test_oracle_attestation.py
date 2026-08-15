@@ -251,6 +251,21 @@ def test_canonical_environment_resolves_canonical_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
+def test_missing_env_marker_refuses(tmp_path: Path) -> None:
+    """No committed ENV marker is a setup bug, never a canonical blessing.
+
+    The pre-fix resolver treated a missing base marker as "canonical", so a
+    family routed through the env-keyed resolver without one had its bytes
+    enforced on EVERY environment (b10 R78-4 round 5, fail-open default).
+    """
+
+    goldens = tmp_path / "goldens"
+    goldens.mkdir()
+    with pytest.raises(RuntimeError, match="no committed ENV marker"):
+        resolve_env_golden(goldens, "case.json")
+
+
+@pytest.mark.smoke
 def test_recorded_env_baselines_are_gitignored() -> None:
     """A recorded env-* baseline can never ride along in a broad git add."""
 

@@ -213,9 +213,22 @@ def resolve_env_golden(
     """
 
     marker = golden_dir / "ENV"
-    canonical_env = marker.read_text().strip() if marker.exists() else None
+    if not marker.exists():
+        # Fail CLOSED (b10 R78 round 5): a family routed through the
+        # env-keyed resolver without a committed base ENV marker previously
+        # counted as "canonical", so its bytes were enforced on EVERY
+        # environment — the opposite default of a layer whose whole thesis
+        # is fail-closed env keying. A missing marker is a setup bug in the
+        # family, never a blessing.
+        raise RuntimeError(
+            f"{golden_dir} has no committed ENV marker but resolves through "
+            "resolve_env_golden; commit the canonical fingerprint (see "
+            "_ENV_GOVERNED_REQUIRED_MARKERS in test_golden_governance_lint.py) "
+            "or route the family off the env-keyed resolver explicitly"
+        )
+    canonical_env = marker.read_text().strip()
     current_env = env_fingerprint()
-    canonical = canonical_env is None or current_env == canonical_env
+    canonical = current_env == canonical_env
     if canonical:
         for package in extra_packages:
             extras_marker = golden_dir / f"ENV-{package}"
