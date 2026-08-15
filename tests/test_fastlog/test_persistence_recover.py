@@ -416,3 +416,57 @@ def test_cleanup_partial_still_sweeps_own_partials(tmp_path: Path) -> None:
 
     assert removed == [own]
     assert not own.exists()
+
+
+def test_disk_finalize_baseexception_marks_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A KeyboardInterrupt mid-finalize must leave a PARTIAL-marked .tmp dir."""
+
+    from torchlens.fastlog import storage_disk as storage_disk_module
+
+    def _interrupt(_entries: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(storage_disk_module, "_build_fastlog_manifest", _interrupt)
+
+    bundle_path = tmp_path / "interrupted.tlfast"
+    with pytest.raises(KeyboardInterrupt):
+        tl.fastlog.record(
+            PersistenceModel(),
+            torch.ones(1, 3),
+            default_op=True,
+            streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+        )
+
+    assert not bundle_path.exists()
+    debris = list(tmp_path.glob("interrupted.tlfast.tmp.*"))
+    assert len(debris) == 1
+    assert (debris[0] / "PARTIAL").exists()
+
+
+def test_disk_finalize_refuses_concurrently_created_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publish must refuse, not silently replace, a target created mid-record."""
+
+    from torchlens.fastlog import storage_disk as storage_disk_module
+
+    bundle_path = tmp_path / "raced.tlfast"
+    real_build = storage_disk_module._build_fastlog_manifest
+
+    def _race_then_build(entries: object) -> object:
+        bundle_path.mkdir()
+        return real_build(entries)
+
+    monkeypatch.setattr(storage_disk_module, "_build_fastlog_manifest", _race_then_build)
+
+    with pytest.raises(TorchLensIOError, match="already exists"):
+        tl.fastlog.record(
+            PersistenceModel(),
+            torch.ones(1, 3),
+            default_op=True,
+            streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+        )
+
+    assert list(bundle_path.iterdir()) == []
