@@ -885,7 +885,8 @@ def load_merged(path: str | Path) -> MergedTrace:
             # environmental degradation (torch/codec drift). It caps the
             # effective alignment at partial but is never a tamper.
             load_degradations.append(
-                f"rank {declared_rank} core no longer parses on this runtime: {exc}"
+                f"rank {declared_rank} core {str(member_path)!r} no longer parses on "
+                f"this runtime: {type(exc).__name__}: {exc}"
             )
             continue
         # A member that loads as a bundle but is NOT a valid rank core (no

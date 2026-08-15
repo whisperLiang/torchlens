@@ -200,34 +200,43 @@ def validate_hook_output(
         If the return value is invalid.
     """
 
+    # R67: these are user-payload refusals. Say "intervention replacement" (the
+    # vocabulary the user typed via intervene=/tl.when), name the helper/site,
+    # and stamp structured fields so a partial record is diagnosable from the
+    # public record alone.
+    helper_name = getattr(hook_context, "name", None)
+    site = _site_name(hook_context)
+
+    def _payload_refusal(problem: str, expected: object, got: object) -> HookValueError:
+        """Build one structured intervention-payload refusal."""
+
+        helper_text = f" (helper {helper_name!r})" if helper_name else ""
+        return HookValueError(
+            f"intervention replacement{helper_text} {problem} at {site}; "
+            f"expected {expected}, got {got}. Fix the replacement tensor passed "
+            "to the intervene= clause.",
+            code="intervention_replacement_invalid",
+            site=site,
+            slot="intervene",
+            helper=helper_name,
+            expected=str(expected),
+            got=str(got),
+        )
+
     if result is None:
-        raise HookValueError(
-            f"hook returned None at {_site_name(hook_context)}; expected torch.Tensor"
-        )
+        raise _payload_refusal("returned None", "torch.Tensor", None)
     if not isinstance(result, torch.Tensor):
-        raise HookValueError(
-            f"hook returned {type(result).__name__} at {_site_name(hook_context)}; "
-            "expected torch.Tensor"
-        )
+        raise _payload_refusal("returned a non-tensor", "torch.Tensor", type(result).__name__)
     if force_shape_change:
         result = _copy_reused_live_hook_result(out, result)
         _copy_tl_replacement_attrs(out, result)
         return result
     if result.dtype != out.dtype:
-        raise HookValueError(
-            f"hook returned dtype {result.dtype} at {_site_name(hook_context)}; "
-            f"expected {out.dtype}"
-        )
+        raise _payload_refusal("has the wrong dtype", out.dtype, result.dtype)
     if result.device != out.device:
-        raise HookValueError(
-            f"hook returned device {result.device} at {_site_name(hook_context)}; "
-            f"expected {out.device}"
-        )
+        raise _payload_refusal("is on the wrong device", out.device, result.device)
     if tuple(result.shape) != tuple(out.shape):
-        raise HookValueError(
-            f"hook returned shape {tuple(result.shape)} at {_site_name(hook_context)}; "
-            f"expected {tuple(out.shape)}"
-        )
+        raise _payload_refusal("has the wrong shape", tuple(out.shape), tuple(result.shape))
     result = _copy_reused_live_hook_result(out, result)
     _copy_tl_replacement_attrs(out, result)
     return result
