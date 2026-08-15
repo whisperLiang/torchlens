@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as ReluAdd
 
 import torchlens as tl
 from torchlens._capture_state_helpers import reset_compiled_model_unwrap_warning_state
@@ -19,26 +20,6 @@ from torchlens.intervention.rerun import rerun
 from torchlens.intervention.types import InterventionSpec, Relationship, TargetSpec
 from torchlens.io import TraceState
 from torchlens.options import CaptureOptions
-
-
-class ReluAdd(torch.nn.Module):
-    """Small model with a hookable relu feeding downstream output."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply relu and a downstream add.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Result tensor.
-        """
-
-        return torch.relu(x) + 1
 
 
 class BadModel(torch.nn.Module):

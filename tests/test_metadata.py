@@ -1363,7 +1363,12 @@ def test_custom_num_context_lines(small_input):
                 if loc.code_context is not None:
                     assert loc.num_context_lines == 7  # 3 + 1 + 3
                     return
-    pytest.skip("No non-input layer with code context found")
+    pytest.fail(
+        "No non-input layer with code context found. SimpleFF traced with "
+        "save_code_context=True is fully under this test's control, so an empty "
+        "code-context surface is a capture regression, not an environment limit "
+        "(hardened from a silent fall-through skip, R79 skip audit 2026-08-15)."
+    )
 
 
 def test_num_context_lines_stored_on_trace(small_input):
@@ -1518,7 +1523,13 @@ def test_corrupt_saved_args(valid_mh_and_ground_truth):
                     entry.saved_args = tuple(corrupted_args)
                     assert mh.validate_forward_pass(ground_truth) is False
                     return
-    pytest.skip("No layer with tensor saved_args found")
+    pytest.fail(
+        "No layer with tensor saved_args found. The fixture traces with "
+        "save_arg_values enabled on a model with tensor-consuming ops, so an "
+        "empty saved_args surface is a capture regression, not an environment "
+        "limit (hardened from a silent fall-through skip, R79 skip audit "
+        "2026-08-15)."
+    )
 
 
 # =============================================================================

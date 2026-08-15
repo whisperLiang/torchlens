@@ -28,6 +28,17 @@ verify against the freshly written golden)
 
 Cell values are either a sorted list of matched labels, ``"ERROR:<Class>"``,
 or a small dict of named sub-results.
+
+Governance adjudication (b10 R78 round-3): this golden is ENVIRONMENT-
+INDEPENDENT by design and therefore deliberately NOT routed through the
+``tests/_oracle_env.py`` env-fingerprint resolver. It encodes selector
+BEHAVIOR — pure-structure JSON of matched label sets, error class names, and
+spec round-trip shapes over torchlens-owned label vocabulary. No float
+formatting, qualname, repr, or emitter bytes enter the record; if a torch
+upgrade ever changes a matched label set, that is a REAL behavior change this
+oracle exists to surface loudly, not environmental drift to key away. The
+family is registered in the environment-independent ledger enforced by
+``tests/test_golden_governance_lint.py``.
 """
 
 from __future__ import annotations
@@ -42,6 +53,12 @@ from typing import Any, NamedTuple
 
 import pytest
 import torch
+from _oracle_env import (  # noqa: E402 - tests/ is on sys.path under pytest
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_update_reason,
+    write_provenance,
+)
 from torch import nn
 
 import torchlens as tl
@@ -54,7 +71,9 @@ from torchlens.intervention.types import TargetSpec
 
 _GOLDEN_PATH = Path(__file__).parent / "golden" / "selector_semantics_matrix.json"
 _UPDATE_ENV = "TORCHLENS_UPDATE_SELECTOR_MATRIX"
-_REGEN = bool(os.environ.get(_UPDATE_ENV))
+# Armed on the exact value "1" only: bool(environ.get(...)) armed regen on
+# TORCHLENS_UPDATE_SELECTOR_MATRIX=0 (b10 R78 round-3).
+_REGEN = flag_armed(os.environ, _UPDATE_ENV)
 if os.environ.get("TL_SELECTOR_MATRIX_REGEN"):
     # One regen-flag convention repo-wide (b10 R78-8b): fail loudly instead of
     # silently ignoring the retired spelling.
@@ -617,6 +636,12 @@ def _construct_cell(make_selector: Callable[[], Any]) -> Any:
 
 
 def _compute_matrix() -> dict[str, Any]:
+    if _REGEN:
+        # Regeneration is in-process: refuse to generate golden bytes on a
+        # torch already wrapped by earlier tests (SF-53), and require the
+        # WHY before any capture runs.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
     matrix: dict[str, Any] = {}
     for name, model_key, factory in FORWARD_CASES:
         matrix[f"capture/{model_key}/{name}"] = _probe_capture(model_key, factory)
@@ -663,6 +688,12 @@ def _golden() -> dict[str, Any]:
         global _REGEN_WRITTEN
         if not _REGEN_WRITTEN:
             _GOLDEN_PATH.write_text(json.dumps(_matrix(), indent=1, sort_keys=True) + "\n")
+            write_provenance(
+                _GOLDEN_PATH.parent,
+                "tests/test_selector_semantics_matrix.py",
+                _UPDATE_ENV,
+                require_update_reason(_UPDATE_ENV),
+            )
             _REGEN_WRITTEN = True
         pytest.skip(
             f"regenerated selector-semantics golden; re-run without {_UPDATE_ENV} to verify"

@@ -50,23 +50,49 @@ def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequ
     )
 
 
-def test_smoke_tests_stay_within_duration_budget(request: pytest.FixtureRequest) -> None:
-    """Every smoke-marked test must finish within the tier's duration budget.
+def test_bounded_tier_tests_stay_within_duration_budget(
+    request: pytest.FixtureRequest,
+) -> None:
+    """Every bounded-tier test must finish within its tier's duration budget.
 
-    The budget value lives in ``tests/conftest.py`` (``SMOKE_DURATION_BUDGET_SECONDS``)
-    and rides along on each recorded offender -- a bare ``conftest`` import here would
-    be ambiguous during full-suite collection (nested conftests share the module name).
+    The budget is TWO-directional (R41): ``smoke`` AND unmarked tests are held
+    to the 5s partition boundary, ``heavy`` to its 20s ceiling (all
+    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. Budget
+    values live in ``tests/conftest.py`` and ride along on each recorded
+    offender -- a bare ``conftest`` import here would be ambiguous during
+    full-suite collection (nested conftests share the module name).
+
+    This test also asserts its own LAST-position ordering: the offender
+    ledger only covers tests that already ran, so a reordering regression
+    (e.g. a plugin shuffling after the conftest reorder) must go red here
+    rather than silently truncating coverage.
     """
 
-    offenders = getattr(request.session, "_tl_smoke_budget_offenders", [])
+    items = request.session.items
+    own_index = next(
+        index for index, item in enumerate(items) if item.nodeid == request.node.nodeid
+    )
+    stragglers = [
+        item.nodeid for item in items[own_index + 1 :] if "test_marker_lint" not in item.nodeid
+    ]
+    assert not stragglers, (
+        "the duration-budget lint no longer runs last -- its offender ledger "
+        f"would miss these later tests: {stragglers[:5]}"
+    )
+
+    guidance = {
+        "smoke": "re-tier to `heavy` (5-20s) or `slow` (>20s), or make it faster",
+        "unmarked": "unmarked tests run in the mid backstop: add `heavy`/`slow` "
+        "consciously, or make it faster",
+        "heavy": "re-tier to `slow` (>20s) or make it faster",
+    }
+    offenders = getattr(request.session, "_tl_duration_budget_offenders", [])
     lines = [
-        f"{nodeid}: {duration:.1f}s (budget {budget:.0f}s)"
-        for nodeid, duration, budget in offenders
+        f"{nodeid} [{tier}]: {duration:.1f}s (budget {budget:.0f}s) -- {guidance[tier]}"
+        for nodeid, tier, duration, budget in offenders
     ]
     assert not offenders, (
-        "Smoke-marked tests exceeded the smoke-tier duration budget this session. "
-        "Re-tier them (move to `heavy` for 5-20s, `slow` for >20s) or make them "
-        "faster:\n  " + "\n  ".join(lines)
+        "Tests exceeded their tier duration budget this session:\n  " + "\n  ".join(lines)
     )
 
 
@@ -76,21 +102,25 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
     """Resolved smoke parameter families must stay within the aggregate budget.
 
     A family of N parameters legitimately costs ~N single-test durations (the
-    selector matrix is 278 cells; the surface oracle is 6 goldens), so the
-    aggregate budget is the enforcement budget (not the 5s partition
-    threshold), load-scaled like the per-test hook. Tightening both to 5s is
-    the tracked follow-up that lands with the >5s re-tier sweep.
+    selector matrix is 278 cells), so each family's budget scales with its
+    resolved cell count: load_factor * max(2x the per-test budget, the
+    per-cell allowance x n_cells). Genuine per-cell ballooning still trips.
     """
 
-    budget = getattr(request.session, "_tl_smoke_family_budget_value", 30.0)
-    family_totals = getattr(request.session, "_tl_smoke_family_durations", {})
+    family_stats = getattr(request.session, "_tl_smoke_family_stats", {})
+    family_budgets = getattr(request.session, "_tl_smoke_family_budgets", {})
     offenders = [
-        (family, duration) for family, duration in family_totals.items() if duration > budget
+        (family, total, count, family_budgets.get(family, 0.0))
+        for family, (total, count) in family_stats.items()
+        if total > family_budgets.get(family, float("inf"))
     ]
-    lines = [f"{family}: {duration:.1f}s (budget {budget:.0f}s)" for family, duration in offenders]
+    lines = [
+        f"{family}: {total:.1f}s over {count} cells (budget {budget:.0f}s)"
+        for family, total, count, budget in offenders
+    ]
     assert not offenders, (
-        "Smoke parametrized families exceeded the aggregate smoke-tier budget. "
-        "Split or re-tier the family:\n  " + "\n  ".join(lines)
+        "Smoke parametrized families exceeded their aggregate cell-scaled "
+        "budget. Split or re-tier the family:\n  " + "\n  ".join(lines)
     )
 
 
@@ -363,3 +393,393 @@ def test_no_module_level_facet_registration_in_tests() -> None:
         "module-level @tl.facets.register mutates the public registry at "
         f"collection time; register inside a restoring fixture: {violations}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R77 round-3: strengthened teardown lint for long-lived Trace fixtures.
+#
+# The original scanner (`_module_trace_fixtures_without_yield`) has three
+# proven evasion shapes: (a) fixtures nested inside test classes are invisible
+# (it only reads `tree.body`); (b) a fixture that builds its Trace through a
+# module-local helper (`make_trace()` -> `tl.trace(...)`) is invisible (only
+# literal `trace(...)` calls are matched); (c) a fixture with a BARE trailing
+# `yield` -- no statement after it and no try/finally -- passes despite having
+# no teardown code at all. The scanner below closes all three. Indirection
+# through helpers is resolved transitively but only within the SAME module;
+# cross-module helper indirection is documented out of scope.
+# ---------------------------------------------------------------------------
+
+
+def _iter_scoped_fixture_functions(
+    tree: ast.Module,
+) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """Collect widely-scoped fixtures at module level and inside classes.
+
+    Parameters
+    ----------
+    tree:
+        Parsed test module.
+
+    Returns
+    -------
+    list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]
+        ``(qualified_name, function)`` pairs for every fixture whose scope is
+        wider than per-test function scope, including fixtures nested inside
+        (arbitrarily nested) test classes.
+    """
+
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+
+    def visit(body: list[ast.stmt], prefix: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if any(_is_module_scoped_fixture(item) for item in node.decorator_list):
+                    found.append((f"{prefix}{node.name}", node))
+            elif isinstance(node, ast.ClassDef):
+                visit(node.body, f"{prefix}{node.name}.")
+
+    visit(tree.body, "")
+    return found
+
+
+def _module_local_trace_helper_names(tree: ast.Module) -> set[str]:
+    """Resolve module-level helper functions that (transitively) call trace.
+
+    Parameters
+    ----------
+    tree:
+        Parsed test module.
+
+    Returns
+    -------
+    set[str]
+        Names of module-level functions whose bodies reach a ``trace(...)`` /
+        ``*.trace(...)`` call, directly or through other module-level helpers
+        (fixed point within the module; cross-module helpers are out of scope).
+    """
+
+    module_functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    trace_callers = {name for name, node in module_functions.items() if _calls_trace(node)}
+    changed = True
+    while changed:
+        changed = False
+        for name, node in module_functions.items():
+            if name in trace_callers:
+                continue
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id in trace_callers
+                ):
+                    trace_callers.add(name)
+                    changed = True
+                    break
+    return trace_callers
+
+
+def _calls_trace_or_local_helper(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, helper_names: set[str]
+) -> bool:
+    """Return whether a fixture reaches a trace call directly or via helpers.
+
+    Parameters
+    ----------
+    function:
+        Fixture function syntax node.
+    helper_names:
+        Module-level helper functions known to (transitively) call trace.
+
+    Returns
+    -------
+    bool
+        Whether the fixture creates a Trace through any in-module path.
+    """
+
+    if _calls_trace(function):
+        return True
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in helper_names
+        ):
+            return True
+    return False
+
+
+def _block_has_unguarded_yield(statements: list[ast.stmt], guarded: bool) -> bool:
+    """Return whether any yield in a statement block lacks a teardown path.
+
+    A yield is *guarded* when some enclosing block (within the fixture) has at
+    least one statement after the statement containing it, or when it sits
+    inside the body/handlers/orelse of a ``try`` with a ``finally`` clause.
+    Yields inside nested function/class definitions belong to those objects,
+    not to the fixture, and are skipped.
+
+    Parameters
+    ----------
+    statements:
+        Statement block to scan.
+    guarded:
+        Whether an enclosing construct already guarantees teardown.
+
+    Returns
+    -------
+    bool
+        Whether an unguarded (teardown-free) yield exists in the block.
+    """
+
+    for index, statement in enumerate(statements):
+        followed = guarded or index + 1 < len(statements)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(statement, ast.Try):
+            inner = followed or bool(statement.finalbody)
+            blocks = [statement.body, statement.orelse]
+            blocks.extend(handler.body for handler in statement.handlers)
+            if any(_block_has_unguarded_yield(block, inner) for block in blocks):
+                return True
+            if _block_has_unguarded_yield(statement.finalbody, followed):
+                return True
+            continue
+        nested_blocks = [
+            value
+            for _field, value in ast.iter_fields(statement)
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt)
+        ]
+        if nested_blocks:
+            if any(_block_has_unguarded_yield(block, followed) for block in nested_blocks):
+                return True
+            continue
+        if not followed and any(
+            isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(statement)
+        ):
+            return True
+    return False
+
+
+def _fixture_has_real_teardown(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return whether a fixture owns an actual teardown path, not a bare yield.
+
+    Parameters
+    ----------
+    function:
+        Fixture function syntax node.
+
+    Returns
+    -------
+    bool
+        ``True`` when the fixture yields with at least one statement after the
+        yield (or a try/finally around it), or registers a finalizer through
+        ``request.addfinalizer(...)``.
+    """
+
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "addfinalizer"
+        ):
+            return True
+    has_yield = _block_contains_yield(function.body)
+    return has_yield and not _block_has_unguarded_yield(function.body, False)
+
+
+def _block_contains_yield(statements: list[ast.stmt]) -> bool:
+    """Return whether a block yields, ignoring nested function/class bodies.
+
+    Parameters
+    ----------
+    statements:
+        Statement block to scan.
+
+    Returns
+    -------
+    bool
+        Whether the block contains a yield belonging to the enclosing function.
+    """
+
+    for statement in statements:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        nested_blocks = [
+            value
+            for _field, value in ast.iter_fields(statement)
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt)
+        ]
+        if isinstance(statement, ast.Try):
+            nested_blocks.extend(handler.body for handler in statement.handlers)
+        if nested_blocks:
+            if any(_block_contains_yield(block) for block in nested_blocks):
+                return True
+            continue
+        if any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(statement)):
+            return True
+    return False
+
+
+def _strict_trace_fixture_violations_in_source(source: str, label: str) -> list[str]:
+    """Scan one module's source for teardown-free long-lived Trace fixtures.
+
+    Parameters
+    ----------
+    source:
+        Python source text of a test module.
+    label:
+        Stable label (relative path) used in violation strings.
+
+    Returns
+    -------
+    list[str]
+        ``label::qualified_fixture_name`` violations.
+    """
+
+    tree = ast.parse(source, filename=label)
+    helper_names = _module_local_trace_helper_names(tree)
+    violations: list[str] = []
+    for qualified_name, function in _iter_scoped_fixture_functions(tree):
+        if not _calls_trace_or_local_helper(function, helper_names):
+            continue
+        if not _fixture_has_real_teardown(function):
+            violations.append(f"{label}::{qualified_name}")
+    return violations
+
+
+def _strict_trace_fixture_violations(tests_root: Path) -> list[str]:
+    """Scan the whole test suite for teardown-free long-lived Trace fixtures.
+
+    Parameters
+    ----------
+    tests_root:
+        Root of the test suite.
+
+    Returns
+    -------
+    list[str]
+        Stable ``path::fixture`` violations.
+    """
+
+    violations: list[str] = []
+    for path in sorted(tests_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        violations.extend(
+            _strict_trace_fixture_violations_in_source(source, str(path.relative_to(tests_root)))
+        )
+    return violations
+
+
+def test_scoped_trace_fixtures_have_real_teardown() -> None:
+    """Widely-scoped Trace fixtures need actual teardown code, however nested."""
+
+    tests_root = Path(__file__).resolve().parent
+    violations = _strict_trace_fixture_violations(tests_root)
+    assert not violations, (
+        "Widely-scoped fixtures create live Traces without a real teardown path "
+        "(class-nested fixtures, helper-built traces, and bare trailing yields "
+        "all count). Yield the Trace and clean up after the yield (or in a "
+        "try/finally):\n  " + "\n  ".join(violations)
+    )
+
+
+_EVASION_CLASS_NESTED = """
+import pytest
+import torchlens as tl
+
+class TestGroup:
+    @pytest.fixture(scope="module")
+    def cached_trace(self):
+        return tl.trace(model, x)
+"""
+
+_EVASION_HELPER_INDIRECTION = """
+import pytest
+import torchlens as tl
+
+def make_trace():
+    return tl.trace(model, x)
+
+def build_log():
+    return make_trace()
+
+@pytest.fixture(scope="module")
+def cached_trace():
+    return build_log()
+"""
+
+_EVASION_BARE_YIELD = """
+import pytest
+import torchlens as tl
+
+@pytest.fixture(scope="session")
+def cached_trace():
+    yield tl.trace(model, x)
+"""
+
+_COMPLIANT_STATEMENT_AFTER_YIELD = """
+import pytest
+import torchlens as tl
+
+@pytest.fixture(scope="module")
+def cached_trace():
+    log = tl.trace(model, x)
+    yield log
+    log.cleanup()
+"""
+
+_COMPLIANT_TRY_FINALLY = """
+import pytest
+import torchlens as tl
+
+def make_trace():
+    return tl.trace(model, x)
+
+class TestGroup:
+    @pytest.fixture(scope="class")
+    def cached_trace(self):
+        log = make_trace()
+        try:
+            yield log
+        finally:
+            log.cleanup()
+"""
+
+_COMPLIANT_FUNCTION_SCOPE_BARE_YIELD = """
+import pytest
+import torchlens as tl
+
+@pytest.fixture()
+def per_test_trace():
+    yield tl.trace(model, x)
+"""
+
+
+@pytest.mark.parametrize(
+    ("snippet", "expected"),
+    [
+        pytest.param(
+            _EVASION_CLASS_NESTED, ["planted.py::TestGroup.cached_trace"], id="class-nested"
+        ),
+        pytest.param(
+            _EVASION_HELPER_INDIRECTION, ["planted.py::cached_trace"], id="helper-indirection"
+        ),
+        pytest.param(_EVASION_BARE_YIELD, ["planted.py::cached_trace"], id="bare-yield"),
+        pytest.param(_COMPLIANT_STATEMENT_AFTER_YIELD, [], id="ok-statement-after-yield"),
+        pytest.param(_COMPLIANT_TRY_FINALLY, [], id="ok-try-finally-class-nested-helper"),
+        pytest.param(_COMPLIANT_FUNCTION_SCOPE_BARE_YIELD, [], id="ok-function-scope"),
+    ],
+)
+def test_strict_trace_fixture_scanner_is_red_capable(snippet: str, expected: list[str]) -> None:
+    """The strengthened scanner catches each proven evasion shape exactly.
+
+    Red-capability proof for the three R77 evasions: (a) class-nested
+    fixtures, (b) one-or-more-hop in-module helper indirection to the trace
+    call, (c) a bare trailing yield with no teardown statement. The compliant
+    shapes prove the scanner does not overfire.
+    """
+
+    assert _strict_trace_fixture_violations_in_source(snippet, "planted.py") == expected

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _ReluModel
 from torch import nn
 
 import torchlens as tl
@@ -41,26 +42,6 @@ from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.validation import check_spec_compat
 
 _INTERVENTION_RESOLVER = importlib.import_module("torchlens.intervention.resolver")
-
-
-class _ReluModel(nn.Module):
-    """Small model with a relu site."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the model.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Output tensor.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _TanhModel(nn.Module):

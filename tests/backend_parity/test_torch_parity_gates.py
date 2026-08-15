@@ -1,4 +1,17 @@
-"""Golden parity gates protecting torch before backend substrate work."""
+"""Golden parity gates protecting torch before backend substrate work.
+
+Governance adjudication (b10 R78 round-3): these goldens are ENVIRONMENT-
+INDEPENDENT semantic projections and deliberately NOT routed through the
+``tests/_oracle_env.py`` env-fingerprint resolver. Every projected value is
+metadata TorchLens owns (labels, parent/child edges, field orders, portable
+policies, manifest schema fields, shapes/dtypes as structured data) — no
+float payloads, reprs of environment objects, or emitter bytes enter the
+digest. A torch upgrade that changes op decomposition would change these
+projections, and that is exactly the loud parity break this gate exists to
+surface, not environmental drift to key away. The family is registered in
+the environment-independent ledger enforced by
+``tests/test_golden_governance_lint.py``.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +25,12 @@ from typing import Any, cast
 
 import pytest
 import torch
+from _oracle_env import (
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_update_reason,
+    write_provenance,
+)
 from torch import nn
 
 import torchlens as tl
@@ -121,6 +140,19 @@ def _seeded_branchy_input() -> tuple[_BranchyTinyModel, torch.Tensor]:
     return model, x
 
 
+def _guard_update_generation() -> None:
+    """Refuse update-run generation on a torch earlier tests already wrapped.
+
+    Golden generation for this family is in-process (SF-53): on an update run
+    the FIRST trace built must start from unwrapped torch, so regeneration
+    happens in a fresh interpreter running only this file. No-op outside
+    update runs.
+    """
+
+    if flag_armed(os.environ, _UPDATE_ENV):
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+
+
 def _default_trace() -> Trace:
     """Build the default full-save golden trace.
 
@@ -130,6 +162,7 @@ def _default_trace() -> Trace:
         Current torch default parity trace.
     """
 
+    _guard_update_generation()
     model, x = _seeded_mlp_input()
     return tl.trace(
         model,
@@ -151,6 +184,7 @@ def _selective_trace() -> Trace:
         Current torch selective parity trace.
     """
 
+    _guard_update_generation()
     model, x = _seeded_branchy_input()
     return tl.trace(model, x, save=tl.func("tanh"), capture=CaptureOptions(random_seed=1702))
 
@@ -164,6 +198,7 @@ def _backward_ready_trace() -> Trace:
         Current torch backward parity trace.
     """
 
+    _guard_update_generation()
     model, x = _seeded_mlp_input(requires_grad=True)
     trace = tl.trace(
         model,
@@ -277,32 +312,15 @@ def _golden_payload(projection: dict[str, Any]) -> dict[str, Any]:
     return {"sha256_chunks": _digest_chunks(_digest_payload(projection)), "projection": projection}
 
 
-def _read_or_update_golden(path: Path, projection: dict[str, Any]) -> dict[str, Any]:
-    """Read a golden payload, optionally updating it under the update env flag.
-
-    Parameters
-    ----------
-    path:
-        Golden JSON path.
-    projection:
-        Newly computed projection.
-
-    Returns
-    -------
-    dict[str, Any]
-        Golden payload.
-    """
-
-    payload = _golden_payload(projection)
-    if os.environ.get(_UPDATE_ENV) == "1":
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return payload
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _assert_projection_matches_golden(name: str, projection: dict[str, Any]) -> None:
+def _assert_projection_matches_golden(name: str, projection: dict[str, Any]) -> bool:
     """Assert a projection matches its committed golden digest file.
+
+    Under ``TORCHLENS_UPDATE_BACKEND_PARITY=1`` the golden is REWRITTEN and
+    never compared: the historical path wrote the payload and then returned
+    it to be compared against itself, so an update run reported green — the
+    fourth auto-green regen path (b10 R78 round-3; same doctrine as
+    ``tests/test_exports.py``). The caller must ``pytest.skip`` when this
+    returns ``True`` so a regeneration run never reports a verifying pass.
 
     Parameters
     ----------
@@ -310,17 +328,43 @@ def _assert_projection_matches_golden(name: str, projection: dict[str, Any]) -> 
         Golden basename without suffix.
     projection:
         Newly computed projection.
+
+    Returns
+    -------
+    bool
+        ``True`` when the golden was regenerated (no comparison happened).
     """
 
-    golden = _read_or_update_golden(_GOLDEN_DIR / f"{name}.json", projection)
+    path = _GOLDEN_DIR / f"{name}.json"
+    if flag_armed(os.environ, _UPDATE_ENV):
+        reason = require_update_reason(_UPDATE_ENV)
+        payload = _golden_payload(projection)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_provenance(
+            _GOLDEN_DIR,
+            f"tests/backend_parity/test_torch_parity_gates.py ({name})",
+            _UPDATE_ENV,
+            reason,
+        )
+        return True
+    golden = json.loads(path.read_text(encoding="utf-8"))
     assert _digest_payload(projection) == _digest_from_golden(golden)
     assert projection == golden["projection"]
+    return False
+
+
+def _skip_regenerated(regenerated: bool) -> None:
+    """SKIP an update run after its goldens are written (write-then-skip)."""
+
+    if regenerated:
+        pytest.skip(f"regenerated backend-parity goldens; re-run without {_UPDATE_ENV} to verify")
 
 
 def _skip_during_golden_update() -> None:
     """Skip meta-tests while committed goldens are being regenerated."""
 
-    if os.environ.get(_UPDATE_ENV) == "1":
+    if flag_armed(os.environ, _UPDATE_ENV):
         pytest.skip("can-fail meta-tests are skipped during golden regeneration")
 
 
@@ -564,7 +608,7 @@ def _public_accessor_projection(trace: Trace) -> dict[str, Any]:
 def test_trace_golden_digest(name: str, builder: Any) -> None:
     """Trace projections match committed digest goldens."""
 
-    _assert_projection_matches_golden(name, _trace_projection(builder()))
+    _skip_regenerated(_assert_projection_matches_golden(name, _trace_projection(builder())))
 
 
 def test_tlspec_roundtrip_and_manifest_goldens(tmp_path: Path) -> None:
@@ -575,25 +619,28 @@ def test_tlspec_roundtrip_and_manifest_goldens(tmp_path: Path) -> None:
     tl.save(trace, bundle_path)
     loaded = cast(Trace, tl.load(bundle_path))
 
-    _assert_projection_matches_golden(
+    regenerated = _assert_projection_matches_golden(
         "tlspec_roundtrip_digest",
         {
             "source": _trace_projection(trace),
             "loaded": _trace_projection(loaded),
         },
     )
-    _assert_projection_matches_golden(
+    regenerated |= _assert_projection_matches_golden(
         "tlspec_manifest_projection",
         _manifest_projection(bundle_path),
     )
+    _skip_regenerated(regenerated)
 
 
 def test_field_order_and_dataframe_golden() -> None:
     """FIELD_ORDER, portable state, and dataframe projections match goldens."""
 
-    _assert_projection_matches_golden(
-        "field_order_dataframe_digest",
-        _dataframe_projection(_default_trace()),
+    _skip_regenerated(
+        _assert_projection_matches_golden(
+            "field_order_dataframe_digest",
+            _dataframe_projection(_default_trace()),
+        )
     )
 
 
@@ -617,9 +664,11 @@ def test_semantic_output_fields_do_not_add_dataframe_columns() -> None:
 def test_public_accessor_golden() -> None:
     """Public accessors and grad-adjacent op surfaces match goldens."""
 
-    _assert_projection_matches_golden(
-        "public_accessors_digest",
-        _public_accessor_projection(_backward_ready_trace()),
+    _skip_regenerated(
+        _assert_projection_matches_golden(
+            "public_accessors_digest",
+            _public_accessor_projection(_backward_ready_trace()),
+        )
     )
 
 
@@ -692,6 +741,8 @@ def test_bundle_copy_preserves_manifest_gate(tmp_path: Path) -> None:
     copied_path = tmp_path / "copied.tlspec"
     tl.save(trace, source_path)
     shutil.copytree(source_path, copied_path)
-    _assert_projection_matches_golden(
-        "tlspec_manifest_projection", _manifest_projection(copied_path)
+    _skip_regenerated(
+        _assert_projection_matches_golden(
+            "tlspec_manifest_projection", _manifest_projection(copied_path)
+        )
     )

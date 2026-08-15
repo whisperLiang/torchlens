@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -11,48 +10,19 @@ from typing import Any
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
-from torchlens.receptive_field import _rules
 from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
-
-_BUILTIN_RULE_MODULES = (
-    "attention",
-    "conv_pool",
-    "elementwise",
-    "interpolation",
-    "linear",
-    "norms",
-    "sequence",
-    "transforms",
-)
-_BUILTIN_RULE_PACK: dict[str, object] | None = None
 
 
 @pytest.fixture(autouse=True)
 def built_in_rule_pack() -> Iterator[None]:
     """Install the built-in rules while preserving process-global registry state."""
 
-    global _BUILTIN_RULE_PACK
-    original = dict(_rules._RF_RULES)
-    original_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    if _BUILTIN_RULE_PACK is None:
-        importlib.import_module("torchlens.receptive_field.rules")
-        if not _rules._RF_RULES:
-            for module_name in _BUILTIN_RULE_MODULES:
-                module = importlib.import_module(f"torchlens.receptive_field.rules.{module_name}")
-                importlib.reload(module)
-        _BUILTIN_RULE_PACK = dict(_rules._RF_RULES)
-    else:
-        _rules._RF_RULES.update(_BUILTIN_RULE_PACK)
-    try:
+    with preserved_rf_registry(install_builtin=True):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(original)
-        _rules._RF_RULES_EPOCH = original_epoch
 
 
 def _register_exact_residual_rules() -> None:

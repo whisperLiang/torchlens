@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as ReluAdd
 
 import torchlens as tl
 from torchlens.data_classes.cleanup import _scrub_intervention_fields_after_removal
@@ -14,26 +15,6 @@ from torchlens.intervention.handles import HookHandle
 from torchlens.intervention.types import FireRecord, TargetSpec
 from torchlens.io import TraceState
 from torchlens.options import CaptureOptions
-
-
-class ReluAdd(torch.nn.Module):
-    """Small model with a stable relu intervention site."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run a relu followed by an add.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            ReLU out plus one.
-        """
-
-        return torch.relu(x) + 1
 
 
 def _identity_hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:

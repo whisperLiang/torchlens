@@ -968,6 +968,32 @@ def _digest_chunks(record: dict[str, Any]) -> list[str]:
 # collapsed_addresses honestly reports the concrete op labels hidden by op
 # segments (previously an empty frozenset while nodes were hidden). Every
 # schedule step count, t value, node, and edge is otherwise unchanged.
+#
+# Governance adjudication (b10 R78 round-3): this family is ENVIRONMENT-
+# SENSITIVE — the record freezes raw DOT bytes plus pydot-parsed structural
+# digests, both of which depend on the `graphviz` python package (the direct
+# DOT emitter, quoting included) and `pydot` (the parser the structural digest
+# is built through), on top of python/torch. The golden therefore resolves
+# through tests/_oracle_env.py with the family-scoped fingerprint extension
+# ("graphviz", "pydot"): the canonical golden enforces only when the
+# ENV/ENV-graphviz/ENV-pydot markers in tests/golden/ all match the running
+# environment; every other environment is fail-closed env-keyed. These
+# imports live BELOW the oracle models on purpose (see the frozen-source-line
+# note above).
+import os  # noqa: E402
+
+from _oracle_env import (  # noqa: E402
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_env_golden,
+    require_update_reason,
+    resolve_env_golden,
+    write_provenance,
+)
+
+#: Direct byte-generators of this family's golden (see adjudication above).
+_EMITTER_PACKAGES = ("graphviz", "pydot")
+
 _BYTE_ORACLE_ENV = "TORCHLENS_RENDER_BYTE_ORACLE"
 
 
@@ -1030,18 +1056,40 @@ def _environment_invariant_record(record: dict[str, Any]) -> dict[str, Any]:
 def test_viz_render_identity_oracle(tmp_path: Path) -> None:
     """Characterize every draw axis with bytes and structural goldens."""
 
+    # Armed on the exact value "1" only: the historical presence check
+    # (`_UPDATE_ENV in os.environ`) armed regeneration on NAME=0 (b10 R78
+    # round-3).
+    regen = flag_armed(os.environ, _UPDATE_ENV)
+    if regen:
+        # Generation is in-process: refuse to render golden bytes on a torch
+        # already wrapped by earlier tests (SF-53), and require the WHY
+        # before any capture runs.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
     actual = _record(tmp_path)
     payload = {"sha256_chunks": _digest_chunks(actual), "record": actual}
-    if _UPDATE_ENV in __import__("os").environ:
-        _GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _GOLDEN_PATH.write_text(
+    if regen:
+        golden_path, _ = resolve_env_golden(
+            _GOLDEN_PATH.parent, _GOLDEN_PATH.name, _EMITTER_PACKAGES
+        )
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        write_provenance(
+            golden_path.parent,
+            "tests/test_viz_render_identity_oracle.py",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
         )
         # Never fall through to compare against the file just written: an
         # update run reporting green is a vacuous pass (b10 R78-8d).
         pytest.skip(f"updated render-identity golden; re-run without {_UPDATE_ENV} to verify")
-    expected = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
-    if __import__("os").environ.get(_BYTE_ORACLE_ENV) == "1":
+    golden_path = require_env_golden(
+        _GOLDEN_PATH.parent, _GOLDEN_PATH.name, _UPDATE_ENV, extra_packages=_EMITTER_PACKAGES
+    )
+    expected = json.loads(golden_path.read_text(encoding="utf-8"))
+    if os.environ.get(_BYTE_ORACLE_ENV) == "1":
         assert payload == expected
     else:
         assert _environment_invariant_record(actual) == _environment_invariant_record(

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _ReluAdd
 
 import torchlens as tl
 from torchlens.intervention import errors as terrors
@@ -92,26 +93,6 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "BatchNormTrainModeWarning": "tests/test_intervention_phase12.py::test_append_batchnorm_train_mode_warns",
 }
 """Manual manifest proving every catalog entry is represented in the test matrix."""
-
-
-class _ReluAdd(torch.nn.Module):
-    """Small stable model for Phase 14 cross-cutting tests."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ReLU and a downstream add.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            ReLU output plus one.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _LinearRelu(torch.nn.Module):

@@ -122,6 +122,10 @@ test = [
     "pydot",
     "pillow",
     "pytest",
+    # Order-isolation infra: every `-p no:randomly` in the suite/drivers and
+    # the randomized order-audit leg are REAL only when the plugin is present
+    # (R76 reopened 2026-08-15: the flags were silent no-ops without it).
+    "pytest-randomly",
     "pytest-timeout",
     "requests",
     "soxr",

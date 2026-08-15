@@ -6,19 +6,10 @@ from pathlib import Path
 
 import pytest
 import torch
-from torch import nn
+from example_models import TinyReluAdd as _ReluAdd
 
 import torchlens as tl
 from torchlens.experimental import dagua
-
-
-class _ReluAdd(nn.Module):
-    """Small graph with an intervention site and downstream consumer."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run a relu followed by an add."""
-
-        return torch.relu(x) + 1
 
 
 def _interventions() -> tl.Trace:

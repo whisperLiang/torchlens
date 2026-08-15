@@ -48,18 +48,109 @@ RECORD_ENV_VAR = "TORCHLENS_ORACLE_RECORD_ENV"
 #: silently skip every golden case while staying green (grind-p3 T13.1).
 ENFORCE_ENV_VAR = "TORCHLENS_ORACLE_ENFORCE"
 
+#: Required WHY sidecar for every golden update/record run (b10 R78-8a
+#: follow-up): the PROVENANCE record documents how AND why a golden changed.
+REASON_ENV_VAR = "TORCHLENS_GOLDEN_REASON"
 
-def env_fingerprint() -> str:
-    """Return the golden-environment fingerprint for this interpreter."""
+
+def flag_armed(environ: Mapping[str, str], name: str) -> bool:
+    """Return whether a golden update/regen/record flag is ARMED.
+
+    A flag arms on the exact value ``"1"`` ONLY (b10 R78 round-3): truthy
+    interpretation (``bool(environ.get(name))``) armed regeneration on
+    ``NAME=0``, ``NAME=false``, and every other non-empty spelling a user
+    types to DISARM it. Every golden mutation flag read must route through
+    this predicate (or an inline ``== "1"`` comparison, enforced by
+    ``tests/test_golden_governance_lint.py``).
+
+    Parameters
+    ----------
+    environ:
+        Environment mapping to inspect (normally ``os.environ``).
+    name:
+        Flag variable name.
+
+    Returns
+    -------
+    bool
+        True exactly when ``environ[name] == "1"``.
+    """
+
+    return environ.get(name) == "1"
+
+
+def _package_version(package: str) -> str:
+    """Return the installed distribution version of ``package``.
+
+    Parameters
+    ----------
+    package:
+        Distribution name (e.g. ``"graphviz"``).
+
+    Returns
+    -------
+    str
+        The installed version string, or ``"absent"`` when the distribution
+        is not installed — an honest fingerprint component either way.
+    """
+
+    import importlib.metadata
+
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return "absent"
+
+
+def env_fingerprint(extra_packages: tuple[str, ...] = ()) -> str:
+    """Return the golden-environment fingerprint for this interpreter.
+
+    Parameters
+    ----------
+    extra_packages:
+        Family-scoped fingerprint extension (b10 R78 round-3, SF-51-compatible):
+        packages whose version DIRECTLY generates the family's golden bytes
+        (e.g. the ``graphviz`` python package emits the DOT the viz-identity
+        goldens freeze). Extending per-family keeps the GLOBAL key narrow —
+        do not add packages here to chase float drift; this is only for
+        direct byte-generators of the calling family.
+
+    Returns
+    -------
+    str
+        ``py<maj>.<min>-torch<ver>`` plus one ``-<pkg><ver>`` segment per
+        extra package.
+    """
 
     import torch
 
     torch_version = torch.__version__.split("+", 1)[0]
-    return f"py{sys.version_info.major}.{sys.version_info.minor}-torch{torch_version}"
+    base = f"py{sys.version_info.major}.{sys.version_info.minor}-torch{torch_version}"
+    extras = "".join(f"-{package}{_package_version(package)}" for package in extra_packages)
+    return base + extras
 
 
-def resolve_env_golden(golden_dir: Path, name: str) -> tuple[Path, bool]:
+def resolve_env_golden(
+    golden_dir: Path, name: str, extra_packages: tuple[str, ...] = ()
+) -> tuple[Path, bool]:
     """Resolve one golden file for the current environment.
+
+    Parameters
+    ----------
+    golden_dir:
+        Directory holding the canonical goldens, the ``ENV`` marker, and (for
+        families with ``extra_packages``) one ``ENV-<pkg>`` marker per direct
+        byte-generator package naming the version the canonical goldens were
+        recorded under.
+    name:
+        Golden file name.
+    extra_packages:
+        Family-scoped fingerprint extension; see :func:`env_fingerprint`.
+        The environment is canonical only when the base ``ENV`` marker AND
+        every ``ENV-<pkg>`` marker match the running versions — a missing or
+        mismatched emitter marker moves the family onto the fail-closed
+        env-keyed path instead of silently comparing bytes emitted by a
+        different generator version.
 
     Returns
     -------
@@ -73,12 +164,22 @@ def resolve_env_golden(golden_dir: Path, name: str) -> tuple[Path, bool]:
     marker = golden_dir / "ENV"
     canonical_env = marker.read_text().strip() if marker.exists() else None
     current_env = env_fingerprint()
-    if canonical_env is None or current_env == canonical_env:
+    canonical = canonical_env is None or current_env == canonical_env
+    if canonical:
+        for package in extra_packages:
+            extras_marker = golden_dir / f"ENV-{package}"
+            recorded = extras_marker.read_text().strip() if extras_marker.exists() else None
+            if recorded != _package_version(package):
+                canonical = False
+                break
+    if canonical:
         return golden_dir / name, False
-    return golden_dir / f"env-{current_env}" / name, True
+    return golden_dir / f"env-{env_fingerprint(extra_packages)}" / name, True
 
 
-def require_env_golden(golden_dir: Path, name: str, update_env: str) -> Path:
+def require_env_golden(
+    golden_dir: Path, name: str, update_env: str, extra_packages: tuple[str, ...] = ()
+) -> Path:
     """Return the enforceable golden path for this environment, fail-closed.
 
     Policy for a MISSING golden (b10 R78-4):
@@ -104,6 +205,8 @@ def require_env_golden(golden_dir: Path, name: str, update_env: str) -> Path:
         Golden file name.
     update_env:
         The owning family's update flag, named in failure messages.
+    extra_packages:
+        Family-scoped fingerprint extension; see :func:`resolve_env_golden`.
 
     Returns
     -------
@@ -112,7 +215,7 @@ def require_env_golden(golden_dir: Path, name: str, update_env: str) -> Path:
         path to record.
     """
 
-    golden_path, off_canonical = resolve_env_golden(golden_dir, name)
+    golden_path, off_canonical = resolve_env_golden(golden_dir, name, extra_packages)
     if golden_path.exists():
         return golden_path
     if not off_canonical:
@@ -120,7 +223,7 @@ def require_env_golden(golden_dir: Path, name: str, update_env: str) -> Path:
             f"missing canonical golden {golden_path}; generate deliberately with "
             f"{update_env}=1 (the update run reports SKIP, then re-run to verify)"
         )
-    if os.environ.get(ENFORCE_ENV_VAR) == "1":
+    if flag_armed(os.environ, ENFORCE_ENV_VAR):
         pytest.fail(
             f"this leg declares {ENFORCE_ENV_VAR}=1 (byte-oracle enforcement) but "
             f"runs off-canonical environment {env_fingerprint()!r} with no committed "
@@ -129,7 +232,7 @@ def require_env_golden(golden_dir: Path, name: str, update_env: str) -> Path:
             f"{RECORD_ENV_VAR}=1 run on the new environment, reviewed and committed) "
             "or restore the leg's environment; an enforcing leg never skips"
         )
-    if os.environ.get(RECORD_ENV_VAR) == "1" and not os.environ.get("CI"):
+    if flag_armed(os.environ, RECORD_ENV_VAR) and not os.environ.get("CI"):
         golden_path.parent.mkdir(parents=True, exist_ok=True)
         return golden_path
     if os.environ.get("CI"):
@@ -173,21 +276,116 @@ def golden_mutation_flags_armed_under_ci(environ: Mapping[str, str]) -> list[str
     )
 
 
-def write_provenance(golden_dir: Path, generator: str, update_env: str) -> None:
-    """Record how the goldens in ``golden_dir`` were (re)generated.
+def require_update_reason(update_env: str) -> str:
+    """Return the mandatory WHY for a golden update/record run, fail-closed.
+
+    ``write_provenance`` historically recorded only HOW a golden was
+    regenerated (generator, flag, env, date) — never WHY. Every update run
+    must now carry ``TORCHLENS_GOLDEN_REASON`` (b10 R78 round-3): an empty
+    or missing reason fails the update run BEFORE bytes are written, so a
+    rebaseline can never land without a git-greppable justification.
+
+    Parameters
+    ----------
+    update_env:
+        The owning family's update flag, named in the failure message.
+
+    Returns
+    -------
+    str
+        The non-empty reason string.
+    """
+
+    reason = os.environ.get(REASON_ENV_VAR, "").strip()
+    if not reason:
+        pytest.fail(
+            f"{update_env}=1 is a deliberate golden rebaseline and requires "
+            f"{REASON_ENV_VAR} to record WHY (e.g. {REASON_ENV_VAR}='r21 collapse "
+            "schedule fix, enumerated in the sprint report'). Refusing to write "
+            "goldens without a reason."
+        )
+    return reason
+
+
+#: Update flags whose wrap-state guard already verified a clean start in this
+#: process. Intra-family wrapping DURING generation is inherent to in-process
+#: multi-capture families and deterministic in a fresh single-family run; the
+#: guard's job is to refuse generation on a torch some EARLIER test already
+#: wrapped (SF-53), so it checks once per family per process.
+_WRAP_GUARD_CLEARED: set[str] = set()
+
+
+def guard_wrap_state_for_golden_update(update_env: str) -> None:
+    """Refuse a golden update run whose generation starts on wrapped torch.
+
+    In-process golden generation constructs models and captures on whatever
+    torch state earlier tests left behind: torchlens torch-function wrappers
+    install lazily on the first capture and STAY installed, so bytes
+    generated mid-session can silently freeze wrap-state artifacts (SF-53,
+    the b10 R78-1 generator-design gap the surface oracle fixed with a
+    subprocess worker). Families that still generate in-process call this at
+    the START of an update run's generation: if torch is already wrapped by
+    earlier activity in this pytest process, the update run FAILS with
+    instructions — a guard and a clear failure, never a silent unwrap.
+
+    Parameters
+    ----------
+    update_env:
+        The owning family's update flag, named in the failure message.
+    """
+
+    if update_env in _WRAP_GUARD_CLEARED:
+        return
+    state = sys.modules.get("torchlens._state")
+    if state is not None and getattr(state, "_is_decorated", False):
+        pytest.fail(
+            f"{update_env}=1 golden generation must start on UNWRAPPED torch, but "
+            "torchlens torch-function wrappers are already installed from earlier "
+            "captures in this pytest process (SF-53: generated bytes may depend on "
+            "wrap state). Regenerate in a fresh interpreter running ONLY this "
+            f"family, e.g.: {update_env}=1 {REASON_ENV_VAR}='<why>' pytest <this "
+            "family's test file>"
+        )
+    _WRAP_GUARD_CLEARED.add(update_env)
+
+
+def write_provenance(golden_dir: Path, generator: str, update_env: str, reason: str) -> None:
+    """APPEND how and why the goldens in ``golden_dir`` were (re)generated.
 
     Written by update/record runs only — a sidecar, never compared, so it
     documents regeneration without perturbing golden bytes (b10 R78-8a).
+    Records are APPENDED with full history (b10 R78 round-3): the historical
+    single overwritten file lied whenever one directory hosted multiple flag
+    families or a partial update — the last writer erased every earlier
+    family's record.
+
+    Parameters
+    ----------
+    golden_dir:
+        Goldens directory receiving the ``PROVENANCE`` sidecar.
+    generator:
+        Human-readable generator identity (test file / family).
+    update_env:
+        The flag that armed this write.
+    reason:
+        WHY the goldens changed; thread from :func:`require_update_reason`.
     """
 
     import datetime
 
     import torch
 
-    (golden_dir / "PROVENANCE").write_text(
+    record = (
         f"generator: {generator}\n"
         f"flag: {update_env}=1\n"
+        f"reason: {reason}\n"
         f"env: {env_fingerprint()}\n"
         f"torch: {torch.__version__}\n"
         f"recorded: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
     )
+    path = golden_dir / "PROVENANCE"
+    existing = path.read_text() if path.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    separator = "---\n" if existing else ""
+    path.write_text(existing + separator + record)

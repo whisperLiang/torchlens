@@ -50,10 +50,18 @@ def _isolated_wrapper_epoch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         rescue_module, "capture_with_rescue", lambda run_capture, **_kw: run_capture()
     )
+    # Restore the PRE-TEST diagnostic modes on teardown instead of hardcoding
+    # them off: a fixed escape_detector="off" re-wrap disarmed diagnostics a
+    # surrounding session had deliberately armed (R77 fixture-health finding 3).
+    saved_escape_detector = _state._escape_detector_mode
+    saved_completeness_witness = _state._completeness_witness_mode
     unwrap_torch()
     yield
     unwrap_torch()
-    wrap_torch(escape_detector="off")
+    wrap_torch(
+        escape_detector=saved_escape_detector,
+        completeness_witness=saved_completeness_witness,
+    )
 
 
 def _gap_warnings(caught: list[warnings.WarningMessage]) -> list[warnings.WarningMessage]:
