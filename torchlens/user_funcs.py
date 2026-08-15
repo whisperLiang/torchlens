@@ -3410,13 +3410,20 @@ def _trace_torch_model(
 
     # Streaming saves, sinks, and halt-predicate partials are not re-runnable;
     # they report an escape as before instead of attempting a rescue re-run.
+    # User-supplied intervention transforms and pre-attached hooks are refused
+    # too (fail closed): a re-run invokes every user callable a SECOND time,
+    # and their side effects (counters, file writes, externally-held state)
+    # would double-apply with only a session-time disclosure. ``save=``
+    # selector predicates stay eligible -- selectors are pure by contract.
     rescue_eligible = (
         streaming_options.bundle_path is None
         and streaming_options.out_callback is None
         and grad_storage_path_value is None
         and halt is None
+        and intervene is None
+        and not hooks
     )
-    trace = capture_with_rescue(run_capture, eligible=rescue_eligible)
+    trace = capture_with_rescue(run_capture, eligible=rescue_eligible, model=model)
     trace.profile_enabled = profile_enabled
     trace.save_grads = save_grads_policy
     if uses_selective_layers_to_save:

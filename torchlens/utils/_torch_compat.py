@@ -91,6 +91,8 @@ __all__ = [
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
     "HAS_JIT_BUILTIN_TABLE",
+    "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
+    "HAS_JIT_OVERLOAD_RESOLVER",
     "HAS_NAMED_TENSOR_API",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
@@ -141,6 +143,8 @@ __all__ = [
     "get_fsdp_wrapper_type",
     "get_fx_graph_module_type",
     "get_jit_builtin_table",
+    "get_jit_boolean_dispatch_table",
+    "get_jit_overload_resolver_module",
     "get_optional_torch_namespace",
     "get_torch_capability_snapshot",
     "probe_c10d_capabilities",
@@ -691,6 +695,30 @@ def _probe_jit_builtin_table() -> bool:
     return _import_module_attr_or_none("torch.jit._builtins", "_builtin_table") is not None
 
 
+def _probe_jit_boolean_dispatch_table() -> bool:
+    """Return whether TorchScript exposes the private boolean-dispatch table.
+
+    Returns
+    -------
+    bool
+        True when ``torch._jit_internal.boolean_dispatched`` is present.
+    """
+
+    return _import_module_attr_or_none("torch._jit_internal", "boolean_dispatched") is not None
+
+
+def _probe_jit_overload_resolver() -> bool:
+    """Return whether TorchScript exposes the private overload resolver.
+
+    Returns
+    -------
+    bool
+        True when ``torch.jit._script._get_overloads`` is present.
+    """
+
+    return _import_module_attr_or_none("torch.jit._script", "_get_overloads") is not None
+
+
 def _probe_device_context_dispatch() -> bool:
     """Return whether DeviceContext stack APIs needed for factory injection exist.
 
@@ -1219,6 +1247,8 @@ HAS_FUNCTORCH_APIS: bool = _probe_functorch_apis()
 HAS_FUNCTORCH_LEVEL_API: bool = _probe_functorch_level_api()
 HAS_FUNCTORCH_WRAPPED_TENSOR_API: bool = _probe_functorch_wrapped_tensor_api()
 HAS_JIT_BUILTIN_TABLE: bool = _probe_jit_builtin_table()
+HAS_JIT_BOOLEAN_DISPATCH_TABLE: bool = _probe_jit_boolean_dispatch_table()
+HAS_JIT_OVERLOAD_RESOLVER: bool = _probe_jit_overload_resolver()
 HAS_DEVICE_CONTEXT_DISPATCH: bool = _probe_device_context_dispatch()
 HAS_DEVICE_CONSTRUCTORS: bool = _probe_device_constructors()
 HAS_ACCUMULATE_GRAD_CLASS: bool = _probe_accumulate_grad_class()
@@ -1313,6 +1343,8 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_FUNCTORCH_LEVEL_API",
     "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
     "HAS_JIT_BUILTIN_TABLE",
+    "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
+    "HAS_JIT_OVERLOAD_RESOLVER",
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
     "HAS_ACCUMULATE_GRAD_CLASS",
@@ -1775,6 +1807,58 @@ def get_jit_builtin_table() -> dict[int, Any] | None:
         )
         return None
     return builtin_table
+
+
+def get_jit_boolean_dispatch_table() -> Any | None:
+    """Return TorchScript's private boolean-dispatch table when available.
+
+    The table maps each ``torch._jit_internal.boolean_dispatch`` product (the
+    ``F.max_pool*`` family) to its dispatch record; TorchScript's sugared-value
+    layer consults it BY OBJECT before attempting source compilation, so
+    wrappers must be registered as additional keys to keep ``torch.jit.script``
+    working while torch is wrapped.
+
+    Returns
+    -------
+    Any | None
+        The ``boolean_dispatched`` WeakKeyDictionary, or ``None`` when
+        unavailable.
+    """
+
+    table = _import_module_attr_or_none("torch._jit_internal", "boolean_dispatched")
+    if table is None:
+        mark_torch_capability_missing(
+            "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
+            "TorchScript boolean-dispatch wrapper registration is disabled",
+        )
+        return None
+    return table
+
+
+def get_jit_overload_resolver_module() -> Any | None:
+    """Return the module holding TorchScript's private overload resolver.
+
+    ``torch.jit._script._get_overloads`` is the one recursive-compilation
+    entry the C++ sugared-value layer calls that does NOT honor
+    ``__prepare_scriptable__``; the identity shim normalizes wrapped
+    functionals there so overloaded ops (``F.interpolate``,
+    ``F.adaptive_avg_pool2d/3d``) keep scripting while torch is wrapped.
+
+    Returns
+    -------
+    Any | None
+        The ``torch.jit._script`` module, or ``None`` when the resolver is
+        unavailable.
+    """
+
+    resolver = _import_module_attr_or_none("torch.jit._script", "_get_overloads")
+    if resolver is None:
+        mark_torch_capability_missing(
+            "HAS_JIT_OVERLOAD_RESOLVER",
+            "TorchScript overload normalization for wrapped functionals is disabled",
+        )
+        return None
+    return sys.modules.get("torch.jit._script")
 
 
 def get_device_context_type() -> type[Any] | None:
@@ -2413,8 +2497,12 @@ def force_eager_stance_scope() -> Iterator[bool]:
     compiled callable reached in the scope, triggers zero new compiles during
     the scope (including on never-seen input shapes), and leaves every warm
     compiled artifact reproduced bitwise after exit. Reading the probe never
-    imports ``torch._dynamo``; a process that never imported Dynamo cannot hold
-    a compiled callable, so skipping the stance there is exact, not heuristic.
+    imports ``torch._dynamo``. Skipping the stance when Dynamo is absent is
+    exact for every callable that EXISTS at scope entry (compiling one imports
+    Dynamo), but NOT for a callable created inside the scope: a forward whose
+    first ``torch.compile`` happens mid-capture imports Dynamo after this
+    check, so that callable runs compiled and is bypassed-and-disclosed
+    (``dynamo_region_not_logged``) rather than eager-logged.
     """
 
     if not HAS_SET_STANCE or "torch._dynamo" not in sys.modules:

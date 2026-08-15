@@ -1338,3 +1338,75 @@ def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() ->
     assert all(d["reason"] == "owner_not_captured" for d in equal_diags)
     assert all(d["mutates"] is False for d in equal_diags)
     assert len(AUDITED_COMPLETENESS_BOUNDARIES) <= MAX_AUDITED_COMPLETENESS_BOUNDARIES
+
+
+def test_witness_arm_install_failure_strands_no_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException escaping the observer INSTALL phase must unwind cleanly.
+
+    R07 regression: ~240 lines of process-global ``setattr``s ran BEFORE the
+    ``try`` owning the yield, and that try had no except arm -- Python never
+    calls ``__exit__`` when ``__enter__`` raises, so one Ctrl-C during an
+    ``intervention_ready`` capture stranded ~124 torch surfaces (the
+    ``torch._ops.*.__call__`` dispatch, the storage accessor surface, the
+    scalar/predicate belt) permanently and monotonically: the next armed
+    capture read the leaked wrapper as its "original" and re-installed over
+    it. The whole install phase is now fenced by the L4 unwind standard.
+    """
+
+    from torchlens.backends.torch.wrappers import wrap_torch
+
+    wrap_torch()
+
+    def _surface_snapshot() -> dict[str, object]:
+        import torch._ops as torch_ops
+
+        return {
+            "Tensor.item": inspect.getattr_static(torch.Tensor, "item"),
+            "Tensor.tolist": inspect.getattr_static(torch.Tensor, "tolist"),
+            "Tensor.numpy": inspect.getattr_static(torch.Tensor, "numpy"),
+            "torch.equal": torch.equal,
+            "UntypedStorage.data_ptr": inspect.getattr_static(torch.UntypedStorage, "data_ptr"),
+            "OpOverloadPacket.__call__": torch_ops.OpOverloadPacket.__dict__.get("__call__"),
+        }
+
+    baseline = _surface_snapshot()
+
+    # Inject the interrupt at the LAST install step, so every earlier patch
+    # has already landed and must be unwound.
+    def _interrupted() -> object:
+        raise KeyboardInterrupt
+
+    # The runtime observer is the cw-rebound copy, so patch cw's globals.
+    monkeypatch.setattr(cw, "_private_c_module_callables", _interrupted)
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(self.lin(x))
+
+    with pytest.raises(KeyboardInterrupt):
+        tl.trace(
+            Model(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(intervention_ready=True, cache=False),
+        )
+
+    leaked = {name for name, obj in _surface_snapshot().items() if obj is not baseline[name]}
+    assert not leaked, f"stranded witness patches: {sorted(leaked)}"
+
+    # No monotonic stacking either: a later armed capture completes and the
+    # surfaces are still pristine afterwards.
+    monkeypatch.undo()
+    trace = tl.trace(
+        Model(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(intervention_ready=True, cache=False),
+    )
+    assert trace is not None
+    leaked_after = {name for name, obj in _surface_snapshot().items() if obj is not baseline[name]}
+    assert not leaked_after, f"stranded witness patches after clean capture: {sorted(leaked_after)}"

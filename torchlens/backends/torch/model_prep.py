@@ -1214,6 +1214,23 @@ def _record_module_entry_metadata(
                 trace, t, module, parent_labels=[], kind="internal_source"
             )
             label = get_tensor_label(t)
+            # R16: adoption must not LAUNDER an escape. Outside a disclosed
+            # transform/dynamo region (whose interiors legitimately produce
+            # untagged tensors), an untagged non-buffer tensor entering a
+            # module is the module-consumed twin of the wrapped-function
+            # unattributed-args case: a stale pre-wrap reference whose output
+            # is first consumed by a module used to vanish silently (no
+            # warning, no rescue, consumption-order-dependent disclosure).
+            # Record the adoption so postprocess raises the same provenance
+            # warning and escape signal the function path raises.
+            if (
+                label is not None
+                and not getattr(trace, "_raw_transform_escape_detected", False)
+                and not getattr(trace, "_raw_dynamo_region_detected", False)
+            ):
+                trace.__dict__.setdefault("_module_entry_adoptions", []).append(
+                    (str(label), str(module_address))
+                )
         if label is None:
             continue  # Skip untracked tensors (e.g. external constants) (#117)
         input_tensor_labels.add(label)

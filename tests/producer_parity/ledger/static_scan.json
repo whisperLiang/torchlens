@@ -5700,7 +5700,7 @@
   "field": "modules",
   "file": "torchlens/utils/_torch_compat.py",
   "has_default": false,
-  "sites": 10,
+  "sites": 11,
   "via_getattr": false
  },
  {

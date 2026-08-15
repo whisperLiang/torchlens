@@ -453,6 +453,14 @@ def _warn_unattributed_tensor_args(self: "Trace") -> None:
             continue
         label = getattr(op, "label", None) or getattr(op, "layer_label", None) or op._label_raw
         offenders.append(f"{label} ({', '.join(positions)})")
+    # R16: module-entry adoptions of untagged tensors (outside disclosed
+    # transform/dynamo regions) are the module-consumed twin of the
+    # unattributed-args case; without this fold, a stale-ref escape whose
+    # output was first consumed by a MODULE was laundered into a clean
+    # ``internalsource`` node -- no warning, no rescue,
+    # consumption-order-dependent disclosure.
+    for label, module_address in self.__dict__.pop("_module_entry_adoptions", None) or ():
+        offenders.append(f"{label} (adopted at module entry {module_address})")
     if not offenders:
         return
     # Session-time escape signal: the capture entry reads this flag to decide

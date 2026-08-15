@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+import torch
 from torch.overrides import TorchFunctionMode
 
 from ... import _state
@@ -143,7 +144,11 @@ def _record_emitted_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        # Identity-checked restore (the profile-slot standard): a user or
+        # callback that installed its own showwarning during the window must
+        # not be silently reverted.
+        if warnings.showwarning is recorder:
+            warnings.showwarning = forward
 
 
 @contextmanager
@@ -163,7 +168,8 @@ def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        if warnings.showwarning is dedup:
+            warnings.showwarning = forward
 
 
 @contextmanager
@@ -192,7 +198,8 @@ def _defer_capture_failed_warnings(
     try:
         yield
     finally:
-        warnings.showwarning = forward
+        if warnings.showwarning is hold:
+            warnings.showwarning = forward
 
 
 def _flush_deferred_warnings(
@@ -230,12 +237,20 @@ def _op_name_counts(trace: Trace) -> Counter[str]:
     (``__add__`` -> ``add``, the pinned stage-0 delta), so spellings are
     canonicalized by stripping underscores before diffing — otherwise every
     operator-using model would read as a false "recovery".
+
+    Bookkeeping SOURCE nodes (``func_name == "none"``: minted
+    ``internalsource`` adoptions, other functionless placeholders) are
+    excluded: they represent the ABSENCE of a captured function. A perfect
+    rescue replaces the primary's minted orphan-source with the real op, so
+    counting them made the rescued trace read one ``none`` short —
+    ``lost_ops=('none',)`` — and the two-sided oracle refused the recovery
+    (the R16-1 false negative).
     """
 
     return Counter(
         name.strip("_")
         for op in getattr(trace, "ops", ())
-        if (name := getattr(op, "func_name", None))
+        if (name := getattr(op, "func_name", None)) and name != "none"
     )
 
 
@@ -340,26 +355,120 @@ def _partial_buffer_write_labels(exc: BaseException) -> tuple[str, ...] | None:
     )
 
 
+def _snapshot_declared_state(model: Any) -> dict[str, Any] | None:
+    """Byte snapshot of the model's declared state (parameters + ALL buffers).
+
+    Taken ONLY on the escape path, immediately before a rescue re-run: the
+    journal-based refusal above it is structurally blind to PARAMETER writes
+    (the write index covers registered buffers only) and to writes performed
+    BY the escaped op itself (an escaped call leaves no journal record), so
+    journal emptiness is not proof of state-neutrality. The transient
+    O(model-state) copy is confined to the rare escape path — the plain
+    capture path pays nothing (the W6 arming contract).
+
+    Returns
+    -------
+    dict[str, Any] | None
+        ``slot key -> detached clone`` for every named parameter and buffer,
+        or ``None`` when the model is unavailable.
+    """
+
+    if model is None or not isinstance(model, torch.nn.Module):
+        return None
+    snapshot: dict[str, Any] = {}
+    with _state.pause_logging(), torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if parameter is not None:
+                snapshot[f"param:{name}"] = parameter.detach().clone()
+        for name, buffer in model.named_buffers():
+            if buffer is not None:
+                snapshot[f"buffer:{name}"] = buffer.detach().clone()
+    return snapshot
+
+
+def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, ...]:
+    """Restore snapshot values into every changed state slot; name the changes.
+
+    Called after a rescue re-run: any slot whose bytes differ from the
+    post-primary snapshot proves the rescue forward WROTE declared state — and
+    therefore (same forward, same restored RNG) the primary wrote it too, so
+    the model is doubly mutated. Copying the snapshot back leaves the model
+    exactly as ONE forward left it. A slot that vanished or changed
+    shape/dtype cannot be restored in place and is reported as-is.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The slot keys whose values changed during the rescue re-run.
+    """
+
+    changed: list[str] = []
+    with _state.pause_logging(), torch.no_grad():
+        live: dict[str, Any] = {}
+        for name, tensor in model.named_parameters():
+            live[f"param:{name}"] = tensor
+        for name, tensor in model.named_buffers():
+            live[f"buffer:{name}"] = tensor
+        for key, baseline in snapshot.items():
+            current = live.get(key)
+            if current is None:
+                changed.append(key)
+                continue
+            try:
+                if (
+                    current.shape == baseline.shape
+                    and current.dtype == baseline.dtype
+                    and torch.equal(current, baseline)
+                ):
+                    continue
+                changed.append(key)
+                if current.shape == baseline.shape and current.dtype == baseline.dtype:
+                    current.data.copy_(baseline)
+            except (RuntimeError, TypeError, NotImplementedError):
+                changed.append(key)
+        changed.extend(sorted(set(live) - set(snapshot)))
+    return tuple(dict.fromkeys(changed))
+
+
+# Verification reasons carrying MORE-SPECIFIC diagnostic content than the
+# generic rescue stamps: a recovered rescue must not demote any of these to
+# ``mode_rescue_rerun`` (b6-fable/b3-fable: only dynamo was protected, so an
+# armed detector/witness verdict on the rescued run -- or a teardown failure
+# -- was clobbered into the generic reason).
+_SPECIFIC_VERIFICATION_REASONS = frozenset(
+    {
+        "dynamo_region_not_logged",
+        "callable_escape_shadow_report",
+        "dispatch_witness_unaccounted_ops",
+        "input_boundary_unverifiable",
+        "transform_call_route_unverified",
+        "owner_thread_tripwire_changed",
+        "escape_detector_teardown_failed",
+    }
+)
+
+
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """Stamp the rescue disclosure onto a trace (session-time facts).
 
-    An unrecovered escape must never SILENCE a more specific verdict: when
-    the primary already carries a verification reason (dispatch witness,
-    shadow detector, dynamo boundary), that reason stays authoritative and
-    the rescue attempt is disclosed only through ``rescue_rerun``. The
-    ``escape_rescue_unrecovered`` reason is reserved for the formerly-silent
-    class where the primary made no claim at all.
+    A rescue stamp must never SILENCE a more specific verdict: when the trace
+    already carries a specific verification reason (dispatch witness, shadow
+    detector, dynamo boundary, thread tripwire, teardown failure), that
+    reason stays authoritative and the rescue attempt is disclosed only
+    through ``rescue_rerun``. The ``escape_rescue_unrecovered`` reason is
+    reserved for the formerly-silent class where the primary made no claim at
+    all; ``mode_rescue_rerun`` replaces only a generic or absent reason.
     """
 
     trace.capture_verified = False
     existing_reason = getattr(trace, "capture_verification_reason", None)
-    if getattr(trace, "_raw_dynamo_region_detected", False) or existing_reason == (
-        "dynamo_region_not_logged"
+    if getattr(trace, "_raw_dynamo_region_detected", False) or (
+        existing_reason in _SPECIFIC_VERIFICATION_REASONS
     ):
-        # R16-3: the dynamo-region verdict has TOP precedence at both finalize
-        # sites (compile threads and unaccounted dispatches are symptoms of
-        # that same region); a recovered rescue must not clobber it. The
-        # rescue attempt stays disclosed through ``rescue_rerun`` below.
+        # R16-3 generalized: a specific verdict (dynamo top precedence, an
+        # armed detector/witness report, the thread tripwire) outranks both
+        # generic rescue stamps. The rescue attempt stays disclosed through
+        # ``rescue_rerun`` below.
         pass
     elif reason == "mode_rescue_rerun" or not existing_reason:
         trace.capture_verification_reason = reason
@@ -370,6 +479,7 @@ def capture_with_rescue(
     run_capture: Callable[[], Trace],
     *,
     eligible: bool = True,
+    model: Any = None,
 ) -> Trace:
     """Run one capture; on an escape signal, re-run once with the net armed.
 
@@ -382,6 +492,13 @@ def capture_with_rescue(
         Whether a rescue re-run is permitted. Streaming saves, sinks, and
         halt-predicate partials are not re-runnable; they report the escape
         and skip the rescue.
+    model:
+        The live model being captured. When provided, the escape path takes a
+        post-primary byte snapshot of the declared state and, after the
+        rescue re-run, restores and refuses on ANY state write — covering the
+        PARAMETER writes and escaped-op writes the journal-based refusal is
+        structurally blind to. ``None`` (direct internal callers only) keeps
+        the journal-only guard.
 
     Returns
     -------
@@ -486,9 +603,20 @@ def capture_with_rescue(
             )
             return primary
 
-    _thread_local.rescue_active = True
+    # R02-1/R02-2: the journal-based refusals above prove nothing about
+    # PARAMETER writes (the write index covers registered buffers only) or
+    # about writes performed BY the escaped op (which leaves no journal
+    # record). Snapshot the declared state now — post-primary, escape path
+    # only — so the re-run below can be byte-audited and undone.
+    state_snapshot = _snapshot_declared_state(model)
+
     rescue_deferred: list[tuple[Any, Any, tuple[Any, ...], dict[str, Any]]] = []
     try:
+        # Armed INSIDE the try (the house set-inside-try standard): a
+        # KeyboardInterrupt between an outside arm and the try's first line
+        # leaked rescue_active=True for the thread's lifetime, silently
+        # disabling every later rescue on it.
+        _thread_local.rescue_active = True
         set_rng_from_saved_states(rng_snapshot)
         # The rescue run's own capture-failed advisory is deferred too: its
         # exception never propagates (the primary's error or trace does), so
@@ -519,6 +647,57 @@ def capture_with_rescue(
         return primary
     finally:
         _thread_local.rescue_active = False
+
+    if state_snapshot is not None:
+        changed_state = _restore_changed_state(model, state_snapshot)
+        if changed_state:
+            # The rescue forward WROTE declared state, so the primary wrote it
+            # too and the writes were double-applied. The snapshot restore
+            # above already undid the second application (the model now holds
+            # exactly one forward's worth of mutation); the rescue trace is a
+            # second, differently-parameterized forward and is discarded.
+            shown = ", ".join(changed_state[:3])
+            warnings.warn(
+                "TorchLens discarded the rescue re-run: the forward wrote model "
+                f"state ({shown}) the buffer-write journal could not see, and "
+                "running it twice double-applied those writes. The duplicate "
+                "application was restored from a snapshot, so the model now "
+                "holds exactly one forward's mutation. The escape stands "
+                "unrecovered; fix the stale torch reference (or make the "
+                "forward state-neutral) and re-capture.",
+                UserWarning,
+                stacklevel=3,
+            )
+            if primary_error is not None:
+                _flush_deferred_warnings(primary_deferred)
+                partial_trace = getattr(getattr(primary_error, "partial_log", None), "trace", None)
+                if partial_trace is not None:
+                    try:
+                        partial_trace.rescue_rerun = _disclosure(
+                            trigger=trigger,
+                            recovered=False,
+                            primary_error=str(primary_error),
+                            skipped_reason="state_writes_double_forward_undone",
+                            forward_runs=2,
+                        )
+                    except Exception:  # noqa: BLE001 — disclosure is best-effort
+                        pass
+                raise primary_error
+            assert primary is not None
+            _mark(
+                primary,
+                "escape_rescue_unrecovered",
+                _disclosure(
+                    trigger=trigger,
+                    recovered=False,
+                    primary_escape_diagnostics=tuple(
+                        getattr(primary, "escape_diagnostics", ()) or ()
+                    ),
+                    skipped_reason="state_writes_double_forward_undone",
+                    forward_runs=2,
+                ),
+            )
+            return primary
 
     if primary_error is not None:
         # The primary could not even attribute its output; a completed rescue

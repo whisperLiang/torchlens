@@ -344,252 +344,25 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     """
 
     originals: dict[str, Any] = {}
-    for name in INVISIBLE_HOST_ESCAPE_FUNCS | STORAGE_BRIDGE_ESCAPE_FUNCS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_invisible_escape_wrapper(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        originals[name] = original
-    # r39 hon2_1: mode-independent belt for the aten census -- the scalar numeric protocol
-    # (``item``/``__bool__``/``__int__``/``__float__``/``__index__``/``__complex__``) and the
-    # pure predicates (``equal``/``allclose``/``is_nonzero``). These fire regardless of
-    # dispatch-mode state, so a scalar/predicate escape inside torch's own
-    # ``_disable_current_modes()`` (tensor string formatting; explicit guards) still hits a
-    # Python observer. Several names are getset/slot members of the C ``TensorBase`` and NOT in
-    # ``torch.Tensor.__dict__``; setting them installs a SHADOW that restore must DELETE (never
-    # set back to the base slot). A required-observer install failure fails the capture closed.
     host_value_method_restore: dict[str, tuple[bool, Any]] = {}
-    for name in HOST_VALUE_ESCAPE_METHODS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        shadowed = name in torch.Tensor.__dict__
-        try:
-            setattr(torch.Tensor, name, _make_host_value_escape_method(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        host_value_method_restore[name] = (shadowed, original)
-    # Module-level zero-copy export C bindings that bypass the Tensor method patch:
-    # ``torch.utils.dlpack.to_dlpack`` == ``torch._C._to_dlpack`` never calls
-    # ``Tensor.__dlpack__``. Patch the Python-level function (and ``torch._C._to_dlpack`` if the
-    # C module permits assignment) to record the exported tensor as an escape source.
     module_originals: list[tuple[Any, str, Any]] = []
-    for module, func_name in _MODULE_ESCAPE_TARGETS():
-        original_func = getattr(module, func_name, None)
-        if original_func is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(module, func_name, _make_module_escape_wrapper(original_func, state))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        module_originals.append((module, func_name, original_func))
-    # r39 hon2_1: the ``torch.*`` MODULE predicate spellings (``torch.equal`` / ``torch.allclose``
-    # / ``torch.is_nonzero``) return a raw Python bool DIRECTLY from the dispatcher and, under an
-    # explicit ``_disable_current_modes()`` region, bypass the census (E6). Record every tensor
-    # operand -- the same shared source table as the Tensor-method belt.
-    for predicate_name in HOST_VALUE_ESCAPE_MODULE_FUNCS:
-        original_predicate = torch_attr(predicate_name)  # r47 secD_1: no lazy ``torch.__getattr__``
-        if original_predicate is None or not callable(original_predicate):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(
-                torch,
-                predicate_name,
-                _make_host_value_predicate_module_wrapper(original_predicate, state),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        module_originals.append((torch, predicate_name, original_predicate))
-    # Storage-handle raw-pointer accessors (r16-C1): ``UntypedStorage.data_ptr`` /
-    # ``TypedStorage.data_ptr`` reach the SAME raw pointer as ``Tensor.data_ptr`` but off the
-    # storage object, so the Tensor patch never sees them. Fail closed on a genuine user call.
-    # W1_F3 (round7 B1 class): an EMPTY storage-class scan is version-drift uncertainty, not
-    # proof of absence -- the Tensor storage-bridge methods could still hand out handles of a
-    # class this scan failed to enumerate, leaving every storage accessor unobserved. Same
-    # fail-closed posture as the ``_torch_ops_call_classes`` / ``_private_c_module_callables``
-    # empty scans below.
-    if not _STORAGE_RAW_POINTER_TARGETS():
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
     storage_originals: list[tuple[Any, Any]] = []
-    for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
-        storage_original = storage_cls.data_ptr
-        try:
-            setattr(
-                storage_cls, "data_ptr", _make_storage_raw_pointer_wrapper(storage_original, state)
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        storage_originals.append((storage_cls, storage_original))
-    # r67 C3/C6: arm the capture-scoped storage-origin map and install the actual-read
-    # accessor wrappers over BOTH storage classes' public surfaces, table-driven from
-    # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``. Fail CLOSED: an install failure on a
-    # wrap-required row downgrades the capture to INCOMPLETE (a silent skip would be a
-    # silent storage-spelling witness gap). Feature-absent members on this torch are
-    # skipped (classified absent, not failed).
-    state.storage_origins = _StorageOriginRegistry(
-        weak_keys=_torch_compat.HAS_CACHED_UNTYPED_STORAGE_WRAPPER
-    )
     storage_member_restore: list[tuple[Any, str, bool, Any]] = []
-    for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
-        rows = STORAGE_METADATA_ACCESSOR_DISPOSITIONS.get(storage_cls.__name__, {})
-        for member, (disposition, _why) in sorted(rows.items()):
-            if disposition not in _STORAGE_WRAPPED_DISPOSITIONS or member == "data_ptr":
-                continue
-            descriptor = inspect.getattr_static(storage_cls, member, None)
-            if descriptor is None:
-                continue  # feature-absent on this torch build
-            shadowed = member in storage_cls.__dict__
-            class_attr = getattr(storage_cls, member, None)
-            if callable(class_attr):
-                replacement: Any = _make_storage_metadata_wrapper(
-                    class_attr, state, member, disposition
-                )
-                restore_value: Any = class_attr
-            elif hasattr(descriptor, "__get__"):
-                replacement = _make_storage_property_wrapper(descriptor, state, member, disposition)
-                restore_value = descriptor
-            else:
-                # W1_F3 (round7 B1 class): a wrap-REQUIRED row whose member EXISTS but is
-                # neither callable nor a descriptor cannot be wrapped, so its reads are
-                # unobservable -- exactly the docstring contract "can neither be wrapped nor
-                # its source recorded": fail closed, never a silent skip.
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-                continue
-            try:
-                setattr(storage_cls, member, replacement)
-            except (TypeError, AttributeError):
-                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-                continue
-            storage_member_restore.append((storage_cls, member, shadowed, restore_value))
     property_originals: dict[str, Any] = {}
-    for name in INVISIBLE_HOST_ESCAPE_PROPERTIES:
-        descriptor = inspect.getattr_static(torch.Tensor, name, None)
-        if descriptor is None or not hasattr(descriptor, "__get__"):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_invisible_escape_property(descriptor, state))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        property_originals[name] = descriptor
-    # Model-input METADATA-PREDICATE observers (r27-H2): ``is_contiguous`` / ``stride``
-    # methods and the ``requires_grad`` getset descriptor. Read-through recorders gated to
-    # MODEL-INPUT receivers only; a model that never reads input layout/grad records nothing.
     metadata_originals: dict[str, Any] = {}
-    stride_original = getattr(torch.Tensor, "stride", None)
-    for name in INPUT_METADATA_PREDICATE_FUNCS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None:
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(
-                torch.Tensor,
-                name,
-                _make_input_metadata_wrapper(original, state, name, stride_original),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        metadata_originals[name] = original
-    # Model-input BOOLEAN metadata METHODS beyond the layout trio (r31): ``is_conj`` /
-    # ``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced`` /
-    # ``_is_view``. Feature-detected (an accessor absent on the running torch is skipped) and
-    # gated to model-input receivers/aliases only; a model that never reads them records nothing.
     bool_method_originals: dict[str, Any] = {}
-    for name in INPUT_METADATA_BOOL_METHODS:
-        original = getattr(torch.Tensor, name, None)
-        if original is None or not callable(original):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        try:
-            setattr(torch.Tensor, name, _make_input_metadata_bool_method(original, state, name))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        bool_method_originals[name] = original
-    # ``requires_grad`` / ``grad_fn`` / ``is_leaf`` live as getset descriptors on the C BASE
-    # class (``torch._C.TensorBase``), not in ``torch.Tensor.__dict__``; patching installs a
-    # SHADOWING property on ``torch.Tensor`` itself, so restore must DELETE the shadow when the
-    # name was not originally in ``torch.Tensor.__dict__``.
     grad_property_restore: dict[str, tuple[bool, Any]] = {}
-    for prop_name in INPUT_METADATA_PROPERTY_NAMES:
-        prop_descriptor = inspect.getattr_static(torch.Tensor, prop_name, None)
-        if prop_descriptor is None or not hasattr(prop_descriptor, "__get__"):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        shadowed = prop_name in torch.Tensor.__dict__
-        try:
-            setattr(
-                torch.Tensor,
-                prop_name,
-                _make_input_metadata_grad_property(prop_descriptor, state, prop_name),
-            )
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        grad_property_restore[prop_name] = (shadowed, prop_descriptor)
-    # r43: arm the non-owner captured-tensor belt for the whole forward window. The non-owner
-    # observers gate on THIS flag, never the owner's ``pause_logging``-toggled ``_logging_enabled``.
-    # r45 hon2_1: ``_state._nonowner_belt_armed`` mirrors ``belt_armed`` (SAME lifetime) so the
-    # GLOBAL torch-function wrapper's non-owner fast path can short-circuit on one bool read and
-    # only invoke the captured-operand observer during an armed runnable capture.
-    state.belt_armed = True
-    _state._nonowner_belt_armed = True
-    # r47 hon2_1: install a PROCESS-WIDE class-level observer on every ``torch._ops`` class that
-    # defines its own ``__call__`` (the ``torch.ops.*`` aten / higher-order / TorchBind surface,
-    # which bypasses the global torch-FUNCTION wrapper and whose aten census is thread-local). This
-    # is armed-lifecycle-scoped: installed for EXACTLY this forward window and restored FIRST in the
-    # ``finally`` so global torch dispatch is pristine the instant the forward ends. Fail CLOSED: an
-    # empty scan or an install/restore failure downgrades the capture to INCOMPLETE via
-    # ``_HOST_ESCAPE_OBSERVER_FAILED`` -- never a silent "no non-owner op touch".
     torch_ops_call_restore: list[tuple[type, Any]] = []
-    _ops_call_classes = _torch_ops_call_classes()
-    if not _ops_call_classes:
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-    for _ops_cls in _ops_call_classes:
-        try:
-            _ops_original = _ops_cls.__dict__["__call__"]
-            setattr(_ops_cls, "__call__", _make_nonowner_ops_call(_ops_original))
-        except (TypeError, AttributeError, KeyError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        torch_ops_call_restore.append((_ops_cls, _ops_original))
-    # r49 hon2_1: extend the armed-lifecycle observer to the patchable private-C FREE-FUNCTION
-    # modules (``torch._C._{nn,special,fft,linalg,sparse,nested}``), structurally enumerated
-    # from the SAME curated forward-op module authority. These are a THIRD op surface: a
-    # private-C free function bypasses BOTH the global torch-FUNCTION wrapper AND the
-    # ``torch._ops.*`` class patch (it dispatches its inner aten op in C++), so a non-owner
-    # worker consuming a captured operand through ``torch._C._nn.gelu(gate)`` was unwitnessed
-    # -> false VERIFIED. Same fail-CLOSED posture: an empty scan or an install/restore failure
-    # downgrades the capture to INCOMPLETE via ``_HOST_ESCAPE_OBSERVER_FAILED``.
     private_c_call_restore: list[tuple[Any, str, Any]] = []
-    _private_c_callables = _private_c_module_callables()
-    if not _private_c_callables:
-        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-    for _pc_module, _pc_attr, _pc_original in _private_c_callables:
-        try:
-            setattr(_pc_module, _pc_attr, _make_nonowner_private_c_callable(_pc_original))
-        except (TypeError, AttributeError):
-            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-            continue
-        private_c_call_restore.append((_pc_module, _pc_attr, _pc_original))
-    try:
-        yield
-    finally:
+
+    def _restore_installed() -> None:
+        """Disarm the belt and restore every patch installed so far.
+
+        Shared by the install-failure unwind and the normal ``finally``:
+        each registry holds exactly the patches that actually landed, so a
+        partial install restores cleanly.
+        """
+
         state.belt_armed = False
         _state._nonowner_belt_armed = False
         # r47 hon2_1: restore the ``torch._ops`` class ``__call__`` patches FIRST and only when the
@@ -675,4 +448,258 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                     delattr(torch.Tensor, name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+
+    # R07 (the L4 unwind standard, generalized): Python never calls ``__exit__``
+    # when ``__enter__`` raises, so an exception escaping the install phase used
+    # to strand every patch installed so far -- ~124 process-global torch
+    # surfaces including ``torch._ops.*.__call__`` and the whole storage
+    # accessor surface -- permanently AND monotonically (the next armed capture
+    # read the leaked wrapper as its "original" and re-installed over it).
+    try:
+        for name in INVISIBLE_HOST_ESCAPE_FUNCS | STORAGE_BRIDGE_ESCAPE_FUNCS:
+            original = getattr(torch.Tensor, name, None)
+            if original is None:
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(torch.Tensor, name, _make_invisible_escape_wrapper(original, state, name))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            originals[name] = original
+        # r39 hon2_1: mode-independent belt for the aten census -- the scalar numeric protocol
+        # (``item``/``__bool__``/``__int__``/``__float__``/``__index__``/``__complex__``) and the
+        # pure predicates (``equal``/``allclose``/``is_nonzero``). These fire regardless of
+        # dispatch-mode state, so a scalar/predicate escape inside torch's own
+        # ``_disable_current_modes()`` (tensor string formatting; explicit guards) still hits a
+        # Python observer. Several names are getset/slot members of the C ``TensorBase`` and NOT in
+        # ``torch.Tensor.__dict__``; setting them installs a SHADOW that restore must DELETE (never
+        # set back to the base slot). A required-observer install failure fails the capture closed.
+        for name in HOST_VALUE_ESCAPE_METHODS:
+            original = getattr(torch.Tensor, name, None)
+            if original is None or not callable(original):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            shadowed = name in torch.Tensor.__dict__
+            try:
+                setattr(torch.Tensor, name, _make_host_value_escape_method(original, state, name))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            host_value_method_restore[name] = (shadowed, original)
+        # Module-level zero-copy export C bindings that bypass the Tensor method patch:
+        # ``torch.utils.dlpack.to_dlpack`` == ``torch._C._to_dlpack`` never calls
+        # ``Tensor.__dlpack__``. Patch the Python-level function (and ``torch._C._to_dlpack`` if the
+        # C module permits assignment) to record the exported tensor as an escape source.
+        for module, func_name in _MODULE_ESCAPE_TARGETS():
+            original_func = getattr(module, func_name, None)
+            if original_func is None:
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(module, func_name, _make_module_escape_wrapper(original_func, state))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            module_originals.append((module, func_name, original_func))
+        # r39 hon2_1: the ``torch.*`` MODULE predicate spellings (``torch.equal`` / ``torch.allclose``
+        # / ``torch.is_nonzero``) return a raw Python bool DIRECTLY from the dispatcher and, under an
+        # explicit ``_disable_current_modes()`` region, bypass the census (E6). Record every tensor
+        # operand -- the same shared source table as the Tensor-method belt.
+        for predicate_name in HOST_VALUE_ESCAPE_MODULE_FUNCS:
+            original_predicate = torch_attr(
+                predicate_name
+            )  # r47 secD_1: no lazy ``torch.__getattr__``
+            if original_predicate is None or not callable(original_predicate):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(
+                    torch,
+                    predicate_name,
+                    _make_host_value_predicate_module_wrapper(original_predicate, state),
+                )
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            module_originals.append((torch, predicate_name, original_predicate))
+        # Storage-handle raw-pointer accessors (r16-C1): ``UntypedStorage.data_ptr`` /
+        # ``TypedStorage.data_ptr`` reach the SAME raw pointer as ``Tensor.data_ptr`` but off the
+        # storage object, so the Tensor patch never sees them. Fail closed on a genuine user call.
+        # W1_F3 (round7 B1 class): an EMPTY storage-class scan is version-drift uncertainty, not
+        # proof of absence -- the Tensor storage-bridge methods could still hand out handles of a
+        # class this scan failed to enumerate, leaving every storage accessor unobserved. Same
+        # fail-closed posture as the ``_torch_ops_call_classes`` / ``_private_c_module_callables``
+        # empty scans below.
+        if not _STORAGE_RAW_POINTER_TARGETS():
+            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+        for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
+            storage_original = storage_cls.data_ptr
+            try:
+                setattr(
+                    storage_cls,
+                    "data_ptr",
+                    _make_storage_raw_pointer_wrapper(storage_original, state),
+                )
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            storage_originals.append((storage_cls, storage_original))
+        # r67 C3/C6: arm the capture-scoped storage-origin map and install the actual-read
+        # accessor wrappers over BOTH storage classes' public surfaces, table-driven from
+        # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``. Fail CLOSED: an install failure on a
+        # wrap-required row downgrades the capture to INCOMPLETE (a silent skip would be a
+        # silent storage-spelling witness gap). Feature-absent members on this torch are
+        # skipped (classified absent, not failed).
+        state.storage_origins = _StorageOriginRegistry(
+            weak_keys=_torch_compat.HAS_CACHED_UNTYPED_STORAGE_WRAPPER
+        )
+        for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
+            rows = STORAGE_METADATA_ACCESSOR_DISPOSITIONS.get(storage_cls.__name__, {})
+            for member, (disposition, _why) in sorted(rows.items()):
+                if disposition not in _STORAGE_WRAPPED_DISPOSITIONS or member == "data_ptr":
+                    continue
+                descriptor = inspect.getattr_static(storage_cls, member, None)
+                if descriptor is None:
+                    continue  # feature-absent on this torch build
+                shadowed = member in storage_cls.__dict__
+                class_attr = getattr(storage_cls, member, None)
+                if callable(class_attr):
+                    replacement: Any = _make_storage_metadata_wrapper(
+                        class_attr, state, member, disposition
+                    )
+                    restore_value: Any = class_attr
+                elif hasattr(descriptor, "__get__"):
+                    replacement = _make_storage_property_wrapper(
+                        descriptor, state, member, disposition
+                    )
+                    restore_value = descriptor
+                else:
+                    # W1_F3 (round7 B1 class): a wrap-REQUIRED row whose member EXISTS but is
+                    # neither callable nor a descriptor cannot be wrapped, so its reads are
+                    # unobservable -- exactly the docstring contract "can neither be wrapped nor
+                    # its source recorded": fail closed, never a silent skip.
+                    _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                    continue
+                try:
+                    setattr(storage_cls, member, replacement)
+                except (TypeError, AttributeError):
+                    _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                    continue
+                storage_member_restore.append((storage_cls, member, shadowed, restore_value))
+        for name in INVISIBLE_HOST_ESCAPE_PROPERTIES:
+            descriptor = inspect.getattr_static(torch.Tensor, name, None)
+            if descriptor is None or not hasattr(descriptor, "__get__"):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(torch.Tensor, name, _make_invisible_escape_property(descriptor, state))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            property_originals[name] = descriptor
+        # Model-input METADATA-PREDICATE observers (r27-H2): ``is_contiguous`` / ``stride``
+        # methods and the ``requires_grad`` getset descriptor. Read-through recorders gated to
+        # MODEL-INPUT receivers only; a model that never reads input layout/grad records nothing.
+        stride_original = getattr(torch.Tensor, "stride", None)
+        for name in INPUT_METADATA_PREDICATE_FUNCS:
+            original = getattr(torch.Tensor, name, None)
+            if original is None:
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(
+                    torch.Tensor,
+                    name,
+                    _make_input_metadata_wrapper(original, state, name, stride_original),
+                )
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            metadata_originals[name] = original
+        # Model-input BOOLEAN metadata METHODS beyond the layout trio (r31): ``is_conj`` /
+        # ``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced`` /
+        # ``_is_view``. Feature-detected (an accessor absent on the running torch is skipped) and
+        # gated to model-input receivers/aliases only; a model that never reads them records nothing.
+        for name in INPUT_METADATA_BOOL_METHODS:
+            original = getattr(torch.Tensor, name, None)
+            if original is None or not callable(original):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            try:
+                setattr(torch.Tensor, name, _make_input_metadata_bool_method(original, state, name))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            bool_method_originals[name] = original
+        # ``requires_grad`` / ``grad_fn`` / ``is_leaf`` live as getset descriptors on the C BASE
+        # class (``torch._C.TensorBase``), not in ``torch.Tensor.__dict__``; patching installs a
+        # SHADOWING property on ``torch.Tensor`` itself, so restore must DELETE the shadow when the
+        # name was not originally in ``torch.Tensor.__dict__``.
+        for prop_name in INPUT_METADATA_PROPERTY_NAMES:
+            prop_descriptor = inspect.getattr_static(torch.Tensor, prop_name, None)
+            if prop_descriptor is None or not hasattr(prop_descriptor, "__get__"):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            shadowed = prop_name in torch.Tensor.__dict__
+            try:
+                setattr(
+                    torch.Tensor,
+                    prop_name,
+                    _make_input_metadata_grad_property(prop_descriptor, state, prop_name),
+                )
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            grad_property_restore[prop_name] = (shadowed, prop_descriptor)
+        # r43: arm the non-owner captured-tensor belt for the whole forward window. The non-owner
+        # observers gate on THIS flag, never the owner's ``pause_logging``-toggled ``_logging_enabled``.
+        # r45 hon2_1: ``_state._nonowner_belt_armed`` mirrors ``belt_armed`` (SAME lifetime) so the
+        # GLOBAL torch-function wrapper's non-owner fast path can short-circuit on one bool read and
+        # only invoke the captured-operand observer during an armed runnable capture.
+        state.belt_armed = True
+        _state._nonowner_belt_armed = True
+        # r47 hon2_1: install a PROCESS-WIDE class-level observer on every ``torch._ops`` class that
+        # defines its own ``__call__`` (the ``torch.ops.*`` aten / higher-order / TorchBind surface,
+        # which bypasses the global torch-FUNCTION wrapper and whose aten census is thread-local). This
+        # is armed-lifecycle-scoped: installed for EXACTLY this forward window and restored FIRST in the
+        # ``finally`` so global torch dispatch is pristine the instant the forward ends. Fail CLOSED: an
+        # empty scan or an install/restore failure downgrades the capture to INCOMPLETE via
+        # ``_HOST_ESCAPE_OBSERVER_FAILED`` -- never a silent "no non-owner op touch".
+        _ops_call_classes = _torch_ops_call_classes()
+        if not _ops_call_classes:
+            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+        for _ops_cls in _ops_call_classes:
+            try:
+                _ops_original = _ops_cls.__dict__["__call__"]
+                setattr(_ops_cls, "__call__", _make_nonowner_ops_call(_ops_original))
+            except (TypeError, AttributeError, KeyError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            torch_ops_call_restore.append((_ops_cls, _ops_original))
+        # r49 hon2_1: extend the armed-lifecycle observer to the patchable private-C FREE-FUNCTION
+        # modules (``torch._C._{nn,special,fft,linalg,sparse,nested}``), structurally enumerated
+        # from the SAME curated forward-op module authority. These are a THIRD op surface: a
+        # private-C free function bypasses BOTH the global torch-FUNCTION wrapper AND the
+        # ``torch._ops.*`` class patch (it dispatches its inner aten op in C++), so a non-owner
+        # worker consuming a captured operand through ``torch._C._nn.gelu(gate)`` was unwitnessed
+        # -> false VERIFIED. Same fail-CLOSED posture: an empty scan or an install/restore failure
+        # downgrades the capture to INCOMPLETE via ``_HOST_ESCAPE_OBSERVER_FAILED``.
+        _private_c_callables = _private_c_module_callables()
+        if not _private_c_callables:
+            _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+        for _pc_module, _pc_attr, _pc_original in _private_c_callables:
+            try:
+                setattr(_pc_module, _pc_attr, _make_nonowner_private_c_callable(_pc_original))
+            except (TypeError, AttributeError):
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
+                continue
+            private_c_call_restore.append((_pc_module, _pc_attr, _pc_original))
+    except BaseException:
+        _restore_installed()
+        raise
+    try:
+        yield
+    finally:
+        _restore_installed()
         _check_writeback_watch(state)

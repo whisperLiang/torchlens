@@ -260,6 +260,8 @@ def test_nested_private_helper_absence_marks_capability(
     ("helper_name", "flag_name", "expected"),
     [
         ("get_jit_builtin_table", "HAS_JIT_BUILTIN_TABLE", None),
+        ("get_jit_boolean_dispatch_table", "HAS_JIT_BOOLEAN_DISPATCH_TABLE", None),
+        ("get_jit_overload_resolver_module", "HAS_JIT_OVERLOAD_RESOLVER", None),
         ("get_device_context_type", "HAS_DEVICE_CONTEXT_DISPATCH", None),
         ("get_current_function_mode_stack", "HAS_DEVICE_CONTEXT_DISPATCH", None),
         ("get_torch_function_mode_stack_length", "HAS_DEVICE_CONTEXT_DISPATCH", None),
@@ -314,6 +316,8 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_FUNCTORCH_LEVEL_API",
         "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
         "HAS_JIT_BUILTIN_TABLE",
+        "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
+        "HAS_JIT_OVERLOAD_RESOLVER",
         "HAS_DEVICE_CONTEXT_DISPATCH",
         "HAS_DEVICE_CONSTRUCTORS",
         "HAS_ACCUMULATE_GRAD_CLASS",
@@ -359,6 +363,12 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_FUNCTORCH_LEVEL_API": _HAS_FUNCTORCH_LEVEL_API,
         "HAS_FUNCTORCH_WRAPPED_TENSOR_API": True,
         "HAS_JIT_BUILTIN_TABLE": True,
+        # fix-capture-r3 R56: TorchScript compatibility while wrapped needs the
+        # boolean-dispatch table (F.max_pool* family) and the overload resolver
+        # (F.interpolate family). Present across the supported range --
+        # hardcoded True as tripwires.
+        "HAS_JIT_BOOLEAN_DISPATCH_TABLE": True,
+        "HAS_JIT_OVERLOAD_RESOLVER": True,
         "HAS_DEVICE_CONTEXT_DISPATCH": True,
         "HAS_DEVICE_CONSTRUCTORS": True,
         "HAS_ACCUMULATE_GRAD_CLASS": True,
