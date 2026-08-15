@@ -102,7 +102,11 @@ log = tl.trace(model, x)
 missing = log.modules["attn"].facets["q"].grad
 print(missing.reason)
 
-log = tl.trace(model, x, backward_ready=True, save_grads=True)
+log = tl.trace(
+    model,
+    x,
+    capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+)
 log.log_backward(log[log.output_layers[0]].out.sum())
 q_grad = log.modules["attn"].facets["q"].grad
 ```
@@ -197,7 +201,11 @@ Use `tl.facet(name)` for a named facet and `tl.head(index, name)` or
 # Facet recipes often need internal child activations, so this example
 # intentionally saves all payloads. For ordinary selective capture, prefer
 # save=tl.func(...) or save=tl.in_module(...).
-log = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
+log = tl.trace(
+    model,
+    x,
+    capture=tl.options.CaptureOptions(layers_to_save="all", save_arg_values=True),
+)
 edited = log.fork("ablated")
 edited.attach_hooks(tl.head(3, "q"), tl.zero_ablate())
 edited.rerun(model, x)
@@ -403,9 +411,7 @@ are:
 op_structural
 parameter
 module_input
-module_output
 computed_read_only
-missing
 ```
 
 Only `op_structural` built-in facets may claim facet-gradient capability in P1.

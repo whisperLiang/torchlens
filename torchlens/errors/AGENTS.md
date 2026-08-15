@@ -19,7 +19,9 @@ error vocabulary and release threshold live in
   the correct base-category class AND the matching builtin (`ValueError` /
   `RuntimeError` / `AssertionError`) — preserve both bases when adding one.
 - `__init__.py` — the public re-export surface (`__all__`) plus
-  `_LAZY_EXCEPTION_PATHS` legacy path aliases resolved through `importlib`.
+  `_LAZY_EXCEPTION_PATHS` path aliases resolved through `importlib` — NOT
+  legacy-only: the table also carries current cycle-breaking entries, so do
+  not prune it as dead compat.
 
 ## Gotchas
 

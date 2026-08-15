@@ -2,9 +2,11 @@
 
 This page is a compact map for agents writing or reviewing TorchLens code. Prefer the current
 v2 spelling: `tl.trace(..., backend=None)`, predicate `save=...`, `intervene=...`,
-`storage=...`, and `save_grads=...`.
+`storage=...`, and grouped `capture=tl.options.CaptureOptions(save_grads=...)` (the flat
+`save_grads=` kwarg is a deprecated alias that warns).
 
-Backend note: `backend=None` preserves torch eager default plus MLX module auto-routing.
+Backend note: `backend=None` preserves the torch eager default, and EVERY preview backend
+auto-routes genuine framework models (MLX, JAX, tinygrad, Paddle, TensorFlow).
 `tl.record()`/fastlog and true backward capture are torch-only in backend v1. Backend-neutral
 metadata lives on `Trace.backend`, `Trace.module_identity_mode`, `Trace.param_source`,
 `Trace.derived_grads`, `Trace.intermediate_derived_grads`, `Trace.payload_load_status`,
@@ -39,8 +41,11 @@ TensorFlow uses `backend="tf"` / `backend="tensorflow"` for the Keras-3 / TF>=2.
 `keras.backend.backend() == "tensorflow"`. Eager `op_callbacks` capture is the primary shipped
 mechanism and records real values, real taken-branch control flow, op-level records, and
 Keras/`tf.Module` module stacks. Graph-only FuncGraph fallback is the static-mode design for
-compiled/SavedModel-style entries; interventions, true backward capture, and T1/intermediate
-derived gradients are deferred.
+compiled/SavedModel-style entries. SHIPPED for eager entries: static-label `intervene=`
+(two-level writable layer, fail-closed site reachability) and leaf + exact T1 intermediate
+derived gradients via `tl.backends.tf.GradOptions`. Still deferred: `halt=`/`recipes=`, true
+backward capture, and value-dependent predicates (graph-only captures also refuse
+`grad_options` typed).
 JAX `array_payloads` saves round-trip typed PRNG keys and fully addressable single-host sharded
 arrays by value. `jax_named_sharding` metadata is a reconstructible JSON-primitive contract,
 but default load stays value-only; explicit re-sharding goes through `PayloadLoadHints` /
@@ -56,12 +61,12 @@ table is a selection, not the full list — read `torchlens.__all__` for that):
 
 | Job | Names |
 | --- | --- |
-| Capture and sparse recording | `trace`, `fastlog`, `record_span`, `tap` |
+| Capture and sparse recording | `trace`, `fastlog`, `span`, `tap` (`record_span` is a deprecated alias that warns) |
 | Persistence and bundles | `load`, `save`, `bundle`, `Bundle`; schema-v2 manifests add `backend`, `backend_runtime`, and `payload_policy` |
-| Replay and edits | `do`, `replay`, `replay_from`, `rerun` |
+| Replay and edits | `do`, `push`, `push_from`, `run` (`replay`/`replay_from`/`rerun` are deprecated aliases that warn) |
 | Data objects | `Trace`, `Layer`, `Op`, `Quantity`, `Bytes`, `Duration`, `Flops`, `Macs` |
 | Site discovery | `label`, `func`, `func_transform`, `module`, `contains`, `where`, `in_module`, `head`, `output`, `grad_fn`, `facet` |
-| Predicate composition | `followed_by`, `preceded_by`, `intervening`, `when` |
+| Predicate composition | `followed_by`, `preceded_by`, `without_op`, `when` (`intervening` is a deprecated alias that warns) |
 | Activation helpers | `zero_ablate`, `mean_ablate`, `resample_ablate`, `replace_with`, `swap_with`, `steer`, `scale`, `clamp`, `noise`, `project_onto`, `project_off`, `splice_module` |
 | Backward helpers | `bwd_hook`, `grad_zero`, `grad_scale`, `grad_clamp`, `grad_noise`, `grad_clip` |
 | Extraction and validation | `pluck`, `extract`, `extract_dataset`, `validate` (`peek` and `batched_extract` are deprecated aliases that warn) |

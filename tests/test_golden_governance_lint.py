@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import functools
+import re
 from pathlib import Path
 
 import pytest
@@ -557,6 +558,179 @@ def test_env_governed_ledger_dirs_carry_env_markers() -> None:
         "missing env-governed family markers (deleting one silently moves the "
         f"family off-canonical — b10 R78-5): {missing}"
     )
+
+
+#: Emitter-package usage per env-keyed family (b10 R78-2 round 5): the
+#: packages each family passes to ``resolve_env_golden`` / the update path.
+#: The marker DECLARATIONS in ``_ENV_GOVERNED_REQUIRED_MARKERS`` and the
+#: fingerprint EXTENSIONS the code actually keys on were previously untied:
+#: adding one emitter to a family (or dropping a marker row) silently moved
+#: the family off-canonical — CI skip, marker test still green. Each row is
+#: (family test file, goldens dir as declared in the marker table, packages).
+_EMITTER_PACKAGE_CENSUS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("test_viz_render_identity_oracle.py", "golden", ("graphviz", "pydot")),
+    ("test_rank_render_ir_semantic_goldens.py", "golden", ("graphviz", "pydot")),
+    ("godobject_oracle/test_viz_identity.py", "godobject_oracle/goldens", ("graphviz",)),
+    ("godobject_oracle/test_legacy_artifact.py", "godobject_oracle/goldens", ()),
+    ("test_state_keyset_contract.py", "godobject_oracle/goldens", ()),
+    ("surface_oracle/test_surface_oracle.py", "surface_oracle/goldens", ()),
+)
+
+_EMITTER_TUPLE_RE = re.compile(r"^_EMITTER_PACKAGES\s*=\s*\(([^)]*)\)", re.MULTILINE)
+
+
+def _declared_emitter_packages(source: str) -> tuple[str, ...]:
+    """Parse a family file's ``_EMITTER_PACKAGES`` literal ("" if absent)."""
+
+    match = _EMITTER_TUPLE_RE.search(source)
+    if match is None:
+        return ()
+    return tuple(part.strip().strip("'\"") for part in match.group(1).split(",") if part.strip())
+
+
+@pytest.mark.smoke
+def test_emitter_packages_match_declared_env_markers() -> None:
+    """Family emitter tuples and the marker table agree, both directions."""
+
+    sources = dict(_test_texts())
+    per_dir: dict[str, set[str]] = {}
+    for relpath, directory, packages in _EMITTER_PACKAGE_CENSUS:
+        source = sources.get(relpath)
+        assert source is not None, f"emitter census row for missing file {relpath}"
+        declared = _declared_emitter_packages(source)
+        assert declared == packages, (
+            f"{relpath} passes emitter packages {declared} but the census says "
+            f"{packages} — update _EMITTER_PACKAGE_CENSUS AND the family's "
+            "ENV-<pkg> markers together (b10 R78-2)"
+        )
+        per_dir.setdefault(directory, set()).update(packages)
+    for directory, packages in per_dir.items():
+        markers = _ENV_GOVERNED_REQUIRED_MARKERS.get(directory)
+        assert markers is not None, f"emitter census names undeclared dir {directory}"
+        marker_packages = {m.removeprefix("ENV-") for m in markers if m != "ENV"}
+        assert marker_packages == packages, (
+            f"{directory}: declared markers key on {sorted(marker_packages)} but "
+            f"the code keys on {sorted(packages)} — a mismatch moves the family "
+            "off-canonical with the marker test still green (b10 R78-2)"
+        )
+
+
+#: Golden GENERATION mode per update/regen flag (b10 R78-1 round 5, the
+#: wrap-state guard census). "subprocess" families construct and capture in a
+#: fresh ``_worker.py`` interpreter, so their bytes are pre-wrap by
+#: construction; "in-process" families MUST call
+#: ``guard_wrap_state_for_golden_update`` before generating, else a
+#: mid-session regeneration freezes wrap-state-dependent bytes (SF-53).
+#: ``test_module_containment_equality.py`` shipped without the guard while
+#: every sibling carried it — this census makes the omission structural.
+_GENERATION_WRAP_GUARD_CENSUS: dict[str, tuple[str, str]] = {
+    "TORCHLENS_REGEN_EXPORT_GOLDENS": ("test_exports.py", "in-process"),
+    "TORCHLENS_UPDATE_BACKEND_PARITY": (
+        "backend_parity/test_torch_parity_gates.py",
+        "in-process",
+    ),
+    "TORCHLENS_UPDATE_CAPTURE_ORACLE": (
+        "capture_oracle/test_capture_oracle.py",
+        "subprocess",
+    ),
+    "TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE": (
+        "godobject_oracle/test_viz_identity.py",
+        "subprocess",
+    ),
+    "TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE": (
+        "godobject_oracle/test_legacy_artifact.py",
+        "in-process",
+    ),
+    "TORCHLENS_UPDATE_MODULE_CONTAINMENT": (
+        "test_module_containment_equality.py",
+        "in-process",
+    ),
+    "TORCHLENS_UPDATE_RANK_RENDER_IR": (
+        "test_rank_render_ir_semantic_goldens.py",
+        "in-process",
+    ),
+    "TORCHLENS_UPDATE_SELECTOR_MATRIX": ("test_selector_semantics_matrix.py", "in-process"),
+    "TORCHLENS_UPDATE_STATE_KEYSET_ORACLE": ("test_state_keyset_contract.py", "in-process"),
+    "TORCHLENS_UPDATE_SURFACE_ORACLE": ("surface_oracle/test_surface_oracle.py", "subprocess"),
+    "TORCHLENS_UPDATE_VIZ_RENDER_ORACLE": ("test_viz_render_identity_oracle.py", "in-process"),
+}
+
+#: Flag-shaped literals used only as planted fixtures by governance/guard
+#: red-capability tests — never a real golden family. Additions here need the
+#: same scrutiny as a census row: a REAL family hidden in this set would
+#: escape the wrap-guard census entirely.
+_PROBE_ONLY_FLAGS = frozenset(
+    {
+        "TORCHLENS_UPDATE_A",
+        "TORCHLENS_UPDATE_B",
+        "TORCHLENS_UPDATE_X",
+        "TORCHLENS_UPDATE_WRAP_GUARD_PROBE_GREEN",
+        "TORCHLENS_UPDATE_WRAP_GUARD_PROBE_RED",
+    }
+)
+
+_FLAG_LITERAL_RE = re.compile(r"TORCHLENS_(?:UPDATE|REGEN)_[A-Z0-9_]+")
+
+
+def _wrap_guard_census_violations(
+    census: dict[str, tuple[str, str]], sources: dict[str, str]
+) -> list[str]:
+    """Return census violations given ``{relpath: source}`` family sources."""
+
+    violations: list[str] = []
+    for flag, (relpath, mode) in sorted(census.items()):
+        source = sources.get(relpath)
+        if source is None:
+            violations.append(f"{flag}: censused file {relpath} does not exist")
+            continue
+        if mode == "in-process":
+            if "guard_wrap_state_for_golden_update(" not in source:
+                violations.append(
+                    f"{flag}: {relpath} generates goldens in-process but never "
+                    "calls guard_wrap_state_for_golden_update (SF-53)"
+                )
+        elif mode == "subprocess":
+            if "_worker" not in source:
+                violations.append(
+                    f"{flag}: {relpath} is censused subprocess-isolated but no "
+                    "longer references a _worker module"
+                )
+        else:  # pragma: no cover - census typo guard
+            violations.append(f"{flag}: unknown generation mode {mode!r}")
+    return violations
+
+
+@pytest.mark.smoke
+def test_golden_generators_carry_wrap_state_guard() -> None:
+    """Every golden generator family is censused; in-process ones call the guard."""
+
+    sources = dict(_test_texts())
+    discovered: set[str] = set()
+    for _relpath, source in sources.items():
+        discovered.update(_FLAG_LITERAL_RE.findall(source))
+    unclassified = sorted(discovered - set(_GENERATION_WRAP_GUARD_CENSUS) - _PROBE_ONLY_FLAGS)
+    assert not unclassified, (
+        "update/regen flags with no _GENERATION_WRAP_GUARD_CENSUS row — declare "
+        "each new golden family's generation mode (in-process families must call "
+        f"guard_wrap_state_for_golden_update): {unclassified}"
+    )
+    violations = _wrap_guard_census_violations(_GENERATION_WRAP_GUARD_CENSUS, sources)
+    assert not violations, "\n".join(violations)
+
+
+@pytest.mark.smoke
+def test_wrap_guard_census_is_red_capable() -> None:
+    """The census check fails on an in-process generator lacking the guard."""
+
+    census = {"TORCHLENS_UPDATE_X": ("planted.py", "in-process")}
+    unguarded = {"planted.py": "def regen():\n    write_golden()\n"}
+    assert _wrap_guard_census_violations(census, unguarded)
+    guarded = {"planted.py": "guard_wrap_state_for_golden_update(_UPDATE_ENV)\n"}
+    assert not _wrap_guard_census_violations(census, guarded)
+    missing_worker = {
+        "TORCHLENS_UPDATE_X": ("planted.py", "subprocess"),
+    }
+    assert _wrap_guard_census_violations(missing_worker, unguarded)
 
 
 # ---------------------------------------------------------------------------

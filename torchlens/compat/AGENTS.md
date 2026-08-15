@@ -5,6 +5,10 @@ agent to run — keep this package cheap to import and side-effect free.
 
 ## Files
 
+- `__init__.py` — the package's stated PRIMARY purpose: the six migration
+  facades `from_huggingface`, `from_timm`, `from_torchextractor`, `from_fx`,
+  `from_ilg`, and `from_sentence_transformers` (all in `__all__`), plus the
+  lazy `_COMPAT_MODULES` routing.
 - `_report.py` — `CompatRow` / `CompatReport` dataclasses and `report(model, input)`:
   the runtime support report (wrapper coverage, capability flags, distributed findings
   such as the `dtensor` / `device_mesh` / `tensor_parallel` / `pipeline_parallel` rows).

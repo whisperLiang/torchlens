@@ -225,10 +225,18 @@ def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
     -------
     tuple[str, float] | None
         ``(tier_name, base_budget_seconds)``, or ``None`` for exempt tiers
-        (``slow`` unbounded, ``rare`` request-only, ``serial`` load-exempt).
+        (``slow`` unbounded, ``rare`` request-only).
+
+    ``serial`` is deliberately NOT exempt (b2 R41 round 5): it means
+    "load-sensitive, run away from parallel worker load", never "unbudgeted"
+    — the former blanket exemption let any unmarked test dodge the 5s
+    partition boundary by adding one ``@pytest.mark.serial``, with the
+    marker's isolation claim enforced by nothing. A serial item resolves its
+    heavy/smoke/unmarked budget normally; the load-factor scaling can only
+    help it.
     """
 
-    for exempt in ("slow", "rare", "serial"):
+    for exempt in ("slow", "rare"):
         if item.get_closest_marker(exempt) is not None:
             return None
     if item.get_closest_marker("heavy") is not None:
@@ -374,8 +382,14 @@ def _is_full_usage_stats_run(config: pytest.Config) -> bool:
     # broad subset is sound (a smaller run can only check less, never lie).
     # Arm it on the nightly fast tier too: with only {"", "not rare"} accepted
     # no CI invocation ever collected stats and the gate skipped in 100% of CI
-    # runs (b10 R79 / opus-R79-1).
-    if mark_expression not in {"", "not rare", "not slow and not rare"}:
+    # runs (b10 R79 / opus-R79-1). Clause-set comparison, not literal strings
+    # (b2 R41/B2R5-15): the docs teach `-m "not rare and not slow"` and the
+    # former string set accepted only the other word order, so both DOCUMENTED
+    # backstop spellings silently disarmed the gate.
+    clauses = frozenset(
+        clause.strip() for clause in mark_expression.split(" and ") if clause.strip()
+    )
+    if not clauses <= {"not rare", "not slow", "not heavy"}:
         return False
     requested_paths = [Path(str(arg).split("::", maxsplit=1)[0]).resolve() for arg in config.args]
     return requested_paths == [Path(TESTS_DIR).resolve()]

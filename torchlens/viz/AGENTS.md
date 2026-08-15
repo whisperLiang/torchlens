@@ -51,8 +51,10 @@ Exposed as `tl.viz` through the lazy attribute map in `torchlens/__init__.py`
 ## Local Invariants / Gotchas
 - `node_plots.py`, `feature_maps.py`, and `batch_summary.py` are PIL-only by
   design; do not add matplotlib imports there. Matplotlib is reached only
-  through `causal_trace_heatmap()` and `show_tensor()`, and must fail with a
-  clear `ImportError`.
+  through `causal_trace_heatmap()` (clear `ImportError` without matplotlib)
+  and `show_tensor()` — which by DESIGN returns a text message when
+  matplotlib is absent so `Layer.show`/`Op.show` keep working on
+  matplotlib-less installs; do not "fix" it to raise.
 - Hidden-content honesty is load-bearing: capped grids/scatters must keep their
   `+K more` / more-indicator markers so a partial render never reads as
   complete.

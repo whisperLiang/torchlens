@@ -2,10 +2,16 @@
 
 ## Files in This Directory
 
+KEY files only, NOT exhaustive (the package holds ~48 top-level modules; notable
+omissions include `runnable.py` — home of the 7 frozen runnable enums cited
+below — `captured_run.py`, `hash.py`, `facets.py`, `_capture_fingerprint.py`,
+and the 16-file `_runnable_*` execution seam). `ls torchlens/*.py` is the
+authority.
+
 | File | Purpose |
 |------|---------|
 | `__init__.py` | Public API exports, moved-name deprecation shims, `peek`, `extract`, `batched_extract`, validation aliases |
-| `_state.py` | Global toggle, active log, decoration maps, prepared model registry; must not import torchlens modules |
+| `_state.py` | Global toggle, active log, decoration maps, prepared model registry; no torchlens imports except the sanctioned `errors._base` leaf |
 | `_trace_state.py` | Runtime state enum surfaced through `torchlens.io` |
 | `_errors.py`, `_robustness.py`, `_training_validation.py` | Legacy/public error and compatibility helpers |
 | `_literals.py` | Shared literal types for options and modes |
@@ -135,7 +141,9 @@ from `tl.viz.render_*` primitives and are provisional until review-day signoff.
 
 `record(keep_op=...)` and `record(keep_module=...)` are removed and raise `TypeError`.
 `record(save=...)` is the only selective-capture spelling. `layers_to_save=[...]` still exists
-as the final-label two-pass path; an
+as the deprecated flat alias for final-label selection; it is NOT two-pass-only —
+`_trace_selector_helpers.py` builds a live single-pass predicate whenever early labels
+suffice, falling back to two-pass resolution otherwise. An
 unqualified recurrent layer label saves all passes, while `"label:2"` saves only pass 2.
 
 Current 2.x backend surface: torch eager is the stable default; MLX, JAX, tinygrad, Paddle, and
@@ -158,7 +166,8 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
 `to_pandas()`/summary surface that should expose it.
 
 ## Critical Invariants
-1. `_state.py` has no outgoing torchlens imports.
+1. `_state.py` has no outgoing torchlens imports except the sanctioned `errors._base`
+   typing-only leaf (cycle-safe by construction; documented in `_state.py`).
 2. `_ensure_model_prepared()` is the lazy wrapping chokepoint; do not reintroduce import-time
    torch namespace mutation.
 3. RNG state capture/restore must happen before `active_logging()`.

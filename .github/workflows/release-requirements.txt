@@ -1,16 +1,22 @@
 # Hash-locked dependency set for the release job (r4 b2-sol R61).
 # The semantic-release stack runs with the repo-write App token, so every
 # package it imports must be exact-pinned AND hash-verified -- an unpinned
-# transitive is arbitrary code with push access.
+# transitive is arbitrary code with push access. `build` is locked here too
+# (grind r5, P9/R61): build_command formerly ran its own unhashed
+# `pip install build==` INSIDE the token scope, escaping this lock.
 # Regenerate (and re-review the diff) with:
 #   uv pip compile --generate-hashes --python-version 3.11 \
 #     --python-platform x86_64-unknown-linux-gnu \
-#     <(echo 'python-semantic-release==9.21.1') \
+#     <(echo 'python-semantic-release==9.21.1'; echo 'build==1.5.0') \
 #     -o .github/workflows/release-requirements.txt
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
     # via pydantic
+build==1.5.0 \
+    --hash=sha256:13f3eecb844759ab66efec90ca17639bbf14dc06cb2fdf37a9010322d9c50a6f \
+    --hash=sha256:302c22c3ba2a0fd5f3911918651341ebb3896176cbdec15bd421f80b1afc7647
+    # via the locked top-level set
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
@@ -326,6 +332,10 @@ mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
     # via markdown-it-py
+packaging==26.3 \
+    --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+    # via build
 pydantic==2.13.4 \
     --hash=sha256:45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba \
     --hash=sha256:c40756b57adaa8b1efeeced5c196f3f3b7c435f90e84ea7f443901bec8099ef6
@@ -456,6 +466,10 @@ pygments==2.20.0 \
     --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
     --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
     # via rich
+pyproject-hooks==1.2.0 \
+    --hash=sha256:1e859bd5c40fae9448642dd871adf459e5e2084186e8d2c2a79a824c970da1f8 \
+    --hash=sha256:9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913
+    # via build
 python-gitlab==5.6.0 \
     --hash=sha256:68980cd70929fc7f8f06d8a7b09bd046a6b79e1995c19d61249f046005099100 \
     --hash=sha256:bc531e8ba3e5641b60409445d4919ace68a2c18cb0ec6d48fbced6616b954166
@@ -463,7 +477,7 @@ python-gitlab==5.6.0 \
 python-semantic-release==9.21.1 \
     --hash=sha256:b5c509a573899e88e8f29504d2f83e9ddab9a66af861ec1baf39f2b86bbf3517 \
     --hash=sha256:e69afe5100106390eec9e800132c947ed774bdcf9aa8f0df29589ea9ef375a21
-    # via -r /tmp/vizlayer-r5/release.in
+    # via the locked top-level set
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed

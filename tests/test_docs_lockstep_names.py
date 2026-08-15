@@ -250,3 +250,24 @@ def test_capture_outcomes_doc_vocabulary_locksteps_with_the_enums() -> None:
             f"chokepoint gate code {gate_code} is missing from the "
             "capture_outcomes.md capability table"
         )
+
+
+def test_shipped_glossary_covers_the_public_surface() -> None:
+    """Every `tl.__all__` name appears in the shipped user glossary.
+
+    docs/reference/glossary.md was complete (97/97) and gated by NOTHING —
+    the state was held purely by hand against the repo's own LOCKED
+    "a rename is not done until the docs match" rule (b2 rounds 4+5,
+    B2R5-6). Word-boundary matching: the glossary is prose-styled
+    (bold terms + `tl.name(...)` spellings), not one-heading-per-name.
+    """
+
+    import torchlens as tl
+
+    glossary = (_repo_root() / "docs" / "reference" / "glossary.md").read_text(encoding="utf-8")
+    missing = [name for name in tl.__all__ if not re.search(rf"\b{re.escape(name)}\b", glossary)]
+    assert not missing, (
+        f"public names absent from docs/reference/glossary.md: {missing} — the "
+        "shipped glossary is release surface; update it in the same change as "
+        "the rename/addition (LOCKED lockstep rule)"
+    )

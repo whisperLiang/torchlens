@@ -18,6 +18,10 @@ metadata + safetensors blobs, directory bundles); log administration delegates t
   narrow `allowed_custom_callable_modules={...}`).
 - `list_logs()` / `reset_naming_counter()` / `log_model_metadata()` /
   `get_model_metadata()` — admin helpers.
+- `save_intervention(...)` — write an intervention recipe (`Trace.save_intervention`
+  routes here).
+- `TraceState` — the runtime state enum (`torchlens._trace_state`).
+- `suppress_mutate_warnings()` — context manager silencing mutation warnings.
 - `PayloadLoadHints` / `JaxPayloadLoadHint`, `TorchLensIOError`, `rehydrate_nested`,
   `cleanup_tmp` — re-exports from `_io`.
 

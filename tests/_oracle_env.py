@@ -213,9 +213,22 @@ def resolve_env_golden(
     """
 
     marker = golden_dir / "ENV"
-    canonical_env = marker.read_text().strip() if marker.exists() else None
+    if not marker.exists():
+        # Fail CLOSED (b10 R78 round 5): a family routed through the
+        # env-keyed resolver without a committed base ENV marker previously
+        # counted as "canonical", so its bytes were enforced on EVERY
+        # environment — the opposite default of a layer whose whole thesis
+        # is fail-closed env keying. A missing marker is a setup bug in the
+        # family, never a blessing.
+        raise RuntimeError(
+            f"{golden_dir} has no committed ENV marker but resolves through "
+            "resolve_env_golden; commit the canonical fingerprint (see "
+            "_ENV_GOVERNED_REQUIRED_MARKERS in test_golden_governance_lint.py) "
+            "or route the family off the env-keyed resolver explicitly"
+        )
+    canonical_env = marker.read_text().strip()
     current_env = env_fingerprint()
-    canonical = canonical_env is None or current_env == canonical_env
+    canonical = current_env == canonical_env
     if canonical:
         for package in extra_packages:
             extras_marker = golden_dir / f"ENV-{package}"
@@ -398,6 +411,40 @@ def guard_wrap_state_for_golden_update(update_env: str) -> None:
     _WRAP_GUARD_CLEARED.add(update_env)
 
 
+def _source_identity() -> str:
+    """Return ``<HEAD sha> (clean|dirty)`` for the generating checkout.
+
+    A reviewed rebaseline must be mechanically tied to the exact source that
+    emitted it, and a dirty-tree generation must be DISCLOSED, not silently
+    recorded as if it came from a commit (b10 R78 round 5). Best-effort: a
+    non-git checkout records ``unknown`` rather than failing the update run.
+    """
+
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown (git unavailable)"
+    return f"{head} ({'dirty' if status else 'clean'})"
+
+
 def write_provenance(golden_dir: Path, generator: str, update_env: str, reason: str) -> None:
     """APPEND how and why the goldens in ``golden_dir`` were (re)generated.
 
@@ -430,6 +477,7 @@ def write_provenance(golden_dir: Path, generator: str, update_env: str, reason: 
         f"reason: {reason}\n"
         f"env: {env_fingerprint()}\n"
         f"torch: {torch.__version__}\n"
+        f"source: {_source_identity()}\n"
         f"recorded: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
     )
     path = golden_dir / "PROVENANCE"

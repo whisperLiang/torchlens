@@ -17,6 +17,10 @@ partial diagnostics, and fastlog's lightweight `RecordContext` construction.
 | `arg_positions.py` | 3-tier tensor/parameter extraction: static table, dynamic cache, BFS fallback |
 | `salient_args.py` | Human-readable function configuration metadata |
 | `flops.py` | Forward and backward FLOPs estimates with registry hooks |
+| `outcome.py` | SINGLE authority for terminal capture truth: `CaptureOutcome`/`CaptureStatus`/`CapturePhase`/`FailureOrigin` plus the N1-N5 capability chokepoint |
+| `session.py` | Capture-session lifecycle state |
+| `projectors.py` | Projection helper callables used by `projections.py` |
+| `plan.py` | Capture planning helpers |
 | `__init__.py` | Empty package marker |
 
 ## How It Connects

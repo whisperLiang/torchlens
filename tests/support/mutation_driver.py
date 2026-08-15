@@ -57,7 +57,12 @@ Usage (from the repo root)::
 The driver only ever writes inside the sandbox; running against the real
 checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
 red-capability *tests* live in the suite itself; this measures their margin.
-It is wired into no CI leg -- the margin is measured only when invoked.
+CI wiring (b9 round 5): ``weekly.yml``'s ``mutation-margin`` job scores the
+registry/checks/blocks/exempt families every week and fails on any survivor
+or scoring error. The ~161-run per-arm campaign remains invocation-only
+(``--family arms``); a zero-survivor arm-campaign log (driver sha + suite
+sha + survivor count) is a REQUIRED convergence artifact before the R74 row
+may be declared converged.
 """
 
 from __future__ import annotations
@@ -86,6 +91,23 @@ MUTANTS: dict[str, tuple[str, str]] = {
     # through real armed captures by the test_postprocess_dag enforcement
     # plants below.
     "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
+    # The b9-sol round-5 enrollment gap (R74-2): the direct roster covered
+    # exactly one validation comparator and one postprocess checker while
+    # validation/core.py carries five more raise-on-violation entry points
+    # and postprocess/__init__.py two assert seams, all previously
+    # margin-unmeasured. tests/test_mutation_driver_governance.py now
+    # censuses the check-shaped functions in both files against this roster,
+    # so the next entry point cannot ship unenrolled.
+    "M15": ("torchlens/validation/core.py", "_check_layer_arguments_logged_correctly"),
+    "M16": ("torchlens/validation/core.py", "_validate_layer_against_arg"),
+    "M17": ("torchlens/validation/core.py", "_check_arglocs_correct_for_arg"),
+    "M18": ("torchlens/validation/core.py", "_check_unattributed_arg_slots"),
+    "M19": (
+        "torchlens/validation/core.py",
+        "_check_whether_func_on_saved_parents_yields_saved_tensor",
+    ),
+    "M20": ("torchlens/postprocess/__init__.py", "_assert_no_open_window"),
+    "M21": ("torchlens/postprocess/__init__.py", "_assert_postprocess_contract"),
 }
 
 #: mutant id -> (relative file, function, comment marker). A bare ``return

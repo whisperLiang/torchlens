@@ -31,6 +31,14 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_trace_intervention.py` | Trace intervention surface; fork dispatch, replay, and rerun helpers |
 | `_trace_fork.py` | M11 copy-on-write fork builder (COW shells over `OpStoreView`s) |
 | `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold) + M14 duplicate/empty container-cell pooling (`PooledCell`, hydrate-on-read) + singleton label-list compaction (bare str + identity-gated store registry, kind tables only) |
+| `_layer_spec.py` | `_LAYER_MIRROR_SPEC` and the Layer mirror-field spec (split out of `layer.py`) |
+| `_schema_bindings.py` | GENERATED per-field `StorageBinding` axes — DO NOT EDIT; regenerate with `tools/generate_record_schema.py` |
+| `_trace_components.py` | Declared `TRACE_FIELD_OWNERSHIP` component map over the 220 forwarded fields |
+| `_trace_stack.py` | Trace stack/context helpers |
+| `_trace_rehydrate.py` | Load-side Trace rehydration |
+| `_backend_capability_guards.py` | Backend capability guard helpers |
+| `_nonfinite.py` | Nonfinite scan/abort helpers |
+| `prehook.py` | Pre-hook effect records |
 | `_trace_profile.py` | Trace profiling and timing helpers |
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |
@@ -64,8 +72,11 @@ Single-pass layers delegate unknown attrs to `ops[0]`. Multi-pass per-pass field
 `ValueError`, not `AttributeError`, to avoid Python falling through to `__getattr__`.
 
 ### Trace Surface
-`Trace` owns more than storage: lookup, `draw`, `show_graph`, `save`,
-`load`, `find_sites`, `resolve_sites`, `fork`, `rerun`, `replay`, `summary`,
+`Trace` owns more than storage: lookup, `draw`, `save`,
+`find_sites`, `resolve_sites`, `fork`, `run`, `push`, `summary`,
+(loading is module-level `tl.load`, never `trace.load`; there is no
+`Trace.show_graph` — use `draw` or `torchlens.visualization.show_model_graph`;
+`rerun`/`replay` are deprecated aliases of `run`/`push` that warn),
 `preview_fastlog`, and validation convenience custom_methods all live here or are attached via
 helper modules.
 
@@ -75,7 +86,7 @@ Primary structures are dense-id based: `conditional_records`, `conditional_arm_e
 fields are derived views for compatibility and rendering.
 
 ### Portable I/O
-`Trace.save()` and `Trace.load()` delegate to `_io.bundle`. Loaded logs can contain
+`Trace.save()` and module-level `tl.load()` delegate to `_io.bundle`. Loaded logs can contain
 lazy out refs that materialize on access. `cleanup.py` must preserve manifest and
 conditional consistency when removing entries.
 
@@ -84,7 +95,8 @@ conditional consistency when removing entries.
 use first-pass values; only selected graph/role fields are merged across ops.
 Since M8, `Layer` no longer COPIES the first-pass fields: they are mirror
 descriptors reading through to `ops[0]` on demand, with per-layer `__dict__`
-shadows for merged/overwritten values (`_LAYER_MIRROR_SPEC` in `layer.py`).
+shadows for merged/overwritten values (`_LAYER_MIRROR_SPEC` in `_layer_spec.py`;
+`layer.py` imports it).
 `in_conditionals`/`terminal_bool_for` remain build-time snapshots because
 `_build_conditional_records` rebinds them on the OPS after layers are built.
 

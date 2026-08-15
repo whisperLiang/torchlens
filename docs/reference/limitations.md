@@ -62,7 +62,7 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | `save_mode="view"` retains a value later mutated in-place. | An earlier saved activation visibly changes because the view intentionally aliases live storage. | Use the default `save_mode="copy"`, or `reference` only when live autograd identity is required. |
 | `CaptureOptions(save_budget=...)` admits retained activations, then the user forward, a transform, or a cross-device temporary allocates more. | The budget may pass and the process can still OOM. On unmeasurable devices the first charge warns and automatic budgeting is disabled. | Treat `save_budget` as per-device admission control, not an OOM guarantee. Save fewer sites, stream selected disk-only payloads, and use an absolute ceiling on unmeasurable devices. |
 | CPU/MPS capture is small or allocator/RSS samples do not move. | `Trace.forward_peak_memory` can legitimately be `0`; it is a cheap delta, not a high-water allocator proof. | Do not assert it is positive. Opt into `measure_python_peak_memory=True` when Python allocation peak justifies the extra cost. |
-| Exhaustive saving (`layers_to_save="all"`, the default) is combined with disk storage. | Exhaustive payloads remain in RAM until postprocess and still count against the budget. | Use a selective `save=` predicate with streaming disk storage. |
+| Exhaustive saving (`capture=CaptureOptions(layers_to_save="all")`; the bare flat kwarg is a deprecated alias that warns) is combined with disk storage. | Exhaustive payloads remain in RAM until postprocess and still count against the budget. | Use a selective `save=` predicate with streaming disk storage. |
 | A lazy disk-backed activation appears in a text/HTML/JSON NaN/Inf report. | The report says disk-backed/unexamined and does not materialize it implicitly. | Call `op.materialize_out()` before the value-based report when that I/O is intended. |
 | Whole-model `pickle`/`torch.save(model)` runs after tracing. | Persistent per-instance forward wrappers can produce `PicklingError`; a plain attribute holding a torch function from the other wrap epoch (`self.act = F.relu`) fails pickle's by-reference identity check in both directions; `state_dict()` is unaffected. | Call `tl.release_model(model)` immediately before whole-model serialization: it restores forwards AND normalizes held torch-function attributes (one level of exact builtin `list`/`tuple`/`dict`/`set`/`frozenset` containers — dict keys included — plus namedtuples, whose runtime type is preserved) to the live callables, and registers the model so any later `unwrap_torch()`/re-wrap re-normalizes it automatically. References inside closures/partials/custom objects or other builtin subclasses, and bare references held outside the model, stay unpicklable across wrap-state changes. |
 
@@ -108,6 +108,16 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | bf16/fp16 GPU reductions replay in a different legal order. | Validation can exceed its tolerance even when the model is semantically sound. | Re-run deterministically or validate in float32 before classifying the mismatch as capture failure. |
 | Two unrelated repeated subgraphs have the same loop fingerprint. | Recurrence detection can group them into a layer with more passes than expected. | Capture with `recurrence_detection=False` / the current recurrence-disable option and inspect the ungrouped Ops. |
 | An input-routed intervention targets an in-place or `out=` call. | Recognized in-place calls snapshot semantic inputs, but raw hooks may see live references; detected `out=` aliasing warns at hook fire time. | Prefer output interventions or non-mutating functional spellings when the original input value matters. |
+
+## CI-attested platforms
+
+Continuous integration executes the full tiered suite on Linux/CPU only
+(Python 3.10–3.13, torch floor through newest-admitted). macOS and Windows
+run a nightly import + capture + save/load canary, not the suite. CUDA and
+MPS behavior — device peak memory reporting, `save_budget="auto"` device
+measurement, `map_location` transport, and the CUDA-artifact-on-CPU-host
+refusal — is implemented and documented but has **no CI execution**; treat
+device-specific claims as attested by local testing only.
 
 ## Related contracts
 

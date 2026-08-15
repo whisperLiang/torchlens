@@ -1,13 +1,17 @@
 # capture/ - Implementation Guide
 
 ## Label Formats
-- Source tensors: `{type}_{num}_raw`, for example `input_0_raw` or `buffer_1_raw`.
+- Source tensors: `{type}_{num}_raw`, for example `input_1_raw` or `buffer_1_raw`
+  (source counters are 1-based; `input_0_raw` never exists).
 - Function outputs: `{type}_{num}_{counter}_raw`, for example `conv2d_1_5_raw`.
 - Labels are raw during capture and become final labels in `postprocess/labeling.py`.
-- Pass-qualified final labels use `{label}:{call_index}`.
+- Pass-qualified final labels use `{label}:{pass_index}` (the multi-PASS ordinal,
+  not the call counter).
 
 ## arg_positions.py
-- Main entry point: `extract_tensors_and_params(args, kwargs, func_name)`.
+- Main entry point: `extract_tensors_and_params(spec, args, kwargs)` — the resolved
+  `ArgSpec` (3 fields: `positions`, `sequence_positions`, `tensor_kwargs`) comes
+  first, not a function name.
 - Lookup order: `FUNC_ARG_SPECS` static table -> `_state._dynamic_arg_specs` dynamic cache
   (uncacheable entries marked with the `DYNAMIC_SPEC_UNCACHEABLE` sentinel) -> BFS fallback.
 - `ArgSpec` stores tensor arg indexes, tensor kwarg names, param arg indexes, and param kwarg names.

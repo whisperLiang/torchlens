@@ -183,10 +183,10 @@ For full `tl.trace(...)` failures, inspect `exc.partial_log` directly or call
 | --- | --- |
 | `log.set(site, value)` | Record a one-shot tensor or callable replacement and mark the recipe stale. |
 | `log.attach_hooks(site, hook)` | Add sticky helper/callable hooks to the recipe. |
-| `log.do(...)` / `tl.do(log, ...)` | Apply an intervention and dispatch to `replay`, `rerun`, or `set_only`. |
+| `log.do(...)` / `tl.do(log, ...)` | Apply an intervention and dispatch to `push`, `run`, or `set_only`. |
 | `log.fork(name=None)` | Create an isolated branch for experiments. |
-| `log.replay(hooks=None)` | Propagate over the saved DAG without calling `model.forward`. |
-| `log.rerun(model, x, append=False)` | Re-execute the model under the active spec. |
+| `log.push(hooks=None)` | Propagate over the saved DAG without calling `model.forward` (`replay` is a deprecated alias that warns). |
+| `log.run(model, x, append=False)` | Re-execute the model under the active spec (`rerun` is a deprecated alias that warns). |
 | `log.save_intervention(path, level=...)` | Write a `.tlspec/` intervention recipe. |
 
 `Trace.draw(vis_intervention_mode=...)` visualizes the planned intervention
@@ -209,11 +209,10 @@ Common operations:
 | --- | --- |
 | `bundle.names` | Member names in order. |
 | `bundle["clean"]` | Access one `Trace`. |
-| `bundle.node(site)` | Return a `NodeView` across members after relationship checks. |
+| `bundle.node(site)` | Return a `SuperOp` across members after relationship checks. |
 | `bundle.compare_at(site)` | Pairwise comparison matrix at a shared site. |
-| `bundle.metric(fn)` | Apply a per-member metric. |
 | `bundle.joint_metric(fn)` | Apply a metric to the whole bundle. |
-| `bundle.do(...)`, `bundle.attach_hooks(...)`, `bundle.replay()`, `bundle.rerun(model, x)` | Apply mutator/propagation calls to each member. |
+| `bundle.do(...)`, `bundle.attach_hooks(...)`, `bundle.push()`, `bundle.run(model, x)` | Apply mutator/propagation calls to each member (`replay`/`rerun` are deprecated aliases that warn). |
 | `bundle.fork(name=None)` | Fork all members into a new bundle. |
 
 Relationship gates are intentional. Operations that require shared topology or
@@ -223,4 +222,4 @@ same-input evidence fail when TorchLens cannot prove enough compatibility.
 
 | TransformerLens pattern | TorchLens pattern |
 | --- | --- |
-| `act_patch` attribution patching | Attach a `tl.bwd_hook(...)` gradient observer at the site, then `log.rerun(model, x)` under the active spec and score from the captured gradients/outs. |
+| `act_patch` attribution patching | Attach a `tl.bwd_hook(...)` gradient observer at the site, then `log.run(model, x)` under the active spec and score from the captured gradients/outs. |

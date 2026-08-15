@@ -126,12 +126,17 @@ lit = ["lit-nlp~=1.3"]
 depyf = ["depyf~=0.18"]
 compat-shims = ["torchextractor>=0.3,<2", "sentence-transformers>=2.5,<5"]
 vision-shims = ["torchvision>=0.18,<1"]
-# `all` installs the curated, mutually-compatible union of optional integration
-# extras. It aliases `all-stretch` (the vetted satisfiable set) so the two never
-# drift: a literal "everything" is unsatisfiable because the framework-backend
-# extras (jax/tf/tensorflow/paddle/mlx/tinygrad) impose conflicting pins, so they
-# are deliberately excluded from the meta-rollup. `pip install torchlens[all]`
-# therefore installs exactly the same packages as `torchlens[all-stretch]`.
+# `all` aliases `all-stretch` so the two never drift. HONEST STATUS (grind
+# r5, b10 R83-1 — the former "vetted satisfiable set" wording was false in
+# two ways): (1) BOTH meta-extras are currently KNOWN-UNSATISFIABLE as
+# shipped — lit-nlp~=1.3 requires shap<0.46 against the shap~=0.46 pin —
+# tracked as a DISCLOSED skip in nightly's extras-resolution gate; fixing
+# the composition is a queued owner decision. (2) The rollup is PARTIAL by
+# design: the framework-backend extras (jax/tf/tensorflow/paddle/mlx/
+# tinygrad) are excluded for conflicting pins, and nine further extras
+# (captum, hf, sae, nnsight, notebook, neuro, tabular, wandb, lightning)
+# are also not rolled up, so `torchlens[all]` never meant "everything".
+# `pip install torchlens[all]` requests exactly `torchlens[all-stretch]`.
 all = ["torchlens[all-stretch]"]
 all-stretch = [
     "grad-cam~=1.5",
@@ -551,15 +556,22 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
-# build== is PINNED (the old unpinned install resolved arbitrary code while
-# the release App token sat on disk from checkout). PIN AUTHORITY: the nightly
-# wheel job PARSES this build_command for its own build== install, so its
-# double-build gate always attests exactly the builder the release uses.
+# `build` is installed from the HASH-LOCKED release-requirements.txt before
+# semantic-release runs (grind r5, P9/R61): build_command formerly ran its
+# own `pip install 'build==1.5.0'` INSIDE the token scope without
+# --require-hashes, so a replaced index artifact could execute with the
+# repo-write App token despite the lock. PIN AUTHORITY: the build== pin in
+# .github/workflows/release-requirements.txt; the nightly wheel job PARSES
+# that lock for its own build== install, so its double-build gate always
+# attests exactly the builder the release uses.
 #
-# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel deterministic, and
-# scripts/normalize_sdist.py makes the sdist deterministic too (grind r4,
-# R86-1 root causes: gzip header wall-clock mtime + builder uid/gid/uname/
-# gname in the tar members). The nightly double-build gate attests BOTH
+# REPRODUCIBILITY: SOURCE_DATE_EPOCH makes the wheel's timestamps
+# deterministic, and scripts/normalize_sdist.py normalizes the remaining
+# machine-dependent metadata in BOTH artifacts (grind r4 R86-1: gzip header
+# wall-clock mtime + builder uid/gid/uname/gname in the tar members; grind
+# r5 b10 R84-1, measured: the build user's umask leaking source-file modes
+# into tar member headers and wheel zip external_attr). The nightly
+# double-build gate rebuilds under a DIFFERENT umask and attests both
 # artifacts byte-identical.
 #
 # REPRODUCE FROM A TAG (grind r4 recipe correction): python-semantic-release
@@ -572,8 +584,8 @@ major_on_zero = true
 #   pip install 'build==1.5.0'
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
-#       python scripts/normalize_sdist.py dist/*.tar.gz
-build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz"
+#       python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl
+build_command = "SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)

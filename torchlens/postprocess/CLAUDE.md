@@ -21,7 +21,7 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | `loop_grouping_adapter.py` | 7 implementation | Backend-neutral recurrence grouping |
 | `labeling.py` | 8-11 | Final labels, renaming, lookup keys, retained layer lists, field ordering |
 | `finalization.py` | 12-20 | Undecorate, params, layers, modules, hash, streaming finalization/eviction, ref release |
-| `incremental.py` | fastlog enrichment | Adds module paths and param addresses to sparse recordings |
+| `incremental.py` | fastlog enrichment | Adds module paths to sparse recordings; `add_param_addresses` is DEAD on current builds (ActivationRecord carries no `parent_param_addresses` field, so it always raises `RecordingConfigError`) |
 
 ## Step Contracts and the Derived Order (M10 + design-ppdag-v3)
 

@@ -1,9 +1,9 @@
 """Steps 8-11: Label mapping, final info logging, renaming, cleanup, and lookup keys.
 
 Step 8 (_map_raw_labels_to_final_labels): Assigns human-readable labels to each
-    tensor. Label format: ``{layer_type}_{type_num}_{total_num}:{call_index}`` for
-    regular layers, or ``{layer_type}_{type_num}:{call_index}`` for input/output/buffer.
-    The ``:call_index`` suffix is omitted when num_calls == 1. For multi-pass
+    tensor. Label format: ``{layer_type}_{type_num}_{total_num}:{pass_index}`` for
+    regular layers, or ``{layer_type}_{type_num}:{pass_index}`` for input/output/buffer.
+    The ``:{pass_index}`` suffix is omitted when the layer has a single pass. For multi-pass
     layers (pass > 1), layer_type and type_index are INHERITED from the first
     pass to guarantee label consistency within recurrent_ops groups.
 

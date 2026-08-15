@@ -19,7 +19,9 @@ semantic review), re-recording the axes matrix
 (`tests/support/postprocess_axes.py`), the byte-identity oracles, and a
 warnings/exception-order review (those are pinned only by day-1 identity).
 The historical prose invariants (1-3 before 5, 7 before 8, 9/10 before 11,
-15.5 before 16, 16.5 before 17, 18/19 before 20) are corpus entries now.
+15.5 before 16, 18/19 before 20) are corpus entries now; there is NO
+("16.5","17") pair — 16.5's pinned successors are 18, and 17 pairs with
+17.5/18 (read `PINNED_ORDER_PAIRS` in `_contracts.py` for the authority).
 
 ## Executor
 `postprocess()` keeps the prologue (pre-0 + step-0 materialize block), the

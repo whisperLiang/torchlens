@@ -87,6 +87,18 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # torch.tensor silently vanished from the wrapper roster). torchlens/
     # only: tests legitimately assert.
     "S101": 97,
+    # The four "proven harmful HERE" permanent [tool.ruff.lint] ignore
+    # entries (b9 R70 round 5, second pass): permanent exemption is the
+    # right POLICY for these (B009/B010 autofixes traded 214 cosmetic
+    # rewrites for 59 new mypy errors; SIM118 caused 11 smoke failures of
+    # silent type confusion) but permanent exemption is not unbounded
+    # growth. Measured 2026-08-15 with the pinned ruff over the test's own
+    # scope/exclude mode; test_ignored_codes_all_carry_ceilings keeps the
+    # NEXT ignore entry from entering unmeasured.
+    "B009": 120,
+    "B010": 100,
+    "SIM118": 49,
+    "SIM401": 1,
 }
 
 #: Codes measured over torchlens/ only (see the D417 and complexity notes
@@ -205,3 +217,56 @@ def test_deferred_ceiling_parser_is_red_capable() -> None:
     counts = _count_by_code(planted)
     assert counts == Counter({"B023": 2, "SIM105": 1})
     assert counts.get("B023", 0) > 1  # a ceiling of 1 would trip on this plant
+
+
+def _configured_ignore_codes() -> set[str]:
+    """Parse the ``[tool.ruff.lint] ignore`` code list from pyproject."""
+
+    match = re.search(r"^ignore\s*=\s*\[(.*?)^\]", _pyproject_text(), re.MULTILINE | re.DOTALL)
+    assert match, "pyproject.toml lost [tool.ruff.lint] ignore"
+    return set(re.findall(r'^\s*"([A-Z]+\d+)"', match.group(1), re.MULTILINE))
+
+
+def test_ignored_codes_all_carry_ceilings() -> None:
+    """`ignore` is a bounded set: every entry has a no-growth ceiling.
+
+    b9 R70 round 5 (second pass): four "proven harmful HERE" permanent
+    exemptions sat in `ignore` with no ceiling, so their site counts were
+    unmeasured and any NEW code added to `ignore` entered unmeasured by
+    default. Permanent exemption is a policy choice; unbounded growth never
+    is.
+    """
+
+    unceilinged = sorted(_configured_ignore_codes() - set(_DEFERRED_CODE_CEILINGS))
+    assert not unceilinged, (
+        f"[tool.ruff.lint] ignore entries with no ceiling row: {unceilinged} — "
+        "measure each with the pinned ruff and add a shrink-only ceiling in "
+        "_DEFERRED_CODE_CEILINGS in the same change"
+    )
+
+
+#: File-level blanket ruff-noqa directives ("# ruff" + ": noqa") in
+#: torchlens/ (b9 R70 round
+#: 5, F/O pair): each one is a whole-file blind spot no per-code ceiling can
+#: see — a NEW dead import in ops.py / _runnable_execution.py /
+#: completeness_witness.py (three of the most change-heavy capture files) is
+#: permanently invisible to F401. SHRINK-ONLY: converting a blanket to
+#: per-line noqa (the repo's own preferred pattern, see
+#: validation/invariants.py) lowers this; adding a file may never pass
+#: silently.
+_BLANKET_NOQA_CEILING = 9
+
+
+def test_blanket_noqa_directives_never_grow() -> None:
+    """The file-level `# ruff: noqa` census stays at or below its ceiling."""
+
+    blanket = sorted(
+        str(path.relative_to(_PROJECT_ROOT))
+        for path in (_PROJECT_ROOT / "torchlens").rglob("*.py")
+        if re.search("^" + "# ruff" + ": noqa", path.read_text(encoding="utf-8"), re.MULTILINE)
+    )
+    assert len(blanket) <= _BLANKET_NOQA_CEILING, (
+        f"file-level blanket ruff-noqa directives grew to {len(blanket)} (ceiling "
+        f"{_BLANKET_NOQA_CEILING}): {blanket} — use per-line noqa so F401 "
+        "stays armed for genuinely dead code"
+    )

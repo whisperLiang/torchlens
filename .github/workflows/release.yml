@@ -116,11 +116,18 @@ jobs:
       # PyPA-owned repo plus OIDC trusted publishing (no long-lived token to
       # steal), and this job's permissions are already minimized above.
       # Revisit if PyPA starts publishing immutable release tags for it.
+      # PEP 740 attestations are ON (the action's default). `attestations:
+      # false` was a 2026-02-24 debugging leftover (579506df, "enable verbose
+      # PyPI upload and disable attestations for debugging") whose verbose
+      # half was reverted while the attestation half silently shipped for six
+      # months with no explanatory comment. The job already has
+      # `id-token: write` + OIDC trusted publishing, which is all PyPI needs
+      # to accept provenance. If attestation upload ever breaks a release,
+      # set `attestations: false` WITH a dated comment and an owner decision,
+      # never as a silent debug flag (grind r5, b10 R86-1).
       - name: Publish to PyPI
         if: ${{ hashFiles('dist/**') != '' }}
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          attestations: false
 
       - name: Publish to GitHub Releases
         if: ${{ hashFiles('dist/**') != '' }}

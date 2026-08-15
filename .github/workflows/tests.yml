@@ -16,7 +16,13 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    # NO event-name guard here (grind r5, b10 R82-1): inside a reusable
+    # workflow `github.event_name` is the CALLER's event, so a former
+    # `if: pull_request || push` condition meant that adding
+    # `workflow_dispatch:`/`schedule:` to release.yml would SKIP every test
+    # row while the called workflow still reported SUCCESS to
+    # `needs: [tests]` — a release with zero tests executed. Duplicate runs
+    # are already handled by the concurrency group above.
     name: ${{ matrix.track }} (torch ${{ matrix.torch }}, py ${{ matrix.python }})
     runs-on: ubuntu-24.04
     strategy:
@@ -95,6 +101,18 @@ jobs:
             # sys.monitoring escape-detection path, which no 3.10/3.11 row can
             # execute. Before this row existed the path had NO CI coverage and
             # its only >=3.12-gated unit test had rotted unnoticed (T13.4).
+          - track: newest-admitted
+            python: "3.13"
+            torch: "2.13.0+cpu"
+            torchvision: "0.28.0+cpu"
+            numpy: numpy
+            scope: smoke
+            # Python 3.13 was the last classifier-advertised interpreter with
+            # ZERO test execution anywhere in CI — its only appearance was
+            # nightly's resolution-only `uv pip compile` loop, which imports
+            # nothing (grind r5, b10 R85-1). The classifier<->matrix lockstep
+            # test in tests/test_ci_packaging_gates.py now requires a real
+            # row per advertised interpreter, so dropping this row goes red.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -125,7 +143,8 @@ jobs:
             "torch==${TORCH_VERSION}" \
             "torchvision==${TORCHVISION_VERSION}" \
             "${NUMPY_SPEC}" \
-            "pydot==4.0.1"
+            "pydot==4.0.1" \
+            "graphviz==0.21"
 
       - name: Arm randomized test ordering (order-isolation gate row)
         if: matrix.randomized == '1'

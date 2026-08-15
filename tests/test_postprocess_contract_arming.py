@@ -112,3 +112,50 @@ def test_step_postcondition_runs_on_none_audit() -> None:
 
     with pytest.raises(AssertionError, match="must register output layers"):
         _check_postprocess_contract(_Stub(), "1", None)
+
+
+def test_open_window_past_step_20_is_rejected() -> None:
+    """`_assert_no_open_window` trips on a registered open audit window.
+
+    Direct liveness killer (b9 round 5: the whole-function neuter survived
+    the arming suite — nothing exercised the raising branch directly). A
+    fake core whose op store id sits in ``_AUDIT_COLLECTORS`` must raise;
+    an unregistered store must pass.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens._trace_core.op_store import _AUDIT_COLLECTORS
+    from torchlens.postprocess import _assert_no_open_window
+
+    store = object()
+    fake_trace = SimpleNamespace()
+    fake_trace.__dict__["_trace_core"] = SimpleNamespace(ops=store)
+
+    _assert_no_open_window(fake_trace)  # unregistered: must not raise
+    _AUDIT_COLLECTORS[id(store)] = set()
+    try:
+        with pytest.raises(AssertionError, match="audit window open past step 20"):
+            _assert_no_open_window(fake_trace)
+    finally:
+        _AUDIT_COLLECTORS.pop(id(store), None)
+
+
+def test_step0_prologue_seam_checks_the_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_assert_postprocess_contract` closes the window AND checks the step.
+
+    Direct liveness killer (b9 round 5 survivor): with assertions armed, the
+    step-0 prologue seam must route into the contract checker — an unknown
+    step id observed through the seam has to raise exactly like a direct
+    checker call, so a whole-function neuter cannot stay green.
+    """
+
+    from types import SimpleNamespace
+
+    import torchlens.postprocess as postprocess
+
+    monkeypatch.setattr(postprocess, "_postprocess_assertions_enabled", lambda: True)
+    fake_trace = SimpleNamespace()
+    fake_trace.__dict__["_trace_core"] = None
+    with pytest.raises(AssertionError, match="Unknown postprocess step contract"):
+        postprocess._assert_postprocess_contract(fake_trace, "not-a-real-step")

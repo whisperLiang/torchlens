@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.op_ownership import is_torchlens_operation  # noqa: E402
 from benchmarks.perf_gate import (  # noqa: E402
     compare_gate_payloads,
     load_gate_json,
@@ -399,34 +400,10 @@ def _run_cell(
     return payload
 
 
-def _is_torchlens_operation(operation: str) -> bool:
-    """Return whether an operation exercises TorchLens code.
-
-    Parameters
-    ----------
-    operation:
-        Benchmark operation identifier.
-
-    Returns
-    -------
-    bool
-        True for TorchLens-owned rows.
-    """
-
-    return operation.startswith(
-        (
-            "aux_",
-            "fastlog_",
-            "first_capture",
-            "global_wrap",
-            "raw_global",
-            "raw_target",
-            "raw_tl",
-            "rerun_",
-            "tl_",
-            "trace_",
-        )
-    )
+# Ownership classification lives in ONE module (b2 R41 round 5: this file
+# and perf_gate.py carried divergence-prone copies while the classifier
+# gates every blocking axis).
+_is_torchlens_operation = is_torchlens_operation
 
 
 def _assert_torchlens_cells_ok(cells: list[dict[str, Any]]) -> None:
@@ -794,23 +771,39 @@ def _check_rerun_tolerance(
     for row_a in rows_a:
         key = (row_a["model"], row_a["device"], row_a["operation"])
         row_b = by_key_b.get(key)
-        med_a = _timing(row_a, "median_ms")
-        med_b = _timing(row_b, "median_ms") if row_b else None
-        iqr_a = _timing(row_a, "iqr_ms")
-        iqr_b = _timing(row_b, "iqr_ms") if row_b else None
-        if med_a is None or med_b is None or iqr_a is None or iqr_b is None:
+        # Process-CPU is authoritative when both runs carry it, matching the
+        # main gate's policy; wall clock is a disclosed fallback for legacy
+        # rows only (b6 R28 round 5: the wall-based check let a loaded box's
+        # wall drift dominate the verdict).
+        metric = "cpu_median_ms"
+        iqr_key = "cpu_iqr_ms"
+        med_a = _timing(row_a, metric)
+        med_b = _timing(row_b, metric) if row_b else None
+        iqr_a = _timing(row_a, iqr_key)
+        if med_a is None or med_b is None or iqr_a is None:
+            metric, iqr_key = "median_ms", "iqr_ms"
+            med_a = _timing(row_a, metric)
+            med_b = _timing(row_b, metric) if row_b else None
+            iqr_a = _timing(row_a, iqr_key)
+        if med_a is None or med_b is None or iqr_a is None:
             continue
-        tolerance = max(0.10 * med_a, 2 * max(iqr_a, iqr_b), 0.5)
+        # Reference-side IQR ONLY (b6 R28 round 5): `2 * max(iqr_a, iqr_b)`
+        # let the second run WIDEN its own acceptance band with its own
+        # noise, so an unstable rerun could never fail the stability check
+        # it exists to perform. This mirrors the main gate's
+        # baseline-IQR-only rule.
+        tolerance = max(0.10 * med_a, 2 * iqr_a, 0.5)
         diff = abs(med_b - med_a)
         checks.append(
             {
                 "model": key[0],
                 "device": key[1],
                 "operation": key[2],
+                "metric": metric,
                 "median_run1_ms": med_a,
                 "median_run2_ms": med_b,
                 "iqr_run1_ms": iqr_a,
-                "iqr_run2_ms": iqr_b,
+                "iqr_run2_ms": _timing(row_b, iqr_key) if row_b else None,
                 "tolerance_ms": tolerance,
                 "diff_ms": diff,
                 "passed": diff <= tolerance,

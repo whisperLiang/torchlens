@@ -22,7 +22,8 @@ layer.ops             # dict[int, Op]
 ```
 
 ## Field Management
-- Add fields to the class definition and the matching FIELD_ORDER tuple in `constants.py`.
+- Add fields to the class definition and the matching FIELD_ORDER list in the
+  parent package's `torchlens/constants.py` (not in this directory).
 - Add tests for user-facing fields and update `to_pandas()` when the field should export.
 - Avoid ad hoc state that is not scrubbed by save/load, cleanup, and postprocess trimming.
 
@@ -43,8 +44,12 @@ layer.ops             # dict[int, Op]
   in view overlays; mutable builtin containers copy on first read; GroupRefs
   translate to cloned group tables. Modules fork as detached duplicates (their
   cells embed trace-strong accessors); coreless traces take the detached
-  fallback. Fork->parent isolation is pinned; parent in-place container
-  mutation before the fork's first read of that cell is visible to the fork.
+  fallback. Fork->parent isolation is pinned IN BOTH DIRECTIONS: mutable
+  builtin containers are eagerly copied into the fork overlay AT FORK TIME
+  (`OpStoreView.isolate_mutable_cells`), so parent in-place container
+  mutation after the fork is NEVER visible to the fork — the historical
+  before-first-read visibility window is closed; do not weaken the eager
+  sweep to restore it.
 
 ## Op Gotchas
 - `Op.__slots__` is `("_core", "_row")` (M5 seam): fields are generated data

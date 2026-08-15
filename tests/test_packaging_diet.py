@@ -356,6 +356,23 @@ def test_release_job_python_stack_is_hash_locked() -> None:
     ]
     assert not unhashed, f"release lock entries without hashes: {unhashed}"
 
+    # The lock is only airtight if NOTHING ELSE installs inside the token
+    # scope: build_command formerly ran its own unhashed
+    # `pip install 'build==1.5.0'` after checkout, escaping the lock (grind
+    # r5, P9/R61). The builder must come from the lock (asserted present
+    # here) and build_command must never regain an install.
+    pyproject_text = (repo_root / "pyproject.toml").read_text()
+    match = re.search(r'^build_command = "(.*)"$', pyproject_text, flags=re.MULTILINE)
+    assert match, "no build_command found in pyproject.toml"
+    assert "pip install" not in match.group(1), (
+        "build_command runs its own pip install inside the release token "
+        "scope, escaping the hash lock; add the package to "
+        "release-requirements.txt instead"
+    )
+    assert any(line.startswith("build==") for line in requirement_lines), (
+        "the release lock no longer pins the `build` builder"
+    )
+
 
 @pytest.mark.slow
 def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:

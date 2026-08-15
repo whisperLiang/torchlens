@@ -11,9 +11,12 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 ```
 import torchlens
   |- exposes 97 top-level public names in __all__
-  |- eagerly imports the core capture/intervention surface, fastlog/options, and
-  |  the HuggingFace autoroute bridge; compat, export, report, stats,
-  |  validation, and viz stay lazy
+  |- eagerly imports ONLY the light spine: options, errors/_state, ir.*,
+  |  captured_run, observers, quantities, _deprecations, _save_budget, utils,
+  |  and visualization (hard-pinned by tests/test_import_hygiene.py
+  |  _EAGER_TORCHLENS_MODULES). capture, intervention, fastlog, autoroute,
+  |  bridge, compat, export, report, stats, validation, and viz-rendering
+  |  internals are ALL lazy (_LAZY_ATTRS) — do not add eager imports
   |
 trace(model, input, save=..., intervene=..., lookback=..., storage=...)
   |- backends/registry.py      - resolve torch / MLX / JAX / tinygrad / Paddle / TensorFlow backend
@@ -123,7 +126,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Top-level API, 97-name `__all__`, deprecation shims, `peek`/`extract` helpers |
-| `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports |
+| `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports except the sanctioned `errors._base` leaf (typing-only, cycle-safe) |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |
 | `_io/`, `io/` | Portable `.tlspec` save/load, manifest, lazy tensor refs, public I/O helpers |
@@ -230,8 +233,26 @@ exclusive with backward-related capture because it discards the autograd graph.
 - `intervention/` - selectors, sites, hooks, helpers, Bundle, fork/replay/rerun/save.
 - `intervention/_super/` - internal Bundle-level Super* aligned views and accessors.
 - `intervention/_topology/` - internal bundle supergraph and topology diff support.
+- `merged/` - cross-rank merging (C1): `tl.merge_ranks`/`tl.merge_report`, the
+  `MergedTrace` presenter, frozen merge vocabularies, and the merged-directory
+  artifact (routes 2 of the 97 `__all__` names; own AGENTS.md).
+- `distributed/` - explicit-collective capture support: `tl.distributed.arm()`,
+  group-lifecycle ledger, membership-lineage audit (own AGENTS.md).
+- `bundle/` - the intervention `Bundle` product and its aligned Super* views.
+- `ir/` - eagerly-imported capture-event/record IR shared by every backend.
+- `autoroute/` - HF/entry-point auto-routing (lazy).
+- `attribution/`, `receptive_field/`, `repgeom/` - influence geometry and
+  representation analysis surfaces (lazy power-user submodules).
+- `export/`, `report/`, `stats/`, `debug/` - export bridges, human reports,
+  summary stats, power-user diagnostics (lazy; `debug` deliberately not in
+  `__all__`).
+- `partial/` - failed-capture recovery (`tl.partial.from_failed_capture`).
+- `accessors/`, `semantic/`, `observers`, `io/` - accessor protocols, facet
+  recipes, public observers, and the `torchlens.io` save/load facade.
 - `bridge/`, `compat/`, `callbacks/` - optional integrations and migration facades.
 - `notebook/`, `neuro/` - appliance package boundaries gated by extras.
+- `examples/`, `experimental/`, `schemas/` - packaged examples, incubating
+  surfaces, and the shipped tlspec manifest schemas.
 
 ## Key Concepts
 
@@ -307,6 +328,10 @@ arrays and preserve `tf.bfloat16` logical dtype metadata.
 Intervention specs can be saved at audit, executable-with-callables, or portable levels.
 
 ### Appliances
-The appliance subfolders `notebook` and `neuro` are part of the 2.x package layout. They
-currently enforce their extras by importing required dependencies, but export no public
-objects yet.
+The appliance subfolders `notebook` and `neuro` are part of the 2.x package layout. Their
+extras enforcement is DEFERRED, never import-time: `import torchlens.notebook` /
+`torchlens.neuro` stays inert by design, and the dependency check fires on first
+attribute access via PEP-562 `__getattr__` — precisely so a bare import can never run
+foreign code without a trust opt-in (RCE-hardened, gated by
+`tests/test_r9_appliance_import_rce.py`). Never "fix" them to import their
+dependencies at module load; that is the pattern the code forbids.

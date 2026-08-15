@@ -25,6 +25,8 @@ metadata invariants, intervention readiness, and unified `.tlspec` manifest sche
 - `"saved"` - validates saved outs on a `Trace` path.
 - `"backward"` - validates first-class backward capture.
 - `"intervention"` - currently runs forward-like checks and returns intervention-axis details.
+- `"receptive_field"` - captures an armed trace and samples receptive/projective
+  tri-state validations (own dispatch and gate in `consolidated.py`).
 
 Legacy top-level shims for `validate_forward_pass`, `validate_backward_pass`, and
 `validate_saved_outs` forward to this package.
@@ -37,7 +39,8 @@ Legacy top-level shims for `validate_forward_pass`, `validate_backward_pass`, an
    (R75-1; backward validation's stock-autograd pass does the same). If
    the wrappers cannot be removed because a capture is active, validation
    refuses rather than blessing a wrap-state-dependent ground truth.
-2. Run `trace(..., layers_to_save="all", save_arg_values=True)`.
+2. Run `trace(..., capture=CaptureOptions(layers_to_save="all", save_arg_values=True))`
+   (the flat kwargs are deprecated aliases that warn).
 3. Check logged output matches ground truth.
 4. Walk backward from outputs, replaying each saved operation from saved parents.
 5. Perturb parents to ensure output sensitivity unless exempt.
@@ -53,8 +56,10 @@ keys. Invariants are part of the postprocess regression net.
 `validate_tlspec(path)` validates unified manifests against
 `schemas/tlspec_manifest_v{schema_version}.json`, selecting the schema version declared by the
 artifact.
-Older 2.16 intervention/model-log formats are accepted without schema validation so legacy
-artifacts remain loadable.
+Only the two legacy 2.16 INTERVENTION formats (`v2.16_intervention`,
+`v2.16_intervention_with_kind`) are accepted without schema validation. Legacy 2.16
+MODEL-LOG bundles are NOT loadable: they sit below the tlspec v6 / torchlens 2.33
+rehydration floor and refuse with `ArtifactVersionBelowFloorError`.
 
 ## How It Connects
 Validation reads `data_classes/`, uses original torch functions for replay, and calls public

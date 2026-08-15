@@ -251,6 +251,21 @@ def test_canonical_environment_resolves_canonical_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
+def test_missing_env_marker_refuses(tmp_path: Path) -> None:
+    """No committed ENV marker is a setup bug, never a canonical blessing.
+
+    The pre-fix resolver treated a missing base marker as "canonical", so a
+    family routed through the env-keyed resolver without one had its bytes
+    enforced on EVERY environment (b10 R78-4 round 5, fail-open default).
+    """
+
+    goldens = tmp_path / "goldens"
+    goldens.mkdir()
+    with pytest.raises(RuntimeError, match="no committed ENV marker"):
+        resolve_env_golden(goldens, "case.json")
+
+
+@pytest.mark.smoke
 def test_recorded_env_baselines_are_gitignored() -> None:
     """A recorded env-* baseline can never ride along in a broad git add."""
 
@@ -332,6 +347,26 @@ def test_write_provenance_appends_full_history(tmp_path: Path) -> None:
     assert "reason: first rebaseline" in content
     assert "reason: second family, same dir" in content
     assert content.count("---\n") == 1, "records are separated, none overwritten"
+
+
+@pytest.mark.smoke
+def test_write_provenance_records_source_identity(tmp_path: Path) -> None:
+    """Every PROVENANCE record ties the rebaseline to a HEAD sha + tree state.
+
+    Without the source line a reviewed rebaseline could not be mechanically
+    tied to the code that emitted it, and a dirty-tree generation went
+    undisclosed (b10 R78 round 5).
+    """
+
+    import re as _re
+
+    write_provenance(tmp_path, "family_a", "TORCHLENS_UPDATE_A", "source-identity probe")
+    content = (tmp_path / "PROVENANCE").read_text()
+    match = _re.search(r"^source: (.+)$", content, flags=_re.MULTILINE)
+    assert match, f"PROVENANCE record carries no source line:\n{content}"
+    assert _re.fullmatch(
+        r"[0-9a-f]{40} \((clean|dirty)\)|unknown \(git unavailable\)", match.group(1)
+    ), match.group(1)
 
 
 @pytest.mark.smoke

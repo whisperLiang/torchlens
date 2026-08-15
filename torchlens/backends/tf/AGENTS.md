@@ -10,8 +10,10 @@ TensorFlow preview backend. Tier-1 standalone spec (no `capture_backend`); the
 - `intervene=` combined with `grad_options=` refuses typed (the derived-gradient
   replay reruns the un-intervened forward). Both surfaces require eager live
   capture; the static path refuses each.
-- `halt=` and `recipes=` refuse typed as deferred (torch-only), even though the
-  registry `interventions` flag admits them through the shared option gate.
+- `halt=` and `recipes=` refuse typed as deferred on TF (NOT torch-only
+  elsewhere: Paddle's preview ships both `halt=` and `recipes=`), even though
+  the registry `interventions` flag admits them through the shared option
+  gate.
 - `_finish_trace(recurrence_detection=...)` runs the shared neutral grouper via
   `.._finalize.finalize_single_pass_trace`; the eager path passes the user's
   request, the static FuncGraph path stays ungrouped and stores the honest

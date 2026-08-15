@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 import torch.nn.functional
 from _module_containment_snapshot import build_snapshot
+from _oracle_env import (
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_update_reason,
+    write_provenance,
+)
 from fixtures.module_containment_models import ALL_FIXTURES, FixtureBuilder
 
 import torchlens as tl
@@ -210,6 +216,14 @@ def test_torch_variant_goldens_are_all_present_and_distinct() -> None:
 def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
     """Compare module-containment snapshot for one fixture."""
 
+    if flag_armed(os.environ, _UPDATE_ENV) and not os.environ.get("CI"):
+        # Regeneration is in-process, and this family's fixtures include the
+        # MHA/`multi_head_attention_forward` path whose op DECOMPOSITION is
+        # exactly what wrap state changed in the sf-fastpath incident: refuse
+        # to freeze bytes on a torch some earlier test already wrapped
+        # (SF-53), BEFORE the fixture constructs or captures anything.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+
     model, input_args, fixture_name, hook_handle = _unpack_fixture(builder())
     try:
         trace = tl.trace(model, input_args)
@@ -228,8 +242,6 @@ def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
         # require_env_golden was written to eliminate — a fresh clone would
         # bless whatever the current build produced, no flag, no provenance,
         # no review trail.
-        from _oracle_env import flag_armed, require_update_reason, write_provenance
-
         if flag_armed(os.environ, _UPDATE_ENV) and not os.environ.get("CI"):
             reason = require_update_reason(_UPDATE_ENV)
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)

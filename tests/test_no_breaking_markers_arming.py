@@ -237,3 +237,25 @@ def test_explicit_override_allows_with_loud_notice(push_repo) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "active; allowing" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["FALSE", "no", "yes", "true", "2", " 0 "])
+def test_non_exact_override_values_still_block(push_repo, value: str) -> None:
+    """Only the exact string "1" authorizes a major marker.
+
+    The former truthy parse (`not in ("", "0", "false", "False")`) authorized
+    a breaking push on OVERRIDE=FALSE, =no, or any templated junk — values a
+    user sets to DISABLE the override — while the notice claimed "=1 active"
+    (grind r5, b10 R86 probe: FALSE -> rc=0).
+    """
+
+    repo, env, base, _clean_tip, breaking_tip = push_repo
+    result = _run_pre_push(
+        repo,
+        env,
+        stdin=f"refs/heads/breaking-topic {breaking_tip} refs/heads/x {base}\n",
+        extra_env={"TORCHLENS_ALLOW_MAJOR_BUMP": value},
+    )
+    assert result.returncode == 1, (
+        f"OVERRIDE={value!r} must NOT authorize a major marker: {result.stderr}"
+    )

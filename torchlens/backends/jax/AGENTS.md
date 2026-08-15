@@ -21,10 +21,14 @@ the `BackendSpec` in `../default_specs.py` is the only capability truth.
 
 ## jaxpr.py
 - Closed-jaxpr derivation and interpretation. `SAFE_JIT_NAMES` allowlists
-  inlineable jit sub-jaxprs; `REJECTED_NESTED_PRIMITIVES` (`cond`, `scan`,
-  `while`/`while_loop`, `remat2`, `custom_vjp_call`) refuse typed under the
-  default control-flow mode; `EFFECT_PRIMITIVES` and `PURE_JIT_CALL_PRIMITIVES`
-  classify callback and jit-call equations.
+  inlineable jit sub-jaxprs. The DEFAULT control-flow mode is `"unroll"`:
+  `cond`/`scan`/`while_loop` (and forward `custom_vjp_call` regions) are
+  CAPTURED by mode-gated handlers that run before the refusal backstop —
+  only `remat2` reaches the raise on the default path (and today as a bare
+  `ValueError`, not the `BackendUnsupportedError` the backends contract
+  asks for — known gap). `REJECTED_NESTED_PRIMITIVES` refusals apply under
+  the explicit reject mode, not the default; `EFFECT_PRIMITIVES` and
+  `PURE_JIT_CALL_PRIMITIVES` classify callback and jit-call equations.
 
 ## modules.py
 - Module helpers for Equinox and Flax NNX roots (`EquinoxModuleTree`);

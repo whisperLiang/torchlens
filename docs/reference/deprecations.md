@@ -64,9 +64,9 @@ unless a narrower policy is later set.
 | `log_forward_pass` | `trace` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `validate_model_activations` | `validate(scope="forward")` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `validate_saved_activations` | `validate(scope="saved")` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `render_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `render_model_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `draw_model_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `render_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `render_model_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `draw_model_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `ModelHistory` | `Trace` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `get_model_structure` | structure trace accessors | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `show_model_structure` | structure trace accessors | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
@@ -85,6 +85,9 @@ unless a narrower policy is later set.
 | `draw_backward` | `torchlens.visualization.draw_backward` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `draw_combined` | `torchlens.visualization.draw_combined` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `load_intervention_spec` | `torchlens.io.load_intervention_spec` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `ModuleInputSnapshot` | `torchlens.types.ModuleInputSnapshot` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `PreHookEffect` | `torchlens.types.PreHookEffect` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `TensorInputObservation` | `torchlens.types.TensorInputObservation` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 
 ## Capture And Option Keyword Aliases
 
@@ -95,7 +98,7 @@ unless a narrower policy is later set.
 | `random_seed` | grouped capture options | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `save_grads` | backward capture options | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `vis_node_mode` | `node_style` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `vis_opt` | `vis_mode` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `vis_opt` | `view` (full alias chain `vis_opt` -> `vis_mode` -> `view`; the warning names `view`) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | flat `CaptureOptions` fields | grouped option fields | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `mark_layer_depths` | `capture.compute_input_output_distances` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `num_context_lines` | `capture.source_context_lines` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |

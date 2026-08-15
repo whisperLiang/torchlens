@@ -123,3 +123,38 @@ jobs:
         # get a justified, expiring suppression reviewed by the owner -- never
         # an inherited unexplained ignore.
         run: pip-audit
+
+  dep-audit-extras:
+    # The core job above audits only `-e .` — nothing audited the dev/test/
+    # tabular trees that actually pull transformers, timm, lightning,
+    # sentence-transformers, etc., so the job's verdict was narrower than
+    # "Dependency audit" implies (grind r5, b10 R83-2). Same pins, same
+    # no-suppression policy, extras tree.
+    name: Dependency audit (extras)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install dependencies with test extras
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.13.0+cpu" \
+            "pip-audit==2.10.1" \
+            "pip>=26.1" \
+            "setuptools>=83"
+          uv pip check
+
+      - name: Run pip-audit over the extras tree
+        run: pip-audit

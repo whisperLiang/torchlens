@@ -36,7 +36,7 @@ Conventions:
 Maintenance — checking coverage against the full op list::
 
     from torchlens.constants import ORIG_TORCH_FUNCS
-    from torchlens.flops import ZERO_FLOPS_OPS, ELEMENTWISE_FLOPS, SPECIALTY_HANDLERS
+    from torchlens.capture.flops import ZERO_FLOPS_OPS, ELEMENTWISE_FLOPS, SPECIALTY_HANDLERS
     all_names = {name for _, name in ORIG_TORCH_FUNCS}
     covered = ZERO_FLOPS_OPS | set(ELEMENTWISE_FLOPS) | set(SPECIALTY_HANDLERS)
     uncovered = all_names - covered

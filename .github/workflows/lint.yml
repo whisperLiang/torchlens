@@ -86,6 +86,50 @@ jobs:
         # real on every PR.
         run: pre-commit run gitleaks-full-tree --hook-stage manual --all-files --show-diff-on-failure
 
+  release-defenses:
+    # The major-bump defense layers, exercised in CI (grind r5, b10 R86-2 +
+    # R87-1): layer 3 (scripts/no_major_parser.py) previously had ZERO tests
+    # anywhere and failed only at release time, and the two breaking-marker
+    # hook layers ran in no CI job — the pre-commit job above runs only
+    # default-stage hooks, so their commit-msg/pre-push stages are never
+    # selected. This job (a) executes the parser tests under the SAME
+    # hash-locked python-semantic-release the release job uses, so a PSR API
+    # rename fails the PR that bumps the lock, and (b) scans the PR commit
+    # range for breaking markers so a --no-verify push or a hookless clone
+    # cannot land one with only the parser standing.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the hash-locked release stack + pytest
+        run: |
+          pip install --require-hashes --only-binary :all: \
+            -r .github/workflows/release-requirements.txt
+          pip install "pytest>=8,<10"
+
+      - name: Run the no-major parser behavioral tests
+        # The hard import first: if PSR ever fell out of the lock these
+        # tests would importorskip to green — the exact green-skip disease
+        # this repo keeps killing.
+        run: |
+          python -c "import semantic_release, git"
+          pytest tests/test_no_major_parser.py --noconftest -p no:cacheprovider -q
+
+      - name: Scan the PR commit range for breaking markers
+        if: github.event_name == 'pull_request'
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="$(git rev-parse HEAD)"
+          printf 'refs/heads/pr %s refs/heads/base %s\n' "$head" "$base" | \
+            python scripts/check_no_breaking_markers.py --pre-push
+
   # Workflow-file lint authority (schema, expressions, embedded shell via
   # shellcheck). Advisory CI job for now: whether it becomes a REQUIRED status
   # check is the queued R82-4 repo-settings decision (disputed-r2 b10/R82).
@@ -135,13 +179,17 @@ jobs:
           print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
           PY
 
-      - name: Golden-fingerprint and audit pin lockstep (pydot, pip-audit)
+      - name: Golden-fingerprint and audit pin lockstep (pydot, graphviz, pip-audit)
         # pydot is a DOT-render golden fingerprint KEY: the [test] extra is the
         # pin authority and the lean .[dev,tabular] legs repeat it inline, so a
         # bump that misses a site silently renders goldens with a different
         # pydot (grind r4, R83-6). pip-audit is dual-declared (dev extra +
         # quality.yml inline, where the inline copy is what actually runs);
-        # same drift shape, same gate (R83-7).
+        # same drift shape, same gate (R83-7). graphviz, the SIBLING python
+        # DOT emitter, is an equal fingerprint KEY (committed ENV-graphviz
+        # markers) but a CORE runtime dep that must stay a floor for users —
+        # so its authority is the marker itself, and the CI inline pins must
+        # equal it (grind r5, b10 R78-3).
         run: |
           python - <<'PY'
           import pathlib
@@ -169,5 +217,25 @@ jobs:
               f"extra authority {audit_authority}: the inline copy is the one "
               "that actually audits releases"
           )
-          print(f"pydot {pydot_authority} and pip-audit {audit_authority} in lockstep")
+
+          markers = {
+              path: pathlib.Path(path).read_text().strip()
+              for path in (
+                  "tests/golden/ENV-graphviz",
+                  "tests/godobject_oracle/goldens/ENV-graphviz",
+              )
+          }
+          marker_versions = set(markers.values())
+          assert len(marker_versions) == 1, f"ENV-graphviz markers disagree: {markers}"
+          gv_inline = set(re.findall(r"graphviz==([0-9][^\"'\s]*)", tests + canary))
+          assert gv_inline == marker_versions, (
+              f"inline graphviz pins {gv_inline} drifted from the committed "
+              f"ENV-graphviz markers {marker_versions}: the python DOT emitter "
+              "is a golden fingerprint KEY — a free resolution moves the byte "
+              "families off-canonical on the enforcing row (b10 R78-3)"
+          )
+          print(
+              f"pydot {pydot_authority}, graphviz {marker_versions}, and "
+              f"pip-audit {audit_authority} in lockstep"
+          )
           PY
