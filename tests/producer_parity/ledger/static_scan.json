@@ -2892,7 +2892,7 @@
   "field": "source_trace",
   "file": "torchlens/data_classes/layer.py",
   "has_default": false,
-  "sites": 7,
+  "sites": 6,
   "via_getattr": false
  },
  {
@@ -6684,7 +6684,7 @@
   "field": "modules",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 15,
+  "sites": 17,
   "via_getattr": false
  },
  {

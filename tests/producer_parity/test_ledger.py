@@ -293,15 +293,17 @@ def _finish_ledger_refresh(refreshed: list[bool], generator: str) -> None:
         Test identity for the PROVENANCE record.
     """
 
-    if not any(refreshed):
-        return
-    from _oracle_env import write_provenance
+    # The skip sits INSIDE the branch (not behind an early return) so the
+    # skip-audit scanner (tests/test_skip_audit.py) sees its conditional
+    # ancestor: this is a refresh-mode skip, never a dead test.
+    if any(refreshed):
+        from _oracle_env import write_provenance
 
-    write_provenance(_LEDGER_DIR, generator, _REFRESH_ENV, require_update_reason(_REFRESH_ENV))
-    pytest.skip(
-        f"{sum(refreshed)} ledger artifact(s) refreshed under {_REFRESH_ENV}; review the "
-        "diff and rerun without the flag to verify"
-    )
+        write_provenance(_LEDGER_DIR, generator, _REFRESH_ENV, require_update_reason(_REFRESH_ENV))
+        pytest.skip(
+            f"{sum(refreshed)} ledger artifact(s) refreshed under {_REFRESH_ENV}; review the "
+            "diff and rerun without the flag to verify"
+        )
 
 
 # heavy, not smoke (r3settle2 budget lint): the full static re-scan of
