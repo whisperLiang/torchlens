@@ -630,6 +630,22 @@ class TestTraceGC:
         assert "weakly" in str(fast_excinfo.value)
 
     @pytest.mark.smoke
+    def test_cleanup_drops_the_receptive_field_solution_cache(self):
+        """cleanup() must evict the rf solution cache, its only eviction path (R33).
+
+        ``_receptive_field_solution`` (~54 MB on a resnet18 trace) lives
+        outside MODEL_LOG_FIELD_ORDER, so the husking loop skipped it and the
+        cache survived cleanup() with no eviction path at all.
+        """
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        trace.__dict__["_receptive_field_solution"] = object()
+        trace.cleanup()
+        assert "_receptive_field_solution" not in trace.__dict__, (
+            "cleanup() left the receptive-field solution cache pinned"
+        )
+
+    @pytest.mark.smoke
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 

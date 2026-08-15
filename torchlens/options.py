@@ -919,7 +919,12 @@ class CaptureOptions:
     compute_input_output_distances:
         Whether input/output graph distances are computed.
     detach_saved_activations:
-        Whether saved tensors are detached from autograd.
+        Whether saved tensors are detached from autograd. The default
+        ``False`` keeps saved activations graph-connected, which retains the
+        captured autograd graph alongside the payloads: measured ~1.48x the
+        saved-payload bytes live on a resnet18 capture, vs ~1.01x with
+        ``True``. Pass ``True`` for forward-only analysis when that
+        multiplier matters (R33).
     recurrence_detection:
         Whether repeated graph patterns are detected during postprocess.
     intervention_ready:
