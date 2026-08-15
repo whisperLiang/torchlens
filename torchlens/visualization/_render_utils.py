@@ -224,15 +224,34 @@ def run_bounded_subprocess(
 
     stdin = subprocess.PIPE if input is not None else None
     pipe = subprocess.PIPE if capture_output else None
-    proc = subprocess.Popen(
-        cmd,
-        stdin=stdin,
-        stdout=pipe,
-        stderr=pipe,
-        cwd=cwd,
-        text=text,
-        start_new_session=_HAS_PROCESS_GROUPS,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=stdin,
+            stdout=pipe,
+            stderr=pipe,
+            cwd=cwd,
+            text=text,
+            start_new_session=_HAS_PROCESS_GROUPS,
+        )
+    except FileNotFoundError as exc:
+        # The single most common cold-user viz failure: the Graphviz BINARY is
+        # not installed (the python 'graphviz' package alone does not ship it).
+        # Without this, draw() escaped as a raw "FileNotFoundError: ... 'dot'"
+        # naming neither Graphviz nor TorchLens nor the remedy (R65).
+        from ._render_common import GraphvizRenderError
+
+        executable = cmd[0] if cmd else "dot"
+        raise GraphvizRenderError(
+            f"Graphviz executable {executable!r} was not found on PATH, so TorchLens "
+            "cannot render the graph.",
+            remedy=(
+                "install the Graphviz system package (e.g. 'apt install graphviz' on "
+                "Debian/Ubuntu, 'brew install graphviz' on macOS) -- the python "
+                "'graphviz' package alone does not provide the binary"
+            ),
+            executable=str(executable),
+        ) from exc
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:

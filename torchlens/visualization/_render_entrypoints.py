@@ -325,7 +325,7 @@ def render_combined_graph(
         raise PayloadUnavailableError(
             "Must have all layers logged in order to render the graph",
             code="layers_not_logged",
-            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
+            remedy="re-capture with tl.trace(model, x) (default exhaustive capture) before drawing",
         )
     pass_filter = _normalize_backward_pass_filter(bwd)
 

@@ -131,7 +131,34 @@ class ReplayPreconditionError(TorchLensInterventionError):
 
 
 class UntrustedCallableError(ReplayPreconditionError):
-    """Raised when a loaded spec requests an untrusted custom callable import."""
+    """Raised when a loaded spec requests an untrusted custom callable import.
+
+    Unlike catalog errors that derive their message from fields, this security
+    refusal carries BOTH long-form prose and structured ``fields`` (stable
+    ``code`` plus the denied ``module`` / ``import_path`` subject), so callers
+    on this boundary can build the recommended
+    ``allowed_custom_callable_modules`` allowlist without parsing message
+    text (R65).
+    """
+
+    def __init__(self, *args: object, **fields: object) -> None:
+        """Initialize with prose, named fields, or both.
+
+        Parameters
+        ----------
+        *args:
+            Positional message arguments.
+        **fields:
+            Structured payload retained on ``fields``.
+        """
+
+        if args and fields:
+            # The root TorchLensError constructor natively supports prose plus
+            # payload; bypass the catalog XOR narrowing for this boundary.
+            message = ", ".join(str(arg) for arg in args)
+            InterventionError.__init__(self, message, **fields)  # type: ignore[arg-type]
+            return
+        super().__init__(*args, **fields)
 
 
 class OpaqueCallableInExecutableSaveError(ConfigurationError, ValueError):

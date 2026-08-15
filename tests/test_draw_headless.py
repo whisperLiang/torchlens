@@ -73,3 +73,39 @@ def test_view_rendered_file_silent_in_notebook(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.smoke
+def test_missing_graphviz_binary_refuses_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing Graphviz binary names Graphviz and the install remedy (R65).
+
+    Fail-before: ``Trace.draw()`` escaped as raw ``FileNotFoundError: [Errno 2]
+    No such file or directory: 'dot'`` -- 0/4 rubric points.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens.visualization._render_common import GraphvizRenderError
+
+    log = tl.trace(nn.Linear(3, 2), torch.ones(1, 3))
+    monkeypatch.setenv("PATH", "/nonexistent")
+    with pytest.raises(GraphvizRenderError, match="apt install graphviz"):
+        log.draw(vis_save_only=True)
+
+
+@pytest.mark.smoke
+def test_vis_mode_refuses_typed_on_forward_draw() -> None:
+    """The flagship draw option validates typed like its backward sibling (R65)."""
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens._errors import InvalidArgumentError
+
+    log = tl.trace(nn.Linear(3, 2), torch.ones(1, 3))
+    with pytest.raises(InvalidArgumentError, match="rolled") as exc_info:
+        log.draw(vis_mode="bogus", vis_save_only=True)
+    assert exc_info.value.fields["code"] == "visualization_mode_invalid"

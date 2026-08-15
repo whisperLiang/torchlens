@@ -277,7 +277,9 @@ def resolve_function_registry_key(
                 raise UntrustedCallableError(
                     "Refusing to resolve bundle-supplied callable "
                     f"{key.import_path} ({unsafe_callable_reason(internal_builtin)}); "
-                    "it is not a pure forward/tensor op and can execute side effects."
+                    "it is not a pure forward/tensor op and can execute side effects.",
+                    code="custom_callable_not_pure",
+                    import_path=key.import_path,
                 )
             return internal_builtin
         if key.namespace in _fixed_roots:
@@ -306,7 +308,9 @@ def resolve_function_registry_key(
                 raise UntrustedCallableError(
                     "Refusing to resolve bundle-supplied callable "
                     f"{key.namespace}.{key.qualname} ({unsafe_callable_reason(resolved)}); "
-                    "it is not a pure forward/tensor op and can execute side effects."
+                    "it is not a pure forward/tensor op and can execute side effects.",
+                    code="custom_callable_not_pure",
+                    import_path=f"{key.namespace}.{key.qualname}",
                 )
             return resolved
         if key.namespace == "custom":
@@ -390,11 +394,14 @@ def resolve_function_registry_key(
 
                 if _matches(resolved_module, _DENIED_MODULES):
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable from "
-                        f"dangerous module {resolved_module!r}; process / OS / "
-                        "serialization / import / dynamic-library modules are DENIED "
-                        "even under trust_custom_callables or an explicit module "
-                        "allowlist. Trust never authorizes importing these modules."
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} from dangerous module {resolved_module!r}; "
+                        "process / OS / serialization / import / dynamic-library modules "
+                        "are DENIED even under trust_custom_callables or an explicit "
+                        "module allowlist. Trust never authorizes importing these modules.",
+                        code="custom_callable_module_denied",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
                 # STRUCTURAL close of the denylist-completeness class (r31): DENY any
                 # STANDARD-LIBRARY / BUILTIN module (keyed on the resolved real
@@ -405,26 +412,41 @@ def resolve_function_registry_key(
                 # user packages are carved out inside the detector.
                 if is_denied_stdlib_or_builtin_module(resolved_module):
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable from "
-                        f"standard-library / builtin module {resolved_module!r}; stdlib "
-                        "and builtin modules are DENIED even under trust_custom_callables "
-                        "or an explicit module allowlist. Trust authorizes running a "
-                        "user recipe, never importing a stdlib/builtin module."
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} from standard-library / builtin module "
+                        f"{resolved_module!r}; stdlib and builtin modules are DENIED even "
+                        "under trust_custom_callables or an explicit module allowlist. "
+                        "Trust authorizes running a user recipe, never importing a "
+                        "stdlib/builtin module.",
+                        code="custom_callable_module_denied",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
                 if allowed_custom_callable_modules is not None:
                     if resolved_module not in allowed_custom_callable_modules:
                         raise UntrustedCallableError(
                             "Refusing to resolve bundle-supplied custom callable "
-                            f"from module {resolved_module!r}; it is not in "
-                            "allowed_custom_callable_modules. Resolving a foreign "
-                            "callable can execute arbitrary code."
+                            f"{key.import_path!r} from module {resolved_module!r}; it is "
+                            "not in allowed_custom_callable_modules. Resolving a foreign "
+                            "callable can execute arbitrary code.",
+                            code="custom_callable_module_not_allowlisted",
+                            module=resolved_module,
+                            import_path=key.import_path,
                         )
                 elif not trust_custom_callables:
+                    # Names the denied import (R65): with several custom callables in
+                    # one spec, the user cannot build the recommended
+                    # allowed_custom_callable_modules allowlist without knowing WHICH
+                    # module was denied here.
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable because "
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} (module {resolved_module!r}) because "
                         "importing/resolving it can execute arbitrary code. Pass "
-                        "trust_custom_callables=True only for a trusted spec, or "
-                        "supply allowed_custom_callable_modules."
+                        "trust_custom_callables=True only for a trusted spec, or supply "
+                        f"allowed_custom_callable_modules={{{resolved_module!r}}}.",
+                        code="custom_callable_untrusted",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
 
             if path_claims_torchlens:
@@ -461,7 +483,10 @@ def resolve_function_registry_key(
                             f"onto a non-torchlens callable ({unsafe_callable_reason(obj)}) "
                             "that is not a pure forward/tensor op; only pure "
                             "forward/tensor ops resolve from a torchlens-path walk onto "
-                            "a foreign callable, even under trust."
+                            "a foreign callable, even under trust.",
+                            code="custom_callable_not_pure",
+                            module=module_name,
+                            import_path=f"{module_name}:{qualname}",
                         )
                 elif not is_inert_first_party_callable(obj):
                     # Defense-in-depth (mirrors the r21 bundle-unpickler narrowing):
@@ -476,7 +501,10 @@ def resolve_function_registry_key(
                         f"{module_name}:{qualname}; only public, side-effect-free "
                         "first-party callables (facet recipes / transforms / "
                         "intervention helpers) are auto-trusted. Private utilities "
-                        "and I/O / import / exec callables are denied."
+                        "and I/O / import / exec callables are denied.",
+                        code="custom_callable_private_first_party",
+                        module=module_name,
+                        import_path=f"{module_name}:{qualname}",
                     )
             else:
                 # Genuinely foreign import path: gate BEFORE importing, because the
@@ -505,7 +533,10 @@ def resolve_function_registry_key(
                         "Refusing bundle-supplied custom callable whose RESOLVED real "
                         f"module {resolved_owner!r} is a dangerous (process / OS / "
                         "serialization / import) module reached by attribute-walking a "
-                        f"dotted qualname off {module_name!r}; denied even under trust."
+                        f"dotted qualname off {module_name!r}; denied even under trust.",
+                        code="custom_callable_module_denied",
+                        module=resolved_owner,
+                        import_path=f"{module_name}:{qualname}",
                     )
                 # STRUCTURAL stdlib/builtin close (r31): a dotted qualname can walk OFF
                 # a permitted user/torch module and land on a stdlib/builtin callable
@@ -517,7 +548,10 @@ def resolve_function_registry_key(
                         "Refusing bundle-supplied custom callable whose RESOLVED real "
                         f"module {resolved_owner!r} is a standard-library / builtin "
                         f"module reached by attribute-walking a dotted qualname off "
-                        f"{module_name!r}; denied even under trust."
+                        f"{module_name!r}; denied even under trust.",
+                        code="custom_callable_module_denied",
+                        module=resolved_owner,
+                        import_path=f"{module_name}:{qualname}",
                     )
                 # PURITY PARITY (secE-1 / secE-r36-1). A callable that walked BACK into
                 # the torch namespace via a dotted qualname -- OR a module-less C tensor
