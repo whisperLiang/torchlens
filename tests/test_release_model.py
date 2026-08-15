@@ -118,3 +118,80 @@ def test_releasing_one_model_preserves_an_independent_prepared_model() -> None:
     assert [op.layer_label for op in repeated_second.layer_list] == [
         op.layer_label for op in initial_second.layer_list
     ]
+
+
+class _HeldActivationModel(nn.Module):
+    """Model whose plain attributes hold torch function references."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.act = torch.nn.functional.relu  # whichever epoch is live NOW
+        self.extra_acts = [torch.sigmoid, torch.nn.functional.gelu]
+        self.act_table = {"tanh": torch.tanh}
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.act(self.lin(x))
+        for act in self.extra_acts:
+            y = act(y)
+        return self.act_table["tanh"](y)
+
+
+@pytest.mark.smoke
+def test_release_normalizes_prewrap_function_attrs_for_torch_save() -> None:
+    """grind-r4 b8 R56 direction 1: a model built BEFORE wrapping holds
+    pristine originals; pickled WHILE wrapped, every held ref fails pickle's
+    by-reference identity check. release_model must normalize them."""
+
+    from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+    unwrap_torch()
+    try:
+        model = _HeldActivationModel()  # holds pristine originals
+    finally:
+        wrap_torch()
+
+    tl.trace(model, torch.randn(1, 4))  # wrappers now live at the public names
+    tl.release_model(model)
+    torch.save(model, io.BytesIO())
+    pickle.dumps(model)
+    # The normalized refs still compute the same functions.
+    out = model(torch.randn(1, 4))
+    assert out.shape == (1, 4)
+
+
+@pytest.mark.smoke
+def test_release_normalizes_wrapper_attrs_after_unwrap() -> None:
+    """R56 direction 2: a model built WHILE wrapped holds epoch wrappers;
+    after unwrap_torch() those refs fail pickle. release_model normalizes
+    them back to the pristine originals."""
+
+    from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+    wrap_torch()
+    model = _HeldActivationModel()  # holds wrap-epoch wrappers
+    tl.trace(model, torch.randn(1, 4))
+    unwrap_torch()
+    try:
+        tl.release_model(model)
+        torch.save(model, io.BytesIO())
+        pickle.dumps(model)
+        assert model.act is torch.nn.functional.relu, (
+            "the held wrapper was not normalized to the pristine original"
+        )
+    finally:
+        wrap_torch()
+
+
+@pytest.mark.smoke
+def test_release_leaves_foreign_and_user_callables_alone() -> None:
+    """The normalization is ledger-fenced: user callables never swap."""
+
+    def user_act(x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x)
+
+    model = _HeldActivationModel()
+    model.custom = user_act
+    tl.trace(model, torch.randn(1, 4))
+    tl.release_model(model)
+    assert model.custom is user_act
