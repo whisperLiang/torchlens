@@ -118,7 +118,14 @@ def pytest_configure(config: pytest.Config) -> None:
     # early test captured" (wrappers stay installed until explicit unwrap),
     # which every full-suite run already implies. Skipped for collect-only
     # sessions, which never run a capture.
-    if not config.option.collectonly:
+    # ...and skipped when a golden-update flag is armed: in-process golden
+    # families guard that generation starts on UNWRAPPED torch (SF-53), and
+    # this warmup capture would trip that guard before any test ran, making
+    # the documented single-family regen recipe impossible to execute.
+    golden_update_armed = any(
+        key.startswith("TORCHLENS_UPDATE_") and value == "1" for key, value in os.environ.items()
+    )
+    if not config.option.collectonly and not golden_update_armed:
         import warnings as _warnings
 
         import torchlens as _tl

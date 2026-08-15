@@ -2032,10 +2032,17 @@ def _setup_subgraphs_recurse(
 
     if call_depth < len(parent_graph_list) - 1:  # we haven't gotten to the bottom yet, keep going.
         if _module_subtree_payload_empty(
-            module_edge_dict, module_submodule_dict, subgraph_name_w_pass, vis_mode
+            module_edge_dict, module_submodule_dict, parent_graph_list[-1], vis_mode
         ):
-            # r-b6 R19-3: the whole subtree is empty — opening the cluster
-            # here would emit a labeled dashed husk (see helper docstring).
+            # r-b6 R19-3 (+ r5 empty-duplicate residual): each queued path
+            # exists ONLY to nest its FINAL element -- the intermediates were
+            # already emitted by earlier queue entries. Checking the current
+            # node's subtree (which includes its own already-emitted payload)
+            # never pruned these descents, so every hidden-member path
+            # re-opened its ancestor clusters as empty duplicate
+            # ``subgraph cluster_X { }`` blocks, one per member consulted.
+            # Prune on the path TAIL instead: an empty tail contributes
+            # nothing, so nothing may be opened.
             return 0
         with starting_subgraph.subgraph(name=cluster_name) as s:
             return _setup_subgraphs_recurse(
