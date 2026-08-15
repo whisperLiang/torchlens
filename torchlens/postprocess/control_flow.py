@@ -884,6 +884,7 @@ def _fix_buffer_layers(self: Trace) -> None:
     _finish_deferred_buffer_removals(self, deferred_buffer_removals)
 
     _repropagate_ancestry_after_buffer_wiring(self, rewired_buffers)
+    _repropagate_descendants_after_buffer_wiring(self, rewired_buffers)
 
     # And relabel the buffer ops.
 
@@ -961,6 +962,61 @@ def _repropagate_ancestry_after_buffer_wiring(self: Trace, rewired: list[str]) -
             layer.root_ancestors = input_ancestors | internal_source_ancestors
 
 
+def _repropagate_descendants_after_buffer_wiring(self: Trace, rewired: list[str]) -> None:
+    """Re-derive output reach over the ANCESTOR CONE of every buffer rewired at step 6.
+
+    The child-direction mirror of :func:`_repropagate_ancestry_after_buffer_wiring`
+    (which repairs only the four parent-direction sets). ``output_descendants`` /
+    ``has_output_descendant`` are computed once at step 2 from the PRE-MERGE edges,
+    and the step-6 duplicate merge transfers the removed duplicate's children onto
+    the survivor without ever reconciling the survivor's child-direction reach.
+    Merged duplicates reaching DIFFERENT output sets (a multi-output model whose
+    value-identical buffer reads feed different outputs, or a dead-ending survivor
+    merged with an output-reaching duplicate) therefore shipped stale
+    ``output_descendants`` on the survivor and on every ancestor of it -- which the
+    ``ancestry_closure`` invariant (a genuine recompute from the final edges)
+    correctly FAILS on an honest capture.
+
+    The re-derivation is exactly the closure the invariant checks, applied to the
+    affected cone only (raw-label space, reverse topological order):
+
+    * ``output_descendants`` = ``{self}`` if an output, else the union over children;
+    * ``has_output_descendant`` mirrors the set's emptiness.
+
+    The cone walks PARENT edges from every rewired/survivor buffer: only ancestors
+    of a node whose child edges changed can have gained (or lost) output reach.
+    Children outside the cone kept their step-2 values, which are still the closure
+    of their (unchanged) child edges, so reading them is sound.
+
+    Distance fields are deliberately untouched, matching the parent-direction
+    repair's scope: step 4 populates them only under the non-default
+    ``mark_layer_depths`` and the distance closure check skips ``None`` values.
+    """
+
+    if not rewired:
+        return
+    raw_dict = self._raw_graph_ws.raw_layer_dict
+    cone: set[str] = set()
+    frontier = [label for label in rewired if label in raw_dict]
+    while frontier:
+        current = frontier.pop()
+        if current in cone:
+            continue
+        cone.add(current)
+        frontier.extend(parent for parent in raw_dict[current].parents if parent in raw_dict)
+
+    for raw_label in reversed(self._raw_graph_ws.raw_layer_labels_list):
+        if raw_label not in cone:
+            continue
+        layer = raw_dict[raw_label]
+        children = [raw_dict[child] for child in layer.children if child in raw_dict]
+        output_descendants: set[str] = {raw_label} if layer.is_output else set()
+        for child in children:
+            output_descendants.update(child.output_descendants)
+        layer.output_descendants = output_descendants
+        layer.has_output_descendant = bool(output_descendants)
+
+
 def _buffer_source_value_matches(source: Op, buffer_layer: Op) -> bool:
     """Return whether a buffer-version source op output equals the full buffer value."""
 
@@ -1017,6 +1073,15 @@ def _merge_buffer_entries(
                     self[child_layer].parent_arg_positions[arg_type][arg_label] = (
                         source_buffer._label_raw
                     )
+
+    # The survivor now owns the removed duplicate's child edges, so it reaches
+    # every output the duplicate reached: merge the child-direction ancestry
+    # WITH the edges (symmetric with the parent-direction ancestry handling).
+    # The survivor's own ANCESTORS are reconciled afterwards by
+    # _repropagate_descendants_after_buffer_wiring's cone re-derivation.
+    if buffer_to_remove.has_output_descendant:
+        source_buffer.output_descendants.update(buffer_to_remove.output_descendants)
+        source_buffer.has_output_descendant = True
 
     for parent_layer in buffer_to_remove.parents:
         if parent_layer not in source_buffer.parents:

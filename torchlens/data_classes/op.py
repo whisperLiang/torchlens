@@ -2990,18 +2990,36 @@ class Op:
 
         return tuple(self._slot("_edge_uses") or ())
 
-    @property
-    def siblings(self) -> list[str]:
-        """Layers sharing at least one parent (excluding output layers)."""
-        ml = self.source_trace
-        if ml is None:
-            return []
+    def _own_label_spellings(self) -> set[str]:
+        """Return every spelling a relation list may use for THIS op.
+
+        On a finished trace a parent's ``children`` (or a child's ``parents``)
+        may record this op under either its bare ``layer_label`` or -- on a
+        multi-pass layer -- its pass-qualified ``layer_label:pass`` spelling,
+        so self-exclusion in ``siblings``/``co_parents`` must cover BOTH
+        (excluding only the bare spelling appended the op itself on every
+        multi-pass layer). Unfinished traces still use raw labels.
+        """
+
         _finished = self._tracing_finished or (
             self.source_trace is not None and self.source_trace._tracing_finished
         )
-        my_label = self.layer_label if _finished else self._label_raw
+        if not _finished:
+            return {self._label_raw}
+        spellings = {self.layer_label}
+        pass_index = self.pass_index
+        if isinstance(pass_index, int):
+            spellings.add(f"{self.layer_label}:{pass_index}")
+        return spellings
+
+    @property
+    def siblings(self) -> list[str]:
+        """Layers sharing at least one parent (excluding output layers and this op)."""
+        ml = self.source_trace
+        if ml is None:
+            return []
         siblings = []
-        seen = {my_label}
+        seen = self._own_label_spellings()
         for parent_label in self.parents:
             try:
                 parent = ml[parent_label]
@@ -3031,16 +3049,12 @@ class Op:
 
     @property
     def co_parents(self) -> list[str]:
-        """Layers sharing at least one child (excluding output layers)."""
+        """Layers sharing at least one child (excluding output layers and this op)."""
         ml = self.source_trace
         if ml is None:
             return []
-        _finished = self._tracing_finished or (
-            self.source_trace is not None and self.source_trace._tracing_finished
-        )
-        my_label = self.layer_label if _finished else self._label_raw
         spouses = []
-        seen = {my_label}
+        seen = self._own_label_spellings()
         for child_label in self.children:
             try:
                 child = ml[child_label]

@@ -1608,9 +1608,14 @@ class Layer:
 
     @property
     def siblings(self) -> list[str]:
-        """Union of sibling layers (no-pass labels) across all ops."""
+        """Union of sibling layers (no-pass labels) across all ops.
+
+        Every pass spelling of THIS layer is excluded: another pass of the same
+        layer is a per-op sibling, but at the aggregate level it folds back to
+        this layer's own no-pass label, and a layer is never its own sibling.
+        """
         result = []
-        seen = set()
+        seen = {self.layer_label}
         for pass_log in self.ops.values():
             for label in pass_log.siblings:
                 no_pass = self.source_trace[label].layer_label
@@ -1621,20 +1626,24 @@ class Layer:
 
     @property
     def has_siblings(self) -> bool:
-        """Return whether any pass has sibling layers.
+        """Return whether this layer has any sibling layers besides itself.
 
         Returns
         -------
         bool
-            ``True`` when at least one pass has graph siblings.
+            ``True`` when the aggregate ``siblings`` view is non-empty.
         """
-        return any(p.has_siblings for p in self.ops.values())
+        return len(self.siblings) > 0
 
     @property
     def co_parents(self) -> list[str]:
-        """Union of spouse layers (no-pass labels) across all ops."""
+        """Union of spouse layers (no-pass labels) across all ops.
+
+        Every pass spelling of THIS layer is excluded, mirroring ``siblings``:
+        a layer is never its own co-parent at the aggregate level.
+        """
         result = []
-        seen = set()
+        seen = {self.layer_label}
         for pass_log in self.ops.values():
             for label in pass_log.co_parents:
                 no_pass = self.source_trace[label].layer_label
@@ -1645,14 +1654,14 @@ class Layer:
 
     @property
     def has_co_parents(self) -> bool:
-        """Return whether any pass has co-parent layers.
+        """Return whether this layer has any co-parent layers besides itself.
 
         Returns
         -------
         bool
-            ``True`` when at least one pass has graph co-parents.
+            ``True`` when the aggregate ``co_parents`` view is non-empty.
         """
-        return any(p.has_co_parents for p in self.ops.values())
+        return len(self.co_parents) > 0
 
     @property
     def is_in_conditional(self) -> bool:

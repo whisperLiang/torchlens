@@ -19,6 +19,7 @@ __all__ = (
     "_check_special_layer_lists",
     "_check_capture_edge_survival",
     "_check_graph_topology",
+    "_check_sibling_relation_derivation",
 )
 
 
@@ -550,3 +551,88 @@ def _check_graph_topology(ml: Trace) -> None:
                 name,
                 f"Layer {label}: out_versions_by_child has keys not in children: {extra}",
             )
+
+    _check_sibling_relation_derivation(ml, name, label_aliases)
+
+
+def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any) -> None:
+    """Derive ``siblings``/``co_parents`` from the edge tables and compare.
+
+    The round-26 W3-3 removal deleted the ``has_siblings``/``has_co_parents``
+    tautologies (property vs its own length) but left the WHOLE relation family
+    with no tripwire at all: an ``Op.siblings`` implementation drifting from its
+    documented semantics -- exactly the pass-spelling self-inclusion bug, where
+    every multi-pass op listed ITSELF as its own sibling -- shipped through
+    repr, ``to_pandas()``, and every consumer with zero invariant hits.
+
+    This is an independent re-derivation of the documented spec from the
+    ``parents``/``children`` edge tables (a second implementation, not a call
+    into the property's own internals):
+
+    * ``siblings(op)``   = the deduplicated non-output resolvable children of
+      ``op``'s parents, minus every spelling of ``op`` itself (bare
+      ``layer_label`` AND pass-qualified ``layer_label:pass``);
+    * ``co_parents(op)`` = the mirror over ``op``'s children's parents;
+    * ``has_siblings``/``has_co_parents`` mirror their lists' emptiness;
+    * unresolvable edge labels are skipped (they are ``graph_topology``'s
+      bidirectionality finding, and the properties skip them identically);
+    * orphan-registry records resolve through ``ml.orphans``, as the
+      properties document.
+
+    Cost is bounded by the same parent-children/child-parents walk the
+    properties themselves perform (O(sum of neighbour degrees) with memoized
+    label resolution), run once per trace.
+    """
+
+    resolution_cache: dict[str, Any] = {}
+
+    def resolve_relation(entry_label: str) -> Any | None:
+        """Resolve one edge label the way the sibling properties do, memoized."""
+
+        if entry_label in resolution_cache:
+            return resolution_cache[entry_label]
+        try:
+            record = ml[entry_label]
+        except (KeyError, ValueError):
+            try:
+                record = ml.orphans[entry_label]
+            except KeyError:
+                record = None
+        resolution_cache[entry_label] = record
+        return record
+
+    for lpl in ml.layer_list:
+        own_spellings = label_aliases(lpl, lpl.layer_label)
+        report_label = max(own_spellings, key=len)
+        for relation, forward_field, reverse_field in (
+            ("siblings", "parents", "children"),
+            ("co_parents", "children", "parents"),
+        ):
+            expected: set[str] = set()
+            for neighbour_label in getattr(lpl, forward_field):
+                neighbour = resolve_relation(neighbour_label)
+                if neighbour is None:
+                    continue
+                for candidate_label in getattr(neighbour, reverse_field):
+                    if candidate_label in own_spellings or candidate_label in expected:
+                        continue
+                    candidate = resolve_relation(candidate_label)
+                    if candidate is None or candidate.is_output:
+                        continue
+                    expected.add(candidate_label)
+            stored = list(getattr(lpl, relation))
+            if len(stored) != len(set(stored)) or set(stored) != expected:
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {report_label}: {relation}={sorted(stored)} != the "
+                    f"derivation from the recorded {forward_field}/{reverse_field} "
+                    f"edges {sorted(expected)} (an op is never its own "
+                    f"{relation.rstrip('s').replace('_', '-')})",
+                )
+            has_flag = f"has_{relation}"
+            if bool(getattr(lpl, has_flag)) != bool(expected):
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {report_label}: {has_flag}={getattr(lpl, has_flag)} but the "
+                    f"derived {relation} list has {len(expected)} members",
+                )
