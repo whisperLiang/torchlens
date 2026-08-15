@@ -2872,6 +2872,26 @@ def test_v2_zero_frontier_falls_back_to_visible_full_plan(
         trace.cleanup()
 
 
+def test_strict_mode_never_keys_on_ambient_pytest_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strictness is opt-in via the torchlens-owned knob only (r3 R47-A).
+
+    ``PYTEST_CURRENT_TEST`` is set by ANY pytest — a downstream project's
+    suite rendering a TorchLens graph must never inherit our hard-assert
+    mode from a knob it never set. RED before the fix: the ambient marker
+    alone armed strict mode.
+    """
+
+    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "downstream::test_case (call)")
+    monkeypatch.delenv("TORCHLENS_COLLAPSE_STRICT", raising=False)
+    assert strict_collapse_checks_enabled() is False
+    monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", "1")
+    assert strict_collapse_checks_enabled() is True
+
+
 def test_incremental_count_mismatch_warns_once_outside_strict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

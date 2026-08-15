@@ -821,6 +821,18 @@ class MissingFacetError(KeyError):
         self.reason = reason
         super().__init__(self._message())
 
+    def __reduce__(self) -> tuple[type[MissingFacetError], tuple[FacetKey, AbsenceReason]]:
+        """Rebuild from ``(name, reason)`` — the strict constructor's signature.
+
+        The default ``Exception.__reduce__`` replays ``cls(*args)`` with the
+        one formatted message string, so pickle and deepcopy both died with
+        ``TypeError: missing 1 required positional argument: 'reason'``,
+        losing the structured payload (r3 b1-fable R64 finding 2 — the same
+        defect class as the cfdce77b strict-constructor sweep).
+        """
+
+        return (type(self), (self.name, self.reason))
+
     def _message(self) -> str:
         """Return an actionable missing-facet message."""
 

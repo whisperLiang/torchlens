@@ -1088,9 +1088,13 @@ def _apply_axis_map(
                 # (the historical rank-changing path dropped the slice offset
                 # under an exact claim; disputed-r2 b6/R20-2).
                 step, start = int(edge[0]), int(edge[1])
+                # A strided slice keeps only every ``step``-th parent index:
+                # the true support has holes, so the axis must disclose
+                # ``sparse_possible`` (round-3 b6-fable R20-1).
                 local = _Mapped(
                     _Affine(Fraction(step), Fraction(start)),
                     _Affine(Fraction(step), Fraction(start)),
+                    sparse=abs(step) != 1,
                 )
                 geometry = _compose(geometry, local)
                 if kind == "pointwise":

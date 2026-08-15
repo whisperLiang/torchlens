@@ -197,3 +197,92 @@ def test_fold_honesty_dot_sources_differ(tmp_path) -> None:
         "structurally different models rendered byte-identical DOT; the fold "
         "is hiding a non-uniform member"
     )
+
+
+class _WiringBlock(nn.Module):
+    """Same class / params / ordered op types; wiring differs by flag.
+
+    ``x + y`` (residual skip) and ``y + y`` (self-add) share the op-type
+    sequence ``linear -> relu -> add`` and every parameter count — only the
+    DAG edges differ (r3 b6-opus R19-1).
+    """
+
+    def __init__(self, self_add: bool) -> None:
+        super().__init__()
+        self.lin = nn.Linear(8, 8)
+        self.self_add = self_add
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = torch.relu(self.lin(x))
+        return (y + y) if self.self_add else (x + y)
+
+
+class _WiringStack(nn.Module):
+    """Repeated wiring blocks that auto-collapse folds into one ellipsis."""
+
+    def __init__(self, self_add_flags: list[bool]) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([_WiringBlock(flag) for flag in self_add_flags])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def test_run_fold_rejects_wiring_different_members() -> None:
+    """A self-add block cannot hide inside a "+N more" of residual blocks.
+
+    r3 b6-opus R19-1 red pin: op types, kwargs, and every parameter count
+    match across the run — only the intra-module dataflow (skip edge vs
+    self-edge) tells the members apart. RED before the wiring component.
+    """
+
+    trace = tl.trace(_WiringStack([False, False, True]), torch.randn(2, 8))
+    assert not _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_run_fold_accepts_wiring_uniform_members() -> None:
+    """Identically-wired members keep folding (no over-rejection).
+
+    Exterior sources are numbered per member, so consecutive residual
+    blocks fed by DIFFERENT upstream blocks still compare equal.
+    """
+
+    trace = tl.trace(_WiringStack([False, False, False]), torch.randn(2, 8))
+    assert _run_fold_members_uniform(trace, ("blocks.0", "blocks.1", "blocks.2"))
+
+
+def test_fold_honesty_topology_dot_differs(tmp_path) -> None:
+    """Two models differing only in hidden-member WIRING never render
+    byte-identical DOT.
+
+    The r3 b6-opus probe verbatim: 24 blocks, model A all residual
+    ``x + y``, model B blocks 1..23 self-add ``y + y``. Same class, same
+    params, same ordered op types; the underlying edge sets differ. Before
+    the wiring component both folded behind ``+23 more`` and the DOT was
+    byte-identical at auto and max.
+    """
+
+    for mode in ("auto", "max"):
+        sources: list[str] = []
+        for variant in ("residual", "self_add"):
+            flags = [False] * 24
+            if variant == "self_add":
+                flags = [False] + [True] * 23
+            torch.manual_seed(0)
+            trace = tl.trace(_WiringStack(flags), torch.randn(2, 8))
+            outpath = tmp_path / f"topo_{mode}_{variant}"
+            trace.draw(
+                collapse=mode,
+                fold_repeats=True,
+                vis_save_only=True,
+                vis_fileformat="dot",
+                vis_outpath=str(outpath),
+            )
+            sources.append((tmp_path / f"topo_{mode}_{variant}.dot").read_text())
+        assert sources[0] != sources[1], (
+            f"collapse={mode!r}: two models with different hidden wiring "
+            "rendered byte-identical DOT; the fold fingerprint is "
+            "topology-blind"
+        )

@@ -877,3 +877,31 @@ def test_facets_public_module_all_is_curated() -> None:
     assert "FacetView" in facets_mod.__all__
     assert "Any" not in facets_mod.__all__
     assert "dataclass" not in facets_mod.__all__
+
+
+def test_missing_facet_error_survives_pickle_and_deepcopy() -> None:
+    """Pickle/deepcopy keep the structured (name, reason) payload (R64 class).
+
+    The default ``Exception.__reduce__`` replayed ``cls(message)`` against
+    the strict two-argument constructor, so both boundaries raised
+    ``TypeError: ... missing 1 required positional argument: 'reason'`` and
+    the structured payload was lost. RED before the ``__reduce__`` fix.
+    """
+
+    import copy
+    import pickle
+
+    from torchlens.semantic.facets import AbsenceReason
+
+    error = MissingFacetError(
+        "q",
+        AbsenceReason(
+            status="payload_not_saved",
+            save_hint="save=tl.in_module('attn')",
+            detail="attention payloads were not retained",
+        ),
+    )
+    for clone in (pickle.loads(pickle.dumps(error)), copy.deepcopy(error)):
+        assert clone.name == error.name
+        assert clone.reason == error.reason
+        assert str(clone) == str(error)

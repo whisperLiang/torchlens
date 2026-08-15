@@ -12,11 +12,14 @@ Three enforcement layers, all static file scans (smoke-tier, no capture):
    be referenced in ``torchlens/`` beyond its declaration. A dead member goes
    red (the ``merged_export_unsupported`` precedent: declaration-only for a
    full release while refused surfaces raised different codes).
-2. PROVOCATION RATCHET — every vocabulary code must be referenced by some test,
-   except the frozen ``UNPROVOKED_BASELINE`` (historical debt: may only
-   SHRINK — delete entries as provocations land; adding is a conscious public
-   decision) and the reasoned ``ENV_GATED_ALLOWLIST`` (codes whose provocation
-   needs hardware/topology this suite cannot assume).
+2. PROVOCATION RATCHET — every vocabulary code must be referenced in the
+   EXECUTABLE text of some test (docstring mentions, comments, and
+   ``.value == "literal"`` self-identity spelling asserts never count —
+   r3 b6-opus R25-2), except the frozen ``UNPROVOKED_BASELINE`` (historical
+   debt: may only SHRINK — delete entries as provocations land; adding is a
+   conscious public decision) and the reasoned ``ENV_GATED_ALLOWLIST``
+   (codes whose provocation needs hardware/topology this suite cannot
+   assume).
 3. Anti-vacuity + red-capability — the scanners must find real universes and
    must be demonstrably able to fail.
 
@@ -27,6 +30,7 @@ or a reasoned allowlist/baseline entry is consciously added in the same change.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -181,24 +185,79 @@ def _vocabulary() -> dict[str, str]:
     return universe
 
 
-def _test_referenced_codes(universe: set[str]) -> set[str]:
-    """Return every code referenced by some test, by literal or member name.
+# A self-identity SPELLING assert: an enum member's ``.value`` compared against
+# a string LITERAL (either direction). It proves the code's spelling, never that
+# any surface RAISES it, so it must not count as provocation (r3 b6-opus R25-2:
+# two live codes' only test appearance was exactly this form, and a code swap
+# failed zero tests). A genuine result assert (``exc.fields["code"] ==
+# RunnableErrorCode.X.value`` or ``mismatch.code.value == "literal"``) compares
+# a RESULT — not a member-vs-literal pair — and still counts.
+_SELF_IDENTITY_ASSERT = re.compile(
+    r"ErrorCode\.[A-Z0-9_]+\.value\s*==\s*['\"][a-z0-9_]+['\"]"
+    r"|['\"][a-z0-9_]+['\"]\s*==\s*[\w.]*ErrorCode\.[A-Z0-9_]+\.value"
+)
 
-    A code counts as provoked when its string literal appears in a test file,
-    or its enum MEMBER name does (tests that assert via
-    ``RunnableErrorCode.X.value`` never spell the literal).
+
+def _executable_test_text(text: str) -> str:
+    """Reduce one test file to the text that can actually provoke a code.
+
+    Masks (line-blanks) three channels that mention codes without any test
+    ever asserting they are raised: docstrings, ``#`` comments, and
+    self-identity spelling asserts (:data:`_SELF_IDENTITY_ASSERT`). What
+    survives is executable code — provocation tables, ``pytest.raises``
+    bodies, and result assertions all remain countable.
+    """
+
+    lines = text.splitlines()
+    masked: set[int] = set()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # unparseable file: keep full text (conservative)
+        return text
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and node.end_lineno is not None
+        ):
+            masked.update(range(node.lineno - 1, node.end_lineno))
+    reduced: list[str] = []
+    for index, line in enumerate(lines):
+        if index in masked:
+            reduced.append("")
+            continue
+        code_part = line.split("#", 1)[0]
+        if _SELF_IDENTITY_ASSERT.search(code_part):
+            reduced.append("")
+            continue
+        reduced.append(code_part)
+    return "\n".join(reduced)
+
+
+def _test_referenced_codes(universe: set[str]) -> set[str]:
+    """Return every code provoked by some test, by literal or member name.
+
+    A code counts as provoked when its string literal or its enum MEMBER name
+    (tests that assert via ``RunnableErrorCode.X.value`` never spell the
+    literal) appears in the EXECUTABLE text of a test file
+    (:func:`_executable_test_text`): docstring mentions, comments, and
+    self-identity spelling asserts never count.
     """
 
     member_names = {member.value: member.name for member in RunnableErrorCode}
     member_names.update({member.value: member.name for member in MergedErrorCode})
 
     referenced: set[str] = set()
-    texts = _iter_python_texts(_TESTS_ROOT)
+    texts = [
+        (path, _executable_test_text(text))
+        for path, text in _iter_python_texts(_TESTS_ROOT)
+        if path.name != Path(__file__).name
+        # this gate's own tables never count as provocation
+    ]
     for code in universe:
         needle_name = member_names.get(code)
-        for path, text in texts:
-            if path.name == Path(__file__).name:
-                continue  # this gate's own tables never count as provocation
+        for _path, text in texts:
             if code in text or (needle_name is not None and needle_name in text):
                 referenced.add(code)
                 break
@@ -274,3 +333,39 @@ def test_provocation_scanner_is_red_capable() -> None:
     probe = "zz_probe_code_that_no_test_references_zz"
     referenced = _test_referenced_codes({probe})
     assert referenced == set()
+
+
+def test_spelling_asserts_and_prose_never_count_as_provocation() -> None:
+    """The three non-provoking mention channels are masked (r3 b6-opus R25-2).
+
+    A code whose ONLY test appearance is a ``.value == "literal"``
+    self-identity assert, a docstring mention, or a comment passed the old
+    text scan, so a swap of that code failed zero tests. The executable-text
+    reducer must blank all three while keeping genuine provocation forms.
+    """
+
+    sample = "\n".join(
+        [
+            '"""Docstring mentioning zz_doc_code_zz never provokes."""',
+            "",
+            "",
+            "def test_spelling() -> None:",
+            '    """Mentions zz_doc_code_zz again."""',
+            "",
+            '    assert RunnableErrorCode.ZZ_SPELLED_CODE_ZZ.value == "zz_spelled_code_zz"',
+            "    observed = None  # comment mentioning zz_comment_code_zz",
+            '    assert exc.fields["code"] == RunnableErrorCode.ZZ_RESULT_CODE_ZZ.value',
+            '    assert mismatch.code.value == "zz_result_literal_zz"',
+            '    cases = [("zz_table_code_zz", ValueError)]',
+        ]
+    )
+    reduced = _executable_test_text(sample)
+    # Masked channels: docstrings, comments, self-identity spelling asserts.
+    assert "zz_doc_code_zz" not in reduced
+    assert "zz_comment_code_zz" not in reduced
+    assert "ZZ_SPELLED_CODE_ZZ" not in reduced
+    assert "zz_spelled_code_zz" not in reduced
+    # Countable channels: result asserts (both spellings) and tables survive.
+    assert "ZZ_RESULT_CODE_ZZ" in reduced
+    assert "zz_result_literal_zz" in reduced
+    assert "zz_table_code_zz" in reduced

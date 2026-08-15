@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import warnings
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
@@ -38,6 +39,27 @@ def _reap_finished_viewers() -> None:
     """Drop (and thereby reap) every viewer child that has already exited."""
 
     _VIEWER_PROCS[:] = [proc for proc in _VIEWER_PROCS if proc.poll() is None]
+
+
+def _wait_and_release_viewer(proc: subprocess.Popen[bytes]) -> None:
+    """Reap one viewer child the moment it exits.
+
+    r3 b6-opus/sol R40 (carried MED): the registry alone reaped only on the
+    NEXT launch, so one ``draw()`` that opened a viewer left one zombie for
+    the life of the process — and retaining the ``Popen`` handle disabled
+    even the finalizer's opportunistic reap. A per-viewer daemon waiter
+    holds no lock, blocks nothing, and removes the handle as soon as the
+    child is waited on; the launch-time sweep stays as a belt for waiter
+    threads that die abnormally.
+    """
+
+    try:
+        proc.wait()
+    finally:
+        try:
+            _VIEWER_PROCS.remove(proc)
+        except ValueError:  # pragma: no cover - already swept at next launch
+            pass
 
 
 def _is_interactive_display_context() -> bool:
@@ -104,14 +126,21 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
             # and detach the viewer into its own session so a later render
             # timeout kill cannot orphan its grandchildren onto us.
             _reap_finished_viewers()
-            _VIEWER_PROCS.append(
-                subprocess.Popen(
-                    [opener, filepath],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
+            viewer = subprocess.Popen(
+                [opener, filepath],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
+            _VIEWER_PROCS.append(viewer)
+            # Asynchronous wait so the FINAL viewer of a process is reaped
+            # too, not only viewers followed by another launch (r3 R40).
+            threading.Thread(
+                target=_wait_and_release_viewer,
+                args=(viewer,),
+                name="torchlens-viewer-reaper",
+                daemon=True,
+            ).start()
         return True
     except (FileNotFoundError, OSError):
         return False  # no viewer available; silently skip
