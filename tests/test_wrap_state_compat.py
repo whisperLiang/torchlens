@@ -811,8 +811,11 @@ def test_import_callback_unwrap_race_cannot_corrupt_shim_state(
 _MEMBERSHIP_TABLE_REVIEWED: dict[tuple[str, str], str] = {
     ("torch._library.utils", "_RANDOM_FUNCTIONS"): (
         "is_impure()/fx DCE authority; eagerly imported with torch so keys are "
-        "pre-wrap originals, and fx records the protocol-supplied ORIGINAL as "
-        "the node target (verified), so membership answers stay correct."
+        "pre-wrap originals. fx records the protocol-supplied ORIGINAL as the "
+        "node target for C functions (verified); directly-called Python "
+        "functionals recorded the WRAPPER until the Tracer.trace identity shim "
+        "began remapping targets through the ledger (grind-r5 b8 R56), so "
+        "membership answers stay correct on both paths."
     ),
     ("torch.masked.maskedtensor.reductions", "TORCH_REDUCE_MAP"): (
         "MaskedTensor reduction dispatch; eagerly imported with torch, and the "
@@ -926,6 +929,14 @@ def test_import_time_membership_tables_holding_wrapped_originals_are_reviewed() 
     rests on eager import (keys are pre-wrap originals) and protocol-supplied
     original operands; a torch release that adds a NEW such table, or an
     unreviewed family, must fail here for review rather than flip silently.
+
+    BOUNDARY (grind-r5 b8 R56): this census scans ``torch*`` modules only.
+    The eager-import rationale structurally cannot hold for EXTENSION
+    libraries (the official "Extending torch" ``@implements`` pattern)
+    imported after the first capture — their handler tables key on wrappers
+    and silently miss dispatch. That user-side class is a declared residual
+    in ``docs/migration/scoped_detached_patching.md`` ("Honest boundaries"),
+    not something an in-repo census can gate.
     """
 
     _ensure_wrapped()

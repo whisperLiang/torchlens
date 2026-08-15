@@ -59,6 +59,7 @@ import importlib.util
 import inspect
 import sys
 import threading
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -270,6 +271,7 @@ def install_identity_shims() -> None:
         _install_expanded_weights_shims(records)
         _install_resolve_name_shim(records)
         _install_jit_overload_shim(records)
+        _install_fx_trace_shim(records)
     except Exception:
         _restore(records)
         raise
@@ -632,6 +634,63 @@ def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
     setattr(get_overloads_shim, _SHIM_MARKER, True)
     module._get_overloads = get_overloads_shim
     records.append((module, "_get_overloads", orig_get_overloads))
+
+
+# ---------------------------------------------------------------------------
+# Site 6: torch.fx.Tracer.trace -- wrapper-free graph artifacts
+# ---------------------------------------------------------------------------
+
+
+def _install_fx_trace_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim ``torch.fx.Tracer.trace`` so node targets record ORIGINALS.
+
+    fx's patcher reads Python functionals from the live namespace at trace
+    time, so a ``symbolic_trace`` run during the wrapped epoch baked the
+    torchlens WRAPPER object into ``call_function`` node targets (C functions
+    correctly record the protocol-supplied original). Any identity/equality-
+    keyed fx pass (``node.target == F.relu`` -- the standard torch.ao
+    quantization matcher shape) then silently mismatched once wrappers were
+    removed or in any other process, and the GraphModule artifact permanently
+    embedded a torchlens object (grind-r5 b8 R56). Remapping targets through
+    the wrapper ledger after the trace hands every consumer the same graph an
+    unwrapped eager trace produces; subclassed tracers (HF-style) funnel
+    through the same base method.
+    """
+
+    fx_module = getattr(torch, "fx", None)
+    tracer_cls = getattr(fx_module, "Tracer", None)
+    if tracer_cls is None:
+        return
+    orig_trace = vars(tracer_cls).get("trace")
+    if orig_trace is None or _is_shimmed(orig_trace):
+        return
+
+    @functools.wraps(orig_trace)
+    def trace_shim(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Trace, then re-point wrapper-valued call_function targets."""
+        graph = orig_trace(self, *args, **kwargs)
+        try:
+            for node in graph.nodes:
+                if node.op == "call_function":
+                    original = _state._decorated_to_orig.get(id(node.target))
+                    if original is not None:
+                        node.target = original
+        except Exception as error:
+            from ..._errors import TorchLensWarning
+
+            warnings.warn(
+                "TorchLens could not normalize torchlens wrappers out of an "
+                f"fx graph's node targets ({type(error).__name__}: {error}); "
+                "the traced GraphModule may embed wrapper objects that break "
+                "identity-keyed fx passes after unwrap_torch().",
+                TorchLensWarning,
+                stacklevel=2,
+            )
+        return graph
+
+    setattr(trace_shim, _SHIM_MARKER, True)
+    tracer_cls.trace = trace_shim
+    records.append((tracer_cls, "trace", orig_trace))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:
