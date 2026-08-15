@@ -49,6 +49,8 @@ add names to the top-level `torchlens` namespace:
 | `backend_capability_conformance` | Advertised backend capability has no implementation | Disable it or register its implementation |
 | `backend_error` | Base-class default of the backend registry family — never raised directly; every live registry refusal carries one of the specific `backend_*`/`unknown_backend` codes below | Branch on the specific backend codes; this row exists only so an unmigrated future subclass is still documented |
 | `backend_mismatch` | Explicit backend cannot handle the model or inputs | Select the owning backend |
+| `bundle_load_failed` | Bundle load failed on torch/codec drift or a missing dependency | Inspect the chained cause; restore the missing dependency or re-save |
+| `bundle_metadata_integrity_refused` | Bundle metadata pickle is denylisted, corrupt, or truncated | Treat as tamper/corruption; re-save from the source capture |
 | `backend_payload_unsupported` | Backend payload has no supported codec | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
 | `backend_unsupported` | Backend does not implement the requested capability | Omit it or use another backend |
@@ -67,6 +69,7 @@ add names to the top-level `torchlens` namespace:
 | `custom_callable_import_path_missing` | Custom function registry key lacks its `import_path` reference (`InvalidArgumentError`) | Supply `import_path='module:qualname'` on the registry key entry |
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
+| `cleanup_during_active_capture` | `Trace.cleanup()` on the trace a live capture window is writing into | Let the capture or backward projection finish first |
 | `child_process_capture_unsupported` | Capture attempted from a non-deliberate child process | Capture from the owning process, or an initialized SPMD rank |
 | `unwrap_during_active_capture` | `unwrap_torch()` called while a capture is running | Finish or abort the capture before unwrapping |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
@@ -118,8 +121,11 @@ add names to the top-level `torchlens` namespace:
 | `link_format_invalid` | Source-link format is unknown | Choose `terminal`, `html`, or `text` |
 | `jax_unroll_range_invalid` | JAX unroll limit is below one | Pass a positive integer |
 | `jax_unroll_type_invalid` | JAX unroll limit is not an integer | Pass a positive integer |
+| `load_path_symlink_rejected` | A load path (bundle, manifest, metadata, or blobs) is a symlink | Pass the resolved real path |
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
+| `manifest_not_json_object` | Manifest root parses but is not a JSON object | Re-save the artifact; do not hand-edit the manifest |
+| `manifest_unreadable` | Manifest is missing, unreadable, or over the parse limits | Check the path and file integrity; re-save if truncated |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
 | `max_pairs_invalid` | Bundle diff pair budget is below one | Pass `max_pairs >= 1` or None |
 | `max_predicate_failures_invalid` | Predicate failure budget is not a non-negative int | Pass a non-negative integer |
@@ -152,6 +158,7 @@ add names to the top-level `torchlens` namespace:
 | `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
 | `recording_multipass_not_convertible` | `to_trace()` on a multi-pass Recording | Record one pass per Recording |
 | `reentrant_trace` | `tl.trace` was started while another capture was active (`ReentrantTraceError`, `RuntimeError` lineage) | Finish the outer capture before starting another |
+| `release_during_active_capture` | `tl.release_model()` while a capture is still active | Let the capture finish before releasing the model |
 | `recording_option_duplicate` | Recording option was specified twice | Pass each option exactly once |
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
