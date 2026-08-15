@@ -43,7 +43,8 @@ jobs:
             -e ".[dev,tabular]" \
             torch \
             torchvision \
-            "pydot==4.0.1"
+            "pydot==4.0.1" \
+            "graphviz==0.21"
 
       - name: Validate installed environment
         run: |

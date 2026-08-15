@@ -125,7 +125,8 @@ jobs:
             "torch==${TORCH_VERSION}" \
             "torchvision==${TORCHVISION_VERSION}" \
             "${NUMPY_SPEC}" \
-            "pydot==4.0.1"
+            "pydot==4.0.1" \
+            "graphviz==0.21"
 
       - name: Arm randomized test ordering (order-isolation gate row)
         if: matrix.randomized == '1'

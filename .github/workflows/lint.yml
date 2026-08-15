@@ -135,13 +135,17 @@ jobs:
           print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
           PY
 
-      - name: Golden-fingerprint and audit pin lockstep (pydot, pip-audit)
+      - name: Golden-fingerprint and audit pin lockstep (pydot, graphviz, pip-audit)
         # pydot is a DOT-render golden fingerprint KEY: the [test] extra is the
         # pin authority and the lean .[dev,tabular] legs repeat it inline, so a
         # bump that misses a site silently renders goldens with a different
         # pydot (grind r4, R83-6). pip-audit is dual-declared (dev extra +
         # quality.yml inline, where the inline copy is what actually runs);
-        # same drift shape, same gate (R83-7).
+        # same drift shape, same gate (R83-7). graphviz, the SIBLING python
+        # DOT emitter, is an equal fingerprint KEY (committed ENV-graphviz
+        # markers) but a CORE runtime dep that must stay a floor for users —
+        # so its authority is the marker itself, and the CI inline pins must
+        # equal it (grind r5, b10 R78-3).
         run: |
           python - <<'PY'
           import pathlib
@@ -169,5 +173,25 @@ jobs:
               f"extra authority {audit_authority}: the inline copy is the one "
               "that actually audits releases"
           )
-          print(f"pydot {pydot_authority} and pip-audit {audit_authority} in lockstep")
+
+          markers = {
+              path: pathlib.Path(path).read_text().strip()
+              for path in (
+                  "tests/golden/ENV-graphviz",
+                  "tests/godobject_oracle/goldens/ENV-graphviz",
+              )
+          }
+          marker_versions = set(markers.values())
+          assert len(marker_versions) == 1, f"ENV-graphviz markers disagree: {markers}"
+          gv_inline = set(re.findall(r"graphviz==([0-9][^\"'\s]*)", tests + canary))
+          assert gv_inline == marker_versions, (
+              f"inline graphviz pins {gv_inline} drifted from the committed "
+              f"ENV-graphviz markers {marker_versions}: the python DOT emitter "
+              "is a golden fingerprint KEY — a free resolution moves the byte "
+              "families off-canonical on the enforcing row (b10 R78-3)"
+          )
+          print(
+              f"pydot {pydot_authority}, graphviz {marker_versions}, and "
+              f"pip-audit {audit_authority} in lockstep"
+          )
           PY
