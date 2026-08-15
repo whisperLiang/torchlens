@@ -2508,24 +2508,35 @@ def force_eager_stance_scope() -> Iterator[bool]:
     if not HAS_SET_STANCE or "torch._dynamo" not in sys.modules:
         yield False
         return
+    # R07: the stance is APPLIED by ``set_stance(...)`` construction (its
+    # function-call form), so ``__exit__`` ownership must be established in the
+    # same guarded region as the construction -- binding the handle outside the
+    # try left an async-interrupt window between the bind and the try entry
+    # that stranded the process-wide stance. Once ``stance`` is bound, every
+    # exit path (including BaseException) reaches the ``finally``. The one
+    # residual is an interrupt INSIDE ``set_stance`` after it applied but
+    # before it returned: without a public prior-stance getter that window is
+    # unrecoverable and is accepted as atomic-API exposure.
+    stance = None
     try:
-        stance = torch.compiler.set_stance("force_eager")
-    except Exception:
-        mark_torch_capability_missing(
-            "HAS_SET_STANCE",
-            "torch.compiler.set_stance failed to engage; compiled callables keep the "
-            "pre-2.6 bypass-and-disclose capture path",
-        )
-        yield False
-        return
-    try:
-        # Constructing ``set_stance`` already applied the stance (its
-        # function-call form); ``__enter__`` is a no-op today and keeps this
-        # robust if a future torch moves application into the context protocol.
+        try:
+            stance = torch.compiler.set_stance("force_eager")
+        except Exception:
+            mark_torch_capability_missing(
+                "HAS_SET_STANCE",
+                "torch.compiler.set_stance failed to engage; compiled callables keep the "
+                "pre-2.6 bypass-and-disclose capture path",
+            )
+            yield False
+            return
+        # Constructing ``set_stance`` already applied the stance;
+        # ``__enter__`` is a no-op today and keeps this robust if a future
+        # torch moves application into the context protocol.
         stance.__enter__()
         yield True
     finally:
-        stance.__exit__(None, None, None)
+        if stance is not None:
+            stance.__exit__(None, None, None)
 
 
 def get_dynamo_compile_counters(*, force_probe: bool = False) -> Any | None:
