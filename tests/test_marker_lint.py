@@ -50,23 +50,49 @@ def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequ
     )
 
 
-def test_smoke_tests_stay_within_duration_budget(request: pytest.FixtureRequest) -> None:
-    """Every smoke-marked test must finish within the tier's duration budget.
+def test_bounded_tier_tests_stay_within_duration_budget(
+    request: pytest.FixtureRequest,
+) -> None:
+    """Every bounded-tier test must finish within its tier's duration budget.
 
-    The budget value lives in ``tests/conftest.py`` (``SMOKE_DURATION_BUDGET_SECONDS``)
-    and rides along on each recorded offender -- a bare ``conftest`` import here would
-    be ambiguous during full-suite collection (nested conftests share the module name).
+    The budget is TWO-directional (R41): ``smoke`` AND unmarked tests are held
+    to the 5s partition boundary, ``heavy`` to its 20s ceiling (all
+    load-scaled); ``slow``/``rare``/``serial`` are exempt by contract. Budget
+    values live in ``tests/conftest.py`` and ride along on each recorded
+    offender -- a bare ``conftest`` import here would be ambiguous during
+    full-suite collection (nested conftests share the module name).
+
+    This test also asserts its own LAST-position ordering: the offender
+    ledger only covers tests that already ran, so a reordering regression
+    (e.g. a plugin shuffling after the conftest reorder) must go red here
+    rather than silently truncating coverage.
     """
 
-    offenders = getattr(request.session, "_tl_smoke_budget_offenders", [])
+    items = request.session.items
+    own_index = next(
+        index for index, item in enumerate(items) if item.nodeid == request.node.nodeid
+    )
+    stragglers = [
+        item.nodeid for item in items[own_index + 1 :] if "test_marker_lint" not in item.nodeid
+    ]
+    assert not stragglers, (
+        "the duration-budget lint no longer runs last -- its offender ledger "
+        f"would miss these later tests: {stragglers[:5]}"
+    )
+
+    guidance = {
+        "smoke": "re-tier to `heavy` (5-20s) or `slow` (>20s), or make it faster",
+        "unmarked": "unmarked tests run in the mid backstop: add `heavy`/`slow` "
+        "consciously, or make it faster",
+        "heavy": "re-tier to `slow` (>20s) or make it faster",
+    }
+    offenders = getattr(request.session, "_tl_duration_budget_offenders", [])
     lines = [
-        f"{nodeid}: {duration:.1f}s (budget {budget:.0f}s)"
-        for nodeid, duration, budget in offenders
+        f"{nodeid} [{tier}]: {duration:.1f}s (budget {budget:.0f}s) -- {guidance[tier]}"
+        for nodeid, tier, duration, budget in offenders
     ]
     assert not offenders, (
-        "Smoke-marked tests exceeded the smoke-tier duration budget this session. "
-        "Re-tier them (move to `heavy` for 5-20s, `slow` for >20s) or make them "
-        "faster:\n  " + "\n  ".join(lines)
+        "Tests exceeded their tier duration budget this session:\n  " + "\n  ".join(lines)
     )
 
 
@@ -76,21 +102,25 @@ def test_smoke_parametrized_families_stay_within_duration_budget(
     """Resolved smoke parameter families must stay within the aggregate budget.
 
     A family of N parameters legitimately costs ~N single-test durations (the
-    selector matrix is 278 cells; the surface oracle is 6 goldens), so the
-    aggregate budget is the enforcement budget (not the 5s partition
-    threshold), load-scaled like the per-test hook. Tightening both to 5s is
-    the tracked follow-up that lands with the >5s re-tier sweep.
+    selector matrix is 278 cells), so each family's budget scales with its
+    resolved cell count: load_factor * max(2x the per-test budget, the
+    per-cell allowance x n_cells). Genuine per-cell ballooning still trips.
     """
 
-    budget = getattr(request.session, "_tl_smoke_family_budget_value", 30.0)
-    family_totals = getattr(request.session, "_tl_smoke_family_durations", {})
+    family_stats = getattr(request.session, "_tl_smoke_family_stats", {})
+    family_budgets = getattr(request.session, "_tl_smoke_family_budgets", {})
     offenders = [
-        (family, duration) for family, duration in family_totals.items() if duration > budget
+        (family, total, count, family_budgets.get(family, 0.0))
+        for family, (total, count) in family_stats.items()
+        if total > family_budgets.get(family, float("inf"))
     ]
-    lines = [f"{family}: {duration:.1f}s (budget {budget:.0f}s)" for family, duration in offenders]
+    lines = [
+        f"{family}: {total:.1f}s over {count} cells (budget {budget:.0f}s)"
+        for family, total, count, budget in offenders
+    ]
     assert not offenders, (
-        "Smoke parametrized families exceeded the aggregate smoke-tier budget. "
-        "Split or re-tier the family:\n  " + "\n  ".join(lines)
+        "Smoke parametrized families exceeded their aggregate cell-scaled "
+        "budget. Split or re-tier the family:\n  " + "\n  ".join(lines)
     )
 
 

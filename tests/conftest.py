@@ -120,12 +120,20 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = prior
 
 
-# Smoke-tier duration budget (see tests/test_marker_lint.py). The PARTITION
-# threshold for moving a test out of smoke is 5s measured; the ENFORCEMENT
-# budget stays 15s (3x, load-scaled below) until every >5s smoke test is
-# re-tiered — several measured 9.5-14.2s quiet on 2026-08-13. Lower to 5.0
-# once that re-tier lands (tracked follow-up).
-SMOKE_DURATION_BUDGET_SECONDS = 15.0
+# Tier duration budgets (see tests/test_marker_lint.py). The r3 re-tier
+# landed, so the ENFORCEMENT budget now equals the documented PARTITION
+# boundary: smoke and unmarked tests must fit 5s, heavy 20s (each load-scaled
+# below; the pre-r3 15s crutch let a 59s test stay smoke under sprint load —
+# R41 b2 opus+sol). `slow` is unbounded, `rare` only runs on request, and
+# `serial` is exempt by definition (its wall time under parallel load is
+# exactly what the marker declares unrepresentative).
+SMOKE_DURATION_BUDGET_SECONDS = 5.0
+HEAVY_DURATION_BUDGET_SECONDS = 20.0
+#: Per-parametrize-cell allowance for a smoke family's aggregate budget: a
+#: family's cost legitimately scales with its cell count (278 selector cells
+#: at ~57ms/cell), so the aggregate bar is max(2x the per-test budget,
+#: this allowance x n_cells) — genuine per-cell ballooning still trips it.
+SMOKE_FAMILY_PER_CELL_SECONDS = 0.1
 
 
 def _smoke_budget_load_factor() -> float:
@@ -145,16 +153,46 @@ def _smoke_budget_load_factor() -> float:
     return min(max(load_per_cpu, 1.0), 4.0)
 
 
+def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
+    """Return the duration-budget tier for one collected item.
+
+    The budget is TWO-directional (b2 3-lab: 217-391 unmarked files escaped
+    it entirely): an UNMARKED test runs in the mid/phase backstops, so it is
+    held to the same 5s partition boundary as smoke — if it needs longer it
+    needs a `heavy` or `slow` marker, chosen consciously.
+
+    Parameters
+    ----------
+    item:
+        Collected test item.
+
+    Returns
+    -------
+    tuple[str, float] | None
+        ``(tier_name, base_budget_seconds)``, or ``None`` for exempt tiers
+        (``slow`` unbounded, ``rare`` request-only, ``serial`` load-exempt).
+    """
+
+    for exempt in ("slow", "rare", "serial"):
+        if item.get_closest_marker(exempt) is not None:
+            return None
+    if item.get_closest_marker("heavy") is not None:
+        return ("heavy", HEAVY_DURATION_BUDGET_SECONDS)
+    if item.get_closest_marker("smoke") is not None:
+        return ("smoke", SMOKE_DURATION_BUDGET_SECONDS)
+    return ("unmarked", SMOKE_DURATION_BUDGET_SECONDS)
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[Any]
 ) -> Iterator[pytest.TestReport]:
-    """Record smoke tests whose full setup/call/teardown exceeds the budget.
+    """Record tests whose full setup/call/teardown exceeds their tier budget.
 
-    A static lint cannot know runtimes, so an UNMARKED slow test landing in the
-    smoke tier is only catchable at runtime. Offenders are stashed on the session
-    and asserted empty by ``test_marker_lint.py`` (ordered last), which names each
-    offender and its measured duration.
+    A static lint cannot know runtimes, so a slow test landing in a bounded
+    tier is only catchable at runtime. Offenders are stashed on the session
+    and asserted empty by ``test_marker_lint.py`` (ordered last), which names
+    each offender, its tier, and its measured duration.
     """
 
     report = yield
@@ -163,30 +201,42 @@ def pytest_runtest_makereport(
         durations = {}
         item._tl_phase_durations = durations
     durations[report.when] = report.duration
-    if report.when == "teardown" and item.get_closest_marker("smoke") is not None:
-        total_duration = sum(durations.values())
+    if report.when != "teardown":
+        return report
+    total_duration = sum(durations.values())
+    load_factor = _smoke_budget_load_factor()
+    if item.get_closest_marker("smoke") is not None:
         family = getattr(item, "originalname", None) or item.name.split("[")[0]
-        family_totals = getattr(item.session, "_tl_smoke_family_durations", None)
-        if family_totals is None:
-            family_totals = {}
-            item.session._tl_smoke_family_durations = family_totals
+        family_stats = getattr(item.session, "_tl_smoke_family_stats", None)
+        if family_stats is None:
+            family_stats = {}
+            item.session._tl_smoke_family_stats = family_stats
         family_key = f"{item.path}::{family}"
-        family_totals[family_key] = family_totals.get(family_key, 0.0) + total_duration
-    else:
-        total_duration = 0.0
-    budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
+        family_total, family_count = family_stats.get(family_key, (0.0, 0))
+        family_total += total_duration
+        family_count += 1
+        family_stats[family_key] = (family_total, family_count)
+        family_budget = load_factor * max(
+            2.0 * SMOKE_DURATION_BUDGET_SECONDS,
+            SMOKE_FAMILY_PER_CELL_SECONDS * family_count,
+        )
+        family_budgets = getattr(item.session, "_tl_smoke_family_budgets", None)
+        if family_budgets is None:
+            family_budgets = {}
+            item.session._tl_smoke_family_budgets = family_budgets
+        family_budgets[family_key] = family_budget
+    tier_budget = _duration_budget_tier(item)
+    if tier_budget is None:
+        return report
+    tier, base_budget = tier_budget
+    budget = base_budget * load_factor
     item.session._tl_smoke_budget_value = budget
-    # A parametrized family's aggregate legitimately scales with its parameter
-    # count (the 278-cell selector matrix costs ~16s at 57ms/cell on a quiet
-    # box) — give aggregates 2x the per-test budget; genuine family ballooning
-    # still trips at that bar. Tightens with the 5s re-tier follow-up.
-    item.session._tl_smoke_family_budget_value = budget * 2.0
     if total_duration > budget:
-        offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
+        offenders = getattr(item.session, "_tl_duration_budget_offenders", None)
         if offenders is None:
             offenders = []
-            item.session._tl_smoke_budget_offenders = offenders
-        offenders.append((item.nodeid, total_duration, budget))
+            item.session._tl_duration_budget_offenders = offenders
+        offenders.append((item.nodeid, tier, total_duration, budget))
     return report
 
 
