@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 JUNCTION_FUNC_NAMES = frozenset({"__add__", "add", "cat", "concat", "concatenate"})
 
 
-def _resolve_relationship_op(*args: Any, **kwargs: Any) -> Op | None:
+def _resolve_relationship_op(*args: Any, **kwargs: Any) -> Op:
     """Late-bound proxy to ``auto_collapse._resolve_relationship_op``.
 
     Resolved at call time through the ``auto_collapse`` module namespace so
