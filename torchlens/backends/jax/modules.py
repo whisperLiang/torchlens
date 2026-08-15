@@ -237,35 +237,48 @@ def scoped_equinox_module_calls(tree: EquinoxModuleTree) -> Iterator[None]:
     import jax
 
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original module under a TorchLens named scope when known."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            with jax.named_scope(encode_module_scope(address)):
-                with jax.named_scope(encode_module_call_scope(address, call_index)):
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield; a BaseException
+    # escaping it used to strand every wrapper installed so far.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original module under a TorchLens named scope when known."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
                     return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                with jax.named_scope(encode_module_scope(address)):
+                    with jax.named_scope(encode_module_call_scope(address, call_index)):
+                        return __original(self, *args, **kwargs)
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 @contextmanager
@@ -286,35 +299,47 @@ def scoped_nnx_module_calls(tree: NnxModuleTree) -> Iterator[None]:
     import jax
 
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original NNX module under a TorchLens named scope when known."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            with jax.named_scope(encode_module_scope(address)):
-                with jax.named_scope(encode_module_call_scope(address, call_index)):
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): same install fence as
+    # :func:`scoped_equinox_module_calls`.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original NNX module under a TorchLens named scope when known."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
                     return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                with jax.named_scope(encode_module_scope(address)):
+                    with jax.named_scope(encode_module_call_scope(address, call_index)):
+                        return __original(self, *args, **kwargs)
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 def encode_module_scope(address: str) -> str:

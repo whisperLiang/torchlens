@@ -87,7 +87,14 @@ def _observer_function_ast() -> ast.FunctionDef:
 def _install_section_and_finally(
     function: ast.FunctionDef,
 ) -> tuple[list[ast.stmt], list[ast.stmt]]:
-    """Split the observer function into the install section and the restore ``finally``.
+    """Split the observer function into the install section and the restore body.
+
+    The observer's R07 shape (27a5c986) is pinned structurally here: the
+    install loops live in a fence ``try`` whose sole ``except BaseException``
+    arm calls the shared ``_restore_installed`` closure and bare-re-raises,
+    and the yield ``try`` unconditionally restores through that same closure
+    in its ``finally``. The per-registry restore handlers live in the closure
+    body.
 
     Parameters
     ----------
@@ -97,14 +104,38 @@ def _install_section_and_finally(
     Returns
     -------
     tuple[list[ast.stmt], list[ast.stmt]]
-        Statements before the top-level ``try`` and the ``finally`` block statements.
+        The install-fence ``try`` body and the ``_restore_installed`` body.
     """
 
-    for index, statement in enumerate(function.body):
-        if isinstance(statement, ast.Try):
-            assert statement.finalbody, "observer try lost its unconditional finally"
-            return function.body[:index], statement.finalbody
-    pytest.fail("_observe_invisible_host_escapes lost its top-level try/finally")
+    restore_def = next(
+        (
+            statement
+            for statement in function.body
+            if isinstance(statement, ast.FunctionDef) and statement.name == "_restore_installed"
+        ),
+        None,
+    )
+    assert restore_def is not None, "observer lost its shared _restore_installed closure"
+    tries = [statement for statement in function.body if isinstance(statement, ast.Try)]
+    assert len(tries) == 2, "observer lost its install-fence + yield try pair"
+    fence, yield_try = tries
+    assert len(fence.handlers) == 1 and not fence.finalbody, (
+        "install fence must be a single-handler try"
+    )
+    fence_handler = fence.handlers[0]
+    assert fence_handler.type is not None and ast.unparse(fence_handler.type) == "BaseException", (
+        "install fence must catch BaseException"
+    )
+    fence_actions = [ast.unparse(statement) for statement in fence_handler.body]
+    assert "_restore_installed()" in fence_actions, "install fence lost its unwind call"
+    assert any(
+        isinstance(statement, ast.Raise) and statement.exc is None
+        for statement in fence_handler.body
+    ), "install fence must bare-re-raise"
+    assert yield_try.finalbody, "observer yield try lost its unconditional finally"
+    finally_actions = [ast.unparse(statement) for statement in yield_try.finalbody]
+    assert "_restore_installed()" in finally_actions, "observer finally lost its restore call"
+    return fence.body, restore_def.body
 
 
 def _is_fail_closed_mark(statement: ast.stmt) -> bool:

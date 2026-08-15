@@ -458,10 +458,16 @@ class PaddleBackend:
         kwargs = {} if input_kwargs is None else dict(input_kwargs)
         prepared_model = prepare_model_once(model)
         prepare_model_session(trace, prepared_model, module_tree if use_object_module else None)
-        wrap_paddle(self)
-        self._label_source_tensors(trace, args, kwargs)
-        trace.capture_start_time = time.time()
+        # R07: the try owns the wrap call itself -- a raise anywhere between
+        # wrapper install and the forward (source labeling) used to strand the
+        # process-global Paddle wrappers because the unwrap-owning finally had
+        # not been entered yet. ``unwrap_paddle`` on a partially-installed (or
+        # empty) registry is safe, and the hook cleanup follows a completed
+        # ``prepare_model_session``.
         try:
+            wrap_paddle(self)
+            self._label_source_tensors(trace, args, kwargs)
+            trace.capture_start_time = time.time()
             halt_signal: HaltSignal | None = None
             try:
                 with _state.active_logging(trace):

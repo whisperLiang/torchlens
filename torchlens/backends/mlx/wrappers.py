@@ -37,6 +37,39 @@ class _MLXWrapperRegistry:
         if self._wrapped:
             self.unwrap()
         mx, nn = _import_mlx()
+        # R07 (the L4 unwind standard): the install loops mutate process-global
+        # MLX modules and classes; a BaseException escaping mid-install used to
+        # strand every wrapper already landed (nothing called ``unwrap`` because
+        # the capture-side ``finally`` had not been entered yet). ``unwrap``
+        # restores exactly the slots registered so far, so it is the unwind.
+        try:
+            self._wrap_installed(mx, nn, backend, module_tree)
+        except BaseException:
+            self.unwrap()
+            raise
+        self._wrapped = True
+
+    def _wrap_installed(
+        self,
+        mx: Any,
+        nn: Any,
+        backend: object,
+        module_tree: MLXModuleTree | None,
+    ) -> None:
+        """Run the wrapper install loops (fenced by :meth:`wrap`).
+
+        Parameters
+        ----------
+        mx:
+            Imported ``mlx.core`` module.
+        nn:
+            Imported ``mlx.nn`` module.
+        backend:
+            Active MLX backend that receives wrapper events.
+        module_tree:
+            Optional discovered MLX module tree.
+        """
+
         for name in (
             "add",
             "matmul",
@@ -97,7 +130,6 @@ class _MLXWrapperRegistry:
                     module_tree=module_tree,
                     module_instances=instances,
                 )
-        self._wrapped = True
 
     def unwrap(self) -> None:
         """Restore all original MLX callables.

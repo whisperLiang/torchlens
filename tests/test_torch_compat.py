@@ -608,3 +608,66 @@ def test_tf_runtime_support_is_feature_probed() -> None:
 
     unparseable_keras2 = SimpleNamespace(__version__="not-a-version")
     assert _tf_runtime_supported(old_tf, unparseable_keras2) is False
+
+
+class _RecordingStance:
+    """Stance handle recording enter/exit calls."""
+
+    def __init__(self) -> None:
+        self.enters = 0
+        self.exits = 0
+
+    def __enter__(self) -> _RecordingStance:
+        self.enters += 1
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.exits += 1
+
+
+def test_force_eager_stance_scope_exit_owned_with_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once ``set_stance`` returns, ``__exit__`` runs on every exit path (R07).
+
+    The stance is APPLIED by construction, so exit ownership must bind in the
+    same guarded region -- a BaseException delivered after the handle exists
+    (here: from the with-body) must still reach ``__exit__`` exactly once.
+    """
+
+    import torch._dynamo  # noqa: F401 - the scope requires Dynamo in sys.modules
+
+    handle = _RecordingStance()
+    monkeypatch.setattr(tc, "HAS_SET_STANCE", True)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda mode: handle)
+
+    class _Interrupt(KeyboardInterrupt):
+        pass
+
+    with pytest.raises(_Interrupt):
+        with tc.force_eager_stance_scope() as active:
+            assert active is True
+            raise _Interrupt("body interrupted")
+
+    assert handle.exits == 1
+
+
+def test_force_eager_stance_scope_construction_failure_degrades_without_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing ``set_stance`` construction yields ``False`` and calls no exit."""
+
+    import torch._dynamo  # noqa: F401 - the scope requires Dynamo in sys.modules
+
+    monkeypatch.setenv("TORCHLENS_SUPPRESS_TORCH_CAPABILITY_WARNINGS", "1")
+    monkeypatch.setattr(tc, "HAS_SET_STANCE", True)
+
+    def _refuse(mode: str) -> object:
+        raise ValueError("stance refused")
+
+    monkeypatch.setattr(torch.compiler, "set_stance", _refuse)
+
+    with tc.force_eager_stance_scope() as active:
+        assert active is False
+    # The capability flag degraded (monkeypatch restores it at teardown).
+    assert tc.HAS_SET_STANCE is False

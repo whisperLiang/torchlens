@@ -1410,3 +1410,33 @@ def test_witness_arm_install_failure_strands_no_patches(
     assert trace is not None
     leaked_after = {name for name, obj in _surface_snapshot().items() if obj is not baseline[name]}
     assert not leaked_after, f"stranded witness patches after clean capture: {sorted(leaked_after)}"
+
+
+def test_observer_restore_leaves_no_shadow_entries() -> None:
+    """Arm/disarm must leave ``torch.Tensor`` and storage class dicts unchanged.
+
+    Most belt names (``tolist``/``numpy``/``data_ptr``/``stride``/
+    ``is_contiguous``/the bool-method belt/``UntypedStorage.data_ptr``) are C
+    slots on the BASE class and not in the patched class ``__dict__``; the
+    pre-fix plain-setattr restore left a permanent shadow entry behind after
+    every armed capture, so ``unwrap_torch``'s "torch is clean again" claim
+    was false at the class-dict level.
+    """
+
+    class _Trace:
+        """Weakrefable trace stand-in."""
+
+    trace = _Trace()
+    state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=1)
+    tensor_keys_before = set(vars(torch.Tensor))
+    storage_classes = (torch.UntypedStorage, torch.TypedStorage)
+    storage_keys_before = {cls: set(vars(cls)) for cls in storage_classes}
+
+    with cw._observe_invisible_host_escapes(state):
+        # The belt is armed: the census-invisible conversions are shadowed in.
+        assert "tolist" in vars(torch.Tensor)
+        assert "stride" in vars(torch.Tensor)
+
+    assert set(vars(torch.Tensor)) == tensor_keys_before
+    for cls in storage_classes:
+        assert set(vars(cls)) == storage_keys_before[cls]

@@ -1693,43 +1693,56 @@ def scoped_tinygrad_module_calls(
 
     del observed_module_stacks
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original module while the live stack records this module."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            _ACTIVE_TINYGRAD_MODULE_STACK.append(
-                TinygradModuleFrame(
-                    address=address,
-                    call_index=call_index,
-                    module_type=type(self).__name__,
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield; a BaseException
+    # escaping it used to strand every wrapper installed so far.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original module while the live stack records this module."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
+                    return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                _ACTIVE_TINYGRAD_MODULE_STACK.append(
+                    TinygradModuleFrame(
+                        address=address,
+                        call_index=call_index,
+                        module_type=type(self).__name__,
+                    )
                 )
-            )
-            try:
-                return __original(self, *args, **kwargs)
-            finally:
-                _ACTIVE_TINYGRAD_MODULE_STACK.pop()
+                try:
+                    return __original(self, *args, **kwargs)
+                finally:
+                    _ACTIVE_TINYGRAD_MODULE_STACK.pop()
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 @contextmanager
