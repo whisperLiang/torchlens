@@ -32,7 +32,10 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 # route through), and validation/_pristine.py's pristine-oracle window is
 # inherently wrap-state surgery (`_is_decorated` + the detector/witness mode
 # reads that re-arm after unwrap/rewrap).
-_ACCESS_SITE_BASELINE = 294
+# 294 -> 291 (2026-08-15 fixwave-4 settle): release_model's held-ref
+# normalization (capcache-r5) had added six raw unwrap-ledger reads; they now
+# route through the state-owned `_state.wrap_epoch_ledgers()` accessor.
+_ACCESS_SITE_BASELINE = 291
 
 
 def _state_access_sites() -> list[tuple[str, int]]:

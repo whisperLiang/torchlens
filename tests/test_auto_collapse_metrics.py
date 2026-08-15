@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import torchlens as tl
+import torchlens.visualization._condensed_flow as condensed_flow
 import torchlens.visualization.auto_collapse as auto_collapse
 import torchlens.visualization.collapse_optimizer as collapse_optimizer
 from torchlens.visualization._render_common import format_collapsed_module_contents
@@ -1068,7 +1069,7 @@ def _reference_flow_interval_flags(
             for edge in edge_set
         )
         landmark = any(
-            auto_collapse._child_has_junction_op(trace, child_sets.get(child, set()))
+            condensed_flow._child_has_junction_op(trace, child_sets.get(child, set()))
             for child in flow_children[left_index : right_index + 1]
         ) or bool(crossing_edges)
         flags[(left, right)] = auto_collapse.FlowIntervalFlags(
@@ -1799,7 +1800,9 @@ def test_flow_interval_flags_match_reference_with_linear_helper_calls(
         junction_calls += 1
         return False
 
-    monkeypatch.setattr(auto_collapse, "_child_has_junction_op", no_junction)
+    # _flow_interval_flags lives in _condensed_flow (R43 split); patch its home
+    # module so the function's own globals see the counter.
+    monkeypatch.setattr(condensed_flow, "_child_has_junction_op", no_junction)
     try:
         optimized = auto_collapse._flow_interval_flags(trace, children, child_sets, edges)
         assert junction_calls == len(children)
@@ -1858,8 +1861,11 @@ def test_cold_collapse_optimizations_are_byte_identical_across_modes(
     try:
         optimized = _all_mode_collapse_snapshot(trace, tmp_path, "optimized")
         with monkeypatch.context() as reference_patch:
+            # Patch the _condensed_flow home (R43 split): both the moved
+            # _compute_child_condensed_flow_graphs and auto_collapse's
+            # synthetic builder resolve the flags through that module.
             reference_patch.setattr(
-                auto_collapse,
+                condensed_flow,
                 "_flow_interval_flags",
                 _reference_flow_interval_flags,
             )

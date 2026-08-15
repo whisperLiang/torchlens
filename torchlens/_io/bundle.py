@@ -45,6 +45,7 @@ from . import (
     _json,
     below_floor_error,
 )
+from ._canonical_pickle import dump_canonical_metadata
 from ._durability import fsync_dir, fsync_tree
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
@@ -60,7 +61,7 @@ from .payload_codec import (
     numpy_to_transport_tensor,
 )
 from .rehydrate import rehydrate_trace
-from .scrub import BlobSpec, dump_canonical_metadata, scrub_for_save
+from .scrub import BlobSpec, scrub_for_save
 from .state_keys import invalidate_static_class_attr_cache
 from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level

@@ -2892,7 +2892,7 @@
   "field": "source_trace",
   "file": "torchlens/data_classes/layer.py",
   "has_default": false,
-  "sites": 7,
+  "sites": 6,
   "via_getattr": false
  },
  {
@@ -6362,6 +6362,54 @@
  {
   "ambiguous": false,
   "field": "layer_type",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": true,
+  "sites": 3,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "step_index",
+  "file": "torchlens/visualization/_condensed_flow.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "layer_type",
   "file": "torchlens/visualization/_label_format.py",
   "has_default": true,
   "sites": 1,
@@ -6676,7 +6724,7 @@
   "field": "layer_type",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": true,
-  "sites": 2,
+  "sites": 1,
   "via_getattr": true
  },
  {
@@ -6692,7 +6740,7 @@
   "field": "modules",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": true,
-  "sites": 3,
+  "sites": 2,
   "via_getattr": true
  },
  {
@@ -6708,24 +6756,8 @@
   "field": "parents",
   "file": "torchlens/visualization/auto_collapse.py",
   "has_default": false,
-  "sites": 3,
+  "sites": 2,
   "via_getattr": false
- },
- {
-  "ambiguous": true,
-  "field": "parents",
-  "file": "torchlens/visualization/auto_collapse.py",
-  "has_default": true,
-  "sites": 3,
-  "via_getattr": true
- },
- {
-  "ambiguous": false,
-  "field": "step_index",
-  "file": "torchlens/visualization/auto_collapse.py",
-  "has_default": true,
-  "sites": 1,
-  "via_getattr": true
  },
  {
   "ambiguous": true,

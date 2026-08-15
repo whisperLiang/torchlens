@@ -1069,3 +1069,21 @@ def active_capture() -> "tuple[Trace | None, bool]":
 
     enabled = _logging_enabled
     return _active_trace, enabled
+
+
+def wrap_epoch_ledgers() -> "tuple[dict[int, Callable[..., Any]], dict[int, Callable[..., Any]]]":
+    """Return the ``(decorated -> orig, orig -> decorated)`` unwrap ledgers.
+
+    The SANCTIONED NEW-CODE spelling for ledger-fenced wrapper/original
+    resolution outside the hot wrapper paths (R45 raw-access ratchet):
+    callers receive the live id-keyed ledgers for READ-ONLY lookup.
+    ``_decorated_to_orig`` is the append-only unwrap ledger — never mutate
+    or clear it through this accessor (or at all; see the module policy).
+
+    Returns
+    -------
+    tuple[dict[int, Callable[..., Any]], dict[int, Callable[..., Any]]]
+        ``_decorated_to_orig`` and ``_orig_to_decorated``, in that order.
+    """
+
+    return _decorated_to_orig, _orig_to_decorated

@@ -43,6 +43,8 @@ def _row(
     *,
     iqr_ms: float = 1.0,
     status: str = "ok",
+    cpu_median_ms: float | None = None,
+    cpu_iqr_ms: float | None = None,
 ) -> dict[str, object]:
     """Build one synthetic benchmark row.
 
@@ -60,6 +62,12 @@ def _row(
         Interquartile range timing.
     status:
         Row status.
+    cpu_median_ms:
+        Optional process-CPU median timing. The gate is CPU-authoritative
+        for TorchLens-owned rows; omit only for rows exercising the
+        wall-clock legacy fallback.
+    cpu_iqr_ms:
+        Optional process-CPU interquartile range timing.
 
     Returns
     -------
@@ -67,20 +75,21 @@ def _row(
         Benchmark row.
     """
 
+    timing: dict[str, object] = {
+        "median_ms": median_ms,
+        "iqr_ms": iqr_ms,
+    }
+    if cpu_median_ms is not None:
+        timing["cpu_median_ms"] = cpu_median_ms
+    if cpu_iqr_ms is not None:
+        timing["cpu_iqr_ms"] = cpu_iqr_ms
     return {
         "model": model,
         "device": device,
         "operation": operation,
         "label": operation,
         "status": status,
-        "passes": {
-            "timing": {
-                "timing": {
-                    "median_ms": median_ms,
-                    "iqr_ms": iqr_ms,
-                }
-            }
-        },
+        "passes": {"timing": {"timing": timing}},
     }
 
 
@@ -364,26 +373,86 @@ def test_ast_file_cache_respects_lru_cap(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_perf_gate_compare_passes_within_tolerance() -> None:
-    """Regression gate accepts rows inside the baseline-derived tolerance."""
+    """Regression gate accepts rows inside the baseline-derived tolerance.
 
-    baseline = _payload([_row("resnet18", "cpu", "tl_trace", 100.0, iqr_ms=3.0)])
-    current = _payload([_row("resnet18", "cpu", "tl_trace", 109.0, iqr_ms=6.0)])
+    Rows carry process-CPU statistics because the gate is CPU-authoritative
+    for TorchLens-owned rows: a wall-clock-only ``tl_trace`` row BLOCKS by
+    default (covered in ``test_perf_gate_wiring.py``).
+    """
+
+    baseline = _payload(
+        [
+            _row(
+                "resnet18",
+                "cpu",
+                "tl_trace",
+                100.0,
+                iqr_ms=3.0,
+                cpu_median_ms=100.0,
+                cpu_iqr_ms=3.0,
+            )
+        ]
+    )
+    current = _payload(
+        [
+            _row(
+                "resnet18",
+                "cpu",
+                "tl_trace",
+                109.0,
+                iqr_ms=6.0,
+                cpu_median_ms=109.0,
+                cpu_iqr_ms=6.0,
+            )
+        ]
+    )
 
     comparison = compare_gate_payloads(baseline, current)
 
     assert comparison["passed"] is True
+    assert comparison["checks"][0]["metric"] == "process_cpu"
     assert comparison["checks"][0]["tolerance_ms"] == 10.0
 
 
 def test_perf_gate_compare_fails_regression_beyond_tolerance() -> None:
-    """Regression gate rejects median slowdowns beyond tolerance."""
+    """Regression gate rejects median slowdowns beyond tolerance.
 
-    baseline = _payload([_row("resnet18", "cpu", "tl_trace", 100.0, iqr_ms=1.0)])
-    current = _payload([_row("resnet18", "cpu", "tl_trace", 130.0, iqr_ms=1.0)])
+    CPU-authoritative rows, so the FAIL verdict comes from the tolerance
+    math itself, not from the wall-clock-fallback block.
+    """
+
+    baseline = _payload(
+        [
+            _row(
+                "resnet18",
+                "cpu",
+                "tl_trace",
+                100.0,
+                iqr_ms=1.0,
+                cpu_median_ms=100.0,
+                cpu_iqr_ms=1.0,
+            )
+        ]
+    )
+    current = _payload(
+        [
+            _row(
+                "resnet18",
+                "cpu",
+                "tl_trace",
+                130.0,
+                iqr_ms=1.0,
+                cpu_median_ms=130.0,
+                cpu_iqr_ms=1.0,
+            )
+        ]
+    )
 
     comparison = compare_gate_payloads(baseline, current)
 
     assert comparison["passed"] is False
+    assert comparison["checks"][0]["metric"] == "process_cpu"
+    assert comparison["wall_clock_fallback_blocking_rows"] == []
     assert comparison["regressions"][0]["delta_ms"] == 30.0
 
 

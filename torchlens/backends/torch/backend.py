@@ -843,17 +843,9 @@ class TorchBackend:
                 return_addresses=True,
                 allow_repeats=True,
             )
-        # Remove duplicate structural output addresses.
-        addresses_seen = set()
-        output_tensors_w_addresses = []
-        for entry in output_tensors_w_addresses_all:
-            if entry[1] in addresses_seen:
-                continue
-            output_tensors_w_addresses.append(entry)
-            addresses_seen.add(entry[1])
-
-        output_tensors = [t for t, _, _ in output_tensors_w_addresses]
-        output_tensor_addresses = [addr for _, addr, _ in output_tensors_w_addresses]
+        output_tensors, output_tensor_addresses = _dedupe_output_addresses(
+            output_tensors_w_addresses_all
+        )
 
         attributable_output_tensors: list[torch.Tensor] = []
         attributable_output_tensor_addresses: list[str] = []
@@ -1281,6 +1273,32 @@ class TorchBackend:
 
         if _is_cuda_available() and capture_touched_cuda(session):
             torch.cuda.empty_cache()
+
+
+def _dedupe_output_addresses(
+    entries: list[tuple[torch.Tensor, str, Any]],
+) -> tuple[list[torch.Tensor], list[str]]:
+    """Drop entries repeating an already-seen structural output address.
+
+    Parameters
+    ----------
+    entries:
+        ``(tensor, address, container_spec)`` output entries in walk order.
+
+    Returns
+    -------
+    tuple[list[torch.Tensor], list[str]]
+        First-occurrence output tensors and their display addresses.
+    """
+
+    addresses_seen: set[str] = set()
+    deduped = []
+    for entry in entries:
+        if entry[1] in addresses_seen:
+            continue
+        deduped.append(entry)
+        addresses_seen.add(entry[1])
+    return [t for t, _, _ in deduped], [addr for _, addr, _ in deduped]
 
 
 def _register_model_output_container_snapshot(

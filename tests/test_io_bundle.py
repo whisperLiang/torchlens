@@ -798,10 +798,13 @@ def test_bundle_save_overwrite_typeerror_preserves_original_and_marks_partial(
     bundle_path, first_log = _save_bundle(tmp_path, seed=0)
     second_log = _build_conv_log(seed=1)
 
-    def _poisoned_pickle_dump(*_args: Any, **_kwargs: Any) -> None:
+    def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
         raise TypeError("simulated live-resource pickling failure")
 
-    monkeypatch.setattr("torchlens._io.bundle.pickle.dump", _poisoned_pickle_dump)
+    # ``save()`` writes metadata.pkl through ``dump_canonical_metadata()``
+    # (B3R4-R21-2 canonical container bytes), which drives a ``pickle._Pickler``
+    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
+    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
 
     with pytest.raises(TorchLensIOError) as excinfo:
         save(second_log, bundle_path, overwrite=True)
@@ -872,10 +875,12 @@ def test_bundle_save_overwrite_arbitrary_exception_preserves_original_and_marks_
     bundle_path, first_log = _save_bundle(tmp_path, seed=0)
     second_log = _build_conv_log(seed=1)
 
-    def _poisoned_pickle_dump(*_args: Any, **_kwargs: Any) -> None:
+    def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
         raise injected_exception
 
-    monkeypatch.setattr("torchlens._io.bundle.pickle.dump", _poisoned_pickle_dump)
+    # Injected at the metadata.pkl writer (``dump_canonical_metadata()``,
+    # B3R4-R21-2): bare ``pickle.dump`` is no longer on the save path.
+    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
 
     with pytest.raises(TorchLensIOError) as excinfo:
         save(second_log, bundle_path, overwrite=True)

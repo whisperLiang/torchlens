@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import re
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -280,6 +281,18 @@ def _codes_in_tree(
     AST expressions, so they can never count (r4 b6-opus R25 finding 2).
     """
 
+    return _candidate_codes_in_tree(node, member_names) & universe
+
+
+def _candidate_codes_in_tree(node: ast.AST, member_names: dict[str, set[str]]) -> set[str]:
+    """Universe-independent core of :func:`_codes_in_tree`.
+
+    Collects EVERY seam-context string constant and every spelled ErrorCode
+    member value; callers intersect with their universe. The split makes the
+    per-file result cacheable (the universe filter is a pure intersection,
+    so filtering after collection is equivalent to filtering during it).
+    """
+
     found: set[str] = set()
     stack: list[ast.AST] = [node]
     while stack:
@@ -292,18 +305,14 @@ def _codes_in_tree(
             continue
         if isinstance(current, ast.Assert) and _is_self_identity_assert(current):
             continue
-        if (
-            isinstance(current, ast.Constant)
-            and isinstance(current.value, str)
-            and current.value in universe
-        ):
+        if isinstance(current, ast.Constant) and isinstance(current.value, str):
             found.add(current.value)
         elif (
             isinstance(current, ast.Attribute)
             and current.attr in member_names
             and _terminal_name(current.value).endswith("ErrorCode")
         ):
-            found.update(code for code in member_names[current.attr] if code in universe)
+            found.update(member_names[current.attr])
         stack.extend(ast.iter_child_nodes(current))
     return found
 
@@ -342,13 +351,37 @@ def _provoked_codes_in_source(
         tree = ast.parse(text)
     except SyntaxError:  # unparseable file provokes nothing (fail-closed)
         return set()
+    return _provoked_codes_in_tree(tree, universe, member_names)
+
+
+def _provoked_codes_in_tree(
+    tree: ast.Module,
+    universe: set[str],
+    member_names: dict[str, set[str]],
+) -> set[str]:
+    """Tree-based core of :func:`_provoked_codes_in_source` (cached parses)."""
+
+    return _provoked_candidates_in_tree(tree, member_names) & universe
+
+
+def _provoked_candidates_in_tree(
+    tree: ast.Module,
+    member_names: dict[str, set[str]],
+) -> set[str]:
+    """Universe-independent provocation candidates for one parsed file.
+
+    Same seam-function + referenced-assignment fixpoint as the historical
+    scan; only the universe intersection moves to the caller, which makes
+    the per-file result cacheable across scanner calls.
+    """
+
     provoked: set[str] = set()
     referenced_names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         if any(_is_assertion_seam(sub) for sub in ast.walk(node)):
-            provoked.update(_codes_in_tree(node, universe, member_names))
+            provoked.update(_candidate_codes_in_tree(node, member_names))
             referenced_names.update(sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name))
     module_assignments = [
         statement for statement in tree.body if isinstance(statement, ast.Assign | ast.AnnAssign)
@@ -365,7 +398,7 @@ def _provoked_codes_in_source(
             if not names & referenced_names:
                 continue
             counted.add(id(statement))
-            provoked.update(_codes_in_tree(statement, universe, member_names))
+            provoked.update(_candidate_codes_in_tree(statement, member_names))
             referenced_names.update(
                 sub.id for sub in ast.walk(statement) if isinstance(sub, ast.Name)
             )
@@ -380,15 +413,57 @@ def _provoked_codes_in_source(
 _GOVERNANCE_GATE_FILES = frozenset({Path(__file__).name, "test_error_contract_lockstep.py"})
 
 
+@cache
+def _parsed_test_tree(path_str: str) -> ast.Module | None:
+    """Cached AST for one test file (``None`` = unparseable, fail-closed).
+
+    The whole-tree parse is ~6s of genuine CPU across ~900 files; caching it
+    keeps every scanner call after the first (and after the conftest warm
+    hook below) walk-only, inside the smoke duration budget.
+    """
+
+    try:
+        return ast.parse(Path(path_str).read_text())
+    except SyntaxError:
+        return None
+
+
+@cache
+def _file_candidate_codes(path_str: str) -> frozenset[str]:
+    """Cached universe-independent provocation candidates for one test file."""
+
+    tree = _parsed_test_tree(path_str)
+    if tree is None:  # unparseable file provokes nothing (fail-closed)
+        return frozenset()
+    return frozenset(_provoked_candidates_in_tree(tree, _cached_member_name_index()))
+
+
+@cache
+def _cached_member_name_index() -> dict[str, set[str]]:
+    """Process-stable member-name index (the frozen enums never change)."""
+
+    return _member_name_index()
+
+
+def warm_scan_caches() -> None:
+    """Pre-fill the per-file AST + candidate caches OUTSIDE any charged window.
+
+    Called from the root conftest's collection hook (uncharged time), same
+    convention as ``test_skip_audit.warm_scan_caches``.
+    """
+
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        _file_candidate_codes(str(path))
+
+
 def _test_referenced_codes(universe: set[str]) -> set[str]:
     """Return every code provoked by some test's assertion context."""
 
-    member_names = _member_name_index()
     referenced: set[str] = set()
-    for path, text in _iter_python_texts(_TESTS_ROOT):
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
         if path.name in _GOVERNANCE_GATE_FILES:
             continue
-        referenced.update(_provoked_codes_in_source(text, universe, member_names))
+        referenced.update(_file_candidate_codes(str(path)) & universe)
         if referenced >= universe:
             break
     return referenced & universe

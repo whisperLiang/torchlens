@@ -33,7 +33,7 @@ state = {
     "nested": {"ancestors": frozenset(labels[5:20])},
 }
 if sys.argv[1] == "canonical":
-    from torchlens._io.scrub import dump_canonical_metadata
+    from torchlens._io._canonical_pickle import dump_canonical_metadata
 
     class _Sink:
         def __init__(self):
