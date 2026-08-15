@@ -589,14 +589,16 @@ def tensor_nanequal(
         # payloads. Avoid constructing the Inf/NaN masks and substituted tensors
         # in that common case; non-exact comparisons and non-floating dtypes
         # retain the full comparison below.
-        if tensor_a.layout == torch.strided and tensor_a.dtype.is_floating_point:
-            if torch.equal(tensor_a, tensor_b):
-                # IEEE equality hides -0.0 vs +0.0; only certify EXACT when
-                # zero sign bits agree too (fp8 widens first: no signbit
-                # kernel). A flip falls through -- the tolerance band below
-                # may still legitimately accept it.
-                if _signed_zeros_match(*fp8_safe_comparison_pair(tensor_a, tensor_b)):
-                    return True
+        # IEEE equality hides -0.0 vs +0.0; only certify EXACT when zero sign
+        # bits agree too (fp8 widens first: no signbit kernel). A flip falls
+        # through -- the tolerance band below may still legitimately accept it.
+        if (
+            tensor_a.layout == torch.strided
+            and tensor_a.dtype.is_floating_point
+            and torch.equal(tensor_a, tensor_b)
+            and _signed_zeros_match(*fp8_safe_comparison_pair(tensor_a, tensor_b))
+        ):
+            return True
 
         # fp8 has no isinf/nan_to_num/allclose kernel, so every line below used to
         # raise a raw NotImplementedError out of validation replay. The exact-equality

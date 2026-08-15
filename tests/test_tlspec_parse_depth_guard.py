@@ -99,9 +99,11 @@ def test_read_bounded_threads_max_nodes(tmp_path: Path) -> None:
     payload.write_text("[" + ",".join("0" for _ in range(1000)) + "]")
     with pytest.raises(json.JSONDecodeError, match="node count"):
         _json.read_bounded(payload, max_nodes=100)
-    with payload.open("r", encoding="utf-8") as handle:
-        with pytest.raises(json.JSONDecodeError, match="node count"):
-            _json.load_bounded(handle, max_nodes=100)
+    with (
+        payload.open("r", encoding="utf-8") as handle,
+        pytest.raises(json.JSONDecodeError, match="node count"),
+    ):
+        _json.load_bounded(handle, max_nodes=100)
 
 
 # --------------------------------------------------------------------------- #

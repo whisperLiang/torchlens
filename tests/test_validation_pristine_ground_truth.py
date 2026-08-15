@@ -207,9 +207,11 @@ class TestUnwrapLedgerIntegrity:
         assert _state._is_decorated
         key = self._poison()
         try:
-            with pytest.raises(CaptureContextError) as excinfo:
-                with pristine_torch_oracle():
-                    raise AssertionError("oracle must refuse before yielding")
+            with (
+                pytest.raises(CaptureContextError) as excinfo,
+                pristine_torch_oracle(),
+            ):
+                raise AssertionError("oracle must refuse before yielding")
             assert excinfo.value.fields["code"] == "pristine_ledger_poisoned"
         finally:
             _state._decorated_to_orig.pop(key, None)

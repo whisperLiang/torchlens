@@ -14,6 +14,7 @@ Trace.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -56,10 +57,8 @@ def _wait_and_release_viewer(proc: subprocess.Popen[bytes]) -> None:
     try:
         proc.wait()
     finally:
-        try:
+        with contextlib.suppress(ValueError):  # already swept at next launch
             _VIEWER_PROCS.remove(proc)
-        except ValueError:  # pragma: no cover - already swept at next launch
-            pass
 
 
 def _is_interactive_display_context() -> bool:
@@ -191,22 +190,14 @@ def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
     if pgid is None:
         proc.kill()
     else:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_KILL_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    try:
+    with contextlib.suppress(subprocess.TimeoutExpired):  # SIGKILL always lands
         proc.wait(timeout=_KILL_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL always lands
-        pass
 
 
 def run_bounded_subprocess(
@@ -248,10 +239,8 @@ def run_bounded_subprocess(
         _terminate_process_group(proc)
         # Drain pipes and reap after the group kill, mirroring
         # ``subprocess.run``'s own timeout epilogue.
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired, ValueError, OSError):
             proc.communicate(timeout=_KILL_GRACE_SECONDS)
-        except (subprocess.TimeoutExpired, ValueError, OSError):  # pragma: no cover
-            pass
         raise
     except BaseException:
         _terminate_process_group(proc)

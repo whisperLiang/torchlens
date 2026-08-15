@@ -7,7 +7,7 @@ import time
 import warnings
 import weakref
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 from typing import Any
 
@@ -282,10 +282,8 @@ def _copy_tl_replacement_attrs(source: torch.Tensor, replacement: torch.Tensor) 
 
     if replacement is source:
         return
-    try:
+    with suppress(Exception):
         copy_replacement_meta(source, replacement)
-    except Exception:
-        pass
 
 
 def _apply_live_hooks(
@@ -504,7 +502,7 @@ def _content_probe_mutated(before: tuple[Any, ...] | None, after: tuple[Any, ...
     numel_after, sample_after = after
     if numel_before != numel_after or len(sample_before) != len(sample_after):
         return True
-    for left, right in zip(sample_before, sample_after):
+    for left, right in zip(sample_before, sample_after, strict=True):
         if left != right and not (left != left and right != right):  # NaN == NaN here
             return True
     return False
@@ -526,7 +524,9 @@ def _tuple_probes_mutated(
 
     if len(before) != len(after):
         return True
-    return any(_content_probe_mutated(left, right) for left, right in zip(before, after))
+    return any(
+        _content_probe_mutated(left, right) for left, right in zip(before, after, strict=True)
+    )
 
 
 def _apply_inplace_replacement_to_mutated_storage(
@@ -1564,7 +1564,7 @@ def _validate_grad_tuple(
             f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
             f"{len(result)} gradients; expected {len(reference)}"
         )
-    for index, (candidate, expected) in enumerate(zip(result, reference)):
+    for index, (candidate, expected) in enumerate(zip(result, reference, strict=True)):
         if expected is None:
             if candidate is not None:
                 raise HookValueError(

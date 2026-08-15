@@ -279,9 +279,11 @@ def test_compiled_submodule_traversal_failure_restores_earlier_swaps(
     parent.bad = _WrapperWithBrokenOriginalProbe()
     monkeypatch.setattr(helpers, "get_dynamo_optimized_module_type", lambda: nn.Module)
 
-    with pytest.raises(RuntimeError, match="broken _orig_mod probe"):
-        with unwrap_compiled_submodules(parent):
-            pass
+    with (
+        pytest.raises(RuntimeError, match="broken _orig_mod probe"),
+        unwrap_compiled_submodules(parent),
+    ):
+        pass
 
     assert parent.good is good_wrapper
 
@@ -317,11 +319,13 @@ def test_compiled_submodule_unwind_completes_past_raising_restore(
     object.__setattr__(parent, "_modules", hostile)
     monkeypatch.setattr(helpers, "get_dynamo_optimized_module_type", lambda: _WrapperWithOriginal)
 
-    with pytest.raises(RuntimeError, match="hostile _modules restore"):
-        with unwrap_compiled_submodules(parent):
-            assert parent._modules["child_a"] is wrapper_a._orig_mod
-            assert parent._modules["child_b"] is wrapper_b._orig_mod
-            hostile.armed_key = "child_b"
+    with (
+        pytest.raises(RuntimeError, match="hostile _modules restore"),
+        unwrap_compiled_submodules(parent),
+    ):
+        assert parent._modules["child_a"] is wrapper_a._orig_mod
+        assert parent._modules["child_b"] is wrapper_b._orig_mod
+        hostile.armed_key = "child_b"
 
     # child_b's restore raised (it honestly stays eager); child_a's restore
     # runs anyway instead of being skipped by the propagating failure.

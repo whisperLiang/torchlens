@@ -7,7 +7,7 @@ import inspect
 import threading
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -643,14 +643,12 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
         try:
             _warn_escapes()
         except Exception:
-            try:
+            with suppress(Exception):
                 inflight.add_note(
                     "TorchLens scalar-escape advisory suppressed (a warnings "
                     f"filter raised it): {state.count} tensor-to-Python scalar "
                     "escape(s) were observed during this failed capture."
                 )
-            except Exception:
-                pass
         raise
     else:
         _restore_scalar_belt()
