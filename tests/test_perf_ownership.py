@@ -69,3 +69,66 @@ def test_classifier_is_red_capable() -> None:
         if op.startswith(op_ownership.FOREIGN_OPERATION_PREFIXES)
     ]
     assert not overlap, f"prefix families overlap: {overlap}"
+
+
+def _rerun_row(operation: str, timing: dict[str, float]) -> dict:
+    return {
+        "model": "tinynet",
+        "device": "cpu",
+        "operation": operation,
+        "passes": {"timing": {"timing": dict(timing)}},
+    }
+
+
+def test_rerun_tolerance_is_cpu_authoritative_and_reference_widened() -> None:
+    """The rerun stability check uses process-CPU and run1's IQR only.
+
+    b6 R28 round 5: the check read wall medians and took
+    ``2 * max(iqr_run1, iqr_run2)``, so a loaded box's wall drift dominated
+    the verdict and the second run WIDENED its own acceptance band with its
+    own noise — an unstable rerun could never fail the stability check.
+    """
+
+    from benchmarks.perf_suite import _check_rerun_tolerance
+
+    # CPU fields present: verdict keys on cpu_median_ms even when the wall
+    # numbers scream instability.
+    quiet_cpu = {
+        "median_ms": 100.0,
+        "iqr_ms": 1.0,
+        "cpu_median_ms": 100.0,
+        "cpu_iqr_ms": 1.0,
+    }
+    noisy_wall_same_cpu = {
+        "median_ms": 400.0,
+        "iqr_ms": 50.0,
+        "cpu_median_ms": 101.0,
+        "cpu_iqr_ms": 1.0,
+    }
+    result = _check_rerun_tolerance(
+        [_rerun_row("tl_trace", quiet_cpu)], [_rerun_row("tl_trace", noisy_wall_same_cpu)]
+    )
+    assert result["checks"][0]["metric"] == "cpu_median_ms"
+    assert result["passed"], result
+
+    # Reference-side IQR only: a wildly noisy SECOND run must not widen its
+    # own band. run1 is tight (iqr 1ms), run2 drifts 60ms with a huge own-IQR
+    # that under the old max() rule would have self-blessed the drift.
+    drifted = {
+        "median_ms": 160.0,
+        "iqr_ms": 100.0,
+        "cpu_median_ms": 160.0,
+        "cpu_iqr_ms": 100.0,
+    }
+    result = _check_rerun_tolerance(
+        [_rerun_row("tl_trace", quiet_cpu)], [_rerun_row("tl_trace", drifted)]
+    )
+    assert not result["passed"], result
+
+    # Legacy rows without CPU fields fall back to wall, disclosed via metric.
+    legacy = {"median_ms": 100.0, "iqr_ms": 1.0}
+    result = _check_rerun_tolerance(
+        [_rerun_row("tl_trace", legacy)], [_rerun_row("tl_trace", legacy)]
+    )
+    assert result["checks"][0]["metric"] == "median_ms"
+    assert result["passed"]
