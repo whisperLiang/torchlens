@@ -25,6 +25,7 @@ import weakref
 from collections.abc import Mapping
 from typing import Any
 
+from .._errors import _ActionableErrorMixin
 from ..errors import TorchLensError
 
 # The class-owned callable *method* surface: a state key resolving to one of these
@@ -40,12 +41,15 @@ _METHOD_SHADOW_TYPES: tuple[type, ...] = (
 )
 
 
-class PortableStateKeyError(TorchLensError, ValueError):
+class PortableStateKeyError(_ActionableErrorMixin, TorchLensError, ValueError):
     """A portable ``__setstate__`` received a key shadowing a class-owned method.
 
     Raised as a load-integrity tripwire (round 54 ``sec_3``): the state dict of an
     attacker ``.tlspec`` carried a key whose name resolves to a plain method on the
     portable class, which rehydrate would otherwise be able to read-then-call.
+    ``_ActionableErrorMixin`` supplies ``__reduce__`` so the strict two-argument
+    constructor survives pickle/deepcopy/process boundaries (R64-F1) instead of
+    degrading to a bare ``TypeError``.
     """
 
     def __init__(self, cls: type, shadowed: list[str]) -> None:

@@ -82,6 +82,7 @@ add names to the top-level `torchlens` namespace:
 | `decoded_output_unavailable` | Logits were not retained for re-decoding | Capture with retained logits or lower `top_n` |
 | `derived_field_assignment_invalid` | Assignment to a derived compatibility field | Do not assign derived fields |
 | `compiled_callable_unsupported` | Compiled plain callable has no module capture surface | Pass the original eager module |
+| `compile_counts_unavailable` | `tl.debug.count_compiles()` found no Dynamo compile counters in this torch runtime (`CompileCountsUnavailableError`, `RuntimeError` lineage) | Upgrade torch or skip the verification on this runtime |
 | `deprecated_argument_conflict` | Deprecated and replacement arguments were both supplied | Remove the deprecated argument |
 | `diagnostic_severity_invalid` | Diagnostic severity is outside the closed vocabulary | Choose a documented severity |
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
@@ -95,6 +96,8 @@ add names to the top-level `torchlens` namespace:
 | `layers_not_logged` | Rendering requires a fully-logged trace | Capture with full layer logging |
 | `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
+| `graph_breaks_normalization_failed` | `tl.debug.graph_breaks()` got a Dynamo explain result of unrecognized shape (`GraphBreaksNormalizationError`, `RuntimeError` lineage) | Report the shape to TorchLens or pin a recognized torch version |
+| `graph_breaks_unavailable` | `tl.debug.graph_breaks()` found no `torch._dynamo.explain` in this torch runtime (`GraphBreaksUnavailableError`, `RuntimeError` lineage) | Upgrade torch or skip the correlation on this runtime |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
@@ -143,6 +146,7 @@ add names to the top-level `torchlens` namespace:
 | `output_tree_depth_exceeded` | Model-output tree nesting exceeds the output-boundary depth ceiling in `validate_backward_pass` (`InvalidArgumentError`) | Flatten the nested output containers before validating |
 | `record_not_bound` | Record's owning Trace reference is gone | Keep the owning Trace alive |
 | `recording_events_not_retained` | `to_trace()` on a disk-recovered Recording | Convert the in-session Recording |
+| `recording_backward_halted` | `log_backward()` on a halted Recording (the sparse frontier retained no complete output to root the backward walk) | Re-record without `halt=` or use `trace(halt=...)` for prefix backward |
 | `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |
 | `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
 | `recording_multipass_not_convertible` | `to_trace()` on a multi-pass Recording | Record one pass per Recording |
@@ -186,6 +190,8 @@ add names to the top-level `torchlens` namespace:
 | `trace_reference_collected` | Owning Trace was garbage-collected | Keep the Trace alive while reading records |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |
 | `unsupported_tensor_variant` | Model/input carries meta, fake, functional, or sparse tensor variants (`UnsupportedTensorVariantError`) | Materialize dense, strided tensors with concrete shapes on a real device |
+| `visualization_bool_option_invalid` | A bool-only draw/visualization option received a non-bool (strings such as `'no'` were silently truthy) | Pass True or False |
+| `visualization_show_containers_invalid` | `show_containers` is outside its closed vocabulary | Pass False or one of `labels`, `cluster`, `collapsed`, `auto`, `nodes` |
 | `visualization_intervention_mode_invalid` | Intervention rendering mode is unknown | Choose `node_mark` or `as_node` |
 | `visualization_layout_invalid` | Visualization layout is unknown | Choose `auto`, `dot`, or `rank` |
 | `visualization_direction_invalid` | Render direction is unknown | Choose `bottomup`, `topdown`, or `leftright` |

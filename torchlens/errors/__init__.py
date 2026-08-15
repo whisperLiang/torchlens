@@ -213,6 +213,18 @@ _LAZY_EXCEPTION_PATHS = {
         "CaptureAttemptFailedWarning",
     ),
     "CaptureContextError": ("torchlens._errors", "CaptureContextError"),
+    "CompileCountsUnavailableError": (
+        "torchlens.debug._compile_counter",
+        "CompileCountsUnavailableError",
+    ),
+    "GraphBreaksNormalizationError": (
+        "torchlens.debug._graph_breaks",
+        "GraphBreaksNormalizationError",
+    ),
+    "GraphBreaksUnavailableError": (
+        "torchlens.debug._graph_breaks",
+        "GraphBreaksUnavailableError",
+    ),
     "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
     "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),
     "RecordBindingError": ("torchlens._errors", "RecordBindingError"),

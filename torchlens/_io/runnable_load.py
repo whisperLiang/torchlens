@@ -19,6 +19,7 @@ from typing import Any, cast
 import torch
 
 from .. import _state
+from .._errors import _ActionableErrorMixin
 from .._input_walk import INPUT_CONTAINER_KINDS
 from .._runnable_state import _INPUT_STRUCTURE_SITE_PREFIX, _STATE_METADATA_FACT_SITE_PREFIX
 from ..backends import TORCH_BACKEND_NAME
@@ -261,7 +262,7 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     return descriptor
 
 
-class ContextFieldInvalidError(TorchLensError, ValueError):
+class ContextFieldInvalidError(_ActionableErrorMixin, TorchLensError, ValueError):
     """A persisted execution-context field failed closed-vocabulary validation (INV-4).
 
     Raised at PARSE time -- before readiness, staging, or any torch setter/callable
@@ -271,7 +272,9 @@ class ContextFieldInvalidError(TorchLensError, ValueError):
     Subclasses ``TorchLensError`` (in addition to ``ValueError``) so that generic
     ``except TorchLensError`` handling sees it and ``fields["code"]`` is
     branchable (R65: it was a plain ``ValueError`` with no code, invisible to the
-    house error contract).
+    house error contract). ``_ActionableErrorMixin`` supplies ``__reduce__`` so
+    the strict two-argument constructor survives pickle/deepcopy/process
+    boundaries (R64-F1) instead of degrading to a bare ``TypeError``.
     """
 
     def __init__(self, field: str, detail: str) -> None:
@@ -1540,7 +1543,7 @@ def _callable_registry_contradiction(
     return None
 
 
-class DescriptorStructuralBoundError(TorchLensError, ValueError):
+class DescriptorStructuralBoundError(_ActionableErrorMixin, TorchLensError, ValueError):
     """A persisted runnable-descriptor integer failed structural cross-validation (r53 free_1).
 
     Raised at PARSE time -- before readiness resolution, signature binding, state
@@ -1556,6 +1559,9 @@ class DescriptorStructuralBoundError(TorchLensError, ValueError):
     ``except TorchLensError`` handling sees it; the ``RunnableErrorCode`` it
     already carried on ``.code`` is now also mirrored onto ``fields["code"]``
     (R65: it was a plain ``ValueError`` whose code never reached ``.fields``).
+    ``_ActionableErrorMixin`` supplies ``__reduce__`` so the strict
+    three-argument constructor survives pickle/deepcopy/process boundaries
+    (R64-F1) instead of degrading to a bare ``TypeError``.
     """
 
     def __init__(self, code: RunnableErrorCode, field: str, detail: str) -> None:

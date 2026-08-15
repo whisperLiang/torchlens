@@ -12,12 +12,53 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
+from typing import Any, cast
 
+from .._errors import _actionable_message, _ActionableErrorMixin
+from ..errors._base import CompatibilityError
 from ..utils import _torch_compat
 
 
-class CompileCountsUnavailableError(RuntimeError):
-    """Raised when the running torch does not expose Dynamo's compile counters."""
+class CompileCountsUnavailableError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
+    """Raised when the running torch does not expose Dynamo's compile counters.
+
+    Keeps its historical ``RuntimeError`` base while joining the taxonomy
+    with a stable code and a default remedy, so single-message raise sites
+    and existing ``except RuntimeError`` callers stay valid (R64).
+    """
+
+    code: str = "compile_counts_unavailable"
+    default_remedy: str = (
+        "upgrade to a torch build that exposes torch._dynamo.utils.counters, or "
+        "skip the count_compiles() verification on this runtime"
+    )
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable compile-counter capability refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the missing Dynamo counter capability.
+        remedy:
+            Concrete caller action. The class default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        super().__init__(
+            _actionable_message(problem, resolved_remedy),
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
 
 
 class CompileCounts:
