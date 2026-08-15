@@ -272,6 +272,7 @@ def install_identity_shims() -> None:
         _install_resolve_name_shim(records)
         _install_jit_overload_shim(records)
         _install_fx_trace_shim(records)
+        _install_overrides_membership_shims(records)
     except Exception:
         _restore(records)
         raise
@@ -691,6 +692,100 @@ def _install_fx_trace_shim(records: list[tuple[Any, str, Any]]) -> None:
     setattr(trace_shim, _SHIM_MARKER, True)
     tracer_cls.trace = trace_shim
     records.append((tracer_cls, "trace", orig_trace))
+
+
+# ---------------------------------------------------------------------------
+# Site 7: torch.overrides membership tables
+# ---------------------------------------------------------------------------
+
+
+class _LedgerResolvingTable(dict):
+    """Dict view whose LOOKUPS resolve torchlens wrappers to originals.
+
+    Iteration/keys stay exactly the underlying original-keyed contents (the
+    wrapper-poisoning census gate keeps holding); only ``in``/``[]``/``get``
+    additionally accept the live wrapper alias, so the documented
+    ``func in torch.overrides.get_testing_overrides()`` membership check
+    answers the same in both wrap epochs (grind-r5 b7 R55-A).
+    """
+
+    def __contains__(self, key: Any) -> bool:
+        if super().__contains__(key):
+            return True
+        original = _resolve(key)
+        return original is not key and super().__contains__(original)
+
+    def __getitem__(self, key: Any) -> Any:
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            original = _resolve(key)
+            if original is not key:
+                return super().__getitem__(original)
+            raise
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+class _LedgerResolvingMembers(list):
+    """List view whose membership test resolves torchlens wrappers."""
+
+    def __contains__(self, item: Any) -> bool:
+        if super().__contains__(item):
+            return True
+        original = _resolve(item)
+        return original is not item and super().__contains__(original)
+
+
+def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> None:
+    """Shim the two cached ``torch.overrides`` table accessors for membership.
+
+    ``decorate_all_once`` pre-warms both caches so their CONTENTS stay keyed
+    by pristine originals (r4 F3, verified). But membership by the CURRENT
+    namespace read -- ``F.relu in get_testing_overrides()`` or
+    ``my_op in get_overridable_functions()[F]``, the documented
+    ``__torch_function__`` author checks -- was False for every wrapped
+    function during the wrap epoch. The shims hand back per-underlying-table
+    cached views that resolve a wrapper argument through the ledger, exactly
+    like the shipped ``resolve_name`` shim.
+    """
+
+    overrides_module = getattr(torch, "overrides", None)
+    if overrides_module is None:
+        return
+    for accessor_name in ("get_testing_overrides", "get_overridable_functions"):
+        orig_accessor = vars(overrides_module).get(accessor_name)
+        if orig_accessor is None or _is_shimmed(orig_accessor):
+            continue
+        view_cache: dict[int, Any] = {}
+
+        def _make_shim(orig: Callable[[], Any], cache: dict[int, Any]) -> Callable[[], Any]:
+            @functools.wraps(orig)
+            def accessor_shim() -> Any:
+                table = orig()
+                view = cache.get(id(table))
+                if view is None:
+                    if table and isinstance(next(iter(table.values()), None), list):
+                        view = _LedgerResolvingTable(
+                            (key, _LedgerResolvingMembers(members))
+                            for key, members in table.items()
+                        )
+                    else:
+                        view = _LedgerResolvingTable(table)
+                    cache.clear()  # underlying cache rebuilt: drop stale views
+                    cache[id(table)] = view
+                return view
+
+            return accessor_shim
+
+        shim = _make_shim(orig_accessor, view_cache)
+        setattr(shim, _SHIM_MARKER, True)
+        setattr(overrides_module, accessor_name, shim)
+        records.append((overrides_module, accessor_name, orig_accessor))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:

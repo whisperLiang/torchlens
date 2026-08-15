@@ -52,15 +52,57 @@ def active_intervention_context(
         Control while the context is installed.
     """
 
-    previous_spec = _state._active_intervention_spec
-    previous_hook_plan = _state._active_hook_plan
+    # grind-r5 b7 R55 (sol HIGH, poss. REOPENED b2:C10): restores unwind
+    # through a SPLICEABLE entry list (the rng-monitor _PATCH_STACKS
+    # standard), not blind save/restore. The old unconditional restore
+    # re-published a DEAD context when two overlapping contexts unwound out
+    # of stack order (two-thread probe left thread A's spec/plan live after
+    # BOTH finally blocks ran), poisoning every later operation with a stale
+    # intervention. A non-top exit now splices its link out (the entry above
+    # inherits its predecessor) and only the top exit writes the globals.
+    # Cross-thread VISIBILITY of the process-global slot remains bounded by
+    # the single-threaded-by-design capture contract (concurrent captures
+    # refuse at admission; this hot-path manager takes no lock by doctrine).
+    entry = _InterventionContextEntry(
+        intervention_spec,
+        hook_plan,
+        _state._active_intervention_spec,
+        _state._active_hook_plan,
+    )
+    _CONTEXT_ENTRIES.append(entry)
     _state._active_intervention_spec = intervention_spec
     _state._active_hook_plan = hook_plan
     try:
         yield
     finally:
-        _state._active_intervention_spec = previous_spec
-        _state._active_hook_plan = previous_hook_plan
+        if _CONTEXT_ENTRIES and _CONTEXT_ENTRIES[-1] is entry:
+            _CONTEXT_ENTRIES.pop()
+            _state._active_intervention_spec = entry.previous_spec
+            _state._active_hook_plan = entry.previous_plan
+        else:
+            for index in range(len(_CONTEXT_ENTRIES) - 1, -1, -1):
+                if _CONTEXT_ENTRIES[index] is entry:
+                    if index + 1 < len(_CONTEXT_ENTRIES):
+                        above = _CONTEXT_ENTRIES[index + 1]
+                        above.previous_spec = entry.previous_spec
+                        above.previous_plan = entry.previous_plan
+                    del _CONTEXT_ENTRIES[index]
+                    break
+
+
+class _InterventionContextEntry:
+    """One live ``active_intervention_context`` publication, spliceable."""
+
+    __slots__ = ("hook_plan", "previous_plan", "previous_spec", "spec")
+
+    def __init__(self, spec: Any, hook_plan: Any, previous_spec: Any, previous_plan: Any) -> None:
+        self.spec = spec
+        self.hook_plan = hook_plan
+        self.previous_spec = previous_spec
+        self.previous_plan = previous_plan
+
+
+_CONTEXT_ENTRIES: list[_InterventionContextEntry] = []
 
 
 class _HookReentrancyGuard:
