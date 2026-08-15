@@ -199,6 +199,7 @@ add names to the top-level `torchlens` namespace:
 | `sweep_values_missing` | Sweep values iterable is missing | Pass a non-empty iterable |
 | `tensor_connection_labels_missing` | Manual edge endpoint lacks a capture label | Use tensors already captured in the active trace |
 | `top_n_invalid` | Requested `top_n` is below one | Pass a positive integer |
+| `trace_cleaned_up` | Public read on a Trace that `cleanup()` husked (`TraceCleanedUpError`, `AttributeError` lineage) | Re-capture with `tl.trace(...)`; cleanup permanently empties a Trace |
 | `trace_not_finished` | Export requested before the forward pass finished | Wait until `trace(...)` has returned |
 | `trace_reference_collected` | Owning Trace was garbage-collected | Keep the Trace alive while reading records |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |

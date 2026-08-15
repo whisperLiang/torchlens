@@ -234,6 +234,7 @@ _LAZY_EXCEPTION_PATHS = {
     ),
     "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
     "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),
+    "TraceCleanedUpError": ("torchlens._errors", "TraceCleanedUpError"),
     "RecordBindingError": ("torchlens._errors", "RecordBindingError"),
     "ReentrantTraceError": ("torchlens._state", "ReentrantTraceError"),
     # Defined beside the eagerly-imported runnable vocabulary but registered

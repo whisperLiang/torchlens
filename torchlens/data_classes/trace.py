@@ -389,6 +389,19 @@ def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
         Always, with an actionable memory-field hint when available.
     """
 
+    if getattr(trace, "__dict__", {}).get("_tl_cleaned_up", False):
+        # One typed refusal for every reader of a husked trace, instead of a
+        # raw AttributeError naming whichever private field the reader hit
+        # first (b6-opus R25: summary/iteration/getitem/draw/receptive_fields
+        # each leaked a different private name).
+        from .._errors import TraceCleanedUpError
+
+        raise TraceCleanedUpError(
+            f"this Trace was husked by cleanup(), so {name!r} (like every "
+            "logged field) has been deleted",
+            remedy="re-capture with tl.trace(...); cleanup() permanently empties a Trace",
+            attribute=name,
+        )
     hint = _MISSING_ATTR_HINTS.get(name)
     if hint is not None:
         raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}; {hint}")
@@ -2405,8 +2418,14 @@ class Trace(
             state; capability gates independently treat it as UNKNOWN).
         """
 
-        from ..capture.outcome import outcome_for
+        from ..capture.outcome import CaptureOutcome, CaptureStatus, outcome_for
 
+        if self.__dict__.get("_tl_cleaned_up", False):
+            # cleanup() deletes the settled sidecar with every other field.
+            # The frozen vocabulary designates UNKNOWN as the most-restrictive
+            # value and the save gate already lands there; ``None`` is outside
+            # the vocabulary and was the one unsettled read (b6-opus R25).
+            return CaptureOutcome(status=CaptureStatus.UNKNOWN, derived=True)
         return outcome_for(self)
 
     @property

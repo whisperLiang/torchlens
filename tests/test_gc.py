@@ -727,3 +727,49 @@ def test_delattr_capture_events_releases_the_working_projection():
     assert trace.__dict__.get("_capture_events") is None
     assert not stream.op_events
     assert not stream.module_prep_events
+
+
+@pytest.mark.smoke
+def test_cleaned_trace_refuses_typed_and_settles_unknown():
+    """A husked Trace refuses public reads TYPED and settles outcome UNKNOWN.
+
+    b6-opus R25: seven public reads raised raw AttributeError naming
+    whichever private field they touched first (``_tracing_finished``,
+    ``_layers_logged``, ``layer_list``), ``Trace.outcome`` returned ``None``
+    (outside the frozen vocabulary), and a second ``cleanup()`` crashed on
+    the first cleanup's own output.
+    """
+
+    from torchlens._errors import TraceCleanedUpError
+    from torchlens.capture.outcome import CaptureStatus
+
+    trace = tl.trace(_TwoLayerNet(), torch.randn(2, 5))
+    assert trace.outcome is not None and trace.outcome.status is CaptureStatus.COMPLETE
+    trace.cleanup()
+
+    # One typed code for every public reader.
+    readers = {
+        "summary": lambda: trace.summary(),
+        "iteration": lambda: list(trace),
+        "getitem": lambda: trace["relu_1_2"],
+        "draw": lambda: trace.draw(vis_save_only=True),
+        "receptive_fields": lambda: trace.receptive_fields(),
+    }
+    for name, reader in readers.items():
+        with pytest.raises(TraceCleanedUpError) as exc_info:
+            reader()
+        assert exc_info.value.fields["code"] == "trace_cleaned_up", name
+        assert exc_info.value.fields["remedy"], name
+
+    # AttributeError lineage keeps hasattr/getattr-default degrade paths.
+    assert getattr(trace, "layer_list", None) is None
+    assert not hasattr(trace, "_tracing_finished")
+
+    # The settled outcome is UNKNOWN (most restrictive), never None.
+    assert trace.outcome is not None
+    assert trace.outcome.status is CaptureStatus.UNKNOWN
+
+    # Idempotent teardown and surviving diagnostics.
+    trace.cleanup()
+    assert repr(trace)
+    assert tl.report.explain(trace)

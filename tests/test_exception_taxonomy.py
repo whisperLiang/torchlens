@@ -453,6 +453,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "PredicateError": ("RuntimeError",),
     "ReattachError": ("RuntimeError",),
     "RecordBindingError": ("RuntimeError",),
+    "TraceCleanedUpError": ("AttributeError",),
     "RecordContextFieldError": ("AttributeError",),
     "RecorderStateError": ("RuntimeError",),
     "RecordingConfigError": ("ValueError",),
