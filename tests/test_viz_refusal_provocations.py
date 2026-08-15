@@ -10,6 +10,7 @@ of zero tests.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 
 import pytest
 import torch
@@ -22,8 +23,12 @@ pytestmark = pytest.mark.smoke
 
 
 @pytest.fixture(scope="module")
-def small_trace() -> object:
-    return tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(2, 4))
+def small_trace() -> Iterator[object]:
+    trace = tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(2, 4))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def test_direction_refuses_typed() -> None:
