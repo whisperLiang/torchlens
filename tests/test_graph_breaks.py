@@ -89,8 +89,9 @@ def test_graph_breaks_unavailable_capability_is_typed(
 
     monkeypatch.setattr(_torch_compat, "HAS_DYNAMO_EXPLAIN", False)
 
-    with pytest.raises(GraphBreaksUnavailableError, match="unavailable"):
+    with pytest.raises(GraphBreaksUnavailableError, match="unavailable") as exc_info:
         tl.debug.graph_breaks(_BreakFreeModel(), torch.ones(2, 3))
+    assert exc_info.value.code == "graph_breaks_unavailable"
 
 
 def test_graph_breaks_unknown_runtime_shape_is_typed(

@@ -158,8 +158,25 @@ def test_module_focus_invalid_address_raises(tmp_path: Path) -> None:
 
     log = tl.trace(_TwoBlockModel(), torch.randn(1, 4))
 
-    with pytest.raises(ValueError, match="nonexistent"):
+    with pytest.raises(ValueError, match="nonexistent") as exc_info:
         _render_dot(log, tmp_path, module="nonexistent")
+    assert exc_info.value.fields["code"] == "module_focus_not_found"
+
+
+def test_module_focus_wrong_type_raises_module_focus_invalid(tmp_path: Path) -> None:
+    """A non-Module, non-address focus value refuses with the typed code.
+
+    r4 b6-opus R25 finding 2: ``module_focus_invalid`` was previously
+    "provoked" only by this file's test FUNCTION NAMES; no test asserted the
+    code was raised (and the name-adjacent test actually provokes
+    ``module_focus_not_found``).
+    """
+
+    log = tl.trace(_TwoBlockModel(), torch.randn(1, 4))
+
+    with pytest.raises(ValueError, match="module") as exc_info:
+        _render_dot(log, tmp_path, module=42)
+    assert exc_info.value.fields["code"] == "module_focus_invalid"
 
 
 def test_module_focus_with_collapse_fn(tmp_path: Path) -> None:

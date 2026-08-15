@@ -61,6 +61,14 @@ _CONSTANT_SPELLED_CODES: dict[str, tuple[str, str]] = {
         "torchlens/backends/torch/collectives.py",
         "WILDCARD_RECV_UNSUPPORTED",
     ),
+    "intervention_fire_results_unrecordable": (
+        "torchlens/backends/torch/_ops_interventions.py",
+        "INTERVENTION_FIRE_RESULTS_UNRECORDABLE",
+    ),
+    "intervention_fire_results_cleanup_failed": (
+        "torchlens/backends/torch/_ops_interventions.py",
+        "INTERVENTION_FIRE_RESULTS_CLEANUP_FAILED",
+    ),
 }
 
 

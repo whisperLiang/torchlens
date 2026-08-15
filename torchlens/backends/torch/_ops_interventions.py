@@ -62,6 +62,13 @@ if TYPE_CHECKING:
 
 _LIVE_FIRE_RESULTS_STORAGE_ATTR = "_tl_live_fire_results_by_tensor_id"
 
+# Stable constant-spelled refusal kinds (surfaced on ``fields["kind"]``),
+# enrolled in the lockstep gate's constant-spelled table so a rename or
+# string drift trips governance like any inline ``code=`` literal (r25,
+# b6-fable carried MED: both shipped outside every governance surface).
+INTERVENTION_FIRE_RESULTS_UNRECORDABLE = "intervention_fire_results_unrecordable"
+INTERVENTION_FIRE_RESULTS_CLEANUP_FAILED = "intervention_fire_results_cleanup_failed"
+
 
 def _clear_out_of_band_fire_results(
     tensor_id: int,
@@ -111,7 +118,7 @@ def _store_out_of_band_fire_results(
         raise CompatibilityError(
             "An intervention changed execution, but its tensor accepts neither "
             "transient metadata nor storage-backed evidence.",
-            kind="intervention_fire_results_unrecordable",
+            kind=INTERVENTION_FIRE_RESULTS_UNRECORDABLE,
         ) from side_table_error
     records[tensor_id] = (reference, fire_results)
 
@@ -664,6 +671,6 @@ def _pop_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...
             raise CompatibilityError(
                 "Intervention fire metadata could not be cleared after consumption; "
                 "refusing rather than allowing stale evidence into a later capture.",
-                kind="intervention_fire_results_cleanup_failed",
+                kind=INTERVENTION_FIRE_RESULTS_CLEANUP_FAILED,
             ) from exc
     return tuple(fire_results)

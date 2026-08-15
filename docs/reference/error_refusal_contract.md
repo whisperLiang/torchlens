@@ -210,9 +210,9 @@ add names to the top-level `torchlens` namespace:
 | `visualization_node_style_invalid` | Node style is unknown | Choose a documented style |
 | `wrappers_removed_before_capture` | A concurrent `unwrap_torch()` removed the torch wrappers between model preparation and capture admission | Do not call `unwrap_torch()` concurrently with capture entry; re-run `tl.trace` to re-install the wrappers |
 
-## Constant-spelled refusal kinds (distributed collective capture)
+## Constant-spelled refusal kinds
 
-Three distributed-capture refusals identify themselves on `exc.fields["kind"]` (one
+These refusals identify themselves on `exc.fields["kind"]` (one
 entry per structured finding) rather than `exc.fields["code"]`, and their identifier
 strings are spelled as module-level constants rather than inline `code="..."`
 literals. They are part of the same stable public vocabulary: branch on the kind
@@ -225,6 +225,8 @@ string value fails the gate exactly like an inline code.
 | `ambiguous_group_lifetime` | A collective used a process group whose pre-arming lifetime cannot be proven | Call `tl.distributed.arm()` at process start, before any group is created |
 | `uncaptured_collective_op` | Arm-time recognizer set-inequality or dispatcher schema scan found a collective the wraps would not capture | Upgrade TorchLens to a build whose recognizer covers the installed torch, or avoid the unrecognized collective in the traced forward |
 | `wildcard_recv_unsupported` | A point-to-point receive from `ANY_SOURCE` cannot be attributed to a sender | Pass an explicit source rank to `recv`/`irecv` |
+| `intervention_fire_results_unrecordable` | An intervention changed execution but its tensor accepts neither transient metadata nor storage-backed fire-result evidence | Intervene on ordinary tensor outputs, or drop the intervention for this op |
+| `intervention_fire_results_cleanup_failed` | Intervention fire metadata could not be cleared after consumption; refusing prevents stale evidence entering a later capture | Re-run the capture; report the tensor type if it recurs |
 
 The related `group_lifetime_evidence_conflict` kind is governed by the merged-trace
 contract (`docs/reference/merged_trace_contract.md`), where it is also a
