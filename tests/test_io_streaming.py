@@ -281,7 +281,10 @@ def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     def _raise_keyboard_interrupt(*args: Any, **kwargs: Any) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(streaming_module.pickle, "dump", _raise_keyboard_interrupt)
+    # ``finalize()`` writes metadata.pkl through ``dump_canonical_metadata()``
+    # (B3R4-R21-2 canonical container bytes), driving a ``pickle._Pickler``
+    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
+    monkeypatch.setattr(streaming_module, "dump_canonical_metadata", _raise_keyboard_interrupt)
 
     with pytest.raises(KeyboardInterrupt):
         tl.trace(
