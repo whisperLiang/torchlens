@@ -21,13 +21,19 @@ from torchlens.validation import core as validation_core
 pytestmark = pytest.mark.smoke
 
 
-def _traced_linear() -> tuple[tl.Trace, list[torch.Tensor]]:
+def _traced_linear() -> tuple[tl.Trace, list[torch.Tensor], nn.Module]:
     """Capture a tiny linear model with full saves for replay validation.
 
     Returns
     -------
-    tuple[tl.Trace, list[torch.Tensor]]
-        The trace and its ground-truth output tensors.
+    tuple[tl.Trace, list[torch.Tensor], nn.Module]
+        The trace, its ground-truth output tensors, AND the source model.
+        The model rides along on purpose: capture releases the direct param
+        references and rehydrates them through the source-model weakref, so a
+        caller validating a trace must keep its model alive (dropping it here
+        made the healthy-path test hostage to gc timing -- it raised
+        PostTraceParamUnavailable whenever a collection happened to run
+        between capture and validation).
     """
 
     model = nn.Sequential(nn.Linear(4, 3)).eval()
@@ -35,7 +41,7 @@ def _traced_linear() -> tuple[tl.Trace, list[torch.Tensor]]:
     with torch.no_grad():
         ground_truth = model(x)
     trace = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
-    return trace, [ground_truth]
+    return trace, [ground_truth], model
 
 
 def test_degraded_comparator_refuses_to_validate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,7 +52,7 @@ def test_degraded_comparator_refuses_to_validate(monkeypatch: pytest.MonkeyPatch
     every replay), which is the judge-corruption class the finding names.
     """
 
-    trace, ground_truth = _traced_linear()
+    trace, ground_truth, _model = _traced_linear()
     monkeypatch.setattr(validation_core, "tensor_nanequal", lambda *args, **kwargs: True)
     with pytest.raises(RuntimeError, match="comparator self-test failed"):
         validation_core.validate_saved_outs(trace, ground_truth)
@@ -55,7 +61,7 @@ def test_degraded_comparator_refuses_to_validate(monkeypatch: pytest.MonkeyPatch
 def test_always_false_comparator_also_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     """An always-False judge is equally untrustworthy and must abort."""
 
-    trace, ground_truth = _traced_linear()
+    trace, ground_truth, _model = _traced_linear()
     monkeypatch.setattr(validation_core, "tensor_nanequal", lambda *args, **kwargs: False)
     with pytest.raises(RuntimeError, match="comparator self-test failed"):
         validation_core.validate_saved_outs(trace, ground_truth)
@@ -64,7 +70,7 @@ def test_always_false_comparator_also_refuses(monkeypatch: pytest.MonkeyPatch) -
 def test_healthy_comparator_validates_normally() -> None:
     """The self-test is invisible on a healthy comparator."""
 
-    trace, ground_truth = _traced_linear()
+    trace, ground_truth, _model = _traced_linear()
     status = validation_core.validate_saved_outs(trace, ground_truth)
     assert bool(status)
 
@@ -85,7 +91,7 @@ def test_nan_doctrine_is_part_of_the_self_test(monkeypatch: pytest.MonkeyPatch) 
             return True
         return bool(real(a, b, **kwargs))
 
-    trace, ground_truth = _traced_linear()
+    trace, ground_truth, _model = _traced_linear()
     monkeypatch.setattr(validation_core, "tensor_nanequal", _nan_blind)
     with pytest.raises(RuntimeError, match="comparator self-test failed"):
         validation_core.validate_saved_outs(trace, ground_truth)

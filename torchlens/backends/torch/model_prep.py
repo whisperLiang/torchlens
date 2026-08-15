@@ -2848,17 +2848,22 @@ def _clear_session_tensor_metadata(
     # paying a full call that immediately returns) halves the cost of walking
     # broadly-imported module namespaces like ``torch`` (round-3 b4 F1: the
     # pre-forward ownership snapshot made every capture pay this walk twice).
+    # EXACT type() membership on purpose: isinstance() falls back to reading
+    # ``__class__`` on a non-matching type, which the reduce_op deprecation
+    # shim answers with a FutureWarning (SF-45) -- the recursion's entry guard
+    # never runs for inline-skipped items, so this check must stay hostile-safe.
+    # Non-exact scalar subclasses fall through to the guarded recursive call.
     _scalar_leaves = (str, bytes, int, float, bool)
     if isinstance(value, dict):
         for key, item in value.items():
-            if key is not None and not isinstance(key, _scalar_leaves):
+            if key is not None and type(key) not in _scalar_leaves:
                 _clear_session_tensor_metadata(key, seen, depth + 1, visit)
-            if item is not None and not isinstance(item, _scalar_leaves):
+            if item is not None and type(item) not in _scalar_leaves:
                 _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, (list, tuple, set, frozenset, deque)):
         for item in value:
-            if item is not None and not isinstance(item, _scalar_leaves):
+            if item is not None and type(item) not in _scalar_leaves:
                 _clear_session_tensor_metadata(item, seen, depth + 1, visit)
         return
     if isinstance(value, nn.Module):
@@ -2867,7 +2872,7 @@ def _clear_session_tensor_metadata(
     if namespace is None:
         return
     for item in namespace.values():
-        if item is not None and not isinstance(item, _scalar_leaves):
+        if item is not None and type(item) not in _scalar_leaves:
             _clear_session_tensor_metadata(item, seen, depth + 1, visit)
 
 
@@ -2919,9 +2924,12 @@ def _clear_container_tree_tensor_metadata(
         items = list(value)
     # Inline scalar-leaf skip: module-namespace container trees are dominated
     # by strings (``torch.__all__`` alone is ~1400), and each full call here
-    # costs more than the check (round-3 b4 F1 walk-cost finding).
+    # costs more than the check (round-3 b4 F1 walk-cost finding). EXACT
+    # type() membership on purpose: isinstance() reads ``__class__`` on a
+    # non-matching type, which the reduce_op deprecation shim answers with a
+    # FutureWarning (SF-45); subclasses fall through to the guarded recursion.
     for item in items:
-        if item is None or isinstance(item, (str, bytes, int, float, bool)):
+        if item is None or type(item) in (str, bytes, int, float, bool):
             continue
         _clear_container_tree_tensor_metadata(item, seen, depth + 1, visit)
 
