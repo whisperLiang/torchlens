@@ -3,6 +3,7 @@
 # ruff: noqa: F403, F405
 
 import warnings
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -1894,11 +1895,13 @@ def _setup_subgraphs(
 
     max_call_depth = _get_max_call_depth(subgraphs, module_edge_dict, module_submodule_dict)
 
-    subgraph_stack = [[subgraph] for subgraph in subgraphs]
+    # deque: list.pop(0) shifted the whole queue per module, Theta(M^2) on
+    # flat module-heavy graphs before Graphviz even ran (R29, b4 sol MED).
+    subgraph_stack: deque[list[str]] = deque([subgraph] for subgraph in subgraphs)
     call_depth = 0
     emitted_rank_groups = 0
     while len(subgraph_stack) > 0:
-        parent_graph_list = subgraph_stack.pop(0)
+        parent_graph_list = subgraph_stack.popleft()
         emitted_rank_groups += _setup_subgraphs_recurse(
             self,
             graphviz_graph,
@@ -1979,7 +1982,7 @@ def _setup_subgraphs_recurse(
     parent_graph_list: List[str],
     module_edge_dict: Dict[str, Any],
     module_submodule_dict: Dict[str, list[str]],
-    subgraph_stack: list[list[str]],
+    subgraph_stack: deque[list[str]],
     call_depth: int,
     max_call_depth: int,
     vis_mode: str,
