@@ -884,3 +884,69 @@ def test_assignments_pool_one_recurrent_labels_tuple_per_group() -> None:
     for members, instances in instances_by_group.items():
         assert len(instances) == len(members)
         assert all(instance is instances[0] for instance in instances)
+
+
+def test_merge_iso_groups_visits_linear_pairs_on_an_unrelated_chain() -> None:
+    """The pair sweep must not walk C(N,2) over an ungroupable iso group (R29/F29-A).
+
+    Every union arm requires subgraph adjacency or shared param types, yet
+    the sweep walked the full ``it.combinations`` triangle over a plain
+    chain of N identical bare ops -- 35% of capture CPU at 3200 ops, rising
+    as N^2, with ZERO groupings produced (the documented short-circuits
+    never fire because no union ever happens). Candidate enumeration is now
+    relation-driven; an all-unrelated group must cost O(N), pinned here by
+    counting node_to_subgraph lookups (two per visited pair).
+    """
+
+    from torchlens.postprocess.loop_grouping_adapter import (
+        SubgraphInfo,
+        _GroupingWorkspace,
+        _merge_iso_groups_to_layers,
+        _MutableRecurrenceNode,
+    )
+
+    n = 300
+    labels = [f"relu_{index}" for index in range(n)]
+    nodes = {}
+    for index, label in enumerate(labels):
+        nodes[label] = _MutableRecurrenceNode(
+            label=label,
+            raw_order=index,
+            equivalence_key="relu",
+            equivalent_labels=tuple(labels),
+            data_parents=(labels[index - 1],) if index else (),
+            data_children=(labels[index + 1],) if index < n - 1 else (),
+            layer_label=label,
+            recurrent_labels=[],
+            uses_params=False,
+            func_name="relu",
+            param_barcodes=(),
+        )
+    workspace = _GroupingWorkspace(
+        nodes=nodes,
+        raw_labels=tuple(labels),
+        source_labels=(labels[0],),
+        eligible_labels=set(labels),
+    )
+
+    class _CountingDict(dict):
+        lookups = 0
+
+        def __getitem__(self, key):
+            type(self).lookups += 1
+            return super().__getitem__(key)
+
+    node_to_subgraph = _CountingDict({label: SubgraphInfo(starting_node=label) for label in labels})
+    # NO adjacency and NO param types: no pair anywhere in the group can
+    # union, exactly the plain feed-forward chain shape.
+    merged = _merge_iso_groups_to_layers(
+        workspace,
+        {"relu_0": list(labels)},
+        node_to_subgraph,
+        {},
+    )
+    assert merged == {}, "an unrelated bare chain must produce no merged groups"
+    assert _CountingDict.lookups < 20 * n, (
+        f"pair sweep walked {_CountingDict.lookups} node_to_subgraph lookups for "
+        f"{n} unrelated nodes -- the C(N,2) triangle is back (expected O(N))"
+    )

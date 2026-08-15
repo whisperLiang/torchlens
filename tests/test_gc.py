@@ -541,6 +541,122 @@ class TestTraceGC:
             partial_module._FAILED_CAPTURE_REGISTRY.pop(id(exception), None)
 
     @pytest.mark.smoke
+    def test_nonweakrefable_entry_never_pins_the_exception_graph(self):
+        """A dropped locked+non-weakrefable exception must not pin its capture (R37).
+
+        An ``Exception`` subclass declaring ``__slots__`` is non-weakrefable,
+        and one that also refuses ``__setattr__`` rejects the ``partial_log``
+        attachment, so it reaches the registry fallback. The stub design
+        (fixwave-5 integration; supersedes the strong-retention fallback and
+        its refcount sweep) NEVER retains the exception: its graph --
+        traceback, frame locals, model, inputs -- frees the moment the
+        caller drops it, with NO later registry interaction needed. The
+        price, disclosed on the registry docstring, is that the partial
+        TRACE stays pinned by the entry until the registry cap; this test
+        pins that the registry entry is the ONLY thing retaining it.
+        """
+
+        from torchlens import partial as partial_module
+
+        class _LockedSlots(Exception):
+            __slots__ = ()
+
+            def __setattr__(self, name, value):
+                raise AttributeError("locked")
+
+        with pytest.raises(TypeError):
+            weakref.ref(_LockedSlots("x"))  # the precondition this arm exists for
+
+        class _FrameLocalMarker:
+            pass
+
+        def raise_locked():
+            marker = _FrameLocalMarker()
+            marker_ref = weakref.ref(marker)
+            try:
+                raise _LockedSlots("stub retention probe")
+            except _LockedSlots as error:
+                return error, marker_ref
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        exception, marker_ref = raise_locked()
+        partial_log = partial_module.PartialTrace(trace=trace, original_exception=exception)
+        key = id(exception)
+        partial_module._register_failed_capture(exception, partial_log)
+        del partial_log
+
+        # Recovery works while the caller holds the exception, and the sweep
+        # (which runs inside every lookup) never evicts a stub entry.
+        recovered = partial_module.from_failed_capture(exception)
+        assert recovered.trace is trace
+        del recovered
+        assert key in partial_module._FAILED_CAPTURE_REGISTRY
+
+        # The exception graph frees IMMEDIATELY on drop -- no sweep, no
+        # later registry interaction (stronger than the superseded strong
+        # fallback, which kept it until the next registration or lookup).
+        del exception
+        gc.collect()
+        assert marker_ref() is None, (
+            "the stub entry pinned the dead exception's traceback frame locals"
+        )
+
+        # The trace pin is the registry entry ALONE (cap-bounded): popping
+        # the entry must be the last strong reference standing.
+        trace_ref = weakref.ref(trace)
+        del trace
+        gc.collect()
+        assert trace_ref() is not None, "the cap-bounded registry entry should hold the trace"
+        partial_module._FAILED_CAPTURE_REGISTRY.pop(key, None)
+        gc.collect()
+        assert trace_ref() is None, (
+            "something besides the registry entry retained the partial trace"
+        )
+
+    @pytest.mark.smoke
+    def test_live_run_after_model_collection_refuses_typed_and_names_the_weak_ref(self):
+        """A collected source model refuses run() typed AND discloses why (R37).
+
+        The refusal itself is correct by design (the trace holds its model
+        weakly), but it used to be undocumented and its message named neither
+        the weak reference nor a remedy -- the plainest documented idiom
+        ``tl.trace(Model(), x)`` then failed gc-timing-dependently with no
+        actionable explanation.
+        """
+
+        from torchlens.errors import RunCapabilityUnavailableError
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        gc.collect()
+        assert trace._source_model_ref() is None, "inline model should be collected"
+        with pytest.raises(RunCapabilityUnavailableError) as excinfo:
+            trace.run(inputs=torch.randn(1, 5))
+        message = str(excinfo.value)
+        assert "weakly" in message and "strong reference" in message, (
+            "the collected-model refusal must disclose the weak-reference "
+            f"dependency and its remedy; got: {message}"
+        )
+        with pytest.raises(RunCapabilityUnavailableError) as fast_excinfo:
+            trace.run(inputs=torch.randn(1, 5), fast=True)
+        assert "weakly" in str(fast_excinfo.value)
+
+    @pytest.mark.smoke
+    def test_cleanup_drops_the_receptive_field_solution_cache(self):
+        """cleanup() must evict the rf solution cache, its only eviction path (R33).
+
+        ``_receptive_field_solution`` (~54 MB on a resnet18 trace) lives
+        outside MODEL_LOG_FIELD_ORDER, so the husking loop skipped it and the
+        cache survived cleanup() with no eviction path at all.
+        """
+
+        trace = tl.trace(_SimpleLinear(), torch.randn(1, 5))
+        trace.__dict__["_receptive_field_solution"] = object()
+        trace.cleanup()
+        assert "_receptive_field_solution" not in trace.__dict__, (
+            "cleanup() left the receptive-field solution cache pinned"
+        )
+
+    @pytest.mark.smoke
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 
@@ -773,3 +889,100 @@ def test_cleaned_trace_refuses_typed_and_settles_unknown():
     trace.cleanup()
     assert repr(trace)
     assert tl.report.explain(trace)
+
+
+@pytest.mark.smoke
+def test_failed_capture_registry_never_pins_a_nonweakrefable_exception_graph():
+    """The registry fallback stores an identity stub, never the exception.
+
+    Regression (R37, REOPENED b2:C5): a non-weakrefable exception that also
+    rejected ``partial_log`` attachment was retained STRONGLY, pinning its
+    traceback's frame locals (model, inputs) until 128 unrelated failures
+    evicted it.
+    """
+
+    import warnings
+
+    class _LockedError(Exception):
+        __slots__ = ()
+
+        def __setattr__(self, name: str, value: object) -> None:
+            if name == "partial_log":
+                raise AttributeError("locked")
+            super().__setattr__(name, value)
+
+    class _FailingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.linear(x)
+            raise _LockedError("boom")
+
+    model = _FailingModel()
+    model_ref = weakref.ref(model)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            tl.trace(model, torch.ones(1, 3))
+        except _LockedError as exc:
+            partial = tl.partial.from_failed_capture(exc)
+            assert partial is not None
+            del exc, partial
+
+    del model
+    gc.collect()
+    gc.collect()
+    assert model_ref() is None, "the failed-capture registry pinned the exception graph"
+
+
+@pytest.mark.smoke
+def test_static_attr_memo_releases_a_self_referencing_class():
+    """A class-valued cached answer must not pin its own weak memo key (R37).
+
+    Regression (b2-sol): ``cls.self_ref = cls`` made the memo's strong VALUE
+    reach its weak KEY, so eviction could never start and the class leaked for
+    the process lifetime.
+    """
+
+    from torchlens._io.state_keys import _STATIC_ATTR_MEMO, static_class_attr
+
+    ephemeral = type("_EphemeralSelfRef", (), {})
+    ephemeral.self_ref = ephemeral
+    assert static_class_attr(ephemeral, "self_ref") is ephemeral
+    cls_ref = weakref.ref(ephemeral)
+    del ephemeral
+    gc.collect()
+    gc.collect()
+    assert cls_ref() is None, "self-referencing class pinned by _STATIC_ATTR_MEMO"
+    assert all(key is not None for key in _STATIC_ATTR_MEMO)
+
+
+@pytest.mark.smoke
+def test_merged_trace_release_drops_member_traces():
+    """MergedTrace.release() unpins the rank traces it held strongly (b2:B20).
+
+    Regression guard for the presenter's lifetime contract: without release(),
+    a presenter over live traces transitively pinned every member (and its
+    activations) with no counterpart to Trace.cleanup().
+    """
+
+    from torchlens.merged._presenter import MergedTrace, _RankHandle
+
+    trace_a = tl.trace(_SimpleLinear(), torch.randn(2, 5))
+    trace_b = tl.trace(_SimpleLinear(), torch.randn(2, 5))
+    refs = [weakref.ref(trace_a), weakref.ref(trace_b)]
+    merged = MergedTrace(
+        derivation=None,  # placeholder: release() must not need the derivation
+        handles={0: _RankHandle(0, trace=trace_a), 1: _RankHandle(1, trace=trace_b)},
+    )
+    del trace_a, trace_b
+    gc.collect()
+    assert all(ref() is not None for ref in refs), "presenter should pin members"
+
+    merged.release()
+    gc.collect()
+    gc.collect()
+    assert all(ref() is None for ref in refs), "release() left a member pinned"
+    merged.release()  # idempotent

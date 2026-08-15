@@ -400,8 +400,9 @@ def test_variant_refusal_carries_structured_offense_fields() -> None:
     assert isinstance(fields["remedy"], str) and fields["remedy"]
     offenses = fields["offenses"]
     assert isinstance(offenses, tuple) and offenses
-    assert all(set(offense) == {"name", "reason"} for offense in offenses)
+    assert all(set(offense) == {"name", "reason", "path", "shape", "dtype"} for offense in offenses)
     assert any("meta tensor" in offense["name"] for offense in offenses)
+    assert all(offense["path"] for offense in offenses)
 
 
 def _nest(value: object, levels: int) -> object:
@@ -509,3 +510,39 @@ def test_cuda_forward_pass_still_logs() -> None:
     x = torch.randn(2, 4, device="cuda")
     log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="all"))
     assert len(log.layer_logs) > 0
+
+
+def test_offense_path_names_the_input_tree_location() -> None:
+    """Refusals disclose WHERE the offending tensor sits (R67)."""
+
+    model = _Tiny()
+    kwargs = {"extras": {"deep": {"inner": torch.ones(2, 2, device="meta")}}}
+    with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+        check_model_and_input_variants(model, torch.ones(1, 3), kwargs)
+    offense = exc_info.value.fields["offenses"][0]
+    assert offense["path"] == "kwargs['extras']['deep']['inner']"
+    assert offense["shape"] == (2, 2)
+    assert offense["dtype"] == "torch.float32"
+
+
+def test_mid_forward_nested_refusal_carries_the_fields_contract() -> None:
+    """The _ops_activations raises honor code/remedy/offenses (R65)."""
+
+    import torchlens as tl
+
+    class _NestedInsideForward(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return torch.nested.as_nested_tensor([x[0], x[1]])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+            tl.trace(_NestedInsideForward(), torch.ones(2, 3))
+    fields = exc_info.value.fields
+    assert fields["code"] == "unsupported_tensor_variant"
+    assert fields["remedy"]
+    (offense,) = fields["offenses"]
+    assert offense["shape"] is None
+    assert offense["path"].endswith("_raw")  # the op label being recorded

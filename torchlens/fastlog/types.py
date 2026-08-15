@@ -478,7 +478,17 @@ class Recording(CapturedRun):
 
         stamped = getattr(self, "_outcome", None)
         if isinstance(stamped, CaptureOutcome):
-            return stamped
+            # R10-5: a plain-pickled Recording's stamped outcome is spoofable
+            # bytes like any other unpickled field. Re-validate it through the
+            # same string-only parse + coherence matrix the trace-side load
+            # uses, so an incoherent or forged record degrades (never upgrades)
+            # instead of being adopted verbatim.
+            from ..capture.outcome import parse_outcome_payload
+
+            try:
+                return parse_outcome_payload(stamped.to_payload())
+            except Exception:  # noqa: BLE001 - fail closed on hostile payloads
+                return CaptureOutcome(status=CaptureStatus.UNKNOWN, derived=True)
         status = self.status
         if status == "partial_error":
             return CaptureOutcome(

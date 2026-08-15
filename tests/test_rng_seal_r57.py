@@ -107,17 +107,44 @@ def test_held_alias_localtime_literal_timestamp_stays_a_transform() -> None:
 
 
 @pytest.mark.smoke
-def test_held_alias_localtime_computed_argument_flags_uncertainty() -> None:
-    """A computed argument is runtime-dependent: neither a clock-draw claim
-    nor a clean pass is provable, so the window flags uncertainty."""
+def test_held_alias_localtime_unresolvable_argument_flags_uncertainty() -> None:
+    """An UNRESOLVABLE argument is runtime-dependent: neither a clock-draw
+    claim nor a clean pass is provable, so the window flags uncertainty.
+
+    A simple bound name resolves from the frame at ``c_call`` time and stays
+    a pure transform (the fixwave-5 value-resolving decode; see
+    test_held_alias_localtime_bound_variable_stays_a_transform), so the
+    uncertainty lane is exercised by an attribute argument the bytecode
+    walk-back cannot resolve.
+    """
+
+    class _Holder:
+        ts = 1700000000.0
+
+    holder = _Holder()
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        _HELD_LOCALTIME(holder.ts)
+    assert result.uncertain, (
+        "an unresolvable explicit-time argument settled certain; the value "
+        "could have been None at runtime"
+    )
+
+
+@pytest.mark.smoke
+def test_held_alias_localtime_bound_variable_stays_a_transform() -> None:
+    """A bound non-None local resolves at ``c_call`` time: pure transform.
+
+    Nothing can rebind a simple name between its argument load and the call
+    in the same thread, so the resolved value IS the value the converter
+    received -- no over-ceiling and no uncertainty (the runnable-contract
+    no-over-trigger pin exercises the same decode end-to-end).
+    """
 
     timestamp = float(len("x")) * 1700000000.0
     with host_nondeterminism_monitor(nn.Identity()) as result:
         _HELD_LOCALTIME(timestamp)
-    assert result.uncertain, (
-        "a computed explicit-time argument settled certain; the value could "
-        "have been None at runtime"
-    )
+    assert not any("localtime" in channel for channel in result.channels)
+    assert not result.uncertain
 
 
 @pytest.mark.smoke

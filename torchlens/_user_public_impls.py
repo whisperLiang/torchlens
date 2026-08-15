@@ -1633,8 +1633,8 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
+    atol: float | None = None,
+    rtol: float | None = None,
     validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
@@ -1661,9 +1661,13 @@ def validate_backward_pass(
         process-global RNG engines without restoring them; see
         ``tl.trace``'s ``random_seed``.
     atol:
-        Absolute allclose tolerance.
+        Absolute allclose tolerance. ``None`` (default) derives the
+        tolerance per gradient dtype (R13); the historical fp32 decimal
+        pair applied to every dtype was ~4.5e11 fp64 ULPs loose and
+        false-failed fp16 grads.
     rtol:
-        Relative allclose tolerance.
+        Relative allclose tolerance. ``None`` (default) derives per
+        gradient dtype, matching ``torchlens.validation.backward``.
     validate_layer_grads:
         If True (default), also validate captured per-module-output gradients.
     layer_grad_atol:

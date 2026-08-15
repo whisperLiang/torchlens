@@ -585,6 +585,45 @@ def tensor_nanequal(
         if tensor_a.is_quantized or tensor_b.is_quantized:
             return _quantized_tensor_equal(tensor_a, tensor_b)
 
+        # Sparse layouts have no aten::equal / isinf / nan_to_num kernels: every
+        # comparison below used to escape tl.trace() as a raw torch-internal
+        # NotImplementedError naming the SparseCPU dispatcher (R65; the layout
+        # sibling of the fp8 class documented below). Compare the canonical
+        # structure exactly and recurse on the strided values tensor so
+        # NaN/Inf/tolerance semantics match the dense path.
+        if tensor_a.layout != tensor_b.layout:
+            return False
+        if tensor_a.layout == torch.sparse_coo:
+            tensor_a = tensor_a.coalesce()
+            tensor_b = tensor_b.coalesce()
+            if not torch.equal(tensor_a.indices(), tensor_b.indices()):
+                return False
+            return tensor_nanequal(
+                tensor_a.values(), tensor_b.values(), allow_tolerance=allow_tolerance
+            )
+        if tensor_a.layout in (
+            torch.sparse_csr,
+            torch.sparse_csc,
+            torch.sparse_bsr,
+            torch.sparse_bsc,
+        ):
+            if tensor_a.layout in (torch.sparse_csr, torch.sparse_bsr):
+                index_pairs = (
+                    (tensor_a.crow_indices(), tensor_b.crow_indices()),
+                    (tensor_a.col_indices(), tensor_b.col_indices()),
+                )
+            else:
+                index_pairs = (
+                    (tensor_a.ccol_indices(), tensor_b.ccol_indices()),
+                    (tensor_a.row_indices(), tensor_b.row_indices()),
+                )
+            for index_a, index_b in index_pairs:
+                if not torch.equal(index_a, index_b):
+                    return False
+            return tensor_nanequal(
+                tensor_a.values(), tensor_b.values(), allow_tolerance=allow_tolerance
+            )
+
         # Validation overwhelmingly compares identical ordinary floating-point
         # payloads. Avoid constructing the Inf/NaN masks and substituted tensors
         # in that common case; non-exact comparisons and non-floating dtypes
@@ -1387,6 +1426,13 @@ def synchronize_pending_cpu_async_copies() -> None:
     Called at the capture finalize seam and on the failure-scrub arms.
     Idempotent and cheap when nothing is pending; a completed copy's event
     synchronizes immediately.
+
+    A synchronize failure never loses the unfenced tail: entries are retired
+    one at a time as they are successfully fenced, and any failure restores
+    the not-yet-fenced remainder (the failing entry included) to the pending
+    registry ahead of copies recorded since the drain began, so a later drain
+    retries them instead of silently no-opping while un-fenced
+    ``non_blocking=True`` copies stay in flight.
     """
 
     if not _CPU_ASYNC_PENDING_EVENTS:
@@ -1394,25 +1440,107 @@ def synchronize_pending_cpu_async_copies() -> None:
     pending = list(_CPU_ASYNC_PENDING_EVENTS)
     _CPU_ASYNC_PENDING_EVENTS.clear()
     synced_devices: set[str] = set()
-    for entry in pending:
-        if isinstance(entry, torch.device):
-            key = str(entry)
-            if key not in synced_devices:
-                synced_devices.add(key)
-                torch_module = torch_attr(entry.type)
-                sync = getattr(torch_module, "synchronize", None)
-                if sync is not None:
-                    try:
-                        sync(entry)
-                    except TypeError:
-                        # torch.mps.synchronize() (and kin) take no device
-                        # argument. The unguarded call raised TypeError from
-                        # the drain — on the failure-scrub arms that masked
-                        # the ORIGINAL capture exception with a drain
-                        # traceback.
-                        sync()
-        else:
-            entry.synchronize()
+    index = 0
+    try:
+        while index < len(pending):
+            entry = pending[index]
+            if isinstance(entry, torch.device):
+                key = str(entry)
+                if key not in synced_devices:
+                    torch_module = torch_attr(entry.type)
+                    sync = getattr(torch_module, "synchronize", None)
+                    if sync is not None:
+                        try:
+                            sync(entry)
+                        except TypeError:
+                            # torch.mps.synchronize() (and kin) take no device
+                            # argument. The unguarded call raised TypeError from
+                            # the drain — on the failure-scrub arms that masked
+                            # the ORIGINAL capture exception with a drain
+                            # traceback.
+                            sync()
+                    # Marked fenced only AFTER the synchronize succeeded, so a
+                    # failed device sync is retried for the device's later
+                    # entries on the retry drain.
+                    synced_devices.add(key)
+            else:
+                entry.synchronize()
+            index += 1
+    finally:
+        if index < len(pending):
+            # A failed fence must not lose the copies behind it: restore the
+            # unfenced tail (failing entry included) so a later drain retries
+            # instead of returning at the empty-list guard while
+            # ``non_blocking=True`` copies are still in flight.
+            _CPU_ASYNC_PENDING_EVENTS[:0] = pending[index:]
+
+
+#: Backend labels that positively identify a non-CUDA capture home (R36).
+#: Only these skip the allocator flush when the op-device scan yields no
+#: evidence; any label OUTSIDE this closed set (including ``"unknown"``/
+#: missing) fails toward the historical flush, so a future accelerator label
+#: can never silently skip it.
+_KNOWN_NON_CUDA_MEMORY_BACKENDS = frozenset({"cpu", "mps", "xpu", "hpu"})
+
+
+def _entry_device_is_cuda(entry: Any) -> bool | None:
+    """Classify one record's ``device_ref`` fact: CUDA, non-CUDA, or absent.
+
+    Accepts both recorded shapes: the backend-neutral ``DeviceRef`` (hardware
+    device class on ``.backend``) and a plain device string (``"cuda:0"``).
+    """
+
+    ref = getattr(entry, "device_ref", None)
+    if ref is None:
+        return None
+    if isinstance(ref, str):
+        return ref.startswith("cuda")
+    backend = getattr(ref, "backend", None)
+    if backend is None:
+        return None
+    return backend == "cuda"
+
+
+def _capture_observed_cuda_device(trace: Any) -> bool | None:
+    """Best-effort scan of recorded op device facts for a CUDA device (R36-3).
+
+    Parameters
+    ----------
+    trace:
+        Captured (possibly mid-postprocess) Trace. Both record sources are
+        consulted: iterating the trace itself (finished layer records) and
+        its ``ops`` sequence (raw/mid-postprocess records).
+
+    Returns
+    -------
+    bool | None
+        ``True`` when any recorded op ran on a CUDA device, ``False`` when at
+        least one op carried a device fact and none was CUDA, and ``None``
+        when the scan yields no evidence (non-iterable object, zero recorded
+        ops, no op with a device fact, or any scan failure) — the caller then
+        falls back to the stamped backend fact.
+    """
+
+    saw_device_fact = False
+    for source in (trace, getattr(trace, "ops", None)):
+        if source is None:
+            continue
+        source_saw_fact = False
+        try:
+            for entry in source:
+                verdict = _entry_device_is_cuda(entry)
+                if verdict is None:
+                    continue
+                source_saw_fact = True
+                if verdict:
+                    return True
+        except Exception:
+            # An interrupted scan is NO evidence: partial negative facts must
+            # not settle "provably non-CUDA" (the scan only ever ADDS
+            # flushes, never removes one).
+            continue
+        saw_device_fact = saw_device_fact or source_saw_fact
+    return False if saw_device_fact else None
 
 
 def capture_touched_cuda(trace: Any) -> bool:
@@ -1421,9 +1549,22 @@ def capture_touched_cuda(trace: Any) -> bool:
     Gates the capture-lifecycle ``torch.cuda.empty_cache()`` calls on the
     CAPTURE having used CUDA, not on process-wide availability: a CPU-only
     trace inside a GPU training loop must not flush the caller's allocator.
-    Keyed on the trace-level ``forward_memory_backend`` fact stamped by the
-    forward peak-memory bracket from the model device; an unknown or missing
-    value fails toward the historical flush, never toward skipping it.
+
+    Keying decision (R36 b6 pair — one fix for both directions): the stamped
+    ``forward_memory_backend`` fact reflects the MODEL device only, so it is
+    a false negative for a CPU-homed model that moves tensors to CUDA inside
+    ``forward`` and over-broad for non-CUDA accelerator captures whose fact
+    reads ``"unknown"``. The recorded op ``device_ref`` facts are the
+    authoritative key: any CUDA-deviced op means the capture touched CUDA,
+    and a completed scan with none means it provably did not. When no op
+    facts are scannable, an unknown or missing backend fact fails toward the
+    historical flush, never toward skipping it.
+
+    A non-CUDA-homed model can still move tensors to CUDA inside ``forward``,
+    so the recorded op devices are always consulted: any recorded ``cuda``
+    output flips the verdict to flush. A failure while consulting keeps the
+    stamped fact's verdict — the scan only ever ADDS flushes, never removes
+    one.
 
     Parameters
     ----------
@@ -1433,11 +1574,18 @@ def capture_touched_cuda(trace: Any) -> bool:
     Returns
     -------
     bool
-        False only when the capture provably ran on a non-CUDA backend.
+        False only when the capture provably ran on non-CUDA devices
+        (completed op-device scan with no CUDA fact) or, absent any op
+        evidence, was stamped with a KNOWN non-CUDA backend.
     """
 
     backend = getattr(trace, "forward_memory_backend", None)
-    return backend not in ("cpu", "mps")
+    if backend == "cuda":
+        return True
+    observed = _capture_observed_cuda_device(trace)
+    if observed is not None:
+        return observed
+    return backend not in _KNOWN_NON_CUDA_MEMORY_BACKENDS
 
 
 def _copy_tensor_payload(

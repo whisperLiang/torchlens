@@ -306,6 +306,11 @@ _REFUSAL_HINTS: dict[str, str] = {
 }
 
 
+# Ceiling on persisted failure reasons (R67): generous for real messages,
+# small next to any artifact.
+_MAX_REASON_CHARS = 4096
+
+
 def safe_exception_str(exc: BaseException) -> str:
     """Return ``str(exc)`` without letting a hostile ``__str__`` escape.
 
@@ -320,6 +325,11 @@ def safe_exception_str(exc: BaseException) -> str:
         text = str(exc)
     except BaseException:  # noqa: BLE001 -- hostile __str__; disclosed fallback below
         return f"<unprintable {type(exc).__name__}: __str__ raised>"
+    if len(text) > _MAX_REASON_CHARS:
+        # The reason persists verbatim into every artifact (tlspec v7): a user
+        # exception embedding a tensor repr or a multi-MB assert message must
+        # not bloat the artifact. Truncation is disclosed, never silent (R67).
+        text = f"{text[:_MAX_REASON_CHARS]}... [truncated, {len(text)} chars total]"
     return text or type(exc).__name__
 
 
@@ -822,6 +832,23 @@ def _frame_zone(filename: str) -> str:
     return "user"
 
 
+def _qualified_type_name(exc: BaseException) -> str:
+    """Return ``module.qualname`` for a failure's exception type (R67).
+
+    The docstring contract promises a QUALIFIED name; the bare ``__name__``
+    made same-named exception classes from different libraries
+    indistinguishable in a persisted v7 artifact. Builtins keep their bare
+    name (the ``builtins.`` prefix is noise).
+    """
+
+    exc_type = type(exc)
+    module = getattr(exc_type, "__module__", None)
+    qualname = getattr(exc_type, "__qualname__", exc_type.__name__)
+    if not module or module == "builtins":
+        return str(qualname)
+    return f"{module}.{qualname}"
+
+
 def classify_failure_origin(exc: BaseException) -> FailureOrigin:
     """Classify one terminal exception's origin (diagnostic only).
 
@@ -837,6 +864,17 @@ def classify_failure_origin(exc: BaseException) -> FailureOrigin:
         return FailureOrigin.INTERRUPT
     if isinstance(exc, StopSignalSwallowedError):
         return FailureOrigin.TORCHLENS
+    # A user-supplied intervention payload failing validation is the USER's
+    # bad tensor, not a TorchLens bug -- but the raise happens inside a
+    # torchlens frame, so the innermost-frame walk below misattributed it as
+    # TORCHLENS (R67). Classify by exception type instead of frame zone.
+    try:
+        from ..intervention.errors import HookValueError
+    except Exception:  # noqa: BLE001 - classifier must never raise
+        pass
+    else:
+        if isinstance(exc, HookValueError):
+            return FailureOrigin.USER_OP
     tb = exc.__traceback__
     if tb is None:
         return FailureOrigin.UNKNOWN
@@ -1068,7 +1106,7 @@ def settle_failed(
             phase=current_capture_phase(trace),
             origin=origin,
             reason=safe_exception_str(exc),
-            error_type=type(exc).__name__,
+            error_type=_qualified_type_name(exc),
             n_ops_committed=n_ops_committed,
             inference_only=bool(getattr(trace, "inference_only", False)),
             settlement_note=settlement_note,

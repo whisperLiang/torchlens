@@ -260,11 +260,14 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
 
     dev_pins = set(re.findall(r'"ruff==([0-9]+\.[0-9]+\.[0-9]+)"', pyproject_text))
     ci_pins = set(re.findall(r"ruff==([0-9]+\.[0-9]+\.[0-9]+)", lint_text))
+    # The rev is a full commit SHA (R61: the one --fix hook must not ride a
+    # mutable tag); the version lockstep reads the `# vX.Y.Z` provenance
+    # trailer, the same pattern the other SHA-pinned hook repos use.
     hook_revs = set(
         re.findall(
             r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit\s*\n"
             r"(?:\s*#.*\n)*"
-            r"\s*rev:\s*v([0-9]+\.[0-9]+\.[0-9]+)",
+            r"\s*rev:\s*[0-9a-f]{40}\s*#\s*v([0-9]+\.[0-9]+\.[0-9]+)",
             precommit_text,
         )
     )
@@ -423,4 +426,36 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     )
     assert top_level == ["torchlens"], (
         f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
+    )
+
+
+def test_nightly_gate_installs_release_locked_builder() -> None:
+    """The nightly double-build gate installs the release's exact builder (R61).
+
+    SINGLE PIN AUTHORITY: build_command installs NOTHING inside the token
+    scope (asserted by test_release_job_python_stack_is_hash_locked above); the
+    builder comes from the hash-locked release-requirements.txt the release
+    job installs. The nightly gate must install hash-verified from that SAME
+    lock -- a name/version-only install (the old ``uv pip install
+    "$BUILD_PIN"``) verified no artifact bytes, and a second builder lock
+    would let the gate attest a different builder than the release uses.
+    """
+
+    repo_root = Path(__file__).resolve().parent.parent
+    nightly_yml = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
+
+    assert "--require-hashes" in nightly_yml, (
+        "the nightly double-build gate no longer installs the builder hash-verified"
+    )
+    assert "--only-binary :all:" in nightly_yml
+    assert ".github/workflows/release-requirements.txt" in nightly_yml, (
+        "the nightly double-build gate no longer installs the release's exact builder"
+    )
+    assert "build-requirements.txt" not in nightly_yml, (
+        "a second builder lock reappeared; release-requirements.txt is the single pin authority"
+    )
+    workflows_dir = repo_root / ".github" / "workflows"
+    assert not (workflows_dir / "build-requirements.txt").exists(), (
+        "the retired build-requirements.txt lock is back; the builder pin "
+        "lives in release-requirements.txt (single pin authority)"
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -10,7 +11,9 @@ import torch
 from torch import nn
 
 from ..backends import BackendName, BackendUnsupportedError, resolve_backend_spec
+from ..errors import TorchLensWarning
 from ..options import CaptureOptions
+from ..utils.display import user_stacklevel
 from .backward import validate_backward_pass
 
 if TYPE_CHECKING:
@@ -377,6 +380,13 @@ def validate(
     bool | InterventionValidationReport | list[ReceptiveFieldValidation]
         Validation pass/fail for forward, backward, and saved scopes, or an
         intervention validation report for ``scope="intervention"``.
+
+    Notes
+    -----
+    A forward/saved ``False`` also emits one :class:`TorchLensWarning`
+    summarizing the failure; the full structured record is available from
+    :func:`torchlens.validation.last_validation_failure` and
+    :func:`torchlens.validation.get_validation_diagnostics`.
     """
 
     normalized_scope = scope.lower()
@@ -447,7 +457,7 @@ def validate(
             # A run that stays under the pre-existing peak honestly reads 0.
             cuda_peak_before = int(torch.cuda.max_memory_allocated())
         try:
-            return validate_forward_pass(
+            passed = validate_forward_pass(
                 model,
                 input_args,
                 input_kwargs=input_kwargs,
@@ -465,6 +475,23 @@ def validate(
                 _LAST_RUN_PEAKS["cuda_peak_allocated_bytes"] = (
                     cuda_peak_after if cuda_peak_after > cuda_peak_before else 0
                 )
+        if passed is False:
+            # R67: the bare ``False`` used to be silent while the rich
+            # structured diagnosis sat unreferenced in the module side channel.
+            # One warning names WHAT failed and WHERE the full record lives.
+            from .diagnostics import last_validation_failure
+
+            failure = last_validation_failure()
+            detail = f" {failure.summary()}" if failure is not None else ""
+            warnings.warn(
+                f"tl.validate FAILED for scope={normalized_scope!r}.{detail} Full "
+                "structured diagnosis: "
+                "torchlens.validation.last_validation_failure() / "
+                "get_validation_diagnostics().",
+                TorchLensWarning,
+                stacklevel=user_stacklevel(),
+            )
+        return passed
     return _intervention_report(
         model,
         input_args,

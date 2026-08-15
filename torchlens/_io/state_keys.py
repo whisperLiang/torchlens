@@ -91,6 +91,15 @@ _SHADOW_VERDICT_MEMO: weakref.WeakKeyDictionary[type, list[Any]] = weakref.WeakK
 _CACHE_GENERATION = 0
 
 
+class _WeakClassAnswer:
+    """Weakly-held class-valued memo answer (breaks the value->key cycle)."""
+
+    __slots__ = ("ref",)
+
+    def __init__(self, ref: weakref.ref[type]) -> None:
+        self.ref = ref
+
+
 def invalidate_static_class_attr_cache() -> None:
     """Require every memoized static lookup to re-validate its class fingerprint.
 
@@ -101,11 +110,18 @@ def invalidate_static_class_attr_cache() -> None:
 
     global _CACHE_GENERATION
     _CACHE_GENERATION += 1
+    # R37 (b2-sol): a cached answer that strongly reaches its own weak key (a
+    # class-valued attribute, or any container holding the class) makes weak
+    # eviction structurally impossible. Clearing at every load boundary bounds
+    # that retention to one load session instead of process lifetime; answers
+    # rebuild within the next load, where the hot lookups actually happen.
+    _STATIC_ATTR_MEMO.clear()
+    _SHADOW_VERDICT_MEMO.clear()
 
 
 def _class_definition_fingerprint(
     cls: type,
-) -> tuple[tuple[tuple[str, int, type], ...], ...] | None:
+) -> tuple[tuple[tuple[str, int, str, int], ...], ...] | None:
     """Return a fingerprint of every ``__dict__`` a static lookup consults.
 
     Returns ``None`` for an exotic class whose MRO cannot be read, which disables
@@ -113,8 +129,22 @@ def _class_definition_fingerprint(
     """
 
     try:
+        # The type is fingerprinted as a (qualname, id) TOKEN, never the type
+        # object itself: a stored type object is a strong reference inside a
+        # WeakKeyDictionary value, so a class holding an instance of ITSELF as
+        # a class attribute (a sentinel default) could never be evicted.
         return tuple(
-            tuple(sorted((name, id(value), type(value)) for name, value in klass.__dict__.items()))
+            tuple(
+                sorted(
+                    (
+                        name,
+                        id(value),
+                        f"{type(value).__module__}.{type(value).__qualname__}",
+                        id(type(value)),
+                    )
+                    for name, value in klass.__dict__.items()
+                )
+            )
             for klass in (*inspect.getmro(cls), *inspect.getmro(type(cls)))
         )
     except (AttributeError, TypeError):  # pragma: no cover - exotic metaclass
@@ -161,14 +191,50 @@ def static_class_attr(cls: type, name: str, default: Any = _MISSING) -> Any:
         resolved = _resolve_static_class_attr(cls, name)
     else:
         resolved = answers.get(name, _MISSING)
+        if isinstance(resolved, _WeakClassAnswer):
+            resolved = resolved.ref()
+            if resolved is None:  # pragma: no cover - answer class died; re-resolve
+                resolved = _MISSING
         if resolved is _MISSING:
             resolved = _resolve_static_class_attr(cls, name)
-            answers[name] = resolved
+            if isinstance(resolved, type):
+                # A class-valued answer (e.g. ``cls.self_ref = cls``) stored
+                # strongly reaches the weak KEY and pins it forever (R37);
+                # classes are weakref-able, so hold the answer weakly and
+                # keep the memo hit.
+                answers[name] = _WeakClassAnswer(weakref.ref(resolved))
+            elif not _value_reaches_class(resolved, cls):
+                # Non-class values that strongly reach the class (e.g.
+                # ``registry = [Ephemeral]``) cannot be held weakly; skip the
+                # memo and re-resolve on every read instead of pinning.
+                answers[name] = resolved
     if resolved is _ABSENT:
         if default is _MISSING:
             raise AttributeError(name)
         return default
     return resolved
+
+
+def _value_reaches_class(resolved: Any, cls: type) -> bool:
+    """Return whether a resolved attribute value strongly reaches its class.
+
+    A ``WeakKeyDictionary`` value that references its own weak key pins the
+    key forever (eviction can never start), so a class attribute that IS the
+    defining class, or directly references it (``Ephemeral.self_ref =
+    Ephemeral``, ``registry = [Ephemeral]``), must not be memoized -- it is
+    re-resolved on every read instead. The check is one referent level deep;
+    a deeper self-reference topology is a documented residual, not silently
+    covered.
+    """
+
+    if resolved is cls:
+        return True
+    import gc
+
+    try:
+        return cls in gc.get_referents(resolved)
+    except Exception:  # pragma: no cover - exotic C object
+        return True
 
 
 def _resolve_static_class_attr(cls: type, name: str) -> Any:

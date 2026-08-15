@@ -107,7 +107,13 @@ _NUMPY_RNG_INSTANCE_TYPES: tuple[type, ...] = (
     # state, so it is a first-class monitored holder.
     np.random.SeedSequence,
 )
-"""Public NumPy RNG receiver types covered by the host-nondeterminism witness."""
+"""Public NumPy RNG receiver types covered by the host-nondeterminism witness.
+
+``SeedSequence`` is a first-class member (r5 b8-fable R57): ``spawn()`` on a
+model-held sequence (or on a generator's underlying sequence) advances
+``n_children_spawned`` -- verdict-steering hidden state that keys every
+future child's stream -- without touching ``bit_generator.state``.
+"""
 
 _INERT_PROFILE_C_CALL_RECEIVER_TYPES: frozenset[type] = frozenset(
     {ModuleType, dict, list, set, str}
@@ -1720,6 +1726,15 @@ cap value.
 """
 
 
+#: Opcodes that push exactly ONE value and therefore keep positional argument
+#: slots decodable by walking back from the ``CALL`` instruction. As plain
+#: ARGUMENT loads these all push a single value on every supported CPython
+#: (``LOAD_GLOBAL``'s extra-NULL form applies only to callable loads).
+_SINGLE_PUSH_LOAD_OPNAMES = frozenset(
+    {"LOAD_CONST", "LOAD_FAST", "LOAD_NAME", "LOAD_DEREF", "LOAD_GLOBAL"}
+)
+
+
 def _call_site_argcount(frame: Any) -> int | None:
     """Decode the positional argument count of a profile-observed ``c_call`` site.
 
@@ -1761,6 +1776,50 @@ def _call_site_argcount(frame: Any) -> int | None:
         return None
 
 
+def _call_site_explicit_time_value(frame: Any, time_arg_index: int) -> bool:
+    """Return whether a held-alias ``c_call`` site passes an explicit non-None time.
+
+    Reads the caller frame's bytecode at ``f_lasti``. A plain ``CALL``
+    (py3.11+) / ``CALL_FUNCTION`` / ``CALL_METHOD`` (py3.10) oparg carries the
+    exact positional count; the instruction that pushed the time argument is
+    then decodable when every pushed argument is a simple single-push load,
+    and its RUNTIME VALUE is resolved from the frame (constants directly;
+    names from the frame's locals/globals, still bound at ``c_call`` time).
+
+    The previous argcount-only decode was VALUE-BLIND (r5 b8-fable R57): a
+    held alias called with an explicit ``None`` (``localtime(None)``, or the
+    common idiom ``def fmt(ts=None): return ctime(ts)``) decoded as
+    "explicit time" and read the current clock unmarked -- a false VERIFIED.
+    Resolving the value keeps a genuine held ``localtime(t)`` a pure
+    transform (no over-ceiling) while a ``None`` value, a star-call, a
+    non-simple argument expression, or any decode failure marks fail-closed
+    -- over-marking, never under-marking. The module-attr wrapper path is
+    unaffected: it sees the argument value directly and stays exact.
+
+    Parameters
+    ----------
+    frame:
+        Caller frame supplied by the ``c_call`` profile event.
+    time_arg_index:
+        Position of the explicit-time argument in the converter's signature.
+
+    Returns
+    -------
+    bool
+        ``True`` only when the time argument resolves to a non-``None``
+        value; ``False`` means the caller must mark.
+    """
+
+    # One decode authority: delegate to the three-way proof (the monitor
+    # flow additionally distinguishes ``"unknown"`` -- unresolvable value --
+    # as monitor uncertainty; this boolean conflates it with the mark-worthy
+    # outcomes, which is exactly the unit-pinned fail-closed contract).
+    argcount = _call_site_argcount(frame)
+    if argcount is None or argcount <= time_arg_index:
+        return False
+    return _call_site_time_arg_proof(frame, argcount, time_arg_index) == "transform"
+
+
 def _call_site_time_arg_proof(frame: Any, argcount: int, time_arg_index: int) -> str:
     """Classify the explicit time argument at a held-ref converter call site.
 
@@ -1768,33 +1827,52 @@ def _call_site_time_arg_proof(frame: Any, argcount: int, time_arg_index: int) ->
     the common idiom ``def fmt(ts=None): return ctime(ts)``) passes the
     explicit-time slot yet still reads the current clock, so counting
     positionals let a held pre-window alias escape unmarked (grind-r5 b8
-    R57). Only a literal non-``None`` constant pushed as the LAST positional
-    proves the site is a pure transform.
+    R57). The decode is VALUE-resolving (r5 b8-fable R57, unified with
+    :func:`_call_site_explicit_time_value` at fixwave-5 integration):
+    constants resolve directly and simple names resolve from the frame's
+    locals/globals, which are still bound at ``c_call`` time -- nothing can
+    rebind a simple name between its argument load and the call in the same
+    thread, so a resolved value IS the value the converter received.
 
     Returns
     -------
     str
-        ``"transform"`` -- provably a non-``None`` literal (pure transform);
-        ``"now_read"`` -- provably a literal ``None`` (implicit-now clock
-        read); ``"unknown"`` -- computed argument or undecodable site, which
-        callers treat as monitor uncertainty (the value is runtime-dependent,
-        so neither a clock-draw claim nor a clean pass is provable).
+        ``"transform"`` -- resolves to a provably non-``None`` value (pure
+        transform); ``"now_read"`` -- resolves to ``None``, literal or
+        through a bound name (implicit-now clock read); ``"unknown"`` --
+        unresolvable (attribute/expression argument, unbound name, or
+        undecodable site), which callers treat as monitor uncertainty (the
+        value is runtime-dependent, so neither a clock-draw claim nor a
+        clean pass is provable).
     """
 
-    if time_arg_index != argcount - 1:
-        return "unknown"
     try:
         lasti = frame.f_lasti
-        pushed = None
-        for instruction in _dis_module.get_instructions(frame.f_code):
-            if instruction.offset >= lasti:
-                break
-            if instruction.opname in {"CACHE", "PRECALL", "EXTENDED_ARG"}:
-                continue
-            pushed = instruction
-        if pushed is None or pushed.opname != "LOAD_CONST":
+        instructions = list(_dis_module.get_instructions(frame.f_code))
+        call_position = next(
+            (index for index, ins in enumerate(instructions) if ins.offset == lasti),
+            None,
+        )
+        if call_position is None or call_position < argcount:
             return "unknown"
-        return "now_read" if pushed.argval is None else "transform"
+        arg_instructions = instructions[call_position - argcount : call_position]
+        if any(ins.opname not in _SINGLE_PUSH_LOAD_OPNAMES for ins in arg_instructions):
+            return "unknown"
+        time_instruction = arg_instructions[time_arg_index]
+        if time_instruction.opname == "LOAD_CONST":
+            return "now_read" if time_instruction.argval is None else "transform"
+        name = time_instruction.argval
+        if time_instruction.opname in {"LOAD_FAST", "LOAD_DEREF"}:
+            frame_locals = frame.f_locals
+            if name in frame_locals:
+                return "now_read" if frame_locals[name] is None else "transform"
+            return "unknown"
+        # LOAD_GLOBAL / LOAD_NAME: module global (falls back through locals
+        # for class-body/exec frames first, mirroring name resolution).
+        for namespace in (frame.f_locals, frame.f_globals):
+            if name in namespace:
+                return "now_read" if namespace[name] is None else "transform"
+        return "unknown"
     except Exception:
         return "unknown"
 
@@ -1933,10 +2011,12 @@ class host_nondeterminism_monitor:
       is registered BEFORE its attribute is replaced, so a pre-window held reference
       (``from time import time`` / ``from os import urandom`` in a model or helper
       module) marks by ``c_call`` identity on the owner and every in-window hooked
-      thread. The implicit-now converters decode the call site's positional argcount
-      from the caller frame's bytecode (:func:`_call_site_argcount`), keeping a held
-      ``localtime(t)`` a pure transform; an undecodable site (star-call) marks
-      fail-closed. TorchLens's own frames are exempt by exact module-globals ownership
+      thread. The implicit-now converters decode the call site's bytecode
+      (:func:`_call_site_explicit_time_value`), keeping a held
+      ``localtime(1234)`` literal a pure transform; an explicit ``None``
+      argument, a variable (could be ``None``), or an undecodable site
+      (star-call) marks fail-closed. TorchLens's own frames are exempt by exact
+      module-globals ownership
       (its per-op clock reads route patched-attr -> wrapper -> original, emitting
       ``c_call`` for the original from the wrapper's frame).
     * **Dual chained profile hooks (belt).** ``sys.setprofile`` (owner thread) AND
@@ -4767,10 +4847,10 @@ class host_nondeterminism_monitor:
         # restores our hook before teardown), re-opening the blind
         # sub-window for the profile-only channel class. No Python-level
         # fail-closed spelling exists for a pre-window held slot-writer;
-        # this is the NAMED contract residual (runnable_tlspec_contract.md,
-        # residual tail clause on held profile-slot writers) until the
-        # sys.monitoring port -- interpreter-global, slot-swap-immune --
-        # closes it on py>=3.12 (grind-r5 b8 R57).
+        # both are DOCUMENTED residuals -- contract residual-tail row (vi)
+        # in docs/reference/runnable_tlspec_contract.md -- until the
+        # sys.monitoring (PEP 669) port -- interpreter-global,
+        # slot-swap-immune -- closes them on py>=3.12 (grind-r5 b8 R57).
         self._patch_attr(
             _sys_module,
             "setprofile",

@@ -40,7 +40,8 @@ import torch
 from torch.overrides import TorchFunctionMode
 
 from ... import _state
-from ..._errors import OutputAttributionError, TorchLensWarning
+from ..._errors import OutputAttributionError, TorchLensCaptureGapWarning
+from ...utils.display import user_stacklevel
 from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 
 if TYPE_CHECKING:
@@ -450,6 +451,35 @@ _SPECIFIC_VERIFICATION_REASONS = frozenset(
 )
 
 
+def _warn_rescue_success(trigger: str) -> None:
+    """Disclose a SUCCESSFUL rescue re-run at the user's call site.
+
+    Every rescue outcome that REFUSES to re-run warns; the success path was
+    the only silent one (R67), yet it is the outcome that actually ran the
+    user's forward twice -- doubling wall-clock and double-applying any
+    undeclared Python side effects (prints, counters, appended lists, HTTP
+    calls) that the declared-state journals cannot see.
+
+    Parameters
+    ----------
+    trigger:
+        Escape-signal trigger that motivated the re-run.
+    """
+
+    warnings.warn(
+        "TorchLens re-ran the forward pass once to recover ops hidden by a "
+        f"stale pre-wrap torch reference (trigger: {trigger}). The returned "
+        "trace is the rescue capture (capture_verified=False, reason "
+        "'mode_rescue_rerun', details on trace.rescue_rerun) and the model's "
+        "forward executed TWICE -- undeclared Python side effects inside "
+        "forward() double-applied. Remedy: fix the stale torch reference "
+        "(bind/import torch functions after TorchLens has wrapped torch) to "
+        "avoid the second forward.",
+        TorchLensCaptureGapWarning,
+        stacklevel=user_stacklevel(),
+    )
+
+
 def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     """Stamp the rescue disclosure onto a trace (session-time facts).
 
@@ -531,12 +561,13 @@ def capture_with_rescue(
                 "callable). The escape stands unrecovered; fix the stale "
                 "torch reference (or re-capture without the non-re-runnable "
                 "channel) to recover the escaped ops.",
-                # grind-r5 b8 sol LOW (fixwave-4 drift): a routed TorchLens
-                # category, never bare UserWarning -- users filtering/promoting
-                # torchlens advisories via TorchLensWarning must see this
-                # capture-fidelity ceiling notice.
-                TorchLensWarning,
-                stacklevel=3,
+                # Capture-fidelity ceiling notice: routed through the typed
+                # honesty category like the sibling escape-detection
+                # disclosures, never bare UserWarning -- users filtering or
+                # promoting torchlens advisories via TorchLensWarning must
+                # see it (R66 / grind-r5 b8 fixwave-4 drift instance).
+                TorchLensCaptureGapWarning,
+                stacklevel=user_stacklevel(),
             )
             _mark(
                 ineligible_trace,
@@ -754,6 +785,7 @@ def capture_with_rescue(
     if primary_error is not None:
         # The primary could not even attribute its output; a completed rescue
         # capture is the recovery by definition.
+        _warn_rescue_success(trigger)
         _mark(
             rescued,
             "mode_rescue_rerun",
@@ -780,6 +812,7 @@ def capture_with_rescue(
     recovered_counts = rescued_counts - primary_counts
     lost_counts = primary_counts - rescued_counts
     if recovered_counts and not lost_counts:
+        _warn_rescue_success(trigger)
         _mark(
             rescued,
             "mode_rescue_rerun",

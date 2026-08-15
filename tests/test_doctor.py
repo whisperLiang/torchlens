@@ -129,3 +129,56 @@ def test_tf_snapshot_empty_without_tensorflow() -> None:
         assert snapshot == {}
     else:
         assert "HAS_TF_OP_CALLBACKS" in snapshot
+
+
+def test_probe_graphviz_routes_through_the_bounded_group_killing_runner(monkeypatch):
+    """The doctor dot probe uses the ONE spawn seam, not bare subprocess.run (R40).
+
+    subprocess.run's timeout kills only the direct child, so a wedged ``dot``
+    wrapper's grandchild survived the "bounded" probe for the life of the box
+    (probe-proven, b6 sol HIGH). The shared runner tears down the whole
+    process group.
+    """
+
+    import subprocess
+
+    from torchlens.utils import _probe_graphviz, _subprocess as sp
+
+    calls = {}
+
+    def _fake_runner(cmd, **kwargs):
+        calls["cmd"] = cmd
+        calls["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, "dot - graphviz version 9.0", "")
+
+    monkeypatch.setattr(sp, "run_bounded_subprocess", _fake_runner)
+    check = _probe_graphviz()
+    assert calls["cmd"] == ["dot", "-V"]
+    assert calls["kwargs"]["timeout"] == 5
+    assert check.status == "PASS"
+
+
+def test_bounded_subprocess_children_are_armed_to_die_with_the_parent():
+    """Children carry PR_SET_PDEATHSIG=SIGKILL on glibc hosts (R40).
+
+    Group teardown runs in the PARENT, so a hard parent SIGKILL left the
+    session-leading renderer running with nothing to reap it (probe-proven,
+    b6 sol HIGH). The kernel-side parent-death signal closes that hole for
+    the direct child.
+    """
+
+    import signal
+    import sys
+
+    from torchlens.utils import _subprocess as sp
+
+    if sp._PRCTL is None:
+        pytest.skip("no glibc prctl on this host")
+
+    probe = (
+        "import ctypes; v = ctypes.c_int();"
+        "ctypes.CDLL('libc.so.6').prctl(2, ctypes.byref(v), 0, 0, 0);"
+        "print(v.value)"
+    )
+    completed = sp.run_bounded_subprocess([sys.executable, "-c", probe], timeout=30, text=True)
+    assert completed.stdout.strip() == str(int(signal.SIGKILL))

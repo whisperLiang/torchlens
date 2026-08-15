@@ -115,6 +115,39 @@ def test_static_attr_cache_detects_replacement_and_does_not_pin_classes() -> Non
     assert all(key is not class_ref() for key in _STATIC_ATTR_MEMO)
 
 
+def test_static_attr_cache_never_self_retains_its_weak_key() -> None:
+    """A class attribute reaching the class must not pin the weak key (R37/b4:R39-6).
+
+    ``answers[name] = resolved`` inside a ``WeakKeyDictionary`` value strongly
+    reached the key when the attribute IS the class (``self_ref``), directly
+    references it (``registry``), or is an instance of it (the fingerprint
+    stored ``type(value)`` -- the class object itself). Eviction could then
+    never start and the class lived forever.
+    """
+
+    class Ephemeral:
+        marker = 1
+
+    Ephemeral.self_ref = Ephemeral
+    Ephemeral.registry = [Ephemeral]
+    Ephemeral.default = Ephemeral()  # fingerprint half: type(value) is the class
+
+    # Lookups still answer correctly (uncached for the self-reaching names).
+    assert static_class_attr(Ephemeral, "self_ref") is Ephemeral
+    assert static_class_attr(Ephemeral, "registry") == [Ephemeral]
+    assert static_class_attr(Ephemeral, "marker") == 1
+    assert static_class_attr(Ephemeral, "self_ref") is Ephemeral  # repeat read
+
+    class_ref = weakref.ref(Ephemeral)
+    del Ephemeral
+    gc.collect()
+    gc.collect()
+    assert class_ref() is None, (
+        "the static-attr memo self-retained its weak key through a "
+        "class-reaching attribute value or the type-object fingerprint"
+    )
+
+
 def test_capture_cache_lru_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Capture cache enforces its entry cap and exposes bounded clearing."""
 
@@ -514,3 +547,45 @@ def test_ops_memo_hit_is_o1_no_label_reads(tmp_path: Path) -> None:
     assert reads["count"] == 0, (
         f"memo hits must be O(1): {reads['count']} label reads across 32 accesses"
     )
+
+
+def test_barcode_remap_scrubs_every_registered_barcode(tmp_path: Path) -> None:
+    """Every live param barcode is remapped in persisted identity strings (R29).
+
+    Pins the fast P-independent token scan that replaced the O(V x P)
+    alternation regex: coverage must stay exact -- a raw capture barcode
+    leaking into a persisted equivalence key would silently break
+    cross-process byte reproducibility.
+    """
+
+    import torch.nn as nn
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4))
+    trace = tl.trace(model, torch.randn(2, 4))
+    raw_barcodes = {
+        barcode
+        for op in trace.ops
+        for barcode in (getattr(op, "_param_barcodes", ()) or ())
+        if isinstance(barcode, str)
+    }
+    assert raw_barcodes, "expected live param barcodes on a param-bearing capture"
+
+    tl.save(trace, str(tmp_path / "t.tlspec"))
+    loaded = tl.load(str(tmp_path / "t.tlspec"))
+
+    leaked: list[str] = []
+    for op in loaded.ops:
+        equivalence = getattr(op, "equivalence_class", None)
+        if isinstance(equivalence, str):
+            leaked.extend(b for b in raw_barcodes if b in equivalence)
+    for key in getattr(loaded, "op_equivalence_classes", {}) or {}:
+        if isinstance(key, str):
+            leaked.extend(b for b in raw_barcodes if b in key)
+    assert not leaked, f"raw capture barcodes leaked into persisted identity keys: {leaked!r}"
+    remapped = [
+        getattr(op, "equivalence_class", "")
+        for op in loaded.ops
+        if isinstance(getattr(op, "equivalence_class", None), str)
+        and "param_" in getattr(op, "equivalence_class", "")
+    ]
+    assert remapped, "expected canonical param_NNNNNN identities on param ops"

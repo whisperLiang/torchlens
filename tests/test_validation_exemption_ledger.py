@@ -194,7 +194,15 @@ EXEMPTION_LEDGER: tuple[Exemption, ...] = (
         tier="posthoc",
         contract="C2 perturbation sensitivity",
         proof="torchlens.validation.exemptions:_posthoc_discrete_output_decision",
-        refuses="a floating/complex output, where a value perturbation must show up",
+        refuses=(
+            "a floating/complex output, where a value perturbation must show up; "
+            "and (R08) an elementwise comparison whose threshold-straddle probe "
+            "proves the recorded parent has no value influence -- that op falls "
+            "through to the perturbation_insensitive failure. Bool-output "
+            "children also run the negate/zero/NaN + magnitude-ladder retry "
+            "rungs BEFORE any exemption is consulted, so a real edge validates "
+            "instead of exempting"
+        ),
     ),
     Exemption(
         code="discrete_index_output",

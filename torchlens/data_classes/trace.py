@@ -1816,7 +1816,7 @@ class Trace(
         self.graph_shape_hash: str | None = None
         self._intervention_spec: InterventionSpec | None = InterventionSpec()
         self.state_history: list[Any] = []
-        self.observer_spans: list[dict[str, Any]] = list(_state._active_record_spans)
+        self.observer_spans: list[dict[str, Any]] = list(_state._active_record_spans.get())
         self.last_run: Any | None = None
         self.append_history: list[dict[str, Any]] = []
         self._has_direct_writes = False
@@ -2833,6 +2833,19 @@ class Trace(
         state.pop("_stop_directive", None)
         state.pop("_capture_config", None)
         state["_predicate_save_options"] = None
+        # R10-6: run(fast=True) binds a session holding weakrefs/compiled
+        # binders; every other session workspace pops here but this one did
+        # not, so pickle.dumps/copy.deepcopy after a fast run crashed with
+        # "cannot pickle 'weakref.ReferenceType'". Session-time (FieldPolicy
+        # DROP under its private name); a restored trace re-runs verified.
+        state.pop("_fast_run_session", None)
+        # R10-7: the REPR is scrubbed below, but the RAW user callables stayed
+        # in state, so a lambda transform= made pickle.dumps crash while
+        # tl.save succeeded on the same trace. Serialize to the loaded-artifact
+        # form (None), which every post-load consumer already tolerates.
+        state["activation_transform"] = None
+        state["grad_transform"] = None
+        state["_output_transform"] = None
         state.pop("_raw_graph_ws", None)
         state.pop("_module_capture_ws", None)
         state.pop("_wrapper_runtime_ws", None)
@@ -2903,6 +2916,19 @@ class Trace(
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
         pickle_module_accessor_state = state.pop("_pickle_module_accessor_state", None)
+        # P7/R10: restore the persisted NEGATIVE verification disclosure. The
+        # row is string-only and can only ever WORSEN a verdict: anything but
+        # the exact {"verified": False} shape is ignored (stays "no claim"), so
+        # a forged row cannot bless a capture and a stripped row merely reverts
+        # to the historical launder this closes for honest artifacts.
+        verification_row = state.pop("_capture_verification", None)
+        if (
+            isinstance(verification_row, dict)
+            and verification_row.get("verified") is False
+            and isinstance(verification_row.get("reason"), (str, type(None)))
+        ):
+            state["capture_verified"] = False
+            state["capture_verification_reason"] = verification_row.get("reason")
         for field_name in (
             *LEGACY_TRACE_BUILD_STATE_KEYS,
             # "_build_state" is the pre-M10 flat scratchpad key; the three

@@ -65,6 +65,9 @@ def build_source_graph(trace: Trace, request: ResolvedRenderRequest) -> SourceGr
     elif request.vis_mode == "rolled":
         entries_to_plot = dict(trace.layer_logs)
     else:
+        # First-to-fire validation of the flagship draw option: typed with the
+        # same code as the backward/combined siblings (R65) instead of a bare
+        # builtin that named neither the received value nor a remedy.
         raise InvalidArgumentError(
             f"vis_mode must be either 'rolled' or 'unrolled'; received {request.vis_mode!r}",
             code="visualization_mode_invalid",

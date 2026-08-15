@@ -16,6 +16,7 @@ import torch
 
 from .. import __version__ as TORCHLENS_VERSION
 from .._io import TLSPEC_VERSION, TorchLensIOError
+from .._io._durability import fsync_dir, fsync_tree
 from .._io._torch_symbols import torch_attr
 from .._io.manifest import Manifest, TensorEntry
 from .._io.streaming import BundleStreamWriter
@@ -232,10 +233,40 @@ class DiskStorageBackend:
             manifest = _build_fastlog_manifest(self._tensor_entries)
             manifest.write(self.writer.tmp_path / "manifest.json")
             _tighten_bundle_tree(self.writer.tmp_path)
-            self.writer.tmp_path.rename(self.writer.final_path)
         except (OSError, TorchLensIOError, ValueError) as exc:
             self.abort(_scrubbed_abort_reason("Failed to finalize fastlog bundle", exc))
             raise
+        except BaseException as exc:
+            # Safety net (round-8 F3 class, parity with BundleStreamWriter.finalize):
+            # a hand-enumerated except tuple misses shapes like a TypeError from
+            # json.dump or a KeyboardInterrupt unwinding mid-finalize. Mark the
+            # .tmp dir PARTIAL for ANY failure so cleanup_partial()/recover() can
+            # sweep or salvage it, then re-raise unwrapped.
+            self.abort(_scrubbed_abort_reason("Failed to finalize fastlog bundle", exc))
+            raise
+        # Crash-durability before publish (parity with BundleStreamWriter.finalize
+        # and _io/bundle.py): fsync blobs/sidecars and the staged directories so a
+        # power/OS crash after the rename below cannot publish a final-named bundle
+        # holding torn blobs with no PARTIAL sentinel.
+        try:
+            fsync_tree(self.writer.tmp_path)
+        except OSError as exc:
+            self.abort(_scrubbed_abort_reason("Failed to flush fastlog bundle", exc))
+            raise
+        # R59 TOCTOU: re-check target absence at publish time, not just at writer
+        # init -- POSIX rename onto a concurrently-created empty directory would
+        # silently replace it.
+        if self.writer.final_path.exists():
+            reason = f"Bundle path already exists: {self.writer.final_path}"
+            self.abort(reason)
+            raise TorchLensIOError(reason)
+        try:
+            self.writer.tmp_path.rename(self.writer.final_path)
+        except OSError as exc:
+            self.abort(_scrubbed_abort_reason("Failed to publish fastlog bundle", exc))
+            raise
+        # Make the rename itself durable before declaring the bundle final.
+        fsync_dir(self.writer.final_path.parent)
         self.writer._closed = True
         self.writer._finalized = True
         self._finalized = True

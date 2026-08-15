@@ -198,17 +198,47 @@ def _iter_tensors(
 ) -> Iterator[torch.Tensor]:
     """Yield tensors through builtin and inspectable user containers.
 
+    Thin adapter over :func:`_iter_tensors_with_paths` for callers that do not
+    need the input-tree location (e.g. ``compat/_report.py``).
+    """
+
+    for _path, tensor in _iter_tensors_with_paths(obj, _seen=_seen):
+        yield tensor
+
+
+def _path_key(key: Any) -> str:
+    """Render one dict key for an input-tree path, bounded against hostile reprs."""
+
+    try:
+        rendered = repr(key)
+    except Exception:  # noqa: BLE001 - hostile __repr__ must not break the refusal
+        rendered = f"<{type(key).__name__}>"
+    if len(rendered) > 40:
+        rendered = rendered[:37] + "..."
+    return rendered
+
+
+def _iter_tensors_with_paths(
+    obj: Any,
+    _seen: set[int] | None = None,
+    root_path: str = "",
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield ``(input-tree path, tensor)`` through builtin and user containers.
+
     Parameters
     ----------
     obj:
         Root object to inspect.
     _seen:
         Shared object-identity set for cycle prevention.
+    root_path:
+        Path prefix naming the root (e.g. ``"args"`` / ``"kwargs"``).
 
     Yields
     ------
-    torch.Tensor
-        Reachable tensor values.
+    tuple[str, torch.Tensor]
+        Reachable tensor values with the path that reaches them, so refusals
+        can name WHERE the offending tensor sits (R67).
 
     Notes
     -----
@@ -226,9 +256,9 @@ def _iter_tensors(
         _seen = set()
     nodes = 0
     truncated_by: str | None = None
-    stack: list[tuple[Any, int]] = [(obj, 0)]
+    stack: list[tuple[Any, int, str]] = [(obj, 0, root_path)]
     while stack:
-        current, depth = stack.pop()
+        current, depth, path = stack.pop()
         if depth > _ITER_TENSORS_MAX_DEPTH:
             if truncated_by is None:
                 truncated_by = f"depth bound ({_ITER_TENSORS_MAX_DEPTH} nesting levels)"
@@ -245,24 +275,28 @@ def _iter_tensors(
         _seen.add(obj_id)
         nodes += 1
         if isinstance(current, torch.Tensor):
-            yield current
+            yield path, current
             continue
         if isinstance(current, nn.Module):
             continue
-        if isinstance(current, (list, tuple, set, frozenset)):
-            children = list(current)
+        if isinstance(current, (list, tuple)):
+            children = [(child, f"{path}[{index}]") for index, child in enumerate(current)]
+        elif isinstance(current, (set, frozenset)):
+            # Set members have no stable position; the braces still say "inside
+            # this set" without claiming an ordering.
+            children = [(child, f"{path}{{...}}") for child in current]
         elif isinstance(current, dict):
-            children = list(current.values())
+            children = [(child, f"{path}[{_path_key(key)}]") for key, child in current.items()]
         else:
             try:
                 attributes = vars(current)
             except (TypeError, AttributeError):
                 continue
-            children = list(attributes.values())
+            children = [(child, f"{path}.{name}") for name, child in attributes.items()]
         # Reverse so the stack pops children in original order (DFS preorder,
         # matching the recursive traversal this replaced).
-        for child in reversed(children):
-            stack.append((child, depth + 1))
+        for child, child_path in reversed(children):
+            stack.append((child, depth + 1, child_path))
     if truncated_by is not None:
         warnings.warn(
             "TorchLens entry-time tensor-variant scan was truncated at its "
@@ -283,14 +317,47 @@ class UnsupportedTensorVariantError(CompatibilityError, RuntimeError):
     """Raised when ``trace`` is called on a model/input combination
     that TorchLens cannot reliably log (see module docstring for the matrix).
 
-    The capture entry gate attaches structured context on ``fields`` so
-    callers branch without parsing message text: ``code`` is always
+    Every raise site attaches structured context on ``fields`` so callers
+    branch without parsing message text: ``code`` is always
     ``"unsupported_tensor_variant"``, ``remedy`` names the fix, and
-    ``offenses`` is a tuple of ``{"name": ..., "reason": ...}`` dicts, one per
-    detected variant. Mid-forward shapeless-variant refusals raised outside
-    the entry gate (``backends/torch/_ops_activations.py``) do not yet carry
-    these fields.
+    ``offenses`` is a tuple of
+    ``{"name", "reason", "path", "shape", "dtype"}`` dicts, one per detected
+    variant class, where ``path`` is the input-tree location of the first
+    offending tensor (``"args[0]"``, ``"kwargs['x'].deep"``, ``"model.<param>"``,
+    or a mid-forward op label). ``shape`` is ``None`` for shapeless variants.
     """
+
+
+def _offense_entry(name: str, reason: str, path: str, tensor: torch.Tensor) -> dict[str, Any]:
+    """Build one structured offense record (R67: WHERE, not just WHAT).
+
+    Parameters
+    ----------
+    name:
+        Variant-class label (e.g. ``"meta tensor in input"``).
+    reason:
+        Why the variant is unsupported (may be empty for compact channels).
+    path:
+        Input-tree location that reaches the offending tensor.
+    tensor:
+        The offending tensor; shape/dtype reads are guarded because shapeless
+        variants raise on ``.shape`` and hostile subclasses may raise anywhere.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"name", "reason", "path", "shape", "dtype"}``.
+    """
+
+    try:
+        shape: tuple[int, ...] | None = tuple(tensor.shape)
+    except Exception:  # noqa: BLE001 - shapeless variants raise internal errors here
+        shape = None
+    try:
+        dtype = str(tensor.dtype)
+    except Exception:  # noqa: BLE001
+        dtype = None
+    return {"name": name, "reason": reason, "path": path, "shape": shape, "dtype": dtype}
 
 
 def _docs_pointer(section: str | None = None) -> str:
@@ -351,7 +418,7 @@ def check_model_and_input_variants(
 
     maybe_auto_arm()
 
-    offenses: list[tuple[str, str]] = []
+    offenses: list[dict[str, Any]] = []
 
     # Treat a bare tensor and a container of tensors identically — ``_iter_tensors``
     # yields tensors directly for a tensor, or recurses into list/tuple/dict.
@@ -363,88 +430,107 @@ def check_model_and_input_variants(
         args_payload = input_args
 
     # Input-side tensors.
-    for t in _iter_tensors(args_payload):
+    for path, t in _iter_tensors_with_paths(args_payload, root_path="args"):
         if _is_meta_tensor(t):
             offenses.append(
-                (
+                _offense_entry(
                     "meta tensor in input",
                     "Meta tensors have no backing storage, so out saving "
                     "cannot produce usable values.",
+                    path,
+                    t,
                 )
             )
         if _is_sparse_tensor(t):
             offenses.append(
-                (
+                _offense_entry(
                     f"sparse tensor ({t.layout}) in input",
                     "TorchLens' copy/print/FLOPs paths assume dense strided layouts.",
+                    path,
+                    t,
                 )
             )
         if _has_symbolic_shape(t):
             offenses.append(
-                (
+                _offense_entry(
                     "symbolic (SymInt/SymFloat) tensor shape in input",
                     "TorchLens requires concrete integer shapes for metadata and "
                     "counter alignment.",
+                    path,
+                    t,
                 )
             )
         tracing_kind = _tracing_tensor_kind(t)
         if tracing_kind is not None:
             offenses.append(
-                (
+                _offense_entry(
                     f"{tracing_kind} in input",
                     "Tracing tensors carry shape and dtype but no data, so saved "
                     "activations would be empty and torch's own fake-tensor machinery "
                     "aborts the forward as soon as a real parameter meets a fake "
                     "activation. Capture the eager forward on real tensors instead.",
+                    path,
+                    t,
                 )
             )
-    for t in _iter_tensors(dict(input_kwargs)):
+    for path, t in _iter_tensors_with_paths(dict(input_kwargs), root_path="kwargs"):
         if _is_meta_tensor(t):
-            offenses.append(("meta tensor in keyword input", ""))
+            offenses.append(_offense_entry("meta tensor in keyword input", "", path, t))
         if _is_sparse_tensor(t):
-            offenses.append((f"sparse tensor ({t.layout}) in keyword input", ""))
+            offenses.append(
+                _offense_entry(f"sparse tensor ({t.layout}) in keyword input", "", path, t)
+            )
         if _has_symbolic_shape(t):
-            offenses.append(("symbolic tensor shape in keyword input", ""))
+            offenses.append(_offense_entry("symbolic tensor shape in keyword input", "", path, t))
         tracing_kind = _tracing_tensor_kind(t)
         if tracing_kind is not None:
-            offenses.append((f"{tracing_kind} in keyword input", ""))
+            offenses.append(_offense_entry(f"{tracing_kind} in keyword input", "", path, t))
 
     # Model params + buffers (dedupe across both generators).
     seen_ids: set[int] = set()
-    for t in list(model.parameters()) + list(model.buffers()):
+    for name, t in list(model.named_parameters()) + list(model.named_buffers()):
         if id(t) in seen_ids:
             continue
         seen_ids.add(id(t))
         if _is_meta_tensor(t):
             offenses.append(
-                (
+                _offense_entry(
                     "meta tensor among model parameters/buffers",
                     "Meta-init models (e.g. HuggingFace device_map='meta') must be "
                     "materialized on a real device before logging.",
+                    f"model.{name}",
+                    t,
                 )
             )
             break  # one message is enough — don't list every param.
         tracing_kind = _tracing_tensor_kind(t)
         if tracing_kind is not None:
             offenses.append(
-                (
+                _offense_entry(
                     f"{tracing_kind} among model parameters/buffers",
                     "The model was constructed under a fake/functional tracing mode and "
                     "holds no real weights. Build it on a real device before logging.",
+                    f"model.{name}",
+                    t,
                 )
             )
             break
 
     if offenses:
-        # Dedupe while preserving order of first appearance.
+        # Dedupe by variant class while preserving order of first appearance;
+        # the surviving entry keeps the first offending tensor's path/shape/dtype.
         seen: set[str] = set()
-        unique: list[tuple[str, str]] = []
-        for name, why in offenses:
-            if name in seen:
+        unique: list[dict[str, Any]] = []
+        for offense in offenses:
+            if offense["name"] in seen:
                 continue
-            seen.add(name)
-            unique.append((name, why))
-        bullet_list = "\n".join(f"  - {name}" + (f": {why}" if why else "") for name, why in unique)
+            seen.add(offense["name"])
+            unique.append(offense)
+        bullet_list = "\n".join(
+            f"  - {offense['name']} (at {offense['path']})"
+            + (f": {offense['reason']}" if offense["reason"] else "")
+            for offense in unique
+        )
         raise UnsupportedTensorVariantError(
             "torchlens.trace cannot run on this model/input "
             "combination. Detected unsupported tensor variant(s):\n"
@@ -455,7 +541,7 @@ def check_model_and_input_variants(
                 "materialize dense, strided tensors with concrete integer "
                 "shapes on a real device before capture"
             ),
-            offenses=tuple({"name": name, "reason": why} for name, why in unique),
+            offenses=tuple(unique),
         )
 
     # Warnings (non-fatal).

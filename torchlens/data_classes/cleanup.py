@@ -132,6 +132,10 @@ def cleanup(self: "Trace") -> None:
         "_source_bundle_created_at",
         "_fast_run_session",
         "_validation_replay_status",
+        # R33: the receptive-field solution cache (~54 MB on a resnet18
+        # trace) lives outside MODEL_LOG_FIELD_ORDER, so it survived the
+        # husking above with no eviction path at all.
+        "_receptive_field_solution",
     ]:
         if hasattr(self, attr):
             delattr(self, attr)
@@ -154,6 +158,38 @@ def cleanup(self: "Trace") -> None:
     # (``trace_cleaned_up``) instead of leaking whichever private field the
     # reader touches first; ``Trace.outcome`` settles to UNKNOWN.
     self._tl_cleaned_up = True
+    # R33: freed capture-sized allocations land in the glibc arena, not the
+    # OS -- gc.collect() returned ~2.7% of a discarded capture's footprint
+    # and RSS never receded in a long-lived analysis process. cleanup() is
+    # the explicit give-the-memory-back API, so best-effort trim here
+    # (glibc-only; a no-op elsewhere).
+    _trim_host_allocator()
+
+
+_MALLOC_TRIM: Any = False  # False = not probed yet; None = unavailable
+
+
+def _trim_host_allocator() -> None:
+    """Return freed glibc arena memory to the OS, best-effort.
+
+    ``malloc_trim(0)`` only releases memory the allocator already considers
+    free, so it is correctness-neutral; non-glibc hosts probe once to None
+    and no-op forever after.
+    """
+
+    global _MALLOC_TRIM
+    if _MALLOC_TRIM is False:
+        try:
+            import ctypes
+
+            _MALLOC_TRIM = ctypes.CDLL("libc.so.6").malloc_trim
+        except Exception:
+            _MALLOC_TRIM = None
+    if _MALLOC_TRIM is not None:
+        try:
+            _MALLOC_TRIM(0)
+        except Exception:
+            _MALLOC_TRIM = None
 
 
 def _clear_entry_attributes(log_entry: Op) -> None:

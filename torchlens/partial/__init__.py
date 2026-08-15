@@ -31,7 +31,7 @@ class PartialCaptureLookupError(TorchLensError, ValueError):
 
 _FAILED_CAPTURE_REGISTRY_LIMIT = 128
 _FAILED_CAPTURE_REGISTRY: OrderedDict[
-    int, tuple[weakref.ref[BaseException] | BaseException, Trace]
+    int, tuple[weakref.ref[BaseException] | _NonWeakrefIdentityStub, Trace]
 ] = OrderedDict()
 """Fallback recovery table for exceptions that reject ``partial_log`` assignment.
 
@@ -49,10 +49,22 @@ Weak retention is sound because the only route to an entry is
 it dies the entry is unreachable garbage and the weakref callback drops it.
 Keying on ``id()`` stays safe across id reuse for the reason it already was:
 lookup re-checks referent identity, and a dead referent can never satisfy it.
-Exception types that do not support weak references (C-extension types; note
-that builtin exceptions and ``__slots__`` subclasses never reach this table,
-since BaseException always carries a dict and accepts the attachment) fall back
-to strong retention under the same entry cap.
+Exception types that do not support weak references NEVER retain the exception
+strongly (R37 REOPENED b2:C5: the old strong fallback let up to 128 failed
+captures pin their whole exception graphs -- traceback, frame locals, model,
+inputs -- until unrelated failures evicted them). They store an identity STUB
+holding only the exception TYPE: lookup verifies id + exact type instead of
+object identity, a deliberately weaker check for a diagnostic-only channel,
+disclosed here rather than paid for in gigabytes.
+Stub entries still strongly retain the partial TRACE (that is what makes a
+later ``from_failed_capture`` recoverable at all): nothing weakref-able in a
+non-weakrefable exception's retention graph exists to witness its death
+(frames and tracebacks refuse weak references), so the trace pin is bounded
+by the registry CAP rather than by liveness -- a bounded, disclosed cost,
+categorically smaller than the unbounded exception-graph pin the stub
+eliminates. :func:`_sweep_unreachable_strong_entries` remains as a belt for
+the legacy strong entry shape only (a refcount sweep must never fire on
+stubs, whose sole strong reference legitimately IS the registry).
 """
 
 _FAILED_CAPTURE_RESULTS: weakref.WeakValueDictionary[int, PartialTrace] = (
@@ -308,9 +320,10 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     partial_log = getattr(exception, "partial_log", None)
     if isinstance(partial_log, PartialTrace):
         return partial_log
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
     registry_entry = _FAILED_CAPTURE_REGISTRY.get(exception_id)
-    if registry_entry is not None and _registry_referent(registry_entry[0]) is exception:
+    if registry_entry is not None and _held_matches(registry_entry[0], exception):
         _FAILED_CAPTURE_REGISTRY.move_to_end(exception_id)
         memoized = _FAILED_CAPTURE_RESULTS.get(exception_id)
         if memoized is not None and memoized.original_exception is exception:
@@ -321,26 +334,74 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     raise PartialCaptureLookupError("exception does not contain a TorchLens partial capture")
 
 
-def _registry_referent(
-    held: weakref.ref[BaseException] | BaseException,
-) -> BaseException | None:
-    """Resolve a registry slot to its exception, or ``None`` once collected.
+class _NonWeakrefIdentityStub:
+    """Identity witness for a non-weakrefable registered exception.
 
-    Parameters
-    ----------
-    held:
-        Either a weak reference to the registered exception or, for types that
-        do not support weak references, the exception itself.
+    Holds only the exception TYPE (a long-lived class object), never the
+    instance, so the registry cannot pin the exception graph. No liveness
+    witness is constructible for the stub arm: the exception refuses weak
+    references and so do its traceback and frames, so the entry (and the
+    partial trace it strongly retains) is bounded by the registry cap
+    rather than by liveness, disclosed on the registry docstring.
+    """
 
-    Returns
-    -------
-    BaseException | None
-        The registered exception while it is alive, else ``None``.
+    __slots__ = ("exc_type",)
+
+    def __init__(self, exc_type: type[BaseException]) -> None:
+        self.exc_type = exc_type
+
+
+def _held_matches(
+    held: weakref.ref[BaseException] | _NonWeakrefIdentityStub | BaseException,
+    exception: BaseException,
+) -> bool:
+    """Return whether a registry slot identifies ``exception``.
+
+    Weak entries verify OBJECT identity. Stub entries (non-weakrefable types)
+    verify id-key + exact type -- weaker by construction, disclosed in the
+    registry docstring.
     """
 
     if isinstance(held, weakref.ref):
-        return held()
-    return held
+        return held() is exception
+    if isinstance(held, _NonWeakrefIdentityStub):
+        return type(exception) is held.exc_type
+    # Legacy strong entry shape (should not occur after R37); exact identity.
+    return held is exception
+
+
+def _sweep_unreachable_strong_entries() -> None:
+    """Evict strong-fallback entries whose exception no caller can reach.
+
+    Weak entries evict themselves through their weakref callback the moment
+    the caller drops the exception. Strong entries (non-weakrefable exception
+    types) have no callback, so without this sweep a dropped exception kept
+    its whole traceback -- frame locals, model, inputs -- plus the partial
+    trace pinned until 128 later failures evicted it. Swept at registration
+    and lookup time by refcount: an exception whose only remaining reference
+    is this registry's entry tuple can never be passed to
+    ``from_failed_capture`` again, so its entry is unrecoverable garbage.
+    """
+
+    import sys
+
+    for key, entry in list(_FAILED_CAPTURE_REGISTRY.items()):
+        if isinstance(entry[0], weakref.ref):
+            continue
+        if isinstance(entry[0], _NonWeakrefIdentityStub):
+            # Stub entries hold only the exception TYPE; their sole strong
+            # reference legitimately IS the registry tuple, so a refcount
+            # sweep would evict every stub immediately after registration.
+            # No liveness witness is constructible for them (the exception,
+            # its traceback, and its frames all refuse weak references);
+            # they stay until the registry cap, disclosed on the stub class.
+            continue
+        # Sole-ownership baseline: the registry tuple's slot plus
+        # getrefcount's own argument slot -> 2. Any caller-held reference
+        # (including an in-flight ``except`` binding) raises it above that,
+        # so miscounting can only KEEP an entry, never evict a live one.
+        if sys.getrefcount(entry[0]) <= 2:
+            del _FAILED_CAPTURE_REGISTRY[key]
 
 
 def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:
@@ -359,15 +420,17 @@ def _register_failed_capture(exception: BaseException, partial_log: PartialTrace
         Stores a bounded, weakly-held entry for :func:`from_failed_capture`.
     """
 
+    _sweep_unreachable_strong_entries()
     exception_id = id(exception)
-    held: weakref.ref[BaseException] | BaseException
+    held: weakref.ref[BaseException] | _NonWeakrefIdentityStub
     try:
         held = weakref.ref(exception, _drop_failed_capture_entry(exception_id))
     except TypeError:
-        # Exception type does not support weak references: retain strongly,
-        # still under the entry cap. This keeps the traceback alive, which is
-        # exactly what the weak path avoids, so it is the rare fallback.
-        held = exception
+        # Exception type does not support weak references: store an identity
+        # stub (type only), NEVER the exception itself -- a strong entry pins
+        # the traceback's frame locals (model, inputs) with no byte bound
+        # (R37 REOPENED b2:C5). Lookup verifies id + exact type.
+        held = _NonWeakrefIdentityStub(type(exception))
     # Store the TRACE, not the wrapper: a stored wrapper reaches the exception
     # strongly and would keep its own weak key alive forever (and with it the
     # traceback's frame locals).

@@ -675,3 +675,52 @@ def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
     assert "zz_param_code_zz" in provoked
     assert "zz_local_seam_code_zz" in provoked
     assert "zz_module_seam_code_zz" in provoked
+
+
+# --------------------------------------------------------------------------- #
+# R65/F9: codeless TorchLensIOError ratchet (shrink-only)                      #
+# --------------------------------------------------------------------------- #
+
+# Historical debt (b8-opus F9: 236/243 raise sites code-less). The number may
+# only SHRINK: give a site fields["code"] (and ideally a remedy) and lower the
+# ceiling in the same change. Raising it is a conscious public decision.
+_MAX_CODELESS_IO_RAISES = 237
+_IO_FAMILY_PATTERN = re.compile(r"^(TorchLensIOError|Artifact\w*Error)$")
+
+
+def _codeless_io_raises() -> list[str]:
+    """Return ``path:line`` for every IO-family raise without a ``code=``."""
+
+    offenders: list[str] = []
+    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+                continue
+            func = node.exc.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else (func.attr if isinstance(func, ast.Attribute) else None)
+            )
+            if name is None or not _IO_FAMILY_PATTERN.fullmatch(name):
+                continue
+            # A **kwargs splat may carry the code; count it as coded rather
+            # than producing a false red on builder helpers.
+            has_code = any(kw.arg == "code" or kw.arg is None for kw in node.exc.keywords)
+            if not has_code:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+    return offenders
+
+
+def test_codeless_io_raise_count_only_shrinks() -> None:
+    """The IO error family's codeless-raise debt is a shrink-only ratchet."""
+
+    offenders = _codeless_io_raises()
+    assert offenders, "scanner found no IO-family raises at all (vacuous scan)"
+    assert len(offenders) <= _MAX_CODELESS_IO_RAISES, (
+        f"{len(offenders)} codeless IO-family raises exceed the ratchet of "
+        f"{_MAX_CODELESS_IO_RAISES}. New TorchLensIOError/Artifact*Error raises "
+        "must carry fields['code'] (branch-on-fields doctrine); first offenders: "
+        + ", ".join(offenders[:10])
+    )

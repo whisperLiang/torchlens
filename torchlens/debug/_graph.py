@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -104,11 +105,13 @@ def lineage(
         return tuple(getattr(op, "parents", ()) or ()) + tuple(getattr(op, "children", ()) or ())
 
     start_label = _op_label(start_op)
-    queue: list[tuple[Op, int]] = [(start_op, 0)]
+    # deque: list.pop(0) shifts the whole queue per visit, Theta(V^2) on
+    # wide graphs for a linear BFS (R52, 9.3x measured on the FIFO class).
+    queue: deque[tuple[Op, int]] = deque([(start_op, 0)])
     visited = {start_label}
     nodes: list[tuple[str, int, str | None, tuple[int, ...] | None, str | None]] = []
     while queue:
-        op, depth = queue.pop(0)
+        op, depth = queue.popleft()
         shape, dtype = _shape_dtype(op)
         nodes.append((_op_label(op), depth, _source_line(op), shape, dtype))
         if max_depth is not None and depth >= max_depth:

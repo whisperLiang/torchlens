@@ -1481,6 +1481,13 @@ mutating the source. Analysis-only loaded Trace raises `RunCapabilityUnavailable
 `run_capability_unavailable`. This is not module/model reconstruction, source emission, or execution
 of untaken branches.
 
+The live provider holds the source model by WEAK reference (capturing never extends the model's
+lifetime), so live-run availability depends on the CALLER still holding the model: once the last
+strong reference is dropped -- including the inline `tl.trace(Model(), x)` idiom, where the trace
+is the only holder -- any garbage-collection pass makes a later `run()` refuse typed with
+`run_capability_unavailable`. This refusal is therefore gc-timing-dependent by design; keep a model
+reference, or save/load a runnable artifact, when `run()` must stay available.
+
 `fast=True` is the explicit stateful static feature-extraction loop. It never changes the
 default transaction or attestation contract. For a loaded sparse provider, the first call is an
 ordinary fully validated run and must settle `verified`; only then are staged state and compiled
@@ -1508,6 +1515,15 @@ For migration compatibility, the older intervention spelling `run(model, x, ...)
 return its in-place rerun Trace. New provider-neutral code uses the explicit `inputs=` keyword;
 loaded sparse traces always dispatch to the sparse provider. The live provider forks first and then
 delegates unchanged to `save_new_outs`, retaining its graph-alignment tripwire.
+
+Live-provider availability is reference-dependent by design: a Trace holds its source model only
+WEAKLY (`_source_model_ref`, never portable), so a live `run()` works exactly as long as the caller
+keeps a strong reference to the model. An inline-constructed model (`tl.trace(Model(), x)`) is
+collected at the first gc pass after capture, after which every live run refuses with the typed
+`RunCapabilityUnavailableError` -- a correct refusal, not a defect, but one whose timing follows
+the collector. Callers that need `run()` later must keep the model alive, pass it explicitly to
+the legacy `run(model, x)` surface, or save/load a runnable artifact (whose availability does not
+depend on the live object).
 
 Inputs require the recorded tree, leaf paths, shapes, and dtypes. Binding follows model site,
 container record, and path, never display order. Seeds are cloned before in-place calls. Call
@@ -2043,10 +2059,22 @@ negative. Also of this class: a bare one-shot iterator attribute, which cannot b
 without consuming it -- the same class
 as the adversarial draw+`state`-restore a cooperative model does not exercise; (v) a
 held-reference module-builtin call on a PRE-EXISTING (non-hooked) thread -- the module-attr
-patched spelling stays thread-independent; and (vi) a held-reference implicit-now converter
-explicitly passed `None` (`localtime(None)`) decodes as a one-argument transform call site (the
-patched spelling catches it). `datetime.now()` / `localtime()` are NOT residual (covered above).
-Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+, interpreter-wide).
+patched spelling stays thread-independent; and (vi) a PRE-WINDOW held reference to
+`sys.setprofile` / `threading.setprofile` (or the C-level `PyEval_SetProfile`, e.g.
+`cProfile.enable`) can balance-swap the profile hook without touching the patched module
+attributes: the swap opens an unwitnessed sub-window for the profile-ONLY channel class
+(held-alias clock/entropy builtins, `torch.Generator` methods, numpy>=2 instance draws), and both
+teardown `getprofile()` identity checks pass afterwards, so the window settles CERTAIN. The
+module-attr swap spelling IS flagged as uncertainty; only the held-alias/C-level spellings are
+residual, and the PEP-669 port below is their closure. A held-reference implicit-now converter is
+NOT residual: the decode is VALUE-resolving (constants directly; simple names from the frame's
+locals/globals, still bound at `c_call` time). A time argument resolving to `None` -- literal
+`localtime(None)` or through a bound name -- and an undecodable call site (star-call, missing
+time argument) mark fail-closed; an UNRESOLVABLE argument (attribute/expression, unbound name)
+flags monitor uncertainty -- neither a clock-draw claim nor a clean pass is provable -- and a
+value resolving non-`None` decodes as a pure transform (no over-ceiling). `datetime.now()` / `localtime()` are NOT residual
+(covered above). Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+,
+interpreter-wide).
 
 A pruned `.data`-alias BOOL control predicate whose leaf origins resolve positively (e.g.
 `bool(self.gate.data > 0.5)` -> the gate's state digest) is witnessed by that basis: the

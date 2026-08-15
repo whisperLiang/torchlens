@@ -424,7 +424,9 @@ class TraceValidationMixin(_TraceMixinBase):
         ----------
         model:
             Model to execute through TorchLens decorated wrappers. When omitted,
-            the live model captured by this ``Trace`` is reused if still available.
+            the live model captured by this ``Trace`` is reused if still
+            available -- the trace holds it weakly, so this requires the
+            caller to have kept a strong reference (see Raises).
         x:
             Forward input. If ``model`` is omitted, the first positional argument
             is treated as the new user input.
@@ -464,13 +466,30 @@ class TraceValidationMixin(_TraceMixinBase):
             providers. Legacy ``run(model, x)`` intervention reruns retain their
             compatibility return until that surface is migrated.
 
+        Raises
+        ------
+        RunCapabilityUnavailableError
+            When no provider is available: an analysis-only loaded Trace, or a
+            live Trace whose source model has been garbage-collected (see
+            Notes).
+
         Notes
         -----
-        A live-provider run re-executes the retained model object. TorchLens warns
-        once when it detects training-mode BatchNorm running-stat buffers, which the
-        forward pass can mutate. Custom mutable attributes such as caches and user
-        counters cannot be detected generically. Clone the model explicitly when isolated
-        state is required. Live-state mutation can also change the captured graph and
+        A live-provider run re-executes the retained model object. The Trace
+        holds that model by WEAK reference (``tl.release_model()`` doctrine:
+        capturing never extends the model's lifetime), so live-provider
+        availability depends on the CALLER still holding the model. If the
+        caller's last strong reference is dropped -- including the inline
+        ``tl.trace(Model(), x)`` idiom, where the trace is the only holder --
+        any garbage-collection pass makes a later ``run()`` refuse typed with
+        ``run_capability_unavailable``. Keep a reference to the model (or save
+        and load a runnable artifact) when ``run()`` must stay available.
+
+        TorchLens warns once when it detects training-mode BatchNorm
+        running-stat buffers, which the forward pass can mutate. Custom mutable
+        attributes such as caches and user counters cannot be detected
+        generically. Clone the model explicitly when isolated state is
+        required. Live-state mutation can also change the captured graph and
         trigger the normal graph-change tripwire.
         """
 

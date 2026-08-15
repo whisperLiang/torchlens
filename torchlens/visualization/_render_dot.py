@@ -393,7 +393,7 @@ def _resolve_collapse_request(
         raise PayloadUnavailableError(
             "Must have all layers logged in order to render the graph",
             code="layers_not_logged",
-            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
+            remedy="re-capture with tl.trace(model, x) (default exhaustive capture) before drawing",
         )
     return request, repeat_folds, segments, segment_lookup
 
@@ -1895,6 +1895,8 @@ def _setup_subgraphs(
 
     max_call_depth = _get_max_call_depth(subgraphs, module_edge_dict, module_submodule_dict)
 
+    # deque: list.pop(0) shifted the whole queue per module, Theta(M^2) on
+    # flat module-heavy graphs before Graphviz even ran (R29, b4 sol MED).
     subgraph_stack: deque[list[str]] = deque([subgraph] for subgraph in subgraphs)
     call_depth = 0
     emitted_rank_groups = 0
