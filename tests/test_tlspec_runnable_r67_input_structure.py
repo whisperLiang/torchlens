@@ -248,18 +248,47 @@ class _RegBoxB:
         self.t = t
 
 
-register_container(
-    _RegBox,
-    lambda box: ([box.t], None),
-    lambda aux, children: _RegBox(children[0]),
-    state_complete=True,
-)
-register_container(
-    _RegBoxB,
-    lambda box: ([box.t], None),
-    lambda aux, children: _RegBoxB(children[0]),
-    state_complete=True,
-)
+class _StatefulReg:
+    def __init__(self, t: torch.Tensor) -> None:
+        self.t = t
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _registered_test_containers():
+    """Register this module's container fixtures and restore on teardown.
+
+    These registrations used to run at MODULE level, mutating the
+    process-global container registry at pytest collection time -- a full
+    collection carried them for the whole session while a targeted run did
+    not (the exact order-dependence class
+    ``test_no_module_level_registry_mutation_in_tests`` lints for).
+    """
+
+    from torchlens.ir.container import _CONTAINER_REGISTRY
+
+    register_container(
+        _RegBox,
+        lambda box: ([box.t], None),
+        lambda aux, children: _RegBox(children[0]),
+        state_complete=True,
+    )
+    register_container(
+        _RegBoxB,
+        lambda box: ([box.t], None),
+        lambda aux, children: _RegBoxB(children[0]),
+        state_complete=True,
+    )
+    register_container(
+        _StatefulReg,
+        lambda box: ([box.t], None),
+        lambda aux, children: _StatefulReg(children[0]),
+        state_complete=False,
+    )
+    try:
+        yield
+    finally:
+        for registered_type in (_RegBox, _RegBoxB, _StatefulReg):
+            _CONTAINER_REGISTRY.pop(registered_type, None)
 
 
 class _RegModel(nn.Module):
@@ -280,19 +309,6 @@ def test_r67_registered_container_round_trips_verified(tmp_path: Path) -> None:
     assert torch.equal(rerun.output, twin * 3.0)
     # Exact-class fence: a different registered class with identical schema diverges.
     _assert_diverges(path, _RegBoxB(x.clone()))
-
-
-class _StatefulReg:
-    def __init__(self, t: torch.Tensor) -> None:
-        self.t = t
-
-
-register_container(
-    _StatefulReg,
-    lambda box: ([box.t], None),
-    lambda aux, children: _StatefulReg(children[0]),
-    state_complete=False,
-)
 
 
 def test_r67_registered_without_state_complete_refuses_extra_state(tmp_path: Path) -> None:

@@ -371,34 +371,84 @@ def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     )
 
 
-def test_no_module_level_facet_registration_in_tests() -> None:
-    """Test modules must not mutate the facet registry at IMPORT time.
+_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "unregister_container"})
+"""Public registry mutators whose import-time call is an order-dependence bug."""
 
-    A module-level ``@tl.facets.register`` fires at pytest COLLECTION --
-    before any fixture can isolate it -- so a full collection left extra
-    recipes in the process-global registry for the whole session while a
-    targeted run did not: the same trace hashed different recipe/provenance
-    state depending on how pytest was invoked (hunt-b2-sol R76/R77). Register
-    inside a module-scoped fixture that restores ``_REGISTRY`` on teardown.
+
+def _import_time_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Return every node that executes when the module is IMPORTED.
+
+    Function/lambda bodies run only when called, so they are skipped -- but
+    their decorators DO run at import and stay included. Class bodies execute
+    at import and are walked.
+    """
+
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(getattr(node, "decorator_list", []))
+            continue
+        nodes.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return nodes
+
+
+def _facet_register_aliases(tree: ast.Module) -> set[str]:
+    """Names under which the facet ``register`` decorator is imported bare."""
+
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.endswith("facets"):
+            for imported in node.names:
+                if imported.name == "register":
+                    aliases.add(imported.asname or imported.name)
+    return aliases
+
+
+def test_no_module_level_registry_mutation_in_tests() -> None:
+    """Test modules must not mutate public registries at IMPORT time.
+
+    A module-level ``@tl.facets.register`` or ``tl.register_container(...)``
+    fires at pytest COLLECTION -- before any fixture can isolate it -- so a
+    full collection left extra recipes/containers in the process-global
+    registry for the whole session while a targeted run did not: the same
+    trace hashed different recipe/provenance state depending on how pytest
+    was invoked (hunt-b2-sol R76/R77). Register inside a restoring fixture.
+
+    Covers all three call spellings (grind p5 §3.9: the original check saw
+    only the ``x.facets.register`` decorator form): attribute decorators,
+    BARE-NAME decorators (``from ...facets import register``), and
+    import-time ``register_container``/``unregister_container`` calls whether
+    attribute-qualified or bare.
     """
 
     tests_root = Path(__file__).resolve().parent
     violations: list[str] = []
     for path in tests_root.rglob("test*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        facet_aliases = _facet_register_aliases(tree)
+        for node in _import_time_nodes(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            for decorator in node.decorator_list:
-                call = decorator if isinstance(decorator, ast.Call) else None
-                func = call.func if call is not None else decorator
-                if isinstance(func, ast.Attribute) and func.attr == "register":
+            func = node.func
+            is_violation = False
+            if isinstance(func, ast.Attribute):
+                if func.attr in _REGISTRY_MUTATOR_NAMES:
+                    is_violation = True
+                elif func.attr == "register":
                     base = func.value
                     if isinstance(base, ast.Attribute) and base.attr == "facets":
-                        violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
+                        is_violation = True
+            elif isinstance(func, ast.Name):
+                if func.id in _REGISTRY_MUTATOR_NAMES or func.id in facet_aliases:
+                    is_violation = True
+            if is_violation:
+                violations.append(f"{path.relative_to(tests_root)}:{node.lineno}")
     assert not violations, (
-        "module-level @tl.facets.register mutates the public registry at "
-        f"collection time; register inside a restoring fixture: {violations}"
+        "import-time registry mutation (facet register / register_container) runs at "
+        f"pytest collection; register inside a restoring fixture: {sorted(violations)}"
     )
 
 
