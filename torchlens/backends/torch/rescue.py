@@ -40,7 +40,7 @@ import torch
 from torch.overrides import TorchFunctionMode
 
 from ... import _state
-from ..._errors import OutputAttributionError
+from ..._errors import OutputAttributionError, TorchLensWarning
 from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 
 if TYPE_CHECKING:
@@ -531,7 +531,11 @@ def capture_with_rescue(
                 "callable). The escape stands unrecovered; fix the stale "
                 "torch reference (or re-capture without the non-re-runnable "
                 "channel) to recover the escaped ops.",
-                UserWarning,
+                # grind-r5 b8 sol LOW (fixwave-4 drift): a routed TorchLens
+                # category, never bare UserWarning -- users filtering/promoting
+                # torchlens advisories via TorchLensWarning must see this
+                # capture-fidelity ceiling notice.
+                TorchLensWarning,
                 stacklevel=3,
             )
             _mark(
