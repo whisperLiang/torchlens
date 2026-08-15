@@ -494,7 +494,12 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["torchlens/__init__.py:__version__"]
 branch = "main"
 major_on_zero = true
-build_command = "pip install build && python -m build"
+# build== is PINNED (the old unpinned install resolved arbitrary code while
+# the release App token sat on disk from checkout) and SOURCE_DATE_EPOCH is
+# set from the released commit so the shipped wheel is bit-reproducible from
+# its tag (grind r3, R86). PIN AUTHORITY: keep equal to the nightly wheel
+# job's `build==` pin, whose double-build gate attests exactly this builder.
+build_command = "pip install 'build==1.5.0' && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)

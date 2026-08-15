@@ -345,9 +345,31 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Build wheel
+        # PIN AUTHORITY: build== must equal the pin inside pyproject.toml's
+        # [tool.semantic_release] build_command -- the nightly gate below only
+        # attests reproducibility for the builder the release actually uses.
         run: |
-          uv pip install --system build
-          python -m build --wheel --outdir "${{ runner.temp }}/dist"
+          uv pip install --system "build==1.5.0"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --wheel --outdir "${{ runner.temp }}/dist"
+
+      - name: Fail on a non-reproducible wheel (double-build gate)
+        # Same commit + same SOURCE_DATE_EPOCH must give a byte-identical
+        # wheel (grind r3, R86: six dist-info timestamps used to differ on
+        # every rebuild, so no artifact could be independently verified).
+        # The stale local build/ tree is removed first: bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build. The sdist stays out of this gate -- its gzip envelope is not
+        # yet reproducible under setuptools (disclosed residual).
+        run: |
+          rm -rf build
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --wheel --outdir "${{ runner.temp }}/dist-rebuild"
+          first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.whl | cut -d' ' -f1)"
+          second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl | cut -d' ' -f1)"
+          echo "build 1: $first"
+          echo "build 2: $second"
+          test "$first" = "$second"
 
       - name: Install wheel in a clean venv
         run: |
