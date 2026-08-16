@@ -43,6 +43,24 @@ jobs:
             torchvision: "0.16.2+cpu"
             numpy: "numpy==1.26.4"
             scope: smoke
+          # r7 R85-1: pyproject declares THREE python-conditioned torch
+          # floors (>=2.1 for py<3.12, >=2.2 for py3.12, >=2.6 for py3.13)
+          # but CI exercised only the first — the 3.12/3.13 claims were
+          # asserted in metadata and executed nowhere. These two rows run
+          # each conditioned floor on exactly the interpreter that declares
+          # it.
+          - track: floor
+            python: "3.12"
+            torch: "2.2.2+cpu"
+            torchvision: "0.17.2+cpu"
+            numpy: "numpy==1.26.4"
+            scope: smoke
+          - track: floor
+            python: "3.13"
+            torch: "2.6.0+cpu"
+            torchvision: "0.21.0+cpu"
+            numpy: numpy
+            scope: smoke
           - track: canonical
             python: "3.10"
             torch: "2.8.0+cpu"

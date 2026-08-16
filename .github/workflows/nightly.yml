@@ -499,19 +499,35 @@ jobs:
             -e . \
             "torch==2.1.2+cpu"
           "${{ runner.temp }}/floor-venv/bin/python" - <<'PY'
+          import tempfile
+          from pathlib import Path
+
           import graphviz
           import numpy
           import packaging
+          import safetensors
           import tqdm
           import torch
           import torchlens as tl
           from torch import nn
 
           print("floors:", numpy.__version__, packaging.__version__,
-                tqdm.__version__, graphviz.__version__, torch.__version__)
+                tqdm.__version__, graphviz.__version__, torch.__version__,
+                safetensors.__version__)
           trace = tl.trace(nn.Sequential(nn.Linear(4, 3), nn.ReLU()), torch.randn(2, 4))
           assert trace.num_ops >= 2
-          print("floor-env capture OK")
+          # r7 R83-3: the floors for safetensors (tlspec blobs) and pillow
+          # (drawing surfaces) resolved here but were never EXERCISED -- a
+          # floor too low to carry the API TorchLens calls still passed. One
+          # save/load round-trip plus a draw() puts both on the floor path.
+          with tempfile.TemporaryDirectory() as tmp:
+              bundle = Path(tmp) / "floor.tlspec"
+              tl.save(trace, str(bundle))
+              loaded = tl.load(str(bundle))
+              assert loaded.num_ops == trace.num_ops
+              loaded.draw(vis_save_only=True, vis_outpath=str(Path(tmp) / "floor_graph"))
+              loaded.cleanup()
+          print("floor-env capture + save/load + draw OK")
           PY
 
   wheel:
@@ -659,10 +675,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # r7 R85-2: pinned OS images, not *-latest — this canary is the SOLE
+        # evidence behind the CI-attested platform statement, its python and
+        # torch are pinned, and a floating image silently moves the one
+        # variable under test. Bump the images deliberately, with a dated
+        # note, like every other pin in this repo.
         include:
-          - os: macos-latest
+          - os: macos-15
             torch-install: torch==2.13.0 torchvision==0.28.0
-          - os: windows-latest
+          - os: windows-2025
             torch-install: >-
               --index-url https://download.pytorch.org/whl/cpu
               --extra-index-url https://pypi.org/simple

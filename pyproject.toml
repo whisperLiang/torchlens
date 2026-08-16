@@ -176,7 +176,14 @@ dev = [
     "referencing>=0.28,<1",
 ]
 test = [
-    "lightning",
+    # BAND COHERENCE (r7 R83-2): the four ML packages the bridge/ adapters
+    # wrap are banded HERE to the exact ranges this file's own extras declare
+    # as supported (lightning :106, hf :117, vision-shims :128). Before this,
+    # the eight .[dev,test,tabular] CI legs validated whatever resolved --
+    # transformers 5.x landed while the hf extra called ~=4.45 supported, and
+    # the fleet recorded reds from exactly that fork. Widen an adapter band
+    # and this extra IN THE SAME CHANGE, never one side alone.
+    "lightning~=2.4",
     # PIN AUTHORITY for pydot: the DOT-render goldens embed the pydot version as
     # a fingerprint KEY, so an environment that resolves pydot freely (nightly/
     # weekly install .[test]) drifts off the goldens' recording environment and
@@ -194,10 +201,10 @@ test = [
     "pytest-timeout",
     "requests",
     "soxr",
-    "timm",
+    "timm~=1.0",
     "torchaudio",
     "torch_geometric",
-    "torchvision",
+    "torchvision>=0.18,<1",
     # menagerie catalog machinery (menagerie/schema.py, menagerie/envs.py,
     # menagerie/ledger.py) hard-imports these at module load / call time with no
     # try/except guard. They are exercised directly by tests/test_menagerie_*.py
@@ -212,7 +219,7 @@ test = [
     "pydantic>=2.0",
     "PyYAML>=6.0",
     "psutil>=5.9",
-    "transformers",
+    "transformers~=4.45",
     "visualpriors",
 ]
 

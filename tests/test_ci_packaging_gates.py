@@ -425,10 +425,31 @@ def test_built_sdist_manifest_is_governed(tmp_path: Path) -> None:
     assert any(m.startswith("torchlens/schemas/") and m.endswith(".json") for m in members), (
         "sdist must ship the torchlens schema data files"
     )
-    for banned_prefix in ("tests/", "menagerie/", "docs/", "examples/", "notebooks/"):
+    # r7 R84-2: ban ALL the trees MANIFEST.in prunes, plus the two private
+    # gitignored roots no `prune` can cover — not just the original five.
+    for banned_prefix in (
+        "tests/",
+        "menagerie/",
+        "docs/",
+        "examples/",
+        "notebooks/",
+        "benchmarks/",
+        "scripts/",
+        "tools/",
+        "templates/",
+        ".research/",
+        ".project-context/",
+    ):
         offenders = [m for m in members if m.startswith(banned_prefix)]
         assert not offenders, (
             f"sdist ships {len(offenders)} member(s) under {banned_prefix} — the sdist "
             "is the wheel's source, not a repo snapshot (half-shipped suites are "
             "unrunnable; use a checkout)"
         )
+    # r7 R84-1: the internal agent docs must never ship in EITHER artifact;
+    # MANIFEST.in's recursive-exclude comment names this test as its belt.
+    agent_docs = [m for m in members if m.rsplit("/", 1)[-1] in ("CLAUDE.md", "AGENTS.md")]
+    assert not agent_docs, (
+        f"sdist ships internal agent docs: {agent_docs} — MANIFEST.in's "
+        "recursive-exclude belt regressed on a PUBLIC repo"
+    )
