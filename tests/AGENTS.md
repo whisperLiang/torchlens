@@ -72,7 +72,11 @@ session to failing on any recorded offender, so targeted runs that never collect
 tests that actually RAN in the session (a permanently deselected test is never bounded), the
 budget is load-scaled so the same family can pass loaded and fail quiet (the boundary is
 compute cost, not wall time), and a test that mostly sleeps is uncatchable by design
-(min(wall, cpu) charging). Subprocess-per-cell parametrized families whose AGGREGATE compute
+(min(wall, cpu) charging). Garbage-collection pauses are charged to a SESSION ledger, never
+to the test they land in (r7 R76-1): a collection's cost tracks the live session heap, so
+charging it to whichever test called `gc.collect()` made the offender set order-dependent —
+the in-window pause seconds are subtracted from the charged min, while the test's own
+compute stays fully charged. Subprocess-per-cell parametrized families whose AGGREGATE compute
 is heavy-class belong in `heavy` even when each cell is under 5s (the lazy-module
 import-pattern families are the precedent).
 
