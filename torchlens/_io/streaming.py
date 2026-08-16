@@ -132,6 +132,10 @@ class BundleStreamWriter:
         self._finalized = False
         self._tensor_entries: list[TensorEntry] = []
         self._entries_by_blob_id: dict[str, TensorEntry] = {}
+        # blob_id -> position in ``_tensor_entries`` (r8 R29): ``relabel_blob``
+        # linear-scanned the entry list once per streamed payload, O(B^2)
+        # across a streamed save (~1.2e9 compares at 50k saved ops).
+        self._tensor_entry_indexes: dict[str, int] = {}
 
         try:
             self.tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,6 +249,7 @@ class BundleStreamWriter:
                 raise TorchLensIOError(reason) from exc
             raise
 
+        self._tensor_entry_indexes[blob_id] = len(self._tensor_entries)
         self._tensor_entries.append(entry)
         self._entries_by_blob_id[blob_id] = entry
         return entry
@@ -420,10 +425,9 @@ class BundleStreamWriter:
             codec_metadata=entry.codec_metadata,
         )
         self._entries_by_blob_id[blob_id] = updated_entry
-        for index, existing_entry in enumerate(self._tensor_entries):
-            if existing_entry.blob_id == blob_id:
-                self._tensor_entries[index] = updated_entry
-                break
+        entry_index = self._tensor_entry_indexes.get(blob_id)
+        if entry_index is not None:
+            self._tensor_entries[entry_index] = updated_entry
 
     def get_entry(self, blob_id: str) -> TensorEntry:
         """Return the manifest entry recorded for one blob id.

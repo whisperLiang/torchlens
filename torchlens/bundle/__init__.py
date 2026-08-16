@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1475,9 +1475,11 @@ class Bundle:
                 )
         if not pairs:
             raise ValueError("Bundle requires at least one Trace.")
-        duplicate_names = sorted(
-            {name for name, _ in pairs if [n for n, _ in pairs].count(name) > 1}
-        )
+        # O(n) duplicate detection (r8 R52): the prior per-member full
+        # name-list rebuild + count was quadratic (measured 4.1s at 8k
+        # members on the all-valid path).
+        name_counts = Counter(name for name, _ in pairs)
+        duplicate_names = sorted(name for name, count in name_counts.items() if count > 1)
         if duplicate_names:
             raise ValueError(f"Bundle member names must be unique; duplicates: {duplicate_names}")
         return pairs
