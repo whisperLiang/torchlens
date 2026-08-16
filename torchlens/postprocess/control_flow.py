@@ -115,13 +115,17 @@ def _seed_proven_bool_consumers(self: Trace) -> None:
     from ..backends.torch.completeness_witness import host_escape_bool_source_labels
 
     proven_labels = host_escape_bool_source_labels(self)
+    # Shadow set over the list[str] ledger: the per-label list scan was
+    # O(k^2) in terminated-bool count (hunt-6 R52-2 sibling site).
+    seen_terminated_bool_labels = set(self.internally_terminated_bool_ops)
     for label in self._raw_graph_ws.raw_layer_labels_list:
         if label not in proven_labels:
             continue
         layer = self[label]
         if not layer.is_scalar_bool or getattr(layer, "is_orphan", False):
             continue
-        if label not in self.internally_terminated_bool_ops:
+        if label not in seen_terminated_bool_labels:
+            seen_terminated_bool_labels.add(label)
             self.internally_terminated_bool_ops.append(label)
         layer.is_terminal_bool = True
 
