@@ -35,7 +35,13 @@ overloaded functional compiled its original source against the wrapper's
 globals. The standing installed-tree grep gate lives
 in ``tests/test_wrap_state_compat.py``; the ``nested/_internal`` NJT
 identity reads it surfaces are a documented unshimmed residual (nested
-jagged tensors are not supported capture inputs).
+jagged tensors are not supported capture inputs). An eighth normalizes the
+PROTOCOL-ARG identity for pure-Python functionals (grind-r6 b8 R56): their
+bodies dispatch ``handle_torch_function(<module-global self-reference>,
+...)``, which resolves to the torchlens wrapper during the wrap epoch, so
+every host module's ``handle_torch_function`` global gets a translating
+shim presenting the ledger ORIGINAL to user ``__torch_function__`` handlers
+-- the same identity basis C builtins and unwrapped eager torch present.
 
 Strategy: NEVER re-implement torch's decision logic. Each shim normalizes
 the identity operand to the basis the immediately-following torch comparison
@@ -54,11 +60,13 @@ visible through the doctor/compat capability snapshot.
 
 from __future__ import annotations
 
+import collections
 import functools
 import importlib.util
 import inspect
 import sys
 import threading
+import types
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -79,6 +87,17 @@ _MISSING = object()
 
 # (holder, attribute name, original attribute value) for every installed shim.
 _installed: list[tuple[Any, str, Any]] = []
+
+_live_shims: dict[int, Any] = {}
+"""id -> the exact shim objects this module installed (teardown authority).
+
+Restore keys on THIS identity registry, never on the ``_SHIM_MARKER``
+attribute alone: the marker is spoofable (any foreign function can set
+``_torchlens_identity_shim = True``), and a marker-keyed teardown would then
+CLOBBER the user's monkeypatched site with our stored original (grind-r6 b8
+R56, sol). The strong references also prevent id reuse for the registry's
+lifetime.
+"""
 
 # True ONLY between a successful FULL family install and the matching remove.
 # A non-empty ``_installed`` list must never stand in for family completeness:
@@ -224,11 +243,31 @@ def _resolve(fn: Any) -> Any:
     return fn
 
 
+def _register_shim(fn: Any) -> Any:
+    """Mark ``fn`` as a torchlens shim and enroll it in the identity registry."""
+
+    setattr(fn, _SHIM_MARKER, True)
+    _live_shims[id(fn)] = fn
+    return fn
+
+
 def _is_shimmed(value: Any) -> bool:
     """Return whether ``value`` (function or classmethod) is one of our shims."""
 
     fn = getattr(value, "__func__", value)
     return bool(getattr(fn, _SHIM_MARKER, False))
+
+
+def _is_our_live_shim(value: Any) -> bool:
+    """Identity check: ``value`` is an exact shim object THIS module installed.
+
+    The spoof-resistant form of :func:`_is_shimmed`, used wherever the answer
+    authorizes a MUTATION (teardown restore). A foreign callable carrying the
+    marker attribute answers False here.
+    """
+
+    fn = getattr(value, "__func__", value)
+    return id(fn) in _live_shims and _live_shims[id(fn)] is fn
 
 
 def identity_shims_installed() -> bool:
@@ -273,6 +312,7 @@ def install_identity_shims() -> None:
         _install_jit_overload_shim(records)
         _install_fx_trace_shim(records)
         _install_overrides_membership_shims(records)
+        _install_protocol_identity_shims(records)
     except Exception:
         _restore(records)
         raise
@@ -295,6 +335,7 @@ def remove_identity_shims() -> None:
     _remove_import_hook()
     _restore(_installed)
     _installed.clear()
+    _live_shims.clear()
 
 
 def _restore(records: list[tuple[Any, str, Any]]) -> None:
@@ -302,17 +343,25 @@ def _restore(records: list[tuple[Any, str, Any]]) -> None:
 
     A site whose current value is no longer our shim (user monkeypatching
     layered on top) is left untouched rather than clobbered, mirroring the
-    namespace-drift tolerance of wrapper teardown.
+    namespace-drift tolerance of wrapper teardown. "Our shim" is decided by
+    exact object IDENTITY against the live registry, never by the spoofable
+    marker attribute (grind-r6 b8 R56, sol: a foreign function carrying
+    ``_torchlens_identity_shim = True`` must not be clobbered at teardown).
     """
 
     for holder, name, original in reversed(records):
         current = vars(holder).get(name)
-        if current is None or not _is_shimmed(current):
+        if current is None or not _is_our_live_shim(current):
             continue
         try:
             setattr(holder, name, original)
         except (AttributeError, TypeError):
-            pass
+            continue
+        # NOTE: the registry entry is NOT popped here -- one shim object can
+        # be installed at several sites (the protocol-identity shim patches
+        # every host module), so per-record removal would orphan the later
+        # records' identity checks. ``remove_identity_shims`` clears the
+        # registry after the full restore.
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +448,7 @@ def _make_ctor_shim(orig_init: Callable[..., None], sig: inspect.Signature) -> C
                 # state byte-identical across wrap states and pickle-clean).
                 self.activation = resolved_stored
 
-    setattr(ctor_shim, _SHIM_MARKER, True)
+    _register_shim(ctor_shim)
     return ctor_shim
 
 
@@ -418,7 +467,7 @@ def _make_setstate_shim(orig_setstate: Callable[..., None]) -> Callable[..., Non
                 # function, never a torchlens wrapper.
                 self.activation = resolved_stored
 
-    setattr(setstate_shim, _SHIM_MARKER, True)
+    _register_shim(setstate_shim)
     return setstate_shim
 
 
@@ -469,7 +518,7 @@ def _install_causal_bias_shim(records: list[tuple[Any, str, Any]]) -> None:
             func = target
         return orig_tf(cls, func, types, args, kwargs)
 
-    setattr(causal_bias_shim, _SHIM_MARKER, True)
+    _register_shim(causal_bias_shim)
     causal_bias.__torch_function__ = classmethod(causal_bias_shim)
     records.append((causal_bias, "__torch_function__", orig_classmethod))
 
@@ -544,7 +593,7 @@ def _install_expanded_weights_shims(records: list[tuple[Any, str, Any]]) -> None
                     func = alias
         return orig_tf(cls, func, types, args, kwargs)
 
-    setattr(expanded_weight_shim, _SHIM_MARKER, True)
+    _register_shim(expanded_weight_shim)
     expanded_weight.__torch_function__ = classmethod(expanded_weight_shim)
     records.append((expanded_weight, "__torch_function__", orig_classmethod))
 
@@ -583,7 +632,7 @@ def _install_resolve_name_shim(records: list[tuple[Any, str, Any]]) -> None:
                 result = orig_resolve(original)
         return result
 
-    setattr(resolve_name_shim, _SHIM_MARKER, True)
+    _register_shim(resolve_name_shim)
     overrides_module.resolve_name = resolve_name_shim
     records.append((overrides_module, "resolve_name", orig_resolve))
 
@@ -632,7 +681,7 @@ def _install_jit_overload_shim(records: list[tuple[Any, str, Any]]) -> None:
             obj = original
         return orig_get_overloads(obj)
 
-    setattr(get_overloads_shim, _SHIM_MARKER, True)
+    _register_shim(get_overloads_shim)
     module._get_overloads = get_overloads_shim
     records.append((module, "_get_overloads", orig_get_overloads))
 
@@ -689,7 +738,7 @@ def _install_fx_trace_shim(records: list[tuple[Any, str, Any]]) -> None:
             )
         return graph
 
-    setattr(trace_shim, _SHIM_MARKER, True)
+    _register_shim(trace_shim)
     tracer_cls.trace = trace_shim
     records.append((tracer_cls, "trace", orig_trace))
 
@@ -743,6 +792,42 @@ class _LedgerResolvingMembers(list):
         return original is not item and super().__contains__(original)
 
 
+class _LedgerResolvingDefaultTable(collections.defaultdict):
+    """Wrapper-resolving view that PRESERVES defaultdict semantics.
+
+    ``get_overridable_functions()`` returns a ``defaultdict(list)``; the r5
+    membership fix rebuilt it as a plain resolving dict, so a caller indexing
+    a namespace with no recorded entries -- auto-vivification the upstream
+    type guarantees -- started raising KeyError (grind-r6 b8 R56, opus
+    wave-introduced residue). Ledger resolution runs BEFORE the default
+    factory so a wrapper alias still finds its original's row rather than
+    minting an empty one.
+    """
+
+    def __contains__(self, key: Any) -> bool:
+        if dict.__contains__(self, key):
+            return True
+        original = _resolve(key)
+        return original is not key and dict.__contains__(self, original)
+
+    def __getitem__(self, key: Any) -> Any:
+        if not dict.__contains__(self, key):
+            original = _resolve(key)
+            if original is not key and dict.__contains__(self, original):
+                return dict.__getitem__(self, original)
+        return super().__getitem__(key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        """Return the value for ``key`` (wrapper-resolving), never auto-creating."""
+
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        original = _resolve(key)
+        if original is not key and dict.__contains__(self, original):
+            return dict.__getitem__(self, original)
+        return default
+
+
 def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> None:
     """Shim the two cached ``torch.overrides`` table accessors for membership.
 
@@ -775,7 +860,18 @@ def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> 
                 table = orig()
                 view = cache.get(id(table))
                 if view is None:
-                    if table and isinstance(next(iter(table.values()), None), list):
+                    if isinstance(table, collections.defaultdict):
+                        # Preserve the upstream auto-vivification contract
+                        # (grind-r6 b8 R56 opus residue: the plain-dict view
+                        # turned missing-namespace reads into KeyError).
+                        view = _LedgerResolvingDefaultTable(table.default_factory)
+                        view.update(
+                            (key, _LedgerResolvingMembers(members))
+                            if isinstance(members, list)
+                            else (key, members)
+                            for key, members in table.items()
+                        )
+                    elif table and isinstance(next(iter(table.values()), None), list):
                         view = _LedgerResolvingTable(
                             (key, _LedgerResolvingMembers(members))
                             for key, members in table.items()
@@ -786,12 +882,85 @@ def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> 
                     cache[id(table)] = view
                 return view
 
+            # The upstream accessors are @functools.lru_cache functions;
+            # functools.wraps copies __dict__ only, so cache management
+            # attributes vanished from the shimmed surface (grind-r6 b8 R56
+            # opus residue: get_testing_overrides.cache_clear() raised
+            # AttributeError during the wrap epoch). Forward them.
+            for cache_attr in ("cache_clear", "cache_info", "cache_parameters"):
+                upstream = getattr(orig, cache_attr, None)
+                if upstream is not None:
+                    setattr(accessor_shim, cache_attr, upstream)
+
             return accessor_shim
 
         shim = _make_shim(orig_accessor, view_cache)
-        setattr(shim, _SHIM_MARKER, True)
+        _register_shim(shim)
         setattr(overrides_module, accessor_name, shim)
         records.append((overrides_module, accessor_name, orig_accessor))
+
+
+# ---------------------------------------------------------------------------
+# Site 8: handle_torch_function host-module globals (pure-Python functionals)
+# ---------------------------------------------------------------------------
+
+
+def _install_protocol_identity_shims(records: list[tuple[Any, str, Any]]) -> None:
+    """Present ORIGINALS to user ``__torch_function__`` handlers, both epochs.
+
+    C builtins hand the protocol their own (original) identity, but a wrapped
+    PURE-PYTHON torch functional dispatches ``handle_torch_function(relu,
+    ...)`` where ``relu`` resolves from its module globals at call time --
+    the torchlens WRAPPER once wrappers are installed. Every user handler
+    keyed on originals (the documented import-time ``HANDLED_FUNCTIONS``
+    table shape) then silently missed, process-wide, for as long as wrappers
+    stayed installed after the first capture (grind-r6 b8 R56: sol HIGH,
+    fable MED, same root; ~105+ pure-Python functionals).
+
+    The shim patches the ``handle_torch_function`` global of every module
+    hosting a wrapped pure-Python functional, translating a wrapper
+    ``public_api`` to its ledger original before delegating. Dispatch TIMING
+    is untouched (torch's own body still decides whether to dispatch); only
+    the presented identity is normalized to the basis unwrapped eager torch
+    presents, making pure-Python and C-builtin semantics consistent in both
+    wrap epochs.
+    """
+
+    overrides_module = getattr(torch, "overrides", None)
+    if overrides_module is None:
+        return
+    real_handle = vars(overrides_module).get("handle_torch_function")
+    if real_handle is None or _is_shimmed(real_handle):
+        return
+
+    host_modules: dict[int, Any] = {}
+    for obj in list(_state._decorated_func_mapper):
+        if id(obj) not in _state._orig_to_decorated:
+            continue  # not an original
+        if not isinstance(obj, types.FunctionType):
+            continue  # C originals already present themselves to the protocol
+        module = sys.modules.get(getattr(obj, "__module__", "") or "")
+        if module is not None:
+            host_modules.setdefault(id(module), module)
+
+    @functools.wraps(real_handle)
+    def handle_torch_function_shim(
+        public_api: Any, relevant_args: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Normalize a torchlens-wrapper ``public_api`` to its original."""
+
+        original = _state._decorated_to_orig.get(id(public_api))
+        if original is not None:
+            public_api = original
+        return real_handle(public_api, relevant_args, *args, **kwargs)
+
+    _register_shim(handle_torch_function_shim)
+    for module in host_modules.values():
+        current = vars(module).get("handle_torch_function")
+        if current is not real_handle:
+            continue  # absent, already shimmed, or foreign-patched: hands off
+        setattr(module, "handle_torch_function", handle_torch_function_shim)  # noqa: B010
+        records.append((module, "handle_torch_function", real_handle))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:
@@ -808,5 +977,5 @@ def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any
                 break
         return orig_picker(func, conv1d_opt, conv2d_opt, conv3d_opt)
 
-    setattr(conv_picker_shim, _SHIM_MARKER, True)
+    _register_shim(conv_picker_shim)
     return conv_picker_shim
