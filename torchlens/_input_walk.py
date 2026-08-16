@@ -415,6 +415,8 @@ def mapping_protocol_entries_mismatch(
         return True
 
     def _view(pairs: list[tuple[Any, Any]]) -> dict[Any, int]:
+        """Map each pair's encoded key (identity for opaque keys) to its child id."""
+
         view: dict[Any, int] = {}
         for key, child in pairs:
             try:
