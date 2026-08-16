@@ -403,6 +403,10 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
         ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
         ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        # Warn-once set for over-ceiling collapse declines (r8 R60-13):
+        # declined results no longer enter the revision-keyed result cache,
+        # so the one-warning-per-trace dedup rides its own weak set.
+        ("torchlens/visualization/collapse_optimizer.py", "_CEILING_WARNED_TRACES"),
         ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
         ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
     }
@@ -1100,6 +1104,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
         ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
         ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_CEILING_WARNED_TRACES"),
         ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
         ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
     }
