@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
 import pytest
+from support.rf_isolation import preserved_rf_registry
 
 from torchlens.capture.arg_positions import _normalize_func_name
 from torchlens.receptive_field import _rules
+
+
+@pytest.fixture(autouse=True)
+def _isolated_rf_registry() -> Iterator[None]:
+    """Restore the process-global RF rule registry around every test.
+
+    These tests call ``register_rf_rule`` directly; without a teardown the
+    synthetic rules stayed in ``_RF_RULES`` for the rest of the session and
+    bumped the epoch — the documented anti-pattern the module-level
+    registry-mutation gate exists to prevent (r7 R77-2).
+    """
+
+    with preserved_rf_registry(clear=False):
+        yield
 
 
 def _stub_rule(context: object) -> object:

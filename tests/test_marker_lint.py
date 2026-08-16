@@ -526,7 +526,12 @@ def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     )
 
 
-_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "unregister_container"})
+# r7 R77-3: the phantom `unregister_container` is dropped (no such API
+# exists anywhere in the package — the registries deliberately have no
+# unregister spelling) and `register_op_rule` joins: it writes the same
+# class of process-global registry (_CUSTOM_OP_RULES) the conftest
+# restore fixture governs.
+_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "register_op_rule"})
 """Public registry mutators whose import-time call is an order-dependence bug."""
 
 
@@ -575,7 +580,7 @@ def test_no_module_level_registry_mutation_in_tests() -> None:
     Covers all three call spellings (grind p5 §3.9: the original check saw
     only the ``x.facets.register`` decorator form): attribute decorators,
     BARE-NAME decorators (``from ...facets import register``), and
-    import-time ``register_container``/``unregister_container`` calls whether
+    import-time ``register_container``/``register_op_rule`` calls whether
     attribute-qualified or bare.
     """
 
