@@ -9,6 +9,7 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -649,15 +650,11 @@ def save(
                 # The replacement is already installed atomically. A stale backup
                 # is recoverable cleanup debris, not a failed save.
                 pass
-    except TorchLensIOError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+    except TorchLensIOError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
-    except BackendPayloadUnsupportedError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+    except BackendPayloadUnsupportedError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
     except (ImportError, OSError, TypeError, ValueError, pickle.PickleError) as exc:
         # ``TypeError`` is caught alongside the other serialization failure
@@ -668,9 +665,7 @@ def save(
         # the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir un-sweepable by
         # ``cleanup_tmp()``) and the backup restore (permanently losing the
         # pre-overwrite bundle under an undocumented ``.bak.<uuid>`` name).
-        _mark_partial(tmp_path, reason=type(exc).__name__)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise TorchLensIOError(
             f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
             "Remedy: the staging directory was marked PARTIAL (sweepable by "
@@ -698,9 +693,7 @@ def save(
         # unwinding mid-write; those are re-raised unwrapped below so control
         # flow semantics are preserved, while ordinary exceptions are wrapped
         # in ``TorchLensIOError`` to match the sibling branch above.
-        _mark_partial(tmp_path, reason=type(exc).__name__)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         if isinstance(exc, Exception):
             raise TorchLensIOError(
                 f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
@@ -4130,6 +4123,49 @@ def _mark_partial(tmp_path: Path, *, reason: str | None = None) -> None:
                 (tmp_path / REASON_SENTINEL).write_text(bounded, encoding="utf-8")
     except OSError:
         return
+
+
+def _run_save_recovery(
+    tmp_path: Path,
+    backup_path: Path | None,
+    bundle_path: Path,
+    *,
+    primary: BaseException,
+) -> None:
+    """Run the failed-save bookkeeping without ever masking ``primary`` (R63).
+
+    The PARTIAL mark and the backup restore are the two contracts the save
+    handlers exist to guarantee, but running them unguarded meant a
+    rollback-time failure (e.g. ENOSPC while writing the sentinel) replaced
+    the primary exception -- a Ctrl-C was reported as an ordinary I/O error --
+    AND skipped the backup restore, stranding the pre-overwrite bundle under
+    its ``.bak.<uuid>`` name. Each step is independently best-effort;
+    recovery failures are disclosed via warning (and ``add_note`` where the
+    runtime has it), never raised over the primary.
+    """
+
+    def _disclose(step: str, failure: BaseException) -> None:
+        detail = (
+            f"bundle-save recovery step '{step}' itself failed "
+            f"({type(failure).__name__}: {failure}); the primary error is re-raised "
+            f"unchanged. Recovery debris may remain next to {bundle_path}."
+        )
+        note = getattr(primary, "add_note", None)  # py3.11+; 3.10 floor lacks it
+        if callable(note):
+            with contextlib.suppress(Exception):
+                note(detail)
+        with contextlib.suppress(Exception):
+            warnings.warn(detail, UserWarning, stacklevel=3)
+
+    try:
+        _mark_partial(tmp_path, reason=type(primary).__name__)
+    except Exception as failure:
+        _disclose("mark-partial", failure)
+    try:
+        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
+            _restore_backup(backup_path, bundle_path)
+    except Exception as failure:
+        _disclose("backup-restore", failure)
 
 
 def _reanchor_visualizer_paths(trace: Trace, bundle_path: Path) -> None:

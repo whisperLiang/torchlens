@@ -25,6 +25,10 @@ from ._durability import fsync_dir, fsync_tree
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .paths import reject_symlink_path
 
+_PARTIAL_SENTINEL = "PARTIAL"
+"""In-progress marker matching ``bundle.py``/``streaming.py``; ``cleanup_tmp``
+sweeps a stranded ``{target}.tmp.*`` dir without ``force=`` only when present."""
+
 
 def _reject_symlink_path(path: Path, *, context: str) -> None:
     """Reject symlink paths before writing a ``.tlspec`` payload."""
@@ -251,7 +255,13 @@ class _TlSpecWriter:
             )
         target_path = Path(path)
         _reject_symlink_path(target_path, context="bundle tlspec target")
-        tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
+        # Target-PREFIXED staging/backup names (R38+R59, one defect two labs):
+        # the old target-independent ``tmp.<hex>`` / ``tmp.bak.<hex>`` names
+        # were invisible to ``cleanup_tmp(target)`` (it globs
+        # ``{name}.tmp.*`` / ``{name}.bak.*``), so a SIGKILL between the two
+        # ``os.replace`` calls below stranded the ONLY pre-overwrite copy in
+        # an undiscoverable directory that no sweep would ever restore.
+        tmp_path = target_path.parent / f"{target_path.name}.tmp.{uuid.uuid4().hex}"
         # ``backup_path`` holds the pre-overwrite bundle *renamed aside* (never
         # deleted) so a failure during the final swap can restore it. It stays
         # ``None`` unless we actually move an existing target out of the way.
@@ -262,6 +272,11 @@ class _TlSpecWriter:
                 raise FileExistsError(f"Bundle path already exists: {target_path}")
             tmp_path.mkdir(parents=True)
             _restrict_mode(tmp_path, 0o700)
+            # Sweepable from birth: mark the staging dir PARTIAL so a SIGKILL
+            # anywhere before publish leaves a directory ``cleanup_tmp()``
+            # removes without ``force=True``; the sentinel comes off right
+            # before the durability fsync + publish swap.
+            (tmp_path / _PARTIAL_SENTINEL).write_text("", encoding="utf-8")
             save_file({}, str(tmp_path / body_filename))
             member_records = cls._write_bundle_members(bundle, tmp_path=tmp_path, save_level=level)
             cls.write_json(
@@ -297,6 +312,7 @@ class _TlSpecWriter:
             # Durability before publish: fsync every written file and
             # directory so a power/OS crash after the rename below cannot
             # publish a bundle holding zero-length or partial members.
+            (tmp_path / _PARTIAL_SENTINEL).unlink()
             fsync_tree(tmp_path)
             # Atomic overwrite. Never ``rmtree`` the only good bundle before
             # the replacement is known installed: move the existing target
@@ -318,7 +334,7 @@ class _TlSpecWriter:
                 # instead of live-destroying a concurrently-published artifact.
                 if not overwrite:
                     raise FileExistsError(f"Bundle path already exists: {target_path}")
-                backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
+                backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
                 os.replace(target_path, backup_path)
             os.replace(tmp_path, target_path)
             # Make the rename(s) themselves durable: one parent-directory
