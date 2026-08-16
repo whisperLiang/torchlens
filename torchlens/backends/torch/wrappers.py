@@ -1174,6 +1174,60 @@ def _func_mutates_receiver(func_name: str) -> bool:
     )
 
 
+def _positional_inplace_index(func: Any) -> int | None:
+    """Return the positional index of ``func``'s ``inplace`` parameter, if any.
+
+    Python-level functionals (``F.hardswish``, ``F.hardsigmoid``, ...) accept
+    ``inplace`` as an ordinary positional-or-keyword parameter, and their
+    ``nn.Module`` conveniences pass it POSITIONALLY (torch's
+    ``Hardswish.forward`` runs ``F.hardswish(input, self.inplace)``), so a
+    kwargs-only ``inplace`` probe misses the mutation request entirely — and
+    some of those functionals mutate through UNWRAPPED builtins
+    (``torch._C._nn.hardswish_``) that no inner wrapper intercepts. Only plain
+    Python functions are probed: C builtins expose no signature and cannot
+    carry a Python-level ``inplace`` parameter.
+    """
+    if not isinstance(func, types.FunctionType):
+        return None
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return None
+    for index, (name, param) in enumerate(parameters.items()):
+        if name == "inplace":
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                return index
+            return None
+    return None
+
+
+def _call_requests_inplace(
+    inplace_param_index: int | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> bool:
+    """Return whether this call's ``inplace`` argument requests mutation.
+
+    Checks the keyword spelling first, then the positional slot located at
+    decoration time. Truthy non-``True`` values (``inplace=1``) still mutate,
+    and an unreadable flag counts as a request — a spurious materialization
+    is one wasted clone, never a missed pre-mutation copy-out.
+    """
+    if "inplace" in kwargs:
+        value = kwargs["inplace"]
+    elif inplace_param_index is not None and len(args) > inplace_param_index:
+        value = args[inplace_param_index]
+    else:
+        return False
+    try:
+        return bool(value)
+    except Exception:
+        return True
+
+
 def _propagate_data_alias_provenance(
     func_name: str,
     data_alias_inputs: tuple[torch.Tensor, ...],
@@ -1587,6 +1641,7 @@ def torch_func_decorator(
     is_unlogged_func = func_name in funcs_not_to_log
     is_print_func = func_name in print_funcs
     mutates_receiver = _func_mutates_receiver(func_name)
+    inplace_param_index = _positional_inplace_index(func)
     reconstructs_receiver_output = func_name in {"__setitem__", "zero_", "__delitem__"}
     has_inplace_signature = (
         func_name.endswith("_")
@@ -1638,7 +1693,7 @@ def torch_func_decorator(
                 or is_mutating_property_setter
                 or reconstructs_receiver_output
                 or "out" in kwargs
-                or kwargs.get("inplace") is True
+                or _call_requests_inplace(inplace_param_index, args, kwargs)
             ):
                 materialize_deferred_for_call(_collect_tensor_args(args, kwargs))
             if needs_device_injection:
@@ -1864,18 +1919,23 @@ def torch_func_decorator(
         # ``__setitem__``/``zero_``/``__delitem__``, mutating property setters,
         # ``out=`` destinations, and ``inplace=True`` conveniences (``F.relu``
         # / ``F.dropout``) whose actual underscore mutation may run below this
-        # wrapper. NOT ``has_inplace_signature`` — that flag is true for EVERY
-        # dunder (``"__add__".endswith("_")``) and is only ever meaningful
-        # gated behind a same-object return. Storage-rebinding ``.data=``
-        # writes no bytes but rides along via its property-setter signature —
-        # a spurious materialization is merely a wasted clone, never a
-        # correctness risk.
+        # wrapper — including POSITIONALLY-passed ``inplace`` (torch's
+        # ``Hardswish.forward`` runs ``F.hardswish(input, self.inplace)``, and
+        # ``torch._C._nn.hardswish_`` below it is not a wrapped surface, so
+        # this wrapper is the ONLY interception point; missing it left stale
+        # pending aliases that tripped the belt at the next mutating call —
+        # the mobilenet_v3_small failure). NOT ``has_inplace_signature`` —
+        # that flag is true for EVERY dunder (``"__add__".endswith("_")``)
+        # and is only ever meaningful gated behind a same-object return.
+        # Storage-rebinding ``.data=`` writes no bytes but rides along via its
+        # property-setter signature — a spurious materialization is merely a
+        # wasted clone, never a correctness risk.
         if _COW_PENDING and (
             mutates_receiver
             or is_mutating_property_setter
             or reconstructs_receiver_output
             or "out" in kwargs
-            or kwargs.get("inplace") is True
+            or _call_requests_inplace(inplace_param_index, args, kwargs)
         ):
             materialize_deferred_for_call(arg_tensorlike)
 
