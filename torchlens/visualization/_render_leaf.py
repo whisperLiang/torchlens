@@ -572,6 +572,7 @@ def _infer_intervening_module_downstream(trace: "Trace", grad_fn_handle: "GradFn
         trace,
         reverse_edges.get(grad_fn_handle.grad_fn_object_id, []),
         reverse=True,
+        reverse_edges=reverse_edges,
     )
 
 
@@ -580,6 +581,7 @@ def _infer_intervening_module_bfs(
     start_ids: Iterable[int],
     *,
     reverse: bool,
+    reverse_edges: dict[int, list[int]] | None = None,
 ) -> str | None:
     """Find the nearest module-anchored grad_fn_handle by breadth-first search.
 
@@ -591,6 +593,11 @@ def _infer_intervening_module_bfs(
         Initial grad_fn_handle ids to inspect.
     reverse:
         Whether traversal uses reverse edges.
+    reverse_edges:
+        Prebuilt reverse-edge map for ``reverse=True`` callers. The downstream
+        caller already builds this exact map to seed ``start_ids``; rebuilding
+        it here doubled the O(E) sweep per intervening grad_fn
+        (hunt-6 R52-3).
 
     Returns
     -------
@@ -602,11 +609,13 @@ def _infer_intervening_module_bfs(
     # wide backward graphs for a linear BFS (R29, b4 sol MED).
     queue = deque(start_ids)
     seen: set[int] = set()
-    reverse_edges: dict[int, list[int]] = defaultdict(list)
-    if reverse:
+    if reverse and reverse_edges is None:
+        reverse_edges = defaultdict(list)
         for candidate in trace.grad_fns:
             for next_grad_fn_id in candidate.next_grad_fn_ids:
                 reverse_edges[next_grad_fn_id].append(candidate.grad_fn_object_id)
+    if reverse_edges is None:
+        reverse_edges = {}
     while queue:
         grad_fn_object_id = queue.popleft()
         if grad_fn_object_id in seen or grad_fn_object_id not in trace.grad_fn_logs:

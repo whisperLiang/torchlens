@@ -1241,3 +1241,45 @@ def test_collapsed_module_boundary_edge_discloses_multiplicity(tmp_path: Path) -
     assert "x2" in edge_stanza, (
         "two distinct dataflow edges merged into one rendered edge with no multiplicity disclosure"
     )
+
+
+def test_downstream_intervening_inference_builds_reverse_edges_once() -> None:
+    """The reverse-edge map is built once per downstream inference (R52-3).
+
+    ``_infer_intervening_module_downstream`` built the O(E) reverse autograd
+    edge map to seed the BFS, then ``_infer_intervening_module_bfs`` rebuilt
+    the identical map -- two full ``trace.grad_fns`` sweeps per intervening
+    grad_fn. The prebuilt map is now passed through, so the grad_fn table is
+    swept exactly once.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.visualization._render_leaf import _infer_intervening_module_downstream
+
+    class _CountingGradFns(list):
+        """Grad-fn table that counts full sweeps."""
+
+        iter_calls = 0
+
+        def __iter__(self) -> Any:
+            type(self).iter_calls += 1
+            return super().__iter__()
+
+    grad_fns = _CountingGradFns(
+        SimpleNamespace(grad_fn_object_id=i, next_grad_fn_ids=[i + 1], op=None) for i in range(5)
+    )
+    trace = SimpleNamespace(
+        grad_fns=grad_fns,
+        grad_fn_logs={fn.grad_fn_object_id: fn for fn in grad_fns},
+    )
+    handle = SimpleNamespace(grad_fn_object_id=3, next_grad_fn_ids=[4], op=None)
+
+    _CountingGradFns.iter_calls = 0
+    result = _infer_intervening_module_downstream(trace, handle)  # type: ignore[arg-type]
+
+    assert result is None  # no module-anchored grad_fn in the stub chain
+    assert _CountingGradFns.iter_calls == 1, (
+        f"downstream inference swept trace.grad_fns {_CountingGradFns.iter_calls} "
+        "times -- the duplicate reverse-edge build is back"
+    )
