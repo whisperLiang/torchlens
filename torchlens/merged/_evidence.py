@@ -64,6 +64,10 @@ _COMPLETION_BINDINGS = frozenset({"issue_sync", "unobserved"})
 _WITNESS_POLICIES = frozenset({"none", "digest"})
 _INSTALL_EPOCHS = frozenset({"armed_before_any_group", "seeded"})
 _ROLE_NAMES = frozenset({"contribution", "destination", "contribution_destination"})
+_NOT_PRESENT_REASONS = frozenset({"async_completion_unobserved"})
+"""Closed vocabulary for ``witness.not_present_reason`` (null is the other value)."""
+_DISCLOSURE_TOKENS = frozenset({"read_of_inflight_destination", "c10d_group_seq_read_failed"})
+"""Closed vocabulary of boundary disclosure tokens the recorder can emit."""
 _VALUE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 """Byte-exact witness digests are SHA-256 hex, same shape as membership digests."""
 
@@ -231,6 +235,66 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
     events = entry.get("events")
     if not isinstance(events, dict) or events.get("completion_binding") not in _COMPLETION_BINDINGS:
         raise _refuse(f"{where} has a malformed events record", source=source)
+    # Event/disclosure/witness COHERENCE (R18 fixwave-6): every field below is
+    # redundant with the others on an honest record, and each redundancy is a
+    # forgery axis when left unchecked. A tampered core that flips ONE of them
+    # (forged destination digests on an async boundary, digests under witness
+    # policy "none", a stripped in-flight-read disclosure) used to sail
+    # through parse and could only be caught -- or worse, ATTESTED -- by the
+    # cross-rank derivation. The only forgery that survives these checks is a
+    # fully coherent reauthoring of every field on every core, which is the
+    # documented out-of-scope boundary (contract section 11 analog), not an
+    # open residual.
+    completion_binding = events["completion_binding"]
+    async_op = events.get("async_op")
+    if not isinstance(async_op, bool):
+        raise _refuse(f"{where} events async_op is not a boolean", source=source)
+    if async_op != (completion_binding == "unobserved"):
+        raise _refuse(
+            f"{where} events record is incoherent: async_op={async_op} with "
+            f"completion_binding={completion_binding!r} (an unobserved completion "
+            "is exactly the async case)",
+            source=source,
+        )
+    disclosures = entry.get("disclosures")
+    if not isinstance(disclosures, list) or any(
+        not isinstance(token, str) for token in disclosures
+    ):
+        raise _refuse(f"{where} disclosures is not a list of strings", source=source)
+    unknown_tokens = set(disclosures) - _DISCLOSURE_TOKENS
+    if unknown_tokens:
+        raise _refuse(
+            f"{where} disclosures contain tokens {sorted(unknown_tokens)} outside "
+            "the closed vocabulary",
+            source=source,
+        )
+    if (completion_binding == "unobserved") != ("read_of_inflight_destination" in disclosures):
+        raise _refuse(
+            f"{where} disclosure record is incoherent: completion_binding "
+            f"{completion_binding!r} with read_of_inflight_destination "
+            f"{'present' if 'read_of_inflight_destination' in disclosures else 'absent'} "
+            "(every unobserved completion records the in-flight-destination read, "
+            "and no observed completion does)",
+            source=source,
+        )
+    if "c10d_group_seq_read_failed" in disclosures and c10d_group_seq is not None:
+        raise _refuse(
+            f"{where} discloses a failed c10d_group_seq read yet carries a c10d_group_seq value",
+            source=source,
+        )
+    op_node = entry.get("op_node")
+    if not isinstance(op_node, bool) or op_node != (kind not in TENSORLESS_KINDS):
+        raise _refuse(
+            f"{where} op_node does not match its kind's tensorless class "
+            f"({kind!r} boundaries are journal-{'only' if kind in TENSORLESS_KINDS else 'plus-op'})",
+            source=source,
+        )
+    peer = entry.get("peer")
+    if kind in P2P_KINDS:
+        if not isinstance(peer, dict):
+            raise _refuse(f"{where} is a p2p boundary without its peer record", source=source)
+    elif peer is not None:
+        raise _refuse(f"{where} is a collective boundary carrying a peer record", source=source)
     witness = entry.get("witness")
     if not isinstance(witness, dict) or witness.get("policy_resolved") not in _WITNESS_POLICIES:
         raise _refuse(
@@ -238,15 +302,52 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             "outside the closed vocabulary",
             source=source,
         )
+    policy_resolved = witness["policy_resolved"]
+    not_present_reason = witness.get("not_present_reason")
+    if not_present_reason is not None and not_present_reason not in _NOT_PRESENT_REASONS:
+        raise _refuse(
+            f"{where} witness not_present_reason {not_present_reason!r} outside "
+            "the closed vocabulary",
+            source=source,
+        )
+    expected_reason = (
+        "async_completion_unobserved"
+        if policy_resolved == "digest" and completion_binding == "unobserved"
+        else None
+    )
+    if not_present_reason != expected_reason:
+        raise _refuse(
+            f"{where} witness not_present_reason {not_present_reason!r} is "
+            f"incoherent with policy {policy_resolved!r} and completion_binding "
+            f"{completion_binding!r} (expected {expected_reason!r})",
+            source=source,
+        )
     # Digest fields must be null or a LIST of SHA-256 hex strings. A bare
     # string here used to char-split through ``tuple(...)`` in the engine and
     # compare single characters as digests -- two cores carrying the same
-    # garbage string rendered a fabricated ATTESTED verdict.
+    # garbage string rendered a fabricated ATTESTED verdict. Tensorless kinds
+    # legitimately record EMPTY digest lists under witness policy "digest"
+    # (zero tensors to digest); for every tensor-carrying kind an empty list
+    # is tamper, same as the roles rule above.
     for digest_field in ("contribution_digests", "destination_digests"):
         digests = witness.get(digest_field)
         if digests is None:
             continue
-        if not isinstance(digests, list) or not digests:
+        if policy_resolved == "none":
+            raise _refuse(
+                f"{where} witness carries {digest_field} under policy_resolved "
+                "'none'; a rank that never computed witnesses cannot present "
+                "digests, so these are forged, not evidence",
+                source=source,
+            )
+        if digest_field == "destination_digests" and completion_binding == "unobserved":
+            raise _refuse(
+                f"{where} witness carries destination_digests under an "
+                "unobserved completion; the destination bytes were never "
+                "observed at capture, so these digests are forged, not evidence",
+                source=source,
+            )
+        if not isinstance(digests, list) or (not digests and kind not in TENSORLESS_KINDS):
             raise _refuse(
                 f"{where} witness {digest_field} is not null or a non-empty list",
                 source=source,
@@ -262,6 +363,14 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
         raise _refuse(f"{where} lacks op_labels_raw back-references", source=source)
     if any(not isinstance(label, str) for label in op_labels_raw):
         raise _refuse(f"{where} op_labels_raw contains a non-string label", source=source)
+    lifetime = entry.get("lifetime_evidence")
+    if not isinstance(lifetime, dict) or lifetime.get("install_epoch") not in _INSTALL_EPOCHS:
+        raise _refuse(
+            f"{where} lifetime_evidence install_epoch "
+            f"{lifetime.get('install_epoch') if isinstance(lifetime, dict) else lifetime!r} "
+            "outside the closed vocabulary",
+            source=source,
+        )
 
 
 def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
@@ -298,12 +407,28 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
             source=source,
         )
     boundaries = record["boundaries"]
+    install_epoch = record.get("install_epoch")
+    if install_epoch not in _INSTALL_EPOCHS:
+        raise _refuse(
+            f"install_epoch {install_epoch!r} outside the closed vocabulary",
+            source=source,
+        )
     ranks: set[int] = set()
     seen_correlation_keys: set[tuple[str, int, str, int]] = set()
     for index, entry in enumerate(boundaries):
         if not isinstance(entry, dict):
             raise _refuse(f"boundary {index} of {source} is not a mapping", source=source)
         _validate_boundary(entry, index, source)
+        # A rank has exactly ONE install epoch; a boundary claiming a
+        # different one is a forged record trying to promote (or demote) its
+        # own lifetime completeness independently of the rank's arming record.
+        if entry["lifetime_evidence"]["install_epoch"] != install_epoch:
+            raise _refuse(
+                f"boundary {index} of {source} claims install_epoch "
+                f"{entry['lifetime_evidence']['install_epoch']!r} but the rank "
+                f"record's install_epoch is {install_epoch!r}",
+                source=source,
+            )
         ranks.add(int(entry["group"]["my_global_rank"]))
         correlation = entry["correlation"]
         correlation_key = (
@@ -324,12 +449,6 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
             f"Merge input {source} claims multiple global ranks {sorted(ranks)}; "
             "a rank core is a single-rank capture.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
-            source=source,
-        )
-    install_epoch = record.get("install_epoch")
-    if install_epoch not in _INSTALL_EPOCHS:
-        raise _refuse(
-            f"install_epoch {install_epoch!r} outside the closed vocabulary",
             source=source,
         )
     ledger_payload = record.get("group_lifecycle_ledger")
