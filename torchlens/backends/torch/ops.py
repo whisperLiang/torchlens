@@ -258,7 +258,16 @@ class _AncestorBitset:
         return view
 
 
-_ANCESTOR_FIELD_NAMES = ("root_ancestors", "internal_source_ancestors")
+# All four label-set closure fields intern into bitmaps at the freeze
+# (r8 R60-2 widened the historical root/internal pair): ``input_ancestors``
+# and ``output_descendants`` grow O(N*L) on deep graphs too, and leaving
+# them as per-op frozensets kept the dominant retained-memory term.
+_ANCESTOR_FIELD_NAMES = (
+    "root_ancestors",
+    "internal_source_ancestors",
+    "input_ancestors",
+    "output_descendants",
+)
 _ANCESTOR_SLOT_DESCRIPTORS = {
     field_name: vars(Op)[field_name] for field_name in _ANCESTOR_FIELD_NAMES
 }
@@ -306,6 +315,42 @@ def _delete_internal_source_ancestors(op: Op) -> None:
     _delete_ancestor_field(op, "internal_source_ancestors")
 
 
+def _get_input_ancestors(op: Op) -> "set[str] | frozenset[str]":
+    """Return ``op.input_ancestors``: staging set or frozen closure view."""
+
+    return _get_ancestor_field(op, "input_ancestors")
+
+
+def _set_input_ancestors(op: Op, value: set[str]) -> None:
+    """Assign ``op.input_ancestors`` through its preserved slot descriptor."""
+
+    _set_ancestor_field(op, "input_ancestors", value)
+
+
+def _delete_input_ancestors(op: Op) -> None:
+    """Delete ``op.input_ancestors`` through its preserved slot descriptor."""
+
+    _delete_ancestor_field(op, "input_ancestors")
+
+
+def _get_output_descendants(op: Op) -> "set[str] | frozenset[str]":
+    """Return ``op.output_descendants``: staging set or frozen closure view."""
+
+    return _get_ancestor_field(op, "output_descendants")
+
+
+def _set_output_descendants(op: Op, value: set[str]) -> None:
+    """Assign ``op.output_descendants`` through its preserved slot descriptor."""
+
+    _set_ancestor_field(op, "output_descendants", value)
+
+
+def _delete_output_descendants(op: Op) -> None:
+    """Delete ``op.output_descendants`` through its preserved slot descriptor."""
+
+    _delete_ancestor_field(op, "output_descendants")
+
+
 setattr(
     Op,
     "root_ancestors",
@@ -319,6 +364,16 @@ setattr(
         _set_internal_source_ancestors,
         _delete_internal_source_ancestors,
     ),
+)
+setattr(
+    Op,
+    "input_ancestors",
+    property(_get_input_ancestors, _set_input_ancestors, _delete_input_ancestors),
+)
+setattr(
+    Op,
+    "output_descendants",
+    property(_get_output_descendants, _set_output_descendants, _delete_output_descendants),
 )
 
 
