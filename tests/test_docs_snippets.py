@@ -69,9 +69,28 @@ def _iter_python_blocks() -> list[tuple[str, int, str]]:
     return blocks
 
 
+def _doc_block_params() -> list[object]:
+    """Wrap blocks in params; compile-bearing blocks are HEAVY.
+
+    r7 R41/R72 fresh-env gate finding: the ``torch.compile`` fence in
+    reference/debug.md charges ~15s CPU in a COLD environment (first-run
+    dynamo/inductor compilation; the dev box's warm cache hid it), blowing
+    the 5s-tier budget the moment enforcement became always-on. Cold-cache
+    compilation cost is heavy-class by measurement, per-cell.
+    """
+
+    params: list[object] = []
+    for file_name, block_index, code in _iter_python_blocks():
+        marks = (
+            (pytest.mark.heavy,) if ("torch.compile" in code or "frames_compiled" in code) else ()
+        )
+        params.append(pytest.param(file_name, block_index, code, marks=marks))
+    return params
+
+
 @pytest.mark.parametrize(
     ("file_name", "block_index", "code"),
-    _iter_python_blocks(),
+    _doc_block_params(),
     ids=lambda value: str(value),
 )
 def test_p2_doc_python_block_runs(
