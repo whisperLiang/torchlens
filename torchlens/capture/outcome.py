@@ -1207,15 +1207,26 @@ def stamp_cooked(
     *,
     halted: bool,
     reason: str | None = None,
+    boundary_kind: str | None = None,
+    boundary_label: str | None = None,
     frontier_label: str | None = None,
 ) -> CaptureOutcome:
-    """Settle one Trace cooked from a Recording (path 9), attested."""
+    """Settle one Trace cooked from a Recording (path 9), attested.
+
+    ``reason`` and ``boundary_label`` are distinct facts (R06: the single
+    ``reason`` parameter formerly fed both, and the cooked path passed the
+    Recording-space RAW label while ``frontier_labels`` was final -- one
+    outcome mixing label spaces, with ``boundary_kind`` dropped entirely).
+    Callers pass the post-postprocess FINAL labels, mirroring
+    ``settle_halted``'s remap read-back.
+    """
 
     if halted:
         outcome = CaptureOutcome(
             status=CaptureStatus.HALTED,
             reason=reason,
-            boundary_label=reason,
+            boundary_kind=boundary_kind,
+            boundary_label=boundary_label if boundary_label is not None else reason,
             frontier_labels=None if frontier_label is None else (frontier_label,),
             n_ops_committed=count_committed_ops(trace),
             settlement_note="cooked_from=recording",

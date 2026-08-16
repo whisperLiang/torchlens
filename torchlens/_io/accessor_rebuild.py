@@ -85,7 +85,7 @@ def rebuild_trace_accessors(
         address: Buffer(
             address,
             versions,
-            initial_value=getattr(trace, "_buffer_initial_values", {}).get(address),
+            initial_value=(getattr(trace, "_buffer_initial_values", None) or {}).get(address),
             source_trace=trace,
         )
         for address, versions in buffer_versions.items()

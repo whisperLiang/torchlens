@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 from ..utils.collections import assign_to_sequence_or_dict
 from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.tensor_utils import (
+    _ACCUMULATING_REPLAY_ULP_HEADROOM,
     derive_float_tolerances,
     fp8_safe_comparison_pair,
     get_fp8_dtypes,
@@ -464,6 +465,17 @@ DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF = 1e-3
 DEEP_NUMERIC_REPLAY_BASE_SQRT_DEPTH_FACTOR = 16.0
 DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR = 128.0
 DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM = 4.0
+# The absolute terms scale the relative bound by the tensor's max magnitude
+# (cancellation noise is proportional to the accumulated terms' scale), but
+# the max is only an honest proxy for that scale while it is representative
+# of the tensor's bulk. When max|x| exceeds this multiple of the elementwise
+# median magnitude, a single large element would launder a tensor-max atol
+# over an overwhelmingly smaller bulk (probe: ONE 1.0 element in a 100k
+# tensor of 1e-9s let 99.9% of the tensor be zeroed and pass the base lane).
+# Past the ratio the atol falls back to the median magnitude --
+# fail-toward-strict: the guarded atol is never larger than the unguarded
+# one, so nothing that used to fail can start passing.
+DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE = 1e4
 
 
 def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float, float]:
@@ -918,13 +930,22 @@ def _comparator_self_test() -> None:
         # non-vacuity. The loosest sentinel above is a 1/3 relative gap, so
         # any rtol below 0.333 used to pass -- a 5,461x-loosened band ran
         # this self-test green and blessed 30% corruption of every replayed
-        # activation. The literal pairs below pin the band's order of
-        # magnitude: a 1e-3 relative gap (16x the shipped 512-ULP fp32 row)
-        # must read UNEQUAL, and a 1e-6 gap (well inside the row) must read
-        # EQUAL so a pathologically TIGHTENED band that would false-fail
-        # every replay is caught too.
+        # activation. The pairs below pin the band's order of magnitude: a
+        # 16x-the-shipped-512-ULP-fp32-row relative gap (~9.8e-4, formerly
+        # the independent decimal literal 1e-3, which could co-drift against
+        # the row) must read UNEQUAL, and a 1e-6 gap (well inside the row)
+        # must read EQUAL so a pathologically TIGHTENED band that would
+        # false-fail every replay is caught too. The reject sentinel is
+        # DERIVED from the PURE derivation at the shipped headroom -- never
+        # from the live _tolerances_for_dtype cache, which is exactly the
+        # surface a poisoned/corrupted band lives in and must not be able to
+        # move its own tripwire. (Headroom walk-out is pinned separately by
+        # tests/test_replay_tolerance_dtype_tripwire.py's literal pins.)
         band_probe = torch.tensor([1.0, -1.0, 0.5, 2.0])
-        band_reject = band_probe * (1.0 + 1.0e-3)
+        fp32_replay_rtol = derive_float_tolerances(
+            torch.float32, _ACCUMULATING_REPLAY_ULP_HEADROOM
+        )[0]
+        band_reject = band_probe * (1.0 + 16.0 * fp32_replay_rtol)
         band_accept = band_probe * (1.0 + 1.0e-6)
         healthy = (
             bool(tensor_nanequal(base, base.clone(), allow_tolerance=True))
@@ -3191,11 +3212,20 @@ def _deep_numeric_replay_matches_saved(
         # not to the near-zero result it lands on), each capped by its
         # historical ceiling literal.
         base_rel, outlier_rel, mean_rel = _band_c_bounds(depth, recomputed_nonan.dtype)
-        out_scale = float(
-            torch.maximum(recomputed_nonan.abs().max(), saved_nonan.abs().max()).item()
-        )
-        base_atol = min(base_rel * out_scale, DEEP_NUMERIC_REPLAY_ATOL)
-        outlier_atol = min(outlier_rel * out_scale, DEEP_NUMERIC_REPLAY_OUTLIER_ATOL)
+        elementwise_scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs())
+        out_scale = float(elementwise_scale.max().item())
+        # Tensor-max atol amplification is gated behind a dynamic-range check
+        # (see DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE): when the max is
+        # unrepresentative of the bulk, fall back to the median magnitude so
+        # the bulk is judged at (at most) its own scale. Strictly tighter --
+        # median <= max, so the guarded atol can only shrink.
+        typical_scale = float(elementwise_scale.median().item())
+        if out_scale > DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE * typical_scale:
+            atol_scale = typical_scale
+        else:
+            atol_scale = out_scale
+        base_atol = min(base_rel * atol_scale, DEEP_NUMERIC_REPLAY_ATOL)
+        outlier_atol = min(outlier_rel * atol_scale, DEEP_NUMERIC_REPLAY_OUTLIER_ATOL)
 
         if torch.allclose(
             recomputed_nonan,
@@ -3216,7 +3246,16 @@ def _deep_numeric_replay_matches_saved(
             return False
 
         diff = (recomputed_nonan - saved_nonan).abs()
-        scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs()) + 1e-12
+        # Division-safety floor as a dtype-derived subnormal CLAMP, not an
+        # additive term: the former ``+ 1e-12`` inflated the denominator for
+        # every sub-1e-12 element, so TOTAL destruction (zeroing, sign flip)
+        # of elements below ~1.2e-16 read as scaled_diff ~2e-5 and was
+        # blessed. Clamping at the comparison dtype's smallest normal keeps
+        # the division finite while measuring tiny elements at their own
+        # scale -- strictly tighter than the additive floor everywhere.
+        scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs()).clamp_min(
+            torch.finfo(recomputed_nonan.dtype).tiny
+        )
         scaled_diff = diff / scale
         return bool(
             scaled_diff.max().item() <= min(outlier_rel, DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF)

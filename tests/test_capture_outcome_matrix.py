@@ -195,15 +195,19 @@ def test_gated_entries_consult_the_chokepoint() -> None:
         encoding="utf-8"
     )
     gate_calls = re.findall(r'require_capture_capability\(self, "([a-z_]+)"\)', validation_source)
-    # save_new_outs, push, push_from, run (loaded-sparse + unified-live +
-    # legacy-live), log_backward, recording_backward, validate_forward_pass,
-    # check_metadata_invariants.
+    # save_new_outs, push, push_from, run (entry pre-gate + loaded-sparse +
+    # analysis-load pre-gate + unified-live + legacy-live), log_backward,
+    # recording_backward, validate_forward_pass, check_metadata_invariants.
     assert sorted(gate_calls) == sorted(
         [
             "live_replay",  # save_new_outs
             "live_replay",  # push
             "live_replay",  # push_from
+            "live_replay",  # run(): entry pre-gate (R06: FAILED/ABORTED/UNKNOWN
+            # refuse with their N-code before the husk/_runnable read can mask it)
             "loaded_sparse_run",  # run(): loaded sparse provider
+            "live_replay",  # run(): HALTED analysis-load pre-gate (N5 before the
+            # generic analysis refusal's dead-end remedy)
             "live_replay",  # run(): unified live provider
             "live_replay",  # run(): legacy rerun surface
             "backward",  # log_backward

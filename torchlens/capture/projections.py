@@ -338,10 +338,12 @@ class RecordingState:
         if self.predicate_failures:
             details = f": {self.predicate_failures[0].traceback.strip().splitlines()[-1]}"
         raise PredicateError(
-            f"fastlog predicate failed during recording{details}",
+            f"fastlog predicate failed during recording{details}. "
+            "Remedy: fix the predicate; exc.failures carries the accumulated tracebacks.",
             failures=list(self.predicate_failures),
             total_count=len(self.predicate_failures) + self.predicate_failure_overflow_count,
             overflow=self.predicate_failure_overflow_count,
+            code="predicate_evaluation_failed",
         )
 
 

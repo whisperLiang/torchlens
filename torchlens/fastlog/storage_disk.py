@@ -119,6 +119,7 @@ class DiskStorageBackend:
         self.writer = BundleStreamWriter(
             options.streaming.bundle_path,
             include_custom_attributes=options.streaming.include_custom_attributes,
+            include_buffer_values=options.streaming.include_buffer_values,
         )
         # Directories first, so mid-recording contents are already unreachable
         # to other users; finalize() tightens the files it writes.
@@ -321,10 +322,18 @@ class DiskStorageBackend:
         if not record.spec.keep_grad:
             return
         if self.disk_only:
-            raise PredicateError("keep_grad=True is not valid for disk-only fastlog storage")
+            raise PredicateError(
+                "keep_grad=True is not valid for disk-only fastlog storage. "
+                "Remedy: set retain_in_memory=True or drop keep_grad=True.",
+                code="predicate_storage_conflict",
+            )
         dtype = _torch_dtype_from_ref(record.ctx.dtype)
         if dtype is not None and dtype not in _GRAD_DTYPES:
-            raise PredicateError("keep_grad=True is not valid for integer or bool tensors")
+            raise PredicateError(
+                "keep_grad=True is not valid for integer or bool tensors. "
+                "Remedy: drop keep_grad=True or keep the payload in a floating dtype.",
+                code="predicate_storage_conflict",
+            )
         if (
             record.spec.device is not None
             and record.ctx.tensor_device is not None

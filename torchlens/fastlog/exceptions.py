@@ -63,6 +63,7 @@ class PredicateError(CaptureError, RuntimeError):
         failures: list[PredicateFailure] | None = None,
         total_count: int | None = None,
         overflow: int = 0,
+        **payload: object,
     ) -> None:
         """Initialize a predicate error with optional event context.
 
@@ -80,9 +81,14 @@ class PredicateError(CaptureError, RuntimeError):
             Total number of predicate failures observed.
         overflow:
             Number of failures omitted because the failure list was capped.
+        **payload:
+            Structured diagnostic payload forwarded to ``TorchLensError``
+            (``code=``, ``remedy=``, ...). R65a: the historical bare
+            ``super().__init__(message)`` swallowed this channel, leaving
+            ``exc.fields`` empty at every raise site.
         """
 
-        super().__init__(message)
+        super().__init__(message, **payload)
         self.ctx = ctx
         self.result = result
         self.failures = failures or []

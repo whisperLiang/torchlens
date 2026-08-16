@@ -207,7 +207,7 @@ jobs:
           for offset in 0 1 2 3; do
             TORCHLENS_FUZZ_SEED="$(( ${{ github.run_id }} % 1000000000 + offset ))" \
               pytest tests/test_generative_properties_r73.py tests/test_tlspec_parse_fuzz.py \
-                -q --tb=short -p no:randomly
+                -m '' -q --tb=short -p no:randomly
           done
 
   coverage:

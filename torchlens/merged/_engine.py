@@ -312,6 +312,36 @@ def _relation_findings(
         }
         if len(shape_sets) > 1:
             violation(f"tensor shapes disagree across ranks: {sorted(shape_sets)}")
+    # Distinct-shape-set agreement belt for the remaining symmetric kinds
+    # (R18-1 iii fallback): every role of these kinds shares one element
+    # geometry across the group (all_gather/gather/scatter slots equal the
+    # contribution shape; reduce inputs equal outputs; reduce_scatter feeds
+    # group_size output-shaped slots; reduce_scatter_tensor's two shapes
+    # repeat on every rank), so the SET of distinct role shapes must agree
+    # across ranks even though per-rank role COUNTS legitimately differ
+    # (root list vs leaf tensor). all_to_all stays out: uneven splits make
+    # per-rank shape sets legitimately rank-local. A UNIFORM cross-rank shape
+    # rewrite still passes this belt -- coherent reauthoring, the documented
+    # out-of-scope boundary (only a per-core cross-check against the member's
+    # own op records could catch it, and parse never dereferences the trace).
+    if kind in (
+        "all_gather",
+        "gather",
+        "scatter",
+        "reduce",
+        "reduce_scatter",
+        "reduce_scatter_tensor",
+    ):
+        distinct_shape_sets = {
+            frozenset(shapes(entry, ("contribution", "destination", "contribution_destination")))
+            for entry in entries.values()
+            if entry.get("roles")
+        }
+        if len(distinct_shape_sets) > 1:
+            violation(
+                "distinct role shapes disagree across ranks: "
+                f"{sorted(sorted(s) for s in distinct_shape_sets)}"
+            )
     if kind == "all_gather":
         for rank, entry in sorted(entries.items()):
             n_destinations = len(_roles_of(entry, destination_roles))
@@ -403,6 +433,22 @@ def _witness_consistency(
     for rank in presence:
         group_rank = per_rank[rank].group_rank
         if group_rank is not None:
+            # Belt for internal RankEvidence constructors that bypass the
+            # parse boundary (matching the _role_digests belt above): a
+            # permuted/out-of-range group rank used to reach the group-rank
+            # list indexing below as a raw IndexError -- or silently rebind a
+            # slice pairing -- instead of the promised typed refusal. Parse
+            # already pins my_group_rank to the membership position (R18-2).
+            if (
+                isinstance(group_rank, bool)
+                or not isinstance(group_rank, int)
+                or not 0 <= group_rank < group_size
+            ):
+                raise MergeInputError(
+                    f"Boundary group rank {group_rank!r} for rank {rank} is "
+                    f"outside its recorded group of {group_size} member(s).",
+                    code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                )
             by_group_rank[group_rank] = rank
     if len(by_group_rank) < len(presence):
         incomplete = True

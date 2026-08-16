@@ -1145,7 +1145,16 @@ def rebuild_builtin_helper(
         If ``name`` is not a known builtin helper.
     """
 
+    # Local import: ``add``/``replace_with`` live in ``predicates`` (which
+    # imports this module), so a module-level import would cycle. They mint
+    # portability="builtin" specs like every entry below, and their absence
+    # here made a saved/pickled spec a dead artifact (R10-1: save succeeded,
+    # load raised intervention_helper_unknown).
+    from .predicates import add, replace_with
+
     constructors: dict[str, Callable[..., HelperSpec]] = {
+        "add": add,
+        "replace_with": replace_with,
         "zero_ablate": zero_ablate,
         "mean_ablate": mean_ablate,
         "resample_ablate": resample_ablate,

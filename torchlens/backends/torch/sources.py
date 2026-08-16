@@ -159,7 +159,9 @@ def log_source_tensor_predicate(
             decision = _evaluate_keep_op(ctx, state.options)
             if isinstance(decision, RetroactiveCaptureDecision):
                 raise PredicateError(
-                    "tl.followed_by(...) retroactive save is only supported by trace"
+                    "tl.followed_by(...) retroactive save is only supported by trace. "
+                    "Remedy: use tl.trace(save=...) for followed_by retroactive capture.",
+                    code="followed_by_unsupported",
                 )
             spec = decision
             if spec.save_out or spec.save_metadata:

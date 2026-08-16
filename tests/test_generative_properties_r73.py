@@ -321,24 +321,30 @@ def test_canonical_json_bytes_refuses_the_known_bad_classes() -> None:
     numerically while their coerced forms sort lexicographically — for a
     hash-authority encoding every one of those is a forgery seam. NaN and
     the infinities are non-JSON and already refused (``allow_nan=False``);
-    this pins all three classes.
+    this pins all three classes. fixwave-7 (iovalid): every refusal is the
+    typed merged-artifact schema refusal, never a raw builtin exception.
     """
 
-    for bad_float in (float("nan"), float("inf"), float("-inf")):
-        with pytest.raises(ValueError):
-            canonical_json_bytes({"x": bad_float})
-    bad_key_payloads: list = [
+    from torchlens.merged import MergedErrorCode
+    from torchlens.merged._errors import MergedArtifactError
+
+    bad_payloads: list = [
+        {"x": float("nan")},
+        {"x": float("inf")},
+        {"x": float("-inf")},
         {1: "v"},
         {True: "v"},
         {None: "v"},
         {"outer": [{"inner": {2.5: "v"}}]},
         {"1": "same-coerced-form", 1: "different-object"},
+        {"x": object()},  # unserializable leaf: raw TypeError before iovalid
     ]
-    for payload in bad_key_payloads:
-        with pytest.raises(ValueError, match="non-string mapping key"):
+    for payload in bad_payloads:
+        with pytest.raises(MergedArtifactError) as excinfo:
             canonical_json_bytes(payload)
-    with pytest.raises(TypeError):
-        canonical_json_bytes({"x": object()})
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value, (
+            f"payload {payload!r} refused with the wrong code"
+        )
     # The string-keyed spelling stays valid — the refusal is precise.
     assert canonical_json_bytes({"1": "v"}) == b'{"1":"v"}\n'
 
@@ -370,3 +376,39 @@ def test_fresh_seed_leg_stays_wired_into_ci() -> None:
         "truncation/byte-flip sweeps honor TORCHLENS_FUZZ_SEED and must keep "
         "getting fresh seeds (r7 R73)"
     )
+
+
+def test_canonical_json_bytes_refuses_noncanonical_inputs_typed() -> None:
+    """R73: the canonical encoder is an integrity surface -- refuse, never coerce.
+
+    Fail-before: ``{1: "a"}`` and ``{"1": "a"}`` (likewise ``True``/``"true"``)
+    silently produced IDENTICAL bytes, so two structurally distinct payloads
+    shared one attested SHA-256 digest; NaN/Inf, lone surrogates, bytes
+    leaves, and mixed-type keys escaped as raw ValueError/UnicodeEncodeError/
+    TypeError past the module's typed refusal surface.
+    """
+
+    from torchlens.merged import MergedErrorCode
+    from torchlens.merged._errors import MergedArtifactError
+
+    bad_payloads = [
+        {1: "a"},  # int key: coerced to "1" -> digest collision with {"1": "a"}
+        {True: "a"},  # bool key: coerced to "true"
+        {1.0: "a"},  # float key
+        {1: "a", "b": 2},  # mixed keys: raw TypeError from sort_keys
+        {"a": float("nan")},
+        {"a": float("inf")},
+        {"nested": [{"deep": float("-inf")}]},
+        {"a": "\udc80"},  # lone surrogate: escaped dumps, died at .encode
+        {"a": b"raw-bytes"},
+    ]
+    for payload in bad_payloads:
+        with pytest.raises(MergedArtifactError) as excinfo:
+            canonical_json_bytes(payload)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value, (
+            f"payload {payload!r} refused with the wrong code"
+        )
+
+    # The collision pair itself: the string-keyed form still encodes, and it is
+    # now the ONLY spelling that produces these bytes.
+    assert canonical_json_bytes({"1": "a"}) == b'{"1":"a"}\n'

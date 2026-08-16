@@ -142,7 +142,13 @@ class StopDirective:
             return
         result = self.halt_options.halt(ctx)
         if not isinstance(result, bool):
-            raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
+            raise PredicateError(
+                "halt predicate must return bool. "
+                "Remedy: return True or False from the halt predicate.",
+                ctx=ctx,
+                result=result,
+                code="predicate_return_invalid",
+            )
         if result:
             # F6 stop-request latch + settlement boundary facts. The boundary
             # label prefers ``raw_label`` so the recorded label resolves

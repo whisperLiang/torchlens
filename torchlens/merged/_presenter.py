@@ -284,6 +284,28 @@ class MergedTrace:
         self._load_degradations = tuple(load_degradations)
         self._source_path: str | None = None
         self._released = False
+        self._member_outcomes = self._settle_member_outcomes(self._handles)
+
+    @staticmethod
+    def _settle_member_outcomes(handles: Mapping[int, _RankHandle]) -> dict[int, str]:
+        """Read each loaded member's settled capture-outcome status once.
+
+        Computed at construction (statuses are settled and frozen) so the
+        disclosure stays readable after :meth:`release` and never forces a
+        lazy member load. Members whose object carries no settled outcome
+        sidecar (hand-built evidence carriers) make no claim and are absent.
+        """
+
+        from ..capture.outcome import outcome_for
+
+        statuses: dict[int, str] = {}
+        for rank, handle in sorted(handles.items()):
+            if not handle.is_loaded:
+                continue
+            outcome = outcome_for(handle.trace)
+            if outcome is not None:
+                statuses[rank] = outcome.status.value
+        return statuses
 
     def release(self) -> None:
         """Drop every rank-trace handle so the member traces can be reclaimed.
@@ -358,6 +380,37 @@ class MergedTrace:
         """Environment degradations recorded at load (empty on a live merge)."""
 
         return self._load_degradations
+
+    @property
+    def member_outcomes(self) -> Mapping[int, str]:
+        """Read-only ``rank -> settled capture-outcome status`` disclosure.
+
+        R06c: FAILED / ABORTED_NONFINITE / UNKNOWN member cores refuse at
+        merge input resolution; HALTED (and legacy UNATTESTED) members merge
+        but are disclosed here and in :meth:`summary` -- the merged verdicts
+        then describe only what those members captured, and the presenter
+        never claims ``attested_complete`` silently over a halted prefix.
+        Ranks whose member object carries no settled outcome sidecar are
+        absent. Settled at construction; stays readable after
+        :meth:`release`.
+        """
+
+        return dict(self._member_outcomes)
+
+    def _member_outcome_disclosure(self) -> str | None:
+        """The non-complete member-outcome line, or ``None`` when all settle complete."""
+
+        flagged = {
+            rank: status
+            for rank, status in sorted(self._member_outcomes.items())
+            if status != "complete"
+        }
+        if not flagged:
+            return None
+        return (
+            f"member capture outcomes: {flagged} -- non-complete member "
+            "core(s); merged verdicts cover only what those members captured"
+        )
 
     # ------------------------------------------------------------------
     # Structure.
@@ -649,11 +702,20 @@ class MergedTrace:
             )
         lines = [
             f"MergedTrace over ranks {list(self.rank_ids)}: alignment={alignment}",
-            self._witness_coverage_line(),
-            f"{len(self._derivation.joins)} collective join(s), "
-            f"{len(self.gaps)} presence gap(s), "
-            f"{len(self._derivation.divergence_findings)} value divergence(s)",
         ]
+        # The halted/unattested-member disclosure precedes the witness line so
+        # an attested_complete value status is never presented without it.
+        disclosure = self._member_outcome_disclosure()
+        if disclosure is not None:
+            lines.append(disclosure)
+        lines.extend(
+            [
+                self._witness_coverage_line(),
+                f"{len(self._derivation.joins)} collective join(s), "
+                f"{len(self.gaps)} presence gap(s), "
+                f"{len(self._derivation.divergence_findings)} value divergence(s)",
+            ]
+        )
         return "\n".join(lines)
 
     def __repr__(self) -> str:

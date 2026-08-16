@@ -75,7 +75,13 @@ def detect_tlspec_format(path: str | Path) -> str:
         has_tlspec_version = "tlspec_version" in manifest
         if has_tlspec_version and has_kind:
             return "v2.0_unified"
-        if has_kind:
+        if has_kind and _read_json_object_if_present(tlspec_path / "spec.json") is not None:
+            # The intervention classification needs the artifact to actually
+            # BE one: a v2.16 intervention bundle carries spec.json. Inferring
+            # it from `kind` alone misrouted a unified manifest whose
+            # tlspec_version was deleted into the intervention loader, which
+            # died on the absent spec.json with an untyped FileNotFoundError
+            # (R73) instead of falling through to the typed manifest refusal.
             return "v2.16_intervention_with_kind"
 
     spec = _read_json_object_if_present(tlspec_path / "spec.json")

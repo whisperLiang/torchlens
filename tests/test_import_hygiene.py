@@ -135,6 +135,37 @@ _MAX_MARGINAL_NON_TORCHLENS_MODULES = 40
 #: allowlist and denylist above remain the structural authority.
 _TORCHLENS_IMPORT_BUDGET_S = 1.5
 
+#: Marginal ru_maxrss budget for ``import torchlens`` with torch already
+#: resident (R31 axis b: the duration budget is blind to a CPU-cheap but
+#: RSS-fat eager import -- a large frozen table, an mmapped registry, a
+#: module-scope resources read). Measured ~4 MiB marginal on the devbox
+#: (torch 2.13); the budget is ~16x that, an order-of-magnitude tripwire in
+#: the same register as the duration budget above, never a perf gate.
+#: Caveat: ru_maxrss is a high-water mark, so the delta is a LOWER bound and
+#: cannot see memory freed before the second read -- fine for the
+#: "something heavy became eager" class this guards.
+_TORCHLENS_IMPORT_RSS_BUDGET_KIB = 64 * 1024
+
+#: Public top-level names that predate the ``__all__`` contract: real public
+#: helpers deliberately outside ``__all__`` plus typing-import leakage.
+#: SHRINK-ONLY -- a new top-level public name either enters ``__all__``
+#: consciously or is a namespace leak (R31 axis b, namespace identity).
+_LEGACY_NON_ALL_PUBLIC_NAMES = frozenset(
+    {
+        "Any",
+        "TYPE_CHECKING",
+        "annotations",
+        "draw_backward",
+        "draw_combined",
+        "load_intervention_spec",
+        "show_model_graph",
+        "summary",
+        "validate_backward_pass",
+        "validate_forward_pass",
+        "validate_saved_outs",
+    }
+)
+
 
 def _import_probe_script() -> str:
     """Build a fresh-interpreter probe emitting one JSON blob of import facts.
@@ -149,17 +180,41 @@ def _import_probe_script() -> str:
     """
 
     return """
-import json, sys, time
+import json, resource, sys, time, types
 
 before_torch = set(sys.modules)
 import torch
+import torch.nn.functional as _torch_nn_functional
 after_torch = set(sys.modules)
+
+torch_ns_before = {k: id(v) for k, v in vars(torch).items()}
+functional_ns_before = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
+rss_before_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 start_wall = time.perf_counter()
 start_cpu = time.process_time()
 import torchlens
 elapsed_cpu = time.process_time() - start_cpu
 elapsed_wall = time.perf_counter() - start_wall
+
+rss_after_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+torch_ns_after = {k: id(v) for k, v in vars(torch).items()}
+functional_ns_after = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
+
+def _ns_diff(before, after):
+    return {
+        "added": sorted(set(after) - set(before)),
+        "removed": sorted(set(before) - set(after)),
+        "rebound": sorted(k for k in before if k in after and before[k] != after[k]),
+    }
+
+torchlens_stray_public = sorted(
+    name
+    for name, value in vars(torchlens).items()
+    if not name.startswith("_")
+    and name not in torchlens.__all__
+    and not isinstance(value, types.ModuleType)
+)
 
 after = set(sys.modules)
 torchlens_modules = sorted(
@@ -180,6 +235,11 @@ print(json.dumps({
     "marginal_foreign": marginal_foreign,
     "lazy_targets": lazy_targets,
     "eager_lazy_targets": [t for t in lazy_targets if t in after],
+    "rss_marginal_kib": rss_after_kib - rss_before_kib,
+    "torch_ns_diff": _ns_diff(torch_ns_before, torch_ns_after),
+    "functional_ns_diff": _ns_diff(functional_ns_before, functional_ns_after),
+    "torch_module_identity_ok": sys.modules.get("torch") is torch,
+    "torchlens_stray_public": torchlens_stray_public,
 }))
 """
 
@@ -392,6 +452,79 @@ def test_bare_import_stays_within_its_duration_budget(
         "The module allowlist/denylist guards in this file name the culprit "
         "when it is an eager import."
     )
+
+
+@pytest.mark.smoke
+def test_bare_import_stays_within_its_rss_budget(
+    import_facts: dict[str, object],
+) -> None:
+    """Importing torchlens over a resident torch stays memory-cheap (R31 axis b).
+
+    The duration budget is blind to a CPU-cheap but RSS-fat eager import (a
+    large frozen table, an mmapped registry, a module-scope resources read).
+    ru_maxrss is a high-water mark, so the delta is a lower bound -- fine for
+    the order-of-magnitude class this guards.
+    """
+
+    marginal_kib = int(import_facts["rss_marginal_kib"])  # type: ignore[arg-type]
+    if sys.platform == "darwin":
+        # ru_maxrss is bytes on Darwin, KiB on Linux.
+        marginal_kib //= 1024
+    assert marginal_kib < _TORCHLENS_IMPORT_RSS_BUDGET_KIB, (
+        f"importing torchlens grew the high-water RSS by {marginal_kib} KiB "
+        f"(budget {_TORCHLENS_IMPORT_RSS_BUDGET_KIB} KiB, measured ~4 MiB). "
+        "Something memory-heavy became eager on a bare import."
+    )
+
+
+@pytest.mark.smoke
+def test_bare_import_leaves_torch_namespaces_untouched(
+    import_facts: dict[str, object],
+) -> None:
+    """A bare import never mutates torch's namespaces (R31 axis b).
+
+    The single-symbol ``torch.cos`` probe below only samples decoration; this
+    pins the whole surface: no name added to, removed from, or REBOUND in
+    ``vars(torch)`` / ``vars(torch.nn.functional)`` (a rebound name is exactly
+    what an accidental eager wrap looks like), and ``sys.modules['torch']``
+    stays the same module object. New direct torch submodule realizations
+    would show as additions and belong behind the first capture, not the
+    import.
+    """
+
+    torch_diff = dict(import_facts["torch_ns_diff"])  # type: ignore[arg-type]
+    functional_diff = dict(import_facts["functional_ns_diff"])  # type: ignore[arg-type]
+    assert torch_diff == {"added": [], "removed": [], "rebound": []}, (
+        f"bare `import torchlens` mutated vars(torch): {torch_diff}"
+    )
+    assert functional_diff == {"added": [], "removed": [], "rebound": []}, (
+        f"bare `import torchlens` mutated vars(torch.nn.functional): {functional_diff}"
+    )
+    assert import_facts["torch_module_identity_ok"] is True, (
+        "sys.modules['torch'] was rebound during `import torchlens`"
+    )
+
+
+@pytest.mark.smoke
+def test_torchlens_top_level_surface_has_no_stray_public_names(
+    import_facts: dict[str, object],
+) -> None:
+    """Every public non-module top-level name is __all__ or the frozen legacy set.
+
+    R31 axis b, own-namespace half: a helper or typing import leaking onto the
+    top level is a silent public-surface change the __all__ oracle never sees.
+    The legacy ledger is shrink-only.
+    """
+
+    strays = set(import_facts["torchlens_stray_public"])  # type: ignore[arg-type]
+    new_strays = sorted(strays - _LEGACY_NON_ALL_PUBLIC_NAMES)
+    assert not new_strays, (
+        "new public non-module names appeared on the torchlens top level "
+        "outside __all__ -- add to __all__ consciously or underscore them: "
+        f"{new_strays}"
+    )
+    healed = sorted(_LEGACY_NON_ALL_PUBLIC_NAMES - strays)
+    assert not healed, f"these legacy names are gone (good) -- delete their ledger rows: {healed}"
 
 
 @pytest.mark.smoke

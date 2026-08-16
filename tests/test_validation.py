@@ -4495,6 +4495,66 @@ def test_deep_numeric_replay_outlier_bound_scales_with_depth() -> None:
     assert _deep_numeric_replay_matches_saved(layer, noisy) is True
 
 
+def test_deep_numeric_replay_sub_denormal_scale_destruction_fails() -> None:
+    """LOAD-BEARING: total destruction of sub-1e-12 elements must FAIL band C.
+
+    R13 probe: the former ``scale = max(...) + 1e-12`` additive floor in the
+    scaled-diff lane inflated the denominator for every sub-1e-12 element, so
+    10 elements at 1e-17 SIGN-FLIPPED in a 100k tensor read scaled_diff
+    ~2e-5 (well under the ~1.7e-4 cap) and were blessed whenever the tensor
+    reached the outlier/scaled-diff lanes. The dtype-tiny CLAMP measures
+    those elements at their own scale (scaled_diff 2.0), so the destruction
+    fails. One mid-band element pushes the comparison past the base
+    ``allclose`` lane so the scaled-diff lane actually runs.
+    """
+
+    saved_out = torch.ones(100_000)
+    saved_out[:10] = 1e-17
+    recomputed = saved_out.clone()
+    recomputed[:10] = -1e-17  # total destruction: sign flip at 1e-17.
+    # One element between the base and outlier bands: fails the base lane
+    # (bound ~4.3e-5 at depth 128) but is inside the outlier band (~3.4e-4),
+    # so the walk reaches the scaled-diff lane with outlier fraction 0.
+    recomputed[10] = saved_out[10] + 5.0e-5
+    layer = _make_deep_numeric_layer(
+        "linear", [torch.zeros(1, 128), torch.zeros(8, 128)], saved_out
+    )
+
+    assert _op_reduction_depth(layer) >= DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH
+    assert _deep_numeric_replay_matches_saved(layer, recomputed) is False
+
+
+def test_deep_numeric_replay_atol_not_amplified_by_extreme_dynamic_range() -> None:
+    """LOAD-BEARING: one large element must not launder a tensor-max atol.
+
+    R13 probe: ``base_atol = min(base_rel * out_scale, ATOL)`` read the
+    tensor MAX as the accumulated-terms scale, so ONE 1.0 element in a 100k
+    tensor of 1e-9s produced atol ~2.2e-5 and let 99.9% of the tensor be
+    ZEROED and pass the base ``allclose`` lane. With the dynamic-range gate
+    (max/median > 1e4) the atol falls back to the median magnitude and the
+    zeroing fails, while genuine RELATIVE agreement on the same
+    extreme-range tensor still passes through the rtol term.
+    """
+
+    saved_out = torch.full((100_000,), 1e-9)
+    saved_out[0] = 1.0
+    layer = _make_deep_numeric_layer(
+        "linear", [torch.zeros(1, 128), torch.zeros(8, 128)], saved_out
+    )
+    assert _op_reduction_depth(layer) >= DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH
+
+    zeroed_bulk = torch.zeros_like(saved_out)
+    zeroed_bulk[0] = 1.0  # the one big element is kept; the bulk is destroyed.
+    assert _deep_numeric_replay_matches_saved(layer, zeroed_bulk) is False
+
+    # Fail-toward-strict does not nuke honest replays of the same tensor:
+    # genuine reorder noise is RELATIVE and rides the rtol term, not the atol.
+    eps32 = torch.finfo(torch.float32).eps
+    noise_scale = 4.0 * (128.0**0.5) * eps32
+    noisy = saved_out * (1.0 + noise_scale * torch.empty_like(saved_out).uniform_(-1.0, 1.0))
+    assert _deep_numeric_replay_matches_saved(layer, noisy) is True
+
+
 def test_validation_with_getitem_tensor_index():
     model = _GetItemTensorIndex()
     x = torch.randn(5, 3)

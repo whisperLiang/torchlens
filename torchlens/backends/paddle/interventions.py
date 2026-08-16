@@ -120,9 +120,11 @@ class PaddleInterventionRuntime:
         except TypeError as exc:
             raise PredicateError(
                 "intervene predicate must return InterventionDecision, HelperSpec, "
-                "callable, or None",
+                "callable, or None. "
+                "Remedy: return one of those values from the intervene predicate.",
                 ctx=ctx,
                 result=result,
+                code="predicate_return_invalid",
             ) from exc
         if decision is None or decision.hook is None:
             return None
@@ -218,7 +220,13 @@ class PaddleInterventionRuntime:
             return False
         result = self.halt(ctx)
         if not isinstance(result, bool):
-            raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
+            raise PredicateError(
+                "halt predicate must return bool. "
+                "Remedy: return True or False from the halt predicate.",
+                ctx=ctx,
+                result=result,
+                code="predicate_return_invalid",
+            )
         return result
 
     def record_fired_spec(

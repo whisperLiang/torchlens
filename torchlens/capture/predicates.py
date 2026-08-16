@@ -35,7 +35,11 @@ def _coerce_default_capture_spec(default: bool | CaptureSpec) -> CaptureSpec:
         return CaptureSpec(save_out=True, save_metadata=True)
     if default is False:
         return CaptureSpec(save_out=False, save_metadata=False)
-    raise PredicateError("default capture decision must be bool or CaptureSpec")
+    raise PredicateError(
+        "default capture decision must be bool or CaptureSpec. "
+        "Remedy: pass True, False, or a CaptureSpec as the default_op/default_module value.",
+        code="predicate_default_invalid",
+    )
 
 
 def _normalize_capture_decision(
@@ -82,9 +86,11 @@ def _normalize_capture_decision(
     if isinstance(result, (CaptureSpec, RetroactiveCaptureDecision)):
         return result
     raise PredicateError(
-        "predicate must return bool, CaptureSpec, RetroactiveCaptureDecision, or None",
+        "predicate must return bool, CaptureSpec, RetroactiveCaptureDecision, or None. "
+        "Remedy: return one of those values from the save predicate.",
         ctx=ctx,
         result=result,
+        code="predicate_return_invalid",
     )
 
 
@@ -186,9 +192,11 @@ def _evaluate_intervene_op(
         return as_intervention_decision(result)
     except TypeError as exc:
         raise PredicateError(
-            "intervene predicate must return InterventionDecision, HelperSpec, callable, or None",
+            "intervene predicate must return InterventionDecision, HelperSpec, callable, "
+            "or None. Remedy: return one of those values from the intervene predicate.",
             ctx=ctx,
             result=result,
+            code="predicate_return_invalid",
         ) from exc
 
 
@@ -312,12 +320,16 @@ def validate_followed_by_capability(
     if not _is_supported_followed_by_predicate(predicate):
         raise PredicateError(
             "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
-            f"{api_name} received an unsupported followed_by predicate shape."
+            f"{api_name} received an unsupported followed_by predicate shape. "
+            "Remedy: compose the predicate as candidate & tl.followed_by(successor).",
+            code="followed_by_unsupported",
         )
     if not supports_retroactive:
         raise PredicateError(
             f"{api_name} does not support tl.followed_by(...) retroactive capture; "
-            "use trace(save=...) with lookback and lookback_payload_policy instead."
+            "use trace(save=...) with lookback and lookback_payload_policy instead. "
+            "Remedy: use trace(save=...) with lookback= and lookback_payload_policy=.",
+            code="followed_by_unsupported",
         )
 
 

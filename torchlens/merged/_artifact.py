@@ -64,41 +64,61 @@ def _bounded_exc(exc: BaseException) -> str:
 
 
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
-"""UTF-8, sorted keys (strings only), no NaN/Infinity, LF, no whitespace."""
+"""UTF-8, sorted keys, EXACT-``str`` keys only, no NaN/Infinity, no lone
+surrogates, LF, no insignificant whitespace."""
 
 
-def _reject_non_string_keys(obj: Any, path: str = "$") -> None:
-    """Refuse mappings whose keys are not strings, anywhere in ``obj``.
+def _reject_noncanonical(obj: Any, path: str = "$") -> None:
+    """Refuse payload shapes ``json.dumps`` would coerce or die on (R73).
 
-    ``json.dumps`` silently COERCES int/float/bool/None keys to strings, so
-    two distinct payloads (``{1: v}`` vs ``{"1": v}``) would share canonical
-    bytes, ``{"1": a, 1: b}`` would emit DUPLICATE keys, and int-keyed maps
-    sort numerically while their coerced forms sort lexicographically — all
-    fatal ambiguities for a hash-authority encoding (r7 R73 known-bad class).
+    The output feeds SHA-256 integrity digests and byte-equality derivation
+    oracles, so silent coercion is a canonicalization COLLISION: ``{1: "a"}``
+    and ``{"1": "a"}`` produced identical bytes (likewise ``True``/``"true"``),
+    ``{"1": a, 1: b}`` would emit DUPLICATE keys, and int-keyed maps sort
+    numerically while their coerced forms sort lexicographically — letting two
+    structurally distinct payloads share one attested digest. Keys must be
+    exactly ``str`` (subclasses can carry hidden state past a digest).
+    Non-finite floats, lone surrogates, and unserializable leaves raised raw
+    ``ValueError``/``UnicodeEncodeError``/``TypeError`` past the module's
+    otherwise-typed refusal surface. Reject all of it typed at the boundary.
     """
 
     if isinstance(obj, dict):
         for key, value in obj.items():
             if type(key) is not str:
-                raise ValueError(
-                    f"canonical JSON refuses non-string mapping key {key!r} at "
-                    f"{path}: json coercion makes distinct payloads share "
-                    "canonical bytes (and mixed keys emit duplicates). Remedy: "
-                    "stringify mapping keys before canonical serialization."
+                raise _schema_refusal(
+                    f"canonical JSON requires string mapping keys; {path} carries a "
+                    f"{type(key).__name__} key (silent coercion would collide digests)"
                 )
-            _reject_non_string_keys(value, f"{path}.{key}")
-    elif isinstance(obj, (list, tuple)):
-        for index, item in enumerate(obj):
-            _reject_non_string_keys(item, f"{path}[{index}]")
+            _reject_noncanonical(value, f"{path}.{key}")
+        return
+    if isinstance(obj, (list, tuple)):
+        for index, value in enumerate(obj):
+            _reject_noncanonical(value, f"{path}[{index}]")
+        return
+    if isinstance(obj, float) and (obj != obj or obj in (float("inf"), float("-inf"))):
+        raise _schema_refusal(f"canonical JSON forbids non-finite floats; {path} is {obj!r}")
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _schema_refusal(
+                f"canonical JSON requires UTF-8-encodable strings; {path} carries a lone surrogate"
+            ) from exc
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
     """Serialize ``obj`` under the canonical encoding declared above."""
 
-    _reject_non_string_keys(obj)
-    text = json.dumps(
-        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
+    _reject_noncanonical(obj)
+    try:
+        text = json.dumps(
+            obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise _schema_refusal(
+            f"payload is not canonically serializable ({_bounded_exc(exc)})"
+        ) from exc
     return (text + "\n").encode("utf-8")
 
 

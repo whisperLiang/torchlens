@@ -515,6 +515,29 @@ class TraceValidationMixin(_TraceMixinBase):
             from .._runnable_state import validate_run_seed
 
             validate_run_seed(seed)
+        # R06: the settled-outcome gate is the FIRST authority on run(). The
+        # outcome sidecar lives in ``__dict__`` and survives cleanup()-husking,
+        # while the ``self._runnable`` read below trips the husk
+        # ``TraceCleanedUpError`` (and the analysis-load arm its capability
+        # refusal) BEFORE any N-gate could evaluate -- so callers branching on
+        # ``fields["code"] == "N3"`` (the documented contract) missed both husk
+        # classes. Pre-refuse only the statuses EVERY provider row refuses
+        # (FAILED / ABORTED_NONFINITE / UNKNOWN); HALTED stays with the
+        # provider-specific gates because the loaded-sparse row allows it.
+        from ..capture.outcome import CaptureStatus, outcome_for, require_capture_capability
+
+        settled_outcome = outcome_for(self)
+        if settled_outcome is None:
+            # A cleanup()-husked trace loses the stamped sidecar; the outcome
+            # property derives the honest UNKNOWN the structural lattice
+            # mandates for it.
+            settled_outcome = getattr(self, "outcome", None)
+        if settled_outcome is not None and settled_outcome.status in (
+            CaptureStatus.FAILED,
+            CaptureStatus.ABORTED_NONFINITE,
+            CaptureStatus.UNKNOWN,
+        ):
+            require_capture_capability(self, "live_replay")
         readiness = self._runnable.readiness
         loaded_provider = getattr(readiness, "provider", None)
         use_unified_provider = inputs is not MISSING or (
@@ -580,6 +603,10 @@ class TraceValidationMixin(_TraceMixinBase):
                     on_divergence=on_divergence,
                 )
             if loaded_provider is RunProvider.LOADED_ANALYSIS:
+                # R06: a HALTED analysis load refuses N5 first -- the generic
+                # analysis refusal's remedy ("save a runnable artifact") is a
+                # dead end N4 forbids for halted captures.
+                require_capture_capability(self, "live_replay")
                 from .._runnable_execution import raise_analysis_run_unavailable
 
                 raise_analysis_run_unavailable(self)

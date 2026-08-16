@@ -85,6 +85,54 @@ def test_classical_mds_validates_option_values_and_stimulus_counts() -> None:
         tl.repgeom.classical_mds(_distances(5), input_kind="distances", min_n=6)
 
 
+@pytest.mark.parametrize("scale", [1e-12, 1e-6, 1.0, 1e6, 1e12])
+def test_symmetry_gate_is_relative_to_matrix_scale(scale: float) -> None:
+    """The symmetry gate judges RELATIVE asymmetry at every matrix scale.
+
+    Two-sided pin for the scale-aware `_symmetry_tolerance` fix. The former
+    fixed absolute atol=1e-10 was broken in both directions: 66% relative
+    asymmetry at tiny scales read as symmetric (total structural corruption
+    blessed), while ~1e-15-relative float64 round-off at scale 1e7 was
+    rejected (honest matrices refused). A fixed 66% relative asymmetry must
+    FAIL at every scale and a fixed ~1e-14 relative asymmetry (float64
+    round-off class) must PASS at every scale. Genuine Euclidean distance
+    matrices keep the zero-diagonal/non-negativity gates out of the way.
+    """
+
+    from torchlens.repgeom import _check_square_distances
+
+    base = _distances(8) * scale
+    upper = np.triu_indices(8, k=1)
+
+    corrupt = base.copy()
+    corrupt[upper] *= 1.66
+    with pytest.raises(ValueError, match="symmetric"):
+        _check_square_distances(corrupt)
+
+    noisy = base.copy()
+    noisy[upper] *= 1.0 + 1e-14
+    _check_square_distances(noisy)  # float64 round-off passes at every scale.
+
+
+def test_classical_mds_accepts_float64_noise_at_large_scale_end_to_end() -> None:
+    """Round-off-level asymmetry on a large-scale matrix embeds successfully.
+
+    The measured false-fail regression: 1e-15-relative float64 round-off at
+    scale ~1e7 was rejected by the fixed absolute symmetry atol. The full
+    classical_mds pipeline (symmetry, diagonal, non-negativity, duplicate,
+    and rank gates) must accept it now.
+    """
+
+    base = _distances(8) * 1e7
+    upper = np.triu_indices(8, k=1)
+    noisy = base.copy()
+    noisy[upper] *= 1.0 + 1e-15
+
+    embedding, info = tl.repgeom.classical_mds(noisy, input_kind="distances")
+    assert embedding.shape == (8, 2)
+    assert info["input_kind"] == "distances"
+
+
 def test_classical_mds_refuses_rank_deficient_input() -> None:
     """Collinear points cannot support a 2-d embedding."""
 
