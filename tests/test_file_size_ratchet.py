@@ -85,7 +85,10 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/torch/backward.py": 3800,
     "torchlens/data_classes/trace.py": 3750,
     "torchlens/utils/_torch_compat.py": 3450,
-    "torchlens/backends/torch/wrappers.py": 3400,
+    # 3400 -> 3450: pre-existing red inherited from the mnv3 capture fix
+    # (d86bf2d1, +18 lines of positional-inplace interception landed at 3418
+    # without a ledger raise); re-keyed by the L1 lane, not L1 growth.
+    "torchlens/backends/torch/wrappers.py": 3450,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
     "torchlens/postprocess/_contracts.py": 3250,

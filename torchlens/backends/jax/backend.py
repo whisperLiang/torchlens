@@ -52,7 +52,6 @@ from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
-from ...postprocess._site_key import SiteKeyMinter
 from ...postprocess.finalization import _build_module_logs
 from ...postprocess.loop_grouping_adapter import (
     RecurrenceAssignment,
@@ -80,6 +79,7 @@ from .._options import (
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from .._validation_shared import float_replay_tolerances
+from ._site_dialect import jax_site_keys
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
     JaxCaptureResult,
@@ -2267,58 +2267,14 @@ class JAXBackend:
         }
 
     def _jax_site_keys(self, trace: Trace) -> dict[str, str]:
-        """Mint policy-independent ``site_key_v1`` strings for all retained ops.
+        """Mint ``site_key_v1`` per retained op via the JAX site dialect.
 
-        THE JAX SITE DIALECT: torch/preview ops carry a module ADDRESS stack,
-        but jaxpr structure lives in the equation ``source_path`` (nested
-        ``pjit``/``scan``/``while`` call and control sites with iteration
-        markers). The site axis is therefore the CONTAINING source path with
-        iteration markers stripped (:func:`normalize_jax_source_path`'s
-        component rule -- the prior art the memo names), and the
-        pass-qualified call instance is the iteration-QUALIFIED containing
-        path, so corresponding equations in two ``scan``/``while`` iterations
-        share one site with per-iteration ordinal restarts (property P2).
-
-        Parameters
-        ----------
-        trace
-            Trace containing materialized raw JAX ops in execution order.
-
-        Returns
-        -------
-        dict[str, str]
-            Rendered site key per retained raw label (orphans excluded).
+        The dialect (iteration-stripped containing source path as the site
+        axis, iteration-qualified path as the call instance) lives in
+        :mod:`._site_dialect`.
         """
 
-        from .jaxpr import _normalize_jax_source_path_component
-
-        minter = SiteKeyMinter()
-        keys: dict[str, str] = {}
-        for label, op_log in trace._raw_graph_ws.raw_layer_dict.items():
-            if getattr(op_log, "is_orphan", False):
-                continue
-            raw_path = str(
-                (getattr(op_log, "annotations", {}) or {}).get("jax_source_path", "") or ""
-            )
-            containing = tuple(raw_path.split("/")[:-1]) if raw_path else ()
-            module_site = tuple(
-                normalized
-                for component in containing
-                if (normalized := _normalize_jax_source_path_component(component, is_leaf=False))
-                is not None
-            )
-            call_instance = "/".join(containing) if containing else "<root>"
-            keys[label] = minter.mint_at(
-                module_site,
-                call_instance,
-                str(getattr(op_log, "type", "") or ""),
-                (
-                    getattr(op_log, "multi_output_index", None)
-                    if getattr(op_log, "in_multi_output", False)
-                    else None
-                ),
-            )
-        return keys
+        return jax_site_keys(trace)
 
     def _build_jax_recurrence_grouping_graph(
         self, trace: Trace, site_keys: Mapping[str, str] | None = None

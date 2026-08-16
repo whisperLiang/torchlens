@@ -5186,13 +5186,8 @@ TensorLog = Op
 
 
 def _register_prerelease_fields() -> None:
-    """Register sprint-gated Op fields with the S3 prerelease registrar.
-
-    ``site_key`` lands declared ``FieldPolicy.DROP`` under tlspec v7; the
-    registration makes it scrub with its intended persisting policy under
-    the TEST-ONLY activation switch (portability exit gates), and flips to
-    a real ``KEEP`` only at the coordinated version bump.
-    """
+    """Register sprint-gated DROP fields (S3 registrar; site_key persists KEEP
+    only at the coordinated tlspec bump -- gates run under the test switch)."""
 
     from .._io.prerelease import register_prerelease_field
 

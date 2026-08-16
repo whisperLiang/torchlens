@@ -137,6 +137,7 @@ add names to the top-level `torchlens` namespace:
 | `intervention_helper_unknown` | Built-in helper name is unknown | Choose a registered helper |
 | `jax_control_flow_invalid` | JAX control-flow mode is unknown | Choose `reject`, `unroll`, or `region` |
 | `layer_pass_ambiguous` | Per-pass field read on a multi-pass layer | Access the field on one pass via `.ops[k]` |
+| `layer_site_ambiguous` | `Layer.site_key` read on a layer spanning multiple structural sites (spelling provisional pending the S2 vocabulary amendment) | Read the per-pass key via `.ops[k].site_key` |
 | `link_format_invalid` | Source-link format is unknown | Choose `terminal`, `html`, or `text` |
 | `jax_unroll_range_invalid` | JAX unroll limit is below one | Pass a positive integer |
 | `jax_unroll_type_invalid` | JAX unroll limit is not an integer | Pass a positive integer |
@@ -216,6 +217,7 @@ add names to the top-level `torchlens` namespace:
 | `summary_fields_invalid` | Summary field names are unknown | Pass documented summary fields |
 | `summary_level_invalid` | Summary level is unknown | Pass a documented summary level |
 | `summary_option_conflict` | Aliased summary options disagree | Pass one alias, or equal values |
+| `site_key_unavailable` | Site accessor read on a trace without site keys (legacy artifact or detached layer; spelling provisional pending the S2 vocabulary amendment) | Re-capture with a current TorchLens to mint site keys |
 | `stack_ordinals_duplicate` | Stacked ops share an execution ordinal | Narrow the selector to distinct ops |
 | `stack_ordinals_unavailable` | Matched ops lack recorded execution ordinals | Select ops with recorded ordinals |
 | `stack_output_not_tensor` | Stacked op's saved primary out is not one tensor | Select single-tensor-output ops |
