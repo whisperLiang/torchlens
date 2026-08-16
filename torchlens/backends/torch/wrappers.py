@@ -1224,7 +1224,7 @@ def _call_requests_inplace(
         return False
     try:
         return bool(value)
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable flag must count as a mutation request (fail-safe)
         return True
 
 
