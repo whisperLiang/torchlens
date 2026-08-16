@@ -1277,7 +1277,8 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
             statuses = []
         else:
             tail: RowStatus = "complete" if _call_returned(calls[-1]) else "interrupted"
-            statuses = [*(["complete"] * (started - 1)), tail]
+            prefix: list[RowStatus] = ["complete"] * (started - 1)
+            statuses = [*prefix, tail]
     else:  # UNATTESTED / UNKNOWN: structural, unverified disclosures.
         statuses = [
             cast("RowStatus", "complete" if _call_returned(call) else "interrupted")
@@ -1337,9 +1338,11 @@ def attach_failed_episode_ledger(exc: BaseException, resolved: ResolvedEpisode) 
     """Best-effort ledger attach on the FAILED path (exc.partial_log).
 
     The partial product has a settled FAILED outcome but no finished
-    module-call records, so started steps are recovered from the raw op
-    module stacks. Failures here only warn — the user's exception is never
-    masked.
+    module-call records, so step truth is recovered from the surviving
+    module enter/exit event lanes (exact: an entered call that ran zero
+    traced ops is still a started step; only an exit witnesses a return),
+    falling back to the raw op module stacks (non-upgrading). Failures here
+    only warn — the user's exception is never masked.
     """
 
     partial = getattr(exc, "partial_log", None)
@@ -1348,19 +1351,37 @@ def attach_failed_episode_ledger(exc: BaseException, resolved: ResolvedEpisode) 
         return
     try:
         started = 0
-        raw_ws = getattr(trace, "_raw_graph_ws", None)
-        raw_layers = getattr(raw_ws, "raw_layer_dict", None) or {}
-        for raw_op in raw_layers.values():
-            for entry in getattr(raw_op, "modules", ()) or ():
-                if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == resolved.address:
-                    started = max(started, int(entry[1]))
+        returned: int | None = None
+        events = getattr(trace, "_capture_events", None) or getattr(trace, "capture_events", None)
+        enter_events = getattr(events, "module_enter_events", None) if events else None
+        if enter_events:
+            started = sum(
+                1 for event in enter_events if getattr(event, "address", None) == resolved.address
+            )
+            exit_events = getattr(events, "module_exit_events", None) or ()
+            returned = sum(
+                1 for event in exit_events if getattr(event, "address", None) == resolved.address
+            )
+        else:
+            raw_ws = getattr(trace, "_raw_graph_ws", None)
+            raw_layers = getattr(raw_ws, "raw_layer_dict", None) or {}
+            for raw_op in raw_layers.values():
+                for entry in getattr(raw_op, "modules", ()) or ():
+                    if (
+                        isinstance(entry, tuple)
+                        and len(entry) == 2
+                        and entry[0] == resolved.address
+                    ):
+                        started = max(started, int(entry[1]))
         header = _build_header(trace, resolved)
         n_total = max(resolved.n_steps or started, started)
+        complete_steps = returned if returned is not None else max(started - 1, 0)
+        complete_steps = min(complete_steps, started)
         rows: list[EpisodeLedgerRow] = []
         for step in range(n_total):
-            if step < started - 1:
+            if step < complete_steps:
                 row_status: RowStatus = "complete"
-            elif step == started - 1:
+            elif step < started:
                 row_status = "interrupted"
             else:
                 row_status = "absent"

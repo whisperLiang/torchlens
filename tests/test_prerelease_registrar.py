@@ -85,6 +85,9 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
     ),
     "OpRef": ("func_call_id", "op_label", "op_row_index"),
     "Trace": ("_primitive_op_profile", "structure_only"),
+    # L2 episode ledger: the gated annotations sub-key rides the synthetic
+    # "Trace.annotations" owner (see torchlens/_io/prerelease.py).
+    "Trace.annotations": ("episode",),
     "_AtenExecutionContext": (
         "autocast",
         "backend",
@@ -172,6 +175,12 @@ def test_registry_inventory_and_unregister(planted_field: str) -> None:
     unregister_prerelease_field(Trace, planted_field)
     assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
     # Fixture teardown unregisters again; must be idempotent.
+
+
+def test_live_episode_annotations_key_is_inventoried() -> None:
+    # The S7 episode-ledger home (L2) is a standing registrar row under the
+    # synthetic "Trace.annotations" owner until the coordinated bump retires it.
+    assert registered_prerelease_fields().get("Trace.annotations") == ("episode",)
 
 
 # ---------------------------------------------------------------------------
