@@ -27,7 +27,7 @@ import tempfile
 import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -2207,17 +2207,23 @@ def _enforce_capability_option_gates(
             )
 
 
+@dataclass(frozen=True)
+class _StructureOnlyEntryFacts:
+    """Resolved entry facts the structure-only Layer-0 contract checks read."""
+
+    layers_to_save: Any
+    save_predicate: Any
+    halt: Any
+    streaming_options: Any
+    lookback_payload_policy: str
+    raise_on_nan_value: bool
+    intervention_ready: bool
+    should_save_grads: bool
+
+
 def _enforce_structure_only_entry_contract(
-    *,
     capture_options: CaptureOptions,
-    layers_to_save: Any,
-    save_predicate: Any,
-    halt: Any,
-    streaming_options: Any,
-    lookback_payload_policy: str,
-    raise_on_nan_value: bool,
-    intervention_ready: bool,
-    should_save_grads: bool,
+    facts: _StructureOnlyEntryFacts,
 ) -> str | list[Any] | None:
     """Enforce the structure-only Layer-0 entry contract (L7a sec 1.3/2.2).
 
@@ -2239,12 +2245,22 @@ def _enforce_structure_only_entry_contract(
         The effective metadata-only ``layers_to_save`` value (always ``None``).
     """
 
+    _refuse_structure_only_conflicts(facts)
+    _refuse_structure_only_payload_selections(capture_options, facts)
+    _refuse_structure_only_option_payloads(capture_options, facts)
+    return None
+
+
+def _refuse_structure_only_conflicts(facts: _StructureOnlyEntryFacts) -> None:
+    """The three option COMBINATIONS that need tensor values refuse typed."""
+
+    halt = facts.halt
     conflict_remedy = (
         "drop the conflicting option or run a real capture (tl.trace without "
         "structure_only). Structure-only capture has no tensor values to test, "
         "mutate, or replay."
     )
-    if raise_on_nan_value:
+    if facts.raise_on_nan_value:
         raise StructureOnlyOptionConflictError(
             "structure_only=True cannot combine with raise_on_nan=True: a "
             "structure-only capture has no tensor values for a nonfinite "
@@ -2253,7 +2269,7 @@ def _enforce_structure_only_entry_contract(
             remedy=conflict_remedy,
             arguments=("structure_only", "raise_on_nan"),
         )
-    if intervention_ready:
+    if facts.intervention_ready:
         raise StructureOnlyOptionConflictError(
             "structure_only=True cannot combine with intervention_ready=True: "
             "runnable eligibility disables the plain escape belt and runnable "
@@ -2287,30 +2303,39 @@ def _enforce_structure_only_entry_contract(
                 ),
                 arguments=("structure_only", "halt"),
             )
-    values_remedy = (
-        "drop the payload-requesting option: structure-only capture records "
-        "structure and shape/dtype hypotheses, never tensor values. Run a real "
-        "capture (tl.trace without structure_only) to record values."
+
+
+_STRUCTURE_ONLY_VALUES_REMEDY = (
+    "drop the payload-requesting option: structure-only capture records "
+    "structure and shape/dtype hypotheses, never tensor values. Run a real "
+    "capture (tl.trace without structure_only) to record values."
+)
+
+
+def _refuse_values(problem: str, *option_names: str) -> None:
+    """Raise the typed structure-only value-payload refusal."""
+
+    raise InvalidArgumentError(
+        problem,
+        code="structure_only_values_unsupported",
+        remedy=_STRUCTURE_ONLY_VALUES_REMEDY,
+        argument=option_names[0],
+        arguments=option_names,
     )
 
-    def _refuse_values(problem: str, *option_names: str) -> None:
-        """Raise the typed structure-only value-payload refusal."""
 
-        raise InvalidArgumentError(
-            problem,
-            code="structure_only_values_unsupported",
-            remedy=values_remedy,
-            argument=option_names[0],
-            arguments=option_names,
-        )
+def _refuse_structure_only_payload_selections(
+    capture_options: CaptureOptions, facts: _StructureOnlyEntryFacts
+) -> None:
+    """Explicit activation/gradient payload SELECTIONS refuse typed."""
 
-    if save_predicate is not None:
+    if facts.save_predicate is not None:
         _refuse_values(
             "structure_only=True cannot honor a save= payload selection; "
             "activations are never recorded under the structure-only contract",
             "save",
         )
-    if capture_options.is_field_explicit("layers_to_save") and layers_to_save not in (
+    if capture_options.is_field_explicit("layers_to_save") and facts.layers_to_save not in (
         "none",
         None,
         [],
@@ -2321,19 +2346,27 @@ def _enforce_structure_only_entry_contract(
             "structure-only contract",
             "layers_to_save",
         )
-    if capture_options.is_field_explicit("save_grads") and should_save_grads:
+    if capture_options.is_field_explicit("save_grads") and facts.should_save_grads:
         _refuse_values(
             "structure_only=True cannot honor save_grads: gradient payloads "
             "are values and backward capture is refused under the "
             "structure-only contract",
             "save_grads",
         )
+    streaming_options = facts.streaming_options
     if streaming_options.bundle_path is not None or streaming_options.out_callback is not None:
         _refuse_values(
             "structure_only=True cannot stream activation payloads to disk or "
             "callbacks; there are no value payloads to stream",
             "storage",
         )
+
+
+def _refuse_structure_only_option_payloads(
+    capture_options: CaptureOptions, facts: _StructureOnlyEntryFacts
+) -> None:
+    """Payload-recording OPTION values refuse typed."""
+
     if capture_options.is_field_explicit("save_arg_values") and capture_options.save_arg_values:
         _refuse_values(
             "structure_only=True cannot record non-tensor argument VALUES as "
@@ -2361,13 +2394,12 @@ def _enforce_structure_only_entry_contract(
             "structure_only=True cannot decode output VALUES via output_style",
             "output_style",
         )
-    if lookback_payload_policy != "metadata_only":
+    if facts.lookback_payload_policy != "metadata_only":
         _refuse_values(
             "structure_only=True supports only the metadata-only lookback "
             "window; retroactive payload retention records values",
             "lookback_payload_policy",
         )
-    return None
 
 
 def _reject_unsupported_torch_trace_option_values(capture_options: CaptureOptions) -> None:
@@ -2917,6 +2949,13 @@ def trace(
     )
     _filter_trace_kwargs_for_backend(public_trace_kwargs, resolved_spec)
     _enforce_capability_option_gates(public_trace_kwargs, resolved_spec)
+    _refuse_non_torch_episode(public_trace_kwargs, resolved_spec)
+    return cast("Trace", resolved_spec.capture_trace(**public_trace_kwargs))
+
+
+def _refuse_non_torch_episode(public_trace_kwargs: dict[str, Any], resolved_spec: Any) -> None:
+    """episode= capture (capture_kind=episode) is torch-only in this release."""
+
     if str(resolved_spec.name) != "torch":
         episode_value = public_trace_kwargs.pop("episode", None)
         if episode_value is not None:
@@ -2925,7 +2964,6 @@ def trace(
                 f"release; backend {str(resolved_spec.name)!r} does not support "
                 "episode declarations."
             )
-    return cast("Trace", resolved_spec.capture_trace(**public_trace_kwargs))
 
 
 def _trace_torch_model(
@@ -3326,15 +3364,17 @@ def _trace_torch_model(
         )
     if structure_only_value:
         layers_to_save = _enforce_structure_only_entry_contract(
-            capture_options=capture_options,
-            layers_to_save=layers_to_save,
-            save_predicate=save_predicate,
-            halt=halt,
-            streaming_options=streaming_options,
-            lookback_payload_policy=lookback_payload_policy,
-            raise_on_nan_value=raise_on_nan_value,
-            intervention_ready=intervention_ready,
-            should_save_grads=should_save_grads,
+            capture_options,
+            _StructureOnlyEntryFacts(
+                layers_to_save=layers_to_save,
+                save_predicate=save_predicate,
+                halt=halt,
+                streaming_options=streaming_options,
+                lookback_payload_policy=lookback_payload_policy,
+                raise_on_nan_value=raise_on_nan_value,
+                intervention_ready=intervention_ready,
+                should_save_grads=should_save_grads,
+            ),
         )
         save_raw_input_policy = False
         save_raw_output_policy = False

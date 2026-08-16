@@ -346,6 +346,49 @@ def _finalize_input_semantics_without_census(trace: Any) -> None:
     trace.capture_verification_reason = "input_boundary_unverifiable"
 
 
+def _init_witness_fields(trace: Any, mode: str) -> None:
+    """Initialize the witness disclosure fields and counters on the trace."""
+
+    trace.completeness_witness_mode = mode
+    if not hasattr(trace, "completeness_witness_verified"):
+        trace.completeness_witness_verified = None
+    trace.__dict__.setdefault("completeness_diagnostics", [])
+    trace.__dict__.setdefault("completeness_decompositions", [])
+    for counter_field in (
+        "completeness_witness_event_count",
+        "completeness_witness_accounted_count",
+        "completeness_witness_expected_opaque_count",
+        "completeness_witness_unaccounted_count",
+        "completeness_witness_callback_ns",
+    ):
+        trace.__dict__.setdefault(counter_field, 0)
+
+
+def _build_witness_state(
+    trace: Any,
+    mode: str,
+    *,
+    record_escapes: bool,
+    record_aten: bool,
+    event_stream: Any,
+) -> _WitnessState:
+    """Construct the per-forward witness state for the dispatch mode."""
+
+    guard_passes = getattr(trace, "capture_guard_passes", [])
+    guard_pass_index = len(guard_passes) if guard_passes else 1
+    return _WitnessState(
+        trace,
+        threading.get_ident(),
+        guard_pass_index,
+        census=(mode == "shadow"),
+        record_escapes=record_escapes,
+        ledger=record_escapes,
+        record_aten=record_aten,
+        aten_events=event_stream,
+        capture_phase="forward",
+    )
+
+
 @contextmanager
 def capture_completeness_witness(trace: Any) -> Iterator[None]:
     """Optionally run an aten census around one active-logging forward.
@@ -362,19 +405,7 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
     """
 
     mode = _effective_mode()
-    trace.completeness_witness_mode = mode
-    if not hasattr(trace, "completeness_witness_verified"):
-        trace.completeness_witness_verified = None
-    trace.__dict__.setdefault("completeness_diagnostics", [])
-    trace.__dict__.setdefault("completeness_decompositions", [])
-    for counter_field in (
-        "completeness_witness_event_count",
-        "completeness_witness_accounted_count",
-        "completeness_witness_expected_opaque_count",
-        "completeness_witness_unaccounted_count",
-        "completeness_witness_callback_ns",
-    ):
-        trace.__dict__.setdefault(counter_field, 0)
+    _init_witness_fields(trace, mode)
     # A runnable-eligible (``intervention_ready``) capture always records
     # tensor->host escape sources so the sparse descriptor can witness the escape
     # by its producing op, keyed on the ESCAPE EVENT. This is a passive observer:
@@ -393,18 +424,12 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         finally:
             _finalize_input_semantics_without_census(trace)
         return
-    guard_passes = getattr(trace, "capture_guard_passes", [])
-    guard_pass_index = len(guard_passes) if guard_passes else 1
-    state = _WitnessState(
+    state = _build_witness_state(
         trace,
-        threading.get_ident(),
-        guard_pass_index,
-        census=(mode == "shadow"),
+        mode,
         record_escapes=record_escapes,
-        ledger=record_escapes,
         record_aten=record_aten,
-        aten_events=event_stream,
-        capture_phase="forward",
+        event_stream=event_stream,
     )
     mode_context = _CompletenessDispatchMode(state)
     with _state.aten_recording(record_aten):

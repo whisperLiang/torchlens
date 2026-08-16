@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -481,6 +482,30 @@ def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
     typed. Unknown labels surface the standard typed lookup refusal.
     """
 
+    tokens = _validated_until_tokens(until)
+    resolved: list[Any] = []
+    requested: list[str] = []
+    requested_layer_labels: list[str] = []
+    for token in tokens:
+        site_layers, site_names, site_layer_labels = _resolve_until_site(trace, token)
+        resolved.extend(site_layers)
+        requested.extend(site_names)
+        requested_layer_labels.extend(site_layer_labels)
+    stop_raw_index = _until_stop_raw_index(resolved)
+    executed, skipped, stopped_at = _until_execution_partition(trace, stop_raw_index)
+    return _RunUntilPlan(
+        requested_sites=tuple(dict.fromkeys(requested)),
+        stop_raw_index=stop_raw_index,
+        stopped_at=stopped_at,
+        executed_raw_labels=tuple(executed),
+        skipped_raw_labels=tuple(skipped),
+        requested_layer_labels=tuple(dict.fromkeys(requested_layer_labels)),
+    )
+
+
+def _validated_until_tokens(until: Any) -> list[Any]:
+    """Normalize the until= selection to tokens; refuse empty/non-static forms."""
+
     from ._errors import InvalidArgumentError
 
     tokens = list(until) if isinstance(until, (list, tuple, set, frozenset)) else [until]
@@ -510,57 +535,60 @@ def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
                 remedy="pass static layer labels, module addresses, or 'saved'",
                 argument="until",
             )
-    resolved: list[Any] = []
-    requested: list[str] = []
-    requested_layer_labels: list[str] = []
-    for token in tokens:
-        if token == "saved":
-            saved_layers = [
-                layer
-                for layer in trace.layer_list
-                if bool(getattr(layer, "has_saved_activation", False))
-                and layer.layer_type not in ("input", "output")
-            ]
-            if not saved_layers:
-                raise InvalidArgumentError(
-                    "until='saved' resolved to an empty site set: this capture "
-                    "retained no saved activations",
-                    code="run_until_form_invalid",
-                    remedy="capture with save= selection, or pass explicit labels",
-                    argument="until",
-                )
-            resolved.extend(saved_layers)
-            requested.extend(layer.layer_label for layer in saved_layers)
-            requested_layer_labels.extend(layer.layer_label for layer in saved_layers)
-            continue
-        keys = trace.layer_dict_all_keys
-        if token in keys:
-            layer = keys[token]
-            resolved.append(layer)
-            requested.append(layer.layer_label)
-            requested_layer_labels.append(layer.layer_label)
-            continue
-        module_accessor = getattr(trace, "modules", None)
-        module = None
-        if module_accessor is not None and token in module_accessor:
-            module = module_accessor[token]
-        if module is not None:
-            member_labels = tuple(getattr(module, "layer_labels", ()) or ())
-            members = [keys[label] for label in member_labels if label in keys]
-            if members:
-                resolved.extend(members)
-                requested.append(token)
-                requested_layer_labels.extend(member.layer_label for member in members)
-                continue
-        # Unknown site: surface the standard typed lookup refusal with fuzzy
-        # feedback (never a bespoke vocabulary row for a plain lookup miss).
-        trace[token]
-        raise InvalidArgumentError(
-            f"until= site {token!r} did not resolve to layers",
-            code="run_until_form_invalid",
-            remedy="pass a resolvable layer label or module address",
-            argument="until",
-        )
+    return tokens
+
+
+def _resolve_until_site(trace: Any, token: str) -> tuple[list[Any], list[str], list[str]]:
+    """Resolve ONE until= token to (layers, requested names, layer labels)."""
+
+    from ._errors import InvalidArgumentError
+
+    if token == "saved":
+        saved_layers = [
+            layer
+            for layer in trace.layer_list
+            if bool(getattr(layer, "has_saved_activation", False))
+            and layer.layer_type not in ("input", "output")
+        ]
+        if not saved_layers:
+            raise InvalidArgumentError(
+                "until='saved' resolved to an empty site set: this capture "
+                "retained no saved activations",
+                code="run_until_form_invalid",
+                remedy="capture with save= selection, or pass explicit labels",
+                argument="until",
+            )
+        labels = [layer.layer_label for layer in saved_layers]
+        return saved_layers, labels, list(labels)
+    keys = trace.layer_dict_all_keys
+    if token in keys:
+        layer = keys[token]
+        return [layer], [layer.layer_label], [layer.layer_label]
+    module_accessor = getattr(trace, "modules", None)
+    module = None
+    if module_accessor is not None and token in module_accessor:
+        module = module_accessor[token]
+    if module is not None:
+        member_labels = tuple(getattr(module, "layer_labels", ()) or ())
+        members = [keys[label] for label in member_labels if label in keys]
+        if members:
+            return members, [token], [member.layer_label for member in members]
+    # Unknown site: surface the standard typed lookup refusal with fuzzy
+    # feedback (never a bespoke vocabulary row for a plain lookup miss).
+    trace[token]
+    raise InvalidArgumentError(
+        f"until= site {token!r} did not resolve to layers",
+        code="run_until_form_invalid",
+        remedy="pass a resolvable layer label or module address",
+        argument="until",
+    )
+
+
+def _until_stop_raw_index(resolved: list[Any]) -> int:
+    """The stop frontier: the max recorded raw index across resolved sites."""
+
+    from ._errors import InvalidArgumentError
+
     stop_raw_index = -1
     for layer in resolved:
         for op in getattr(layer, "ops", None) or (layer,):
@@ -575,6 +603,14 @@ def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
             remedy="pass sites that resolve to captured operations",
             argument="until",
         )
+    return stop_raw_index
+
+
+def _until_execution_partition(
+    trace: Any, stop_raw_index: int
+) -> tuple[list[str], list[str], str | None]:
+    """Partition the source layers into executed/skipped at the stop frontier."""
+
     executed: list[str] = []
     skipped: list[str] = []
     stopped_at: str | None = None
@@ -587,14 +623,7 @@ def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
         executed.append(raw_label)
         if int(raw_index) == stop_raw_index:
             stopped_at = layer.layer_label
-    return _RunUntilPlan(
-        requested_sites=tuple(dict.fromkeys(requested)),
-        stop_raw_index=stop_raw_index,
-        stopped_at=stopped_at,
-        executed_raw_labels=tuple(executed),
-        skipped_raw_labels=tuple(skipped),
-        requested_layer_labels=tuple(dict.fromkeys(requested_layer_labels)),
-    )
+    return executed, skipped, stopped_at
 
 
 def _loaded_until_cut(
@@ -639,8 +668,32 @@ def _loaded_until_cut(
     state_slot_ids = {
         slot.slot_id for slot in descriptor.tensor_slots if slot.state_binding is not None
     }
+    closure = _until_dependency_closure(
+        prefix=prefix,
+        by_id=by_id,
+        op_label_to_call=op_label_to_call,
+        seed_call_ids=[calls[index].call_id for index in target_indexes],
+        state_slot_ids=state_slot_ids,
+    )
+    candidate_skips = {call.call_id for call in prefix} - closure
+    if candidate_skips:
+        return prefix, "sequential_prefix", "unprovable_independence"
+    return prefix, "closure", None
+
+
+def _until_dependency_closure(
+    *,
+    prefix: tuple[RunnableCallDescriptor, ...],
+    by_id: dict[str, RunnableCallDescriptor],
+    op_label_to_call: dict[str, str],
+    seed_call_ids: list[str],
+    state_slot_ids: set[str],
+) -> set[str]:
+    """Widened dependency closure: C1 tensor deps, C5 control-witness deps,
+    then the C3 declared-state widening over shared state slots."""
+
     closure: set[str] = set()
-    frontier = [calls[index].call_id for index in target_indexes]
+    frontier = list(seed_call_ids)
     while frontier:
         call_id = frontier.pop()
         if call_id in closure or call_id not in by_id:
@@ -664,10 +717,7 @@ def _loaded_until_cut(
                 continue
             if any(argument.slot_id in closure_state_slots for argument in call.tensor_arguments):
                 closure.add(call.call_id)
-    candidate_skips = {call.call_id for call in prefix} - closure
-    if candidate_skips:
-        return prefix, "sequential_prefix", "unprovable_independence"
-    return prefix, "closure", None
+    return closure
 
 
 def _run_truncation_record(plan: _RunUntilPlan, regime: str, cause: str | None = None) -> Any:
@@ -689,14 +739,238 @@ def _run_truncation_record(plan: _RunUntilPlan, regime: str, cause: str | None =
     )
 
 
+def _require_live_source_model(trace: Any) -> Any:
+    """Resolve the weakly-held live source model or refuse typed."""
+
+    source_ref = getattr(trace, "_source_model_ref", None)
+    model = source_ref() if source_ref is not None else None
+    if model is None:
+        raise RunCapabilityUnavailableError(
+            "The live Trace no longer retains its source model: the trace "
+            "holds it only weakly, so live-run availability depends on the "
+            "caller keeping a strong reference (an inline-constructed model "
+            "is collected at the first gc pass after capture). Keep the "
+            "model alive, or save/load a runnable artifact instead.",
+            code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+            provider=RunProvider.LIVE,
+        )
+    return model
+
+
+def _attempt_live_forward(
+    fork: Any,
+    model: Any,
+    inputs_pair: tuple[Any, Any],
+    until_plan: _RunUntilPlan | None,
+    ctx: _LiveFinalizeContext,
+) -> None:
+    """Run the refresh forward with the soft input-contract classifier.
+
+    r41 hon1_3 (corr2_4 parity): the soft input-contract checks are
+    PRE-computed BEFORE the forward -- a failing forward may in-place-mutate
+    an input leaf (``resize_``) before the failing op, so a post-hoc metadata
+    read could misclassify. The precompute has ZERO admission power: a
+    divergent-but-executable input (changed batch / seq-len) still runs and
+    may honestly settle VERIFIED (fresh-refresh semantics); classification
+    happens only at native-failure time.
+    """
+
+    input_args, input_kwargs = inputs_pair
+    first_failed = _first_failed_live_input_check(ctx.trace, input_args, input_kwargs)
+    if first_failed is _INPUT_CHECK_UNAVAILABLE:
+        # This consumer is SOFT (consulted only at native-failure time): an
+        # unavailable classifier means the failure cannot be classified as
+        # input divergence, so the native error re-raises raw -- the old
+        # ``None`` behavior, now explicit (R22-2).
+        first_failed = None
+    try:
+        fork.save_new_outs(
+            model,
+            input_args,
+            input_kwargs=input_kwargs,
+            random_seed=ctx.seed,
+            _run_until_plan=until_plan,
+        )
+    except Exception as exc:  # not BaseException: KeyboardInterrupt/SystemExit stay raw
+        if first_failed is not None:
+            # An admitted-but-inexecutable DIVERGENT input surfaces as the typed
+            # PathDivergenceError carrying the first failed input check, with the
+            # native error chained as ``__cause__`` (corr2_4 on both providers).
+            # A native failure on a NON-divergent input re-raises raw below -- a
+            # genuinely failing model is not a divergence.
+            _raise_failed_contract_as_divergence(first_failed, fork=None, cause=exc)
+        raise
+
+
+def _split_live_inputs(inputs: Any) -> tuple[Any, Any]:
+    """Split the unified inputs= tree into (args, kwargs) when mixed-form."""
+
+    if (
+        isinstance(inputs, Mapping)
+        and {"args", "kwargs"}.issubset(inputs)
+        and set(inputs).issubset({"args", "kwargs"})
+    ):
+        args, kwargs = _split_mixed_inputs(inputs)
+        return list(args), dict(kwargs)
+    return inputs, None
+
+
+def _install_live_until_latch(until_plan: _RunUntilPlan) -> None:
+    """Install the run-scoped latch-once halt predicate on the plan."""
+
+    def _until_latch(ctx: Any, _plan: _RunUntilPlan = until_plan) -> bool:
+        """Fire once at the first boundary past the last requested site."""
+
+        raw_index = getattr(ctx, "raw_index", None)
+        if raw_index is not None and int(raw_index) >= _plan.stop_raw_index:
+            _plan.fired = True
+            return True
+        return False
+
+    until_plan.halt_predicate = _until_latch
+
+
+@dataclass(frozen=True)
+class _LiveFinalizeContext:
+    """Shared facts both live finalize paths need."""
+
+    trace: Any
+    seed: int | None
+    divergence_policy: DivergencePolicy
+    carry_state: bool
+    prior_log_ids: frozenset[int]
+
+
+def _live_nondeterministic_sources(trace: Any) -> tuple[str, ...]:
+    """Capture-side host-RNG disclosure shared by both live finalize paths."""
+
+    runnable_seam = getattr(trace, "_runnable", None)
+    if runnable_seam is not None and bool(runnable_seam.host_rng_consumed):
+        return (_HOST_RNG_SOURCE_KIND,)
+    return ()
+
+
+def _live_readiness_report(trace: Any) -> ReadinessReport:
+    """The constant live-provider readiness report."""
+
+    return ReadinessReport(
+        status=ReadinessStatus.READY,
+        provider=RunProvider.LIVE,
+        backend=str(getattr(trace, "backend", "torch")),
+        capability="live_model_fast_capture",
+        resolver_records=(),
+        state_sources_available=(StateSource.LIVE_MODEL_STATE,),
+        witness_completeness=None,
+        diagnostics=(),
+    )
+
+
+def _finalize_truncated_live_run(
+    fork: Any,
+    until_plan: _RunUntilPlan,
+    ctx: _LiveFinalizeContext,
+) -> RunResult:
+    """Finalize the truncated-success live path (L4 3.2).
+
+    The internal refresh capture settled HALTED -- honestly, on the
+    throwaway -- and must never be enumerable through a public surface:
+    every log minted by this run is unregistered EXCEPT the result fork
+    (the fork carve-out: a verbatim exception-bracket reuse would drop the
+    result the caller is handed).
+    """
+
+    if not until_plan.fired:
+        raise RuntimeError(
+            "Internal invariant violation: the live until= latch never "
+            "fired although the stop index derives from the target's own "
+            "recorded operation indexes."
+        )
+    for log in _state.list_logs():
+        if id(log) not in ctx.prior_log_ids and log is not fork:
+            _state._unregister_log(log)
+    # RunResult.output is None under live truncation ([PROV]): there IS
+    # no full-forward return value; callers read executed-prefix values
+    # off the result trace. The live output-reconstruction contract
+    # check is REPLACED by the truncation ceiling (an
+    # OUTPUT_STRUCTURE_MISMATCH would misattribute a deliberate stop).
+    return _finalize_provider_run(
+        fork=fork,
+        output=None,
+        readiness=_live_readiness_report(ctx.trace),
+        state_source=StateSource.LIVE_MODEL_STATE,
+        initializer_policy_version=None,
+        seed=ctx.seed,
+        random_filled_slot_ids=(),
+        contract_checks=(),
+        provisional_path_faithfulness=PathFaithfulness.UNVERIFIABLE,
+        provisional_mismatch=None,
+        numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
+        divergence_policy=ctx.divergence_policy,
+        nondeterministic_sources=_live_nondeterministic_sources(ctx.trace),
+        state_carried=ctx.carry_state,
+        truncation=_run_truncation_record(until_plan, "live_stop_after"),
+    )
+
+
+def _finalize_full_live_run(fork: Any, ctx: _LiveFinalizeContext) -> RunResult:
+    """Finalize the full (untruncated) live path with the output honesty gate."""
+
+    output, faithful = _reconstruct_live_output(fork)
+    # A lossy output container (computed non-field/non-key state, __slots__, or a
+    # data-descriptor field) cannot be faithfully rebuilt, so it is UNVERIFIABLE here
+    # too -- never a false VERIFIED on the live-refresh provider.
+    if _container_spec_reconstruction_lossy(_output_container_spec(fork)):
+        faithful = False
+    # Honesty gate: only a faithfully reconstructed output (exact container type
+    # and non-tensor leaves) is VERIFIED. An output we could only approximate
+    # from naive leaf paths is UNVERIFIABLE, never blessed with a wrong object.
+    provisional = PathFaithfulness.VERIFIED if faithful else PathFaithfulness.UNVERIFIABLE
+    # Deephunt F2: the live report must declare the same capture-side host-RNG
+    # evidence the sparse producer derives ``host_rng`` from. VERIFIED stays
+    # correct for this provider (the fresh refresh is its own oracle-1 run),
+    # but two successive live runs of a host-RNG model can legitimately differ,
+    # so an empty tuple would misread as a deterministic verified.
+    return _finalize_provider_run(
+        fork=fork,
+        output=output,
+        readiness=_live_readiness_report(ctx.trace),
+        state_source=StateSource.LIVE_MODEL_STATE,
+        initializer_policy_version=None,
+        seed=ctx.seed,
+        random_filled_slot_ids=(),
+        contract_checks=(
+            _contract_check(
+                "live_output_reconstruction",
+                faithful,
+                RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                "Live output could not be faithfully reconstructed from its "
+                "captured container contract.",
+            ),
+        ),
+        provisional_path_faithfulness=provisional,
+        provisional_mismatch=None,
+        numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
+        divergence_policy=ctx.divergence_policy,
+        nondeterministic_sources=_live_nondeterministic_sources(ctx.trace),
+        state_carried=ctx.carry_state,
+    )
+
+
+@dataclass(frozen=True)
+class _LiveRunOptions:
+    """The L4 live-run shaping knobs threaded from the public ``run`` surface."""
+
+    carry_state: bool = False
+    until: Any = None
+
+
 def run_live_trace(
     trace: Any,
     inputs: Any,
     *,
     seed: int | None,
     on_divergence: DivergencePolicy | str = DivergencePolicy.RAISE,
-    carry_state: bool = False,
-    until: Any = None,
+    options: _LiveRunOptions | None = None,
 ) -> RunResult:
     """Run the live-model refresh provider on a transactional fork.
 
@@ -717,13 +991,14 @@ def run_live_trace(
         Optional refresh seed.
     on_divergence:
         Divergence policy threaded from the public ``run`` surface.
-    carry_state:
-        When ``True``, the run's declared-state mutations survive on the live
-        model instead of being restored by the snapshot-restore bracket.
-    until:
-        Optional static site selection (layer labels / module addresses /
-        ``"saved"``); resolved against the source trace's settled final
-        labels, installing a run-scoped halt latch on the refresh capture.
+    options:
+        The L4 run-shaping knobs: ``carry_state=True`` lets the run's
+        declared-state mutations survive on the live model instead of being
+        restored by the snapshot-restore bracket, and ``until=`` is the
+        optional static site selection (layer labels / module addresses /
+        ``"saved"``), resolved against the source trace's settled final
+        labels and installed as a run-scoped halt latch on the refresh
+        capture.
 
     Returns
     -------
@@ -736,36 +1011,19 @@ def run_live_trace(
         If the live source model is no longer available.
     """
 
+    if options is None:
+        options = _LiveRunOptions()
+    carry_state = options.carry_state
+    until = options.until
     divergence_policy = DivergencePolicy(on_divergence)
-    source_ref = getattr(trace, "_source_model_ref", None)
-    model = source_ref() if source_ref is not None else None
-    if model is None:
-        raise RunCapabilityUnavailableError(
-            "The live Trace no longer retains its source model: the trace "
-            "holds it only weakly, so live-run availability depends on the "
-            "caller keeping a strong reference (an inline-constructed model "
-            "is collected at the first gc pass after capture). Keep the "
-            "model alive, or save/load a runnable artifact instead.",
-            code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
-            provider=RunProvider.LIVE,
-        )
+    model = _require_live_source_model(trace)
     # L4 2.3 live until=: resolve the static site selection against the SOURCE
     # trace's settled final labels and install a run-scoped halt latch on the
     # internal refresh capture (latch-once, fired at the first boundary after
     # the last requested site is produced -- save-then-halt keeps it INCLUSIVE).
     until_plan = None if until is None else _resolve_run_until_plan(trace, until)
     if until_plan is not None:
-
-        def _until_latch(ctx: Any, _plan: _RunUntilPlan = until_plan) -> bool:
-            """Fire once at the first boundary past the last requested site."""
-
-            raw_index = getattr(ctx, "raw_index", None)
-            if raw_index is not None and int(raw_index) >= _plan.stop_raw_index:
-                _plan.fired = True
-                return True
-            return False
-
-        until_plan.halt_predicate = _until_latch
+        _install_live_until_latch(until_plan)
     # L4 5.2 snapshot-restore bracket: the default live run leaves the model
     # bit-identical. The snapshot is taken and VALIDATED before the fork and
     # before any forward (fail-before-execute, typed run_state_snapshot_unsupported);
@@ -775,158 +1033,20 @@ def run_live_trace(
         from ._runnable_state import snapshot_live_declared_state
 
         state_snapshot = snapshot_live_declared_state(model)
-    prior_log_ids = {id(log) for log in _state.list_logs()}
+    prior_log_ids = frozenset(id(log) for log in _state.list_logs())
     fork = trace._fork_trace(name=_run_fork_name(trace))
+    finalize_ctx = _LiveFinalizeContext(
+        trace=trace,
+        seed=seed,
+        divergence_policy=divergence_policy,
+        carry_state=carry_state,
+        prior_log_ids=prior_log_ids,
+    )
     try:
-        input_args = inputs
-        input_kwargs = None
-        if (
-            isinstance(inputs, Mapping)
-            and {"args", "kwargs"}.issubset(inputs)
-            and set(inputs).issubset({"args", "kwargs"})
-        ):
-            args, kwargs = _split_mixed_inputs(inputs)
-            input_args = list(args)
-            input_kwargs = dict(kwargs)
-        # r41 hon1_3 (corr2_4 parity): PRE-compute the soft input-contract checks
-        # BEFORE the forward -- a failing forward may in-place-mutate an input leaf
-        # (``resize_``) before the failing op, so a post-hoc metadata read could
-        # misclassify. The precompute has ZERO admission power: a divergent-but-
-        # executable input (changed batch / seq-len) still runs and may honestly
-        # settle VERIFIED (fresh-refresh semantics); classification happens only at
-        # native-failure time below.
-        first_failed = _first_failed_live_input_check(trace, input_args, input_kwargs)
-        if first_failed is _INPUT_CHECK_UNAVAILABLE:
-            # This consumer is SOFT (consulted only at native-failure time
-            # below): an unavailable classifier means the failure cannot be
-            # classified as input divergence, so the native error re-raises
-            # raw -- the old ``None`` behavior, now explicit (R22-2).
-            first_failed = None
-        try:
-            fork.save_new_outs(
-                model,
-                input_args,
-                input_kwargs=input_kwargs,
-                random_seed=seed,
-                _run_until_plan=until_plan,
-            )
-        except Exception as exc:  # not BaseException: KeyboardInterrupt/SystemExit stay raw
-            if first_failed is not None:
-                # An admitted-but-inexecutable DIVERGENT input surfaces as the typed
-                # PathDivergenceError carrying the first failed input check, with the
-                # native error chained as ``__cause__`` (corr2_4 on both providers).
-                # A native failure on a NON-divergent input re-raises raw below -- a
-                # genuinely failing model is not a divergence.
-                _raise_failed_contract_as_divergence(first_failed, fork=None, cause=exc)
-            raise
+        _attempt_live_forward(fork, model, _split_live_inputs(inputs), until_plan, finalize_ctx)
         if until_plan is not None:
-            if not until_plan.fired:
-                raise RuntimeError(
-                    "Internal invariant violation: the live until= latch never "
-                    "fired although the stop index derives from the target's own "
-                    "recorded operation indexes."
-                )
-            # Truncated success path (L4 3.2): the internal refresh capture
-            # settled HALTED -- honestly, on the throwaway -- and must never be
-            # enumerable through a public surface. Unregister every log minted
-            # by this run EXCEPT the result fork (the fork carve-out: a verbatim
-            # exception-bracket reuse would drop the result the caller is
-            # handed).
-            for log in _state.list_logs():
-                if id(log) not in prior_log_ids and log is not fork:
-                    _state._unregister_log(log)
-            runnable_seam = getattr(trace, "_runnable", None)
-            truncated_sources: tuple[str, ...] = (
-                (_HOST_RNG_SOURCE_KIND,)
-                if runnable_seam is not None and bool(runnable_seam.host_rng_consumed)
-                else ()
-            )
-            # RunResult.output is None under live truncation ([PROV]): there IS
-            # no full-forward return value; callers read executed-prefix values
-            # off the result trace. The live output-reconstruction contract
-            # check is REPLACED by the truncation ceiling (an
-            # OUTPUT_STRUCTURE_MISMATCH would misattribute a deliberate stop).
-            return _finalize_provider_run(
-                fork=fork,
-                output=None,
-                readiness=ReadinessReport(
-                    status=ReadinessStatus.READY,
-                    provider=RunProvider.LIVE,
-                    backend=str(getattr(trace, "backend", "torch")),
-                    capability="live_model_fast_capture",
-                    resolver_records=(),
-                    state_sources_available=(StateSource.LIVE_MODEL_STATE,),
-                    witness_completeness=None,
-                    diagnostics=(),
-                ),
-                state_source=StateSource.LIVE_MODEL_STATE,
-                initializer_policy_version=None,
-                seed=seed,
-                random_filled_slot_ids=(),
-                contract_checks=(),
-                provisional_path_faithfulness=PathFaithfulness.UNVERIFIABLE,
-                provisional_mismatch=None,
-                numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
-                divergence_policy=divergence_policy,
-                nondeterministic_sources=truncated_sources,
-                state_carried=carry_state,
-                truncation=_run_truncation_record(until_plan, "live_stop_after"),
-            )
-        output, faithful = _reconstruct_live_output(fork)
-        # A lossy output container (computed non-field/non-key state, __slots__, or a
-        # data-descriptor field) cannot be faithfully rebuilt, so it is UNVERIFIABLE here
-        # too -- never a false VERIFIED on the live-refresh provider.
-        if _container_spec_reconstruction_lossy(_output_container_spec(fork)):
-            faithful = False
-        readiness = ReadinessReport(
-            status=ReadinessStatus.READY,
-            provider=RunProvider.LIVE,
-            backend=str(getattr(trace, "backend", "torch")),
-            capability="live_model_fast_capture",
-            resolver_records=(),
-            state_sources_available=(StateSource.LIVE_MODEL_STATE,),
-            witness_completeness=None,
-            diagnostics=(),
-        )
-        # Honesty gate: only a faithfully reconstructed output (exact container type
-        # and non-tensor leaves) is VERIFIED. An output we could only approximate
-        # from naive leaf paths is UNVERIFIABLE, never blessed with a wrong object.
-        provisional = PathFaithfulness.VERIFIED if faithful else PathFaithfulness.UNVERIFIABLE
-        # Deephunt F2: the live report must declare the same capture-side host-RNG
-        # evidence the sparse producer derives ``host_rng`` from. VERIFIED stays
-        # correct for this provider (the fresh refresh is its own oracle-1 run),
-        # but two successive live runs of a host-RNG model can legitimately differ,
-        # so an empty tuple would misread as a deterministic verified.
-        runnable_seam = getattr(trace, "_runnable", None)
-        nondeterministic_sources: tuple[str, ...] = (
-            (_HOST_RNG_SOURCE_KIND,)
-            if runnable_seam is not None and bool(runnable_seam.host_rng_consumed)
-            else ()
-        )
-        return _finalize_provider_run(
-            fork=fork,
-            output=output,
-            readiness=readiness,
-            state_source=StateSource.LIVE_MODEL_STATE,
-            initializer_policy_version=None,
-            seed=seed,
-            random_filled_slot_ids=(),
-            contract_checks=(
-                _contract_check(
-                    "live_output_reconstruction",
-                    faithful,
-                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
-                    "Live output could not be faithfully reconstructed from its "
-                    "captured container contract.",
-                ),
-            ),
-            provisional_path_faithfulness=provisional,
-            provisional_mismatch=None,
-            numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
-            divergence_policy=divergence_policy,
-            nondeterministic_sources=nondeterministic_sources,
-            state_carried=carry_state,
-        )
+            return _finalize_truncated_live_run(fork, until_plan, finalize_ctx)
+        return _finalize_full_live_run(fork, finalize_ctx)
     except BaseException:
         _state._unregister_log(fork)
         for log in _state.list_logs():

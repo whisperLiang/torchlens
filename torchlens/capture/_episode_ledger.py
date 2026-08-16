@@ -1317,18 +1317,27 @@ def _derive_row_statuses(
     ]
 
 
+@dataclass(frozen=True)
+class _RowDecorations:
+    """Per-row decoration facts shared across the ledger row build."""
+
+    prompt_len: int
+    tokens_by_row: list[tuple[int, ...]] | None
+    frontier: dict[str, str] | None
+
+
 def _build_ledger_rows(
-    *,
     n_total: int,
-    started: int,
     statuses: list[RowStatus],
     calls: list[Any],
-    prompt_len: int,
-    tokens_by_row: list[tuple[int, ...]] | None,
-    frontier: dict[str, str] | None,
+    decorations: _RowDecorations,
 ) -> list[EpisodeLedgerRow]:
     """Build the ordered per-step rows (absent rows past the started prefix)."""
 
+    started = len(calls)
+    prompt_len = decorations.prompt_len
+    tokens_by_row = decorations.tokens_by_row
+    frontier = decorations.frontier
     rows: list[EpisodeLedgerRow] = []
     for step in range(n_total):
         if step < started:
@@ -1420,13 +1429,10 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
         frontier = {"boundary_kind": "op", "boundary_label": str(first)}
 
     rows = _build_ledger_rows(
-        n_total=n_total,
-        started=started,
-        statuses=statuses,
-        calls=calls,
-        prompt_len=prompt_len,
-        tokens_by_row=tokens_by_row,
-        frontier=frontier,
+        n_total,
+        statuses,
+        calls,
+        _RowDecorations(prompt_len=prompt_len, tokens_by_row=tokens_by_row, frontier=frontier),
     )
 
     try:

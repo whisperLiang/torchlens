@@ -290,6 +290,56 @@ def _make_escalated_property(descriptor: Any, state: _StructureOnlyBeltState, na
     return property(getter)
 
 
+def _install_method_belt(
+    state: _StructureOnlyBeltState, method_restores: dict[str, tuple[bool, Any]]
+) -> None:
+    """Wrap the Tensor method escape surface, recording shadow-aware restores."""
+
+    for name in sorted(_TENSOR_METHOD_SURFACE):
+        original = getattr(torch.Tensor, name, None)
+        if original is None or not callable(original):
+            continue
+        shadowed = name in torch.Tensor.__dict__
+        try:
+            setattr(torch.Tensor, name, _make_escalated_method(original, state, name))
+        except (TypeError, AttributeError):
+            continue
+        method_restores[name] = (shadowed, original)
+
+
+def _install_module_func_belt(
+    state: _StructureOnlyBeltState, module_restores: list[tuple[Any, str, Any]]
+) -> None:
+    """Wrap the ``torch.*`` module predicate escape surface."""
+
+    for name in sorted(HOST_VALUE_ESCAPE_MODULE_FUNCS):
+        original = getattr(torch, name, None)
+        if original is None or not callable(original):
+            continue
+        try:
+            setattr(torch, name, _make_escalated_module_func(original, state, name))
+        except (TypeError, AttributeError):
+            continue
+        module_restores.append((torch, name, original))
+
+
+def _install_property_belt(
+    state: _StructureOnlyBeltState, property_restores: dict[str, tuple[bool, Any]]
+) -> None:
+    """Wrap the invisible getset-descriptor escape surface."""
+
+    for name in sorted(INVISIBLE_HOST_ESCAPE_PROPERTIES):
+        descriptor = inspect.getattr_static(torch.Tensor, name, None)
+        if descriptor is None or not hasattr(descriptor, "__get__"):
+            continue
+        shadowed = name in torch.Tensor.__dict__
+        try:
+            setattr(torch.Tensor, name, _make_escalated_property(descriptor, state, name))
+        except (TypeError, AttributeError):
+            continue
+        property_restores[name] = (shadowed, descriptor)
+
+
 @contextmanager
 def structure_only_escape_belt(trace: Any) -> Iterator[None]:
     """LAYER 1: install the escalated escape belt for one capture.
@@ -326,35 +376,9 @@ def structure_only_escape_belt(trace: Any) -> Iterator[None]:
                 delattr(torch.Tensor, name)
 
     try:
-        for name in sorted(_TENSOR_METHOD_SURFACE):
-            original = getattr(torch.Tensor, name, None)
-            if original is None or not callable(original):
-                continue
-            shadowed = name in torch.Tensor.__dict__
-            try:
-                setattr(torch.Tensor, name, _make_escalated_method(original, state, name))
-            except (TypeError, AttributeError):
-                continue
-            method_restores[name] = (shadowed, original)
-        for name in sorted(HOST_VALUE_ESCAPE_MODULE_FUNCS):
-            original = getattr(torch, name, None)
-            if original is None or not callable(original):
-                continue
-            try:
-                setattr(torch, name, _make_escalated_module_func(original, state, name))
-            except (TypeError, AttributeError):
-                continue
-            module_restores.append((torch, name, original))
-        for name in sorted(INVISIBLE_HOST_ESCAPE_PROPERTIES):
-            descriptor = inspect.getattr_static(torch.Tensor, name, None)
-            if descriptor is None or not hasattr(descriptor, "__get__"):
-                continue
-            shadowed = name in torch.Tensor.__dict__
-            try:
-                setattr(torch.Tensor, name, _make_escalated_property(descriptor, state, name))
-            except (TypeError, AttributeError):
-                continue
-            property_restores[name] = (shadowed, descriptor)
+        _install_method_belt(state, method_restores)
+        _install_module_func_belt(state, module_restores)
+        _install_property_belt(state, property_restores)
     except BaseException:
         _restore()
         raise

@@ -1285,8 +1285,7 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
                 aten_pending = _prepare_aten_call(
                     self.state,
                     func,
-                    args,
-                    kwargs,
+                    (args, kwargs or {}),
                     None if owner is None else owner.func_call_id,
                     mutates=_is_mutating_operator(func),
                 )
@@ -2011,6 +2010,8 @@ _reports_include_non_input_boundary = _rebind_function(
 _finalize_input_semantics_without_census = _rebind_function(
     _completeness_finalize._finalize_input_semantics_without_census, globals()
 )
+_init_witness_fields = _rebind_function(_completeness_finalize._init_witness_fields, globals())
+_build_witness_state = _rebind_function(_completeness_finalize._build_witness_state, globals())
 capture_completeness_witness = _rebind_contextmanager(
     _completeness_finalize.capture_completeness_witness, globals()
 )

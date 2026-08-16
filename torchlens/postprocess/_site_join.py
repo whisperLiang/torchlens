@@ -238,10 +238,27 @@ def fold_site_groups(rows: Iterable[FoldRow]) -> dict[str, frozenset[str]]:
         if root_a != root_b:
             parent[root_a] = root_b
 
+    _union_recurrence_edges(rows, parent, union)
+    _union_guarded_site_edges(rows, union)
+
+    groups: dict[str, list[str]] = {}
+    for row in rows:
+        groups.setdefault(find(row.label), []).append(row.label)
+    return {label: frozenset(groups[find(label)]) for label in parent}
+
+
+def _union_recurrence_edges(rows: list[FoldRow], parent: dict[str, str], union: Any) -> None:
+    """Union pass 1: the existing recurrence relation (in-roster members)."""
+
     for row in rows:
         for member in row.recurrent_labels:
             if member in parent:
                 union(row.label, member)
+
+
+def _union_guarded_site_edges(rows: list[FoldRow], union: Any) -> None:
+    """Union pass 2: same site_key AND same equivalence_class (the guard)."""
+
     by_guarded_site: dict[tuple[str, str], list[str]] = {}
     for row in rows:
         if row.site_key is None:
@@ -250,8 +267,3 @@ def fold_site_groups(rows: Iterable[FoldRow]) -> dict[str, frozenset[str]]:
     for members in by_guarded_site.values():
         for member in members[1:]:
             union(members[0], member)
-
-    groups: dict[str, list[str]] = {}
-    for row in rows:
-        groups.setdefault(find(row.label), []).append(row.label)
-    return {label: frozenset(groups[find(label)]) for label in parent}
