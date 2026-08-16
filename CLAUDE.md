@@ -392,6 +392,17 @@ print(tl.compat.report(model, x).to_markdown())
   `device_map='meta'`) still refuse at the entry gate — admission is decision
   point D8, unruled. Human surfaces (summary/profile/explain) carry the
   structure-only hypothesis banner.
+- PREDICATE RUNTIME EXTENSION POINT (S4 seam; every spelling
+  DOCUMENTED-UNSTABLE pending naming-session ratification):
+  `torchlens.ir.predicate_registry` is the ONE documented door through which
+  predicate consumers accept user predicates for the capture-lifecycle
+  `save`/`halt`/`until` slots (`PredicateProtocol` — one positional concrete
+  `RecordContext`; `coerce_predicate(value, slot=...)` — raw callables incl.
+  `BaseSelector` instances returned BY IDENTITY, registered names via a
+  slot-aware enforcing wrapper; `register_predicate(name)` — mutates nothing
+  on the user's object, stamps no loader-consulted attribute). The registry
+  is INERT until consumers adopt name acceptance. `intervene=`/grad slots are
+  outside the contract. Contract: `docs/reference/predicate_runtime.md`.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `tl.receptive_field` is a lazy power-user submodule. `Op`, `Layer`, `ModuleCall`, and
