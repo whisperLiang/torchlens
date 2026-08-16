@@ -904,13 +904,18 @@ def _substitute_conditional_branch_edges(
         dropped, substituted duplicates deduplicated in order.
     """
     filtered_edges: list[tuple[str, str]] = []
+    # Set shadow for the dedup (r8 R60/cleanup): list membership made this
+    # O(E^2) on edge-heavy conditional graphs; same idiom as the arm-entry
+    # sibling above.
+    filtered_seen: set[tuple[str, str]] = set()
     for parent, child in conditional_branch_edges:
         mapped_parent = _map_removed_label(parent, labels_to_remove, replacement_labels)
         mapped_child = _map_removed_label(child, labels_to_remove, replacement_labels)
         if mapped_parent is None or mapped_child is None:
             continue
         mapped_edge = (mapped_parent, mapped_child)
-        if mapped_edge not in filtered_edges:
+        if mapped_edge not in filtered_seen:
+            filtered_seen.add(mapped_edge)
             filtered_edges.append(mapped_edge)
     return filtered_edges
 
