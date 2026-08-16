@@ -174,3 +174,91 @@ updates to typed schemas, serialization, validation, tests, and both runnable do
 Refactors that do not amend the contract must preserve serialized bytes, error codes, readiness,
 verdicts, poisoning, and attestation behavior. The exhaustive runnable, `.tlspec`, I/O, security,
 and provider-parity suites are mandatory gates for changes at this boundary.
+
+## Extension points (the runnable seam contract)
+
+This section is the surface downstream consumers may bind to when extending the runnable
+subsystem (new run modes, run-time state interventions, segment or backward replay
+products). Everything else inside the runnable machinery is internal and may change
+without notice.
+
+**Binding rule.** `torchlens/_runnable_execution.py` is a namespace-aggregator facade over
+its slice modules; slice modules have no importers besides the aggregator. Every extension
+point below is named on ONE of `torchlens/runnable.py`, `torchlens/_runnable_seam.py`,
+`torchlens/_runnable_execution.py`, or `torchlens/_runnable_state.py` (the coordinator
+verbs additionally have their transport-side homes in `torchlens/_io/runnable.py` and
+`torchlens/_io/runnable_load.py`, reached through the coordinator boundary). Consumers
+never import a slice module directly; moving a name off its contract module is a contract
+change.
+
+**E1 -- Descriptor.** `SparseRunDescriptor` plus the closed enums and dataclasses in
+`torchlens.runnable`, mirrored 1:1 by the exhaustive contract document. The registries a
+consumer extends by adding a row are `WITNESS_FAMILY_REGISTRY` (the only dispatch
+authority for witness producer/parser/mutation handling), `WITNESS_GAP_REGISTRY`, and
+`CANONICAL_INITIALIZER_BY_ROLE`. New descriptor content is a versioned contract amendment
+plus a registered persisted-field family (pre-release fields ship DROP-gated); no consumer
+adds a descriptor field directly.
+
+**E2 -- Provider.** `RunProvider` is a closed enum. The four-verb coordinator boundary is
+`RunnableCoordinator` (`torchlens/_runnable_seam.py`): produce
+(`build_sparse_run_descriptor`), decode (`parse_sparse_run_descriptor`), prepare
+(`attach_sparse_run_readiness` plus preflight), execute (`run_loaded_sparse_trace` /
+`run_live_trace`). Provider dispatch is the one hardcoded ladder inside `Trace.run`; a new
+run mode extends that ladder, never adds a second dispatch site. The settlement spine is
+single: every provider finalizes through `_finalize_provider_run`, and
+`mark_trace_path_status` / `refuse_poisoned_trace` are the shared verdict authorities. The
+Trace-side public surface is the closed member set `RUNNABLE_TRACE_PUBLIC_MEMBERS`;
+session state lives only in `RunnableTraceState` under `trace.__dict__["_runnable"]`.
+
+**E3 -- State.** The staged-state lifecycle: `load_trace_state_dict` strict atomic
+staging, the ordered run-time precedence cascade (staged user state, then embedded
+capture state, then random init), and the declared state model boundary of contract
+section 11. Any consumer that binds, mutates, or substitutes state during a run goes
+through the staging surface and the transaction; direct writes to live model state inside
+runnable code are forbidden, and defensive materialization routes through the byte-guard
+chokepoints.
+
+**E4 -- Transaction.** `run_live_trace` and the loaded-sparse executor share the
+call-cone scheduler, all-checks-before-exposure, slot-container clearing plus fork
+unregistration plus host-RNG restore on every escape path, and RNG fork/restore in
+`finally`. New run modes execute inside this transaction shape; early-stopping run
+variants are implemented as scheduler-level cuts, never as post-hoc filters over a full
+run.
+
+**E5 -- Fast run.** `run_fast_loaded_trace` / `run_fast_live_trace`: verify-once then
+guarded loop. The guard and detection-stage namespace (`fast_verify_once`,
+`fast_state_static_guard`, `fast_seed_guard`, `fast_execution_context_guard`,
+`fast_live_function_plan`, `fast_live_module_plan`) is contract surface. Fast mode
+composes with new run keywords only by explicit matrix entry; silence means typed
+refusal, never undefined behavior.
+
+**Public entry.** The one public verb is `Trace.run`, whose dispatch ladder and typed
+keyword-conflict matrix are contract surface: every new keyword lands with its
+conflict-matrix row, and consumers bind totality tests to the CODE list, not a count.
+
+**Protocol extension strategy.** `RunnableTraceProtocol.run` is the contract-pinned
+stable typed minimum: its existing four parameters (`inputs`, `seed`, `fast`,
+`on_divergence`) never change, reorder, or disappear. New keywords land as additive
+keyword-only parameters with defaults on the concrete `Trace.run` while they are
+documented-unstable; a ratified spelling joins the protocol as an additive
+keyword-only-with-default revision in the same change as its documentation.
+
+**Invariants consumers may rely on (and may not weaken).**
+
+1. Single settlement: one finalizer, one report constructor, monotonic poison; a poisoned
+   trace never un-poisons.
+2. Closed vocabularies: `RunnableErrorCode`, `PathFaithfulness`, `CaptureStatus`, the
+   capability-gate table. Additions only via contract amendment; never an in-code
+   carve-out.
+3. Deletion or omission cannot improve a verdict (contract section 4), extended to
+   run-time omission: no truncated or partial run ever settles a positive claim it did
+   not earn.
+4. Transactionality: no partial state, RNG, or mode leakage on any failure path; restore
+   runs in `finally`.
+5. The live provider re-drives the full native forward except under an explicit,
+   disclosed run-level truncation, whose result is blocked from full-forward export.
+6. Meta-tested refactor constraints: no `RunResult` construction or report call outside
+   `_finalize_provider_run`; no verdict derivation from the persisted completeness
+   summary; no local alias-engine reimplementation; no bare state-path clones outside
+   the byte-guard core; no direct legacy runnable Trace-attribute readers;
+   `torchlens.runnable` import purity.
