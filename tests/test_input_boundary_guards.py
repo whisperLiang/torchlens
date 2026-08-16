@@ -825,3 +825,81 @@ def test_snapshot_mapping_protocol_totality_refusal() -> None:
     honest = snapshot_input_boundary({"box": {"seen": 1.0, "hidden": torch.ones(2)}})
     honest_reasons = {refusal["reason"] for refusal in honest["refusals"]}
     assert "mapping_protocol_not_total" not in honest_reasons
+
+
+def _sneaky_substitution_dict(hidden: torch.Tensor) -> dict:
+    """Dict subclass forging a count-PRESERVING protocol substitution (R12)."""
+
+    class SneakySub(dict):
+        """Physically holds ``hidden``; protocol presents an equal-count decoy."""
+
+        def items(self) -> Any:  # type: ignore[override]
+            return [
+                ("visible", dict.__getitem__(self, "visible")),
+                ("decoy", torch.zeros(2)),
+            ]
+
+    return SneakySub({"visible": torch.ones(2), "hidden": hidden})
+
+
+def test_snapshot_mapping_count_preserving_substitution_refuses() -> None:
+    """A count-preserving ``items()`` substitution refuses; forged snapshots never bless.
+
+    R12 (4th-round carry): the totality fact compared only COUNT, so a lying
+    ``items()`` presenting ``[("visible", t), ("decoy", zeros)]`` over physical
+    storage ``{"visible": t, "hidden": t_h}`` passed with EMPTY refusals, the
+    hidden tensor appeared in no snapshot node, and two instances with
+    DIFFERENT hidden payloads snapshot EQUAL while concrete
+    ``dict.__getitem__`` reads steered the forward -- a false-VERIFIED lane
+    (the shrink/pad and namedtuple siblings are already refused).
+    """
+
+    snapshot = snapshot_input_boundary({"box": _sneaky_substitution_dict(torch.ones(3))})
+    reasons = {refusal["reason"] for refusal in snapshot["refusals"]}
+    assert "mapping_protocol_not_total" in reasons
+
+    other = snapshot_input_boundary({"box": _sneaky_substitution_dict(torch.full((7,), 5.0))})
+    assert {refusal["reason"] for refusal in other["refusals"]} >= {"mapping_protocol_not_total"}
+
+
+def test_walker_routes_substituted_mapping_to_opaque_channel() -> None:
+    """``walk_input_boundary`` never walks a forged protocol view (R12).
+
+    The forged node routes WHOLE to the opaque channel (the fail-closed lane
+    cycles and over-deep nests use) instead of witnessing the decoy entries,
+    while an order-only divergence (a sorted-view subclass presenting the same
+    entries) keeps walking normally -- the ordered-key witness follows the
+    protocol traversal the model actually iterates.
+    """
+
+    tensors: list[tuple[Any, ...]] = []
+    opaque: list[Any] = []
+    walk_input_boundary(
+        {"box": _sneaky_substitution_dict(torch.ones(3))},
+        key_component=raw_mapping_key_component,
+        on_tensor=lambda value, path: tensors.append(path),
+        on_opaque_key_subtree=lambda value, path: opaque.append(value),
+    )
+    assert len(opaque) == 1 and isinstance(opaque[0], dict)
+    assert not any("decoy" in path for path in tensors)
+
+    class SortedView(dict):
+        """Same entries, different order: legal protocol divergence."""
+
+        def items(self) -> Any:  # type: ignore[override]
+            return sorted(dict.items(self), key=lambda pair: pair[0], reverse=True)
+
+    honest_tensors: list[tuple[Any, ...]] = []
+    honest_opaque: list[Any] = []
+    walk_input_boundary(
+        {"box": SortedView({"a": torch.ones(2), "b": torch.ones(2)})},
+        key_component=raw_mapping_key_component,
+        on_tensor=lambda value, path: honest_tensors.append(path),
+        on_opaque_key_subtree=lambda value, path: honest_opaque.append(value),
+    )
+    assert not honest_opaque
+    assert len(honest_tensors) == 2
+    sorted_snapshot = snapshot_input_boundary({"box": SortedView({"a": 1.0, "b": 2.0})})
+    assert "mapping_protocol_not_total" not in {
+        refusal["reason"] for refusal in sorted_snapshot["refusals"]
+    }

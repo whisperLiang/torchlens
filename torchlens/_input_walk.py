@@ -381,6 +381,52 @@ def namedtuple_arity_mismatch(value: Any) -> bool:
     return len(fields) != physical_sequence_len(value)
 
 
+def mapping_protocol_entries_mismatch(
+    value: Any, protocol_entries: list[tuple[Any, Any]] | None = None
+) -> bool:
+    """Return whether a dict-backed mapping's protocol view forges its storage.
+
+    The totality fact used to compare only COUNT (``len(items())`` vs the
+    concrete ``dict.__len__``), so a count-PRESERVING substitution -- a lying
+    ``items()`` presenting ``[("visible", t), ("decoy", zeros)]`` over physical
+    storage ``{"visible": t, "hidden": t_h}`` -- still walked the decoy, put the
+    hidden tensor in NO snapshot node, and made two instances with DIFFERENT
+    hidden payloads snapshot EQUAL while concrete ``dict.__getitem__`` reads
+    steered the forward (R12: the last open member of the forgery family whose
+    shrink/pad and namedtuple siblings are already refused).
+
+    The comparison is entry-level and order-insensitive: the protocol view and
+    the concrete ``dict.items(value)`` storage must bind the SAME canonical key
+    tokens to the SAME child objects (identity, not equality -- an equal-valued
+    decoy object is exactly the forgery). Order divergence alone (a sorted-view
+    subclass) stays legal: the ordered-key witness is derived from the protocol
+    traversal the model actually iterates. A key the codec cannot encode
+    compares by object identity, so an opaque key must be THE one physical key
+    object on both sides. Non-dict-backed Mappings have no physical storage
+    distinct from their methods and keep the instance protocol (their
+    hidden-state honesty is owned by the instance-state proofs).
+    """
+
+    if not isinstance(value, dict):
+        return False
+    entries = list(value.items()) if protocol_entries is None else protocol_entries
+    concrete = list(dict.items(value))
+    if len(entries) != len(concrete):
+        return True
+
+    def _view(pairs: list[tuple[Any, Any]]) -> dict[Any, int]:
+        view: dict[Any, int] = {}
+        for key, child in pairs:
+            try:
+                token: Any = encode_mapping_key(key)
+            except ValueError:
+                token = ("opaque-key-identity", id(key))
+            view[token] = id(child)
+        return view
+
+    return _view(entries) != _view(concrete)
+
+
 def classify_input_container(value: Any) -> str:
     """Classify one boundary value into the closed container-kind vocabulary.
 
@@ -579,6 +625,17 @@ def walk_input_boundary(
                 _descend(child, (*path, field.name))
             return
         if kind == "mapping":
+            if mapping_protocol_entries_mismatch(value):
+                # A dict-backed mapping whose protocol view disagrees with its
+                # concrete storage at the ENTRY level (R12: count-preserving
+                # substitution included) routes the WHOLE node to the opaque
+                # channel instead of walking the forged view: witness coverage
+                # ceilings, and the runnable save refuses through the snapshot
+                # walker's symmetric ``mapping_protocol_not_total`` refusal --
+                # the same fail-closed channel cycles and over-deep nests use.
+                if on_opaque_key_subtree is not None:
+                    on_opaque_key_subtree(value, path)
+                return
             for key, child in value.items():
                 try:
                     component = key_component(key)
@@ -1452,12 +1509,14 @@ def snapshot_input_boundary(value: Any) -> dict[str, Any]:
             # from the one the model actually iterates -- and the order-insensitive
             # child-path set could not detect it.
             entries = list(item.items())
-            if isinstance(item, dict) and len(entries) != physical_sequence_len(item):
+            if mapping_protocol_entries_mismatch(item, entries):
                 # The protocol view is not TOTAL over the physical dict storage:
-                # a lying ``items()``/``keys()`` shrank (or padded) the witnessed
-                # structure identically on the capture and runtime snapshots -- a
-                # false-VERIFIED shape, the same forgery lane
+                # a lying ``items()``/``keys()`` shrank, padded, or SUBSTITUTED
+                # the witnessed structure identically on the capture and runtime
+                # snapshots -- a false-VERIFIED shape, the same forgery lane
                 # ``physical_sequence_len`` closes for sequences and namedtuples.
+                # Entry-level, not count-only (R12): a count-preserving decoy
+                # entry hid a physically stored tensor from every snapshot node.
                 # A refusal (not a node fact) keeps persisted snapshot shapes
                 # byte-stable for existing artifacts while failing closed on
                 # both the save and runtime sides.

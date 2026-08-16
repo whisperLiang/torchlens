@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, cast
 
 import torch
@@ -580,7 +580,18 @@ def _simple_leaves(
             )
         _in_progress.add(value_id)
         try:
-            children = value.values() if isinstance(value, dict) else value
+            # CONCRETE access (R12 sibling sweep): ``value.values()`` /
+            # ``for child in value`` dispatch to overridable protocol methods,
+            # so a lying subclass view could hide or substitute the leaves that
+            # steer backend resolution -- the same forgery lane the boundary
+            # walkers refuse. Read the builtin storage slots directly, like
+            # ``iter_physical_sequence``/``dict.items`` do on the witness side.
+            if isinstance(value, dict):
+                children: Iterable[object] = dict.values(value)
+            else:
+                from .._input_walk import iter_physical_sequence
+
+                children = (child for _, child in iter_physical_sequence(value))
             return tuple(
                 leaf
                 for child in children
