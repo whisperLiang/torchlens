@@ -62,14 +62,22 @@ pure-Python rank layout above 20,000 cost units.
 ## Gotchas
 - Graphviz render writes a DOT source file alongside rendered output.
 - Sibling ordering is intentionally scoped to forward unrolled Graphviz dot renders under
-  the node cap. Rolled, collapsed, focused, backward, conditional, rank-layout, Dagua, and
-  large graph paths should no-op.
+  the node cap. The exact in-scope predicate is `_should_order_siblings`
+  (`_render_dot.py`): dot engine AND unrolled mode AND node count under
+  `SIBLING_ORDER_NODE_CAP` AND no `module=` focus AND
+  `vis_intervention_mode == "node_mark"` AND `vis_call_depth >= 1000` — so
+  rolled, focused, rank-layout, capped-depth, and large graphs no-op there
+  (backward/combined renders never reach it; they dispatch through
+  `_render_entrypoints.py`). It has NO collapse or conditional term:
+  `collapse_fn` is accepted but unused by the predicate.
 - The rank-layout path is a direct DOT writer rendered through `neato -n`; verify module
   clusters and edge labels after layout changes.
 - `show_model_graph()` (implemented in `torchlens/_user_public_impls.py`, not
   package-local) should cleanup temporary logs in `finally`.
 - Buffer visibility has multiple modes; use `_normalize_buffer_visibility()`.
-- Intervention node rendering depends on `intervention_ready` metadata.
+- Intervention node rendering keys on the trace's `_intervention_spec`
+  (`node_spec.py`) and the `vis_intervention_mode` render option
+  (`_render_dot.py`) — NOT on the deprecated `intervention_ready` name.
 - Bundle diff rendering is SVG-string based; compare snapshots after visual changes.
 
 ## Tests to Run After Changes

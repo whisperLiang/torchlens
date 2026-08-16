@@ -1,9 +1,11 @@
 # receptive_field/ - Implementation Guide
 
 Lazy public submodule (`tl.receptive_field` resolves through the top-level lazy
-`__getattr__` table). Influence geometry is solved on first property access:
-`op.receptive_field` / `op.projective_field` return `ReceptiveFieldView`s and the
-engines run only when a view is queried.
+`__getattr__` table). Influence geometry is solved on FIRST PROPERTY ACCESS:
+the `op.receptive_field` / `op.projective_field` property bodies call
+`_engine.solve(trace)` / `solve_projective(trace)` EAGERLY (with the solution
+cached on the trace) and then return `ReceptiveFieldView`s — the laziness
+boundary is the property access itself, not the first view query.
 
 ## __init__.py
 - `verify(trace, ...)` is the public tripwire entry point; `self_check()` aliases it.

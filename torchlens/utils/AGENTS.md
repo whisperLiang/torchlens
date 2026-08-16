@@ -34,7 +34,10 @@ this package mostly stateless and free of high-level TorchLens business logic.
 - `tensor_nanequal()` is NaN-aware and complex-aware.
 - `get_memory_amount()` deliberately AVOIDS `pause_logging()`: it resolves the unwrapped
   size methods once instead of toggling global logging state per tensor (hot-path perf).
-- `MAX_FLOATING_POINT_TOLERANCE` is shared by validation.
+- `MAX_FLOATING_POINT_TOLERANCE` is a legacy fp32-only facade (the float32 row
+  of `_DTYPE_FLOAT_TOLERANCES`); validation derives per-dtype tolerances via
+  `derive_float_tolerances`/`_tolerances_for_dtype` in `validation/core.py`
+  and no longer consumes this symbol.
 
 ## RNG and Autocast
 - `log_current_rng_states()` and `set_rng_from_saved_states()` support deterministic replay.

@@ -7,12 +7,12 @@ disagree, the YAML wins — update this doc in the same change.
 
 | File | Trigger | What It Does |
 |------|---------|-------------|
-| `workflows/lint.yml` | PR to main + `workflow_call` | ruff `format --check` + `check` (CHECK-ONLY — see below), full-tree `pre-commit run --all-files` parity job, full-tree gitleaks scan, actionlint + cross-file pin-lockstep gates (torch, pydot, pip-audit). |
-| `workflows/tests.yml` | PR to main + `workflow_call` | Smoke matrix over exact CPU torch pins (floor 2.1.2 / canonical 2.8.0 / newest-admitted, py 3.10–3.12) with executed-floor attestations and the render-byte-oracle row; plus var-gated crawler round21 release-proof jobs (`MENAGERIE_RELEASE_RUNNERS`). |
+| `workflows/lint.yml` | PR to main + `workflow_call` | ruff `format --check` + `check` (CHECK-ONLY — see below), full-tree `pre-commit run --all-files` parity job, full-tree gitleaks scan, actionlint + cross-file pin-lockstep gates (torch, pydot, graphviz, jsonschema, pip-audit). |
+| `workflows/tests.yml` | PR to main + `workflow_call` | Smoke matrix over exact CPU torch pins (floor 2.1.2 / canonical 2.8.0 / newest-admitted, py 3.10–3.13; the 3.13 row rides the newest-admitted torch) with executed-floor attestations and the render-byte-oracle row; plus var-gated crawler round21 release-proof jobs (`MENAGERIE_RELEASE_RUNNERS`). |
 | `workflows/quality.yml` | PR to main + `workflow_call` | mypy on py3.11 + newest-admitted torch; PR-blocking wheel/sdist manifest tripwires; pip-audit with NO suppressions. |
 | `workflows/release.yml` | Push to main | Calls lint/tests/quality via `workflow_call`, then python-semantic-release (pinned) versions, builds reproducible artifacts, publishes to PyPI via OIDC trusted publishing and to GitHub Releases with a minimal-scope App token. |
-| `workflows/nightly.yml` | Cron + `workflow_dispatch` | Perf regression gate, full fast tier, coverage floor, capture byte oracle, preview-backend matrix (tf/jax/tinygrad/paddle/mlx), wheel+sdist double-build reproducibility gate, PEP 561 consumer smoke. |
-| `workflows/weekly.yml` | Cron + `workflow_dispatch` | Slow and rare tiers with executed-floor attestations. |
+| `workflows/nightly.yml` | Cron + `workflow_dispatch` | Nine jobs: perf regression gate, full fast tier, coverage floor (incl. the per-package floor script), capture byte oracle, preview-backend matrix (tf/jax/tinygrad/paddle/mlx), metadata-gates, wheel+sdist double-build reproducibility gate + PEP 561 consumer smoke, platform-canary, shuffle-stress. |
+| `workflows/weekly.yml` | Cron + `workflow_dispatch` | Four jobs: slow/rare extended tiers with executed-floor attestations, mutation-margin, hook-pin-staleness, optimized-verdict-identity. |
 | `workflows/latest-canary.yml` | Cron + `workflow_dispatch` | Smoke tier against latest released torch/torchvision (ecosystem-drift isolation). |
 | `workflows/mutation.yml` | Cron (Sun) + `workflow_dispatch` | Rotating per-arm mutation-campaign shard (1-of-4 arm shards weekly; any family on dispatch) in the canonical pinned CPU env; fails on any SURVIVOR/ERROR/TIMEOUT; archives per-mutant verdicts. |
 
@@ -52,8 +52,10 @@ AND a `chore(release):` head-commit condition.
 - Third-party actions are SHA-pinned. ONE documented exception:
   `pypa/gh-action-pypi-publish@release/v1` (PyPA's own guidance; rationale in
   release.yml).
-- Pre-commit hook repos are SHA-pinned (ruff-pre-commit stays on its tag,
-  lockstep-parsed by a test).
+- Pre-commit hook repos are SHA-pinned — INCLUDING ruff-pre-commit (its old
+  stay-on-tag exception was reversed: it is the one hook with `--fix` write
+  access, so a mutable tag was the wrong exception; the ruff version is
+  lockstep-parsed by `tests/test_packaging_diet.py`).
 - Every workflow declares `permissions: contents: read`; checkout uses
   `persist-credentials: false` outside the release job.
 

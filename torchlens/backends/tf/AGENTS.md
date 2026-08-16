@@ -37,7 +37,9 @@ TensorFlow preview backend. Tier-1 standalone spec (no `capture_backend`); the
 - Static-label `intervene=` for eager entries. `normalize_tf_interventions()`
   builds a `TFInterventionPlan` over two writable levels: module-boundary
   substitution (`apply_tf_module_intervention`) and the curated
-  `_CURATED_WRAP_ENTRIES` tf.nn/tf.math functional wrap (`tf_intervention_wrap`).
+  `_CURATED_WRAP_ENTRIES` functional wrap (`tf_intervention_wrap`) — entries
+  span FOUR namespaces: `tf.nn`, `tf.math`, `tf.linalg` (`matmul`), and
+  top-level `tf` callables (`tf.matmul`, `tf.add`, `tf.concat`, ...).
 - Builtin helper adapters: `zero_ablate`, `scale`, `add` ONLY. Other helpers
   (including `replace_with`) raise `BackendUnsupportedError`; pass a callable
   action for custom replacements.
