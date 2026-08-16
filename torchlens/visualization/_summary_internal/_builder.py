@@ -169,6 +169,10 @@ def _capture_verification_banner(trace: Trace) -> str:
     """
 
     notes = []
+    # L7a G3 render honesty: a structure-only capture's shapes/dtypes are
+    # HYPOTHESES; every human surface says so (memo sec 3.4).
+    if bool(getattr(trace, "structure_only", False)):
+        notes.append("structure-only capture -- shapes/dtypes are HYPOTHESES, not measurements")
     status_value = getattr(getattr(getattr(trace, "outcome", None), "status", None), "value", None)
     if status_value not in (None, "complete"):
         notes.append(f"capture outcome: {status_value}")

@@ -3738,6 +3738,24 @@ class Trace(
     # ******** Public Convenience Methods ********
     # ********************************************
 
+    def discharge_against(self, real_trace: "Trace") -> Any:
+        """Discharge this structure-only trace's hypotheses against a real run.
+
+        DOCUMENTED-UNSTABLE surface (L7a; no deprecation shim owed on
+        rename). Only defined on a structure-only capture; ``real_trace``
+        must be an ordinary settled COMPLETE capture of the same graph.
+        Returns a frozen ``StructureDischarge`` record (per-claim table +
+        overall verdict); neither trace is mutated — the verdict registers in
+        a weak-keyed side table consulted by the structure-only capability
+        chokepoint (a REFUTED discharge flips hypothesis consumers to typed
+        refusals). See ``torchlens.capture.structure_only.discharge_against``
+        for the full join/precondition contract.
+        """
+
+        from ..capture.structure_only import discharge_against as _discharge
+
+        return _discharge(self, real_trace)
+
 
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]

@@ -381,6 +381,33 @@ def _docs_pointer(section: str | None = None) -> str:
     )
 
 
+def _first_user_frame() -> tuple[str | None, int | None]:
+    """Return the first non-torchlens frame (the user's capture callsite).
+
+    Teaching-enrichment helper (L7a): names WHERE the refused capture was
+    requested. Best-effort; ``(None, None)`` when no external frame is
+    visible.
+    """
+
+    import inspect
+    from pathlib import Path
+
+    torchlens_root = Path(__file__).resolve().parent
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            filename = Path(frame.f_code.co_filename).resolve()
+            try:
+                filename.relative_to(torchlens_root)
+            except ValueError:
+                return str(filename), frame.f_lineno
+            frame = frame.f_back
+    finally:
+        del frame
+    return None, None
+
+
 def check_model_and_input_variants(
     model: nn.Module,
     input_args: Any = None,
@@ -531,12 +558,36 @@ def check_model_and_input_variants(
             + (f": {offense['reason']}" if offense["reason"] else "")
             for offense in unique
         )
+        # L7a default-path teaching enrichment (memo 1.4-B item 3, ships
+        # regardless of D8): name the USER callsite and point meta-init
+        # holders at the structure-only mode's contract. No new code is
+        # minted and the offense payload shape is unchanged.
+        caller_file, caller_line = _first_user_frame()
+        callsite_note = ""
+        if caller_file is not None and caller_line is not None:
+            from ._source_links import file_line_text
+
+            callsite_note = (
+                f"\nCapture was requested at {file_line_text(caller_file, caller_line)}."
+            )
+        meta_pointer = ""
+        if any("meta tensor" in offense["name"] for offense in unique):
+            meta_pointer = (
+                "\nMeta-initialized models stay refused at this gate "
+                "(decision point D8); structure-only capture "
+                "(structure_only=True) records graph structure and shape "
+                "hypotheses for supported substrates -- see "
+                "docs/reference/structure_only_capabilities.md."
+            )
         raise UnsupportedTensorVariantError(
             "torchlens.trace cannot run on this model/input "
             "combination. Detected unsupported tensor variant(s):\n"
             f"{bullet_list}\n"
+            f"{callsite_note}{meta_pointer}"
             f"\n{_docs_pointer('Capture entry and execution contexts')}",
             code="unsupported_tensor_variant",
+            file_path=caller_file,
+            line_no=caller_line,
             remedy=(
                 "materialize dense, strided tensors with concrete integer "
                 "shapes on a real device before capture"

@@ -41,6 +41,14 @@ pytestmark = pytest.mark.smoke
 #: Any declared-DROP field works; this one is a plain session-time int.
 _PLANT_FIELD = "_tl_save_selector_fire_count"
 
+#: STANDING lane registrations: real sprint-gated fields registered at import
+#: time and retired only at the coordinated tlspec bump. Inventory assertions
+#: are made RELATIVE to this ledger so each new writer lane lands here as a
+#: reviewed one-line diff (registrar keeps the live inventory).
+_STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
+    "Trace": ("structure_only",),  # L7a mode marker (wave 0)
+}
+
 
 @pytest.fixture
 def planted_field():
@@ -71,13 +79,17 @@ def test_registration_requires_declared_drop_policy() -> None:
         register_prerelease_field(Trace, "_no_such_field_anywhere")
     with pytest.raises(ValueError, match="no-op"):
         register_prerelease_field(Trace, _PLANT_FIELD, persisted_policy=FieldPolicy.DROP)
-    assert registered_prerelease_fields() == {}
+    # No refused registration may have landed; only STANDING lane
+    # registrations (real sprint-gated fields awaiting the coordinated bump,
+    # e.g. L7a's Trace.structure_only) are present.
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
 
 
 def test_registry_inventory_and_unregister(planted_field: str) -> None:
-    assert registered_prerelease_fields() == {"Trace": (planted_field,)}
+    inventory = registered_prerelease_fields()
+    assert planted_field in inventory["Trace"]
     unregister_prerelease_field(Trace, planted_field)
-    assert registered_prerelease_fields() == {}
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
     # Fixture teardown unregisters again; must be idempotent.
 
 

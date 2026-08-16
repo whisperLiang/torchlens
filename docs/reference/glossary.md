@@ -299,3 +299,42 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 : `MergeAlignment`, `BoundaryConsistency`, `MergeValueStatus`, and `MergedErrorCode` are
   frozen vocabularies in `torchlens.merged`, release-gated against
   [the merged-trace contract](merged_trace_contract.md).
+
+## Unstable surfaces (documented-unstable; no deprecation shim owed)
+
+Spellings below shipped ahead of their naming-session/S2 ratification under
+the megasprint provisional-name protocol: they may rename WITHOUT deprecation
+shims, by declared contract. Each carries the same tag at its definition.
+
+**structure_only (capture kwarg) / trace.structure_only** — *unstable — no
+deprecation shim owed*
+: `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` runs the
+  capture under the structure-only contract: the op graph, module hierarchy,
+  parameter geometry, and per-op shape/dtype are recorded with every
+  value-bearing claim a HYPOTHESIS; value payloads are never retained,
+  value-requiring consumers refuse typed through
+  `torchlens.capture.structure_only.require_structure_only_capability`, and
+  value-dependent branches refuse with the user's source line
+  (device-neutral). The mirror field `trace.structure_only` declares the
+  mode. Capability contract:
+  [structure_only_capabilities.md](structure_only_capabilities.md).
+
+**Trace.discharge_against(real_trace)** — *unstable — no deprecation shim owed*
+: Discharges a structure-only trace's hypotheses against an ordinary settled
+  COMPLETE capture of the same graph. Returns a frozen `StructureDischarge`
+  (per-claim table + overall corroborated/refuted verdict, positional join
+  licensed by graph-shape digest equality); a REFUTED discharge flips
+  hypothesis consumers to typed refusals. Neither trace is mutated.
+
+**StructureClaimStatus (hypothesis / corroborated / refuted)** — *unstable —
+no deprecation shim owed*
+: The tri-state evidence class of a structure-only trace's value-bearing
+  claims; never silently promoted.
+
+**Structure-only refusal codes** — *unstable — no deprecation shim owed;
+S2-gated*
+: `structure_only_option_conflict`, `structure_only_values_unsupported`,
+  `value_dependent_branch_unsupported`, `meta_kernel_unavailable`,
+  `structure_only_{save,runnable,replay,validation,backward,episode}_unsupported`,
+  `structure_only_refuted_hypothesis`, `structure_only_discharge_precondition`,
+  `structure_only_type_invalid`.

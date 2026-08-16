@@ -1,0 +1,53 @@
+# Structure-Only Capture: Capability Contract
+
+THE capability table file for structure-only capture (`structure_only=True`),
+owned by L7a; the in-code authority is
+`torchlens.capture.structure_only.STRUCTURE_ONLY_CAPABILITIES` with the ONE
+chokepoint `require_structure_only_capability`, and this file is its human
+mirror (lockstep-tested in `tests/test_structure_only_capabilities.py`).
+
+RULE: Rows may change STATUS by amendment from their amend_owner at their
+named flip_event (with evidence). No amendment may widen a CLAIM beyond its
+conditional wording; a wave that wants a bigger claim writes a NEW row
+through S2. This file never promises for a wave it hasn't shipped.
+
+NAMING: every spelling below is DOCUMENTED-UNSTABLE pending naming-session
+ratification, and every refusal code is additionally S2-gated (no
+deprecation shim owed on rename). The D8 decision point (meta-tensor
+admission scoped to structure-only captures) is QUEUED; every cell below is
+the D8-DEFAULT state — the entry-gate refusal stands until an explicit JMT
+ruling.
+
+Grammar of `status_v1` (closed, five members): `supported_structural` |
+`supported_hypothesis` | `refuse:<code>` | `verify:<Vn>` |
+`out_of_scope:<contract-ref>`.
+
+| key | claim (conditional wording) | status_v1 | flip_event | evidence | amend_owner | refusal_code |
+|---|---|---|---|---|---|---|
+| `graph_structure` | The op graph, edges, order, and module nesting of THIS meta execution are recorded exactly. | `supported_structural` | never | tests/test_structure_only_entry.py (E-1 structural pins) | L7a | — |
+| `param_geometry` | Parameter/buffer names, shapes, dtypes are recorded as declared; the persistence partition is recorded IF V8 verifies meta-compatibility. | `supported_structural` | V8 verdict | pending: V8 verification test | L7a | — |
+| `shapes_dtypes` | Per-op shapes/dtypes are HYPOTHESES: valid under meta propagation, unproven until discharged by a real capture of the same graph. | `supported_hypothesis` | discharge | tests/test_structure_only_discharge.py | L7a | — |
+| `flops_estimates` | FLOPs/MACs are derived from hypothesis shapes; they inherit hypothesis status and are labelled estimated, never measured. | `supported_hypothesis` | discharge | tests/test_structure_only_honesty.py | L7a | — |
+| `memory_estimates` | Memory figures are geometry estimates; measured-memory columns render unknown, never zero. | `supported_hypothesis` | discharge | tests/test_structure_only_honesty.py | L7a | — |
+| `taken_path_conditionals` | Conditional structure of the taken path is recorded; any VALUE-dependent branch through the enumerated escape surface refuses typed at the user's source line REGARDLESS of the tensor's device; unenumerated meta deaths refuse typed via the backstop; unenumerated REAL-value escapes in form (b) are undetectable and are priced by hypothesis status (coverage claim exactly per memo sec 2.1 C-ENUM/C-BACKSTOP/C-RESIDUAL). | `supported_structural` | never | tests/test_structure_only_teaching.py | L7a | — |
+| `meta_admission` | Meta-materialized models (form (a)) are admitted ONLY under D8; until D8 is granted the entry gate refuses unchanged. | `refuse:unsupported_tensor_variant` | D8 granted | tests/test_structure_only_honesty.py (baseline gate pins) | S2-amendment | `unsupported_tensor_variant` |
+| `value_payloads` | Activations, argument values, output values are never recorded; requests refuse typed. | `refuse:structure_only_values_unsupported` | never | tests/test_structure_only_entry.py | L7a | `structure_only_values_unsupported` |
+| `previews` | Value previews/thumbnails require values; refused. | `refuse:structure_only_values_unsupported` | never | tests/test_structure_only_entry.py | L7a | `structure_only_values_unsupported` |
+| `nonfinite_predicates` | raise_on_nan and nonfinite halt predicates have no values to test; the combination refuses typed at entry. | `refuse:structure_only_option_conflict` | never | tests/test_structure_only_entry.py | L7a | `structure_only_option_conflict` |
+| `runnable_ready_composition` | structure_only + runnable_ready is refused at entry: runnable eligibility and the structure substrate are incompatible in v1. | `refuse:structure_only_option_conflict` | L7b amendment lands | tests/test_structure_only_entry.py | L7b | `structure_only_option_conflict` |
+| `substrate_uniformity` | Form (a) requires meta inputs with meta state; mixed real/meta at entry refuses typed (memo sec 1.5 E-3/E-4); partially-meta state is not pre-validated and dies typed mid-forward via the backstop (E-5). Only reachable under D8; until then the entry gate refuses every meta cell unchanged. | `refuse:unsupported_tensor_variant` | D8 granted | blocked on D8 | S2-amendment | `unsupported_tensor_variant` |
+| `viz_graph_render` | Graph rendering (incl. size_by consuming hypothesis shapes) works, carrying the structure-only banner. | `supported_hypothesis` | never | tests/test_structure_only_honesty.py | L7a | — |
+| `viz_payload_visualizers` | Payload-consuming visualizers (activation heatmaps, custom value visualizers) require values; refused typed. | `refuse:structure_only_values_unsupported` | never | tests/test_structure_only_entry.py | L7a | `structure_only_values_unsupported` |
+| `structure_digests` | Graph-shape and meta-domain content digests are always computed; they can never collide with value-bearing digests. | `supported_structural` | never | tests/test_structure_only_honesty.py (G2 domain pin) | L7a | — |
+| `discharge` | A real capture of the same graph upgrades hypothesis rows to corroborated or refutes them; upgrades happen ONLY via the discharge authority. | `supported_structural` | never | tests/test_structure_only_discharge.py | L7a | — |
+| `refuted_rows` | Consumers that tolerate hypothesis rows refuse REFUTED rows typed (G5). | `supported_structural` | never | tests/test_structure_only_discharge.py | L7a | — |
+| `teaching_refusals` | Enumerated value escapes (device-neutral, both forms) and missing meta kernels refuse typed with the user source line; other meta-mechanism deaths are typed via the backstop without branch classification; unenumerated real-value escapes are outside the detectable surface (C-RESIDUAL); user exceptions propagate unchanged. | `supported_structural` | never | tests/test_structure_only_teaching.py | L7a | — |
+| `save_analysis_artifact` | Persisting a structure-only trace is refused UNTIL the coordinated tlspec bump lands the marker + load rows; artifacts are then marked and load-validated. Registrar exit gates (test-only activation switch, fail-closed load marker) are the one sanctioned round-trip path before the bump. | `refuse:structure_only_save_unsupported` | wave-3 bump | tests/test_structure_only_capabilities.py | P1 | `structure_only_save_unsupported` |
+| `save_runnable` | Runnable save is refused in v1; IF the L7b late-bind posture lands (wave 1, post-L4, S1-serialized), declared late-bind slots replace this refusal for eligible models. | `refuse:structure_only_runnable_unsupported` | L7b amendment lands | tests/test_structure_only_capabilities.py | L7b | `structure_only_runnable_unsupported` |
+| `live_replay` | Replay requires values; refused unless and until late-bind (see save_runnable) provides them at bind time. | `refuse:structure_only_replay_unsupported` | L7b amendment lands | tests/test_structure_only_capabilities.py | L7b | `structure_only_replay_unsupported` |
+| `validation_entry` | There is nothing to validate against; refused permanently by design (discharge is the verification story). | `refuse:structure_only_validation_unsupported` | never | tests/test_structure_only_capabilities.py | L7a | `structure_only_validation_unsupported` |
+| `backward_grads` | Backward/gradient capture is refused in v1; any future support is an L9-adjacent S2 amendment, not implied here. | `refuse:structure_only_backward_unsupported` | S2 amendment | tests/test_structure_only_capabilities.py | S2-amendment | `structure_only_backward_unsupported` |
+| `episode_composition` | Episode capture composes with structure-only ONLY if a later S2 amendment rules it; refused in v1. | `refuse:structure_only_episode_unsupported` | S2 amendment | reserved: no episode surface exists on this branch yet | S2-amendment | `structure_only_episode_unsupported` |
+| `distributed` | Distributed structure-only capture is out of scope this sprint; the existing distributed refusal contract governs. | `out_of_scope:distributed-contract` | S2 amendment | torchlens/_distributed.py refusal surface | S2-amendment | — |
+| `fake_tensor_substrate` | Capturing a REAL model structure-only via FakeTensorMode is a VERIFY item, not a capability. | `verify:V1` | V1 verdict | pending: V1 spike | L7a | — |
+| `symbolic_shapes` | Symbolic/dynamic shapes remain refused at the variant gate; a ShapeEnv-backed range hypothesis is a VERIFY item. | `verify:V2` | V2 verdict | pending: V2 verification | L7a | — |

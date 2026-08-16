@@ -50,6 +50,7 @@ class TraceProfile:
     capture_verified: bool | None = None
     capture_verification_reason: str | None = None
     rescue_rerun: bool = False
+    structure_only: bool = False
 
     def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying profile dataframe.
@@ -88,6 +89,10 @@ class TraceProfile:
         """
 
         notes = []
+        # L7a G3 render honesty: hypothesis shapes must never present as
+        # measurements (memo sec 3.4).
+        if self.structure_only:
+            notes.append("structure-only capture -- shapes/dtypes are HYPOTHESES, not measurements")
         if self.capture_status not in ("complete", "unknown"):
             notes.append(f"capture outcome: {self.capture_status}")
         if self.capture_verified is False:
@@ -505,11 +510,13 @@ def build_profile(
     capture_verified = getattr(trace, "capture_verified", None)
     capture_verification_reason = getattr(trace, "capture_verification_reason", None)
     rescue_rerun = bool(getattr(trace, "rescue_rerun", None) or False)
+    structure_only = bool(getattr(trace, "structure_only", False))
     verification = {
         "capture_status": capture_status,
         "capture_verified": capture_verified,
         "capture_verification_reason": capture_verification_reason,
         "rescue_rerun": rescue_rerun,
+        "structure_only": structure_only,
     }
     frame.attrs.update(verification)
     honesty_frame.attrs.update(verification)
@@ -522,4 +529,5 @@ def build_profile(
         capture_verified=capture_verified,
         capture_verification_reason=capture_verification_reason,
         rescue_rerun=rescue_rerun,
+        structure_only=structure_only,
     )

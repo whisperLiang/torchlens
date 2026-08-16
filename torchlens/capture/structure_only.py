@@ -102,6 +102,21 @@ class StructureClaimStatus(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# Chokepoint refusal codes raised only through the capability rows below
+# (constant-spelled so the error-contract lockstep sees them; enrolled in
+# tests/test_error_contract_lockstep.py::_CONSTANT_SPELLED_CODES). All
+# S2-gated, DOCUMENTED-UNSTABLE.
+# ---------------------------------------------------------------------------
+
+STRUCTURE_ONLY_SAVE_UNSUPPORTED = "structure_only_save_unsupported"
+STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED = "structure_only_runnable_unsupported"
+STRUCTURE_ONLY_REPLAY_UNSUPPORTED = "structure_only_replay_unsupported"
+STRUCTURE_ONLY_VALIDATION_UNSUPPORTED = "structure_only_validation_unsupported"
+STRUCTURE_ONLY_BACKWARD_UNSUPPORTED = "structure_only_backward_unsupported"
+STRUCTURE_ONLY_EPISODE_UNSUPPORTED = "structure_only_episode_unsupported"
+
+
+# ---------------------------------------------------------------------------
 # Capability table (memo sec 6) — the IN-CODE authority
 # ---------------------------------------------------------------------------
 
@@ -354,7 +369,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="wave-3 bump",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="P1",
-        refusal_code="structure_only_save_unsupported",
+        refusal_code=STRUCTURE_ONLY_SAVE_UNSUPPORTED,
     ),
     CapabilityRow(
         key="save_runnable",
@@ -367,7 +382,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="L7b amendment lands",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="L7b",
-        refusal_code="structure_only_runnable_unsupported",
+        refusal_code=STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED,
     ),
     CapabilityRow(
         key="live_replay",
@@ -379,7 +394,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="L7b amendment lands",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="L7b",
-        refusal_code="structure_only_replay_unsupported",
+        refusal_code=STRUCTURE_ONLY_REPLAY_UNSUPPORTED,
     ),
     CapabilityRow(
         key="validation_entry",
@@ -391,7 +406,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="never",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="L7a",
-        refusal_code="structure_only_validation_unsupported",
+        refusal_code=STRUCTURE_ONLY_VALIDATION_UNSUPPORTED,
     ),
     CapabilityRow(
         key="backward_grads",
@@ -403,7 +418,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="S2 amendment",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="S2-amendment",
-        refusal_code="structure_only_backward_unsupported",
+        refusal_code=STRUCTURE_ONLY_BACKWARD_UNSUPPORTED,
     ),
     CapabilityRow(
         key="episode_composition",
@@ -415,7 +430,7 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         flip_event="S2 amendment",
         evidence="reserved: no episode surface exists on this branch yet",
         amend_owner="S2-amendment",
-        refusal_code="structure_only_episode_unsupported",
+        refusal_code=STRUCTURE_ONLY_EPISODE_UNSUPPORTED,
     ),
     CapabilityRow(
         key="distributed",
@@ -664,16 +679,13 @@ def _layer_claims(layer: Any) -> tuple[tuple[str, Any], ...]:
     """Extract the compared claim kinds from one layer record."""
 
     shape = getattr(layer, "shape", None)
+    param_shapes = getattr(layer, "param_shapes", None) or ()
     return (
         ("shape", tuple(shape) if shape is not None else None),
         ("dtype", str(getattr(layer, "dtype", None))),
-        (
-            "param_geometry",
-            tuple(
-                (name, tuple(shape))
-                for name, shape in sorted((getattr(layer, "param_shapes", None) or {}).items())
-            ),
-        ),
+        # Layer.param_shapes is an ordered sequence of parameter shapes
+        # (weight, bias, ...); order is part of the geometry claim.
+        ("param_geometry", tuple(tuple(entry) for entry in param_shapes)),
     )
 
 
@@ -717,7 +729,11 @@ def discharge_against(structure_trace: Any, real_trace: Any) -> StructureDischar
     for index, (hyp_layer, real_layer) in enumerate(
         zip(structure_trace.layer_list, real_trace.layer_list)
     ):
-        site = getattr(hyp_layer, "layer_label", None) or f"layer[{index}]"
+        site = (
+            getattr(hyp_layer, "label", None)
+            or getattr(hyp_layer, "layer_label", None)
+            or f"layer[{index}]"
+        )
         for claim_kind, hyp_value in _layer_claims(hyp_layer):
             observed = dict(_layer_claims(real_layer))[claim_kind]
             matched = hyp_value == observed
