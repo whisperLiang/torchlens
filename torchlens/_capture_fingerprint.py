@@ -98,23 +98,72 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     return hasher.hexdigest()
 
 
-def _hash_nested_tensor_content(value: Any) -> str:
-    """Return a deterministic content hash for nested tensor inputs.
+_INPUT_FRAGMENT_DEPTH_CEILING = 64
 
-    Parameters
-    ----------
-    value:
-        Nested tensor container.
 
-    Returns
-    -------
-    str
-        SHA-256 digest.
+def _forward_input_fragment(value: Any, depth: int = 0) -> object:
+    """Return a full-structure key fragment for the forward inputs.
+
+    The capture-cache key used to reduce inputs to their TENSOR leaves only
+    (the deleted ``_hash_nested_tensor_content``), so a changed non-tensor
+    forward input (``use_relu=False`` after a ``use_relu=True`` capture), a
+    changed kwarg NAME over the same tensor value, or a restructured input
+    container keyed identically to the original capture and ``cache=True``
+    served the WRONG trace (r8 b4 R39, opus end-to-end repro). This walker
+    frames the FULL nested structure: containers recursively (dict keys AND
+    values, sequences in order, sets order-insensitively), tensors by
+    content hash, and every non-container non-tensor leaf through
+    :func:`_attribute_state_fragment` (scalars by value, callables by code
+    digest, opaque objects by type identity -- the documented boundary).
+
+    Unlike attribute fragments there is NO item ceiling: nothing is
+    truncated -- every element is hashed, so a tail difference cannot
+    false-hit -- and the depth ceiling is generous (forward inputs
+    legitimately nest deeper than instance attributes). Past the ceiling
+    the fragment never matches (always-miss, never a truncated false hit).
     """
 
-    tensors = _iter_tensor_inputs(value)
-    entries = [_hash_tensor_content(tensor) for tensor in tensors]
-    return hashlib.sha256(repr(entries).encode("utf-8")).hexdigest()
+    if depth > _INPUT_FRAGMENT_DEPTH_CEILING:
+        return _never_matching_fragment("input-depth-ceiling")
+    if isinstance(value, torch.Tensor):
+        # The attribute reducer's tensor branch is exactly the contract
+        # needed here (content hash; meta by metadata; unhashable content
+        # mints never-matching); it does not recurse, so the fresh depth
+        # budget is irrelevant.
+        return _attribute_state_fragment(value)
+    # The concrete container type participates (unlike attribute fragments):
+    # ``forward(x, [1, 2])`` and ``forward(x, (1, 2))`` can branch on
+    # isinstance and trace different programs, so they must key apart.
+    if isinstance(value, dict):
+        return (
+            "dict",
+            type(value).__name__,
+            len(value),
+            tuple(
+                sorted(
+                    (
+                        repr(_forward_input_fragment(key, depth + 1)),
+                        repr(_forward_input_fragment(item, depth + 1)),
+                    )
+                    for key, item in value.items()
+                )
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        return (
+            "sequence",
+            type(value).__name__,
+            len(value),
+            tuple(_forward_input_fragment(item, depth + 1) for item in value),
+        )
+    if isinstance(value, (set, frozenset)):
+        return (
+            "set",
+            type(value).__name__,
+            len(value),
+            tuple(sorted(repr(_forward_input_fragment(item, depth + 1)) for item in value)),
+        )
+    return _attribute_state_fragment(value)
 
 
 def _fingerprint_model_content(model: nn.Module) -> str:
@@ -176,14 +225,23 @@ def _hash_code_object_into(hasher: Any, code: types.CodeType, depth: int = 0) ->
             hasher.update(repr(const).encode("utf-8"))
 
 
-def _callable_code_digest(func: Any) -> str:
+def _callable_code_digest(func: Any, depth: int = 0) -> str:
     """Digest one callable's implementation for the capture-cache key.
 
-    Plain functions (and bound/unbound methods) hash their code object plus
-    default-argument reprs. Callables without a Python code object (C
-    builtins, scripted callables) fall back to a stable module/qualname token
-    -- NEVER ``repr(func)``, whose memory address would break cross-process
-    key stability.
+    Plain functions (and bound/unbound methods) hash their code object,
+    default-argument reprs, and CLOSURE cell contents. Two factory-built
+    forwards share one code object while their closure cells configure
+    DIFFERENT traced programs (``def make(k): def f(x): return x * k``), so
+    omitting the cells collided them on one key and ``cache=True`` served
+    the WRONG activations (r8 b4 R39, fable probe). Cell values reduce
+    through :func:`_attribute_state_fragment` under the shared depth
+    ceiling; an unhashable cell mints a never-matching fragment there
+    (always-miss, never a false hit), and a not-yet-filled cell hashes a
+    stable empty token (two digests taken while the cell is unfilled are
+    indistinguishable by construction). Callables without a Python code
+    object (C builtins, scripted callables) fall back to a stable
+    module/qualname token -- NEVER ``repr(func)``, whose memory address
+    would break cross-process key stability.
     """
 
     hasher = hashlib.sha256()
@@ -196,6 +254,15 @@ def _callable_code_digest(func: Any) -> str:
                 hasher.update(repr(getattr(target, attribute, None)).encode("utf-8"))
             except Exception:
                 hasher.update(f"<unreprable-{attribute}>".encode())
+        closure = getattr(target, "__closure__", None)
+        if closure:
+            for cell in closure:
+                try:
+                    contents = cell.cell_contents
+                except ValueError:
+                    hasher.update(b"<empty-cell>")
+                    continue
+                hasher.update(repr(_attribute_state_fragment(contents, depth + 1)).encode("utf-8"))
     else:
         module = getattr(target, "__module__", None) or type(target).__module__
         qualname = getattr(target, "__qualname__", None) or type(target).__qualname__
@@ -330,7 +397,11 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
         except Exception:
             return _never_matching_fragment("ndarray-unreadable")
     if callable(value):
-        return ("callable", _callable_code_digest(value))
+        # Thread the CURRENT depth through: the digest folds closure cells
+        # back through this fragment reducer, so a self-referential closure
+        # (an inner function holding itself) must consume the shared depth
+        # budget and terminate at the ceiling instead of recursing forever.
+        return ("callable", _callable_code_digest(value, depth))
     cls = type(value)
     return ("object", f"{cls.__module__}.{cls.__qualname__}")
 

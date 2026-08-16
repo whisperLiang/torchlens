@@ -41,8 +41,8 @@ from ._capture_fingerprint import (  # noqa: F401  isort: skip
     _attribute_state_fragment,
     _callable_code_digest,
     _fingerprint_model_content,
+    _forward_input_fragment,
     _hash_code_object_into,
-    _hash_nested_tensor_content,
     _hash_tensor_content,
     _never_matching_fragment,
 )
@@ -1711,15 +1711,17 @@ def _capture_cache_key(
     """
 
     payload = {
-        # Schema 4: schema 3 (single-record authenticated entries plus the
-        # model-implementation signature) widened so plain instance
-        # attributes participate in the key (a changed ``self.k`` must miss).
-        "schema": 4,
+        # Schema 5: schema 4 (plain instance attributes in the key) widened
+        # so the FULL forward-input structure participates -- non-tensor
+        # inputs, kwarg names, and container shape. The tensor-leaf-only
+        # input hash let ``trace(model, x, use_relu=False)`` hit the cached
+        # ``use_relu=True`` capture and serve the WRONG trace (r8 b4 R39).
+        "schema": 5,
         "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
         "model": _fingerprint_model_content(model),
         "model_impl": _fingerprint_model_implementation(model),
-        "inputs": _hash_nested_tensor_content((input_args, input_kwargs)),
+        "inputs": repr(_forward_input_fragment((input_args, input_kwargs))),
         "config": config,
     }
     encoded = json.dumps(payload, sort_keys=True, default=repr).encode("utf-8")

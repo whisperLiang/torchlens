@@ -84,10 +84,6 @@ from .tensor_tracking import _append_module_suffix_to_equivalence_class
 # shared across instances during one capture. Cleanup releases it at the end of
 # the session; the next capture rebuilds from the current class definitions.
 _module_class_metadata_cache: dict[type, dict[str, Any]] = {}
-_module_namespace_container_slots: weakref.WeakKeyDictionary[
-    ModuleType,
-    tuple[int, tuple[str, ...]],
-] = weakref.WeakKeyDictionary()
 
 # Process-stable memo for source start lines. ``inspect.findsource`` re-tokenizes
 # (functions) or fully AST-parses (classes, CPython < 3.13) the defining file on
@@ -2844,20 +2840,24 @@ def _clear_session_tensor_metadata(
         seen.add(obj_id)
         namespace = getattr(value, "__dict__", None)
         if isinstance(namespace, dict):
-            cached_slots = _module_namespace_container_slots.get(value)
-            if cached_slots is None or cached_slots[0] != len(namespace):
-                slot_names = tuple(
-                    name
-                    for name, item in namespace.items()
-                    if not _is_isinstance_hostile_deprecation_shim(item)
-                    and isinstance(
-                        item,
-                        (torch.Tensor, dict, list, tuple, set, frozenset, deque),
-                    )
+            # No slot memo (r8 b4 R39, sol probe): the memo invalidated on
+            # ``len(namespace)`` only, so REPLACING a value at a constant
+            # length (``mod.stash = 5`` becoming ``mod.stash = tensor``) kept
+            # the stale slot list and the stamped tensor escaped the session
+            # clear -- provenance laundering across sessions. No cheaper
+            # invalidation is sound: detecting a new tensor/container slot
+            # requires type-inspecting every item, which IS the rebuild, so
+            # the filter runs fresh each walk (one isinstance pass per
+            # reachable module namespace per session end).
+            slot_names = tuple(
+                name
+                for name, item in namespace.items()
+                if not _is_isinstance_hostile_deprecation_shim(item)
+                and isinstance(
+                    item,
+                    (torch.Tensor, dict, list, tuple, set, frozenset, deque),
                 )
-                _module_namespace_container_slots[value] = (len(namespace), slot_names)
-            else:
-                slot_names = cached_slots[1]
+            )
             for name in slot_names:
                 item = namespace.get(name)
                 if isinstance(item, torch.Tensor) and not isinstance(item, torch.nn.Parameter):
