@@ -31,6 +31,17 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   `COMPLETE`, `HALTED`, `ABORTED_NONFINITE`, `FAILED`, `UNATTESTED`, or `UNKNOWN`; failed outcomes
   also identify the phase. See [Capture outcomes](capture_outcomes.md).
 
+**Episode capture**
+: One wrapped multi-step generation run captured as a single product
+  (`capture_kind=episode`): `tl.trace(episode_root, x, episode=EpisodeSpec(stepped_module=...))`
+  stamps the declaration and lands a per-step status ledger (header + rows with
+  `complete`/`interrupted`/`absent` statuses, emitted tokens, and the managed-RNG entry
+  seed) at `trace.annotations["episode"]`. A diagnostic-tier product for tens of steps
+  (cost is superlinear in step count); the ledger is a disclosure, never a settlement
+  authority, and its persistence is gated until the coordinated schema bump. All episode
+  spellings are provisional (no deprecation shim owed). See
+  [Episode capture](episode_capture.md).
+
 ## Graph records
 
 **Op**

@@ -2009,6 +2009,14 @@
  },
  {
   "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/bundle/__init__.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
   "field": "modules",
   "file": "torchlens/bundle/__init__.py",
   "has_default": false,
@@ -2020,8 +2028,40 @@
   "field": "params",
   "file": "torchlens/bundle/__init__.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 4,
   "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/bundle/_relations.py",
+  "has_default": false,
+  "sites": 16,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "params",
+  "file": "torchlens/bundle/_relations.py",
+  "has_default": false,
+  "sites": 7,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/capture/_episode_ledger.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/capture/_episode_ledger.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
  },
  {
   "ambiguous": true,

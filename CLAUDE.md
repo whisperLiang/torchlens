@@ -200,6 +200,26 @@ print(tl.compat.report(model, x).to_markdown())
   FAILED, never COMPLETE. Refresh re-arms `raise_on_nan`. Halted analysis
   `tl.save` works (the transient-leak refusal is fixed); halted `log_backward`
   and loaded-sparse `run()` remain allowed.
+- EPISODE CAPTURE (torch-only; every spelling DOCUMENTED-UNSTABLE): one wrapped multi-step
+  generation run is ONE product — `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` stamps
+  `capture_kind=episode` and lands the per-step status ledger (header + rows:
+  complete/interrupted/absent, emitted tokens from the root output, managed-RNG
+  entry_seed) at `trace.annotations["episode"]` after settlement. The ledger is a
+  DISCLOSURE, never a settlement authority (outcome vocabulary and N1-N5 unchanged);
+  loads validate fail-closed (illegal attachment refuses `episode_ledger_without_declaration`,
+  geometry violations quarantine `episode_ledger_incoherent`); persistence of the annotations
+  key AND the Bundle `member_relations` key is registrar-gated until the coordinated bump.
+  DIAGNOSTIC-TIER cost, superlinear (gpt2-124M CPU: N=20 79 s / N=100 657 s, 947 MB, 5.4 GB
+  RSS) — tens of steps, never hundreds; guarded-fast (`trace.run(fast=True)`) is the default
+  engine and must reproduce wrapped tokens bit-exactly (pinned). Teacher forcing
+  (`forced_tokens=`) is a disclosed NON-VERIFYING mode; escalation re-runs the WHOLE episode
+  wrapped with `escalated_from`/`reason`/`fidelity_basis` disclosed (E-A3: mismatch records
+  `diverged`, never a settlement input); declared unsnapshotable state refuses at declaration
+  time (`episode_state_unsnapshotable`). Bundles gain the optional S6 member-relation table
+  (`member_relations=`, `Bundle.relate`, `Bundle.derive_episode_status` — a derived fold,
+  never Bundle-level settlement; mutators cascade explicitly or refuse typed). Doc of record:
+  `docs/reference/episode_capture.md`.
 - `tl.trace(..., backend=None)` routes through `BackendSpec`; explicit backend mismatches,
   unknown names, unsupported capabilities, and audit-only payload reads raise typed backend
   errors. Public backend-neutral metadata lives on `Trace.backend`, `Trace.module_identity_mode`,

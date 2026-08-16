@@ -3248,6 +3248,15 @@ class Trace(
                 pickle_module_accessor_state._list,
                 pickle_module_accessor_state._pass_dict,
             )
+        # Episode-ledger load validation (S7): an episode payload in the
+        # restored annotations is validated fail-closed -- illegal attachment
+        # refuses typed, incoherent geometry quarantines with one warning.
+        if isinstance(self.__dict__.get("annotations"), dict) and (
+            "episode" in self.__dict__["annotations"]
+        ):
+            from ..capture._episode_ledger import validate_loaded_episode_annotations
+
+            validate_loaded_episode_annotations(self)
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:

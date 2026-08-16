@@ -170,6 +170,15 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 - Line length: 100
 - `tl.receptive_field` is lazy; entity-level `receptive_field` / `projective_field` siblings
   pair with `Trace.receptive_fields()` / `Trace.projective_fields()` tables.
+- EPISODE CAPTURE (torch-only, spellings DOCUMENTED-UNSTABLE): `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` captures one wrapped
+  multi-step generation run as ONE product with a per-step status ledger at
+  `trace.annotations["episode"]` (disclosure, never a settlement authority; persistence
+  registrar-gated until the coordinated tlspec bump). DIAGNOSTIC-TIER: cost is superlinear
+  in step count — tens of steps, never hundreds. Bundles carry the optional S6
+  member-relation table (`member_relations=`, `Bundle.relate`,
+  `Bundle.derive_episode_status`). Doc of record: `docs/reference/episode_capture.md`;
+  refusal codes in `docs/reference/error_refusal_contract.md`.
 
 ## Quality Gates
 Every task must pass before completion unless the task explicitly narrows verification:

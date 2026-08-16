@@ -84,6 +84,9 @@ _EAGER_TORCHLENS_MODULES = frozenset(
         "torchlens.captured_run",
         "torchlens.errors",
         "torchlens.errors._base",
+        # errors._base-only leaf (episode/bundle-relation refusal family);
+        # eager because torchlens.errors re-exports it beside .runnable.
+        "torchlens.errors.episode",
         "torchlens.errors.runnable",
         "torchlens.ir",
         "torchlens.ir.capture_events",
