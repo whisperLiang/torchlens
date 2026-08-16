@@ -400,6 +400,7 @@ def _add_node_to_graphviz(
     node_decision: Any | None = None,
     rolled_maps: "_RolledEdgeMaps | None" = None,
     deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+    encoding: Any | None = None,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -484,6 +485,7 @@ def _add_node_to_graphviz(
             show_containers,
             collapsed_container_nodes,
             show_input_transform_summary,
+            encoding=encoding,
         )
 
     _add_edges_for_node(
@@ -533,6 +535,7 @@ def _build_layer_node(
     show_input_transform_summary: bool = False,
     resolved_specs: list[NodeSpec] | None = None,
     sibling_counts: Mapping[str, int] | None = None,
+    encoding: Any | None = None,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -627,6 +630,10 @@ def _build_layer_node(
         )
     if theme is not None:
         default_spec = apply_theme_to_spec(default_spec, theme)
+    if encoding is not None:
+        from ._encoding import channel_wrapped_node_spec_fn
+
+        node_spec_fn = channel_wrapped_node_spec_fn(encoding, node, node_spec_fn)
     spec = _apply_node_spec_fn(self, node, default_spec, node_mode, node_spec_fn)
     if resolved_specs is not None:
         resolved_specs.append(spec)
@@ -1835,7 +1842,9 @@ def _apply_node_spec_fn(
         Preset to apply before the optional user callback.
     node_spec_fn:
         Optional user callback. Unrolled nodes are represented to the callback
-        by their parent Layer.
+        by their parent Layer. Encoding channels ride this slot as a per-node
+        wrapper (``_encoding.channel_wrapped_node_spec_fn``; C3 order:
+        preset -> channel -> user).
 
     Returns
     -------

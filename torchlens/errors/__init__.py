@@ -18,7 +18,15 @@ from ._base import (
     TraceNotReproducibleWarning,
     ValidationError,
 )
+from .episode import (
+    BundleRelationError,
+    EpisodeCaptureError,
+    EpisodeDeclarationError,
+    EpisodeErrorCode,
+    EpisodeLedgerError,
+)
 from .runnable import (
+    BufferSinkRoutingError,
     CollectiveBoundaryReplayError,
     NumericAttestationError,
     PathDivergenceError,
@@ -317,10 +325,16 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "BufferSinkRoutingError",
+    "BundleRelationError",
     "CaptureError",
     "CompatibilityError",
     "ConfigurationError",
     "DiagnosticSeverityError",
+    "EpisodeCaptureError",
+    "EpisodeDeclarationError",
+    "EpisodeErrorCode",
+    "EpisodeLedgerError",
     "InterventionError",
     "NumericAttestationError",
     "PathDivergenceError",

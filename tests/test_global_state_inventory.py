@@ -32,6 +32,7 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
+        ("torchlens/_state.py", "_aten_recording_armed"),
         # _active_record_spans left this ledger in fixwave-5 (R54): it is now
         # a never-rebound ContextVar holding an immutable tuple, so it is no
         # longer process-global mutable state at all.
@@ -390,6 +391,7 @@ _WEAK_SUBJECT_TABLES = frozenset(
         # entries die with the trace.
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/capture/structure_only.py", "_DISCHARGE_REGISTRY"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         # Per-trace grad_fn-call ordinal index (fix/walkers f399c63a, linear
@@ -874,6 +876,7 @@ def _capture_scope_snapshot() -> dict[str, Any]:
         "relationship_input_id": _state._relationship_input_id,
         "relationship_input_shape_hash": _state._relationship_input_shape_hash,
         "runnable_ledger_armed": _state._runnable_ledger_armed,
+        "aten_recording_armed": _state._aten_recording_armed,
         "capture_reserved_by": _state._capture_reserved_by,
         "active_label_session": torch_tl._ACTIVE_LABEL_SESSION,
         "active_witness_state": completeness_witness._ACTIVE_WITNESS_STATE,
@@ -1095,6 +1098,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/capture/structure_only.py", "_DISCHARGE_REGISTRY"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),

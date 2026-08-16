@@ -56,6 +56,9 @@ add names to the top-level `torchlens` namespace:
 | `bundle_producer_unverifiable` | Current-schema bundle's recorded `torchlens_version` does not parse under PEP 440 | Re-save the artifact with a released torchlens |
 | `bundle_torch_incompatible` | Bundle's recorded torch version is major-incompatible with (or unparseable against) the runtime torch | Load under a torch runtime with the recorded major version |
 | `bundle_save_failed` | Bundle save failed; the staging dir was marked PARTIAL and any pre-overwrite bundle restored | Fix the chained cause named in the message and re-save |
+| `bundle_member_has_relations` | A Bundle mutator (remove/clear/eviction) would orphan member-relation rows — silent orphaning is forbidden (S6 R5) | Pass `cascade_relations=True` to drop the rows explicitly, or remove the relations first |
+| `bundle_relation_member_missing` | A member-relation row names a member absent from the Bundle (S6 R1: no dangling edges, ever) | Add the named member or drop the row |
+| `bundle_relation_schema_invalid` | A member-relation row is outside the closed S6 schema (unknown kind, wrong row shape for the kind, or undeclared params) | Use the documented relation kinds and their declared params |
 | `backend_payload_unsupported` | Backend payload has no supported codec (`BackendPayloadUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage) | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
 | `backend_unsupported` | Backend does not implement the requested capability (`BackendUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage; the TF site-reachability subclass shares it) | Omit it or use another backend |
@@ -102,7 +105,16 @@ add names to the top-level `torchlens` namespace:
 | `diagnostic_severity_invalid` | Diagnostic severity is outside the closed vocabulary | Choose a documented severity |
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
+| `encoding_callable_error` | An encoding-channel user callable (`color_by=fn`) raised while resolving a node's value; the original exception is chained. UNSTABLE code (pre-ratification) | Fix the callable; read `Layer.ops` for per-pass truth instead of per-pass attributes on rolled aggregates |
+| `encoding_requires_dot_layout` | Explicit `layout="rank"` with an active encoding channel (`color_by`); v1 channels are dot-layout-only. UNSTABLE code (pre-ratification) | Pass `layout="dot"` or `layout="auto"`, or drop the channel |
+| `encoding_source_invalid` | An encoding-channel source names no known record field or scalar builtin, or (on a rolled multi-pass node) a field with no declared rolled-aggregate semantics row. UNSTABLE code (pre-ratification) | Pass a Layer/Op field name, a scalar builtin, or a callable; unroll the graph for per-pass sources |
+| `encoding_value_invalid` | An encoding-channel source produced a value the channel cannot encode (bool, non-scalar tensor, or other non-numeric). UNSTABLE code (pre-ratification) | Encode a numeric source, or convert the value inside a callable |
 | `env_flag_invalid` | A TorchLens boolean environment variable is set to an unrecognized value | Use `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, or unset the variable |
+| `episode_declaration_invalid` | The `episode=` declaration is unusable: the stepped module is not a proper submodule of the traced root, the token axis/output contract is unmet, the forced-token feed is malformed, or the declaration combines with chunking, `cache=True`, or a value-free save policy (the structure-only combination refuses with `structure_only_episode_unsupported`) | Fix the declaration per the message; wrap the loop in an `nn.Module` and declare its stepped submodule |
+| `episode_ledger_incoherent` | Episode ledger geometry violates the monotone prefix law, a coherence arm, the declared step count, or the value-mode token presence rule; on load the ledger quarantines and the outcome derivation degrades fail-closed | Re-capture the episode; a hand-edited ledger never loads as claims |
+| `episode_ledger_payload_in_structure_only` | A structure-only episode ledger carries token payloads (S7 presence rule) | Remove the token payloads or drop the structure-only marker |
+| `episode_ledger_without_declaration` | An episode ledger is attached to a capture that carries no episode declaration — illegal per the marker-combination table | Capture with `episode=EpisodeSpec(...)` instead of hand-attaching a ledger |
+| `episode_state_unsnapshotable` | Declared episode-carried state has no snapshot/restore support inside the declared checkpoint scope (E-A4); refused at declaration time, before execution | Declare only snapshotable state, or make the item deep-copyable |
 | `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
 | `followed_by_unsupported` | `tl.followed_by(...)` predicate shape or retroactive capture is unsupported on this surface (`PredicateError`, `RuntimeError` lineage) | Compose `candidate & tl.followed_by(successor)` and capture with `tl.trace(save=...)` |
@@ -118,6 +130,8 @@ add names to the top-level `torchlens` namespace:
 | `graphviz_binary_unavailable` | The Graphviz executable is not on PATH, so no render subprocess can start (`GraphvizUnavailableError`, `RuntimeError` lineage) | Install the Graphviz system package (`apt install graphviz` / `brew install graphviz`) |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
+| `grouping_invalid` | `grouping=` value is outside the closed vocabulary | Choose a documented grouping policy value |
+| `grouping_policy_unavailable` | `grouping=` value is legal vocabulary but not entry-legal for this capture kind/wave (spelling provisional pending the S2 vocabulary amendment) | Use the default `grouping='structural'` |
 | `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
 | `hash_content_type_unsupported` | `tl.hash.content` value cannot be deterministically encoded (`ArgumentTypeError`, `TypeError` lineage) | Pass tensors, arrays, builtin scalars/containers, or `__dict__`-inspectable objects |
 | `hash_expected_type_invalid` | `tl.assert_unchanged` pin is neither a string nor `None` (`ArgumentTypeError`, `TypeError` lineage) | Pass the pinned hash string, or `None` to bootstrap a pin |
@@ -137,6 +151,7 @@ add names to the top-level `torchlens` namespace:
 | `intervention_helper_unknown` | Built-in helper name is unknown | Choose a registered helper |
 | `jax_control_flow_invalid` | JAX control-flow mode is unknown | Choose `reject`, `unroll`, or `region` |
 | `layer_pass_ambiguous` | Per-pass field read on a multi-pass layer | Access the field on one pass via `.ops[k]` |
+| `layer_site_ambiguous` | `Layer.site_key` read on a layer spanning multiple structural sites (spelling provisional pending the S2 vocabulary amendment) | Read the per-pass key via `.ops[k].site_key` |
 | `link_format_invalid` | Source-link format is unknown | Choose `terminal`, `html`, or `text` |
 | `jax_unroll_range_invalid` | JAX unroll limit is below one | Pass a positive integer |
 | `jax_unroll_type_invalid` | JAX unroll limit is not an integer | Pass a positive integer |
@@ -200,12 +215,18 @@ add names to the top-level `torchlens` namespace:
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
 | `renderer_capability_unsupported` | RenderIR requires a capability its renderer lacks (`UnsupportedRendererCapabilityError`, `RuntimeError` lineage) | Use the graphviz renderer or drop the option needing the capability |
+| `run_carry_state_requires_live_model` | `carry_state=True` on a loaded provider, which mutates staged clones and has no live model for state to carry into (PROVISIONAL spelling, documented-unstable) | Drop `carry_state=` on loaded traces, or run the live model |
+| `run_fast_carry_state_unsupported` | `carry_state=True` with `fast=True`; fast mode's cached-oracle contract forbids declared-state mutation (PROVISIONAL spelling, documented-unstable) | Drop `carry_state=` or drop `fast=` |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
+| `run_fast_until_unsupported` | `until=` with `fast=True`; the fast tier compiles the full recorded path (PROVISIONAL spelling, documented-unstable) | Drop `until=` or drop `fast=` |
+| `run_until_form_invalid` | `until=`/run-time `save=` run-window selection invalid: a non-string non-predicate form, an empty or unresolvable selection, sites with no producing recorded call, or a `save=` site outside the `until=` executed window (PROVISIONAL spelling, documented-unstable; predicate/selector forms refuse separately via `run_capability_unavailable` at stage `predicate_surface_pending` until the S4 merge) | Pass static layer labels, module addresses, or `'saved'`, inside the executed window |
 | `run_input_missing` | Legacy rerun received no forward input | Pass the input as `log.run(model, x)` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |
 | `run_legacy_arguments_conflict` | Unified and legacy run arguments were mixed | Pass one input form only |
-| `run_legacy_options_conflict` | Unified run received legacy rerun options | Drop the legacy options |
+| `run_legacy_options_conflict` | Legacy and unified run options were mixed in either direction (legacy rerun options on the unified surface, or the unified-only `carry_state=` on the legacy surface) | Drop the mismatched options |
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
+| `run_state_snapshot_unsupported` | The default live run() could not snapshot declared state before executing (enumeration unavailable, unprovable/overlapping alias topology, or clone/allocation failure); fail-before-execute, no forward ran (`StateBindingError`, `ValueError` lineage; PROVISIONAL spelling, documented-unstable) | Pass `carry_state=True` if you accept declared-state mutation persisting, or fix the named state entry |
+| `run_state_restore_failed` | A declared-state restore failed AFTER execution (the live model's state is now unknown), or a later live/fast run() was attempted on a trace carrying that session-scoped state-compromised latch (`StateBindingError`, `ValueError` lineage; PROVISIONAL spelling, documented-unstable) | Reload known-good weights (or re-capture), then run again |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
 | `save_budget_invalid` | `save_budget` is not `'auto'`, a float in `(0, 1]`, an int byte cap, or `None` (`InvalidArgumentError`, `ValueError` lineage) | Pass one of the documented spellings |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
@@ -217,6 +238,7 @@ add names to the top-level `torchlens` namespace:
 | `summary_fields_invalid` | Summary field names are unknown | Pass documented summary fields |
 | `summary_level_invalid` | Summary level is unknown | Pass a documented summary level |
 | `summary_option_conflict` | Aliased summary options disagree | Pass one alias, or equal values |
+| `site_key_unavailable` | Site accessor read on a trace without site keys (legacy artifact or detached layer; spelling provisional pending the S2 vocabulary amendment) | Re-capture with a current TorchLens to mint site keys |
 | `stack_ordinals_duplicate` | Stacked ops share an execution ordinal | Narrow the selector to distinct ops |
 | `stack_ordinals_unavailable` | Matched ops lack recorded execution ordinals | Select ops with recorded ordinals |
 | `stack_output_not_tensor` | Stacked op's saved primary out is not one tensor | Select single-tensor-output ops |

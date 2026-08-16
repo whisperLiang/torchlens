@@ -13,7 +13,7 @@ import types
 import warnings
 import weakref
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial, wraps
 from typing import TYPE_CHECKING, Any, cast
@@ -40,7 +40,6 @@ from ...utils._torch_compat import (
     HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE,
     dynamo_is_compiling,
     fix_tensor_sequence_slot,
-    get_current_dispatch_mode_stack,
     get_current_function_mode_stack,
     get_device_constructors,
     get_device_context_type,
@@ -65,6 +64,7 @@ from ...utils.tensor_utils import (
     print_override,
     safe_copy,
 )
+from ._modes import pause_own_dispatch_modes
 from ._tl import (
     _DETACHED_ACTIVATION_PROPAGATION_FUNCS,
     get_param_meta,
@@ -86,7 +86,6 @@ from .buffer_writes import (
 )
 from .completeness_witness import (
     CompletenessWitnessMode,
-    _CompletenessDispatchMode,
     completeness_scope_for_wrapper,
     internal_scalar_read,
     observe_nonowner_operands,
@@ -124,11 +123,7 @@ def _diagnostic_edge_armed() -> bool:
         ``True`` when a shared one-shot token is required.
     """
 
-    return (
-        _state._escape_detector_mode == "shadow"
-        or _state._completeness_witness_mode == "shadow"
-        or _state._runnable_ledger_armed
-    )
+    return _state.diagnostic_observer_armed()
 
 
 @dataclass(frozen=True)
@@ -1534,49 +1529,6 @@ def _setattr_ignoring_advisories(namespace: Any, name: str, value: Any) -> None:
         setattr(namespace, name, value)
 
 
-def _exit_own_witness_modes() -> list[Any] | None:
-    """Pop TorchLens's own completeness-witness dispatch modes off the stack top.
-
-    ``TensorBase.__new__`` with a strict Tensor SUBCLASS ``cls`` crashes whenever
-    ANY python ``TorchDispatchMode`` is active: torch materializes the interior
-    tensor's python object as plain ``Tensor`` on the mode's redispatch, and the
-    subsequent subclass association refuses (reproduced on stock torch with a
-    no-op mode — torch-inherent, not a wrapper effect). The completeness witness
-    is TorchLens's OWN mode (armed for validation and runnable-eligible
-    captures), so the wrapper exits it for exactly the original ctor call and
-    re-enters afterwards. The ctor op itself IS captured by this wrapper, so its
-    paused interior stays owned — the same opacity class as a fused kernel.
-    Foreign user modes are never popped: stock torch crashes under them too, and
-    popping them would change observable torch behavior relative to unwrapped
-    eager execution. Runs on the owner thread around one synchronous call, so
-    the exit/re-enter pair is LIFO-safe.
-
-    Returns
-    -------
-    list[Any] | None
-        The exited witness modes, outermost last, or ``None`` when the stack is
-        unreadable or holds no TorchLens witness mode on top (fail closed to
-        stock behavior).
-    """
-
-    stack = get_current_dispatch_mode_stack()
-    if not stack:
-        return None
-    exited: list[Any] = []
-    while stack and isinstance(stack[-1], _CompletenessDispatchMode):
-        mode = stack.pop()
-        mode.__exit__(None, None, None)
-        exited.append(mode)
-    return exited or None
-
-
-def _reenter_witness_modes(exited: list[Any]) -> None:
-    """Re-enter witness modes previously popped by ``_exit_own_witness_modes``."""
-
-    for mode in reversed(exited):
-        mode.__enter__()
-
-
 _MUTATING_TENSOR_PROPERTY_SETTERS = frozenset({"real", "imag", "data"})
 
 # Setters that rebind the receiver to the RHS's storage instead of writing in
@@ -1652,7 +1604,7 @@ def torch_func_decorator(
     force_distinct_return = func_name == "identity"
     # ``TensorBase.__new__`` is the one wrapped callable whose ORIGINAL refuses
     # to run under any python TorchDispatchMode when handed a strict Tensor
-    # subclass cls (see _exit_own_witness_modes); every other op pays nothing.
+    # subclass cls (see pause_own_dispatch_modes); every other op pays nothing.
     constructs_tensor_subclass = func_name == "__new__"
     # Decoration-time constant: ``propagate_detached_saved_activation`` is a
     # guaranteed no-op for any name outside the propagation allowlist, but its
@@ -1971,36 +1923,39 @@ def torch_func_decorator(
             else False
         )
         expected_token = None
-        exited_witness_modes = None
-        if (
+        pauses_owned_modes = (
             constructs_tensor_subclass
             and args
             and isinstance(args[0], type)
             and args[0] is not torch.Tensor
             and issubclass(args[0], torch.Tensor)
-        ):
-            exited_witness_modes = _exit_own_witness_modes()
+        )
         # W3 F8: per-op duration must measure the USER op, not TorchLens
         # bookkeeping. The clock starts here -- after RNG/autocast snapshots
         # and container/intervention-site registration -- and stops right
         # after the call returns, so ``func_duration`` no longer
         # systematically overstates cheap ops in instrumented captures.
         func_exec_start = time.time()
+        mode_pause = pause_own_dispatch_modes() if pauses_owned_modes else nullcontext(())
+        paused_modes: tuple[Any, ...] = ()
         try:
-            if _diagnostic_edge_armed():
-                with expected_original_call(
-                    func,
-                    f"torch_func:{func_name}:logged",
-                    func_name=func_name,
-                    func_call_id=func_call_id,
-                    call_barcode=func_call_barcode,
-                ) as expected_token:
+            with mode_pause as paused_modes:
+                if _diagnostic_edge_armed():
+                    with expected_original_call(
+                        func,
+                        f"torch_func:{func_name}:logged",
+                        func_name=func_name,
+                        func_call_id=func_call_id,
+                        call_barcode=func_call_barcode,
+                    ) as expected_token:
+                        out_orig = func(*args, **kwargs)
+                else:
                     out_orig = func(*args, **kwargs)
-            else:
-                out_orig = func(*args, **kwargs)
         finally:
-            if exited_witness_modes is not None:
-                _reenter_witness_modes(exited_witness_modes)
+            if paused_modes:
+                from ._aten_capture import _record_mode_paused_interior
+
+                _record_mode_paused_interior(trace, owner_func_call_id=func_call_id)
             _nvtx_range_pop(nvtx_pushed)
         func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:

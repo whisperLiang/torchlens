@@ -1902,6 +1902,7 @@ class Op(_SelectionOperand):
         equivalence_class: Any
         equivalent_ops: Any
         recurrent_ops: Any
+        site_key: str | None
         parents: Any
         parent_arg_positions: Any
         _edge_uses: Any
@@ -2092,6 +2093,10 @@ class Op(_SelectionOperand):
         "equivalence_class": FieldPolicy.KEEP,
         "equivalent_ops": FieldPolicy.KEEP,
         "recurrent_ops": FieldPolicy.KEEP,
+        # site_key_v1 structural-position identity: DROP under tlspec v7,
+        # prerelease-registered (S3 discipline) -- persists KEEP only at the
+        # coordinated version bump.
+        "site_key": FieldPolicy.DROP,
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
@@ -5201,3 +5206,15 @@ TensorLog = Op
 
 register_prerelease_field(Op, "edge_substitutions", persisted_policy=FieldPolicy.BLOB_RECURSIVE)
 register_prerelease_field(Op, "edge_replacement_stamps", persisted_policy=FieldPolicy.KEEP)
+
+
+def _register_prerelease_fields() -> None:
+    """Register sprint-gated DROP fields (S3 registrar; site_key persists KEEP
+    only at the coordinated tlspec bump -- gates run under the test switch)."""
+
+    from .._io.prerelease import register_prerelease_field
+
+    register_prerelease_field(Op, "site_key")
+
+
+_register_prerelease_fields()

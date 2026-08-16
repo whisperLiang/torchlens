@@ -158,7 +158,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 97 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 98 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
   break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,
@@ -211,6 +211,26 @@ print(tl.compat.report(model, x).to_markdown())
   FAILED, never COMPLETE. Refresh re-arms `raise_on_nan`. Halted analysis
   `tl.save` works (the transient-leak refusal is fixed); halted `log_backward`
   and loaded-sparse `run()` remain allowed.
+- EPISODE CAPTURE (torch-only; every spelling DOCUMENTED-UNSTABLE): one wrapped multi-step
+  generation run is ONE product — `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` stamps
+  `capture_kind=episode` and lands the per-step status ledger (header + rows:
+  complete/interrupted/absent, emitted tokens from the root output, managed-RNG
+  entry_seed) at `trace.annotations["episode"]` after settlement. The ledger is a
+  DISCLOSURE, never a settlement authority (outcome vocabulary and N1-N5 unchanged);
+  loads validate fail-closed (illegal attachment refuses `episode_ledger_without_declaration`,
+  geometry violations quarantine `episode_ledger_incoherent`); persistence of the annotations
+  key AND the Bundle `member_relations` key is registrar-gated until the coordinated bump.
+  DIAGNOSTIC-TIER cost, superlinear (gpt2-124M CPU: N=20 79 s / N=100 657 s, 947 MB, 5.4 GB
+  RSS) — tens of steps, never hundreds; guarded-fast (`trace.run(fast=True)`) is the default
+  engine and must reproduce wrapped tokens bit-exactly (pinned). Teacher forcing
+  (`forced_tokens=`) is a disclosed NON-VERIFYING mode; escalation re-runs the WHOLE episode
+  wrapped with `escalated_from`/`reason`/`fidelity_basis` disclosed (E-A3: mismatch records
+  `diverged`, never a settlement input); declared unsnapshotable state refuses at declaration
+  time (`episode_state_unsnapshotable`). Bundles gain the optional S6 member-relation table
+  (`member_relations=`, `Bundle.relate`, `Bundle.derive_episode_status` — a derived fold,
+  never Bundle-level settlement; mutators cascade explicitly or refuse typed). Doc of record:
+  `docs/reference/episode_capture.md`.
 - `tl.trace(..., backend=None)` routes through `BackendSpec`; explicit backend mismatches,
   unknown names, unsupported capabilities, and audit-only payload reads raise typed backend
   errors. Public backend-neutral metadata lives on `Trace.backend`, `Trace.module_identity_mode`,
@@ -246,6 +266,24 @@ print(tl.compat.report(model, x).to_markdown())
   stale-label sidecar FAILS validation rather than silently passing.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
+- `Trace.draw(color_by=...)` (UNSTABLE spelling, keyword-only, no deprecation shim owed until
+  the naming session ratifies it) is the v1 encoding channel: a record field name, scalar
+  builtin (`time`/`flops`/`bytes`/`magnitude`/`grad_norm`), or callable `node -> value` fills
+  eligible op nodes from a colorblind-safe sequential ramp (linear min-max, legend-disclosed).
+  Channels are dot-layout-only (AUTO forces dot with a notice; explicit `layout="rank"` refuses
+  `encoding_requires_dot_layout`) and presentation-only (collapse plan and Trace untouched).
+  On rolled multi-pass layers, field sources resolve through the name-keyed rolled-aggregate
+  allowlist in `torchlens/visualization/_encoding.py`: marker-varying and mirrored
+  first-pass-only numerics (`raw_index`, `step_index`, `ordinal_index`, `grad_fn_object_id`,
+  `buffer_pass`, `transformed_gradient_memory`, `conditional_depth`) stay UNENCODED with a
+  legend note — an encoding must never imply uniformity it cannot prove (tripwire class);
+  exact cross-pass totals (`total_*`, the autograd trio) encode with a mandatory aggregation
+  legend line; unclassified sources refuse `encoding_source_invalid`. `show_legend` is now
+  tri-state: `None` (default, AUTO) draws a channel-only disclosure legend iff a channel is
+  active; `True`/`False` keep their historical meanings, and explicit `False` is honored even
+  with channels active. Typed refusals: `encoding_source_invalid`, `encoding_value_invalid`
+  (bools and non-scalar tensors refuse — a bool is not a magnitude), `encoding_callable_error`
+  (chains the user exception), `encoding_requires_dot_layout`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose
@@ -383,6 +421,31 @@ print(tl.compat.report(model, x).to_markdown())
   with the typed `tl.errors.ArtifactVersionBelowFloorError` (drop-not-resurrect; the legacy
   field-alias ladders are deleted). Legacy 2.16 intervention specs remain loadable — the
   floor covers Trace rehydration only.
+- SITE KEYS + GROUPING SURFACE (L1 wave 0; every spelling DOCUMENTED-UNSTABLE
+  pending naming-session/S2 ratification): every retained op carries
+  `op.site_key` (`site_key_v1`) — a portable, policy-independent
+  STRUCTURAL-POSITION identity minted at grouping time on every backend
+  (`"s1|" + module-site/type/slot/ordinal`, percent-escaped; ordinals restart
+  per pass-qualified innermost call instance, so reused-module calls share
+  keys across instances). It is a BRIDGING relation (cross-capture joins on
+  position, never proven source identity: per-call-instance cardinality guard
+  + source-location witness + corroborated/positional/refused verdict tiers,
+  internal until S2). `Layer.site_key` returns the single shared key or
+  refuses typed `layer_site_ambiguous` (within-call recurrence groups span
+  sites); `Layer.site_peers` indexes same-site layers live; keyless legacy
+  artifacts refuse `site_key_unavailable`. `Layer.shape_summary` is the
+  derived across-pass shape string ("2->4" monotone / "2-4" min-max /
+  first->last full shapes; contains `->`, escape at render). The
+  `grouping=` trace kwarg is closed-vocabulary ("structural" default;
+  "strict_shapes"/"fold_sites" refuse typed until their designs/D1 rule);
+  `trace.grouping` mirrors the request and `trace.grouping_policy` is the
+  load-validated `grouping_policy_v1` stamp (coherence rules C1-C8;
+  invalid/legacy stamps settle to the canonical degraded representation and
+  refuse stamp-consuming operations typed). All persisted rows are
+  FieldPolicy.DROP + prerelease-registered under tlspec v7. Invariants
+  I-S1/I-S2/I-S3' are live tripwires; folding stays OFF everywhere except
+  future episode products (D1 default) — the tier-(a) fold closure ships
+  entry-dark as a pure function.
 - STRUCTURE-ONLY CAPTURE (L7a wave 0, D8-DEFAULT branch; every spelling
   DOCUMENTED-UNSTABLE pending naming-session/S2 ratification):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records the
@@ -561,7 +624,15 @@ nondeterministic-capture-context runs report `not_applicable`; `attested` always
 ### Sparse runnable execution
 
 `trace.run(inputs=x, seed=...)` is the provider-neutral execution spelling. A live Trace delegates
-on a fork to the existing `save_new_outs` fast capture path; a loaded sparse Trace binds cloned
+on a fork to the existing `save_new_outs` fast capture path. The live refresh projector's
+buffer-sink refusal is TRAINING-MODE AWARE (D18, explicit JMT ruling): eval-mode BatchNorm
+(every buffer sink carries derived write evidence `buffer_value_changed=False` with agreeing
+mode claims) is refresh-eligible and runnable on the DEFAULT path, while any value-changing
+buffer write (train-mode running stats, counters), unproven (`None`) evidence, a mode claim
+contradicting the evidence, or a value-changing write in the refreshed rerun's own journal
+refuses with the typed `BufferSinkRoutingError` carrying
+`RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE` (provisional spelling, documented-unstable;
+pinned "computational graph changed" message term preserved). A loaded sparse Trace binds cloned
 input leaves plus staged/random state and executes its resolved taken-path DAG under
 `pause_logging()`. Both return `RunResult(output, trace, report)` and leave the source Trace
 unchanged. Analysis-only loads raise typed `run_capability_unavailable`. Stage 5 populates

@@ -74,6 +74,7 @@ def compute_preview_recurrence_assignments(
                 pass_index=1,
                 num_passes=1,
                 equivalence_key=graph.nodes[label].equivalence_key,
+                site_key=graph.nodes[label].site_key,
             ),
         )
         for label in graph.raw_labels
@@ -182,6 +183,7 @@ def _build_preview_recurrence_graph(
             recurrence_anchored=(
                 bool(getattr(op_log, "modules", None)) or bool(getattr(op_log, "is_buffer", False))
             ),
+            site_key=getattr(op_log, "site_key", None),
         )
 
     return RecurrenceGroupingGraph(

@@ -13,6 +13,8 @@ from ._runnable_state import (
 )
 from .runnable import (
     NONDETERMINISTIC_SOURCE_VOCABULARY,
+    RUN_TRUNCATION_CAUSE_VOCABULARY,
+    RUN_TRUNCATION_REGIME_VOCABULARY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     ContractCheck,
@@ -23,6 +25,7 @@ from .runnable import (
     RunnableDiagnostic,
     RunnableErrorCode,
     RunReport,
+    RunTruncation,
     SparseRunDescriptor,
     StateSource,
     WitnessCompleteness,
@@ -65,12 +68,22 @@ def _path_faithfulness(
     input_alias_unresolved: bool = False,
     nondeterministic_control_source: bool = False,
     input_derived_layout_stale: bool = False,
+    run_truncated: bool = False,
 ) -> tuple[PathFaithfulness, RunnableDiagnostic | None]:
     """Classify exact three-state path faithfulness after all honesty checks."""
 
     failed = next((check for check in checks if not check.passed), None)
     if failed is not None:
         return PathFaithfulness.DIVERGED, failed.diagnostic
+    if run_truncated:
+        # L4 2.4 positive-claim bar: a truncated (until=) run may never settle a
+        # positive claim. The ceiling is an input to the verdict derivation
+        # UPSTREAM of attestation (the r35-I3 extension point), so VERIFIED is
+        # unreachable and attestation derives NOT_APPLICABLE via the existing
+        # lattice rule before a single archive byte is read. Contradictions the
+        # executed region DOES evidence still degrade normally: the failed-check
+        # arm above settles DIVERGED first (the cap is a ceiling, never a floor).
+        return PathFaithfulness.UNVERIFIABLE, None
     # r71 A3: the VERIFIED gate consults ONLY the parser-derived completeness FLOOR
     # (re-derived here from the typed gap ledger by the ONE derivation function).
     # The persisted summary is a redundant assertion checked equal at parse; reading
@@ -154,6 +167,8 @@ def _run_report(
     first_mismatch: RunnableDiagnostic | None,
     numeric_attestation: NumericAttestationStatus,
     nondeterministic_sources: Iterable[str] = (),
+    state_carried: bool = False,
+    truncation: RunTruncation | None = None,
 ) -> RunReport:
     """Build the settled run-report surface -- the ONE report finalizer (r37 corr2-5).
 
@@ -182,6 +197,31 @@ def _run_report(
             "Internal invariant violation: nondeterministic sources outside the "
             f"closed vocabulary: {sorted(unknown_sources)!r}."
         )
+    if truncation is not None:
+        # L4 2.4 redundant tamper assert (tripwire, not the mechanism): the
+        # run_truncated ceiling is threaded into the verdict derivation UPSTREAM
+        # of attestation, so a truncated run reaching this spine with a positive
+        # claim is an internal invariant violation, never a reachable state.
+        if path_faithfulness is PathFaithfulness.VERIFIED:
+            raise RuntimeError(
+                "Internal invariant violation: a truncated run may never settle "
+                "VERIFIED path_faithfulness (the run_truncated ceiling was bypassed)."
+            )
+        if numeric_attestation is NumericAttestationStatus.ATTESTED:
+            raise RuntimeError(
+                "Internal invariant violation: a truncated run may never settle "
+                "ATTESTED numeric attestation."
+            )
+        if truncation.regime not in RUN_TRUNCATION_REGIME_VOCABULARY:
+            raise RuntimeError(
+                f"Internal invariant violation: truncation regime {truncation.regime!r} "
+                "is outside the closed vocabulary."
+            )
+        if truncation.cause is not None and truncation.cause not in RUN_TRUNCATION_CAUSE_VOCABULARY:
+            raise RuntimeError(
+                f"Internal invariant violation: truncation cause {truncation.cause!r} "
+                "is outside the closed vocabulary."
+            )
     return RunReport(
         readiness=readiness,
         state_source=state_source,
@@ -194,6 +234,10 @@ def _run_report(
         numeric_attestation=numeric_attestation,
         poisoned=poisoned,
         nondeterministic_sources=declared_sources,
+        state_carried=bool(state_carried),
+        truncation=truncation,
+        truncated=truncation is not None,
+        stopped_at=None if truncation is None else truncation.stopped_at,
     )
 
 

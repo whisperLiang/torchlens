@@ -1302,6 +1302,9 @@ def _materialize_backward_projections(trace: Any) -> None:
         # revision counter: fall back to the event count as a change signal.
         revision = len(events)
     if getattr(trace, "_backward_projection_revision", None) == revision:
+        from ...postprocess._primitive_profile import _materialize_backward_primitive_profile
+
+        _materialize_backward_primitive_profile(trace)
         return
     trace._tl_materializing_backward_projection = True
     try:
@@ -1330,6 +1333,9 @@ def _materialize_backward_projections(trace: Any) -> None:
         # the retry (sol review finding 2).
         trace._backward_projection_event_count = len(events)
         trace._backward_projection_revision = revision
+        from ...postprocess._primitive_profile import _materialize_backward_primitive_profile
+
+        _materialize_backward_primitive_profile(trace)
     except BaseException:
         # Poison every lazy-invalidation surface: the projection or epoch
         # may be partially mutated, so the next access must take the full
@@ -1900,6 +1906,7 @@ def _make_grad_fn_hook(
     grad_fn_object_id: int,
     *,
     is_accumulate_grad: bool = False,
+    aten_marker_tokens: list[Any] | None = None,
 ) -> Callable[..., tuple[torch.Tensor | None, ...] | None]:
     """Build a runtime hook for one autograd grad_fn_handle.
 
@@ -1911,6 +1918,8 @@ def _make_grad_fn_hook(
         ``id()`` of the hooked grad_fn_handle.
     is_accumulate_grad:
         Whether this hook is attached to an AccumulateGrad node.
+    aten_marker_tokens:
+        LIFO marker tokens installed by the private ATen GradFn prehook.
 
     Returns
     -------
@@ -1922,6 +1931,10 @@ def _make_grad_fn_hook(
 
     def hook(*hook_args: Any) -> tuple[torch.Tensor | None, ...] | None:
         """Record one autograd grad_fn hook firing and apply live interventions."""
+        if aten_marker_tokens:
+            from ._aten_capture import _end_backward_grad_fn
+
+            _end_backward_grad_fn(aten_marker_tokens.pop())
         live_trace = trace_ref()
         if live_trace is None:
             return None
@@ -2051,6 +2064,50 @@ def _make_grad_fn_hook(
         return result
 
     return hook
+
+
+def _make_aten_grad_fn_prehook(
+    trace: Any,
+    grad_fn_object_id: int,
+    marker_tokens: list[Any],
+) -> Callable[..., None]:
+    """Build a prehook that brackets one GradFn execution for ATen attribution.
+
+    Parameters
+    ----------
+    trace
+        Trace receiving primitive events.
+    grad_fn_object_id
+        Captured GradFn object identity.
+    marker_tokens
+        Per-node LIFO token stack shared with the posthook.
+
+    Returns
+    -------
+    Callable[..., None]
+        Framework-compatible prehook that leaves gradient inputs unchanged.
+    """
+
+    trace_ref = weakref.ref(trace)
+
+    def prehook(*hook_args: Any) -> None:
+        """Publish the predicted GradFn-call witness immediately before execution."""
+
+        del hook_args
+        live_trace = trace_ref()
+        if live_trace is None:
+            return None
+        grad_fn_record = getattr(live_trace, "grad_fn_logs", {}).get(grad_fn_object_id)
+        if grad_fn_record is None:
+            return None
+        pass_index = int(getattr(live_trace, "_active_backward_pass_index", 0) or 0)
+        call_index = len(grad_fn_record.calls) + 1
+        from ._aten_capture import _begin_backward_grad_fn
+
+        marker_tokens.append(_begin_backward_grad_fn(grad_fn_object_id, call_index, pass_index))
+        return None
+
+    return prehook
 
 
 def _make_grad_fn_prehook(
@@ -2553,6 +2610,7 @@ def _walk_and_hook_backward_graph(
             if parent_layer is not None:
                 parent_layer.grad_fn = grad_fn_record
         try:
+            aten_marker_tokens: list[Any] = []
             with pause_logging():
                 handles.append(
                     grad_fn_handle.register_hook(
@@ -2560,12 +2618,24 @@ def _walk_and_hook_backward_graph(
                             trace,
                             grad_fn_object_id,
                             is_accumulate_grad=is_accumulate_grad,
+                            aten_marker_tokens=aten_marker_tokens,
                         )
                     )
                 )
             if is_accumulate_grad:
                 handles.append(
                     grad_fn_handle.register_prehook(_make_grad_fn_prehook(trace, grad_fn_object_id))
+                )
+            event_stream = _ensure_backward_event_stream(trace)
+            if getattr(event_stream, "aten_recording_enabled", False):
+                handles.append(
+                    grad_fn_handle.register_prehook(
+                        _make_aten_grad_fn_prehook(
+                            trace,
+                            grad_fn_object_id,
+                            aten_marker_tokens,
+                        )
+                    )
                 )
         except RuntimeError as exc:
             # A node the walk discovered but could not observe is a typed
@@ -3078,7 +3148,10 @@ def _run_backward_with_capture(
     result = None
     trace._tl_active_backward_bracket = True
     try:
-        result = backward_callable()
+        from ._aten_capture import _capture_backward_aten
+
+        with _capture_backward_aten(trace, pass_index):
+            result = backward_callable()
     except BaseException:
         # BaseException (including KeyboardInterrupt/SystemExit) is stamped
         # as a failed attempt without being swallowed or translated: the

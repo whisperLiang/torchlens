@@ -51,6 +51,7 @@ from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
+from ...postprocess._grouping_stamp import build_grouping_policy_stamp
 from ...postprocess._materialize import materialize_from_events
 from ...postprocess.finalization import _build_module_logs
 from ...postprocess.loop_grouping_adapter import (
@@ -79,6 +80,7 @@ from .._options import (
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from .._validation_shared import float_replay_tolerances
+from ._site_dialect import jax_site_keys
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
     JaxCaptureResult,
@@ -1846,6 +1848,10 @@ class JAXBackend:
         """
 
         assignments = self._jax_recurrence_assignments(trace)
+        trace.grouping_policy = build_grouping_policy_stamp(
+            ran_recurrence_grouping=bool(trace.recurrence_detection),
+            requested=getattr(trace, "grouping", "structural"),
+        )
         raw_labels = tuple(trace._raw_graph_ws.raw_layer_labels_list)
         raw_to_final_op_label: dict[str, str] = {}
 
@@ -1881,6 +1887,7 @@ class JAXBackend:
             op_log.pass_index = assignment.pass_index
             op_log.num_passes = assignment.num_passes
             op_log.equivalence_class = assignment.equivalence_key
+            op_log.site_key = assignment.site_key
             op_log.dtype_ref = DtypeRef.from_value(op_log.dtype)
             op_log.device_ref = DeviceRef.from_value(getattr(op_log.out, "device", None))
             op_log.backend_address = f"jaxpr:{label}"
@@ -2249,25 +2256,43 @@ class JAXBackend:
             Recurrence assignments keyed by raw label.
         """
 
+        site_keys = self._jax_site_keys(trace)
         if not trace.recurrence_detection:
             return {
-                label: self._jax_singleton_assignment(label, op_log)
+                label: self._jax_singleton_assignment(label, op_log, site_keys.get(label))
                 for label, op_log in trace._raw_graph_ws.raw_layer_dict.items()
             }
-        graph = self._build_jax_recurrence_grouping_graph(trace)
+        graph = self._build_jax_recurrence_grouping_graph(trace, site_keys)
         assignments = group_recurrent_nodes(graph)
         return {
-            label: assignments.get(label, self._jax_singleton_assignment(label, op_log))
+            label: assignments.get(
+                label, self._jax_singleton_assignment(label, op_log, site_keys.get(label))
+            )
             for label, op_log in trace._raw_graph_ws.raw_layer_dict.items()
         }
 
-    def _build_jax_recurrence_grouping_graph(self, trace: Trace) -> RecurrenceGroupingGraph:
+    def _jax_site_keys(self, trace: Trace) -> dict[str, str]:
+        """Mint ``site_key_v1`` per retained op via the JAX site dialect.
+
+        The dialect (iteration-stripped containing source path as the site
+        axis, iteration-qualified path as the call instance) lives in
+        :mod:`._site_dialect`.
+        """
+
+        return jax_site_keys(trace)
+
+    def _build_jax_recurrence_grouping_graph(
+        self, trace: Trace, site_keys: Mapping[str, str] | None = None
+    ) -> RecurrenceGroupingGraph:
         """Build the neutral recurrence graph from JAX materialized raw logs.
 
         Parameters
         ----------
         trace
             Trace containing materialized raw JAX ops.
+        site_keys
+            Pre-minted ``site_key_v1`` strings per retained raw label
+            (:meth:`_jax_site_keys`).
 
         Returns
         -------
@@ -2313,6 +2338,12 @@ class JAXBackend:
                 param_barcodes=tuple(op_log._param_barcodes),
                 retain=retain,
                 pruned=pruned,
+                output_slot=(
+                    getattr(op_log, "multi_output_index", None)
+                    if getattr(op_log, "in_multi_output", False)
+                    else None
+                ),
+                site_key=(site_keys or {}).get(label),
             )
 
         return RecurrenceGroupingGraph(
@@ -2322,7 +2353,9 @@ class JAXBackend:
             eligible_labels=tuple(eligible_labels),
         )
 
-    def _jax_singleton_assignment(self, label: str, op_log: Any) -> RecurrenceAssignment:
+    def _jax_singleton_assignment(
+        self, label: str, op_log: Any, site_key: str | None = None
+    ) -> RecurrenceAssignment:
         """Return a singleton recurrence assignment for one JAX op.
 
         Parameters
@@ -2331,6 +2364,8 @@ class JAXBackend:
             Raw operation label.
         op_log
             Materialized operation log.
+        site_key
+            Pre-minted ``site_key_v1`` string for this op, when retained.
 
         Returns
         -------
@@ -2344,6 +2379,7 @@ class JAXBackend:
             pass_index=1,
             num_passes=1,
             equivalence_key=op_log.equivalence_class or label,
+            site_key=site_key,
         )
 
     def _relabel_jax_graph_edges(self, trace: Trace, raw_to_final: Mapping[str, str]) -> None:

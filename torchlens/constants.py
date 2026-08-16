@@ -175,6 +175,10 @@ MODEL_LOG_FIELD_ORDER = [
     "save_code_context",
     "save_rng_states",
     "recurrence_detection",
+    # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
+    # FieldPolicy.DROP under tlspec v7, prerelease-registered)
+    "grouping",
+    "grouping_policy",
     "verbose",
     "profile_enabled",
     "has_gradients",
@@ -428,6 +432,10 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "equivalence_class",
     "equivalent_ops",
     "recurrent_ops",
+    # Structural position identity (site_key_v1, minted at step 7; portable
+    # bridging relation -- FieldPolicy.DROP until the coordinated tlspec bump,
+    # prerelease-registered)
+    "site_key",
     # Graph info
     "parents",
     "parent_arg_positions",
@@ -946,6 +954,41 @@ BACKWARD_PASS_FIELD_ORDER = [
     "status",
     "order_attribution_coverage",
     "grad_fn_calls",
+]
+
+PRIMITIVE_OP_FIELD_ORDER = [
+    "label",
+    "sequence",
+    "capture_phase",
+    "forward_pass_index",
+    "backward_epoch_index",
+    "owner_func_call_id",
+    "parent_op_refs",
+    "parent_grad_fn_call_ref",
+    "owner_status",
+    "decomposition_slot",
+    "namespace",
+    "operator",
+    "overload",
+    "schema",
+    "schema_fingerprint",
+    "module_call_stack",
+    "input_tensor_facts",
+    "output_tensor_facts",
+    "mutation_kind",
+    "view_copy_kind",
+    "autocast_context",
+    "dispatch_key_context",
+    "grad_fn_ref",
+    "grad_fn_link_status",
+    "grad_fn_link_provenance",
+    "algorithmic_flops",
+    "flop_status",
+    "flop_formula_source",
+    "flop_formula_version",
+    "outcome",
+    "exception_type",
+    "execution_context",
 ]
 
 # ---------------------------------------------------------------------------

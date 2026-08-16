@@ -31,6 +31,17 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   `COMPLETE`, `HALTED`, `ABORTED_NONFINITE`, `FAILED`, `UNATTESTED`, or `UNKNOWN`; failed outcomes
   also identify the phase. See [Capture outcomes](capture_outcomes.md).
 
+**Episode capture**
+: One wrapped multi-step generation run captured as a single product
+  (`capture_kind=episode`): `tl.trace(episode_root, x, episode=EpisodeSpec(stepped_module=...))`
+  stamps the declaration and lands a per-step status ledger (header + rows with
+  `complete`/`interrupted`/`absent` statuses, emitted tokens, and the managed-RNG entry
+  seed) at `trace.annotations["episode"]`. A diagnostic-tier product for tens of steps
+  (cost is superlinear in step count); the ledger is a disclosure, never a settlement
+  authority, and its persistence is gated until the coordinated schema bump. All episode
+  spellings are provisional (no deprecation shim owed). See
+  [Episode capture](episode_capture.md).
+
 ## Graph records
 
 **Op**
@@ -58,6 +69,54 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 **Facet**
 : A named semantic view into one captured value, such as an attention projection or an LSTM state.
+
+### Documented-unstable ATen profile INDEX
+
+The wave-0 ATen execution-profile core is gated off for ordinary callers and its fields remain
+`FieldPolicy.DROP`. Only the pytest prerelease switch can persist and reload these records; ordinary
+v7 artifacts contain no primitive profile. The public recorder, entity accessors, and absent-profile
+refusal remain unavailable until the S2-owned capability amendment lands. The names below are the
+exact surface already introduced by the gated core. Each is documented unstable and may be renamed
+or removed without a compatibility alias. No validation or honesty tripwire may be weakened.
+
+<!-- ATEN-UNSTABLE-INDEX:START -->
+
+| Surface | Exact spelling or token | Stability |
+| --- | --- | --- |
+| Facades, record kind, disclosure, and provenance | `AtenOp`, `OpRef`, `SuperAtenOp`, `primitive_op`, `mode_paused_interior`, `exact_via_aten`, `heuristic` | unstable -- no deprecation shim owed |
+| Field-order contract | `PRIMITIVE_OP_FIELD_ORDER` | unstable -- no deprecation shim owed |
+| Primitive fields | `label`, `sequence`, `capture_phase`, `forward_pass_index`, `backward_epoch_index`, `owner_func_call_id`, `parent_op_refs`, `parent_grad_fn_call_ref`, `owner_status`, `decomposition_slot`, `namespace`, `operator`, `overload`, `schema`, `schema_fingerprint`, `module_call_stack`, `input_tensor_facts`, `output_tensor_facts`, `mutation_kind`, `view_copy_kind`, `autocast_context`, `dispatch_key_context`, `grad_fn_ref`, `grad_fn_link_status`, `grad_fn_link_provenance`, `algorithmic_flops`, `flop_status`, `flop_formula_source`, `flop_formula_version`, `outcome`, `exception_type`, `execution_context` | unstable -- no deprecation shim owed |
+| Observer-gap fields | `kind`, `capture_phase`, `sequence_before`, `sequence_after`, `owner_func_call_id`, `parent_op_refs`, `reason` | unstable -- no deprecation shim owed |
+| Redundant Op-reference fields | `op_row_index`, `op_label`, `func_call_id` | unstable -- no deprecation shim owed |
+| Tensor-fact fields | `container_path`, `tensor_impl_capability`, `logical_version`, `storage_alias_group`, `shape`, `stride`, `dtype`, `device`, `layout`, `requires_grad` | unstable -- no deprecation shim owed |
+| Execution-context fields | `pytorch_version`, `backend`, `device_model`, `device_capability`, `grad_mode`, `inference_mode`, `module_training_summary`, `autocast`, `deterministic_algorithms`, `tf32_matmul_policy`, `sdpa_policy`, `compile_stance`, `owner_thread_coverage`, `completeness_witness_mode` | unstable -- no deprecation shim owed |
+| Super comparison fields | `comparison_status`, `has_observation_gap` | unstable -- no deprecation shim owed |
+| Invariant contracts | `primitive_op_invariants`, `non_torch_primitive_op_inert` | unstable -- no deprecation shim owed |
+| Switch-active load failures | `primitive_op_schema_invalid`, `primitive_op_fk_invalid` | unstable -- no deprecation shim owed |
+| Capture phases | `forward`, `backward`, `setup` | unstable -- no deprecation shim owed |
+| Mutation classes | `none`, `in_place`, `out_variant`, `metadata_only`, `unknown` | unstable -- no deprecation shim owed |
+| View/copy classes | `view`, `copy`, `alias`, `unknown` | unstable -- no deprecation shim owed |
+| Owner classes | `forward_op`, `backward_grad_fn_call`, `orphan`, `unresolved` | unstable -- no deprecation shim owed |
+| Grad-link classes | `linked`, `unlinked`, `conflict`, `not_applicable` | unstable -- no deprecation shim owed |
+| Dispatcher outcomes | `returned`, `raised` | unstable -- no deprecation shim owed |
+| FLOP evidence classes | `formula_exact`, `estimated`, `unsupported` | unstable -- no deprecation shim owed |
+| Super alignment classes | `all_present_same_schema`, `all_present_different_schema`, `sparse`, `coverage_indeterminate` | unstable -- no deprecation shim owed |
+| Execution and disclosure tokens | `forced_eager`, `strict_subclass_constructor` | unstable -- no deprecation shim owed |
+| Temporary label grammar | `aten_<sequence>` | unstable -- no deprecation shim owed |
+
+<!-- ATEN-UNSTABLE-INDEX:END -->
+
+`AtenOp` is one value-free dispatcher call measured during a concrete capture. Its label is opaque,
+capture-local, and intentionally excluded from universal Trace string lookup. `OpRef` is a redundant
+dense foreign key whose row index, Op label, and function-call witness must all agree. A
+`mode_paused_interior` entry says only that TorchLens paused its owned dispatch observer around a
+strict Tensor-subclass constructor; recorded rows and counts on that parent are lower bounds, and no
+synthetic primitive row is created for the unseen interior.
+
+`SuperAtenOp` aligns observed rows positionally by `decomposition_slot`. Its `comparison_status`
+distinguishes equal-schema coverage, different-schema coverage, proven sparse membership, and
+coverage that is indeterminate because at least one member has an observation gap. Positional
+alignment is evidence, not semantic equivalence.
 
 ## Selection and storage
 
@@ -141,6 +200,29 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 : Influence geometry through the captured DAG toward inputs / toward outputs. Entity-level
   `op.receptive_field` and `op.projective_field` pair with Trace-level
   `Trace.receptive_fields()` and `Trace.projective_fields()` tables.
+
+**Encoding channel** *(unstable — no deprecation shim owed)*
+: A declarative value source (record field name, scalar builtin, or callable `node -> value`)
+  mapped to a visual channel on `draw()`. v1 ships the color channel; size and rank channels
+  follow. Channels are presentation-only: they never change the Trace or the collapse plan, and
+  they require the Graphviz dot layout (`layout="auto"` forces dot when a channel is active;
+  explicit `layout="rank"` refuses with `encoding_requires_dot_layout`).
+
+**color_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(color_by=...)` fills eligible operation nodes from a colorblind-safe sequential ramp,
+  normalized linear min-max over the visible nodes (the legend states the transform). Missing,
+  non-finite, or rolled-ambiguous values leave nodes unencoded with a legend note. On rolled
+  multi-pass layers, field sources resolve through a name-keyed rolled-aggregate allowlist:
+  per-pass-varying and first-pass-only sources are never painted as if uniform, exact cross-pass
+  totals encode with a mandatory aggregation legend line, and unclassified sources refuse
+  (`encoding_source_invalid`). Wrong-typed values refuse (`encoding_value_invalid`); a raising
+  callable refuses with the original exception chained (`encoding_callable_error`).
+
+**show_legend tri-state**
+: `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
+  then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
+  active), and `False` (no legend, honored even with channels active — the encoding is then
+  undisclosed). The `None` value is *(unstable — no deprecation shim owed)* pending ratification.
 
 ## Backend-neutral identity
 
@@ -306,6 +388,82 @@ Spellings below shipped ahead of their naming-session/S2 ratification under
 the megasprint provisional-name protocol: they may rename WITHOUT deprecation
 shims, by declared contract. Each carries the same tag at its definition.
 
+**site_key (`Op.site_key`)** — *unstable — no deprecation shim owed*
+: The portable structural-position identity of one retained op
+  (`site_key_v1`): a `"s1|"`-prefixed string of the pass-free module address
+  stack, the normalized op type, the output slot, and a 1-based occurrence
+  ordinal within one pass-qualified innermost module call instance, minted
+  from raw records at grouping time on every backend. Policy-independent
+  (identical whether grouping ran, degraded, or was off), process-portable
+  (no barcodes, ids, or arg hashes), and a BRIDGING relation: two captures of
+  the same program agree on site keys even when their layer labels disagree.
+  It proves POSITION, never source identity — cross-capture joins carry a
+  per-call-instance cardinality guard, a source-location witness, and a
+  three-tier verdict (corroborated / positional / refused). Editing the
+  model's `forward()` changes downstream sites: keys bridge captures of the
+  SAME program, never a program diff. The `"s1"` prefix makes any future
+  re-keying a visible schema event. `FieldPolicy.DROP` under tlspec v7
+  (prerelease-registered; persists at the coordinated bump).
+
+**Layer.site_key** — *unstable — no deprecation shim owed*
+: The layer's single site key iff every op in the layer shares exactly one.
+  A site-SPANNING layer (within-call-instance recurrence such as transformer
+  residual-add pairs, or root-context loops) refuses typed
+  `layer_site_ambiguous` — read per-pass keys via `.ops[k].site_key`.
+  Site-uniformity and pass-uniformity are DIFFERENT axes: a reused-module
+  multi-pass layer has one key. Legacy pre-site-key artifacts refuse typed
+  `site_key_unavailable`, never a `None` read.
+
+**Layer.site_peers** — *unstable — no deprecation shim owed*
+: Layers sharing any of this layer's site keys within the trace (the
+  reused-relu cohort surface), computed live per call and never persisted.
+  Refuses typed `site_key_unavailable` on keyless layers — a legacy artifact
+  never collapses into a `None`-key peer-of-everything.
+
+**Layer.shape_summary** — *unstable — no deprecation shim owed*
+: Derived (never persisted) data string summarizing output shapes ACROSS
+  PASSES of one layer: `None` for single-pass and shape-uniform layers; one
+  varying axis renders `"A->B"` (monotone) or `"A-B"` (min-max); multi-axis
+  or rank-varying layers render first-to-last full shapes
+  (`"2x64x8x8->2x512x4x4"`). Distinct from the internal module-run fold
+  summary (`ModuleRepeatFold.shape_summary`), which summarizes across a
+  repeated MODULE RUN. The string legitimately contains `->`; renderers must
+  HTML-escape it (escape-at-render, never assert-absence).
+
+**grouping= (trace kwarg) / trace.grouping** — *unstable — no deprecation
+shim owed; S2-gated vocabulary*
+: Closed-vocabulary grouping-policy knob: `"structural"` (default — today's
+  recurrence grouping), `"strict_shapes"` (reserved; refuses typed until its
+  own reviewed design lands), `"fold_sites"` (the D1 within-capture folding
+  axis; refuses typed on plain captures until an affirmative D1 ruling).
+  Unknown values refuse `grouping_invalid`; legal-but-not-entry-legal values
+  refuse `grouping_policy_unavailable`. The mirror field `trace.grouping`
+  records the requested value. Distinct from the display-only `fold_repeats`
+  viz knob, which folds repeated module runs at render time and never
+  changes grouping.
+
+**trace.grouping_policy** — *unstable — no deprecation shim owed; S2-gated
+vocabulary*
+: The persisted, load-validated `grouping_policy_v1` stamp recording HOW the
+  trace was grouped: `policy` (the step-7 grouping that actually ran —
+  `structural` / `params_only` / later `fold_sites`), `requested` (the knob
+  mirror), `folded_sites` and `site_join` (two distinct site-granular axes:
+  step-7 folds vs product-layer joins), `detector`, `effective`, and
+  `settlement_note`. Loads validate against the exact writer key set, closed
+  vocabularies, and coherence rules C1–C8; parse failure or incoherence
+  warns once and settles to THE canonical degraded representation
+  (`policy="unknown"`, `settlement_note="grouping_stamp_<reason>"`), which
+  round-trips byte-stable and stays degraded — verdicts only worsen across
+  persistence. Legacy pre-stamp artifacts settle silently to
+  `grouping_stamp_legacy`; degraded stamps refuse stamp-consuming
+  operations typed. `FieldPolicy.DROP` under tlspec v7
+  (prerelease-registered).
+
+**L1 grouping refusal codes** — *unstable — no deprecation shim owed;
+S2-gated*
+: `layer_site_ambiguous`, `site_key_unavailable`, `grouping_invalid`,
+  `grouping_policy_unavailable`.
+
 **structure_only (capture kwarg) / trace.structure_only** — *unstable — no
 deprecation shim owed*
 : `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` runs the
@@ -465,3 +623,16 @@ shim owed*
   names are never replaceable; name misses at coercion refuse
   `predicate_unregistered`. The registry is INERT until consuming surfaces
   adopt name acceptance.
+
+**color_by (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: The v1 encoding-channel value source on `Trace.draw` (L5 channel core). See
+  the "color_by" entry above for semantics.
+
+**show_legend=None AUTO value** — *unstable — no deprecation shim owed*
+: The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
+  an encoding channel is active, then a channel-only disclosure legend.
+  `True`/`False` keep their stable historical meanings.
+
+**Encoding refusal codes** — *unstable — no deprecation shim owed*
+: `encoding_source_invalid`, `encoding_value_invalid`,
+  `encoding_callable_error`, `encoding_requires_dot_layout`.

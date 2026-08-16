@@ -100,7 +100,18 @@ class ResolvedRenderRequest:
     code_panel: Any = False
     node_overlay: Any = None
     node_label_fields: tuple[str, ...] | None = None
-    show_legend: bool = False
+    # Tri-state (L5 channel core): None = AUTO -- no legend unless an
+    # encoding channel is active, then a channel-only disclosure legend.
+    # True/False keep their historical meanings; explicit False is honored
+    # even with channels active (a deliberate act).
+    show_legend: bool | None = None
+    # Encoding channel core (L5, DOCUMENTED-UNSTABLE until ratified):
+    # ``color_by`` is the raw user source; ``encoding`` carries the resolved
+    # per-draw EncodingState. Presentation-only: NEITHER joins __hash__ (the
+    # collapse-planning subset is unchanged -- channels must never affect the
+    # collapse plan).
+    color_by: Any = None
+    encoding: Any = None
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False

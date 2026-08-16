@@ -28,6 +28,18 @@ Key entry points:
   `draw_backward()`, `validate_forward_pass()`
 - Backend registry: `torchlens/backends/registry.py` - `BackendSpec`, `BackendName`,
   backend resolution, validation dispatch, and canonical backend errors.
+- Site keys + grouping surface (L1 wave 0, DOCUMENTED-UNSTABLE): every
+  retained op carries the portable structural-position key `op.site_key`
+  (`site_key_v1`, minted at grouping time on every backend,
+  policy-independent, the cross-capture bridging relation);
+  `Layer.site_key` / `Layer.site_peers` / `Layer.shape_summary` are the
+  Layer surface (typed refusals `layer_site_ambiguous` /
+  `site_key_unavailable`); `grouping=` is the closed-vocabulary knob
+  ("structural" default; others refuse typed pre-D1/S2) mirrored on
+  `trace.grouping`, with the load-validated `grouping_policy_v1` stamp on
+  `trace.grouping_policy` (C1-C8 coherence; degrade-settlement monotonic).
+  Persisted rows are DROP + prerelease-registered; join/fold machinery in
+  `torchlens/postprocess/_site_key.py` / `_site_join.py` / `_grouping_stamp.py`.
 - Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
   structure + shape/dtype HYPOTHESES, never values; value consumers refuse
@@ -82,6 +94,13 @@ Key entry points:
   eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
   see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
   refuse typed.
+- Visualization encoding channel (UNSTABLE naming, keyword-only): `Trace.draw(color_by=...)`
+  fills op nodes from a sequential ramp (field name / scalar builtin / callable), dot-layout-only
+  (AUTO forces dot; explicit rank refuses `encoding_requires_dot_layout`), legend-disclosed via
+  the tri-state `show_legend` (`None`=AUTO channel-only legend, `True`/`False` historical; explicit
+  `False` honored). Rolled multi-pass field sources resolve through the name-keyed allowlist in
+  `torchlens/visualization/_encoding.py`; varying/first-pass-only sources stay unencoded with a
+  legend note (honest-visuals tripwire), and unclassified sources refuse `encoding_source_invalid`.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
@@ -129,6 +148,9 @@ patched = tl.trace(
 streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 recording = tl.record(model, x, save=tl.func("relu"))
 trace_from_recording = recording.to_trace()
+# D18: eval-mode BatchNorm is runnable on the default live path (no value-changing
+# buffer writes); train-mode buffer writers refuse with the typed BufferSinkRoutingError
+# (RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE, provisional/documented-unstable).
 run_result = torch_trace.run(inputs=x, seed=42)
 runnable_path = "architecture.tlspec"
 tl.save(torch_trace, runnable_path, level="runnable", include_weights=True)
@@ -179,6 +201,15 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 - Line length: 100
 - `tl.receptive_field` is lazy; entity-level `receptive_field` / `projective_field` siblings
   pair with `Trace.receptive_fields()` / `Trace.projective_fields()` tables.
+- EPISODE CAPTURE (torch-only, spellings DOCUMENTED-UNSTABLE): `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` captures one wrapped
+  multi-step generation run as ONE product with a per-step status ledger at
+  `trace.annotations["episode"]` (disclosure, never a settlement authority; persistence
+  registrar-gated until the coordinated tlspec bump). DIAGNOSTIC-TIER: cost is superlinear
+  in step count — tens of steps, never hundreds. Bundles carry the optional S6
+  member-relation table (`member_relations=`, `Bundle.relate`,
+  `Bundle.derive_episode_status`). Doc of record: `docs/reference/episode_capture.md`;
+  refusal codes in `docs/reference/error_refusal_contract.md`.
 
 ## Quality Gates
 Every task must pass before completion unless the task explicitly narrows verification:

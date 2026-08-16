@@ -170,6 +170,8 @@ else:
 
 
 _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
+    "grouping": "structural",
+    "grouping_policy": None,
     "trace_label": None,
     "model_label": None,
     "backend": "torch",
@@ -1153,6 +1155,7 @@ class Trace(
     _module_capture_ws: ModuleCaptureWorkspace
     _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
+    _primitive_op_profile: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
@@ -1167,6 +1170,7 @@ class Trace(
     _containers: dict[int, Any]
     _annotation_blobs: dict[str, Any] | None
     _last_sibling_ordering_decision: Any
+    _last_encoding_state: Any
     _module_call_accessor: Any
     _op_accessor_cache: Any
     _layer_accessor_cache: Any
@@ -1360,6 +1364,10 @@ class Trace(
         "save_code_context": FieldPolicy.KEEP,
         "save_rng_states": FieldPolicy.KEEP,
         "recurrence_detection": FieldPolicy.KEEP,
+        # L1 grouping surface: DROP under tlspec v7, prerelease-registered
+        # (S3 discipline); flips to persisting at the coordinated bump.
+        "grouping": FieldPolicy.DROP,
+        "grouping_policy": FieldPolicy.DROP,
         "verbose": FieldPolicy.KEEP,
         "profile_enabled": FieldPolicy.KEEP,
         "has_gradients": FieldPolicy.KEEP,
@@ -1482,6 +1490,9 @@ class Trace(
         # from its own state, and .tlspec artifacts stay object-shaped until
         # the M11 direct semantic serialization.
         "_trace_core": FieldPolicy.DROP,
+        # Wave-0 primitive profile: the S3 registrar substitutes KEEP only
+        # beneath its pytest-only activation switch. Ordinary tlspec v7 omits it.
+        "_primitive_op_profile": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -1735,6 +1746,7 @@ class Trace(
         self._raw_graph_ws = RawGraphWorkspace()
         self._module_capture_ws = ModuleCaptureWorkspace()
         self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
+        self._primitive_op_profile = None
         self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
         # L7a: True marks a structure-only capture (the flag declares the
@@ -1838,6 +1850,11 @@ class Trace(
         self.save_code_context = save_code_context
         self.save_rng_states = save_rng_states
         self.recurrence_detection = recurrence_detection
+        # L1 grouping surface: "structural" is the only entry-legal knob
+        # value in wave 0 (others refuse typed at trace entry); the stamp is
+        # written by each producer once step-7 grouping settles.
+        self.grouping = "structural"
+        self.grouping_policy: dict[str, Any] | None = None
         self.verbose = verbose
         self.profile_enabled = False
         self.has_gradients = False
@@ -2385,6 +2402,7 @@ class Trace(
         """
 
         self.__dict__.pop("_last_sibling_ordering_decision", None)
+        self.__dict__.pop("_last_encoding_state", None)
 
     def find_layers(self, query: str, *, limit: int = 10) -> list[str]:
         """Return layer labels matching a fuzzy query.
@@ -3174,6 +3192,12 @@ class Trace(
         # retain the previous trace's events and re-serialize them later).
         state.pop("_capture_events", None)
         self.__dict__.update(state)
+        from .._io.prerelease import prerelease_fields_active
+
+        if prerelease_fields_active() and self.__dict__.get("_primitive_op_profile") is not None:
+            from ..validation._invariants_primitive_ops import validate_loaded_primitive_profile
+
+            validate_loaded_primitive_profile(self)
         # Event streams never serialize (FieldPolicy.DROP), but a restored
         # trace remains a supported backward-capture target within the live
         # process, so restore installs a fresh stream EXPLICITLY here rather
@@ -3231,6 +3255,18 @@ class Trace(
         from ..capture.outcome import resolve_loaded_outcome
 
         self.__dict__["_capture_outcome"] = resolve_loaded_outcome(self.__dict__)
+        # Grouping-policy stamp: adopt-or-degrade (L1). An absent stamp
+        # (every pre-stamp v7 artifact) settles silently to the canonical
+        # legacy settlement; an invalid one warns once and settles with the
+        # violated rule's name. Monotonic: verdicts only worsen across
+        # persistence, and the settled payload round-trips byte-stable. The
+        # knob mirror normalizes first (a DROP-scrubbed field restores as an
+        # explicit None, bypassing default fill).
+        if self.__dict__.get("grouping") is None:
+            self.__dict__["grouping"] = "structural"
+        from ..postprocess._grouping_stamp import settle_loaded_grouping_policy
+
+        self.__dict__["grouping_policy"] = settle_loaded_grouping_policy(self.__dict__)
         # F9: adopt the restored detached records into a fresh sealed core so
         # loaded traces rejoin the single-truth store (best-effort — an abort
         # preserves the coreless-island behavior; backward records stay
@@ -3247,6 +3283,15 @@ class Trace(
                 pickle_module_accessor_state._list,
                 pickle_module_accessor_state._pass_dict,
             )
+        # Episode-ledger load validation (S7): an episode payload in the
+        # restored annotations is validated fail-closed -- illegal attachment
+        # refuses typed, incoherent geometry quarantines with one warning.
+        if isinstance(self.__dict__.get("annotations"), dict) and (
+            "episode" in self.__dict__["annotations"]
+        ):
+            from ..capture._episode_ledger import validate_loaded_episode_annotations
+
+            validate_loaded_episode_annotations(self)
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:
@@ -3772,6 +3817,10 @@ class Trace(
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 
+# S3-gated wave-0 primitive profile hook. The registrar accepts only the
+# declared DROP policy above and substitutes KEEP solely in its pytest switch.
+register_prerelease_field(Trace, "_primitive_op_profile", persisted_policy=FieldPolicy.KEEP)
+
 # L7a mode marker rides the S3 pre-release registrar: declared FieldPolicy.DROP
 # above (no schema change under tlspec v7), registered here so portability exit
 # gates can round-trip it under the test-only activation switch, and flipped to
@@ -3779,3 +3828,10 @@ Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  #
 # registration together with the M-C1..C3 load-validation rows).
 register_prerelease_field(Trace, "structure_only", persisted_policy=FieldPolicy.KEEP)
 register_prerelease_field(Trace, "intervention_audit", persisted_policy=FieldPolicy.KEEP)
+
+# L1 grouping surface: the knob mirror + the grouping-policy stamp, declared
+# FieldPolicy.DROP above and registered so the portability exit gates can
+# round-trip them under the test-only switch; flipped to persisting at the
+# wave-3 coordinated bump.
+register_prerelease_field(Trace, "grouping")
+register_prerelease_field(Trace, "grouping_policy")

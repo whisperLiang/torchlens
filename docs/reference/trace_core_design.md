@@ -195,13 +195,16 @@ The current derivation runs backwards (the policy table is built from the FIELD_
 literal at 10 sites). It is inverted with a byte-provable staged transition: the
 checked-in `constants.py` literals stay hand-written and authoritative as the declared
 schema, and `field_order_from_policy(cls.FIELD_POLICY) == LITERAL` is asserted for all
-11 classes, in both directions, before anything is generated.
+12 classes, in both directions, before anything is generated. The twelfth class is the
+DROP-gated `primitive_op` row: its installed wave-0 bindings remain `RUNTIME`, while an
+isolated prerelease audit derives the intended `INTERNED`/`EDGE`/`SCALAR` bindings without
+activating a v7 writer.
 
 Generated artifacts, all deterministic, CHECKED IN, and reviewed as source with a
 regenerate-and-diff CI test (never runtime codegen, never a bare `__getattr__` field
 surface): column layout; annotated `@property` facade descriptors; the explicit semantic
 state protocol (`__tl_state_items__`/`__tl_state_restore__`) closing the CRITICAL
-state-adapter blindness for all 11 classes at once (13 production consumers); the
+state-adapter blindness for all 12 classes at once (13 production consumers); the
 `to_pandas` row; the `.pyi` stub (dropped only if the DX oracle shows it conflicts with
 inherited annotated properties). Lockstep tests: every FIELD_ORDER entry has exactly one
 binding; every portable field a serializer; every stored column declared or explicitly

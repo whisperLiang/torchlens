@@ -1139,6 +1139,18 @@ def _scrub_value(
             scrubbed_state[_prerelease.PRERELEASE_STATE_KEY] = (
                 _prerelease.prerelease_marker_payload()
             )
+        else:
+            # Registered pre-release ANNOTATIONS sub-keys are new persistence
+            # write paths inside the already-persisting annotations mapping
+            # (e.g. the episode ledger): they never ride a real artifact of
+            # the frozen tlspec version. The pop acts on the scrubbed copy
+            # only -- the live trace keeps its session-time annotations.
+            gated_annotation_keys = _prerelease.gated_annotations_keys()
+            if gated_annotation_keys:
+                annotations_state = scrubbed_state.get("annotations")
+                if isinstance(annotations_state, dict):
+                    for gated_key in gated_annotation_keys:
+                        annotations_state.pop(gated_key, None)
         _apply_source_metadata_policy(scrubbed_state, options)
         _apply_trace_blob_policy(scrubbed_state, options)
     # ``FuncCallLocation`` is matched by name rather than ``isinstance`` to avoid

@@ -40,7 +40,9 @@ from torchlens.data_classes._trace_components import (
     TRACE_FIELD_OWNERSHIP,
 )
 
-pytestmark = pytest.mark.smoke
+# Per-test smoke marks (the former module-level pytestmark was additive
+# with the census's heavy re-tier and tripped the marker-combination
+# lint; every non-census test stays in the smoke tier).
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 
@@ -158,6 +160,7 @@ def _scan_external_writes() -> dict[str, list[str]]:
     return {attr: sorted(sites) for attr, sites in found.items()}
 
 
+@pytest.mark.smoke
 def test_every_external_private_write_is_declared_or_exempted() -> None:
     """No package attaches an undeclared private field to the Trace."""
 
@@ -178,6 +181,7 @@ def test_every_external_private_write_is_declared_or_exempted() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_exemption_ledger_is_shrink_only() -> None:
     """Every exemption row corresponds to a real, still-present external write."""
 
@@ -189,6 +193,7 @@ def test_exemption_ledger_is_shrink_only() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_exemptions_and_declared_ownership_are_disjoint() -> None:
     """A name is either a declared Trace field or an exemption, never both."""
 
@@ -200,6 +205,7 @@ def test_exemptions_and_declared_ownership_are_disjoint() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_every_exemption_carries_a_reason() -> None:
     """Exemption values are real sentences, not placeholders."""
 
@@ -215,6 +221,10 @@ def test_every_exemption_carries_a_reason() -> None:
     )
 
 
+# Whole-package AST census: crossed the 5s smoke partition as the tree grew
+# through the wave-0 merges (6.8s isolated at the L1 merge); heavy per the
+# marker partition (5-20s), not a budget dodge.
+@pytest.mark.heavy
 def test_declared_writes_still_dominate_the_census() -> None:
     """Sanity floor: most external private writes ARE declared fields.
 
@@ -228,6 +238,7 @@ def test_declared_writes_still_dominate_the_census() -> None:
     assert len(declared) >= 60, f"only {len(declared)} declared writes seen; scanner may be blind"
 
 
+@pytest.mark.smoke
 def test_gate_scanner_detects_planted_offenders() -> None:
     """Planted positives/negatives across assign, augassign, setattr, delattr."""
 
@@ -254,6 +265,7 @@ def test_gate_scanner_detects_planted_offenders() -> None:
     ]
 
 
+@pytest.mark.smoke
 def test_gate_scanner_detects_dict_spellings_and_loaded_trace() -> None:
     """grind-r6 b5 R45/R50: the ``__dict__`` spellings and the local-name gap.
 

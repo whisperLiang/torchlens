@@ -109,6 +109,12 @@ from .backends._options import (
 from .backends._selective_save import apply_static_label_save_policy, reject_selector_outside_kinds
 from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
+from .capture._episode_ledger import (
+    attach_episode_header,
+    attach_failed_episode_ledger,
+    resolve_episode_declaration,
+    write_episode_ledger,
+)
 from .capture.stop import StopDirective
 from .data_classes.trace import (
     Trace,
@@ -127,6 +133,7 @@ from .ir.op_record import amend_graph_edge_insertion
 from .ir.selector_eval import selector_contains_kind
 from .options import (
     CaptureOptions,
+    EpisodeSpec,
     ReplayOptions,
     SaveOptions,
     StreamingOptions,
@@ -1475,6 +1482,7 @@ def _run_model_and_save_specified_outs(
     lookback: int = 0,
     lookback_payload_policy: str = "metadata_only",
     retain_output_parents_for_layers_to_save: bool = False,
+    episode_resolved: Any | None = None,
     _selective_layers_to_save_request: object | None = None,
     _resolved_layer_nums_to_save: tuple[int, ...] | None = None,
     _resolved_grad_layer_nums_to_save: tuple[int, ...] | str | None = None,
@@ -1881,6 +1889,11 @@ def _run_model_and_save_specified_outs(
                 include_custom_attributes=stream_custom_attributes,
                 include_buffer_values=stream_buffer_values,
             )
+        if episode_resolved is not None:
+            # Pre-capture episode declaration marker: rides the partial
+            # product on failure and is visible to postprocess consumers; the
+            # settlement-time writer replaces it with the finalized ledger.
+            attach_episode_header(trace, episode_resolved)
     except BaseException:
         # A pre-forward setup failure (the Trace ctor or any later pre-forward
         # step) must not leak the capture-global runtime context configured just
@@ -2456,6 +2469,7 @@ def trace(
         | MissingType
     ) = MISSING,
     *,
+    grouping: str | MissingType = MISSING,
     structure_only: bool | MissingType = MISSING,
     jax_control_flow: Literal["reject", "unroll", "region"] | MissingType = MISSING,
     jax_max_control_flow_unroll: int | MissingType = MISSING,
@@ -2464,6 +2478,7 @@ def trace(
     save_preview: bool | MissingType = MISSING,
     jax_static_argnums: int | Sequence[int] | MissingType = MISSING,
     grad_options: Any | None | MissingType = MISSING,
+    episode: EpisodeSpec | None = None,
     capture_output_structure: bool | MissingType = MISSING,
     chunk_size: int | None | MissingType = MISSING,
     chunk_paths: Iterable[Any] | None | MissingType = MISSING,
@@ -2700,6 +2715,16 @@ def trace(
     recipes:
         Per-trace additive facet recipes captured into the immutable
         registry snapshot for the returned trace.
+    grouping:
+        UNSTABLE (no deprecation shim owed). Closed-vocabulary grouping
+        policy: ``"structural"`` (the default -- today's recurrence
+        grouping), ``"strict_shapes"`` (reserved; refuses typed until its
+        own reviewed design lands), ``"fold_sites"`` (the D1 folding axis;
+        refuses typed on plain captures until an affirmative D1 ruling).
+        The requested value is recorded on ``trace.grouping`` and the
+        policy that actually ran on ``trace.grouping_policy``. Distinct
+        from the display-only ``fold_repeats`` viz knob, which folds
+        repeated module runs at RENDER time and never changes grouping.
     structure_only:
         If True, run this capture under the structure-only contract
         (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
@@ -2782,6 +2807,15 @@ def trace(
     public_trace_kwargs = locals().copy()
     public_trace_kwargs.pop("backend")
     public_trace_kwargs.pop("capture_output_structure")
+    # grouping= (UNSTABLE, keyword-only; L1 wave 0): closed-vocabulary knob.
+    # Only "structural" (today's grouping, the default) is entry-legal;
+    # "strict_shapes" waits on its own reviewed design and "fold_sites" on
+    # an affirmative D1 ruling (the flip PR) / the episode capture kind.
+    public_trace_kwargs.pop("grouping")
+    if grouping is not MISSING:
+        from .postprocess._grouping_stamp import validate_grouping_knob
+
+        validate_grouping_knob(grouping)
     if chunk_paths is not MISSING and chunk_paths is not None and chunk_size in (MISSING, None):
         raise ChunkedForwardConfigError("chunk_paths requires chunk_size.")
     if backend is None and (jax_static_argnums is not MISSING or grad_options is not MISSING):
@@ -2881,6 +2915,14 @@ def trace(
     )
     _filter_trace_kwargs_for_backend(public_trace_kwargs, resolved_spec)
     _enforce_capability_option_gates(public_trace_kwargs, resolved_spec)
+    if str(resolved_spec.name) != "torch":
+        episode_value = public_trace_kwargs.pop("episode", None)
+        if episode_value is not None:
+            raise BackendUnsupportedError(
+                "episode= capture (capture_kind=episode) is torch-only in this "
+                f"release; backend {str(resolved_spec.name)!r} does not support "
+                "episode declarations."
+            )
     return cast("Trace", resolved_spec.capture_trace(**public_trace_kwargs))
 
 
@@ -2954,6 +2996,7 @@ def _trace_torch_model(
         | None
         | MissingType
     ) = MISSING,
+    episode: EpisodeSpec | None = None,
     capture_output_structure: bool | MissingType = MISSING,
     chunk_size: int | None | MissingType = MISSING,
     chunk_paths: Iterable[Any] | None | MissingType = MISSING,
@@ -3134,6 +3177,49 @@ def _trace_torch_model(
             ),
             argument="lookback_payload_policy",
         )
+    episode_resolved = None
+    if episode is not None:
+        from .errors.episode import EpisodeDeclarationError
+
+        if chunk_size not in (MISSING, None) or chunk_paths not in (MISSING, None):
+            raise EpisodeDeclarationError(
+                "episode= cannot combine with chunked forwards (chunk_size/"
+                "chunk_paths): an episode is ONE wrapped session capture, and "
+                "the chunk fan-out produces several.",
+                code="episode_declaration_invalid",
+            )
+        if cache is not MISSING and cache:
+            raise EpisodeDeclarationError(
+                "episode= cannot combine with cache=True in this release: the "
+                "capture cache replays a stored product, and episode ledgers "
+                "are settled per capture.",
+                code="episode_declaration_invalid",
+            )
+        if getattr(capture_options, "structure_only", False):
+            # S2 marker-combination table: episode x structure_only is TYPED
+            # REFUSE this sprint (no value semantics to fold). The refusal
+            # code is L7a's capability-table constant — ONE vocabulary for
+            # the combination across the entry check and the post-capture
+            # capability gate (capture/structure_only.py owns the row).
+            from .capture.structure_only import STRUCTURE_ONLY_EPISODE_UNSUPPORTED
+
+            raise EpisodeDeclarationError(
+                "structure-only episodes are out of scope this sprint: "
+                "capture_kind=episode with the structure-only marker refuses "
+                "typed per the ratified marker-combination table.",
+                code=STRUCTURE_ONLY_EPISODE_UNSUPPORTED,
+            )
+        if capture_options.layers_to_save in (None, "none", "None", "NONE") or (
+            isinstance(capture_options.layers_to_save, list) and not capture_options.layers_to_save
+        ):
+            raise EpisodeDeclarationError(
+                "episode= is value-mode and derives its per-step token column "
+                "from the retained root output; save='none' retains no output "
+                "payload. Remedy: keep the default save policy or include the "
+                "output in the save= selection.",
+                code="episode_declaration_invalid",
+            )
+        episode_resolved = resolve_episode_declaration(episode, model)
     save_options = merge_save_options(
         save=grouped_save_options,
         activation_transform=activation_transform,
@@ -3794,8 +3880,11 @@ def _trace_torch_model(
         lookback=lookback,
         lookback_payload_policy=lookback_payload_policy,
         retain_output_parents_for_layers_to_save=(
-            retain_output_parents_for_layers_to_save or uses_selective_layers_to_save
+            retain_output_parents_for_layers_to_save
+            or uses_selective_layers_to_save
+            or episode_resolved is not None
         ),
+        episode_resolved=episode_resolved,
         _selective_layers_to_save_request=(
             _selective_layers_to_save_request
             if _selective_layers_to_save_request is not None
@@ -3839,7 +3928,15 @@ def _trace_torch_model(
         and grad_transform is None
         and output_transform_value is None
     )
-    trace = capture_with_rescue(run_capture, eligible=rescue_eligible, model=model)
+    try:
+        trace = capture_with_rescue(run_capture, eligible=rescue_eligible, model=model)
+    except Exception as capture_exc:
+        if episode_resolved is not None:
+            # Best-effort: the FAILED partial product carries the episode
+            # declaration; attach the derived ledger disclosure without ever
+            # masking the user's exception.
+            attach_failed_episode_ledger(capture_exc, episode_resolved)
+        raise
     trace.profile_enabled = profile_enabled
     trace.save_grads = save_grads_policy
     if uses_selective_layers_to_save:
@@ -3874,6 +3971,11 @@ def _trace_torch_model(
         _prepare_log_for_capture_cache(trace)
         if _store_authenticated_capture_cache(trace, cache_path, cache_secret):
             _evict_capture_cache(cache_path.parent, keep=cache_path)
+
+    if episode_resolved is not None:
+        # Settlement-time episode ledger (S7): written ONCE, after postprocess
+        # and outcome settlement, from the settled record + module-call truth.
+        write_episode_ledger(trace, episode_resolved)
 
     return trace
 

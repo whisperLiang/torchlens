@@ -80,6 +80,7 @@ from ._executor import (
     run_pipeline,
 )
 from ._materialize import materialize_from_events
+from ._primitive_profile import _finalize_forward_primitive_profile
 from .ast_branches import resolve_var_names
 from .control_flow import (
     _fix_buffer_layers,
@@ -751,6 +752,7 @@ def _postprocess_body(
     # pools onto shared instances, right before the physical seal.
     _compact_ancestor_sets(self)
     _compact_op_metadata(self)
+    _finalize_forward_primitive_profile(self)
 
     # The core freeze point (trace_core_design.md section 3.3): forward
     # topology froze logically at step 17, the payload plane settled through

@@ -30,6 +30,7 @@ from ._metrics import (
     resolve_metric,
 )
 from ._super.super_op import (
+    SuperAtenOp,
     SuperLayer,
     SuperLayerAccessor,
     SuperOp,
@@ -250,6 +251,7 @@ __all__ = [
     "SpecCompat",
     "SpecMutationError",
     "SpecPortabilityError",
+    "SuperAtenOp",
     "SiteTable",
     "SpliceModuleDeviceError",
     "SpliceModuleDtypeError",

@@ -787,6 +787,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "num_passes",
                 "pass_index",
                 "recurrent_ops",
+                # site_key_v1 minting: policy-independent structural-position
+                # identity, minted here on BOTH the full-detection and the
+                # degraded (recurrence_detection=False) paths.
+                "site_key",
             )
         ),
         reads=frozenset(
@@ -807,6 +811,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "parents",
                 "raw_index",
                 "recurrent_ops",
+                # Same-step read-after-own-write: the grouping-graph builder
+                # copies each op's just-minted key onto its RecurrenceNode.
+                "site_key",
+                # site-key type axis (the normalized op type token).
+                "type",
             )
         ),
         trace_state=tokens("r:raw_graph_ws"),
@@ -1481,6 +1490,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "saved_args",
                 "saved_kwargs",
                 "shape",
+                # Whole-record scrub: the streamed-bundle writer reads every
+                # declared portable field to apply its policy (site_key is
+                # DROP under v7 and read-then-dropped here).
+                "site_key",
                 "step_index",
                 "terminal_bool_for",
                 "terminal_conditional_id",
@@ -1866,6 +1879,10 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "raw_index",
                     "recurrent_ops",
                     "token:raw_graph_ws",
+                    # site_key_v1 minting reads the type axis of step-1 output
+                    # rows (every retained op, output nodes included, gets a
+                    # structural-position key at step 7).
+                    "type",
                 )
             ),
             "loop detection consumes the completed raw graph incl. output rows",
@@ -2675,6 +2692,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "num_passes",
                     "pass_index",
                     "recurrent_ops",
+                    # step 18's whole-record scrub reads the step-7-minted
+                    # site_key (DROP under v7, read-then-dropped).
+                    "site_key",
                 )
             ),
             "step 18 consumes/refines _layer_label_raw, equivalence_class, num_passes, pass_index, ... after step 7 writes",

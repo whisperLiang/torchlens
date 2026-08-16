@@ -8,6 +8,10 @@ import warnings
 import torchlens
 
 TARGET_ALL = [
+    # L3 ATen profile facade (documented-unstable; exported at __all__ head).
+    # Ratchet row repaired by L6 post-merge: the L1/L3 merge train landed the
+    # export without this row, leaving main red on the frozen-surface test.
+    "AtenOp",
     "trace",
     "release_model",
     "clear_capture_cache",

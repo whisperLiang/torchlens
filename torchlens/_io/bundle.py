@@ -2624,7 +2624,61 @@ def _load_unified_bundle_directory(
     baseline_name = metadata.get("baseline_name")
     if baseline_name is not None and not isinstance(baseline_name, str):
         raise TorchLensIOError("Unified bundle baseline_name must be a string or null.")
-    return Bundle(members, baseline=baseline_name)
+    member_relations = _load_gated_member_relations(metadata)
+    return Bundle(members, baseline=baseline_name, member_relations=member_relations)
+
+
+def _load_gated_member_relations(metadata: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Read the GATED S6 ``member_relations`` key from bundle metadata.
+
+    Mirrors the Trace pre-release marker semantics through the one
+    validation chokepoint (:func:`torchlens._io.prerelease.validate_prerelease_state`):
+    a marker on an inactive switch refuses typed, a malformed marker refuses
+    even when active, and a ``member_relations`` key WITHOUT a valid marker
+    refuses typed — a hand-built gated key never loads as real truth. An
+    absent key is simply a plain (or gated-era) bundle (S6 R7).
+
+    Returns
+    -------
+    tuple | None
+        Parsed relation rows for the Bundle constructor (which re-checks R1
+        against the loaded member names), or ``None`` when the key is absent.
+
+    Raises
+    ------
+    PreReleaseArtifactError
+        Marker present while the switch is inactive, malformed marker, or
+        a ``member_relations`` key without the marker.
+    BundleRelationError
+        ``bundle_relation_schema_invalid`` when the payload is outside the
+        closed S6 row schema.
+    """
+
+    from . import PreReleaseArtifactError
+    from .prerelease import PRERELEASE_STATE_KEY, validate_prerelease_state
+
+    had_marker = PRERELEASE_STATE_KEY in metadata
+    validate_prerelease_state(metadata, cls_name="Bundle")
+    relations_payload = metadata.get("member_relations")
+    if relations_payload is None:
+        return None
+    if not had_marker:
+        raise PreReleaseArtifactError(
+            "bundle.json carries the gated 'member_relations' key without the "
+            f"pre-release marker ({PRERELEASE_STATE_KEY!r}): a hand-built gated "
+            "key never loads as real truth under the current tlspec version."
+        )
+    from ..bundle._relations import MemberRelationTable
+    from ..errors.episode import BundleRelationError
+
+    try:
+        table = MemberRelationTable.from_payload(relations_payload)
+    except (TypeError, ValueError) as exc:
+        raise BundleRelationError(
+            f"bundle.json 'member_relations' payload is outside the closed S6 schema: {exc}",
+            code="bundle_relation_schema_invalid",
+        ) from exc
+    return table.rows
 
 
 def _read_manifest_object(path: Path) -> dict[str, Any]:

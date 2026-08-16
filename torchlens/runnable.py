@@ -277,6 +277,12 @@ class RunnableErrorCode(str, Enum):
     COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
     HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
     USER_INTERVENTION_NOT_REPLAYABLE = "user_intervention_not_replayable"
+    #: PROVISIONAL SPELLING (D18, ships documented-unstable pending naming
+    #: ratification): the live refresh projector refused buffer-sink routing --
+    #: a train-mode (value-changing) buffer writer, unproven (``None``) write
+    #: evidence, a claim/evidence contradiction, or a refreshed rerun that
+    #: wrote a buffer on the newly-allowed eval-mode path.
+    BUFFER_SINK_ROUTING_MUTABLE = "buffer_sink_routing_mutable"
 
 
 class LiteralAtomKind(str, Enum):
@@ -1409,6 +1415,69 @@ NONDETERMINISTIC_SOURCE_VOCABULARY: Final[frozenset[str]] = frozenset(
 """Closed vocabulary for ``RunReport.nondeterministic_sources`` (r53 F4)."""
 
 
+RUN_TRUNCATION_REGIME_VOCABULARY: Final[frozenset[str]] = frozenset(
+    {"closure", "sequential_prefix", "live_stop_after"}
+)
+"""Closed vocabulary for ``RunTruncation.regime`` (L4 until=; [S2-PROV])."""
+
+
+RUN_TRUNCATION_CAUSE_VOCABULARY: Final[frozenset[str]] = frozenset(
+    {"unprovable_independence", "coverage_gap", "ancestry_break"}
+)
+"""Closed cause vocabulary for the sequential-prefix fallback disclosure ([S2-PROV])."""
+
+
+@dataclass(slots=True)
+class _RunUntilPlan:
+    """Internal resolved plan for one ``until=`` run (L4 sec 2; session-only).
+
+    Built at the run door from the SOURCE trace's settled final labels, threaded
+    through the live refresh as a run-installed halt latch (2.3) or consumed by
+    the loaded-sparse closure engine (2.1). ``fired`` records whether the live
+    latch actually stopped the internal refresh capture.
+    """
+
+    requested_sites: tuple[str, ...]
+    stop_raw_index: int
+    stopped_at: str | None
+    #: Ordered raw labels of the executed prefix (non-output target ops).
+    executed_raw_labels: tuple[str, ...]
+    #: Ordered raw labels of every skipped target op (real output nodes included).
+    skipped_raw_labels: tuple[str, ...]
+    #: Final layer labels of every resolved requested layer (call mapping key).
+    requested_layer_labels: tuple[str, ...] = ()
+    halt_predicate: Any = None
+    fired: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RunTruncation:
+    """Run-result truncation disclosure for ``until=`` (L4 sec 3; [S2-PROV]).
+
+    Truncation is a RESULT/REPORT term, NEVER a capture outcome: the source
+    trace's ``CaptureOutcome`` is untouched by any run, and no N-gate row
+    branches on this record. ``None`` on the report means a full run.
+    """
+
+    #: Which regime executed: ``closure`` (loaded-sparse dependency closure),
+    #: ``sequential_prefix`` (the disclosed loaded-sparse fallback), or
+    #: ``live_stop_after`` (the live regime's stop-after semantics).
+    regime: str
+    #: The caller's requested site labels, as resolved.
+    requested_sites: tuple[str, ...]
+    #: The frontier label the run stopped at (the slate's ``stopped_at``).
+    stopped_at: str | None
+    #: Count of executed calls/ops.
+    executed_count: int
+    #: Count of skipped (not-run) calls/ops -- semantically "not-run",
+    #: never "passed" and never "unverified-but-fine".
+    skipped_count: int
+    #: Order-stable digest of the skipped site labels.
+    skipped_digest: str
+    #: Sequential-prefix fallback cause tag, ``None`` for other regimes.
+    cause: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RunReport:
     """Honesty, state, resolution, and contract metadata for one run.
@@ -1432,6 +1501,17 @@ class RunReport:
     numeric_attestation: NumericAttestationStatus
     poisoned: bool
     nondeterministic_sources: tuple[str, ...]
+    #: PROVISIONAL (documented-unstable, rides naming/S2): ``True`` when the
+    #: live run was invoked with ``carry_state=True`` and declared-state
+    #: mutations were deliberately left on the live model (the default run
+    #: snapshot-restores declared state and reports ``False``).
+    state_carried: bool = False
+    #: Truncation disclosure ([S2-PROV], L4 until=): ``None`` for a full run.
+    truncation: RunTruncation | None = None
+    #: Ratified flat reading surface (S2 sec 2): ``truncation is not None``.
+    truncated: bool = False
+    #: Ratified flat reading surface (S2 sec 2): the stop-frontier site label.
+    stopped_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

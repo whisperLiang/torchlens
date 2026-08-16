@@ -65,6 +65,7 @@ from . import (
     _invariants_equivalence as _invariants_equivalence,
     _invariants_modules_params as _invariants_modules_params,
     _invariants_payloads as _invariants_payloads,
+    _invariants_primitive_ops as _invariants_primitive_ops,
     _invariants_topology as _invariants_topology,
 )
 from .status import (  # noqa: F401 (rebound-child globals)
@@ -259,7 +260,10 @@ _RAW_LABEL_BEARING_LIST_FIELDS = (
     "equivalent_ops",
     "recurrent_ops",
 )
-_RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call")
+# ``site_key`` joins the sweep roster; its COMPONENT-level scan (a raw label
+# embedded before the ordinal tail is invisible to this whole-string pattern)
+# lives in ``_invariants_sites._check_site_key_invariants``.
+_RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call", "site_key")
 
 # Dict-shaped relation metadata carrying labels on either axis:
 # ``conditional_elif_children`` holds label LISTS as values (int keys), and
@@ -439,6 +443,8 @@ _check_edge_use_parent_arg_invariants = _rebind_function(
     _invariants_payloads._check_edge_use_parent_arg_invariants, globals()
 )
 _check_op_log_fields = _rebind_function(_invariants_payloads._check_op_log_fields, globals())
+_check_primitive_op_invariants = _invariants_primitive_ops._check_primitive_op_invariants
+_check_non_torch_primitive_op_inert = _invariants_primitive_ops._check_non_torch_primitive_op_inert
 _check_payload_metadata_invariants = _rebind_function(
     _invariants_payloads._check_payload_metadata_invariants, globals()
 )
@@ -605,6 +611,8 @@ _check_graph_ordering = _rebind_function(_invariants_equivalence._check_graph_or
 _check_loop_detection_invariants = _rebind_function(
     _invariants_equivalence._check_loop_detection_invariants, globals()
 )
+from ._invariants_sites import _check_site_key_invariants  # noqa: E402
+
 _check_distance_invariants = _rebind_function(
     _invariants_connectivity._check_distance_invariants, globals()
 )
@@ -651,6 +659,7 @@ for _split_module in (
     _invariants_backward_flow,
     _invariants_topology,
     _invariants_payloads,
+    _invariants_primitive_ops,
     _invariants_conditional_base,
     _invariants_conditionals,
     _invariants_conditional_modules,
@@ -686,6 +695,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "non_torch",
     ),
     MetadataInvariantContract(
+        "non_torch_primitive_op_inert",
+        _check_non_torch_primitive_op_inert,
+        "non_torch",
+    ),
+    MetadataInvariantContract(
         "backend_neutral_accessor_refs",
         _check_backend_neutral_accessor_refs,
         "all",
@@ -710,6 +724,14 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         _check_loop_detection_invariants,
         "torch",
     ),
+    # Site-key tripwires I-S1/I-S2/I-S3' (L1 grouping core). All backends:
+    # every producer mints keys; legacy keyless artifacts are out of the
+    # declared domain (presence guard at the invariant's birth).
+    MetadataInvariantContract(
+        "site_key_invariants",
+        _check_site_key_invariants,
+        "all",
+    ),
     MetadataInvariantContract("graph_topology", _check_graph_topology, "torch"),
     MetadataInvariantContract(
         "backend_neutral_graph_topology",
@@ -727,6 +749,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "torch",
     ),
     MetadataInvariantContract("op_log_fields", _check_op_log_fields, "torch"),
+    MetadataInvariantContract(
+        "primitive_op_invariants",
+        _check_primitive_op_invariants,
+        "torch",
+    ),
     MetadataInvariantContract(
         "payload_metadata_invariants",
         _check_payload_metadata_invariants,

@@ -94,7 +94,12 @@ from .node_spec import (
     INTERVENTION_HOOK_BORDER_COLOR,
     INTERVENTION_HOOK_FILL_COLOR,
     INTERVENTION_SITE_COLOR,
+    # S5 contract (C4): the three node-callback aliases have ONE declaration
+    # home (node_spec.py); this module re-exports them for internal consumers.
+    BackwardNodeSpecFn as BackwardNodeSpecFn,
+    CollapsedNodeSpecFn as CollapsedNodeSpecFn,
     NodeSpec,
+    NodeSpecFn as NodeSpecFn,
     graphviz_graph_overrides,
     intervention_graph_override,
     intervention_site_and_cone_labels,
@@ -177,7 +182,6 @@ def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) ->
 
 
 if TYPE_CHECKING:
-    from ..data_classes.grad_fn import GradFn
     from ..data_classes.module import Module
     from .auto_collapse import ModuleRepeatFold
 
@@ -285,9 +289,6 @@ class BoundaryNode:
 
 
 GraphNode = BaseGraphNode | BoundaryNode | FocusNode
-NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
-BackwardNodeSpecFn = Callable[["GradFn", NodeSpec], NodeSpec | None]
-CollapsedNodeSpecFn = Callable[["Module", NodeSpec], NodeSpec | None]
 CollapseFn = Callable[["Module"], bool]
 SkipFn = Callable[["Layer"], bool]
 InterveningClusterMode = Literal["upstream", "outside", "downstream", "own"]

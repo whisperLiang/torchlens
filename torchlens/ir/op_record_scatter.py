@@ -162,6 +162,7 @@ CELL_SOURCES: dict[str, str] = {
     # ---- equivalence / recurrence ------------------------------------------------
     "equivalent_ops": "JOIN:equivalence",
     "recurrent_ops": "DEFAULT",
+    "site_key": "DEFAULT",  # STEP:7 mints the site_key_v1 value
     # ---- ancestry --------------------------------------------------------------
     "root_ancestors": "FACET:ancestry",
     "children": "JOIN:children",

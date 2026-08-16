@@ -61,10 +61,14 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # (fail-neutral; nothing to patch means nothing can escape through it).
     "torchlens/backends/torch/_completeness_finalize.py": frozenset({"getattr(torch, '_C')"}),
     # TorchDispatchMode base class (public-by-usage, import fails the module
-    # loudly at import time) and the same fail-closed torch.ops enumeration.
-    "torchlens/backends/torch/completeness_witness.py": frozenset(
-        {"from torch.utils._python_dispatch", "import torch._ops"}
-    ),
+    # loudly at import time) for the shared owned-mode marker and pause
+    # bracket; the l3 aten wave 0 mode-pop unification MOVED the import here
+    # from completeness_witness.py, and the stack getter already routes
+    # through _torch_compat (get_current_dispatch_mode_stack).
+    "torchlens/backends/torch/_modes.py": frozenset({"from torch.utils._python_dispatch"}),
+    # The fail-closed torch.ops enumeration (the TorchDispatchMode base-class
+    # import moved to _modes.py with the l3 mode-pop unification).
+    "torchlens/backends/torch/completeness_witness.py": frozenset({"import torch._ops"}),
     # Expanded-weights identity shim (SF-53 census): the conv/RNN per-sample-grad
     # picker compares the dispatched func against torch's OWN
     # ``_cudnn_rnn_flatten_weight`` symbol, so the shim must read that exact private

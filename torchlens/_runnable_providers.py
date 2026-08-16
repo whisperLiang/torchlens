@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         _raise_first_divergence,
         _raise_monotonic_divergence,
         _require_loaded_sparse_provider,
+        _resolve_run_until_plan,
         _run_fork_name,
         _run_report,
         _snapshot_input_byte_digests,
@@ -62,6 +63,7 @@ def run_loaded_sparse_trace(
     *,
     seed: int | None,
     on_divergence: DivergencePolicy,
+    until: Any = None,
 ) -> RunResult:
     """Execute a loaded sparse recipe on a transactional Trace fork.
 
@@ -90,6 +92,10 @@ def run_loaded_sparse_trace(
             "on_divergence must be DivergencePolicy.RAISE or DivergencePolicy.RETURN_DIVERGED."
         ) from exc
     descriptor, readiness, callables = _require_loaded_sparse_provider(trace)
+    # L4 2.1: resolve the static until= selection against the loaded trace's
+    # settled labels BEFORE anything binds or executes; the scheduler cut is
+    # computed pre-transaction from descriptor facts only.
+    until_plan = None if until is None else _resolve_run_until_plan(trace, until)
     # r71 A4 defense-in-depth: run preparation RE-ASSERTS the parser-derived
     # completeness floor before anything executes. Parse already refused a summary
     # differing from the floor; a descriptor that somehow reaches execution with the
@@ -149,6 +155,7 @@ def run_loaded_sparse_trace(
             input_alias_unresolved=input_alias_unresolved,
             prepared_state=prepared_state,
             fork=fork,
+            until_plan=until_plan,
         )
     except BaseException:
         _state._unregister_log(fork)
@@ -251,6 +258,8 @@ def _finalize_provider_run(
     divergence_policy: DivergencePolicy,
     nondeterministic_sources: Iterable[str] = (),
     unregister_fork_on_divergence: bool = True,
+    state_carried: bool = False,
+    truncation: Any = None,
 ) -> RunResult:
     """THE single provider settlement finalizer (r39 CLASS B sparse<->live parity immunizer).
 
@@ -287,5 +296,7 @@ def _finalize_provider_run(
         first_mismatch=mismatch,
         numeric_attestation=numeric_attestation,
         nondeterministic_sources=nondeterministic_sources,
+        state_carried=state_carried,
+        truncation=truncation,
     )
     return RunResult(output=output, trace=fork, report=report)

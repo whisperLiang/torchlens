@@ -56,6 +56,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "module_identity_mode": "header",
     "param_source": "header",
     "derived_grads": "graph",
+    "_primitive_op_profile": "graph",
     # Union additions (2026-08-13 grind): fields declared by the G2/F3a/B1-04
     # fixes now carry owners. Semantic-output scratch + predicate keys are
     # session-lifetime; validation side channels are session; bundle-source
@@ -177,6 +178,8 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "save_code_context": "capture_config",
     "save_rng_states": "capture_config",
     "recurrence_detection": "capture_config",
+    "grouping": "capture_config",
+    "grouping_policy": "capture_config",
     "verbose": "capture_config",
     "profile_enabled": "capture_config",
     "has_gradients": "totals",
@@ -468,6 +471,10 @@ TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
     # --- Visualization scratch --------------------------------------------
     "_last_sibling_ordering_decision": (
         "viz: last sibling-ordering decision for diagnostics (scrub-declared runtime-only)"
+    ),
+    "_last_encoding_state": (
+        "viz: last draw's encoding-channel state (L5 color_by) for diagnostics "
+        "(scrub-declared runtime-only)"
     ),
     # --- __dict__-spelled transients surfaced by the r6 R45 gate widening --
     # Every row below is popped/consumed within its own window; none can
