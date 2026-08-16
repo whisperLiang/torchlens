@@ -382,6 +382,35 @@ def test_cooked_halted_trace_settles_attested_halted() -> None:
     assert outcome.frontier_labels == tuple(cooked.output_layers)
 
 
+def test_cooked_halted_outcome_matches_exhaustive_settlement() -> None:
+    """R06: the cooked HALTED outcome carries the same facts as settle_halted.
+
+    Fail-before: stamp_cooked dropped ``boundary_kind`` (None vs the
+    exhaustive path's 'op'), and its single ``reason`` parameter received the
+    Recording-space RAW label (e.g. ``relu_1_3_raw``) while
+    ``frontier_labels`` was final -- one outcome mixing label spaces, and
+    ``outcome.reason != trace.halt_reason``, the invariant the exhaustive
+    path pins above.
+    """
+
+    recording = tl.record(
+        ThreeStageModel(),
+        torch.ones(1, 3),
+        save=lambda ctx: ctx.kind == "op",
+        halt=halt_on_relu,
+    )
+    cooked = recording.to_trace()
+    outcome = cooked.outcome
+    exhaustive = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
+
+    assert outcome.boundary_kind == exhaustive.outcome.boundary_kind == "op"
+    # Coherence with the trace's own remapped halt fields (final label space).
+    assert outcome.reason == cooked.halt_reason
+    assert outcome.boundary_label == cooked.halt_frontier
+    assert "_raw" not in str(outcome.reason)
+    assert "_raw" not in str(outcome.boundary_label)
+
+
 # ---------------------------------------------------------------------------
 # Path 20: preview backends stamp at their return boundaries (source lockstep)
 # ---------------------------------------------------------------------------

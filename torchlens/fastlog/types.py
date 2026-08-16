@@ -987,13 +987,33 @@ class Recording(CapturedRun):
         from ..capture.outcome import stamp_cooked
 
         cooked_frontier = None
+        cooked_reason = None
+        cooked_boundary = None
+        cooked_boundary_kind = None
         if self.halted:
             output_labels = list(getattr(trace, "output_layers", ()))
             cooked_frontier = str(output_labels[0]) if output_labels else None
+            # R06: the halted postprocess remapped the persisted halt fields to
+            # FINAL labels; the settled record mirrors them (settle_halted
+            # parity) instead of stamping the Recording-space raw label into an
+            # outcome whose frontier is final. boundary_kind rides the
+            # Recording's own settled outcome; the raw halt_reason stays the
+            # fallback when the remap did not run.
+            remapped_reason = getattr(trace, "halt_reason", None)
+            cooked_reason = (
+                remapped_reason if isinstance(remapped_reason, str) else self.halt_reason
+            )
+            remapped_frontier = getattr(trace, "halt_frontier", None)
+            cooked_boundary = (
+                remapped_frontier if isinstance(remapped_frontier, str) else cooked_reason
+            )
+            cooked_boundary_kind = getattr(self.outcome, "boundary_kind", None)
         stamp_cooked(
             trace,
             halted=self.halted,
-            reason=self.halt_reason,
+            reason=cooked_reason,
+            boundary_kind=cooked_boundary_kind,
+            boundary_label=cooked_boundary,
             frontier_label=cooked_frontier,
         )
         return trace
