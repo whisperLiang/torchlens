@@ -205,9 +205,16 @@ def test_buffer_duplicate_axis_actually_merges(
         removed: Any,
         *,
         deferred_removals: Any = None,
+        survivor_edge_shadows: Any = None,
     ) -> None:
         merges.append((survivor._label_raw, removed._label_raw))
-        real_merge(trace, survivor, removed, deferred_removals=deferred_removals)
+        real_merge(
+            trace,
+            survivor,
+            removed,
+            deferred_removals=deferred_removals,
+            survivor_edge_shadows=survivor_edge_shadows,
+        )
 
     monkeypatch.setattr(cf, "_merge_buffer_entries", spying_merge)
     trace = _axis_buffer_duplicate()

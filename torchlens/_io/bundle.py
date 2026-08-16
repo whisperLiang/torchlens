@@ -4163,6 +4163,8 @@ def _run_save_recovery(
     """
 
     def _disclose(step: str, failure: BaseException) -> None:
+        """Note and warn that recovery ``step`` failed, never raising over ``primary``."""
+
         detail = (
             f"bundle-save recovery step '{step}' itself failed "
             f"({type(failure).__name__}: {failure}); the primary error is re-raised "
