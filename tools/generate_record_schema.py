@@ -142,12 +142,7 @@ def _classify(
         return "BITSET", "mutable_container"
     if name in _GROUP_FIELDS:
         return "GROUP", "mutable_container"
-    if name in _OVERLAY_EDGE_FIELDS:
-        overlay_default = container_defaults.get(name)
-        return "EDGE", (
-            "mutable_container" if isinstance(overlay_default, (list, dict, set)) else "immutable"
-        )
-    if _is_property(cls, name):
+    if _is_property(cls, name) and name not in _OVERLAY_EDGE_FIELDS:
         return "COMPUTED", "immutable"
     if policy.portable_policy is FieldPolicy.DROP:
         return "RUNTIME", "immutable"
