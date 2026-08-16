@@ -66,6 +66,12 @@ _NEW_FILE_LINE_CAP = 2000
 #: fix/infra-r7 lane while the other fixwave-6 lanes (capture/iomerged/
 #: valid-conc/vizgraph) merged their reviewed fix growth to main in parallel;
 #: the raise reconciles the branch-frozen census with the merged tree.
+#: 2026-08-16 fixwave-7 settle: six ceilings re-stepped to the next 50 above
+#: the merged-tree measurement (bundle 4350->4450, scrub 2350->2400,
+#: loop_grouping_adapter 2500->2600, user_funcs 3850->3900, exemptions
+#: 2950->3000, auto_collapse 2400->2450) -- reviewed fixwave-7 growth
+#: (buffer-value channel gating, R29 lazy pair generation, admission
+#: ordering, collapse-ceiling honesty) landing in already-ledgered files.
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5300,
     "torchlens/data_classes/op.py": 5200,
@@ -73,9 +79,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4350,
+    "torchlens/_io/bundle.py": 4450,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 3850,
+    "torchlens/user_funcs.py": 3900,
     "torchlens/backends/torch/backward.py": 3800,
     "torchlens/data_classes/trace.py": 3750,
     "torchlens/utils/_torch_compat.py": 3450,
@@ -85,8 +91,8 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/postprocess/_contracts.py": 3250,
     "torchlens/backends/torch/model_prep.py": 3200,
     "torchlens/data_classes/module.py": 2950,
-    "torchlens/visualization/auto_collapse.py": 2400,
-    "torchlens/validation/exemptions.py": 2950,
+    "torchlens/visualization/auto_collapse.py": 2450,
+    "torchlens/validation/exemptions.py": 3000,
     "torchlens/backends/paddle/backend.py": 2700,
     "torchlens/_runnable_state.py": 2700,
     "torchlens/capture/arg_positions.py": 2650,
@@ -94,12 +100,12 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/_capture_state_helpers.py": 2350,
     "torchlens/bundle/__init__.py": 2450,
     "torchlens/data_classes/layer.py": 2350,
-    "torchlens/postprocess/loop_grouping_adapter.py": 2500,
+    "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
     "torchlens/visualization/_render_edges.py": 2350,
     "torchlens/options.py": 2400,
     "torchlens/intervention/save.py": 2350,
-    "torchlens/_io/scrub.py": 2350,
+    "torchlens/_io/scrub.py": 2400,
     "torchlens/debug/_infer_input_shape.py": 2250,
     "torchlens/postprocess/ast_branches.py": 2250,
     "torchlens/visualization/_summary_internal/_builder.py": 2200,
@@ -125,8 +131,12 @@ _MAX_LEDGER_SLACK = 100
 #: test_global_state_inventory re-stepped -- the census ran on the infra lane
 #: while the capture lane's reviewed tripwire growth for those files merged
 #: to main in parallel.
+#: 2026-08-16 fixwave-7 settle: test_validation re-stepped 8500->8600 for
+#: the wave's reviewed invariant tripwires; test_merged_engine instead
+#: SPLIT (the r8 adversarial classes moved to
+#: test_merged_engine_hardening.py) and stays under the unledgered cap.
 _TEST_FILE_CEILINGS: dict[str, int] = {
-    "tests/test_validation.py": 8500,
+    "tests/test_validation.py": 8600,
     "tests/example_models.py": 5500,
     "tests/test_real_world_models.py": 4850,
     "tests/test_toy_models.py": 4050,
