@@ -212,12 +212,18 @@ add names to the top-level `torchlens` namespace:
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
 | `renderer_capability_unsupported` | RenderIR requires a capability its renderer lacks (`UnsupportedRendererCapabilityError`, `RuntimeError` lineage) | Use the graphviz renderer or drop the option needing the capability |
+| `run_carry_state_requires_live_model` | `carry_state=True` on a loaded provider, which mutates staged clones and has no live model for state to carry into (PROVISIONAL spelling, documented-unstable) | Drop `carry_state=` on loaded traces, or run the live model |
+| `run_fast_carry_state_unsupported` | `carry_state=True` with `fast=True`; fast mode's cached-oracle contract forbids declared-state mutation (PROVISIONAL spelling, documented-unstable) | Drop `carry_state=` or drop `fast=` |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
+| `run_fast_until_unsupported` | `until=` with `fast=True`; the fast tier compiles the full recorded path (PROVISIONAL spelling, documented-unstable) | Drop `until=` or drop `fast=` |
+| `run_until_form_invalid` | `until=`/run-time `save=` run-window selection invalid: a non-string non-predicate form, an empty or unresolvable selection, sites with no producing recorded call, or a `save=` site outside the `until=` executed window (PROVISIONAL spelling, documented-unstable; predicate/selector forms refuse separately via `run_capability_unavailable` at stage `predicate_surface_pending` until the S4 merge) | Pass static layer labels, module addresses, or `'saved'`, inside the executed window |
 | `run_input_missing` | Legacy rerun received no forward input | Pass the input as `log.run(model, x)` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |
 | `run_legacy_arguments_conflict` | Unified and legacy run arguments were mixed | Pass one input form only |
-| `run_legacy_options_conflict` | Unified run received legacy rerun options | Drop the legacy options |
+| `run_legacy_options_conflict` | Legacy and unified run options were mixed in either direction (legacy rerun options on the unified surface, or the unified-only `carry_state=` on the legacy surface) | Drop the mismatched options |
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
+| `run_state_snapshot_unsupported` | The default live run() could not snapshot declared state before executing (enumeration unavailable, unprovable/overlapping alias topology, or clone/allocation failure); fail-before-execute, no forward ran (`StateBindingError`, `ValueError` lineage; PROVISIONAL spelling, documented-unstable) | Pass `carry_state=True` if you accept declared-state mutation persisting, or fix the named state entry |
+| `run_state_restore_failed` | A declared-state restore failed AFTER execution (the live model's state is now unknown), or a later live/fast run() was attempted on a trace carrying that session-scoped state-compromised latch (`StateBindingError`, `ValueError` lineage; PROVISIONAL spelling, documented-unstable) | Reload known-good weights (or re-capture), then run again |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
 | `save_budget_invalid` | `save_budget` is not `'auto'`, a float in `(0, 1]`, an int byte cap, or `None` (`InvalidArgumentError`, `ValueError` lineage) | Pass one of the documented spellings |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |

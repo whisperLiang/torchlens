@@ -547,6 +547,7 @@ def save_new_outs(
     grad_layers_to_save: str | list[Any] | None = "all",
     random_seed: int | None = None,
     backward_ready: bool | None = None,
+    _run_until_plan: Any | None = None,
 ) -> None:
     """Re-run the model with new inputs, saving refreshed outs.
 
@@ -598,6 +599,7 @@ def save_new_outs(
                 grad_layers_to_save=grad_layers_to_save,
                 random_seed=random_seed,
                 backward_ready=None,
+                _run_until_plan=_run_until_plan,
             )
         finally:
             self.detach_saved_activations = model_detach_saved_activations
@@ -667,6 +669,11 @@ def save_new_outs(
             else tuple(cast(list[int], grad_layer_nums_to_save))
         ),
         _refresh_projection_capture=True,
+        # L4 2.3 live until=: the run-installed halt latch rides the EXISTING
+        # halt= surface of the internal refresh capture (one forwarded argument;
+        # the driver's halt arm settles the throwaway HALTED and returns the
+        # partial normally into the projection flow below).
+        halt_predicate=None if _run_until_plan is None else _run_until_plan.halt_predicate,
     )
     projected_layer_nums = (
         "all" if layer_nums_to_save == "all" else tuple(cast(list[int], layer_nums_to_save))
@@ -676,6 +683,31 @@ def save_new_outs(
         if grad_layer_nums_to_save == "all"
         else tuple(cast(list[int], grad_layer_nums_to_save))
     )
+    if _run_until_plan is not None and _run_until_plan.fired:
+        # L4 2.3 truncated refresh: the latch fired and the internal capture
+        # settled HALTED. The projection is PREFIX-SCOPED (all projector
+        # tripwires at full strength on the executed prefix; a prefix mismatch
+        # refuses exactly like a full mismatch), and BOTH post-return feedback
+        # writes are suppressed with their inherited authority explicitly
+        # neutralized -- never left to absence:
+        #   (1) output-losslessness: the fork INHERITED the source's positive
+        #       stamp via the fork builder's runnable copy pass, and the halt
+        #       frontier's own proof attests the truncated frontier tensor,
+        #       never the full-forward output -- so the :672-style copy is
+        #       SKIPPED and the inherited proof is CLEARED to None (the shipped
+        #       fail-closed state; the live reconstructor fails closed).
+        #   (2) replay-arg completeness: a truncated refresh did not witness
+        #       complete replay arg/version data over a partial forward, and the
+        #       field initializes True at construction -- so it is SET FALSE
+        #       explicitly, never merely skipped.
+        RefreshProjector(
+            self,
+            projected_layer_nums,
+            projected_grad_layer_nums,
+        ).project_prefix(refreshed, _run_until_plan)
+        self._runnable.output_losslessness = None
+        self._replay_arg_version_data_complete = False
+        return
     RefreshProjector(
         self,
         projected_layer_nums,
@@ -1104,8 +1136,11 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
     on the given inputs, so the captured mode is DECLARED state the replay reproduces.
     Recording it (per submodule -- submodules can differ) lets the producer declare the mode
     as a witness fact; a mode-sensitive op replayed without a recorded mode fact is downgraded
-    to UNVERIFIABLE (fail closed). It runs only for intervention-ready captures, touches no
-    tensors, and stores an in-memory map consumed by the producer at save time.
+    to UNVERIFIABLE (fail closed). It runs for every capture (D18 widened the former
+    intervention-ready gate so the live refresh projector's mode-claim belt holds on the
+    default path; the widening is verdict-inert on the sparse side because the runnable
+    producer refuses non-intervention-ready captures outright), touches no tensors, and
+    stores an in-memory map consumed by the producer at save time and by the projector belt.
 
     Parameters
     ----------
@@ -1115,8 +1150,6 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
         The prepared source model whose per-module ``training`` flags are recorded.
     """
 
-    if not bool(getattr(trace, "intervention_ready", False)):
-        return
     named_modules = getattr(model, "named_modules", None)
     if not callable(named_modules):
         return

@@ -32,3 +32,13 @@ Two S5 grain metric rows are intentionally rebaselined: `deeplabv3_resnet50` and
 v1's lower variance came from a degenerate opaque ASPP cut; v2 exposes the ASPP
 branches. For ConvNeXt Tiny, v2's extra downsample detail is treated as a
 legitimate overview detail rather than a blocking regression.
+
+## run() Declared-State Restore (default behavior change)
+
+The default live `trace.run(inputs=...)` now snapshot-restores the model's declared
+state (named parameters plus registered buffers, alias topology preserved) around the
+run, so repeated `run()` calls leave the model bit-identical. Previously, forward-pass
+mutations of declared state (BatchNorm running statistics, buffer counters, `no_grad`
+in-forward parameter updates) persisted on the live model across `run()` calls. Pass
+`carry_state=True` (provisional spelling, documented-unstable) for the old persistence;
+the report discloses the choice as `report.state_carried`.

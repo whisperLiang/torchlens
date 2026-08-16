@@ -531,7 +531,15 @@ nondeterministic-capture-context runs report `not_applicable`; `attested` always
 ### Sparse runnable execution
 
 `trace.run(inputs=x, seed=...)` is the provider-neutral execution spelling. A live Trace delegates
-on a fork to the existing `save_new_outs` fast capture path; a loaded sparse Trace binds cloned
+on a fork to the existing `save_new_outs` fast capture path. The live refresh projector's
+buffer-sink refusal is TRAINING-MODE AWARE (D18, explicit JMT ruling): eval-mode BatchNorm
+(every buffer sink carries derived write evidence `buffer_value_changed=False` with agreeing
+mode claims) is refresh-eligible and runnable on the DEFAULT path, while any value-changing
+buffer write (train-mode running stats, counters), unproven (`None`) evidence, a mode claim
+contradicting the evidence, or a value-changing write in the refreshed rerun's own journal
+refuses with the typed `BufferSinkRoutingError` carrying
+`RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE` (provisional spelling, documented-unstable;
+pinned "computational graph changed" message term preserved). A loaded sparse Trace binds cloned
 input leaves plus staged/random state and executes its resolved taken-path DAG under
 `pause_logging()`. Both return `RunResult(output, trace, report)` and leave the source Trace
 unchanged. Analysis-only loads raise typed `run_capability_unavailable`. Stage 5 populates

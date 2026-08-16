@@ -808,6 +808,143 @@ def snapshot_state_alias_topology(model: object) -> Mapping[str, Any] | None:
     return {"groups": groups, "refusals": tuple(refusals)}
 
 
+@dataclass(frozen=True, slots=True)
+class LiveDeclaredStateSnapshot:
+    """One live-model declared-state snapshot for the run() restore bracket (L4 5.2).
+
+    ``bindings`` maps every registered slot to its live tensor object; ``clones``
+    holds ONE value clone per distinct live object identity (alias groups -- tied
+    weights, double-registered buffers -- snapshot once and restore once, so
+    ``a is b`` is preserved). ``owners`` records the owning module and registry
+    dict per binding so a forward that REASSIGNED a slot to a new object is
+    restored by re-binding the ORIGINAL object with its restored value.
+    """
+
+    #: (module, registry_attr, local_name, canonical_name, original_object)
+    bindings: tuple[tuple[Any, str, str, str, torch.Tensor], ...]
+    #: id(original_object) -> value clone
+    clones: dict[int, torch.Tensor]
+
+
+def _snapshot_refusal(reason: str, **payload: Any) -> Exception:
+    """Build the typed fail-before-execute snapshot preflight refusal (L4 5.4)."""
+
+    return StateBindingError(
+        "run() could not snapshot the live model's declared state before "
+        f"execution: {reason}. No forward was run (fail-before-execute). "
+        "Remedy: pass carry_state=True to run without the restore bracket if "
+        "you accept declared-state mutation persisting on the live model",
+        code="run_state_snapshot_unsupported",
+        detection_stage="state_snapshot_preflight",
+        **payload,
+    )
+
+
+def snapshot_live_declared_state(model: object) -> LiveDeclaredStateSnapshot:
+    """Snapshot a live model's declared state before a default run() executes.
+
+    Covers the full declared state model boundary: named parameters plus every
+    registered buffer (``remove_duplicate=False``), value-level clones through
+    the byte-guard chokepoint, alias topology preserved (one clone per live
+    object identity). Enumeration failure, an unprovable alias topology, and a
+    clone/allocation failure each refuse TYPED before any forward runs; no
+    partial snapshot ever proceeds to execution.
+    """
+
+    named_modules = getattr(model, "named_modules", None)
+    if not callable(named_modules):
+        raise _snapshot_refusal("the model exposes no named_modules() enumeration")
+    topology = snapshot_state_alias_topology(model)
+    if topology is None:
+        raise _snapshot_refusal("the model exposes no named parameter/buffer accessors")
+    refusals = tuple(topology.get("refusals", ()))
+    if refusals:
+        first = refusals[0]
+        raise _snapshot_refusal(
+            "the declared-state alias topology is unprovable or overlapping "
+            f"(state entries {first[0]!r} and {first[1]!r} relate as {first[2]!r}; "
+            "unprovable refuses, never guesses)",
+            alias_refusals=refusals,
+        )
+    bindings: list[tuple[Any, str, str, str, torch.Tensor]] = []
+    try:
+        modules = list(named_modules(remove_duplicate=False))
+    except Exception as exc:
+        raise _snapshot_refusal(f"named_modules() enumeration failed ({exc!r})") from exc
+    for module_path, module in modules:
+        for registry_attr in ("_parameters", "_buffers"):
+            registry = getattr(module, registry_attr, None)
+            if not isinstance(registry, dict):
+                continue
+            for local_name, value in registry.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                canonical = f"{module_path}.{local_name}" if module_path else local_name
+                bindings.append((module, registry_attr, local_name, canonical, value))
+    clones: dict[int, torch.Tensor] = {}
+    with _state.pause_logging(), _guarded_defensive_materialize():
+        for _module, _registry_attr, _local_name, canonical, value in bindings:
+            if id(value) in clones:
+                continue
+            try:
+                clones[id(value)] = _byte_guarded_clone(value, state_dict_name=canonical)
+            except Exception as exc:
+                raise _snapshot_refusal(
+                    f"cloning state entry {canonical!r} failed ({exc!r})",
+                    state_dict_name=canonical,
+                ) from exc
+    return LiveDeclaredStateSnapshot(bindings=tuple(bindings), clones=clones)
+
+
+class LiveStateRestoreFailure(RuntimeError):
+    """Internal carrier for a declared-state restore that failed mid-bracket.
+
+    The transaction converts this into the typed ``run_state_restore_failed``
+    refusal with the structured fields the contract promises; the failing
+    restore exception is chained as ``__cause__``.
+    """
+
+    def __init__(self, state_dict_name: str, groups_restored: int) -> None:
+        super().__init__(
+            f"declared-state restore failed at {state_dict_name!r} after "
+            f"{groups_restored} alias group(s) were restored"
+        )
+        self.state_dict_name = state_dict_name
+        self.groups_restored = groups_restored
+
+
+def restore_live_declared_state(snapshot: LiveDeclaredStateSnapshot) -> None:
+    """Restore a declared-state snapshot onto the live model (finally bracket).
+
+    Runs under ``no_grad`` and ``pause_logging``, one value restore per alias
+    group (distinct live object), then re-binds any slot the forward reassigned
+    to a different object back to its ORIGINAL object -- so repeated run()
+    calls leave the model bit-identical with ``a is b`` alias semantics intact.
+    Raises :class:`LiveStateRestoreFailure` (original exception chained) on the
+    first failed restore; the caller owns the state-compromised consequence
+    (L4 5.4).
+    """
+
+    restored: set[int] = set()
+    with _state.pause_logging(), torch.no_grad():
+        for _module, _registry_attr, _local_name, canonical, original in snapshot.bindings:
+            key = id(original)
+            if key in restored:
+                continue
+            try:
+                original.copy_(snapshot.clones[key])
+            except Exception as exc:
+                raise LiveStateRestoreFailure(canonical, len(restored)) from exc
+            restored.add(key)
+        for module, registry_attr, local_name, canonical, original in snapshot.bindings:
+            try:
+                registry = getattr(module, registry_attr, None)
+                if isinstance(registry, dict) and registry.get(local_name) is not original:
+                    registry[local_name] = original
+            except Exception as exc:
+                raise LiveStateRestoreFailure(canonical, len(restored)) from exc
+
+
 def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
     """Validate and atomically stage a user state mapping on a sparse Trace.
 

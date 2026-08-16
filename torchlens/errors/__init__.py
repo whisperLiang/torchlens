@@ -26,6 +26,7 @@ from .episode import (
     EpisodeLedgerError,
 )
 from .runnable import (
+    BufferSinkRoutingError,
     CollectiveBoundaryReplayError,
     NumericAttestationError,
     PathDivergenceError,
@@ -323,6 +324,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "BufferSinkRoutingError",
     "BundleRelationError",
     "CaptureError",
     "CompatibilityError",
