@@ -51,13 +51,17 @@ def explain(
     -----
     The JSON schema is identified by ``schema="torchlens.explain.v1"`` and
     contains these stable snake-case keys: ``schema``, ``audience``,
-    ``capture_status``, ``model_class``, ``layer_count``, ``operation_count``,
+    ``capture_status``, ``capture_verified``, ``capture_verification_reason``,
+    ``rescue_rerun``, ``model_class``, ``layer_count``, ``operation_count``,
     ``saved_tensor_count``, ``total_tensor_count``, ``has_backward_pass``,
     ``exception_type``, ``exception_message``, ``last_completed_op_label``,
     ``last_completed_op_shape``, ``last_completed_op_dtype``,
     ``last_completed_op_device``, ``failing_boundary``, and
     ``first_nonfinite``. Evidence unavailable from the supplied log is reported
-    as ``"unknown"`` rather than inferred.
+    as ``"unknown"`` rather than inferred. ``capture_status`` is the log's
+    settled ``CaptureOutcome`` status value (``"partial"`` for a failed
+    partial capture), never assumed complete; ``capture_verified`` is the
+    tri-state stored fact (``None`` = no ceiling recorded).
     """
 
     if audience not in {"researcher", "practitioner", "auto"}:
@@ -76,6 +80,9 @@ def explain(
 
     lines = [
         "TorchLens report",
+        "",
+        "Capture status",
+        *_capture_status_lines(log),
         "",
         "Model summary",
         *_model_summary_lines(log),
@@ -244,6 +251,75 @@ def _partial_text(diagnosis: dict[str, Any]) -> str:
     )
 
 
+def _capture_verification(log: Any) -> dict[str, Any]:
+    """Return the capture's verification/outcome facts, never inferred.
+
+    The report layer's honesty contract (report/AGENTS.md) requires a rescued
+    or ceilinged capture (``capture_verified=False``) to stay visible in every
+    report surface. ``capture_status`` used to be HARDCODED ``"complete"`` for
+    every non-partial log (round-7 R67/R88 HIGH), so a HALTED or rescued
+    capture explained as clean.
+
+    Parameters
+    ----------
+    log:
+        Capture object.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``capture_status`` (the settled ``CaptureOutcome`` status value, or
+        ``"unknown"`` when the log carries none), tri-state
+        ``capture_verified`` (``None`` = no ceiling recorded),
+        ``capture_verification_reason``, and ``rescue_rerun``.
+    """
+
+    outcome = getattr(log, "outcome", None)
+    status = getattr(outcome, "status", None)
+    status_value = getattr(status, "value", None)
+    return {
+        "capture_status": str(status_value) if status_value is not None else "unknown",
+        "capture_verified": getattr(log, "capture_verified", None),
+        "capture_verification_reason": getattr(log, "capture_verification_reason", None),
+        "rescue_rerun": bool(getattr(log, "rescue_rerun", None) or False),
+    }
+
+
+def _capture_status_lines(log: Any) -> list[str]:
+    """Return capture outcome/verification lines for the text report.
+
+    Parameters
+    ----------
+    log:
+        Completed trace-like object.
+
+    Returns
+    -------
+    list[str]
+        Bullet lines for the capture-status section.
+    """
+
+    facts = _capture_verification(log)
+    lines = [f"- Capture outcome: {facts['capture_status']}."]
+    if facts["capture_verified"] is False:
+        reason = facts["capture_verification_reason"] or "unrecorded reason"
+        lines.append(
+            f"- Capture verification: UNVERIFIED ({reason}); parts of this "
+            "forward may be missing or unattributed -- treat every summary "
+            "below as a lower bound on what ran."
+        )
+    elif facts["capture_verified"] is True:
+        lines.append("- Capture verification: verified.")
+    else:
+        lines.append("- Capture verification: no ceiling recorded.")
+    if facts["rescue_rerun"]:
+        lines.append(
+            "- This result came from the disclosed rescue re-run "
+            "(mode_rescue_rerun), not the primary capture."
+        )
+    return lines
+
+
 def _base_json(log: Any, audience: Audience) -> dict[str, Any]:
     """Return fields common to complete and partial JSON reports.
 
@@ -263,7 +339,7 @@ def _base_json(log: Any, audience: Audience) -> dict[str, Any]:
     return {
         "schema": "torchlens.explain.v1",
         "audience": audience,
-        "capture_status": "complete",
+        **_capture_verification(log),
         "model_class": getattr(log, "model_class_name", type(log).__name__),
         "layer_count": _safe_len(getattr(log, "layer_list", None)),
         "operation_count": int(getattr(log, "num_ops", 0) or 0),

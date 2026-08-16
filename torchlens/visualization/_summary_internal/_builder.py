@@ -141,9 +141,45 @@ def render_model_summary(
         f"{format_discoverability_summary(trace, show_input_preprocessing_details=show_input_preprocessing_details)}"
         f"\n\n{legacy_text}"
     )
+    banner = _capture_verification_banner(trace)
+    if banner:
+        text = f"{banner}\n{text}"
     if print_to is not None:
         print_to(text)
     return text
+
+
+def _capture_verification_banner(trace: Trace) -> str:
+    """Return the disclosure line for a non-clean capture, or ``""``.
+
+    Round-7 R67/R88: the report honesty contract requires a rescued or
+    ceilinged capture (``capture_verified=False``) and any non-COMPLETE
+    settled outcome to stay VISIBLE in summary output rather than rendering
+    indistinguishably from a clean complete capture.
+
+    Parameters
+    ----------
+    trace:
+        Trace being summarized.
+
+    Returns
+    -------
+    str
+        One-line disclosure, or empty for a clean complete capture.
+    """
+
+    notes = []
+    status_value = getattr(getattr(getattr(trace, "outcome", None), "status", None), "value", None)
+    if status_value not in (None, "complete"):
+        notes.append(f"capture outcome: {status_value}")
+    if getattr(trace, "capture_verified", None) is False:
+        reason = getattr(trace, "capture_verification_reason", None) or "unrecorded reason"
+        notes.append(f"capture UNVERIFIED ({reason})")
+    if bool(getattr(trace, "rescue_rerun", None) or False):
+        notes.append("rescue re-run result (mode_rescue_rerun)")
+    if not notes:
+        return ""
+    return "! " + "; ".join(notes) + " -- this summary may undercount what ran"
 
 
 def format_model_repr(trace: Trace) -> str:
