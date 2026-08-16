@@ -152,20 +152,29 @@ class CaptureOutcome:
         }
 
 
-class CaptureOutcomeError(TorchLensError):
+class CaptureOutcomeError(TorchLensError, ValueError):
     """Typed capability refusal from the capture-outcome chokepoint.
 
     ``fields["code"]`` carries the stable gate code (``"N1"``..``"N5"``);
     branch on it, never on message text.
+
+    ``ValueError`` lineage (R64-4): the sibling refusals at the same public
+    doors (``tl.save`` raises ``RunnablePreflightError`` /
+    ``InvalidArgumentError`` for its other three refusal reasons) are all
+    ``ValueError``-lineage, so a caller's natural ``except ValueError`` used
+    to catch three of the door's four refusals and silently miss the N-gate.
     """
 
 
-class StopSignalSwallowedError(CaptureError):
+class StopSignalSwallowedError(CaptureError, RuntimeError):
     """A halt/nonfinite stop request was swallowed by user code (F6).
 
     Raised at the capture boundary when the stop-request latch is set but the
     forward returned normally: a user ``except``/``except BaseException`` ate
     the control signal, so the capture can never be blessed COMPLETE.
+    ``RuntimeError`` lineage (R64-4): it reports an invalid runtime state at
+    the capture boundary, like its ``CaptureContextError`` sibling; it was one
+    of only two concrete publicly-raised classes with no builtin lineage.
     """
 
 

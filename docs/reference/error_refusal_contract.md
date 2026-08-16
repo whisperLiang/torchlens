@@ -47,7 +47,7 @@ add names to the top-level `torchlens` namespace:
 | `batch_items_invalid` | Export batch-items count is negative | Pass a non-negative integer |
 | `batch_render_invalid` | Batch render policy is unknown or malformed | Choose a documented batch_render policy |
 | `backend_ambiguity` | Auto-resolution found multiple equal backend matches | Pass `backend=` explicitly |
-| `backend_capability_conformance` | Advertised backend capability has no implementation | Disable it or register its implementation |
+| `backend_capability_conformance` | Advertised backend capability has no implementation (`BackendCapabilityConformanceError`, dual `ValueError` + `NotImplementedError` lineage) | Disable it or register its implementation |
 | `backend_error` | Base-class default of the backend registry family — never raised directly; every live registry refusal carries one of the specific `backend_*`/`unknown_backend` codes below | Branch on the specific backend codes; this row exists only so an unmigrated future subclass is still documented |
 | `backend_mismatch` | Explicit backend cannot handle the model or inputs | Select the owning backend |
 | `bundle_load_failed` | Bundle load failed on torch/codec drift or a missing dependency | Inspect the chained cause; restore the missing dependency or re-save |
@@ -55,9 +55,9 @@ add names to the top-level `torchlens` namespace:
 | `bundle_producer_unverifiable` | Current-schema bundle's recorded `torchlens_version` does not parse under PEP 440 | Re-save the artifact with a released torchlens |
 | `bundle_torch_incompatible` | Bundle's recorded torch version is major-incompatible with (or unparseable against) the runtime torch | Load under a torch runtime with the recorded major version |
 | `bundle_save_failed` | Bundle save failed; the staging dir was marked PARTIAL and any pre-overwrite bundle restored | Fix the chained cause named in the message and re-save |
-| `backend_payload_unsupported` | Backend payload has no supported codec | Save metadata only or use another backend |
+| `backend_payload_unsupported` | Backend payload has no supported codec (`BackendPayloadUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage) | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
-| `backend_unsupported` | Backend does not implement the requested capability | Omit it or use another backend |
+| `backend_unsupported` | Backend does not implement the requested capability (`BackendUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage; the TF site-reachability subclass shares it) | Omit it or use another backend |
 | `buffer_visibility_invalid` | Unsupported `show_buffers` value | Choose a documented visibility policy |
 | `bundle_member_payload_missing` | Bundle member retained no tensor at this node | Query a node with stored tensors |
 | `bundle_member_unknown` | Bundle member name is not in the bundle | Pass a known member name |
@@ -197,6 +197,7 @@ add names to the top-level `torchlens` namespace:
 | `run_legacy_options_conflict` | Unified run received legacy rerun options | Drop the legacy options |
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
+| `save_budget_invalid` | `save_budget` is not `'auto'`, a float in `(0, 1]`, an int byte cap, or `None` (`InvalidArgumentError`, `ValueError` lineage) | Pass one of the documented spellings |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
 | `save_predicate_type_invalid` | `save=` is neither SaveOptions, predicate, selector, nor `None` (`save='all'` lands here) | Pass a predicate or SaveOptions; use `layers_to_save='all'` for exhaustive saves |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
