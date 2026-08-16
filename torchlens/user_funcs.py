@@ -3058,7 +3058,9 @@ def _trace_torch_model(
         should_save_grads = True
     if train_mode_value and grad_storage_path_value is not None:
         raise TrainingModeConfigError(
-            "backward_ready=True is not compatible with disk-backed gradient storage"
+            "backward_ready=True is not compatible with disk-backed gradient storage. "
+            "Remedy: drop the gradient storage path or drop backward_ready=True.",
+            code="backward_ready_conflict",
         )
 
     validate_training_compatibility(

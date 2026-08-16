@@ -503,7 +503,10 @@ def _apply_retroactive_decision(
     if policy == "metadata_only":
         raise PredicateError(
             "tl.followed_by(...) requires lookback_payload_policy other than "
-            "'metadata_only' so candidate payloads are retained."
+            "'metadata_only' so candidate payloads are retained. "
+            "Remedy: pass lookback_payload_policy='detached_raw' or another "
+            "payload-retaining policy.",
+            code="lookback_payload_policy_conflict",
         )
     candidates = getattr(trace, "_predicate_lookback_candidates", ())
     by_label = {

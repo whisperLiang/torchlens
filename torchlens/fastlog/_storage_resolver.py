@@ -116,14 +116,25 @@ def _resolve_storage(
     """
 
     if spec.keep_grad and intent.on_disk and not intent.in_ram:
-        message = f"keep_grad=True is not valid for disk-only {kind} storage"
+        message = (
+            f"keep_grad=True is not valid for disk-only {kind} storage. "
+            "Remedy: set retain_in_memory=True or drop keep_grad=True."
+        )
         if kind == "grad":
-            raise InvalidStorageError(message)
-        raise PredicateError(message)
+            raise InvalidStorageError(message, code="predicate_storage_conflict")
+        raise PredicateError(message, code="predicate_storage_conflict")
     if spec.keep_grad and (tensor.dtype in _INTEGER_DTYPES or spec.dtype in _INTEGER_DTYPES):
-        raise PredicateError("keep_grad=True is not valid for integer or bool tensors")
+        raise PredicateError(
+            "keep_grad=True is not valid for integer or bool tensors. "
+            "Remedy: drop keep_grad=True or keep the payload in a floating dtype.",
+            code="predicate_storage_conflict",
+        )
     if spec.save_mode not in {"copy", "reference", "view", "cpu_async"}:
-        raise PredicateError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        raise PredicateError(
+            "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'. "
+            "Remedy: set save_mode to one of those documented modes.",
+            code="save_mode_invalid",
+        )
     if spec.save_mode == "reference":
         _warn_reference_save_mode_once()
     if spec.save_mode == "view" and not spec.keep_grad:
@@ -305,18 +316,23 @@ def _validate_train_mode_transformed(
     if not isinstance(transformed, torch.Tensor):
         raise TrainingModeConfigError(
             "activation_transform must return a torch.Tensor while keep_grad=True "
-            f"for fastlog event {label!r}."
+            f"for fastlog event {label!r}. "
+            "Remedy: return a differentiable torch.Tensor from activation_transform.",
+            code="transform_not_differentiable",
         )
     if transformed.dtype in _INTEGER_DTYPES:
         raise TrainingModeConfigError(
             f"backward_ready=True with non-grad dtype {transformed.dtype} on fastlog "
             f"event {label!r}. Integer and bool dtypes cannot propagate grads. "
-            "Adjust activation_transform to return a floating dtype."
+            "Remedy: adjust activation_transform to return a floating dtype.",
+            code="transform_not_differentiable",
         )
     if raw_tensor.requires_grad and transformed.grad_fn is None:
         raise TrainingModeConfigError(
             "activation_transform returned a tensor disconnected from the autograd "
             "graph (grad_fn is None) while keep_grad=True. The transformed out "
-            f"for fastlog event {label!r} must remain differentiable."
+            f"for fastlog event {label!r} must remain differentiable. "
+            "Remedy: keep activation_transform on the autograd graph (no detach/no_grad).",
+            code="transform_not_differentiable",
         )
     _ = spec

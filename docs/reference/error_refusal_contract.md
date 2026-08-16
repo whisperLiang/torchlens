@@ -42,6 +42,7 @@ add names to the top-level `torchlens` namespace:
 | `ambiguous_op_lookup` | Accessor key matches multiple pass-qualified objects | Use a full address, pass label, or call index |
 | `auto_environment_unsupported` | `TORCHLENS_AUTO=1` requested implicit capture | Unset it and call `auto_capture()` |
 | `backward_capture_conflict` | `save_grads` conflicts with `backward_ready=False` | Enable or omit `backward_ready` |
+| `backward_ready_conflict` | `backward_ready=True` conflicts with another capture option or ambient state — disk saves, explicit detaching, active inference mode, or a `keep_grad=False` default (`TrainingModeConfigError`, `ValueError` lineage) | Drop the conflicting option or drop `backward_ready=True` |
 | `backward_graph_unavailable` | Backward drawing without a captured backward graph | Call `log_backward(loss)` first |
 | `backward_pass_filter_invalid` | Backward pass filter is not a positive one-based int | Pass a positive pass number |
 | `batch_items_invalid` | Export batch-items count is negative | Pass a non-negative integer |
@@ -103,6 +104,7 @@ add names to the top-level `torchlens` namespace:
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
 | `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
+| `followed_by_unsupported` | `tl.followed_by(...)` predicate shape or retroactive capture is unsupported on this surface (`PredicateError`, `RuntimeError` lineage) | Compose `candidate & tl.followed_by(successor)` and capture with `tl.trace(save=...)` |
 | `fsdp_capture_unsupported` | `record()` received an FSDP-wrapped model | Record the unsharded module |
 | `import_path_invalid` | Custom-callable import reference is malformed | Use the `module:qualname` form |
 | `intervening_cluster_invalid` | Intervening-cluster policy is unknown | Choose `upstream`, `outside`, `downstream`, or `own` |
@@ -118,6 +120,7 @@ add names to the top-level `torchlens` namespace:
 | `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
 | `hash_content_type_unsupported` | `tl.hash.content` value cannot be deterministically encoded (`ArgumentTypeError`, `TypeError` lineage) | Pass tensors, arrays, builtin scalars/containers, or `__dict__`-inspectable objects |
 | `hash_expected_type_invalid` | `tl.assert_unchanged` pin is neither a string nor `None` (`ArgumentTypeError`, `TypeError` lineage) | Pass the pinned hash string, or `None` to bootstrap a pin |
+| `inference_only_conflict` | `inference_only=True` combined with backward-related capture flags that need the discarded autograd graph (`TrainingModeConfigError`, `ValueError` lineage) | Drop `inference_only` or drop the backward flag |
 | `input_namedtuple_schema_not_total` | Model-input tuple subclass declares a namedtuple `_fields` schema that does not account for the physical tuple — malformed non-tuple-of-str `_fields`, or declared arity differing from physical arity (`InvalidArgumentError`) | Fix the `_fields` declaration (one str per positional element) or pass a plain tuple/list |
 | `input_tree_cycle` | Model-input tree contains a self-referential container (`InvalidArgumentError`) | Remove the container reference cycle from the model input |
 | `input_tree_depth_exceeded` | Model-input tree nesting exceeds the input-boundary depth ceiling (`InvalidArgumentError`) | Flatten the nested input containers before tracing |
@@ -139,6 +142,7 @@ add names to the top-level `torchlens` namespace:
 | `load_path_symlink_rejected` | A load path (bundle, manifest, metadata, or blobs) is a symlink | Pass the resolved real path |
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
+| `lookback_payload_policy_conflict` | `tl.followed_by(...)` under `lookback_payload_policy='metadata_only'`, which retains no candidate payloads (`PredicateError`, `RuntimeError` lineage) | Pass a payload-retaining lookback policy such as `'detached_raw'` |
 | `fastlog_index_too_large` | Fastlog recovery index exceeds the byte ceiling | Treat as a hostile/implausible bundle; re-record |
 | `manifest_missing` | Bundle directory has no `manifest.json` | Pass the bundle directory produced by `tl.save()` |
 | `manifest_not_json_object` | Manifest root parses but is not a JSON object | Re-save the artifact; do not hand-edit the manifest |
@@ -166,6 +170,10 @@ add names to the top-level `torchlens` namespace:
 | `op_lookup_pass_required` | Bare label names a multi-pass layer | Append a pass qualifier such as `:2` |
 | `on_forward_error_invalid` | Forward-error policy is unknown | Choose `raise`, `attach_partial`, or `return_partial` |
 | `on_predicate_error_invalid` | Predicate-error policy is unknown | Choose `auto`, `accumulate`, or `fail-fast` |
+| `predicate_default_invalid` | Default capture decision is neither bool nor `CaptureSpec` (`PredicateError`, `RuntimeError` lineage) | Pass `True`, `False`, or a `CaptureSpec` as the default |
+| `predicate_evaluation_failed` | Accumulated predicate exceptions surfaced at the end of a recording (`PredicateError`, `RuntimeError` lineage; `exc.failures` carries the tracebacks) | Fix the predicate using the accumulated failure tracebacks |
+| `predicate_return_invalid` | A save, intervene, or halt predicate returned a value outside its declared contract (`PredicateError`, `RuntimeError` lineage) | Return a documented decision value from the predicate |
+| `predicate_storage_conflict` | `keep_grad=True` conflicts with disk-only storage or an integer/bool payload dtype (`PredicateError`, `RuntimeError` lineage; the grad-slot twin raises `InvalidStorageError`) | Keep the payload in RAM with a floating dtype, or drop `keep_grad=True` |
 | `postprocess_audit_asserts_stripped` | `TORCHLENS_POSTPROCESS_ASSERTIONS` is armed under `-O`/`-OO`, so every contract check would be stripped and the audit would report clean without verifying anything | Re-run without `-O`, or unset the variable |
 | `postprocess_audit_env_invalid` | A `TORCHLENS_POSTPROCESS_*` audit knob holds an unrecognized value (a typo must never silently rearm or disarm an audit) | Use a documented value for the knob, or unset it |
 | `option_group_conflict` | Grouped and flat options set the same field on a merge entrypoint (`ArgumentConflictError`; historically `ValueError`) | Use one option style |
@@ -225,6 +233,7 @@ add names to the top-level `torchlens` namespace:
 | `trace_cleaned_up` | Public read on a Trace that `cleanup()` husked (`TraceCleanedUpError`, `AttributeError` lineage) | Re-capture with `tl.trace(...)`; cleanup permanently empties a Trace |
 | `trace_not_finished` | Export requested before the forward pass finished | Wait until `trace(...)` has returned |
 | `trace_reference_collected` | Owning Trace was garbage-collected | Keep the Trace alive while reading records |
+| `transform_not_differentiable` | An out/grad/activation transform returned a non-tensor, non-grad dtype, or graph-disconnected value while `backward_ready=True`/`keep_grad=True` (`TrainingModeConfigError`, `ValueError` lineage) | Return a differentiable floating-dtype tensor that stays on the autograd graph |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |
 | `unsupported_tensor_variant` | Model/input carries meta, fake, functional, or sparse tensor variants (`UnsupportedTensorVariantError`) | Materialize dense, strided tensors with concrete shapes on a real device |
 | `visualization_bool_option_invalid` | A bool-only draw/visualization option received a non-bool (strings such as `'no'` were silently truthy) | Pass True or False |

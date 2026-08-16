@@ -166,7 +166,9 @@ def _emit_predicate_operation_events(
             spec = _evaluate_keep_op(ctx, state.options)
             if isinstance(spec, RetroactiveCaptureDecision):
                 raise PredicateError(
-                    "tl.followed_by(...) retroactive save is only supported by trace"
+                    "tl.followed_by(...) retroactive save is only supported by trace. "
+                    "Remedy: use tl.trace(save=...) for followed_by retroactive capture.",
+                    code="followed_by_unsupported",
                 )
             if spec.save_out:
                 demanded = EnrichmentLevel.PAYLOAD
