@@ -4,7 +4,6 @@ Wrappers persist after first installation and branch on ``_state._logging_enable
 This module also patches detached torch references and torch transform boundaries.
 """
 
-import functools
 import inspect
 import os
 import sys
@@ -3219,7 +3218,6 @@ def _wrap_torch_locked(
     # something happened to materialize them between unwrap and re-wrap.
     _warm_derived_identity_caches()
 
-    foreign_patched_slots: list[str] = []
     for namespace_name, func_name in get_orig_torch_funcs():
         # r-b4 R26-5b: install tolerates namespace drift; teardown/re-install must
         # too, or unwrap_torch() dies mid-loop on the exact drift install absorbs,
@@ -3234,51 +3232,11 @@ def _wrap_torch_locked(
         elif id(current) in _state._decorated_to_orig:
             decorated = current
         if decorated is None:
-            # Diagnostic filter: the inventory also enumerates rows first
-            # wrap never decorates (types, typing aliases, the getset
-            # ``__get__`` method-wrappers) -- those are unledgered in EVERY
-            # epoch and are not foreign patches. Plain/builtin functions,
-            # bound methods, and partials are the shapes third-party patches
-            # take; a foreign callable INSTANCE stays a disclosed blind spot.
-            if isinstance(
-                current,
-                (
-                    types.FunctionType,
-                    types.BuiltinFunctionType,
-                    types.MethodType,
-                    functools.partial,
-                ),
-            ):
-                foreign_patched_slots.append(f"{namespace_name}.{func_name}")
             continue
         try:
             _setattr_ignoring_advisories(local_func_namespace, func_name, decorated)
         except (AttributeError, TypeError):
             pass
-    if foreign_patched_slots:
-        from ..._errors import TorchLensWarning
-
-        # r8 R56 (sol): the epoch-2 skip used to be SILENT -- a slot foreign-
-        # patched during the unwrapped gap stays unwrapped for the whole new
-        # epoch, so every capture through it leans on the rescue re-run
-        # (double forward, capture_verified=False) or loses the op with only
-        # an escape disclosure. Hands-off is still the right call (wrapping a
-        # foreign patch we did not see at first wrap could double-apply it);
-        # the diagnostic mirrors unwrap_torch()'s buried-sites warning.
-        preview = ", ".join(sorted(foreign_patched_slots)[:8])
-        overflow = len(foreign_patched_slots) - 8
-        warnings.warn(
-            "TorchLens re-wrap left "
-            f"{len(foreign_patched_slots)} torch slot(s) unwrapped because a "
-            "third party replaced them while torch was unwrapped: "
-            f"{preview}{f' (+{overflow} more)' if overflow > 0 else ''}. "
-            "Captures through these functions rely on the rescue re-run "
-            "(capture_verified=False) or lose the ops; remove the foreign "
-            "patch (or re-apply it on top of the wrapped function) and call "
-            "torchlens.backends.torch.wrappers.wrap_torch() again.",
-            TorchLensWarning,
-            stacklevel=3,
-        )
 
     _decorate_transform_builders()
     _decorate_direct_transforms()
