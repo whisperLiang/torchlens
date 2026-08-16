@@ -1486,7 +1486,7 @@ def _warn_nonpersistent_buffer_disclosure_once() -> None:
         "declared state the artifact cannot replay without, and they are written "
         "even with include_weights/include_activations false. Review the buffers "
         "before sharing the artifact if they may hold sensitive data.",
-        UserWarning,
+        TorchLensWarning,
         stacklevel=3,
     )
 
@@ -1517,7 +1517,7 @@ def _warn_unattestable_activation_archive_once() -> None:
         "input. Numeric attestation on a later .run() will report not_applicable for that "
         "reason -- not because the inputs changed. Capture the model input alongside the "
         "selected activations if byte-exact attestation is wanted.",
-        UserWarning,
+        TorchLensWarning,
         stacklevel=3,
     )
 
@@ -2636,7 +2636,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             continue
         warnings.warn(
             f"Leaving non-partial temp directory {candidate} in place; pass force=True to remove it.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
@@ -2654,7 +2654,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
                 warnings.warn(
                     f"Leaving orphaned backup directory {candidate} in place; "
                     "restoring it onto the missing bundle path failed.",
-                    UserWarning,
+                    TorchLensWarning,
                     stacklevel=2,
                 )
             continue
@@ -2668,7 +2668,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             warnings.warn(
                 f"Force-removed backup directory {candidate} whose contents differ "
                 f"from the live bundle at {bundle_path}; it was not provably redundant.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
             continue
@@ -2676,7 +2676,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             f"Leaving backup directory {candidate} in place; its contents differ from "
             f"the live bundle at {bundle_path} and it is not provably redundant. "
             "Pass force=True to remove it anyway.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
     return removed
@@ -3898,7 +3898,7 @@ def _check_unknown_blob_entries(manifest: Manifest, blobs_path: Path) -> None:
     if extra_names:
         warnings.warn(
             f"Bundle contains unreferenced extra files in blobs/: {', '.join(extra_names)}.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
@@ -4173,7 +4173,7 @@ def _run_save_recovery(
             with contextlib.suppress(Exception):
                 note(detail)
         with contextlib.suppress(Exception):
-            warnings.warn(detail, UserWarning, stacklevel=3)
+            warnings.warn(detail, TorchLensWarning, stacklevel=3)
 
     try:
         _mark_partial(tmp_path, reason=type(primary).__name__)
@@ -4311,7 +4311,7 @@ def _restore_backup(backup_path: Path, bundle_path: Path, *, warn_on_failure: bo
                 f"Could not restore the previous bundle from its backup after a failed "
                 f"save ({exc}). Your prior artifact is NOT lost: it remains at "
                 f"{backup_path}. Move it back to {bundle_path} to recover it.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
         return False

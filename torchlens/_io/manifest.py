@@ -23,6 +23,7 @@ import torch
 from packaging.version import InvalidVersion, Version
 
 from .. import __version__ as TORCHLENS_VERSION
+from ..errors._base import TorchLensWarning
 from . import (
     MIN_TLSPEC_VERSION,
     MIN_TORCHLENS_VERSION_TEXT,
@@ -947,7 +948,7 @@ def enforce_version_policy(manifest: Manifest) -> None:
                 "Bundle torch_version="
                 f"{manifest.torch_version} differs from runtime torch_version="
                 f"{torch.__version__} (minor version mismatch).",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
     elif manifest.torch_version != torch.__version__:
@@ -989,7 +990,7 @@ def enforce_version_policy(manifest: Manifest) -> None:
                 "Bundle torchlens_version="
                 f"{manifest.torchlens_version} is newer than runtime torchlens_version="
                 f"{TORCHLENS_VERSION}.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
         elif manifest_torchlens < runtime_torchlens:
@@ -1007,7 +1008,7 @@ def enforce_version_policy(manifest: Manifest) -> None:
                 "Bundle python_version="
                 f"{manifest.python_version} differs from runtime python_version="
                 f"{_runtime_python_version()} (major version mismatch).",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
     elif manifest.python_version != _runtime_python_version():
@@ -1015,7 +1016,7 @@ def enforce_version_policy(manifest: Manifest) -> None:
             "Bundle python_version="
             f"{manifest.python_version} differs from runtime python_version="
             f"{_runtime_python_version()} and could not be parsed under PEP 440.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
@@ -1050,7 +1051,7 @@ def _parse_version(
             warnings.warn(
                 f"Could not parse {label} version {version_text!r} under PEP 440; "
                 "falling back to string comparison.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=3,
             )
         return None
