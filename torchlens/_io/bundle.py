@@ -2618,14 +2618,14 @@ def _load_gated_member_relations(metadata: dict[str, Any]) -> tuple[Any, ...] | 
             "key never loads as real truth under the current tlspec version."
         )
     from ..bundle._relations import MemberRelationTable
-    from ..errors.episode import BundleRelationError, EpisodeErrorCode
+    from ..errors.episode import BundleRelationError
 
     try:
         table = MemberRelationTable.from_payload(relations_payload)
     except (TypeError, ValueError) as exc:
         raise BundleRelationError(
             f"bundle.json 'member_relations' payload is outside the closed S6 schema: {exc}",
-            code=EpisodeErrorCode.BUNDLE_RELATION_SCHEMA_INVALID.value,
+            code="bundle_relation_schema_invalid",
         ) from exc
     return table.rows
 

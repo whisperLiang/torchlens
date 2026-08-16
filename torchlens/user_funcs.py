@@ -3159,21 +3159,21 @@ def _trace_torch_model(
         )
     episode_resolved = None
     if episode is not None:
-        from .errors.episode import EpisodeDeclarationError, EpisodeErrorCode
+        from .errors.episode import EpisodeDeclarationError
 
         if chunk_size not in (MISSING, None) or chunk_paths not in (MISSING, None):
             raise EpisodeDeclarationError(
                 "episode= cannot combine with chunked forwards (chunk_size/"
                 "chunk_paths): an episode is ONE wrapped session capture, and "
                 "the chunk fan-out produces several.",
-                code=EpisodeErrorCode.EPISODE_DECLARATION_INVALID.value,
+                code="episode_declaration_invalid",
             )
         if cache is not MISSING and cache:
             raise EpisodeDeclarationError(
                 "episode= cannot combine with cache=True in this release: the "
                 "capture cache replays a stored product, and episode ledgers "
                 "are settled per capture.",
-                code=EpisodeErrorCode.EPISODE_DECLARATION_INVALID.value,
+                code="episode_declaration_invalid",
             )
         if getattr(capture_options, "structure_only", False):
             # S2 marker-combination table: episode x structure_only is TYPED
@@ -3182,7 +3182,7 @@ def _trace_torch_model(
                 "structure-only episodes are out of scope this sprint: "
                 "capture_kind=episode with the structure-only marker refuses "
                 "typed per the ratified marker-combination table.",
-                code=EpisodeErrorCode.EPISODE_DECLARATION_INVALID.value,
+                code="episode_declaration_invalid",
             )
         if capture_options.layers_to_save in (None, "none", "None", "NONE") or (
             isinstance(capture_options.layers_to_save, list) and not capture_options.layers_to_save
@@ -3192,7 +3192,7 @@ def _trace_torch_model(
                 "from the retained root output; save='none' retains no output "
                 "payload. Remedy: keep the default save policy or include the "
                 "output in the save= selection.",
-                code=EpisodeErrorCode.EPISODE_DECLARATION_INVALID.value,
+                code="episode_declaration_invalid",
             )
         episode_resolved = resolve_episode_declaration(episode, model)
     save_options = merge_save_options(

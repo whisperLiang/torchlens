@@ -33,7 +33,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors.episode import BundleRelationError, EpisodeErrorCode
+from ..errors.episode import BundleRelationError
 
 __all__ = [
     "MEMBER_ROW_KINDS",
@@ -317,7 +317,7 @@ class MemberRelationTable:
                         f"bundle relation row {index} (kind {row.kind!r}) names "
                         f"member {named!r}, which is not a Bundle member. "
                         "Relation rows may only reference current members (S6 R1).",
-                        code=EpisodeErrorCode.BUNDLE_RELATION_MEMBER_MISSING.value,
+                        code="bundle_relation_member_missing",
                         row_index=index,
                         row_kind=row.kind,
                         missing_member=named,
@@ -332,7 +332,7 @@ class MemberRelationTable:
                 raise BundleRelationError(
                     f"episode_member rows for episode {episode_id!r} carry "
                     "duplicate at_step values; steps must be distinct (S6 R3).",
-                    code=EpisodeErrorCode.BUNDLE_RELATION_SCHEMA_INVALID.value,
+                    code="bundle_relation_schema_invalid",
                     episode_id=episode_id,
                 )
             prefill_rows = [row for row in rows if row.params["role"] == "prefill"]
@@ -340,6 +340,6 @@ class MemberRelationTable:
                 raise BundleRelationError(
                     f"episode_member rows for episode {episode_id!r} must carry "
                     "exactly one role='prefill' row at at_step 0 (S6 R3).",
-                    code=EpisodeErrorCode.BUNDLE_RELATION_SCHEMA_INVALID.value,
+                    code="bundle_relation_schema_invalid",
                     episode_id=episode_id,
                 )

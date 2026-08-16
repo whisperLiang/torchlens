@@ -916,11 +916,11 @@ class ResolvedEpisode:
 def _declaration_error(message: str, *, code: str | None = None) -> Exception:
     """Build the typed entry refusal (import-local to keep the leaf light)."""
 
-    from ..errors.episode import EpisodeDeclarationError, EpisodeErrorCode
+    from ..errors.episode import EpisodeDeclarationError
 
     return EpisodeDeclarationError(
         message,
-        code=code if code is not None else EpisodeErrorCode.EPISODE_DECLARATION_INVALID.value,
+        code=code if code is not None else "episode_declaration_invalid",
     )
 
 
@@ -962,7 +962,6 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
 
     import torch.nn as nn
 
-    from ..errors.episode import EpisodeErrorCode
     from ..options import EpisodeSpec as _EpisodeSpec
 
     if not isinstance(spec, _EpisodeSpec):
@@ -1051,7 +1050,7 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
                 "snapshot/restorable within the declared checkpoint scope: "
                 f"deepcopy failed with {type(exc).__name__}: {exc}. Remedy: "
                 "declare only snapshotable state, or make the item deep-copyable.",
-                code=EpisodeErrorCode.EPISODE_STATE_UNSNAPSHOTABLE.value,
+                code="episode_state_unsnapshotable",
             ) from exc
     return ResolvedEpisode(
         episode_id=f"ep-{uuid.uuid4().hex[:16]}",

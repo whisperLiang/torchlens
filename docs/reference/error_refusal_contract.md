@@ -56,6 +56,9 @@ add names to the top-level `torchlens` namespace:
 | `bundle_producer_unverifiable` | Current-schema bundle's recorded `torchlens_version` does not parse under PEP 440 | Re-save the artifact with a released torchlens |
 | `bundle_torch_incompatible` | Bundle's recorded torch version is major-incompatible with (or unparseable against) the runtime torch | Load under a torch runtime with the recorded major version |
 | `bundle_save_failed` | Bundle save failed; the staging dir was marked PARTIAL and any pre-overwrite bundle restored | Fix the chained cause named in the message and re-save |
+| `bundle_member_has_relations` | A Bundle mutator (remove/clear/eviction) would orphan member-relation rows — silent orphaning is forbidden (S6 R5) | Pass `cascade_relations=True` to drop the rows explicitly, or remove the relations first |
+| `bundle_relation_member_missing` | A member-relation row names a member absent from the Bundle (S6 R1: no dangling edges, ever) | Add the named member or drop the row |
+| `bundle_relation_schema_invalid` | A member-relation row is outside the closed S6 schema (unknown kind, wrong row shape for the kind, or undeclared params) | Use the documented relation kinds and their declared params |
 | `backend_payload_unsupported` | Backend payload has no supported codec (`BackendPayloadUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage) | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
 | `backend_unsupported` | Backend does not implement the requested capability (`BackendUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage; the TF site-reachability subclass shares it) | Omit it or use another backend |
@@ -103,6 +106,11 @@ add names to the top-level `torchlens` namespace:
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
 | `env_flag_invalid` | A TorchLens boolean environment variable is set to an unrecognized value | Use `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, or unset the variable |
+| `episode_declaration_invalid` | The `episode=` declaration is unusable: the stepped module is not a proper submodule of the traced root, the token axis/output contract is unmet, the forced-token feed is malformed, or the declaration combines with chunking, `cache=True`, a value-free save policy, or the structure-only marker (TYPED REFUSE per the ratified marker-combination table) | Fix the declaration per the message; wrap the loop in an `nn.Module` and declare its stepped submodule |
+| `episode_ledger_incoherent` | Episode ledger geometry violates the monotone prefix law, a coherence arm, the declared step count, or the value-mode token presence rule; on load the ledger quarantines and the outcome derivation degrades fail-closed | Re-capture the episode; a hand-edited ledger never loads as claims |
+| `episode_ledger_payload_in_structure_only` | A structure-only episode ledger carries token payloads (S7 presence rule) | Remove the token payloads or drop the structure-only marker |
+| `episode_ledger_without_declaration` | An episode ledger is attached to a capture that carries no episode declaration — illegal per the marker-combination table | Capture with `episode=EpisodeSpec(...)` instead of hand-attaching a ledger |
+| `episode_state_unsnapshotable` | Declared episode-carried state has no snapshot/restore support inside the declared checkpoint scope (E-A4); refused at declaration time, before execution | Declare only snapshotable state, or make the item deep-copyable |
 | `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
 | `followed_by_unsupported` | `tl.followed_by(...)` predicate shape or retroactive capture is unsupported on this surface (`PredicateError`, `RuntimeError` lineage) | Compose `candidate & tl.followed_by(successor)` and capture with `tl.trace(save=...)` |

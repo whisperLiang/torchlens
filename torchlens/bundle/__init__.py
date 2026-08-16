@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 
 from .._trace_state import TraceState
-from ..errors.episode import BundleRelationError, EpisodeErrorCode
+from ..errors.episode import BundleRelationError
 from ..intervention._metrics import is_scalar_like, relative_l1_scalar, resolve_metric
 from ..intervention._super.super_logs import (
     SuperBufferAccessor,
@@ -606,7 +606,7 @@ class Bundle:
             except (TypeError, ValueError) as exc:
                 raise BundleRelationError(
                     f"Bundle member-relation row is outside the closed S6 schema: {exc}",
-                    code=EpisodeErrorCode.BUNDLE_RELATION_SCHEMA_INVALID.value,
+                    code="bundle_relation_schema_invalid",
                 ) from exc
         table = MemberRelationTable(rows)
         table.validate_against_members(self._members.keys())
@@ -647,7 +647,7 @@ class Bundle:
                 f"Bundle.{operation} would orphan member-relation rows naming "
                 f"{related}; pass cascade_relations=True to drop those rows "
                 "explicitly, or remove the relations first (S6 R5).",
-                code=EpisodeErrorCode.BUNDLE_MEMBER_HAS_RELATIONS.value,
+                code="bundle_member_has_relations",
                 operation=operation,
                 related_members=related,
             )
@@ -2002,7 +2002,7 @@ class Bundle:
                     f"Bundle capacity eviction would orphan member-relation "
                     f"rows naming {evictable!r}; remove the member explicitly "
                     "(cascade_relations=True) or raise the capacity (S6 R5).",
-                    code=EpisodeErrorCode.BUNDLE_MEMBER_HAS_RELATIONS.value,
+                    code="bundle_member_has_relations",
                     operation="eviction",
                     related_members=[evictable],
                 )
