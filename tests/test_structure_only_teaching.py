@@ -405,3 +405,19 @@ def test_install_census_every_surface_member_is_escalated_in_mode() -> None:
         assert getattr(torch.Tensor, name, None) is original, name
     for name, original in module_originals.items():
         assert getattr(torch, name, None) is original, f"torch.{name}"
+
+
+@smoke
+def test_teaching_refusals_fire_identically_under_predicate_composition() -> None:
+    """Memo 2.5 combination row: composing the mode with a (value-free)
+    predicate surface must not soften the belts."""
+
+    with pytest.raises(ValueDependentBranchError) as excinfo:
+        tl.trace(
+            IfBranch(),
+            torch.randn(2, 4),
+            capture=CaptureOptions(structure_only=True),
+            halt=tl.func("nonexistent_op_name"),
+        )
+    assert excinfo.value.fields["consumer_kind"] == "if_test"
+    assert excinfo.value.fields["code"] == "value_dependent_branch_unsupported"

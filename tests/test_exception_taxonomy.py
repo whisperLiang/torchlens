@@ -1144,6 +1144,33 @@ _BUILTIN_EXCEPTION_ROOTS = frozenset(
 # current: a stale entry (class deleted or later registered) fails the gate
 # just like a missing one.
 _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
+    # -- L7a structure-only refusals + S3 registrar (DOCUMENTED-UNSTABLE;
+    # their torchlens.errors registration rides the S2 author's ratification
+    # PR together with the BUILTIN_LINEAGE_GOLDEN rows — this allowlist entry
+    # is the pre-ratification parking spot, retired in that same PR) --
+    "torchlens.capture.structure_only.ValueDependentBranchError": (
+        "S2-gated structure-only teaching refusal; errors-namespace "
+        "registration deferred to the S2 ratification PR"
+    ),
+    "torchlens.capture.structure_only.MetaKernelUnavailableError": (
+        "S2-gated structure-only teaching refusal; errors-namespace "
+        "registration deferred to the S2 ratification PR"
+    ),
+    "torchlens.capture.structure_only.StructureOnlyCapabilityError": (
+        "S2-gated structure-only chokepoint refusal; errors-namespace "
+        "registration deferred to the S2 ratification PR"
+    ),
+    "torchlens._errors.StructureOnlyOptionConflictError": (
+        "S2-gated structure-only entry conflict (ArgumentConflictError "
+        "subclass); errors-namespace registration deferred to the S2 "
+        "ratification PR"
+    ),
+    "torchlens._io.PreReleaseArtifactError": (
+        "S3 registrar fail-closed load refusal for switch-stamped pre-release "
+        "artifacts; surfaced by the first standing registration importing the "
+        "registrar eagerly. Registration decision belongs to the S3 "
+        "registrar owner at the coordinated bump"
+    ),
     # -- Internal control-flow signals / private helpers (never user-caught) --
     "torchlens.fastlog._halt.HaltSignal": (
         "internal control-flow stop signal (BaseException); converted to recording status"
