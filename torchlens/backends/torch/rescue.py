@@ -403,6 +403,8 @@ def _state_bytes_equal(current: torch.Tensor, baseline: torch.Tensor) -> bool:
     ``torch.equal`` verdict.
     """
 
+    # detach-ok: read-only byte comparison of state snapshots; never a
+    # training-path payload, nothing retains the detached views.
     try:
         current_bytes = (
             current.detach().resolve_conj().resolve_neg().contiguous().reshape(-1)
