@@ -1089,3 +1089,114 @@ def test_curated_roster_rows_resolve_to_live_sites() -> None:
         f"{sorted(resurrected)}. Remove them from the ledger so the liveness "
         "gate re-arms for those rows."
     )
+
+
+class TestProtocolArgWrapperIdentity:
+    """grind-r6 b8 R56: pure-Python functionals and the shim residues."""
+
+    def test_pure_python_functional_presents_original_to_user_handler(self):
+        # sol HIGH / fable MED, same root: F.relu's body dispatches
+        # handle_torch_function(relu, ...) where `relu` resolves from module
+        # globals -- the torchlens WRAPPER during the wrap epoch -- so every
+        # user handler keyed on originals (the documented import-time
+        # HANDLED_FUNCTIONS shape) silently missed, process-wide, after the
+        # first capture. C builtins present the original; pure-Python must
+        # match.
+        _ensure_wrapped()
+        wrapped_relu = F.relu
+        original_relu = _state._decorated_to_orig.get(id(wrapped_relu))
+        assert original_relu is not None, "F.relu is not wrapped; test premise broken"
+        assert isinstance(original_relu, types.FunctionType)
+
+        seen: list[Any] = []
+
+        class _Probe(torch.Tensor):
+            @classmethod
+            def __torch_function__(cls, func, types_, args=(), kwargs=None):
+                seen.append(func)
+                return super().__torch_function__(func, types_, args, kwargs or {})
+
+        F.relu(torch.randn(4).as_subclass(_Probe))
+        assert seen, "handler never fired"
+        assert seen[0] is original_relu, (
+            "user __torch_function__ handler saw the torchlens wrapper as func "
+            "for a pure-Python functional; original-keyed handler tables miss"
+        )
+
+    def test_overridable_functions_view_preserves_defaultdict_semantics(self):
+        # opus wave-introduced residue: the r5 membership view rebuilt
+        # get_overridable_functions()'s defaultdict(list) as a plain dict, so
+        # indexing a namespace with no recorded entries raised KeyError where
+        # upstream auto-vivifies an empty list.
+        _ensure_wrapped()
+        table = torch.overrides.get_overridable_functions()
+        sentinel_key = object()
+        try:
+            assert table[sentinel_key] == [], "defaultdict auto-vivification lost"
+        finally:
+            # The view is cached and shared; leave no sentinel row behind.
+            table.pop(sentinel_key, None)
+        # Membership resolution through the ledger still holds.
+        assert F.relu in table.get(F, []) or any(F.relu in members for members in table.values())
+
+    def test_overrides_accessor_cache_api_survives_shimming(self):
+        # opus wave-introduced residue: the upstream accessors may be
+        # lru_cache functions; functools.wraps copies __dict__ only, so
+        # cache_clear / cache_info vanished from the shimmed surface. Assert
+        # PARITY with the pristine upstream original (on this build
+        # get_testing_overrides is lru_cache'd; get_overridable_functions
+        # caches in a private helper and exposes no cache API to lose).
+        from torchlens.backends.torch import identity_shims
+
+        _ensure_wrapped()
+        checked = 0
+        for holder, name, original in identity_shims._installed:
+            if holder is not torch.overrides or name not in (
+                "get_testing_overrides",
+                "get_overridable_functions",
+            ):
+                continue
+            shimmed = getattr(torch.overrides, name)
+            for cache_attr in ("cache_clear", "cache_info"):
+                if callable(getattr(original, cache_attr, None)):
+                    checked += 1
+                    assert callable(getattr(shimmed, cache_attr, None)), (
+                        f"{name}.{cache_attr} stripped by the membership shim"
+                    )
+            # NOTE: cache_clear() is deliberately NOT invoked here -- clearing
+            # and rebuilding the table mid-epoch would key it by WRAPPERS,
+            # recreating the exact poisoning the coherence gate above guards.
+            if callable(getattr(shimmed, "cache_info", None)):
+                shimmed.cache_info()  # usable, not merely present
+        assert checked, "no upstream cache API found on either accessor; premise drifted"
+
+    def test_teardown_never_clobbers_spoofed_marker_site(self):
+        # sol MED: _restore keyed on the spoofable _SHIM_MARKER attribute, so
+        # a foreign monkeypatch carrying the marker was CLOBBERED with our
+        # stored original at unwrap. Teardown must key on exact shim object
+        # identity.
+        from torchlens.backends.torch import identity_shims
+        from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+        _ensure_wrapped()
+        overrides_module = torch.overrides
+        pristine = None
+        for holder, name, original in identity_shims._installed:
+            if holder is overrides_module and name == "resolve_name":
+                pristine = original
+                break
+        assert pristine is not None, "resolve_name shim record missing; test premise broken"
+
+        def foreign_resolve_name(f):
+            return "foreign"
+
+        foreign_resolve_name._torchlens_identity_shim = True  # the spoof
+        overrides_module.resolve_name = foreign_resolve_name
+        try:
+            unwrap_torch()
+            assert overrides_module.resolve_name is foreign_resolve_name, (
+                "teardown clobbered a foreign monkeypatch that spoofed the shim marker"
+            )
+        finally:
+            overrides_module.resolve_name = pristine
+            wrap_torch()

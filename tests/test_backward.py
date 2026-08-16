@@ -2460,3 +2460,48 @@ def test_gradient_validation_tolerances_are_named_constants() -> None:
     # deriving at float32 reproduces the named fp32 pair rather than a fresh literal.
     fp32_atol, fp32_rtol = derive_float_tolerances(torch.float32, ulp_headroom=0.0)
     assert isinstance(fp32_atol, float) and isinstance(fp32_rtol, float)
+
+
+def test_success_path_handle_removal_never_swallows_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """grind-r6 b8 R63 (fable, probe): SIGINT during success-path cleanup.
+
+    The success-path finally tail folds every cleanup step's failure into
+    ``cleanup_error`` and re-raises the FIRST at the end -- except the
+    hook-handle removal loop, which used ``suppress(BaseException)`` and
+    discarded a KeyboardInterrupt delivered during handle removal after a
+    SUCCESSFUL backward: ``log_backward`` returned normally and the interrupt
+    vanished. There is no primary exception on this path whose precedence
+    could justify the swallow.
+    """
+    from torchlens import _state
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+
+    class _InterruptedHandle:
+        """Handle whose removal is hit by a pending SIGINT exactly once."""
+
+        fired = False
+
+        def remove(self) -> None:
+            """Raise KeyboardInterrupt on the first removal attempt."""
+            if not self.fired:
+                self.fired = True
+                raise KeyboardInterrupt
+
+    hostile = _InterruptedHandle()
+    real_walk = backward._walk_and_hook_backward_graph
+
+    def walk_then_plant(trace_arg: tl.Trace, loss: torch.Tensor, handles: list[object]) -> None:
+        """Run the real walk, then plant the interrupt-carrying handle."""
+        real_walk(trace_arg, loss, handles)
+        handles.append(hostile)
+
+    monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", walk_then_plant)
+    with pytest.raises(KeyboardInterrupt):
+        trace.log_backward(_output_loss(trace))
+
+    assert hostile.fired is True
+    assert _state._active_trace is None

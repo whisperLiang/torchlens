@@ -201,6 +201,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _torch_compile_row(model),
         _fx_row(model),
         _torch_capabilities_row(),
+        _mechanical_belt_row(),
         _lightning_row(model),
         _functorch_row(model),
         _quantized_row(model, input),
@@ -1337,6 +1338,77 @@ def _torch_capabilities_row() -> CompatRow:
         bool(missing),
         details,
         suggestion,
+    )
+
+
+def _mechanical_belt_row() -> CompatRow:
+    """Build the protocol-invisible belt coverage row.
+
+    Returns
+    -------
+    CompatRow
+        Disclosure row for belt probe failures and unprobed candidates
+        (grind-r6 b3 R02, sol MED). A candidate whose mode visibility could
+        not be measured is neither belt-patched nor proven protocol-visible,
+        so a stale pre-wrap reference to it can drop ops with zero signal
+        while the capture still reports ``capture_verified=True``.
+    """
+
+    from torchlens import _state
+    from torchlens.backends.torch.belt import belt_report
+
+    if not _state._is_decorated:
+        return CompatRow(
+            "mechanical_belt",
+            "Protocol-invisible belt coverage",
+            "not_tested",
+            "info",
+            False,
+            "Belt not derived yet: torch wrapping is lazy and the belt derives at first capture.",
+            "Run one capture (or torchlens.backends.torch.wrappers.wrap_torch()) and re-check.",
+        )
+    report_data = belt_report()
+    if report_data is None:
+        return CompatRow(
+            "mechanical_belt",
+            "Protocol-invisible belt coverage",
+            "not_tested",
+            "info",
+            False,
+            "Belt derivation unavailable.",
+            "",
+        )
+    # Unprobed candidates are a STANDING recipe-coverage limitation (hundreds
+    # of in-place variants have no probe recipe on every healthy build):
+    # disclosed as a count, never a warning (r-b4 R26-4 false-alarm rule).
+    # A probe FAILURE is unexpected breakage on this build and drives the
+    # warning severity.
+    unprobed_detail = f"unprobed_candidates={report_data.unprobed_candidate_count}"
+    if not report_data.probe_failures:
+        return CompatRow(
+            "mechanical_belt",
+            "Protocol-invisible belt coverage",
+            "pass",
+            "ok",
+            False,
+            f"Belt members={len(report_data.members)}; probe_failures=none; {unprobed_detail}.",
+            "",
+        )
+    failure_names = ", ".join(f"{ns}.{fn}" for ns, fn in report_data.probe_failures)
+    details = (
+        f"Belt members={len(report_data.members)}; probe FAILURES (visibility "
+        f"unmeasured): {failure_names}; {unprobed_detail}. A stale pre-wrap reference "
+        "to an unmeasured candidate can silently drop ops from the trace."
+    )
+    return CompatRow(
+        "mechanical_belt",
+        "Protocol-invisible belt coverage",
+        "scope",
+        "warning",
+        True,
+        details,
+        "Avoid holding pre-wrap references to the named functions; "
+        "see torchlens.utils.doctor() for per-failure exception details.",
     )
 
 

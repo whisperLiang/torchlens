@@ -344,3 +344,30 @@ def test_backward_epoch_publication_is_atomic(monkeypatch: pytest.MonkeyPatch) -
         assert epoch.watermark == trace._backward_projection_event_count
     finally:
         trace.cleanup()
+
+
+def test_save_works_after_two_differentiable_backward_passes(tmp_path) -> None:
+    """grind-r6 b5 R45 (sol HIGH root, probe-proven): tl.save after 2x create_graph.
+
+    The higher-order rewalk parked its label type counter in
+    ``trace.__dict__["_backward_grad_fn_type_counter"]`` -- an undeclared
+    private field with no PORTABLE_STATE_SPEC row, so ``tl.save`` raised
+    TorchLensIOError after two differentiable grad passes. The counter is
+    now rewalk-scoped scratch and never touches the trace.
+    """
+
+    model = nn.Linear(4, 2)
+    x = torch.randn(1, 4, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True),
+        save_mode="reference",
+    )
+    try:
+        trace.log_backward(trace[-1].out.sum(), retain_graph=True, create_graph=True)
+        trace.log_backward(trace[-1].out.sum(), create_graph=True)
+        assert "_backward_grad_fn_type_counter" not in trace.__dict__
+        tl.save(trace, str(tmp_path / "two_pass.tlspec"))
+    finally:
+        trace.cleanup()

@@ -1118,6 +1118,7 @@ def _warn_zero_match_capture_selectors(
     intervene_selector: Any,
     intervene_direction: str | None,
     halt_selector: Any = None,
+    layers_to_save_request: Any = None,
 ) -> None:
     """Warn when a capture-time save/intervention/halt selector matched no sites.
 
@@ -1139,6 +1140,16 @@ def _warn_zero_match_capture_selectors(
         real outputs where the caller expected a frontier. Only ``BaseSelector``
         halts are judged -- an arbitrary value-dependent callable legitimately
         never firing is data, not a typo.
+    layers_to_save_request:
+        The ORIGINAL selective label-based ``layers_to_save`` request, when
+        one was made. ``layers_to_save`` resolves through its own predicate/
+        deferred machinery (never a ``BaseSelector``), so it sat outside this
+        disclosure family: a typo'd layer name retained only the
+        always-retained output tail and disclosed NOTHING, live and in the
+        artifact -- the highest-traffic instance of the cc2cabbb class
+        (grind-r6 b3 R15, opus MED). The request is re-resolved against the
+        FINAL label space here; zero matches record and warn like the
+        sibling slots.
 
     Returns
     -------
@@ -1211,6 +1222,29 @@ def _warn_zero_match_capture_selectors(
                 UserWarning,
                 stacklevel=3,
             )
+        if layers_to_save_request is not None:
+            from .capture.trace import _get_op_nums_from_user_labels
+
+            try:
+                matched: Any = _get_op_nums_from_user_labels(
+                    trace,
+                    layers_to_save_request,  # type: ignore[arg-type]
+                )
+            except InvalidArgumentError:
+                # The post-capture lookup is loud for unknown keys; here the
+                # capture already completed, so an unknown name IS the
+                # zero-match fact to disclose, not grounds to destroy the
+                # finished trace at return time.
+                matched = []
+            if not matched:
+                _record_unmatched("layers_to_save", layers_to_save_request)
+                warnings.warn(
+                    f"layers_to_save={layers_to_save_request!r} matched zero layers; "
+                    "only the always-retained output tail was saved. Check the "
+                    "layer names against trace.layer_labels.",
+                    UserWarning,
+                    stacklevel=3,
+                )
     finally:
         trace.__dict__.pop("_tl_save_selector_fire_count", None)
         if not defer_backward_intervention:
@@ -1438,6 +1472,7 @@ def _run_model_and_save_specified_outs(
     lookback: int = 0,
     lookback_payload_policy: str = "metadata_only",
     retain_output_parents_for_layers_to_save: bool = False,
+    _selective_layers_to_save_request: object | None = None,
     _resolved_layer_nums_to_save: tuple[int, ...] | None = None,
     _resolved_grad_layer_nums_to_save: tuple[int, ...] | str | None = None,
     _deferred_retention_selector: Any = None,
@@ -1858,6 +1893,7 @@ def _run_model_and_save_specified_outs(
         ),
         intervene_direction=getattr(warning_intervene_decision, "direction", None),
         halt_selector=halt_predicate,
+        layers_to_save_request=_selective_layers_to_save_request,
     )
     return trace
 
@@ -2709,6 +2745,7 @@ def _trace_torch_model(
     chunk_size: int | None | MissingType = MISSING,
     chunk_paths: Iterable[Any] | None | MissingType = MISSING,
     retain_output_parents_for_layers_to_save: bool = False,
+    _selective_layers_to_save_request: object | None = None,
 ) -> Trace:
     """Run the registry-owned torch trace implementation.
 
@@ -3329,6 +3366,9 @@ def _trace_torch_model(
             chunk_size=None,
             chunk_paths=None,
             retain_output_parents_for_layers_to_save=uses_selective_layers_to_save,
+            _selective_layers_to_save_request=(
+                requested_layers_to_save if uses_selective_layers_to_save else None
+            ),
         )
         initial_chunk_size = min(normalized_chunk_size, chunk_plan.total_size)
         initial_record = {
@@ -3411,6 +3451,9 @@ def _trace_torch_model(
                 chunk_size=None,
                 chunk_paths=None,
                 retain_output_parents_for_layers_to_save=uses_selective_layers_to_save,
+                _selective_layers_to_save_request=(
+                    requested_layers_to_save if uses_selective_layers_to_save else None
+                ),
             )
             appended_chunk_size = min(
                 normalized_chunk_size,
@@ -3517,6 +3560,11 @@ def _trace_torch_model(
         lookback_payload_policy=lookback_payload_policy,
         retain_output_parents_for_layers_to_save=(
             retain_output_parents_for_layers_to_save or uses_selective_layers_to_save
+        ),
+        _selective_layers_to_save_request=(
+            _selective_layers_to_save_request
+            if _selective_layers_to_save_request is not None
+            else (requested_layers_to_save if uses_selective_layers_to_save else None)
         ),
         _deferred_retention_selector=(
             requested_layers_to_save

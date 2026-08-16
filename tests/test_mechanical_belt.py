@@ -165,3 +165,80 @@ def test_belt_derivation_is_rng_neutral() -> None:
     before = torch.random.get_rng_state().clone()
     belt._derive()
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def _forged_failure_report() -> belt.BeltReport:
+    """A belt report carrying one probe failure, for disclosure-row tests."""
+
+    return belt.BeltReport(
+        members=(("torch", "from_numpy"),),
+        probed_visible=(),
+        probe_failures=(("torch", "frombuffer"),),
+        unprobed_candidate_count=2,
+        unprobed_candidates=(("torch", "abs_"), ("torch", "acos_")),
+        probe_failure_details=(("torch", "frombuffer", "RuntimeError('probe exploded')"),),
+    )
+
+
+def test_probe_failure_reaches_doctor_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """grind-r6 b3 R02 (sol MED): doctor() must consume belt probe failures.
+
+    A failed probe means the candidate is neither belt-patched nor proven
+    mode-visible, so a stale pre-wrap reference to it drops ops with zero
+    signal while ``capture_verified`` stays True. Before the fix NO doctor
+    row consumed the belt report at all.
+    """
+
+    import torchlens.utils as tl_utils
+
+    monkeypatch.setattr(belt, "_report", _forged_failure_report())
+    monkeypatch.setattr(belt, "_member_map", {})
+    rows = {check.name: check for check in tl_utils.doctor().checks}
+    assert "mechanical belt" in rows, "no doctor row consumes the belt report"
+    row = rows["mechanical belt"]
+    assert row.status == "WARN"
+    assert "torch.frombuffer" in row.detail
+    assert "probe exploded" in row.detail
+    assert "unprobed_candidates=2" in row.detail
+
+
+def test_probe_failure_reaches_compat_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """grind-r6 b3 R02 (sol MED): compat.report() must carry the belt row."""
+
+    from torchlens.compat import report as compat_report
+
+    monkeypatch.setattr(belt, "_report", _forged_failure_report())
+    monkeypatch.setattr(belt, "_member_map", {})
+    row = compat_report(torch.nn.Linear(2, 2), torch.randn(1, 2)).row("mechanical_belt")
+    assert row.status == "scope"
+    assert row.severity == "warning"
+    assert row.detected is True
+    assert "torch.frombuffer" in row.details
+
+
+def test_clean_belt_reports_pass_not_false_alarm() -> None:
+    """Healthy build: PASS rows that still DISCLOSE the unprobed count.
+
+    Hundreds of in-place variants legitimately have no probe recipe on every
+    healthy build; that standing limitation is disclosed as a count but must
+    never flip the status (a permanent false alarm trains users to ignore
+    the row -- r-b4 R26-4).
+    """
+
+    import torchlens.utils as tl_utils
+    from torchlens.compat import report as compat_report
+
+    real = belt.belt_report()
+    assert real is not None
+    assert not real.probe_failures
+
+    # Direct probe call: the full doctor() sweep (graphviz subprocess, extras
+    # imports) is exercised by the failure test and is too slow to repeat here.
+    doctor_row = tl_utils._probe_mechanical_belt()
+    assert doctor_row.status == "PASS"
+    assert "unprobed_candidates=" in doctor_row.detail
+
+    compat_row = compat_report(torch.nn.Linear(2, 2), torch.randn(1, 2)).row("mechanical_belt")
+    assert compat_row.status == "pass"
+    assert compat_row.severity == "ok"
+    assert "unprobed_candidates=" in compat_row.details

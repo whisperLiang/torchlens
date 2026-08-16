@@ -70,8 +70,42 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # compat wrapper would change the object identity the comparison depends on.
     # Guarded getattr, fail-neutral: if the symbol disappears, torch's special
     # case disappears with it and the shim falls through to the alias-table path.
+    # The three string-literal ``import_module`` reads (surfaced by the r6 R26
+    # scanner extension) are the SAME shim's module handles: gated on the
+    # HAS_EXPANDED_WEIGHTS_CONV_PICKER capability flag and wrapped in
+    # ``except ImportError: return`` (fail-neutral -- no expanded-weights
+    # machinery means nothing to shim).
     "torchlens/backends/torch/identity_shims.py": frozenset(
-        {"getattr(torch, '_cudnn_rnn_flatten_weight')"}
+        {
+            "getattr(torch, '_cudnn_rnn_flatten_weight')",
+            "import_module('torch.nn.utils._expanded_weights.conv_expanded_weights')",
+            "import_module('torch.nn.utils._expanded_weights.conv_utils')",
+            "import_module('torch.nn.utils._expanded_weights.expanded_weights_impl')",
+        }
+    ),
+    # Forward-pre-hook provenance interposition (grind-r6 b4 R26, sol MED --
+    # the aliased-import touch this scanner extension exists to see): the
+    # interposer must read and patch torch's REAL global pre-hook registry
+    # (``torch.nn.modules.module._global_forward_pre_hooks``) because the
+    # registry OBJECT IDENTITY is what torch's own Module.__call__ consults;
+    # a compat-layer copy would observe nothing. Reversible interposition;
+    # a registration that bypasses it is disclosed per-snapshot as
+    # ``registration_interposition_bypassed``, never silently missed.
+    "torchlens/backends/torch/prehook_provenance.py": frozenset(
+        {"torch.nn.modules.module._global_forward_pre_hooks"}
+    ),
+    # Conventional stable private BASE CLASSES read for isinstance
+    # classification (norm/dropout family detection). Unguarded on purpose:
+    # if torch ever removes them the read fails LOUDLY at call time -- there
+    # is no silent-degradation path for a capability flag to disclose.
+    "torchlens/data_classes/_trace_validation.py": frozenset(
+        {"torch.nn.modules.batchnorm._BatchNorm"}
+    ),
+    "torchlens/intervention/rerun.py": frozenset(
+        {
+            "torch.nn.modules.batchnorm._BatchNorm",
+            "torch.nn.modules.dropout._DropoutNd",
+        }
     ),
 }
 
@@ -82,10 +116,38 @@ def _is_private_segment(segment: str) -> bool:
     return segment.startswith("_") and not (segment.startswith("__") and segment.endswith("__"))
 
 
+def _torch_import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map locally-bound names to the full ``torch.*`` dotted paths they alias.
+
+    grind-r6 b4 R26 (sol MED): ``import torch.nn.modules.module as
+    torch_module`` followed by ``torch_module._global_forward_pre_hooks``
+    was invisible to the gate -- the import path has no private segment and
+    the attribute chain roots at the alias, not at ``torch``. Both aliased
+    ``import ... as`` bindings and ``from torch.x import y [as z]`` bindings
+    become recognized chain roots.
+    """
+
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "torch" and alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level == 0 and module.split(".")[0] == "torch":
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    aliases[alias.asname or alias.name] = f"{module}.{alias.name}"
+    return aliases
+
+
 def _private_touches(tree: ast.AST) -> set[str]:
     """Collect private torch touches from one module's AST."""
 
     touches: set[str] = set()
+    aliases = _torch_import_aliases(tree)
     nested_attribute_values = {
         id(node.value)
         for node in ast.walk(tree)
@@ -100,6 +162,10 @@ def _private_touches(tree: ast.AST) -> set[str]:
             current = current.value
         if isinstance(current, ast.Name) and current.id == "torch":
             return list(reversed(parts))
+        if isinstance(current, ast.Name) and current.id in aliases:
+            # Resolve the alias to its full dotted path, dropping the
+            # leading "torch" so callers can re-prefix uniformly.
+            return aliases[current.id].split(".")[1:] + list(reversed(parts))
         return None
 
     for node in ast.walk(tree):
@@ -122,6 +188,26 @@ def _private_touches(tree: ast.AST) -> set[str]:
                 if (isinstance(base, ast.Name) and base.id == "torch") or chain is not None:
                     prefix = "torch" if chain is None else "torch." + ".".join(chain)
                     touches.add(f"getattr({prefix}, {node.args[1].value!r})")
+            # importlib.import_module("torch._x") / __import__("torch._x")
+            # string-literal forms (grind-r6 b4 R26): a private torch module
+            # imported by string never appears as an Import node.
+            func = node.func
+            is_import_call = (isinstance(func, ast.Name) and func.id == "__import__") or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "import_module"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "importlib"
+            )
+            if (
+                is_import_call
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                target = node.args[0].value
+                segments = target.split(".")
+                if segments[0] == "torch" and any(_is_private_segment(s) for s in segments[1:]):
+                    touches.add(f"import_module({target!r})")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 segments = alias.name.split(".")
@@ -130,12 +216,16 @@ def _private_touches(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             segments = module.split(".")
-            if (
-                node.level == 0
-                and segments[0] == "torch"
-                and any(_is_private_segment(s) for s in segments[1:])
-            ):
-                touches.add(f"from {module}")
+            if node.level == 0 and segments[0] == "torch":
+                if any(_is_private_segment(s) for s in segments[1:]):
+                    touches.add(f"from {module}")
+                else:
+                    # Private NAME imported from a public torch module
+                    # (``from torch.utils import _pytree``): the module path
+                    # alone carries no private segment (grind-r6 b4 R26).
+                    for alias in node.names:
+                        if _is_private_segment(alias.name):
+                            touches.add(f"from {module} import {alias.name}")
     return touches
 
 
@@ -198,3 +288,34 @@ def test_gate_scanner_detects_planted_offenders() -> None:
     assert "torch._C._jit_get_all_schemas" in touches
     assert "getattr(torch._C, '_TensorBase')" in touches
     assert "getattr(torch, '_VF')" in touches
+
+
+@pytest.mark.smoke
+def test_gate_scanner_detects_aliased_and_string_literal_offenders() -> None:
+    """grind-r6 b4 R26 (sol MED): the scanner blind spots, planted.
+
+    Before the extension every one of these forms passed the gate silently:
+    the aliased module import roots the attribute chain at the alias name,
+    the from-import binds a private name off a public module path, and the
+    string-literal import never produces an Import node at all.
+    """
+
+    planted = ast.parse(
+        "import importlib\n"
+        "import torch.nn.modules.module as torch_module\n"
+        "from torch import nn\n"
+        "from torch.utils import _pytree\n"
+        "from torch.nn.modules import module as mod_alias\n"
+        "a = torch_module._global_forward_pre_hooks\n"
+        "b = nn.modules.batchnorm._BatchNorm\n"
+        "c = mod_alias._global_backward_hooks\n"
+        "d = importlib.import_module('torch.nn.utils._expanded_weights.conv_utils')\n"
+        "e = __import__('torch._dynamo')\n"
+    )
+    touches = _private_touches(planted)
+    assert "torch.nn.modules.module._global_forward_pre_hooks" in touches
+    assert "torch.nn.modules.batchnorm._BatchNorm" in touches
+    assert "torch.nn.modules.module._global_backward_hooks" in touches
+    assert "from torch.utils import _pytree" in touches
+    assert "import_module('torch.nn.utils._expanded_weights.conv_utils')" in touches
+    assert "import_module('torch._dynamo')" in touches

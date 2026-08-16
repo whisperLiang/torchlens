@@ -245,6 +245,22 @@ def _promote_layers_to_save_output_parent(
         device=output_device,
         save_mode=cast(Any, getattr(trace, "save_mode", "copy")),
     )
+    # Output-parent promotion retains real payloads and must be visible to
+    # the save-budget accountant like every other RAM retention: this path
+    # kept ram/transformed payloads with no admit/commit, silently
+    # undercounting on every selective capture whose outputs were not
+    # selected (grind-r6 b5 R34-N2). Admit BEFORE the copy allocates;
+    # disk-only routes stay exempt like the other predicate disk saves.
+    budget = getattr(trace, "_save_budget_accountant", None)
+    reservation = None
+    if budget is not None and intent.in_ram:
+        target_device = torch.device(output_device) if output_device is not None else tensor.device
+        reservation = budget.admit(
+            str(event.label_raw),
+            target_device,
+            int(tensor.nelement() * tensor.element_size()),
+            site="primary",
+        )
     ram_payload, disk_payload, transformed_ram_payload, transformed_disk_payload = _resolve_storage(
         tensor,
         spec,
@@ -254,6 +270,8 @@ def _promote_layers_to_save_output_parent(
         ctx=ctx,
         kind="activation",
     )
+    if budget is not None and reservation is not None:
+        budget.commit(reservation, (ram_payload, transformed_ram_payload))
     raw_blob_ref = _write_output_parent_blob(trace, event.label_raw, disk_payload, "out")
     transformed_blob_ref = _write_output_parent_blob(
         trace,

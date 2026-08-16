@@ -80,6 +80,18 @@ from ..utils.rng import (
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
 
+_AUTO_SEED_ENTROPY = random.Random()
+"""Private entropy stream for ``random_seed=None`` capture seed picks (R57).
+
+Seeded once from OS entropy at import. Drawing the auto seed from the user's
+global ``random`` engine either advanced that stream past the capture's
+restore bracket (breaking byte-exact RNG neutrality for a seeded host
+process) or, if the draw were bracketed too, made consecutive auto-seeded
+captures reuse one identical seed (silently correlating dropout patterns
+across runs). A private stream preserves both guarantees; the chosen seed is
+always disclosed on ``trace.random_seed``.
+"""
+
 
 def _cleanup_forward_memory_once(
     trace: "Trace",
@@ -1373,7 +1385,15 @@ def run_and_log_inputs_through_model(
     identical graph structure.
     """
     if random_seed is None:
-        random_seed = random.randint(1, 4294967294)
+        # R57 (neutrality half): the auto-seed pick draws from a PRIVATE
+        # entropy stream, never the user's global ``random`` engine. Drawing
+        # from the global stream either leaked one ``randint`` advance past
+        # the restore bracket below (capture not byte-neutral to a seeded
+        # host process) or, if bracketed, made every ``random_seed=None``
+        # capture reuse the identical seed (correlated dropout across runs).
+        # The private stream keeps both properties: byte-exact global-engine
+        # neutrality AND fresh seeds per capture.
+        random_seed = _AUTO_SEED_ENTROPY.randint(1, 4294967294)
     self.random_seed = random_seed  # type: ignore[assignment]
     # The per-capture code-context cache (and the call-site anchor stored
     # inside it) is only valid for the stack of ONE capture run: the anchor
@@ -1974,14 +1994,34 @@ def run_and_log_inputs_through_model(
             # tracker uninstall and end_label_session, leaving the user's model
             # permanently altered by a failed capture.
             try:
-                if capture_session is not None and not postprocess:
-                    capture_session.snapshot_recording_projection(self)
-                    self._fastlog_captured_run_core = capture_session.seal()
-            finally:
-                backend.cleanup_failed_forward_session(
-                    self, (model, input_tensors, (input_args, input_kwargs)), e
+                try:
+                    if capture_session is not None and not postprocess:
+                        capture_session.snapshot_recording_projection(self)
+                        self._fastlog_captured_run_core = capture_session.seal()
+                finally:
+                    backend.cleanup_failed_forward_session(
+                        self, (model, input_tensors, (input_args, input_kwargs)), e
+                    )
+                self.__dict__.pop("_capture_producer_policy", None)
+            except Exception as cleanup_exc:
+                # grind-r6 b1 R06 (sol MED, probe): the PRIMARY user error must
+                # propagate. An ordinary seal/cleanup double-fault used to
+                # escape INSTEAD of ``raise e`` -- the settled CaptureOutcome
+                # named the primary while the escaping exception was the
+                # secondary and carried no partial_log. Mirror the interrupt
+                # arm: attach the secondary as a note and re-raise the primary
+                # below. A BaseException secondary (Ctrl-C during cleanup)
+                # keeps escaping -- interrupts always win (B8-23 doctrine).
+                note = (
+                    "TorchLens failed-forward cleanup also failed while handling "
+                    f"this error: {type(cleanup_exc).__name__}: "
+                    f"{safe_exception_str(cleanup_exc)}"
                 )
-            self.__dict__.pop("_capture_producer_policy", None)
+                add_note = getattr(e, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
         finally:
             # Guaranteed settlement: a cleanup double-fault still stamps the
             # terminal outcome before the (original or secondary) exception

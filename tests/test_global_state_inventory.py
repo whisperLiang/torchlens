@@ -39,7 +39,9 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_capture_replay_templates"),
         # Pre-admission reservation: claimed before any capture-global side
         # effect, released in run_and_log's outermost finally (refused-loser
-        # data-quality fix, hunt-b2 R54).
+        # data-quality fix, hunt-b2 R54). The claim token authenticates
+        # same-thread re-entry (grind-r6 b7 R55) and shares the reservation's
+        # exact lifetime.
         ("torchlens/_state.py", "_capture_reserved_by"),
         # Continuation token minted with the reservation claim and cleared
         # with its release: same-thread re-entry must present it, so a nested
@@ -1569,6 +1571,16 @@ def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> 
         with _state.capture_reservation(resume=token):
             assert _state._capture_reserved_by == threading.get_ident()
         # The inner exit must not release the outer claim.
+        assert _state._capture_reserved_by == threading.get_ident()
+        # Same-thread entry WITHOUT the live claim is the R55 nested-capture
+        # hole and must refuse typed, not pass through.
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation():
+                pass  # pragma: no cover - refused above
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation(resume=object()):
+                pass  # pragma: no cover - refused above
+        # The refused entries must not have released or reclaimed the slot.
         assert _state._capture_reserved_by == threading.get_ident()
 
         # R55: a bare same-thread re-entry (no token) is a nested PUBLIC

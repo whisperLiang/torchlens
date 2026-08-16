@@ -122,3 +122,41 @@ def test_cleanup_forward_memory_gated_on_capture_touched_cuda(monkeypatch):
     cpu_trace = tl.trace(nn.Linear(2, 2), torch.randn(1, 2))
     TorchBackend().cleanup_forward_memory(cpu_trace)
     assert calls == [], "a CPU-only capture must never clear the CUDA allocator cache"
+
+
+def test_cleanup_double_fault_still_raises_the_primary_error(monkeypatch):
+    """grind-r6 b1 R06 (sol MED, probe): the primary user error propagates.
+
+    When ``backend.cleanup_failed_forward_session`` itself raised while
+    handling an ordinary forward failure, the SECONDARY cleanup exception
+    escaped instead of ``raise e``: the settled CaptureOutcome named the
+    primary while the caller caught an unrelated error with no partial_log.
+    The secondary now rides the primary as a note (or warning on 3.10),
+    mirroring the interrupt arm.
+    """
+
+    from torchlens.backends.torch.backend import TorchBackend
+
+    class _FailingModel(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = torch.relu(x)
+            raise ValueError("primary-user-error")
+
+    real_cleanup = TorchBackend.cleanup_failed_forward_session
+
+    def raising_cleanup(self, session, model_tuple, exc):
+        real_cleanup(self, session, model_tuple, exc)
+        raise KeyError("secondary-cleanup-error")
+
+    monkeypatch.setattr(TorchBackend, "cleanup_failed_forward_session", raising_cleanup)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="primary-user-error") as excinfo:
+            tl.trace(_FailingModel(), torch.ones(2))
+    exc = excinfo.value
+    notes = getattr(exc, "__notes__", [])
+    noted = any("secondary-cleanup-error" in note for note in notes)
+    assert noted or not hasattr(exc, "add_note"), (
+        f"cleanup double-fault not disclosed on the primary: notes={notes}"
+    )
+    assert getattr(exc, "partial_log", None) is not None
