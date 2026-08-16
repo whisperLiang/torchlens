@@ -698,6 +698,10 @@ AXES: dict[str, str] = {
         "default-on checked suppression of constructor args proven equal to captured shape dims"
     ),
     "labels:show_redundant_args": "show_redundant_args=True opt-out (every captured arg)",
+    "channel:color_by": "color_by= fill encoding (field / scalar builtin / callable)",
+    "channel:size_by": "size_by= box-minimum encoding ('dims' / field / callable)",
+    "channel:size_scale": "scale='sqrt' (default) vs 'linear' size transform",
+    "channel:stack_by": "stack_by= rank columns (licensed auto + explicit annotation)",
 }
 
 # Axes that are deliberately NOT given a page, with the honest reason.
@@ -2305,6 +2309,89 @@ SECTIONS: list[Section] = [
                     )
                 ],
                 covers=["surface:bundle_diff"],
+            ),
+        ],
+    ),
+    # =====================================================================
+    Section(
+        "M",
+        "Encoding Channels (L5, documented-unstable spellings)",
+        "Declarative value -> visual channel mappings on draw(): color_by "
+        "(fill), size_by + scale (box minimums), stack_by (rank columns). "
+        "All strictly opt-in, dot-layout-only, legend/caption-disclosed.",
+        [
+            Page(
+                label="m1_color_by",
+                title="color_by: sequential fill from a value source",
+                caption=(
+                    "color_by fills eligible op nodes from a colorblind-safe sequential ramp, "
+                    "normalized linear min-max over visible nodes. Sources: a record field, a scalar "
+                    "builtin (time/flops/bytes/magnitude/grad_norm), or a callable. The AUTO legend "
+                    "(show_legend=None) discloses the source, the transform, and min/mid/max swatches.\n"
+                    "CHECK: fills vary across nodes; the encoding legend block is present and names the "
+                    "source; unencoded nodes (missing values) keep their role fill."
+                ),
+                panels=[
+                    Panel(
+                        "color_by='time' -- per-op forward duration",
+                        "small_conv",
+                        kwargs={"color_by": "time"},
+                    ),
+                    Panel(
+                        "color_by='bytes' -- activation memory",
+                        "small_conv",
+                        kwargs={"color_by": "bytes"},
+                    ),
+                ],
+                covers=["channel:color_by"],
+            ),
+            Page(
+                label="m2_size_by",
+                title="size_by + scale: box minimums from a value source (D4 default mapping)",
+                caption=(
+                    "size_by sizes nodes by a scalar field, a callable, or the closed 'dims' shape "
+                    "token (numel of the non-batch output shape -- the conservative D4 default "
+                    "mapping, sqrt scale default). Emitted sizes are MINIMUMS under fixedsize=false: "
+                    "labels never truncate, fonts never scale, and encoded area is clamped to 4x the "
+                    "default node area. On text-heavy nodes the label's natural size dominates -- the "
+                    "motif reads on compact nodes (ellipses, small labels).\n"
+                    "CHECK: the legend states 'size ~ sqrt(dims)' (left) / 'linear(dims)' (right); "
+                    "larger-activation nodes are never SMALLER than smaller-activation ones."
+                ),
+                panels=[
+                    Panel(
+                        "size_by='dims' (scale='sqrt' default)",
+                        "small_conv",
+                        kwargs={"size_by": "dims"},
+                    ),
+                    Panel(
+                        "size_by='dims', scale='linear' (literal area motif)",
+                        "small_conv",
+                        kwargs={"size_by": "dims", "scale": "linear"},
+                    ),
+                ],
+                covers=["channel:size_by", "channel:size_scale"],
+            ),
+            Page(
+                label="m3_stack_by",
+                title="stack_by: rank columns from an annotation (the classic timestep diagram)",
+                caption=(
+                    "stack_by=True derives pass_index on multi-pass ops under the LOCKSTEP LICENSE "
+                    "(globally monotone execution windows -- non-monotone traces refuse "
+                    "stack_by_auto_underivable and an explicit field/callable bypasses). Nodes sharing "
+                    "an annotation value pin to one rank; with direction='leftright' the ranks read as "
+                    "timestep columns. The graph caption and legend disclose the annotation used.\n"
+                    "CHECK: each recurrent pass forms one column; the stem/head ops hang free (not "
+                    "pinned to column 1); the caption line 'stacked by: pass_index (auto)' is present."
+                ),
+                panels=[
+                    Panel(
+                        "stack_by=True, direction='leftright' -- RNN cell over 4 steps",
+                        "rnn_cell_seq",
+                        kwargs={"stack_by": True, "direction": "leftright"},
+                    ),
+                ],
+                covers=["channel:stack_by"],
             ),
         ],
     ),

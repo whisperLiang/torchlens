@@ -123,6 +123,10 @@ one page or carry an explicit N/A rationale; anything else is a defect.
 | `diag:collapse_schedule` | Trace.collapse_schedule() diagnostic | p40 |
 | `labels:checked_suppression` | default-on checked suppression of constructor args proven equal to captured shape dims | p47 |
 | `labels:show_redundant_args` | show_redundant_args=True opt-out (every captured arg) | p47 |
+| `channel:color_by` | color_by= fill encoding (field / scalar builtin / callable) | p74 |
+| `channel:size_by` | size_by= box-minimum encoding ('dims' / field / callable) | p75 |
+| `channel:size_scale` | scale='sqrt' (default) vs 'linear' size transform | p75 |
+| `channel:stack_by` | stack_by= rank columns (licensed auto + explicit annotation) | p76 |
 
 ## Deliberately not paged (with rationale)
 
@@ -204,6 +208,9 @@ one page or carry an explicit N/A rationale; anything else is a defect.
 | 69 | K | `k1_degenerate` | Degenerate graphs: single op, no modules, scalar out, no params | `no_submodules`, `paramless_deep`, `scalar_out`, `single_op` | 4 |
 | 71 | L | `l1_fastlog_preview` | preview_fastlog: which ops would a predicate keep? | `tiny_mlp` | 1 |
 | 72 | L | `l2_bundle_diff` | bundle_diff: clean vs intervened, per-node delta | `tiny_mlp` | 1 |
+| 74 | M | `m1_color_by` | color_by: sequential fill from a value source | `small_conv` | 2 |
+| 75 | M | `m2_size_by` | size_by + scale: box minimums from a value source (D4 default mapping) | `small_conv` | 2 |
+| 76 | M | `m3_stack_by` | stack_by: rank columns from an annotation (the classic timestep diagram) | `rnn_cell_seq` | 1 |
 
 ## How to extend
 
