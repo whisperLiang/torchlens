@@ -84,14 +84,20 @@ _NEW_FILE_LINE_CAP = 2000
 #:   bundle/__init__.py 2450 | capture/trace.py 2200
 #:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
 #:   _runnable_state.py 2700 (L4 D18 mode-aware projector + snapshot-restore)
+#: 2026-08-16 L6 merge settle (same debt record): three more ceilings
+#: re-stepped for reviewed L6 selection-algebra / edge-substitution mass
+#: (edge boundary verdict in validation/core, tier-(ii) edge stores on Op,
+#: the v7 save boundary in _io/bundle). PRE-SPRINT BASELINE at 75439a67:
+#:   validation/core.py 5300 | data_classes/op.py 5200
+#:   (_io/bundle.py already listed above at 4450; L6 re-steps 4500 -> 4550)
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5300,
-    "torchlens/data_classes/op.py": 5200,
+    "torchlens/validation/core.py": 5450,
+    "torchlens/data_classes/op.py": 5250,
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4500,
+    "torchlens/_io/bundle.py": 4550,
     "torchlens/_io/runnable_load.py": 3850,
     "torchlens/user_funcs.py": 4200,
     "torchlens/backends/torch/backward.py": 3900,

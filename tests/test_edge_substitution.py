@@ -50,7 +50,11 @@ def _capture():
 
 @pytest.fixture(scope="module")
 def capture():
-    return _capture()
+    model, x, trace = _capture()
+    try:
+        yield model, x, trace
+    finally:
+        trace.cleanup()
 
 
 def _edge(trace, parent="relu_1_2"):

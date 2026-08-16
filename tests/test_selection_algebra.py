@@ -53,7 +53,11 @@ def log():
     """One traced deterministic CNN shared by the suite."""
 
     torch.manual_seed(0)
-    return tl.trace(_TwoConv(), torch.randn(1, 1, 12, 12))
+    trace = tl.trace(_TwoConv(), torch.randn(1, 1, 12, 12))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +65,11 @@ def other_log():
     """A second trace for trace-mismatch rows."""
 
     torch.manual_seed(1)
-    return tl.trace(_TwoConv(), torch.randn(1, 1, 12, 12))
+    trace = tl.trace(_TwoConv(), torch.randn(1, 1, 12, 12))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def _elements(resolved: ResolvedSelection) -> int:

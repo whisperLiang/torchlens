@@ -38,11 +38,15 @@ class _TwoConv(nn.Module):
 @pytest.fixture(scope="module")
 def log():
     torch.manual_seed(0)
-    return tl.trace(
+    trace = tl.trace(
         _TwoConv(),
         torch.randn(1, 1, 12, 12),
         capture=tl.options.CaptureOptions(intervention_ready=True),
     )
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
 
 
 def test_edit_is_public_type_and_helper_spec_is_alias():
