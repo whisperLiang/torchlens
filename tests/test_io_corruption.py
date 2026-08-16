@@ -331,6 +331,30 @@ def test_manifest_write_failure_refuses_typed(tmp_path: Path) -> None:
     assert excinfo.value.fields.get("remedy")
 
 
+def test_io_artifact_door_codes_are_provoked(tmp_path: Path) -> None:
+    """R25 ratchet shrink: three io artifact-door codes gain live provocations.
+
+    Each of these sat in ``UNPROVOKED_BASELINE`` -- a code swap at any of the
+    three doors would have failed zero tests.
+    """
+
+    trace = _save_bundle(tmp_path, "seed.tl")  # returns the bundle path
+    from torchlens.io import load_intervention_spec
+
+    with pytest.raises(TypeError) as kind:
+        load_intervention_spec(trace)
+    assert kind.value.fields["code"] == "artifact_kind_mismatch"
+
+    source = tl.trace(_CorruptionModel(), torch.randn(2, 4))
+    with pytest.raises(ValueError) as level:
+        tl.Bundle({"m": source}).save(tmp_path / "b.tlspec", level="runnable")
+    assert level.value.fields["code"] == "artifact_save_level_unsupported"
+
+    with pytest.raises(ValueError) as payload:
+        tl.save(source, tmp_path / "weights.tl", level="portable", include_weights=True)
+    assert payload.value.fields["code"] == "save_payload_level_conflict"
+
+
 def test_remedy_field_derives_from_authored_message_tail() -> None:
     """R65 remedy contract: fields['remedy'] exists whenever the message ends
     with an authored "Remedy: ..." sentence; an explicit kwarg always wins."""
