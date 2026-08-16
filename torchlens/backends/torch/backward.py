@@ -3658,7 +3658,7 @@ def log_backward(
 
     def run() -> Any:
         """Run the user's requested backward call."""
-        return loss.backward(**backward_kwargs)  # type: ignore[no-untyped-call]
+        return loss.backward(**backward_kwargs)
 
     try:
         _run_backward_with_capture(
@@ -3716,8 +3716,8 @@ class RecordingBackward:
                 """Run the original Tensor.backward implementation."""
                 if _state._escape_detector_mode == "shadow":
                     with expected_original_call(original_backward, "autograd:tensor_backward"):
-                        return original_backward(tensor_self, *args, **kwargs)  # type: ignore[no-untyped-call]
-                return original_backward(tensor_self, *args, **kwargs)  # type: ignore[no-untyped-call]
+                        return original_backward(tensor_self, *args, **kwargs)
+                return original_backward(tensor_self, *args, **kwargs)
 
             # A backward on a graph that does not reach this trace's pinned
             # forward grad-fns is unrelated PyTorch work: delegate it

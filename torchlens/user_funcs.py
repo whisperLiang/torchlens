@@ -1228,7 +1228,7 @@ def _warn_zero_match_capture_selectors(
             try:
                 matched: Any = _get_op_nums_from_user_labels(
                     trace,
-                    layers_to_save_request,  # type: ignore[arg-type]
+                    layers_to_save_request,
                 )
             except InvalidArgumentError:
                 # The post-capture lookup is loud for unknown keys; here the
@@ -3847,7 +3847,7 @@ def _sync_public_impl_wrapper_metadata(implementations: Any = None) -> None:
     if _public_impl_metadata_synced:
         return
     if implementations is None:
-        from . import _user_public_impls as implementations  # type: ignore[no-redef]
+        from . import _user_public_impls as implementations
     pending = False
     for name in _PUBLIC_IMPL_WRAPPER_NAMES:
         implementation = getattr(implementations, name, None)

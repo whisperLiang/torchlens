@@ -475,6 +475,17 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
         f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
     )
 
+    # The agent docs (CLAUDE.md / AGENTS.md under torchlens/) are internal
+    # working notes on a PUBLIC repo; both pyproject's exclude-package-data
+    # block and MANIFEST.in claim THIS test enforces their absence, and until
+    # r7 R84-1 neither claim was true — the one packaging regression that has
+    # already shipped once had no tripwire.
+    agent_doc_members = [m for m in members if m.rsplit("/", 1)[-1] in ("CLAUDE.md", "AGENTS.md")]
+    assert not agent_doc_members, (
+        f"wheel ships internal agent docs: {agent_doc_members} — "
+        "[tool.setuptools.exclude-package-data] or MANIFEST.in regressed"
+    )
+
 
 def test_nightly_gate_installs_release_locked_builder() -> None:
     """The nightly double-build gate installs the release's exact builder (R61).
@@ -547,4 +558,141 @@ def test_precommit_pin_is_single_valued_and_inside_the_contributor_band() -> Non
     assert int(band.group(1)) <= major < int(band.group(2)), (
         f"CI pre-commit pin {ci_pins} escaped the contributor band "
         f">={band.group(1)},<{band.group(2)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pin-lockstep gates (r7 R87-1): these five assertions previously lived ONLY
+# as inline scripts in lint.yml's actionlint job — a job the repo documents
+# as advisory, so none was PR-blocking and none was locally runnable
+# (`pytest tests/` could not reach them; the "one version authority"
+# doctrine was enforceable only by pushing). They are the same checks,
+# ported verbatim; lint.yml now points here instead of duplicating them.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
+
+
+def _all_workflow_text() -> str:
+    """Concatenate every workflow file (the scan corpus for inline pins)."""
+
+    return "".join(path.read_text() for path in sorted(_WORKFLOWS_DIR.glob("*.yml")))
+
+
+@pytest.mark.smoke
+def test_newest_admitted_torch_literal_lockstep() -> None:
+    """quality.yml's inline torch pins equal tests.yml's newest matrix row.
+
+    The newest-admitted torch version is inlined in quality.yml (mypy +
+    dep-audit envs) and repeatedly in tests.yml's matrix with nothing keeping
+    them equal — a matrix bump that skips quality.yml silently type-checks
+    and audits an older torch. (The nightly capture-byte-oracle pin
+    deliberately tracks the golden ENV marker instead and is lockstepped by
+    test_ci_packaging_gates.)
+    """
+
+    torch_re = re.compile(r"torch(?:==|: \")(\d+\.\d+\.\d+)\+cpu")
+    tests_versions = torch_re.findall((_WORKFLOWS_DIR / "tests.yml").read_text())
+    quality_versions = torch_re.findall((_WORKFLOWS_DIR / "quality.yml").read_text())
+    assert tests_versions and quality_versions, (
+        "expected torch==X.Y.Z+cpu literals in tests.yml and quality.yml"
+    )
+    newest = max(tests_versions, key=lambda v: tuple(map(int, v.split("."))))
+    stale = sorted(set(quality_versions) - {newest})
+    assert not stale, (
+        f"quality.yml pins torch {stale} but tests.yml's newest-admitted row is {newest}: "
+        "bump them together so type-check/audit run on the newest admitted torch"
+    )
+
+
+@pytest.mark.smoke
+def test_pydot_inline_pins_match_the_test_extra_authority() -> None:
+    """Every inline workflow pydot pin equals the [test] extra's pin.
+
+    pydot is a DOT-render golden fingerprint KEY: the [test] extra is the
+    pin authority and the lean .[dev,tabular] legs repeat it inline, so a
+    bump that misses a site silently renders goldens with a different pydot.
+    The scan covers EVERY workflow file — a hand-enumerated list let
+    mutation.yml's third pin drift unguarded from birth.
+    """
+
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
+    authority = set(re.findall(r'"pydot==([0-9][^"]*)"', pyproject))
+    assert len(authority) == 1, f"expected ONE pydot pin in pyproject: {authority}"
+    inline = set(re.findall(r"pydot==([0-9][^\"'\s]*)", _all_workflow_text()))
+    assert inline == authority, (
+        f"inline pydot pins {inline} drifted from the [test] extra authority "
+        f"{authority}: bump every site together or the DOT goldens' recording "
+        "environment forks between tiers"
+    )
+
+
+@pytest.mark.smoke
+def test_pip_audit_inline_pin_matches_the_dev_extra_authority() -> None:
+    """quality.yml's inline pip-audit pin equals the dev extra's exact pin."""
+
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
+    authority = set(re.findall(r'"pip-audit==([0-9][^"]*)"', pyproject))
+    assert len(authority) == 1, f"expected ONE pip-audit pin in pyproject: {authority}"
+    inline = set(
+        re.findall(r"pip-audit==([0-9][^\"'\s]*)", (_WORKFLOWS_DIR / "quality.yml").read_text())
+    )
+    assert inline == authority, (
+        f"quality.yml pip-audit pin {inline} drifted from the dev extra "
+        f"authority {authority}: the inline copy is the one that actually "
+        "audits releases"
+    )
+
+
+@pytest.mark.smoke
+def test_jsonschema_inline_pins_agree_and_sit_inside_the_dev_band() -> None:
+    """Inline jsonschema pins are single-valued and inside the dev band.
+
+    The inline copies validate the menagerie release lock, so a partial bump
+    forks lock-validation verdicts between legs.
+    """
+
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
+    inline = set(re.findall(r"jsonschema==([0-9][^\"'\s]*)", _all_workflow_text()))
+    assert len(inline) <= 1, f"inline jsonschema pins disagree across workflows: {inline}"
+    if inline:
+        band = re.search(r'"jsonschema>=([0-9.]+),<([0-9.]+)"', pyproject)
+        assert band is not None, "dev extra lost its jsonschema band"
+        pinned = next(iter(inline))
+
+        def _key(version: str) -> tuple[int, ...]:
+            return tuple(int(part) for part in version.split("."))
+
+        assert _key(band.group(1)) <= _key(pinned) < _key(band.group(2)), (
+            f"inline jsonschema {pinned} escaped the dev-extra band "
+            f">={band.group(1)},<{band.group(2)}"
+        )
+
+
+@pytest.mark.smoke
+def test_graphviz_inline_pins_match_the_committed_env_markers() -> None:
+    """Every inline graphviz pin equals the committed ENV-graphviz markers.
+
+    graphviz (the python DOT emitter) is a golden fingerprint KEY but a CORE
+    runtime dep that must stay a floor for users — so its authority is the
+    committed marker itself, and the CI inline pins must equal it. A free
+    resolution moves the byte families off-canonical on the enforcing row.
+    """
+
+    markers = {
+        rel: (_REPO_ROOT / rel).read_text().strip()
+        for rel in (
+            "tests/golden/ENV-graphviz",
+            "tests/godobject_oracle/goldens/ENV-graphviz",
+        )
+    }
+    marker_versions = set(markers.values())
+    assert len(marker_versions) == 1, f"ENV-graphviz markers disagree: {markers}"
+    inline = set(re.findall(r"graphviz==([0-9][^\"'\s]*)", _all_workflow_text()))
+    assert inline == marker_versions, (
+        f"inline graphviz pins {inline} drifted from the committed "
+        f"ENV-graphviz markers {marker_versions}: the python DOT emitter is a "
+        "golden fingerprint KEY — a free resolution moves the byte families "
+        "off-canonical on the enforcing row"
     )

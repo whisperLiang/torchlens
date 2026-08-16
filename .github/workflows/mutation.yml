@@ -64,12 +64,16 @@ jobs:
         # survivor either way on an unrelated upstream event. Same pins as
         # weekly.yml's mutation-margin job; pydot AND graphviz pinned
         # together (r7 R83: the DOT emitters were pinned asymmetrically here).
+        # r7 R83-1: this was the repo's ONLY bare .[test] leg -- pytest
+        # resolved outside the dev extra's deliberate >=8,<10 band, so a
+        # pytest major could silently change what this verdict-emitting gate
+        # enforces. Same extras as the weekly mutation-margin job now.
         run: |
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
-            -e ".[test]" \
+            -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
             "torchvision==0.23.0+cpu" \
             "pydot==4.0.1" \
@@ -88,12 +92,16 @@ jobs:
             ""|registry|checks|blocks|exempt|arms|corechecks|executor|bounded) ;;
             *) echo "invalid family input: $INPUT_FAMILY"; exit 1 ;;
           esac
+          # Whole-string validation via case patterns ONLY (r7 R82, proven
+          # bypass): grep matches PER LINE, so "1/1<newline>forged=x" passed
+          # the old `grep -qE '^[0-9]+/[0-9]+$'` on its first line and the
+          # embedded newline reached $GITHUB_OUTPUT as a forged output row.
+          # A case pattern matches the ENTIRE string, newlines included.
           case "$INPUT_ARM_SHARD" in
             "") ;;
-            */*)
-              if ! printf '%s' "$INPUT_ARM_SHARD" | grep -qE '^[0-9]+/[0-9]+$'; then
-                echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1
-              fi ;;
+            *[!0-9/]*|*/*/*|/*|*/)
+              echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1 ;;
+            */*) ;;
             *) echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1 ;;
           esac
           if [ -n "$INPUT_FAMILY" ]; then

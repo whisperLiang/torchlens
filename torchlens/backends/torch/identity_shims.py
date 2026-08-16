@@ -446,6 +446,8 @@ def _make_ctor_shim(orig_init: Callable[..., None], sig: inspect.Signature) -> C
 
     @functools.wraps(orig_init)
     def ctor_shim(self: Any, *args: Any, **kwargs: Any) -> None:
+        """Rebind a stale ``activation`` default to the live namespace callable."""
+
         import torch.nn.functional as F
 
         try:
@@ -541,6 +543,8 @@ def _install_causal_bias_shim(records: list[tuple[Any, str, Any]]) -> None:
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
+        """Normalize a stale SDPA reference to the live namespace basis."""
+
         import torch.nn.functional as F
 
         target = getattr(F, "scaled_dot_product_attention", None)
@@ -607,6 +611,8 @@ def _install_expanded_weights_shims(records: list[tuple[Any, str, Any]]) -> None
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
+        """Normalize a stale cudnn flatten-weight reference to the namespace basis."""
+
         flatten = getattr(torch, "_cudnn_rnn_flatten_weight", None)
         if flatten is not None and func is not flatten and _resolve(func) is _resolve(flatten):
             # The special case reads the namespace at call time; hand it the
@@ -1049,6 +1055,8 @@ def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any
 
     @functools.wraps(orig_picker)
     def conv_picker_shim(func: Any, conv1d_opt: Any, conv2d_opt: Any, conv3d_opt: Any) -> Any:
+        """Normalize a stale conv reference to the ``torch.nn.functional`` basis."""
+
         import torch.nn.functional as F
 
         for name in ("conv1d", "conv2d", "conv3d"):

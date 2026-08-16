@@ -81,7 +81,7 @@ def _pin_in_memo(memo: dict[int, Any], value: Any) -> None:
         Original object being memoized.
     """
 
-    memo.setdefault(id(memo), []).append(value)  # type: ignore[union-attr]
+    memo.setdefault(id(memo), []).append(value)
 
 
 @dataclass(frozen=True)

@@ -242,7 +242,13 @@ def activation_patch_residual_stream(
             selector = facet(facet_name).in_module(address)
             for pos_index, position in enumerate(patch_positions_list):
 
-                def _patch_position(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                def _patch_position(
+                    out: torch.Tensor,
+                    *,
+                    hook: Any,
+                    position: Any = position,
+                    clean_value: torch.Tensor = clean_value,
+                ) -> torch.Tensor:
                     """Return ``out`` with one position replaced by the clean activation."""
 
                     del hook
@@ -596,7 +602,9 @@ def _activation_patch_by_module(
     for layer_index, address in enumerate(modules):
         clean_value = _facet_tensor(clean_log.modules[address].facets[facet_name]).detach().clone()
 
-        def _patch_whole(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+        def _patch_whole(
+            out: torch.Tensor, *, hook: Any, clean_value: torch.Tensor = clean_value
+        ) -> torch.Tensor:
             """Return the clean activation for this facet slice."""
 
             del out, hook
@@ -649,7 +657,9 @@ def _activation_patch_heads(
                 .clone()
             )
 
-            def _patch_head(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+            def _patch_head(
+                out: torch.Tensor, *, hook: Any, clean_value: torch.Tensor = clean_value
+            ) -> torch.Tensor:
                 """Return the clean activation for this head facet slice."""
 
                 del out, hook

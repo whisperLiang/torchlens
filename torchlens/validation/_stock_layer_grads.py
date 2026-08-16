@@ -370,7 +370,7 @@ def _stock_layer_grads(
         set_random_seed(random_seed)
         output = model(*input_args, **dict(input_kwargs))
         loss = loss_fn(output)
-        loss.backward()  # type: ignore[no-untyped-call]
+        loss.backward()
         collector.collect_grads_after_backward()
         return dict(collector.stock_module_output_grads), set(collector.identity_output_addresses)
     finally:

@@ -544,7 +544,7 @@ def _raw_runtime_output(
     return reconstructed_output
 
 
-def _registered_flatten_children(value):
+def _registered_flatten_children(value: Any) -> list[Any] | None:
     """Return a registered container's flatten children, else ``None`` (r67 C2, corr1-3)."""
 
     from torchlens.ir.container import get_registered_container
@@ -560,7 +560,7 @@ def _registered_flatten_children(value):
         return None
 
 
-def _codec_component(key):
+def _codec_component(key: Any) -> str | int | None:
     """Encode one runtime mapping key through the canonical codec, or ``None`` (r67 C2)."""
 
     from torchlens._input_walk import encode_mapping_key

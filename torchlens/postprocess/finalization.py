@@ -818,7 +818,7 @@ def _build_module_param_info(
     """Gather parameter counts, sizes, and buffer layers for a single module."""
     from ..data_classes.param import ParamAccessor
 
-    module_param_dict = {pl.address: pl for pl in self._param_logs_by_module.get(address, [])}  # type: ignore[attr-defined]
+    module_param_dict = {pl.address: pl for pl in self._param_logs_by_module.get(address, [])}
     module_params = ParamAccessor(module_param_dict)
     m_num_params = mbd["module_nparams"].get(address, 0)
     m_num_trainable = mbd["module_nparams_trainable"].get(address, 0)
@@ -867,10 +867,10 @@ def _build_module_logs(self: "Trace") -> None:
     module_order.append(root_module)
 
     # Pre-compute param_logs grouped by module address
-    self._param_logs_by_module = defaultdict(list)  # type: ignore[attr-defined]
+    self._param_logs_by_module = defaultdict(list)
     for pl in self.param_logs:
         for module_address in pl.all_module_addresses:
-            self._param_logs_by_module[module_address].append(pl)  # type: ignore[attr-defined]
+            self._param_logs_by_module[module_address].append(pl)
 
     # Pre-compute reverse mapping: child_call_label -> parent_call_label
     _child_to_parent_pass = {}

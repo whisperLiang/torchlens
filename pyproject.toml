@@ -176,7 +176,14 @@ dev = [
     "referencing>=0.28,<1",
 ]
 test = [
-    "lightning",
+    # BAND COHERENCE (r7 R83-2): the four ML packages the bridge/ adapters
+    # wrap are banded HERE to the exact ranges this file's own extras declare
+    # as supported (lightning :106, hf :117, vision-shims :128). Before this,
+    # the eight .[dev,test,tabular] CI legs validated whatever resolved --
+    # transformers 5.x landed while the hf extra called ~=4.45 supported, and
+    # the fleet recorded reds from exactly that fork. Widen an adapter band
+    # and this extra IN THE SAME CHANGE, never one side alone.
+    "lightning~=2.4",
     # PIN AUTHORITY for pydot: the DOT-render goldens embed the pydot version as
     # a fingerprint KEY, so an environment that resolves pydot freely (nightly/
     # weekly install .[test]) drifts off the goldens' recording environment and
@@ -194,10 +201,10 @@ test = [
     "pytest-timeout",
     "requests",
     "soxr",
-    "timm",
+    "timm~=1.0",
     "torchaudio",
     "torch_geometric",
-    "torchvision",
+    "torchvision>=0.18,<1",
     # menagerie catalog machinery (menagerie/schema.py, menagerie/envs.py,
     # menagerie/ledger.py) hard-imports these at module load / call time with no
     # try/except guard. They are exercised directly by tests/test_menagerie_*.py
@@ -212,7 +219,7 @@ test = [
     "pydantic>=2.0",
     "PyYAML>=6.0",
     "psutil>=5.9",
-    "transformers",
+    "transformers~=4.45",
     "visualpriors",
 ]
 
@@ -382,10 +389,11 @@ output = "tests/generated_outputs/coverage.lcov"
 # STRICTNESS RATCHET (R68, grind r4): the flags below only ever FLIP TO TRUE,
 # each landed at measured zero cost against the pinned mypy; the set is locked
 # by tests/test_mypy_ratchet_governance.py (narrowing any of them goes red
-# there). Next rungs, measured 2026-08-15 and relayed to the source lane:
-# disallow_untyped_defs (3 sites: _runnable_output_contracts.py:547,:563,
-# data_classes/op.py:3647) and warn_unused_ignores (63 dead ignores in 31
-# files). Flip each here in the SAME change that clears its sites.
+# there). 2026-08-16 (fixwave-7, R68 paired re-measurement): the disputed
+# dead-ignore count adjudicated at 64 in 31 files (pinned mypy 2.1.0,
+# torchlens/ config scope) -- all 64 removed, warn_unused_ignores flipped;
+# the 3 untyped defs annotated, disallow_untyped_defs flipped. Both rungs
+# now enforce; the ratchet has no measured next rung.
 python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
@@ -395,7 +403,8 @@ check_untyped_defs = true
 no_implicit_optional = true
 disallow_incomplete_defs = true
 strict_equality = true
-disallow_untyped_defs = false
+disallow_untyped_defs = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100

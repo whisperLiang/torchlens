@@ -27,7 +27,7 @@ _INDEX_MAX_BYTES = _MAX_JSON_BYTES
 _MAX_RECOVERY_WARNINGS = 200
 
 
-class _RecoveryWarningSink(list):  # type: ignore[type-arg]
+class _RecoveryWarningSink(list):
     """Recovery-warning ledger with a hard cap and an explicit overflow summary.
 
     A malformed-line flood (a multi-million-line corrupt index) used to append

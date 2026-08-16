@@ -43,6 +43,24 @@ jobs:
             torchvision: "0.16.2+cpu"
             numpy: "numpy==1.26.4"
             scope: smoke
+          # r7 R85-1: pyproject declares THREE python-conditioned torch
+          # floors (>=2.1 for py<3.12, >=2.2 for py3.12, >=2.6 for py3.13)
+          # but CI exercised only the first — the 3.12/3.13 claims were
+          # asserted in metadata and executed nowhere. These two rows run
+          # each conditioned floor on exactly the interpreter that declares
+          # it.
+          - track: floor
+            python: "3.12"
+            torch: "2.2.2+cpu"
+            torchvision: "0.17.2+cpu"
+            numpy: "numpy==1.26.4"
+            scope: smoke
+          - track: floor
+            python: "3.13"
+            torch: "2.6.0+cpu"
+            torchvision: "0.21.0+cpu"
+            numpy: numpy
+            scope: smoke
           - track: canonical
             python: "3.10"
             torch: "2.8.0+cpu"
@@ -200,12 +218,14 @@ jobs:
         # Executed-floor attestation on EVERY smoke row (previously only the
         # nightly preview-backend legs had one): a row where collection drift,
         # a conftest guard, or mass importorskip/oracle skipping hollows out
-        # the suite must go red, not green. The smoke tier selects ~3900 tests
-        # (measured 2026-08-14); the floor is roughly half so normal
-        # test-count churn and per-torch-version skips never trip it while a
-        # mass-skip regression always does.
+        # the suite must go red, not green. The smoke tier selects ~5,026
+        # tests (re-trued 2026-08-16, r7 R41: the old "~3900"/1900 pair had
+        # lagged the tier by a thousand tests, tolerating a silent 61% loss);
+        # the floor is roughly half so normal churn and per-torch-version
+        # skips never trip it, and the 15% skip-fraction bound scales with
+        # the selection so the ratchet no longer weakens as the suite grows.
         run: |
-          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/smoke.junit.xml" 1900
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/smoke.junit.xml" 2500 0.15
 
       - name: Enforce the render byte oracle
         if: matrix.render_byte_oracle == '1'

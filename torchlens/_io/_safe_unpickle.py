@@ -1344,7 +1344,7 @@ _VM_INTERNAL_CODE_FILES: frozenset[str] = frozenset(
 )
 
 
-class _DenyMissingDispatch(dict):  # type: ignore[type-arg]
+class _DenyMissingDispatch(dict):
     """Opcode dispatch table that raises ``UnpicklingError`` on an unknown opcode.
 
     The C ``pickle.Unpickler`` raises ``pickle.UnpicklingError`` ("invalid load key")
@@ -2074,7 +2074,7 @@ class SafeBundleUnpickler(pickle._Unpickler):
     # repointed). This is the single load-bearing detail of the C->pure-Python
     # migration. ``_RenameAwareUnpickler`` inherits this ``dispatch`` unchanged.
     dispatch = _DenyMissingDispatch(pickle._Unpickler.dispatch)
-    dispatch[pickle.BUILD[0]] = load_build  # type: ignore[assignment]
-    dispatch[pickle.REDUCE[0]] = load_reduce  # type: ignore[assignment]
-    dispatch[pickle.NEWOBJ[0]] = load_newobj  # type: ignore[assignment]
-    dispatch[pickle.NEWOBJ_EX[0]] = load_newobj_ex  # type: ignore[assignment]
+    dispatch[pickle.BUILD[0]] = load_build
+    dispatch[pickle.REDUCE[0]] = load_reduce
+    dispatch[pickle.NEWOBJ[0]] = load_newobj
+    dispatch[pickle.NEWOBJ_EX[0]] = load_newobj_ex

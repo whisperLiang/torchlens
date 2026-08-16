@@ -2720,9 +2720,7 @@ class ModuleAccessor(Accessor["Module"]):
                 if alias not in self._dict:
                     self._alias_dict[alias] = ml
 
-    def __getitem__(  # type: ignore[override]
-        self, key: int | str
-    ) -> "Module":
+    def __getitem__(self, key: int | str) -> "Module":
         """Return a Module by module-specific lookup rules."""
         if key == "":
             key = "self"

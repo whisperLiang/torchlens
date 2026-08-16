@@ -64,12 +64,38 @@ def _bounded_exc(exc: BaseException) -> str:
 
 
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
-"""UTF-8, sorted keys, no NaN/Infinity, LF, no insignificant whitespace."""
+"""UTF-8, sorted keys (strings only), no NaN/Infinity, LF, no whitespace."""
+
+
+def _reject_non_string_keys(obj: Any, path: str = "$") -> None:
+    """Refuse mappings whose keys are not strings, anywhere in ``obj``.
+
+    ``json.dumps`` silently COERCES int/float/bool/None keys to strings, so
+    two distinct payloads (``{1: v}`` vs ``{"1": v}``) would share canonical
+    bytes, ``{"1": a, 1: b}`` would emit DUPLICATE keys, and int-keyed maps
+    sort numerically while their coerced forms sort lexicographically — all
+    fatal ambiguities for a hash-authority encoding (r7 R73 known-bad class).
+    """
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if type(key) is not str:
+                raise ValueError(
+                    f"canonical JSON refuses non-string mapping key {key!r} at "
+                    f"{path}: json coercion makes distinct payloads share "
+                    "canonical bytes (and mixed keys emit duplicates). Remedy: "
+                    "stringify mapping keys before canonical serialization."
+                )
+            _reject_non_string_keys(value, f"{path}.{key}")
+    elif isinstance(obj, (list, tuple)):
+        for index, item in enumerate(obj):
+            _reject_non_string_keys(item, f"{path}[{index}]")
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
     """Serialize ``obj`` under the canonical encoding declared above."""
 
+    _reject_non_string_keys(obj)
     text = json.dumps(
         obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )

@@ -556,7 +556,7 @@ class OpRowStore:
             # post-seal writes land in the overlay, which every fork
             # snapshots). Audits never see a sealed store (the trailing
             # postprocess audit window closes before the freeze seam).
-            self.__class__ = _SealedRowMajorOpRowStore  # type: ignore[assignment]
+            self.__class__ = _SealedRowMajorOpRowStore
             return
         n_fields = self.layout.n_fields
         columns: list[_FrozenColumn] = []

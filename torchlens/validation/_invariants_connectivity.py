@@ -668,7 +668,7 @@ def _check_module_containment_logic(ml: Trace) -> None:
                 )
             visited.add(current)
             try:
-                parent_mod: Module = mod_accessor[current]  # type: ignore[assignment]
+                parent_mod: Module = mod_accessor[current]
             except (KeyError, IndexError):
                 break
             current = parent_mod.address_parent

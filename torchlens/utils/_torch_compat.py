@@ -550,7 +550,7 @@ def _probe_device_type_arg_supported() -> bool:
         # On torch 2.1-2.3 this raises TypeError ("takes no arguments" /
         # "takes 0 positional arguments but 1 was given").  On torch >= 2.4 it
         # returns a bool.
-        torch.is_autocast_enabled("cpu")  # type: ignore[call-arg]
+        torch.is_autocast_enabled("cpu")
         return True
     except TypeError:
         return False
@@ -3133,7 +3133,7 @@ def _legacy_is_autocast_enabled(device_type: str) -> bool:
     """
 
     if device_type == "cpu":
-        return bool(torch.is_autocast_cpu_enabled())  # type: ignore[attr-defined]
+        return bool(torch.is_autocast_cpu_enabled())
     if device_type == "cuda":
         # The no-arg form queries the CUDA/GPU autocast flag on legacy torch.
         return bool(torch.is_autocast_enabled())
@@ -3158,9 +3158,9 @@ def _legacy_get_autocast_dtype(device_type: str) -> torch.dtype:
     """
 
     if device_type == "cpu":
-        return torch.get_autocast_cpu_dtype()  # type: ignore[attr-defined]
+        return torch.get_autocast_cpu_dtype()
     if device_type == "cuda":
-        return torch.get_autocast_gpu_dtype()  # type: ignore[attr-defined]
+        return torch.get_autocast_gpu_dtype()
     raise RuntimeError(
         f"autocast dtype query not supported for device_type={device_type!r} "
         f"on torch {torch.__version__}"

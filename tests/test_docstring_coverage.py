@@ -37,55 +37,13 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1] / "torchlens"
 #: (b9 R69-1 round 3): each is ``return self._facet_or_default(...).x``, which
 #: carries real missing-facet defaulting semantics. torchlens/ is fenced for
 #: this lane; the docstrings ride the ir/ source lane.
-_OP_RECORD_FACET_PROPERTY = (
-    "call-rooted facet-defaulting property (b9 R69-1); docstring rides the ir/ source lane"
-)
-
 DEFERRED: dict[tuple[str, str], str] = {
-    # Sites newly VISIBLE when the gate learned to descend into loop/match
-    # bodies (b9 R69-1). Both files are other-lane territory in fixwave-2
-    # (identity_shims.py -> FW2-WRAP, _save_budget.py -> FW2-CAPTURE), so the
-    # docstrings ride those lanes; the ledger rows keep the gate exact until
-    # they land.
-    ("backends/torch/identity_shims.py", "causal_bias_shim"): "FW2-WRAP owns identity_shims.py",
-    ("backends/torch/identity_shims.py", "conv_picker_shim"): "FW2-WRAP owns identity_shims.py",
-    ("backends/torch/identity_shims.py", "ctor_shim"): "FW2-WRAP owns identity_shims.py",
-    ("backends/torch/identity_shims.py", "expanded_weight_shim"): "FW2-WRAP owns identity_shims.py",
-    ("ir/op_record.py", "OpRecord.parent_arg_positions"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord._edge_uses"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.unattributed_tensor_args"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.dropped_edge_tensor_args"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.is_output_parent"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.input_was_parameter"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.equivalence_class"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.module_stack"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.modules"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.input_ancestors"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.internal_source_ancestors"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.root_ancestors"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.has_internal_source_ancestor"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.grad_fn_class_qualname"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.is_transform"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_kind"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_chain"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_config"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_fn_name"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_fn_qualname"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.transform_fn_source"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.is_scalar_bool"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.bool_value"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.params"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.parent_params"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.backend_semantics"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.policy"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.predicate_matched"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.tracing_finished"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.construction_done"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.record_context"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.capture_spec"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.intervention_fired"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.intervention_replaced"): _OP_RECORD_FACET_PROPERTY,
-    ("ir/op_record.py", "OpRecord.fire_results"): _OP_RECORD_FACET_PROPERTY,
+    # EMPTY is the intended steady state (this ledger's original header).
+    # 2026-08-16 (fixwave-7, R69): the 39 rows parked here for three fix
+    # waves -- 35 OpRecord facet-defaulting properties and 4 identity shims
+    # whose "owning lanes" had long since shipped -- are DOCUMENTED and the
+    # ledger is emptied. A new row needs a live owner and a dated reason;
+    # parking on a lane that already settled is how these went unowned.
 }
 
 _PROPERTY_DECORATORS = frozenset({"property", "cached_property", "functools.cached_property"})

@@ -151,8 +151,8 @@ def test_raw_python_functional_and_partial_emit_shadow_reports() -> None:
         class Model(nn.Module):
             """Invoke a raw Python functional holder."""
 
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Call the hidden raw Python functional."""
+            def forward(self, x: torch.Tensor, invoke: Callable[..., Any] = invoke) -> torch.Tensor:
+                """Call the hidden raw Python functional (bound per iteration)."""
 
                 return invoke(x)
 
@@ -183,8 +183,8 @@ def test_hidden_class_and_default_refs_emit_shadow_reports() -> None:
         class Model(nn.Module):
             """Invoke one unrelated hidden helper."""
 
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Delegate to the helper."""
+            def forward(self, x: torch.Tensor, invoke: Callable[..., Any] = invoke) -> torch.Tensor:
+                """Delegate to the helper (bound per iteration)."""
 
                 return invoke(x)
 

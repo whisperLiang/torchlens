@@ -5,6 +5,7 @@ import sys
 import time
 import weakref
 from collections.abc import Iterator
+from contextlib import contextmanager
 from os.path import join as opj
 from pathlib import Path
 from types import ModuleType
@@ -253,21 +254,34 @@ def _charged_seconds(wall_seconds: float, cpu_seconds: float, gc_pause_seconds: 
 SMOKE_FAMILY_PER_CELL_SECONDS = 0.1
 
 
+#: Session-frozen load factor (r7 R41, fixwave-7): the factor was recomputed
+#: PER ITEM from instantaneous loadavg, so the same test passed or failed on
+#: momentary run-queue pressure and could raise its own budget by finishing
+#: during a load spike. One reading at first use now holds for the whole
+#: session — deterministic within a run, still load-aware across runs.
+_SESSION_LOAD_FACTOR: float | None = None
+
+
 def _smoke_budget_load_factor() -> float:
-    """Scale the wall-clock budget by CPU oversubscription at measurement time.
+    """Scale the wall-clock budget by CPU oversubscription, frozen per session.
 
     Wall-clock durations inflate roughly with run-queue pressure; a fixed
     budget false-trips whenever an orchestrator runs sibling lanes on the same
     box (measured 2026-08-13: the same four tests read 2.9-14.2s quiet but
     15.6-34.9s at loadavg ~5x nproc). Capped so a pathological load reading
-    can never disarm the lint entirely.
+    can never disarm the lint entirely, and frozen at its first reading so
+    per-item load wobble cannot flip verdicts mid-session.
     """
 
+    global _SESSION_LOAD_FACTOR
+    if _SESSION_LOAD_FACTOR is not None:
+        return _SESSION_LOAD_FACTOR
     try:
         load_per_cpu = os.getloadavg()[0] / max(os.cpu_count() or 1, 1)
     except OSError:  # pragma: no cover - getloadavg unsupported on the platform.
-        return 1.0
-    return min(max(load_per_cpu, 1.0), 4.0)
+        load_per_cpu = 1.0
+    _SESSION_LOAD_FACTOR = min(max(load_per_cpu, 1.0), 4.0)
+    return _SESSION_LOAD_FACTOR
 
 
 def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
@@ -697,7 +711,27 @@ def _set_sentinel_default(module: ModuleType, name: str, default: object) -> Non
         Cold-process sentinel value.
     """
 
-    setattr(module, name, _copy_sentinel_value(default))
+    _assign_sentinel(module, name, _copy_sentinel_value(default))
+
+
+def _assign_sentinel(module: ModuleType, name: str, value: object) -> None:
+    """Write a sentinel value, mutating container sentinels IN PLACE.
+
+    Rebinding a set/dict/WeakSet sentinel booby-traps every ``from module
+    import NAME`` alias in a test module: the alias keeps the OLD object, so
+    its reads and ``.clear()`` calls silently target dead state after the
+    first fixture cycle (r7 R76/R77 b2 remainder — the
+    ``_WARNED_DEPRECATIONS`` from-import in test_conditional_lifecycle was
+    exactly this). Same-type containers are cleared and refilled instead;
+    immutable sentinels (bools, None) still rebind.
+    """
+
+    current = getattr(module, name, _MISSING)
+    if type(current) is type(value) and isinstance(current, (set, dict, weakref.WeakSet)):
+        current.clear()
+        current.update(value)
+    else:
+        setattr(module, name, value)
 
 
 @pytest.fixture(autouse=True)
@@ -724,7 +758,7 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
             if prior is _MISSING:
                 _set_sentinel_default(module, name, default)
             else:
-                setattr(module, name, prior)
+                _assign_sentinel(module, name, prior)
 
 
 #: Public content registries that tests mutate through PUBLIC registration
@@ -732,11 +766,30 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
 #: container class or custom op rule was a permanent process-global, so
 #: full-suite and targeted runs saw different registry state depending on
 #: which tests had run first. Snapshot/restore per test, same lazy
-#: sys.modules discipline as the warn-once sentinels.
-_CONTENT_REGISTRIES: tuple[tuple[str, str], ...] = (
-    ("torchlens.ir.container", "_CONTAINER_REGISTRY"),
-    ("torchlens.capture.flops", "_CUSTOM_OP_RULES"),
+#: sys.modules discipline as the warn-once sentinels. The third column
+#: names the registry's own lock attribute (or None): the container
+#: registry has a writer/iterator race lock that the restore must honor.
+#:
+#: r7 R76/R77 adjudication (fixwave-7): two same-day parallel lanes each
+#: landed a twin of this fixture — one lazy but lockless, one locked but
+#: force-importing ``capture.flops`` suite-wide. This is the MERGED single
+#: fixture: lazy module lookup (flops stays unimported until a test needs
+#: it) AND lock-disciplined container access.
+_CONTENT_REGISTRIES: tuple[tuple[str, str, str | None], ...] = (
+    ("torchlens.ir.container", "_CONTAINER_REGISTRY", "_CONTAINER_REGISTRY_LOCK"),
+    ("torchlens.capture.flops", "_CUSTOM_OP_RULES", None),
 )
+
+
+@contextmanager
+def _registry_lock(module: object, lock_name: str | None) -> Iterator[None]:
+    """Hold the registry's own lock when it declares one."""
+
+    if lock_name is None:
+        yield
+    else:
+        with getattr(module, lock_name):
+            yield
 
 
 @pytest.fixture(autouse=True)
@@ -744,28 +797,30 @@ def _restore_content_registries() -> Iterator[None]:
     """Restore registered-container and custom-op-rule state after every test."""
 
     snapshots: dict[tuple[str, str], object] = {}
-    for module_name, name in _CONTENT_REGISTRIES:
+    for module_name, name, lock_name in _CONTENT_REGISTRIES:
         module = sys.modules.get(module_name)
         if module is None:
             snapshots[(module_name, name)] = _MISSING
             continue
-        snapshots[(module_name, name)] = dict(getattr(module, name))
+        with _registry_lock(module, lock_name):
+            snapshots[(module_name, name)] = dict(getattr(module, name))
     try:
         yield
     finally:
-        for module_name, name in _CONTENT_REGISTRIES:
+        for module_name, name, lock_name in _CONTENT_REGISTRIES:
             module = sys.modules.get(module_name)
             if module is None:
                 continue
             prior = snapshots[(module_name, name)]
-            registry = getattr(module, name)
             if prior is _MISSING:
                 # Module imported DURING the test: whatever it registered at
                 # import time is legitimate baseline; drop only test-added
                 # rows is impossible to distinguish, so leave as-is.
                 continue
-            registry.clear()
-            registry.update(prior)
+            with _registry_lock(module, lock_name):
+                registry = getattr(module, name)
+                registry.clear()
+                registry.update(prior)
 
 
 _CAPABILITY_DEPENDENT_CACHES: tuple[tuple[str, str], ...] = (
@@ -815,35 +870,6 @@ def _restore_lazy_capability_probes() -> Iterator[None]:
     finally:
         _torch_compat.restore_capability_probes(snapshot)
         _clear_capability_dependent_caches()
-
-
-@pytest.fixture(autouse=True)
-def _restore_public_registries() -> Iterator[None]:
-    """Restore the public registration registries after every test (r7 R76).
-
-    ``tl.register_container`` and ``utils.register_op_rule`` are plain global
-    dict writes with no public unregister, so per-test registrations
-    (``custom_test_op``, input-walk local container classes) leaked into
-    every later test in the process -- full-suite and targeted runs saw
-    different registry contents, an order-dependence seed. Snapshot both
-    registries before the test and restore them after, under the container
-    registry's own lock (the writer/iterator race fix owns it).
-    """
-
-    from torchlens.capture import flops as flops_mod
-    from torchlens.ir import container as container_mod
-
-    with container_mod._CONTAINER_REGISTRY_LOCK:
-        container_snapshot = dict(container_mod._CONTAINER_REGISTRY)
-    flops_snapshot = dict(flops_mod._CUSTOM_OP_RULES)
-    try:
-        yield
-    finally:
-        with container_mod._CONTAINER_REGISTRY_LOCK:
-            container_mod._CONTAINER_REGISTRY.clear()
-            container_mod._CONTAINER_REGISTRY.update(container_snapshot)
-        flops_mod._CUSTOM_OP_RULES.clear()
-        flops_mod._CUSTOM_OP_RULES.update(flops_snapshot)
 
 
 @pytest.fixture(autouse=True)

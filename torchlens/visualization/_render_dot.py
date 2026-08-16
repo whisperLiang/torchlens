@@ -1890,7 +1890,7 @@ def _setup_subgraphs(
         module_submodule_dict = defaultdict(list)
         for call_label, mpl in self.modules._pass_dict.items():
             module_submodule_dict[call_label] = list(mpl.call_children)
-        subgraphs = list(self.modules["self"].ops[0].call_children)  # type: ignore[union-attr]
+        subgraphs = list(self.modules["self"].ops[0].call_children)
     else:
         module_submodule_dict = defaultdict(list)
         for ml in self.modules:
@@ -2028,10 +2028,10 @@ def _setup_subgraphs_recurse(
     else:
         raise ValueError("vis_mode must be 'rolled' or 'unrolled'")
     sg_ml = self.modules[subgraph_module]
-    module_type = sg_ml.class_name  # type: ignore[union-attr]
-    if (sg_ml.num_calls > 1) and (vis_mode == "unrolled"):  # type: ignore[union-attr]
+    module_type = sg_ml.class_name
+    if (sg_ml.num_calls > 1) and (vis_mode == "unrolled"):
         subgraph_title = subgraph_name_w_pass
-    elif (sg_ml.num_calls > 1) and (vis_mode == "rolled"):  # type: ignore[union-attr]
+    elif (sg_ml.num_calls > 1) and (vis_mode == "rolled"):
         subgraph_title = (
             f"{subgraph_module} (x{sg_ml.num_calls}"
             f"{_collapsed_module_rolling_suffix(self, subgraph_module)})"

@@ -426,7 +426,7 @@ def _check_module_hierarchy(ml: Trace) -> None:
         # Address hierarchy bidirectional
         if mod_log.address_parent is not None:
             try:
-                parent: Module = mod_accessor[mod_log.address_parent]  # type: ignore[assignment]
+                parent: Module = mod_accessor[mod_log.address_parent]
             except (KeyError, IndexError):
                 # Parent module may be a container (ModuleList, ModuleDict)
                 # that is never called during the forward pass, so no
@@ -445,7 +445,7 @@ def _check_module_hierarchy(ml: Trace) -> None:
 
         for child_addr in mod_log.address_children:
             try:
-                child: Module = mod_accessor[child_addr]  # type: ignore[assignment]
+                child: Module = mod_accessor[child_addr]
             except (KeyError, IndexError):
                 # Static children may not have been invoked during the forward
                 # pass, so no Module exists.  Skip rather than error.

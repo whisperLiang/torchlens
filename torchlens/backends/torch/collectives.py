@@ -772,7 +772,7 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
         _journal_boundary(trace, payload, op_labels)
         return result
 
-    wrapped_collective.__wrapped__ = original  # type: ignore[attr-defined]
+    wrapped_collective.__wrapped__ = original
     wrapped_collective.__tl_distributed_wrap__ = True  # type: ignore[attr-defined]
     return wrapped_collective
 

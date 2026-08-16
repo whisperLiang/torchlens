@@ -252,6 +252,34 @@ def test_smoke_module_imports_stay_within_duration_budget(
     )
 
 
+def test_every_collected_module_imports_within_the_heavy_boundary(
+    request: pytest.FixtureRequest,
+) -> None:
+    """No collected module may burn more than the 20s heavy boundary importing.
+
+    r7 R41 (b2): the import/collection budget was smoke-only — a 60s import
+    in a heavy/slow/unmarked module escaped entirely, even though import cost
+    is paid by EVERY selection that collects the file (including smoke runs,
+    which collect the whole tree before deselecting). Non-smoke modules get
+    the heavy partition boundary rather than smoke's 5s; charged on
+    ``min(wall, cpu)`` like everything else.
+    """
+
+    budget = 20.0
+    durations = getattr(request.session, "_tl_module_collection_durations", {})
+    offenders = [
+        (path, values) for path, values in sorted(durations.items()) if min(values) > budget
+    ]
+    lines = [
+        f"{path}: wall {wall:.1f}s / cpu {cpu:.1f}s (budget {budget:.0f}s on min)"
+        for path, (wall, cpu) in offenders
+    ]
+    assert not offenders, (
+        "Modules exceeded the whole-tree import/collection boundary (import "
+        "cost is paid by every selection that collects the file):\n  " + "\n  ".join(lines)
+    )
+
+
 def warm_scan_caches() -> None:
     """Pre-fill the whole-tree parse caches OUTSIDE any test's charged window.
 
@@ -526,7 +554,12 @@ def test_root_tests_do_not_import_ambiguous_conftest_module() -> None:
     )
 
 
-_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "unregister_container"})
+# r7 R77-3: the phantom `unregister_container` is dropped (no such API
+# exists anywhere in the package — the registries deliberately have no
+# unregister spelling) and `register_op_rule` joins: it writes the same
+# class of process-global registry (_CUSTOM_OP_RULES) the conftest
+# restore fixture governs.
+_REGISTRY_MUTATOR_NAMES = frozenset({"register_container", "register_op_rule"})
 """Public registry mutators whose import-time call is an order-dependence bug."""
 
 
@@ -575,7 +608,7 @@ def test_no_module_level_registry_mutation_in_tests() -> None:
     Covers all three call spellings (grind p5 §3.9: the original check saw
     only the ``x.facets.register`` decorator form): attribute decorators,
     BARE-NAME decorators (``from ...facets import register``), and
-    import-time ``register_container``/``unregister_container`` calls whether
+    import-time ``register_container``/``register_op_rule`` calls whether
     attribute-qualified or bare.
     """
 

@@ -1919,7 +1919,7 @@ def _check_layer_arguments_logged_correctly(
                 saved_values = getattr(target_layer, argtype_field)
                 if saved_values is None:
                     return ValidationCheckResult.unverified("missing_saved_args")
-                for key, val in iterfunc(saved_values):  # type: ignore[operator]
+                for key, val in iterfunc(saved_values):
                     validation_result_for_arg_and_layer = _validate_layer_against_arg(
                         self, target_layer, parent_layer, arg_type, key, val, verbose=verbose
                     )
