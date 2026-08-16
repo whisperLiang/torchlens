@@ -83,6 +83,7 @@ _NEW_FILE_LINE_CAP = 2000
 #:   _io/bundle.py 4450 | backends/torch/backward.py 3800
 #:   bundle/__init__.py 2450 | capture/trace.py 2200
 #:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
+#:   _runnable_state.py 2700 (L4 D18 mode-aware projector + snapshot-restore)
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5300,
     "torchlens/data_classes/op.py": 5200,
@@ -105,7 +106,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/auto_collapse.py": 2450,
     "torchlens/validation/exemptions.py": 3000,
     "torchlens/backends/paddle/backend.py": 2700,
-    "torchlens/_runnable_state.py": 2700,
+    "torchlens/_runnable_state.py": 2850,
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
     "torchlens/_capture_state_helpers.py": 2350,
