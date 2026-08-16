@@ -1693,17 +1693,39 @@ def _run_model_and_save_specified_outs(
         intervention_spec = hook_plan_spec
     elif hook_plan_spec is not None:
         intervention_spec = _merge_intervention_spec_hooks(intervention_spec, hook_plan_spec)
-    _state.reset_capture_runtime_context()
-    _state.configure_capture_runtime_context(
-        hook_plan=hook_plan,
-        intervention_spec=intervention_spec,
-        capture_replay_templates=intervention_ready,
-        model_object_id=model_object_id,
-        model_class_qualname=model_class_qualname,
-        weight_fingerprint=weight_fingerprint,
-        input_object_id=input_object_id,
-        input_signature_hash=input_signature_hash,
-    )
+    # r8 R54 (sol 2-thread repro): the process-global runtime-context reset +
+    # configure below ran BEFORE any admission check, so a concurrent capture
+    # destined for the typed refusal first RESET the admitted winner's live
+    # context (clearing its replay-template flag and intervention plan
+    # mid-capture). Claim the capture slot FIRST; the inner claim in
+    # ``run_and_log_inputs_through_model`` passes through on the token. The
+    # slot is released exactly once on every settlement path.
+    _capture_slot = _state.capture_reservation()
+    _reservation_token = _capture_slot.__enter__()
+    _reservation_live = [True]
+
+    def _release_capture_slot() -> None:
+        """Release the early admission claim exactly once."""
+
+        if _reservation_live[0]:
+            _reservation_live[0] = False
+            _capture_slot.__exit__(None, None, None)
+
+    try:
+        _state.reset_capture_runtime_context()
+        _state.configure_capture_runtime_context(
+            hook_plan=hook_plan,
+            intervention_spec=intervention_spec,
+            capture_replay_templates=intervention_ready,
+            model_object_id=model_object_id,
+            model_class_qualname=model_class_qualname,
+            weight_fingerprint=weight_fingerprint,
+            input_object_id=input_object_id,
+            input_signature_hash=input_signature_hash,
+        )
+    except BaseException:
+        _release_capture_slot()
+        raise
     try:
         from .semantic import facets as facets_mod
 
@@ -1851,6 +1873,7 @@ def _run_model_and_save_specified_outs(
         # below. Reset here so the protected region begins no later than
         # configure_capture_runtime_context().
         _state.reset_capture_runtime_context()
+        _release_capture_slot()
         raise
     try:
         trace._run_and_log_inputs_through_model(
@@ -1860,6 +1883,7 @@ def _run_model_and_save_specified_outs(
             layers_to_save,
             grads_to_save,
             random_seed,
+            reservation_resume=_reservation_token,
         )
     except BaseException as exc:
         # F5: postprocess pops ``_out_writer`` at its transient-state seam, so
@@ -1878,6 +1902,7 @@ def _run_model_and_save_specified_outs(
         raise
     finally:
         _state.reset_capture_runtime_context()
+        _release_capture_slot()
         if hasattr(trace, "_capture_container_structure"):
             delattr(trace, "_capture_container_structure")
     warning_intervene_decision = (
