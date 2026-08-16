@@ -116,7 +116,10 @@ class DiskStorageBackend:
         self.recording = recording
         self.disk_only = not options.streaming.retain_in_memory
         self._validate_static_keep_grad()
-        self.writer = BundleStreamWriter(options.streaming.bundle_path)
+        self.writer = BundleStreamWriter(
+            options.streaming.bundle_path,
+            include_custom_attributes=options.streaming.include_custom_attributes,
+        )
         # Directories first, so mid-recording contents are already unreachable
         # to other users; finalize() tightens the files it writes.
         _tighten_bundle_tree(self.writer.tmp_path)
