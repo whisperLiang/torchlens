@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 
 from .._trace_state import TraceState
+from ..errors.episode import BundleRelationError, EpisodeErrorCode
 from ..intervention._metrics import is_scalar_like, relative_l1_scalar, resolve_metric
 from ..intervention._super.super_logs import (
     SuperBufferAccessor,
@@ -34,10 +35,12 @@ from ..intervention.errors import (
 )
 from ..intervention.resolver import resolve_sites
 from ..intervention.types import Relationship
+from ._relations import MemberRelationRow, MemberRelationTable
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from torch import nn
 
+    from ..capture._episode_ledger import EpisodeFoldResult, EpisodeLedger
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
 
@@ -173,6 +176,11 @@ class Bundle:
         Optional names for a sequence of logs.
     baseline:
         Optional baseline member name or ``Trace`` reference.
+    member_relations:
+        Optional S6 member-relation rows (``MemberRelationRow`` instances or
+        payload mappings). Rows are schema-validated and checked against the
+        initial members (R1: no dangling edges). ``None`` means an empty
+        table with unchanged plain-Bundle semantics.
     """
 
     def __init__(
@@ -181,6 +189,7 @@ class Bundle:
         *,
         names: Sequence[str] | None = None,
         baseline: str | Trace | None = None,
+        member_relations: Sequence[MemberRelationRow | Mapping[str, Any]] | None = None,
     ) -> None:
         """Initialize a flat bundle without eagerly building a supergraph."""
 
@@ -189,6 +198,9 @@ class Bundle:
         self._supergraph: Supergraph | None = None
         self._capacity: int | None = None
         self._baseline_name: str | None = self._resolve_baseline_name(baseline)
+        self._member_relations: MemberRelationTable = self._build_relation_table(
+            (), member_relations or ()
+        )
 
     def __len__(self) -> int:
         """Return the number of bundle members.
@@ -307,8 +319,10 @@ class Bundle:
             "aligned_pairs": _bundle_aligned_pairs,
             "compare": _bundle_compare,
             "delta_map": _bundle_delta_map,
+            "derive_episode_status": _bundle_derive_episode_status,
             "norm_delta": _bundle_norm_delta,
             "output_delta": _bundle_output_delta,
+            "relate": _bundle_relate,
             "show_diff": _bundle_show_diff,
         }
         helper = dynamic_custom_methods.get(name)
@@ -551,6 +565,99 @@ class Bundle:
         """
 
         return self._baseline_name
+
+    @_BundleStructuralProperty
+    def member_relations(self) -> tuple[MemberRelationRow, ...]:
+        """Return the immutable S6 member-relation view (R4).
+
+        Returns
+        -------
+        tuple[MemberRelationRow, ...]
+            Identity-stable frozen-row tuple: repeated reads return THE SAME
+            object until ``relate`` (or an R5 cascade) installs a new table
+            version. In-place mutation is impossible.
+        """
+
+        return self._member_relations.rows
+
+    def _build_relation_table(
+        self,
+        existing_rows: Sequence[MemberRelationRow],
+        new_rows: Sequence[MemberRelationRow | Mapping[str, Any]],
+    ) -> MemberRelationTable:
+        """Return a NEW validated relation table (existing + coerced new rows).
+
+        Raises
+        ------
+        BundleRelationError
+            ``bundle_relation_schema_invalid`` when a new row is off-schema
+            (unknown kind, wrong shape for its kind, undeclared or missing
+            param keys, ill-typed values); R1/R3 refusals ride through from
+            ``validate_against_members``.
+        """
+
+        rows: list[MemberRelationRow] = list(existing_rows)
+        for row in new_rows:
+            if isinstance(row, MemberRelationRow):
+                rows.append(row)
+                continue
+            try:
+                rows.append(MemberRelationRow.from_payload(row))
+            except (TypeError, ValueError) as exc:
+                raise BundleRelationError(
+                    f"Bundle member-relation row is outside the closed S6 schema: {exc}",
+                    code=EpisodeErrorCode.BUNDLE_RELATION_SCHEMA_INVALID.value,
+                ) from exc
+        table = MemberRelationTable(rows)
+        table.validate_against_members(self._members.keys())
+        return table
+
+    def _relation_table_for_removal(
+        self,
+        removed_names: Sequence[str],
+        *,
+        cascade_relations: bool,
+        operation: str,
+    ) -> MemberRelationTable | None:
+        """Return the post-removal relation table, refusing typed first (R5).
+
+        Called BEFORE any member is removed so the refusal is atomic.
+
+        Returns
+        -------
+        MemberRelationTable | None
+            The cascaded table to install after removal succeeds, or
+            ``None`` when no relation row names a removed member (table
+            unchanged, view identity preserved).
+
+        Raises
+        ------
+        BundleRelationError
+            ``bundle_member_has_relations`` when a removed member is named
+            in a relation row and ``cascade_relations`` is ``False``
+            (silent orphaning is forbidden).
+        """
+
+        removed = set(removed_names)
+        related = sorted({name for name in removed if self._member_relations.rows_naming(name)})
+        if not related:
+            return None
+        if not cascade_relations:
+            raise BundleRelationError(
+                f"Bundle.{operation} would orphan member-relation rows naming "
+                f"{related}; pass cascade_relations=True to drop those rows "
+                "explicitly, or remove the relations first (S6 R5).",
+                code=EpisodeErrorCode.BUNDLE_MEMBER_HAS_RELATIONS.value,
+                operation=operation,
+                related_members=related,
+            )
+        return MemberRelationTable(
+            tuple(
+                row
+                for row in self._member_relations.rows
+                if not (set(row.named_members()) & removed)
+            )
+        )
 
     @property
     def supergraph(self) -> Supergraph:
@@ -925,54 +1032,98 @@ class Bundle:
         self._enforce_capacity()
         return self
 
-    def remove(self, name_or_names: str | Trace | Sequence[str | Trace]) -> Trace | list[Trace]:
+    def remove(
+        self,
+        name_or_names: str | Trace | Sequence[str | Trace],
+        *,
+        cascade_relations: bool = False,
+    ) -> Trace | list[Trace]:
         """Remove and return one or more members by name or Trace object.
 
         Parameters
         ----------
         name_or_names:
             Member name, Trace object, or a list of either.
+        cascade_relations:
+            Whether relation rows naming a removed member are dropped with
+            it. ``False`` (default) refuses typed BEFORE any member is
+            removed when a removed member is named in a relation row.
 
         Returns
         -------
         Trace | list[Trace]
             Removed member, or removed members for list input.
+
+        Raises
+        ------
+        BundleRelationError
+            ``bundle_member_has_relations`` when a removed member has
+            relation rows and ``cascade_relations`` is ``False`` (S6 R5).
         """
 
         is_many = self._is_list_like(name_or_names)
         names = self._coerce_member_name_list(name_or_names)
+        unknown = [name for name in names if name not in self._members]
+        if unknown:
+            raise KeyError(f"Unknown bundle member(s): {sorted(unknown)}")
+        new_table = self._relation_table_for_removal(
+            names, cascade_relations=cascade_relations, operation="remove"
+        )
         removed: list[Trace] = []
         for name in names:
             log = self._members.pop(name)
             removed.append(log)
             if self._baseline_name == name:
                 self._baseline_name = None
+        if new_table is not None:
+            self._member_relations = new_table
         self._supergraph = None
         return removed if is_many else removed[0]
 
-    def remove_except(self, keep: str | Trace | Sequence[str | Trace]) -> None:
+    def remove_except(
+        self,
+        keep: str | Trace | Sequence[str | Trace],
+        *,
+        cascade_relations: bool = False,
+    ) -> None:
         """Remove every member whose name is not listed in ``keep``.
 
         Parameters
         ----------
         keep:
             Member name, Trace object, or list of either to retain.
+        cascade_relations:
+            Whether relation rows naming any removed member are dropped
+            with it. ``False`` (default) refuses typed BEFORE any member is
+            removed when a removed member is named in a relation row.
 
         Returns
         -------
         None
             The bundle is mutated in place.
+
+        Raises
+        ------
+        BundleRelationError
+            ``bundle_member_has_relations`` when a removed member has
+            relation rows and ``cascade_relations`` is ``False`` (S6 R5).
         """
 
         keep_set = set(self._coerce_member_name_list(keep))
         unknown = keep_set - set(self._members)
         if unknown:
             raise KeyError(f"Unknown bundle member(s): {sorted(unknown)}")
+        removed_names = [name for name in self._members if name not in keep_set]
+        new_table = self._relation_table_for_removal(
+            removed_names, cascade_relations=cascade_relations, operation="remove_except"
+        )
         self._members = OrderedDict(
             (name, log) for name, log in self._members.items() if name in keep_set
         )
         if self._baseline_name is not None and self._baseline_name not in self._members:
             self._baseline_name = None
+        if new_table is not None:
+            self._member_relations = new_table
         self._supergraph = None
 
     @property
@@ -1022,21 +1173,44 @@ class Bundle:
         self.capacity = n
         return self
 
-    def clear(self) -> None:
+    def clear(self, *, cascade_relations: bool = False) -> None:
         """Remove all non-baseline members.
+
+        Parameters
+        ----------
+        cascade_relations:
+            Whether relation rows naming any removed member are dropped
+            with it. ``False`` (default) refuses typed BEFORE any member is
+            removed when a removed member is named in a relation row.
 
         Returns
         -------
         None
             The bundle is mutated in place.
+
+        Raises
+        ------
+        BundleRelationError
+            ``bundle_member_has_relations`` when a removed member has
+            relation rows and ``cascade_relations`` is ``False`` (S6 R5).
         """
 
-        if self._baseline_name is not None and self._baseline_name in self._members:
-            baseline = self._members[self._baseline_name]
-            self._members = OrderedDict([(self._baseline_name, baseline)])
+        keep_baseline = self._baseline_name is not None and self._baseline_name in self._members
+        removed_names = [
+            name for name in self._members if not (keep_baseline and name == self._baseline_name)
+        ]
+        new_table = self._relation_table_for_removal(
+            removed_names, cascade_relations=cascade_relations, operation="clear"
+        )
+        if keep_baseline:
+            baseline_name = cast("str", self._baseline_name)
+            baseline = self._members[baseline_name]
+            self._members = OrderedDict([(baseline_name, baseline)])
         else:
             self._members.clear()
             self._baseline_name = None
+        if new_table is not None:
+            self._member_relations = new_table
         self._supergraph = None
 
     def do(self, *args: Any, **kwargs: Any) -> Bundle:
@@ -1821,6 +1995,17 @@ class Bundle:
             )
             if evictable is None:
                 break
+            if self._member_relations.rows_naming(evictable):
+                # R5: an IMPLICIT eviction may neither orphan relation rows
+                # nor cascade them silently — refuse typed, always.
+                raise BundleRelationError(
+                    f"Bundle capacity eviction would orphan member-relation "
+                    f"rows naming {evictable!r}; remove the member explicitly "
+                    "(cascade_relations=True) or raise the capacity (S6 R5).",
+                    code=EpisodeErrorCode.BUNDLE_MEMBER_HAS_RELATIONS.value,
+                    operation="eviction",
+                    related_members=[evictable],
+                )
             self._members.pop(evictable)
             self._supergraph = None
 
@@ -1971,6 +2156,107 @@ class Bundle:
             return ref()
         except TypeError:
             return None
+
+
+def _bundle_relate(self: Bundle, *rows: MemberRelationRow | Mapping[str, Any]) -> Bundle:
+    """Append S6 relation rows, installing a NEW validated table (R4).
+
+    Exposed as the budget-preserving dynamic method ``Bundle.relate``.
+
+    Parameters
+    ----------
+    self:
+        Bundle receiving the rows.
+    *rows:
+        ``MemberRelationRow`` instances or payload mappings.
+
+    Returns
+    -------
+    Bundle
+        This bundle.
+
+    Raises
+    ------
+    BundleRelationError
+        ``bundle_relation_schema_invalid`` for an off-schema row,
+        ``bundle_relation_member_missing`` for a row naming a non-member
+        (R1). On refusal the existing table is unchanged.
+    """
+
+    self._member_relations = self._build_relation_table(self._member_relations.rows, rows)
+    return self
+
+
+def _bundle_derive_episode_status(
+    self: Bundle,
+    episode_id: str,
+    *,
+    ledger: EpisodeLedger | None = None,
+) -> EpisodeFoldResult:
+    """Fold a bundle's episode members into a derived episode status.
+
+    Exposed as the budget-preserving dynamic method
+    ``Bundle.derive_episode_status``. This is a DERIVATION, never a settled
+    outcome: the fold recomputes from member outcomes plus optional ledger
+    geometry, writes nothing, and there is no Bundle-level settlement
+    (Bundle has no outcome field by design; members remain the settlement
+    authority).
+
+    Parameters
+    ----------
+    self:
+        Bundle whose episode members are folded.
+    episode_id:
+        Episode entity named by ``episode_member`` relation rows.
+    ledger:
+        Optional episode ledger; supplies ``n_steps_declared`` and the
+        driver-halt geometry (fold arms 2 and 4 are ledger-only facts and
+        degrade fail-closed to ``episode_unknown`` without it).
+
+    Returns
+    -------
+    EpisodeFoldResult
+        The derived status with its qualifying disclosures. An
+        ``episode_id`` with no relation rows folds over an empty domain and
+        lands on the fail-closed ``episode_unknown`` default arm.
+    """
+
+    from ..capture._episode_ledger import derive_episode_status as _fold_episode_status
+
+    episode_rows = sorted(
+        (
+            row
+            for row in self._member_relations.rows
+            if row.kind == "episode_member" and row.params["episode_id"] == episode_id
+        ),
+        key=lambda row: int(row.params["at_step"]),
+    )
+    escalation_sources = {
+        row.from_member for row in self._member_relations.rows if row.kind == "escalates"
+    }
+    member_outcomes: list[tuple[str, str | None]] = []
+    excluded: set[int] = set()
+    for index, row in enumerate(episode_rows):
+        member = self._members[cast("str", row.member)]
+        # Public settled-outcome accessor; None (unsettled live trace)
+        # folds as UNKNOWN — the fold's most restrictive input.
+        outcome = getattr(member, "outcome", None)
+        if outcome is None:
+            member_outcomes.append(("unknown", None))
+        else:
+            phase = outcome.phase.value if outcome.phase is not None else None
+            member_outcomes.append((outcome.status.value, phase))
+        # E-B5: escalation members annotate the episode; they are not part
+        # of the prefix law and leave the fold domain here.
+        if row.member in escalation_sources:
+            excluded.add(index)
+    n_declared = ledger.header.n_steps_declared if ledger is not None else None
+    return _fold_episode_status(
+        member_outcomes,
+        n_declared=n_declared,
+        ledger=ledger,
+        escalation_members=frozenset(excluded),
+    )
 
 
 def _metric_label(metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> str:
