@@ -222,6 +222,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "save_budget": "auto",
     "raise_on_nan": False,
     "structure_only": False,
+    "intervention_audit": [],
     "keep_orphans": False,
     "annotations": {},
     "observer_spans": [],
@@ -1230,6 +1231,11 @@ class Trace(
         # wave-3 coordinated bump flips it to KEEP together with the M-C1..C3
         # load-validation rows. Never a silent v7 schema change.
         "structure_only": FieldPolicy.DROP,
+        # L6 resolved-intervention audit record (S3 registrar discipline):
+        # DROP under v7, registered with the pre-release registrar; the
+        # wave-3 bump flips it to KEEP (reprs/identities/digests only, never
+        # raw values). Never a silent v7 schema change.
+        "intervention_audit": FieldPolicy.DROP,
         "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
@@ -1748,6 +1754,11 @@ class Trace(
         # gate through torchlens.capture.structure_only). DOCUMENTED-UNSTABLE
         # spelling pending naming-session ratification.
         self.structure_only: bool = False
+        # L6: session-time audit records for resolved-selection interventions
+        # (query repr + resolve digest + per-site relations; patch_from adds
+        # source identity + value digests). DROP under v7; pre-release-
+        # registered, flips to KEEP at the wave-3 bump. DOCUMENTED-UNSTABLE.
+        self.intervention_audit: list[dict[str, Any]] = []
         self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
         self.halted = False
@@ -3042,6 +3053,7 @@ class Trace(
             "module_filter": None,
             "raise_on_nan": False,
             "structure_only": False,
+            "intervention_audit": [],
             "keep_orphans": False,
             "annotations": {},
             "observer_spans": [],
@@ -3815,6 +3827,7 @@ register_prerelease_field(Trace, "_primitive_op_profile", persisted_policy=Field
 # the persisting policy at the wave-3 coordinated bump (which retires this
 # registration together with the M-C1..C3 load-validation rows).
 register_prerelease_field(Trace, "structure_only", persisted_policy=FieldPolicy.KEEP)
+register_prerelease_field(Trace, "intervention_audit", persisted_policy=FieldPolicy.KEEP)
 
 # L1 grouping surface: the knob mirror + the grouping-policy stamp, declared
 # FieldPolicy.DROP above and registered so the portability exit gates can

@@ -154,6 +154,7 @@
               "buffer_initial_value",
               "captured_arg",
               "child_version",
+              "edge_substitution",
               "func_config",
               "grad",
               "grad_fn_grad",

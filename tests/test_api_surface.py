@@ -8,6 +8,10 @@ import warnings
 import torchlens
 
 TARGET_ALL = [
+    # L3 ATen profile facade (documented-unstable; exported at __all__ head).
+    # Ratchet row repaired by L6 post-merge: the L1/L3 merge train landed the
+    # export without this row, leaving main red on the frozen-surface test.
+    "AtenOp",
     "trace",
     "release_model",
     "clear_capture_cache",
@@ -105,6 +109,13 @@ TARGET_ALL = [
     "grad_zero",
     "tap",
     "record_span",
+    "Selection",
+    "ResolvedSelection",
+    "units",
+    "params",
+    "random_selection",
+    "Edit",
+    "patch_from",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -165,6 +176,11 @@ def test_all_matches_frozen_96_name_surface() -> None:
     top-level entry points; machinery lives in `torchlens.merged`) = 96.
     The grind R39 cache remedy exports `clear_capture_cache` (the agreed
     user-facing half of the capture-cache bounds fix) = 97.
+    The L6 selection algebra (feature megasprint, DOCUMENTED-UNSTABLE pending
+    naming-session ratification) adds `Selection`, `ResolvedSelection`,
+    `units`, `params`, and `random_selection` = 102; its stage 2 adds
+    `Edit` (public edit-object type; HelperSpec is the deprecated alias)
+    and `patch_from` = 104.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

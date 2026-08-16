@@ -129,6 +129,17 @@ ablated = tl.trace(
 disk_log = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 recording = tl.record(model, x, save=tl.func("relu"))
 full_structure = recording.to_trace()
+
+# Selection algebra (L6): compose regions, resolve explicitly, edit with do().
+log = tl.trace(model, x, capture=tl.options.CaptureOptions(intervention_ready=True))
+u1, u2 = log["relu_2_4"], log["conv2d_2_3"]
+inter = u1.receptive_field.at((3, 3)) & u2.receptive_field.at((5, 5))  # a Selection
+resolved = inter.resolve(log)              # frozen, trace-bound, session-only
+fork = log.fork()
+fork.do(inter, tl.zero_ablate())           # edit-then-scatter: only masked elements
+fork2 = log.fork()
+fork2.do(tl.units("relu_1_2", [(0, 0, 1, 1)]).resolve(fork2), tl.patch_from(log))
+print(fork.intervention_audit[-1])         # query repr + resolve digest + relations
 ```
 
 Use `backend=` only when the backend is intentionally part of the test or example:
@@ -455,6 +466,63 @@ print(tl.compat.report(model, x).to_markdown())
   `device_map='meta'`) still refuse at the entry gate — admission is decision
   point D8, unruled. Human surfaces (summary/profile/explain) carry the
   structure-only hypothesis banner.
+- SELECTION ALGEBRA (L6 stage 1; Selection/ResolvedSelection/resolve/
+  `__selection__`/operators slate-ratified subject to D7, producer
+  constructors + members DOCUMENTED-UNSTABLE): `tl.Selection` is the
+  composable trace-independent query AST; `selection.resolve(trace)` returns
+  the frozen trace-bound `tl.ResolvedSelection` (ordered `SiteEntry(site_key,
+  mask, provenance)` tuple; SESSION-ONLY, never persisted). TWO-LEVEL
+  denotation: (touched-site family, selected-element set) — zero-mask entries
+  stay first-class, `.empty`/`__bool__` are element-level, and `bool()` on
+  the QUERY refuses typed. Operators `| & - ~` + reflected forms, NO
+  `__xor__`; `-` never un-touches, `~` is touched-site mask complement (never
+  predicate negation: `~lift(s) != lift(~s)`). Every region-shaped producer
+  implements `__selection__` (BaseSelector, ReceptiveFieldBox,
+  GradientReceptiveField, FacetSpec, Op, Layer) and carries the operator
+  mixin, so `u1.receptive_field.at(p) | u2.receptive_field.at(q)` IS a
+  Selection; `selector OP selector` keeps shipped CompositeSelector semantics
+  and `selector - selector` desugars to `and(a, not(b))`. Masks are exact AS
+  SETS with producer inexactness on the closed `provenance.relation` lattice
+  (`exact|upper_bound|lower_bound|unknown`; JOIN/FLIP/DIFFERENCE tables are
+  normative). Kinds `ACT|PARAM|EDGE` are closed; mixed kinds refuse
+  `selection_kind_incompatible`; resolution refusals ride
+  `SelectionError` with `selection_unresolvable` + a closed reason set.
+  Producers: `tl.units(site, indices)`, `tl.params(name, mask=None)`,
+  `tl.random_selection(like=, within=, seed=)` (seeded size-matched control).
+- EDGE SUBSTITUTION (L6 stage 3; DOCUMENTED-UNSTABLE): `trace.edges` is the
+  dataflow edge family (EdgeUseRecords; intervention_ready-gated, refusal
+  `edge_provenance_unavailable`); canonical occurrence address
+  `(child_func_call_id, arg_kind, arg_path)`. `do(edge_selection, edit)`
+  replaces the value CONSUMED on the edge on the replay/push engine ONLY
+  (rerun/set_only refuse `edge_intervention_engine_unsupported`; rerun-side
+  design is an escalated named future) — the child re-executes from the
+  substituted input (node-level `intervention_replaced` never fires for
+  edges), the substituted value rides the DROP-gated tier-(ii) store
+  `Op.edge_substitutions` (+ `edge_replacement_stamps`,
+  `FireRecord.edge_address`; all pre-release-registered), and capture truth
+  (saved_args / out_versions_by_child / parent.out) is retained unmodified
+  (parity-pinned). Validation: uncorroborated tier-(ii) entries FAIL;
+  corroborated children re-execute from the spliced value and must match
+  (distinct verdict `edge_intervention_boundary`). v7 SAVE BOUNDARY at the
+  `_io/bundle.py` save entry (two-conjunct key: entries present AND
+  pre-release switch inactive): ALL four levels refuse
+  `edge_intervention_save_unsupported`, PRECEDING
+  `artifact_save_level_unsupported`; save-entry refusal order is
+  MergedTrace -> N1 outcome -> L7a structure-only -> L6 edge boundary (do
+  not silently reorder another owner's refusal). `tap(resolved_selection)`
+  stores per-site masks on TapRecords; `values(masked=True)` returns fresh
+  masked copies.
+- PREDICATE RUNTIME EXTENSION POINT (S4 seam; every spelling
+  DOCUMENTED-UNSTABLE pending naming-session ratification):
+  `torchlens.ir.predicate_registry` is the ONE documented door through which
+  predicate consumers accept user predicates for the capture-lifecycle
+  `save`/`halt`/`until` slots (`PredicateProtocol` — one positional concrete
+  `RecordContext`; `coerce_predicate(value, slot=...)` — raw callables incl.
+  `BaseSelector` instances returned BY IDENTITY, registered names via a
+  slot-aware enforcing wrapper; `register_predicate(name)` — mutates nothing
+  on the user's object, stamps no loader-consulted attribute). The registry
+  is INERT until consumers adopt name acceptance. `intervene=`/grad slots are
+  outside the contract. Contract: `docs/reference/predicate_runtime.md`.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `tl.receptive_field` is a lazy power-user submodule. `Op`, `Layer`, `ModuleCall`, and

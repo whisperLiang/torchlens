@@ -147,6 +147,10 @@ CELL_SOURCES: dict[str, str] = {
     "parents": "CORE",
     "parent_arg_positions": "FACET:graph",
     "_edge_uses": "JOIN:edge_uses",
+    # L6 stage-3 tier-(ii) stores: ingest seeds the neutral {}; the do() edge
+    # engine writes them session-time on fork replay (FieldPolicy.DROP).
+    "edge_substitutions": "DEFAULT",
+    "edge_replacement_stamps": "DEFAULT",
     "is_output_parent": "FACET:graph",
     "input_was_parameter": "FACET:graph",
     # ---- params (resolved against the registry) -------------------------------

@@ -471,6 +471,14 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "SaveBudgetExceededError": ("RuntimeError",),
     "ScalarEscapeWarning": ("Warning",),
     "SelectorCapabilityError": ("ValueError",),
+    "SelectionError": ("ValueError",),
+    # Post-merge lockstep repair (L6 merge train): these public error classes
+    # landed on main via the L2/L5 lanes without their golden rows.
+    "BufferSinkRoutingError": ("ValueError",),
+    "BundleRelationError": ("ValueError",),
+    "EpisodeCaptureError": (),
+    "EpisodeDeclarationError": ("ValueError",),
+    "EpisodeLedgerError": ("ValueError",),
     "SelectorCompositionError": ("ValueError",),
     "ShapeInferenceError": ("RuntimeError",),
     "SiteAmbiguityError": ("ValueError",),
@@ -1144,6 +1152,12 @@ _BUILTIN_EXCEPTION_ROOTS = frozenset(
 # current: a stale entry (class deleted or later registered) fails the gate
 # just like a missing one.
 _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
+    # L4 declared-state restore bracket: an INTERNAL carrier converted into
+    # the typed run_state_restore_failed refusal at the transaction boundary
+    # (never user-facing; parked by the L6 merge train post-merge repair).
+    "torchlens._runnable_state.LiveStateRestoreFailure": (
+        "internal mid-bracket carrier; surfaced as run_state_restore_failed"
+    ),
     # -- L7a structure-only refusals + S3 registrar (DOCUMENTED-UNSTABLE;
     # their torchlens.errors registration rides the S2 author's ratification
     # PR together with the BUILTIN_LINEAGE_GOLDEN rows — this allowlist entry
