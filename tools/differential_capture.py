@@ -268,8 +268,10 @@ def run_wrapper_side(model_name: str) -> dict[str, Any]:
         from torch import nn
 
         class _Probe(nn.Module):
+            _probe_fn = staticmethod(probe)
+
             def forward(self, inp: Any) -> Any:
-                return probe(inp)
+                return self._probe_fn(inp)
 
         probe_trace = tl.trace(_Probe(), spec.make_input())
         expansions[comp_name] = [

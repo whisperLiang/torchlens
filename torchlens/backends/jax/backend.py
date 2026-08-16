@@ -3435,13 +3435,15 @@ def _experimental_per_op_boundary_vjp_oracle(
     for label, (boundary_value, suffix_fn) in boundaries.items():
         try:
 
-            def scalar_loss(replacement: Any) -> Any:
+            def scalar_loss(replacement: Any, *, suffix_fn: Any = suffix_fn) -> Any:
                 """Return scalar loss for one replacement boundary value.
 
                 Parameters
                 ----------
                 replacement
                     Replacement boundary value.
+                suffix_fn
+                    Suffix function bound at definition time (loop-safe).
 
                 Returns
                 -------

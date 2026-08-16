@@ -1863,7 +1863,7 @@ def test_contended_admission_never_publishes_partial_owner_state() -> None:
         for _ in range(rounds):
             barrier = threading.Barrier(contenders)
 
-            def contend() -> None:
+            def contend(barrier: threading.Barrier = barrier) -> None:
                 """Enter ``active_logging`` at the same instant as the others."""
 
                 nonlocal admitted, refused

@@ -60,7 +60,11 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # MODE with any future count or the dispute recurs.
     "B905": 102,
     "B028": 2,
-    "B023": 17,
+    # 2026-08-16 fixwave-7: all 17 B023 sites fixed (loop vars bound via
+    # keyword defaults / class attributes at definition time) -- the
+    # config's own "REAL bug class" ledger row is retired. Any new site is
+    # a genuine late-binding hazard; fix it, never raise this.
+    "B023": 0,
     "B904": 17,
     "B018": 14,
     "B007": 16,

@@ -69,7 +69,9 @@ def test_every_hub_function_resolves_through_hub_globals() -> None:
         family_files = {f"{name}.py" for name in child_names}
         family_files.add(hub.__file__.rsplit("/", 1)[-1])
 
-        def _is_family_function(value: object) -> bool:
+        def _is_family_function(
+            value: object, bound_family_files: frozenset[str] | set[str] = frozenset(family_files)
+        ) -> bool:
             """Return whether a value is a plain function DEFINED in this family.
 
             Imported helpers (``rebind_function``, ``status`` predicates, ...)
@@ -88,7 +90,7 @@ def test_every_hub_function_resolves_through_hub_globals() -> None:
 
             return (
                 isinstance(value, types.FunctionType)
-                and value.__code__.co_filename.rsplit("/", 1)[-1] in family_files
+                and value.__code__.co_filename.rsplit("/", 1)[-1] in bound_family_files
             )
 
         for name, value in sorted(hub_vars.items()):

@@ -231,8 +231,8 @@ def test_op_alias_index_matches_scan_for_every_key() -> None:
             keys = _op_probe_keys(accessor)
             assert len(keys) > 10, name
             for key in keys:
-                indexed = _outcome(lambda k=key: accessor._resolve_substring(k))
-                scanned = _outcome(lambda k=key: accessor._resolve_substring_by_scan(k))
+                indexed = _outcome(lambda k=key, a=accessor: a._resolve_substring(k))
+                scanned = _outcome(lambda k=key, a=accessor: a._resolve_substring_by_scan(k))
                 if isinstance(scanned, str):
                     # Exception text, including the ambiguity message, verbatim.
                     assert indexed == scanned, (name, key)
@@ -244,7 +244,7 @@ def test_op_alias_index_matches_scan_for_every_key() -> None:
                     assert indexed is scanned, (name, key)
                     probed["hit"] += 1
                 # ``__getitem__`` must agree with both.
-                via_getitem = _outcome(lambda k=key: accessor[k])
+                via_getitem = _outcome(lambda k=key, a=accessor: a[k])
                 if isinstance(indexed, Op):
                     assert via_getitem is indexed, (name, key)
                 elif isinstance(indexed, str):

@@ -252,9 +252,11 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
         scattered: list[tuple[str, dict]] = []
         original_scatter = scatter_module.scatter_record_to_cells
 
-        def observing_scatter(record, extras, owning_trace):
-            cells = original_scatter(record, extras, owning_trace)
-            scattered.append((record.core.label_raw, cells))
+        def observing_scatter(
+            record, extras, owning_trace, _orig=original_scatter, _sink=scattered
+        ):
+            cells = _orig(record, extras, owning_trace)
+            _sink.append((record.core.label_raw, cells))
             return cells
 
         scatter_module.scatter_record_to_cells = observing_scatter

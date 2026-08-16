@@ -542,7 +542,7 @@ def apply_tf_module_intervention(
         current = _map_tensor_leaves(
             current,
             tf,
-            lambda tensor: _fire_site(
+            lambda tensor, site=site: _fire_site(
                 plan, session, tf, site, tensor, _producer_label(session, tensor)
             ),
         )
