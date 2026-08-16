@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import itertools
+import warnings
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
+from ..errors._base import TorchLensWarning
 from .events import (
     BackwardCoverageGap,
     BackwardPassEnd,
@@ -35,6 +37,12 @@ from .op_record import (
 )
 from .predicate import RecordContext
 from .refs import ParamRef, ReservedLabel
+
+# Op-record count at which a running capture DISCLOSES its growth exactly
+# once (r8 R60-1). Purely informational -- capture continues -- sized from
+# the measured ~31KB/op journal+row cost (a 50k-op forward holds roughly
+# 1.5GB of op records before postprocess).
+OP_COUNT_DISCLOSURE_THRESHOLD = 50_000
 
 # The journal op lane's record union: compat flat events (legacy producer,
 # preview backends) and decomposed records (torch decomposed producer). The
@@ -818,6 +826,24 @@ class CaptureEvents:
         else:
             object.__setattr__(event, "seq", seq)
         self.op_events.append(event)
+        if len(self.op_events) == OP_COUNT_DISCLOSURE_THRESHOLD:
+            # Capture-side op-count disclosure (r8 R60-1): the save budget
+            # bounds retained activation BYTES only, so a million-op forward
+            # with nothing saved grew op records unbounded with no
+            # torchlens-side signal until the OOM killer fired. This is a
+            # disclosure, not a ceiling -- huge captures stay legal -- fired
+            # exactly once per journal at the threshold crossing (one int
+            # compare per op on the hot path).
+            warnings.warn(
+                f"TorchLens has recorded {OP_COUNT_DISCLOSURE_THRESHOLD} ops in "
+                "this forward and capture is still running. Op records grow "
+                "memory per op regardless of save=; a very deep or long-loop "
+                "forward can exhaust host RAM. Consider tracing a smaller "
+                "submodule, reducing loop iterations, or using "
+                "tl.record(model, x, save=...) for sparse recording.",
+                TorchLensWarning,
+                stacklevel=2,
+            )
         self.live_index.append(event)
 
     def append_module_prep(self, event: ModulePrepEvent) -> None:
