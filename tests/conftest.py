@@ -301,6 +301,15 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
 
     cpu_before = _process_cpu_seconds()
     result = yield
+    # Coverage-instrumented sessions are provably outside the budget
+    # contract: instrumentation slows every test by design, and the
+    # partition boundary is about UNINSTRUMENTED compute cost (r7 R41/R72:
+    # the nightly coverage job used to --deselect ONE budget test by a name
+    # that had since been renamed, so the real assertions ran instrumented
+    # anyway and the always-on sessionfinish tripwire could not be
+    # deselected at all). Every uninstrumented leg still records + enforces.
+    if bool(getattr(item.config.option, "cov_source", None)):
+        return result
     cpu_seconds = _process_cpu_seconds() - cpu_before
     wall_seconds = sum(getattr(item, "_tl_phase_durations", {}).values())
     charged = min(wall_seconds, cpu_seconds)

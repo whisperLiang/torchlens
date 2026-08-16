@@ -310,3 +310,27 @@ def test_canonical_json_bytes_is_key_order_invariant() -> None:
         )
     # And it must remain VALUE-sensitive (the invariance is not constancy).
     assert canonical_json_bytes({"a": 1}) != canonical_json_bytes({"a": 2})
+
+
+def test_fresh_seed_leg_stays_wired_into_ci() -> None:
+    """r7 R73 (6th pass): the fuzz leg keeps getting unwired -- pin it.
+
+    ``TORCHLENS_FUZZ_SEED`` existed for six review passes with ZERO workflow
+    references; the sweeps ran only their fixed default seed. The nightly
+    fast-tier job now injects run-id-derived fresh seeds; this pin makes
+    unwiring it a red instead of a seventh rediscovery.
+    """
+
+    from pathlib import Path
+
+    nightly = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "nightly.yml"
+    if not nightly.exists():
+        pytest.skip("no nightly workflow in this tree (sdist/test-only layout)")
+    text = nightly.read_text(encoding="utf-8")
+    assert "TORCHLENS_FUZZ_SEED" in text, (
+        "nightly.yml no longer injects fresh TORCHLENS_FUZZ_SEED values; the "
+        "generative sweeps are back to a fixed regression corpus"
+    )
+    assert "test_generative_properties_r73.py" in text, (
+        "the fresh-seed leg no longer targets the generative property suite"
+    )

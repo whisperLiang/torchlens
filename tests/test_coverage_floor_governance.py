@@ -12,8 +12,11 @@ kept every gate green. These checks make the claim mechanical:
    pyproject so a local ``coverage report`` reaches the same verdict as CI
    (R72 sol: without it, local and CI coverage verdicts silently differed).
 
-Parsing is line/regex-based on purpose: ``tomllib`` only exists on 3.11+ and
-the suite still runs a 3.10 leg (the test_order_isolation_infra precedent).
+pyproject parsing is line/regex-based on purpose: ``tomllib`` only exists on
+3.11+ and the suite still runs a 3.10 leg (the test_order_isolation_infra
+precedent). The workflow side parses real YAML (PyYAML is a declared test
+dep) so the assertions bind to the actual ``jobs.coverage`` command instead
+of whole-file substrings (r7 R72).
 """
 
 from __future__ import annotations
@@ -49,26 +52,64 @@ def _nightly_text() -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_nightly_coverage_job_exists_and_instruments_the_smoke_tier() -> None:
-    """Deleting the nightly coverage job must go red here, not merge green."""
+def _coverage_job_command() -> str:
+    """Return the nightly ``coverage`` job's pytest command, job-scoped.
 
-    nightly = _nightly_text()
-    assert re.search(r"^\s*coverage:\s*$", nightly, flags=re.MULTILINE), (
+    r7 R72 (sol MED): the old checks searched the WHOLE workflow text for
+    ``--cov=torchlens`` / floor literals, so an emptied coverage job plus
+    those strings anywhere else satisfied every predicate. Parse the actual
+    job so the assertions bind to the command that runs.
+    """
+
+    import yaml
+
+    workflow = yaml.safe_load(_nightly_text())
+    job = workflow.get("jobs", {}).get("coverage")
+    assert job is not None, (
         "the nightly workflow no longer declares the `coverage` job — the only "
         "measured coverage gate in the repo (R72/SF-19). Restore it; do not "
         "delete the sole coverage tripwire."
     )
-    assert "--cov=torchlens" in nightly and "--cov-branch" in nightly, (
+    commands = [
+        step.get("run", "")
+        for step in job.get("steps", [])
+        if "pytest" in step.get("run", "") and "--cov" in step.get("run", "")
+    ]
+    assert len(commands) == 1, (
+        f"expected exactly ONE instrumented pytest command in jobs.coverage, got {len(commands)}"
+    )
+    return commands[0]
+
+
+def test_nightly_coverage_job_exists_and_instruments_the_smoke_tier() -> None:
+    """Deleting or hollowing the nightly coverage job must go red here."""
+
+    command = _coverage_job_command()
+    assert "-m smoke" in command, "the coverage job no longer selects the smoke tier"
+    assert "--cov=torchlens" in command and "--cov-branch" in command, (
         "the nightly coverage job no longer instruments torchlens under branch "
-        "coverage — the floor below would be measuring nothing"
+        "coverage — the floor would be measuring nothing"
+    )
+    # The instrumented leg must not deselect budget tests by name: the
+    # carve-out lives in the budget machinery itself (a renamed test id once
+    # turned the deselect into a silent no-op while claiming the exemption).
+    assert "--deselect" not in command, (
+        "the coverage job deselects tests by name again — the instrumentation "
+        "carve-out belongs in tests/conftest.py (cov_source check), where a "
+        "rename cannot silently void it"
+    )
+    conftest_text = (_PROJECT_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert 'getattr(item.config.option, "cov_source", None)' in conftest_text, (
+        "tests/conftest.py lost the instrumented-session budget carve-out that "
+        "replaced the coverage job's brittle --deselect"
     )
 
 
 def test_nightly_coverage_floor_is_never_lowered() -> None:
-    """The workflow's --cov-fail-under may rise but never drop below baseline."""
+    """The job's --cov-fail-under may rise but never drop below baseline."""
 
-    nightly = _nightly_text()
-    floors = [int(value) for value in re.findall(r"--cov-fail-under=(\d+)", nightly)]
+    command = _coverage_job_command()
+    floors = [int(value) for value in re.findall(r"--cov-fail-under=(\d+)", command)]
     assert floors, (
         "the nightly coverage job lost its --cov-fail-under floor entirely; "
         f"restore at least --cov-fail-under={COVERAGE_FLOOR_BASELINE}"

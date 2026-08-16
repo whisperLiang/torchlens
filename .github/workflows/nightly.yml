@@ -132,6 +132,20 @@ jobs:
         run: |
           python scripts/check_ci_executed_tests.py "${{ runner.temp }}/fast-tier.junit.xml" 6000
 
+      - name: Fresh-seed generative property sweep
+        # r7 R73 (6th pass): TORCHLENS_FUZZ_SEED was wired into ZERO
+        # workflows, so the generative suites ran only their fixed default
+        # seed -- a regression corpus, never standing exploration. Four fresh
+        # seeds cost <1s each (opus measured, removing the flake objection);
+        # the run id makes every nightly a new seed while the failure output
+        # names the seed for deterministic local reproduction
+        # (TORCHLENS_FUZZ_SEED=<n> pytest tests/test_generative_properties_r73.py).
+        run: |
+          for offset in 0 1 2 3; do
+            TORCHLENS_FUZZ_SEED="$(( ${{ github.run_id }} % 1000000000 + offset ))" \
+              pytest tests/test_generative_properties_r73.py -q --tb=short -p no:randomly
+          done
+
   coverage:
     name: Coverage floor (smoke tier)
     runs-on: ubuntu-latest
@@ -171,14 +185,12 @@ jobs:
           uv pip check
 
       - name: Run the smoke tier under coverage with a floor
-        # The ONE deselect is the smoke-duration budget guard: it asserts
-        # wall-clock runtime, and coverage instrumentation slows tests by
-        # design, so the assertion is provably outside its contract here (it
-        # still enforces on every uninstrumented leg). No other test is
-        # excluded.
+        # No deselects: the duration-budget machinery itself skips recording
+        # under coverage instrumentation (tests/conftest.py, r7 R41/R72 --
+        # the old single --deselect here named a test that had been RENAMED,
+        # so it silently excluded nothing while claiming the carve-out).
         run: |
           pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
-            --deselect tests/test_marker_lint.py::test_smoke_tests_stay_within_duration_budget \
             --cov=torchlens --cov-branch \
             --cov-report=term --cov-report=xml:"${{ runner.temp }}/coverage.xml" \
             --cov-fail-under=55 \
