@@ -61,6 +61,57 @@ _MLX_VALIDATION_REPLAY_BACKEND = "mlx"
 _TINYGRAD_VALIDATION_REPLAY_BACKEND = "tinygrad"
 
 
+def _apply_run_save_selection(result: Any, selected: Any) -> Any:
+    """Apply the run-time save= retention selection to one settled RunResult.
+
+    Retention/presentation ONLY (L4 sec 4): verification breadth is untouched
+    (every contract check already ran at settlement), the attestation aggregate
+    is unchanged, and input/output boundary nodes keep their payloads exactly
+    like the capture-time selection machinery. ``None`` (save= omitted) is
+    today's behavior byte-for-byte.
+    """
+
+    if selected is None:
+        return result
+    from ..capture.projectors import RefreshProjector
+
+    for layer in result.trace.layer_list:
+        if layer.layer_type in ("input", "output"):
+            continue
+        if layer.layer_label in selected:
+            continue
+        RefreshProjector._clear_payload(layer)
+    return result
+
+
+def _refuse_state_compromised_live_run(trace: Any) -> None:
+    """Refuse live/fast execution after a failed declared-state restore (L4 5.4).
+
+    The session-scoped STATE-COMPROMISED latch means a prior run()'s restore
+    failed mid-bracket, so the LIVE MODEL's declared state is unknown -- every
+    door that reads the live model (default live, fast live, legacy rerun)
+    refuses typed. Loaded-sparse runs of a saved artifact stay legal: they
+    execute against staged clones and never read the live model.
+    """
+
+    runnable_state = getattr(trace, "_runnable", None)
+    compromised = getattr(runnable_state, "state_compromised", None)
+    if compromised is None:
+        return
+    from ..errors import StateBindingError
+
+    raise StateBindingError(
+        "A prior run() failed while RESTORING this trace's live model state "
+        f"(stopped at state entry {compromised.get('state_dict_name')!r}), so the "
+        "live model's declared state is unknown and live/fast execution would "
+        "misreport. Remedy: reload known-good weights onto the model (or "
+        "re-capture / re-stage state), then run again",
+        code="run_state_restore_failed",
+        detection_stage="state_restore",
+        **dict(compromised),
+    )
+
+
 def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
     """Warn once when a live rerun has an obvious model-state mutation risk.
 
@@ -144,6 +195,7 @@ class TraceValidationMixin(_TraceMixinBase):
         grad_layers_to_save: str | list[str] | None = "all",
         random_seed: int | None = None,
         backward_ready: bool | None = None,
+        _run_until_plan: Any | None = None,
     ) -> None:
         """Re-run the model with new inputs, saving only outs.
 
@@ -174,6 +226,7 @@ class TraceValidationMixin(_TraceMixinBase):
             grad_layers_to_save=grad_layers_to_save,
             random_seed=random_seed,
             backward_ready=backward_ready,
+            _run_until_plan=_run_until_plan,
         )
 
     def validate_saved_outs(
@@ -432,6 +485,9 @@ class TraceValidationMixin(_TraceMixinBase):
         inputs: Any | MissingType = MISSING,
         seed: int | None = None,
         fast: bool = False,
+        carry_state: bool = False,
+        until: Any = None,
+        save: Any = None,
         on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
         append: bool | MissingType = MISSING,
         chunk_size: int | None | MissingType = MISSING,
@@ -464,6 +520,17 @@ class TraceValidationMixin(_TraceMixinBase):
             loaded provider performs one ordinary verified run, then reuses staged state
             and compiled argument binders. Unlike the default transactional provider, later
             fast iterations reuse one result Trace in place.
+        carry_state:
+            PROVISIONAL spelling (documented-unstable). Default ``False``: the
+            live provider snapshot-restores the model's declared state (named
+            parameters, registered buffers, alias topology preserved) around
+            the run, so repeated ``run()`` calls leave the model bit-identical.
+            ``True`` skips the restore: declared-state mutations persist on the
+            live model (episode/rollout state accumulation). The report
+            discloses the choice (``report.state_carried``); verification is
+            untouched -- the NEXT run from mutated state faces every gate as
+            usual. Refuses typed with ``fast=True`` and on loaded providers
+            (staged clones have no live model for state to carry into).
         on_divergence:
             Strict divergence behavior or the sole poison-return opt-in.
         append:
@@ -553,6 +620,22 @@ class TraceValidationMixin(_TraceMixinBase):
             from ..capture.structure_only import require_structure_only_capability
 
             require_structure_only_capability(self, "live_replay")
+        if self.__dict__.get("_run_truncation_skipped_raw_labels") is not None:
+            # L4 3.3.2: a truncated result cannot be re-run (any provider). The
+            # poison bit alone does NOT refuse a re-run -- the transaction's
+            # inherited-status leg would silently settle UNVERIFIABLE instead,
+            # which is exactly the silence the capability table forbids.
+            from ..errors import RunCapabilityUnavailableError
+            from ..runnable import RunnableErrorCode
+
+            raise RunCapabilityUnavailableError(
+                "This Trace is a TRUNCATED run product (until=): it covers only "
+                "the executed prefix, so re-running it would replay a cut "
+                "forward. Run the ORIGINAL source trace instead (with or "
+                "without until=).",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                detection_stage="truncated_result_rerun",
+            )
         readiness = self._runnable.readiness
         loaded_provider = getattr(readiness, "provider", None)
         use_unified_provider = inputs is not MISSING or (
@@ -597,6 +680,78 @@ class TraceValidationMixin(_TraceMixinBase):
                     remedy="use on_divergence='raise' with fast=True, or drop fast=",
                     argument="on_divergence",
                 )
+            if fast and carry_state:
+                raise InvalidArgumentError(
+                    "carry_state=True cannot combine with fast=True: fast mode's "
+                    "cached-oracle contract already forbids declared-state mutation",
+                    code="run_fast_carry_state_unsupported",
+                    remedy="drop carry_state= (fast mode never restores state it "
+                    "forbids mutating) or drop fast=",
+                    argument="carry_state",
+                )
+            if fast and until is not None:
+                raise InvalidArgumentError(
+                    "until= cannot combine with fast=True this release (the fast "
+                    "tier compiles the full recorded path)",
+                    code="run_fast_until_unsupported",
+                    remedy="drop until= or drop fast=",
+                    argument="until",
+                )
+            if fast and save is not None:
+                from ..errors import RunCapabilityUnavailableError
+                from ..runnable import RunnableErrorCode
+
+                raise RunCapabilityUnavailableError(
+                    "run-time save= does not compose with fast=True yet: the fast "
+                    "tier's hook site-set is scoped by the ORIGINAL capture save= "
+                    "selection (an explicit matrix entry is required; silence "
+                    "would be undefined behavior)",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="fast_run_save_pending",
+                    remedy="drop save= with fast=True, or re-capture with the "
+                    "desired save= selection",
+                )
+            run_save_labels: Any = None
+            if save is not None:
+                from .._runnable_execution import _resolve_run_until_plan
+
+                # Reuse the static-form resolver: same accepted family (labels,
+                # module addresses, 'saved'), same typed refusals (pre-S4
+                # predicate gate, junk forms, unknown-site lookup feedback).
+                save_plan = _resolve_run_until_plan(self, save)
+                run_save_labels = frozenset(save_plan.requested_layer_labels)
+                if until is not None:
+                    until_preview = _resolve_run_until_plan(self, until)
+                    executed_raw = frozenset(until_preview.executed_raw_labels)
+                    executed_final = {
+                        layer.layer_label
+                        for layer in self.layer_list
+                        if layer._layer_label_raw in executed_raw
+                    }
+                    outside = sorted(run_save_labels - executed_final)
+                    if outside:
+                        raise InvalidArgumentError(
+                            "run-time save= selection must lie inside the "
+                            "until= executed window; out-of-window site(s): "
+                            f"{', '.join(outside)}",
+                            code="run_until_form_invalid",
+                            remedy="widen until= to cover the save= sites, or "
+                            "drop the out-of-window save= sites",
+                            argument="save",
+                        )
+            if carry_state and loaded_provider in {
+                RunProvider.LOADED_SPARSE,
+                RunProvider.LOADED_ANALYSIS,
+            }:
+                raise InvalidArgumentError(
+                    "carry_state=True requires a live model: the loaded provider "
+                    "mutates STAGED CLONES, never a live model, so there is no "
+                    "model for state to carry into (a silent no-op would "
+                    "misreport what persisted)",
+                    code="run_carry_state_requires_live_model",
+                    remedy="drop carry_state= on loaded traces, or run the live model",
+                    argument="carry_state",
+                )
             from ..capture.outcome import require_capture_capability
 
             if loaded_provider is RunProvider.LOADED_SPARSE:
@@ -614,11 +769,15 @@ class TraceValidationMixin(_TraceMixinBase):
                     return run_fast_loaded_trace(self, run_inputs, seed=seed)
                 from .._runnable_execution import run_loaded_sparse_trace
 
-                return run_loaded_sparse_trace(
-                    self,
-                    run_inputs,
-                    seed=seed,
-                    on_divergence=on_divergence,
+                return _apply_run_save_selection(
+                    run_loaded_sparse_trace(
+                        self,
+                        run_inputs,
+                        seed=seed,
+                        on_divergence=on_divergence,
+                        until=until,
+                    ),
+                    run_save_labels,
                 )
             if loaded_provider is RunProvider.LOADED_ANALYSIS:
                 # R06: a HALTED analysis load refuses N5 first -- the generic
@@ -640,6 +799,7 @@ class TraceValidationMixin(_TraceMixinBase):
             require_structure_only_capability(self, "live_replay")
             from .._runnable_execution import run_live_trace
 
+            _refuse_state_compromised_live_run(self)
             source_ref = getattr(self, "_source_model_ref", None)
             live_model = source_ref() if source_ref is not None else None
             if live_model is not None:
@@ -650,11 +810,16 @@ class TraceValidationMixin(_TraceMixinBase):
 
                 return run_fast_live_trace(self, run_inputs, seed=seed)
 
-            return run_live_trace(
-                self,
-                run_inputs,
-                seed=seed,
-                on_divergence=on_divergence,
+            return _apply_run_save_selection(
+                run_live_trace(
+                    self,
+                    run_inputs,
+                    seed=seed,
+                    on_divergence=on_divergence,
+                    carry_state=carry_state,
+                    until=until,
+                ),
+                run_save_labels,
             )
 
         if fast:
@@ -664,6 +829,29 @@ class TraceValidationMixin(_TraceMixinBase):
                 remedy="call trace.run(inputs=..., fast=True) instead of the legacy surface",
                 argument="fast",
             )
+        if carry_state:
+            raise KeywordConflictError(
+                "carry_state= is a unified-run option and cannot mix with the "
+                "legacy run surface (which never snapshot-restores state)",
+                code="run_legacy_options_conflict",
+                remedy="call trace.run(inputs=..., carry_state=True) instead of the legacy surface",
+                argument="carry_state",
+            )
+        if until is not None:
+            raise KeywordConflictError(
+                "until= is a unified-run option and cannot mix with the legacy run surface",
+                code="run_legacy_options_conflict",
+                remedy="call trace.run(inputs=..., until=...) instead of the legacy surface",
+                argument="until",
+            )
+        if save is not None:
+            raise KeywordConflictError(
+                "save= is a unified-run option and cannot mix with the legacy run surface",
+                code="run_legacy_options_conflict",
+                remedy="call trace.run(inputs=..., save=...) instead of the legacy surface",
+                argument="save",
+            )
+        _refuse_state_compromised_live_run(self)
 
         # N3/N5 (legacy live rerun surface): same live-provider rule.
         from ..capture.outcome import require_capture_capability

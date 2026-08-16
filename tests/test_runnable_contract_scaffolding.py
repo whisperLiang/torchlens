@@ -171,6 +171,10 @@ def test_authoritative_descriptor_and_report_field_names() -> None:
         "numeric_attestation",
         "poisoned",
         "nondeterministic_sources",
+        "state_carried",
+        "truncation",
+        "truncated",
+        "stopped_at",
     )
     assert tuple(field.name for field in fields(ReadinessReport)) == (
         "status",

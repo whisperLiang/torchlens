@@ -1131,6 +1131,7 @@ poisoned_run_refused
 collective_boundary_runnable_unsupported
 halted_capture_not_runnable
 user_intervention_not_replayable
+buffer_sink_routing_mutable
 ```
 
 `halted_capture_not_runnable` (early-stopping unification, N4) is the SAVE-time runnable
@@ -1148,6 +1149,28 @@ provenance the artifact archives -- and would permanently ceiling `unverifiable`
 diagnostic names every replaced op label. An armed selector that fired on zero sites leaves
 the capture unreplaced and runnable; analysis-level saves of intervened captures remain
 allowed, and the intervention spec itself stays separately saveable.
+
+`buffer_sink_routing_mutable` (D18; PROVISIONAL SPELLING, documented-unstable pending
+naming ratification) is the LIVE refresh projector's mode-aware buffer-sink routing
+refusal (`BufferSinkRoutingError`, stage `refresh_buffer_sink_routing`), raised on the
+default `run()` / `save_new_outs` path by all four typed arms of one closed rule --
+refuse iff any buffer sink carries `buffer_value_changed is not False`: (1) a
+train-mode buffer WRITER (`True` = a capture-time value-changing write, e.g. BatchNorm
+running stats or a `num_batches_tracked` counter); (2) UNPROVEN write evidence
+(`None`, fail closed -- the narrowing never widens past the evidence); (3) a recorded
+mode claim (the literal `training`/`use_input_stats` argument, or the capture-recorded
+`module_training_modes` entry for the producing op's innermost module) CONTRADICTING
+the write evidence in either direction (a tampered or incoherent claim, never resolved
+permissively); (4) the refresh write tripwire -- on the newly-allowed no-write path the
+refreshed rerun's OWN buffer-write journal must also record no value-changing buffer
+write, and any target-vs-refreshed buffer-sink evidence asymmetry
+(`(raw_label, buffer_value_changed, buffer_write_kind)` tuples) refuses the same way,
+so a tampered stored bit cannot buy a pass. Eval-mode BatchNorm (all sinks `False`
+with agreeing eval claims) is refresh-eligible and runnable on the default path.
+`ValueError` stays in the error's MRO and the message keeps the pinned "computational
+graph changed" term. The generic (untyped) graph-signature arm is unchanged and
+carries no D18 obligation. The fast tier's mode-aware `fast_state_static_guard` and
+the loaded-sparse buffer-write attestation downgrade are untouched by this code.
 
 `collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
 refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal
@@ -1439,7 +1462,55 @@ first_mismatch: RunnableDiagnostic | None
 numeric_attestation: NumericAttestationStatus
 poisoned: bool
 nondeterministic_sources: tuple[str, ...]
+state_carried: bool = False
+truncation: RunTruncation | None = None
+truncated: bool = False
+stopped_at: str | None = None
 ```
+
+`truncation` / `truncated` / `stopped_at` (L4 `until=`; [S2-PROV] spellings, documented-unstable;
+`truncated` and `stopped_at` are the S2-ratified flat reading surface) disclose a truncated run.
+Truncation is a RUN-RESULT term, NEVER a capture outcome: `CaptureStatus` keeps its six members,
+the source trace's outcome is untouched by any run, and no N-gate row branches on `until=`.
+`RunTruncation` carries the regime (`closure` | `sequential_prefix` | `live_stop_after`), the
+requested sites, executed/skipped counts, a skipped-set digest, and -- for the
+`sequential_prefix` fallback -- the cause tag (`unprovable_independence` | `coverage_gap` |
+`ancestry_break`). THE POSITIVE-CLAIM BAR: a truncated run may NEVER settle VERIFIED
+`path_faithfulness` or ATTESTED `numeric_attestation` -- the fail-closed `run_truncated` ceiling
+is threaded into the verdict derivation UPSTREAM of attestation, so the settled pair is
+regime-specific: loaded-sparse `(unverifiable, not_applicable)` (the archive is never opened),
+live `(unverifiable, not_present)`. Contradictions the executed region evidences still settle
+DIVERGED (the cap is a ceiling, never a floor), and the report finalizer keeps a redundant
+tamper assert. The executed region runs EVERY check at full strength; the skipped region is a
+disclosed set -- semantically "not-run", never "passed". Skipped sites are retained
+structure-only (value payloads cleared, never a stale capture-time tensor); the truncated
+result is poisoned at the conservative floor (S2 row-0), refuses every save at the poison
+gate, and refuses re-run typed at the run door. The full recorded input tree remains REQUIRED
+under any `until=` (require-all inputs: the closure never shrinks the input contract). The
+live regime is STOP-AFTER (the forward runs natively and halts at the first boundary after
+the last requested site; `RunResult.output` is None -- read executed-prefix values off the
+result trace); the loaded-sparse regime executes the sequential prefix through the last
+requested call, labeled `closure` only when that prefix IS the widened dependency closure
+(C1 tensor deps, C3 declared-state deps, C5 control-witness deps leave no candidate skip;
+the C4 certified-fresh vocabulary is not yet shipped, so any candidate skip discloses the
+`sequential_prefix` regime with `unprovable_independence`).
+
+`state_carried` (L4; PROVISIONAL spelling, documented-unstable pending naming ratification) is
+`True` only when a LIVE run was invoked with `carry_state=True`, deliberately leaving
+declared-state mutations on the live model. The DEFAULT live run brackets execution with a
+declared-state snapshot-restore (named parameters plus every registered buffer, one clone and
+one restore per alias group with `a is b` preserved, restore in `finally` on every path), so
+repeated `run()` calls leave the model bit-identical and report `False`. The snapshot is taken
+and validated BEFORE any forward runs: enumeration failure, an unprovable or overlapping alias
+topology, and a clone/allocation failure each refuse typed (`run_state_snapshot_unsupported`,
+fail-before-execute). A restore that fails AFTER execution poisons the transactional fork,
+stamps a session-scoped state-compromised latch on the source trace (NOT the poison bit --
+the trace's recorded path facts are not a lie; the live MODEL's state is), and raises typed
+(`run_state_restore_failed`, chaining the restore exception with the failed slot name and the
+count of alias groups restored); the latch refuses later live/fast runs while loaded-sparse
+runs of a saved artifact stay legal (staged clones never read the live model). `carry_state=`
+never touches verification: the next run from mutated state faces every gate as usual,
+including the mode-aware buffer-sink projector.
 
 `ContractCheck` is `name: str`, `passed: bool`, `diagnostic: RunnableDiagnostic | None`, ordered by
 execution. Random reports name the policy and every random-filled slot, including alias members,
