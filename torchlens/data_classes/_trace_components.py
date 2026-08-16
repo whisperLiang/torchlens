@@ -445,10 +445,17 @@ TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
     "_deferred_gradient_selector": "refresh projection: deferred gradient selector",
     # --- Bundle-load provenance (set by _io/bundle via setattr) ------------
     # `_source_bundle_path` / `_source_bundle_manifest_sha256` ARE declared;
-    # these three siblings were never enrolled with them.
+    # these siblings were never enrolled with them. The complete family and
+    # its save-time strip behavior are declared ONCE in
+    # ``torchlens._io.bundle.LOAD_PROVENANCE_TRANSIENT_ATTRS`` (R50-2).
     "_loaded_from_bundle": "bundle load: marks a loaded trace (undeclared sibling of the two owned)",
     "_source_bundle_created_at": "bundle load: manifest created_at (undeclared sibling)",
     "_source_bundle_provenance": "bundle load: manifest provenance (undeclared sibling)",
+    "_source_bundle_model_fingerprint": (
+        "bundle load: manifest model fingerprint, read back by the runnable "
+        "tlspec writer (was the one family member outside every authority, "
+        "R50-1/R50-2)"
+    ),
     # --- One-shot warning latches -----------------------------------------
     "_warned_direct_write_propagation": "intervention: one-shot warning latch (replay + rerun)",
     "_warned_unknown_append_helper": "intervention: one-shot warning latch (rerun)",

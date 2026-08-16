@@ -88,6 +88,23 @@ REASON_SENTINEL = "REASON.txt"
 # this, so the cap only refuses an absurd artifact; it is deliberately generous
 # to avoid refusing a real save.
 _MAX_METADATA_PKL_BYTES = 512 * 1024**2
+
+# THE single authority for the load-provenance transient family (R50-2): every
+# attribute _io/bundle attaches to a LOADED trace that must never persist into
+# a re-save. One conceptual family used to have four declaration stories and a
+# function-local strip tuple as its only complete inventory; the strip pass in
+# ``scrub_for_save``'s caller and the exemption ledger in
+# ``data_classes/_trace_components.py`` both key off this constant's members.
+LOAD_PROVENANCE_TRANSIENT_ATTRS: tuple[str, ...] = (
+    "_loaded_from_bundle",
+    "_source_bundle_manifest_sha256",
+    "_source_bundle_path",
+    "_source_bundle_created_at",
+    "_source_bundle_provenance",
+    "_source_bundle_model_fingerprint",
+    "payload_load_status",
+    "_validation_replay_status",
+)
 # Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
 # bound allocation -- a pickle of tiny values expands its byte size into RSS
 # BEFORE any structural check can refuse it. This is the same lesson the JSON
@@ -2743,16 +2760,7 @@ def _scrub_trace_for_bundle(
     """
 
     transient_attrs = {}
-    for attr_name in (
-        "_loaded_from_bundle",
-        "_source_bundle_manifest_sha256",
-        "_source_bundle_path",
-        "_source_bundle_created_at",
-        "_source_bundle_provenance",
-        "_source_bundle_model_fingerprint",
-        "payload_load_status",
-        "_validation_replay_status",
-    ):
+    for attr_name in LOAD_PROVENANCE_TRANSIENT_ATTRS:
         if hasattr(trace, attr_name):
             transient_attrs[attr_name] = getattr(trace, attr_name)
             delattr(trace, attr_name)
