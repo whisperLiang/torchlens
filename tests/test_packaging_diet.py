@@ -388,6 +388,13 @@ def test_release_job_python_stack_is_hash_locked() -> None:
         "isolated build env pip-installs an UNPINNED setuptools from the "
         "live index inside the release token scope"
     )
+    # r7 R84: the normalizer decides the published bytes of BOTH artifacts;
+    # dropping either argument shipped machine-dependent bytes with the
+    # first signal a post-release nightly red.
+    assert "python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl" in match.group(1), (
+        "build_command no longer normalizes both artifacts "
+        "(scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl)"
+    )
     setuptools_pins = [line for line in requirement_lines if line.startswith("setuptools==")]
     assert setuptools_pins, (
         "release lock does not pin the setuptools build backend; "
@@ -484,12 +491,28 @@ def test_nightly_gate_installs_release_locked_builder() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     nightly_yml = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
 
-    assert "--require-hashes" in nightly_yml, (
+    # r7 R84: scope the assertions to the wheel job's BUILD STEP -- the old
+    # whole-file substring passed if the flag appeared anywhere in the
+    # 600-line workflow, not necessarily in the step that installs the
+    # builder the gate then attests.
+    build_step = re.search(
+        r"name: Build wheel and sdist with the release's exact builder.*?(?=\n\s*- name:)",
+        nightly_yml,
+        flags=re.DOTALL,
+    )
+    assert build_step is not None, "nightly.yml lost its exact-builder build step"
+    step_text = build_step.group(0)
+    assert "--require-hashes" in step_text, (
         "the nightly double-build gate no longer installs the builder hash-verified"
     )
-    assert "--only-binary :all:" in nightly_yml
-    assert ".github/workflows/release-requirements.txt" in nightly_yml, (
+    assert "--only-binary :all:" in step_text
+    assert ".github/workflows/release-requirements.txt" in step_text, (
         "the nightly double-build gate no longer installs the release's exact builder"
+    )
+    install_pos = step_text.find("--require-hashes")
+    build_pos = step_text.find("python -m build")
+    assert 0 <= install_pos < build_pos, (
+        "the hash-verified install must precede `python -m build` inside the build step"
     )
     assert "build-requirements.txt" not in nightly_yml, (
         "a second builder lock reappeared; release-requirements.txt is the single pin authority"
