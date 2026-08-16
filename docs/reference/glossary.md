@@ -356,6 +356,51 @@ S2-gated*
   `__torchlens_cache_key__ = ("registered", name, version)`. Slot vocabulary
   `save | halt | until` is closed (S2-owned); unknown slots refuse typed.
 
+**Selection / ResolvedSelection / `__selection__`** — *unstable — no
+deprecation shim owed (do/Selection spellings slate-ratified subject to D7)*
+: `tl.Selection` is the composable selection QUERY — a frozen AST over leaf
+  terms (selector / receptive-field box / gradient-RF / facet / param / unit)
+  and boolean combinators, trace-independent; `selection.resolve(trace)`
+  returns a `tl.ResolvedSelection` — frozen, trace-bound, an ordered tuple of
+  `SiteEntry(site_key, mask, provenance)` rows. TWO-LEVEL DENOTATION:
+  (touched-site family, selected-element set); zero-mask entries are retained
+  first-class; `.empty`/`__bool__` are ELEMENT-level; `bool()` on the QUERY
+  type refuses typed (`selection_bool_ambiguous`). Anything region-shaped
+  implements `__selection__`; `SiteEntry.mask` returns a FRESH materialization
+  (mutation cannot alter the selection). Masks are exact AS SETS; producer
+  inexactness rides the closed `provenance.relation` lattice
+  (`exact | upper_bound | lower_bound | unknown`). `ResolvedSelection` is
+  session-time only, never persisted. Selection kinds `ACT | PARAM | EDGE`
+  are a closed vocabulary; mixed kinds refuse `selection_kind_incompatible`.
+
+**Selection operators `| & - ~` (+ reflected)** — *ratified set (slate 5.4);
+semantics unstable-documented*
+: Same-site operands compose as masks; different-site yields a MULTI-SITE
+  selection; `-` never un-touches sites (`fam(A-B) = fam(A)`); `~` is the
+  touched-site mask complement (never predicate negation and never
+  model-universe). NO `__xor__`: `(a - b) | (b - a)` spells it.
+  `BaseSelector` keeps its shipped composite semantics; `selector - selector`
+  desugars to `and(a, not(b))`; a selector composed with a region producer
+  defers to the Selection algebra.
+
+**tl.units / tl.params / tl.random_selection** — *unstable — no deprecation
+shim owed*
+: Stage-1 producer constructors: `units(site, indices)` (explicit site +
+  index set), `params(name, mask=None)` (named-parameter element region),
+  `random_selection(like=, within=, seed=)` (seeded size-matched control
+  sampled without replacement inside `within`; too-small populations refuse
+  `selection_unresolvable` / `population_too_small`).
+
+**SelectionError / selection refusal codes** — *unstable — no deprecation
+shim owed; S2-gated*
+: One carrier class (`torchlens.selection.SelectionError`, catalogued in the
+  intervention error catalog) for the closed codes
+  `selection_trace_mismatch`, `selection_bool_ambiguous`,
+  `selection_kind_incompatible`, `selection_unresolvable` (closed reason set
+  `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
+  mask_shape_mismatch | facet_write_mask_unavailable | population_too_small`),
+  and `selection_apply_invalid` (stage 2).
+
 **register_predicate(name, \*, replace=False)** — *unstable — no deprecation
 shim owed*
 : Registers a plain predicate callable under a name for later

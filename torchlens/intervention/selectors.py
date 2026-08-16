@@ -56,9 +56,14 @@ class BaseSelector:
         Returns
         -------
         CompositeSelector
-            Intersection selector.
+            Intersection selector. A non-selector operand that implements
+            ``__selection__`` defers to that object's reflected operator, so
+            ``selector & rf_box`` composes as a Selection; junk operands keep
+            their shipped refusals.
         """
 
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
         _check_composition(self, other)
         return CompositeSelector("and", _flatten_same_operator("and", self, other))
 
@@ -73,9 +78,12 @@ class BaseSelector:
         Returns
         -------
         CompositeSelector
-            Union selector.
+            Union selector. A non-selector operand that implements
+            ``__selection__`` defers to that object's reflected operator.
         """
 
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
         from ..ir.selector_eval import contains_followed_by
 
         if contains_followed_by(self) or contains_followed_by(other):
@@ -107,6 +115,57 @@ class BaseSelector:
                 "negated followed_by selectors cannot be evaluated safely."
             )
         return NotSelector(self)
+
+    def __sub__(self, other: SelectorLike) -> CompositeSelector:
+        """Return a selector matching this selector minus ``other`` (DESUGAR).
+
+        ``a - b`` desugars to ``CompositeSelector("and", (a, NotSelector(b)))``
+        — no new selector kind, no spec round-trip change. Selector evaluation
+        is a per-subject characteristic function, so difference of match-sets
+        IS ``a(x) and not b(x)``; this coincides with Selection-level ``-`` on
+        whole-site lifted terms (law-tested).
+
+        Parameters
+        ----------
+        other:
+            Selector (or predicate callable) to subtract. A non-selector
+            operand implementing ``__selection__`` defers to that object's
+            reflected operator.
+
+        Returns
+        -------
+        CompositeSelector
+            Difference selector.
+        """
+
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
+        if isinstance(other, BaseSelector):
+            negated: SelectorLike = ~other  # shipped guards (followed_by refusal) apply
+        elif callable(other):
+            negated = NotSelector(other)
+        else:
+            raise ArgumentTypeError(
+                f"cannot subtract {type(other).__name__} from a selector; pass a "
+                "selector or predicate callable.",
+                code="selector_subtraction_operand_invalid",
+                remedy="subtract a selector, predicate callable, or region producer",
+            )
+        _check_composition(self, negated)
+        return CompositeSelector("and", _flatten_same_operator("and", self, negated))
+
+    def __selection__(self) -> Any:
+        """Lift this selector as a Selection selector-term.
+
+        The lifted term keeps predicate meaning intact: it resolves to
+        whole-site masks over matched sites. Selection-level ``~`` is mask
+        complement — users who mean "all sites not matching s" spell ``~s``
+        BEFORE lifting (``~lift(s) != lift(~s)``, pinned non-law).
+        """
+
+        from ..selection import _selection_from_selector
+
+        return _selection_from_selector(self)
 
     def to_target_spec(self) -> TargetSpec:
         """Convert the selector to a mutable target spec.

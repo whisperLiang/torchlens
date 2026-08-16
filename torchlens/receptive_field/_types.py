@@ -8,6 +8,7 @@ from enum import Enum
 from fractions import Fraction
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
+from ..selection import _SelectionOperand
 from ._errors import ReceptiveFieldError, ReceptiveFieldValidationError
 
 if TYPE_CHECKING:
@@ -371,7 +372,7 @@ class ReceptiveFieldBoxAxis:
 
 
 @dataclass(frozen=True)
-class ReceptiveFieldBox:
+class ReceptiveFieldBox(_SelectionOperand):
     """Concrete per-unit geometric receptive-field answer."""
 
     __match_args__: ClassVar[tuple[str, ...]] = (
@@ -416,6 +417,20 @@ class ReceptiveFieldBox:
             raise ValueError("axes must contain one box axis per input axis.")
         if tuple(axis.input_axis for axis in self.axes) != tuple(range(len(self.input_shape))):
             raise ValueError("box axes must be ordered by consecutive input_axis values.")
+
+    def __selection__(self) -> object:
+        """Lift this hull as an ACT selection term (mask exact AS A SET).
+
+        Pointwise axes without a coordinate fall to the documented full-slice
+        convention, which the lift treats as part of the hull (disclosed).
+        Hull inexactness rides ``provenance.relation`` (``exact`` only when
+        the box is exact with no sparse-possible axis, else ``upper_bound``),
+        never a fuzzy mask.
+        """
+
+        from ..selection import _selection_from_box
+
+        return _selection_from_box(self)
 
     def slices(self, pointwise_coords: Mapping[int, int] | None = None) -> tuple[slice, ...]:
         """Return input-space slices corresponding to this box.
@@ -488,7 +503,7 @@ class ReceptiveFieldBox:
 
 
 @dataclass(frozen=True)
-class GradientReceptiveField:
+class GradientReceptiveField(_SelectionOperand):
     """Empirical receptive-field influence set measured by autograd."""
 
     __match_args__: ClassVar[tuple[str, ...]] = (
@@ -548,6 +563,17 @@ class GradientReceptiveField:
             start < 0 or stop < start for start, stop in self.support_ranges
         ):
             raise ValueError("support_ranges must contain non-negative half-open bounds.")
+
+    def __selection__(self) -> object:
+        """Lift the empirical support mask as an exact-set ACT selection term.
+
+        The mask's own epistemics remain the RF layer's documented claim
+        (relation=``exact`` w.r.t. the empirical mask), unchanged by lifting.
+        """
+
+        from ..selection import _selection_from_gradient
+
+        return _selection_from_gradient(self)
 
     @property
     def source_key(self) -> str:

@@ -35,6 +35,15 @@ Key entry points:
   `docs/reference/structure_only_capabilities.md`); value-dependent branches
   refuse device-neutrally at the user's source line;
   `trace.discharge_against(real_trace)` corroborates/refutes hypotheses.
+- Selection algebra (L6; core spellings slate-ratified subject to D7, rest
+  DOCUMENTED-UNSTABLE): `tl.Selection` (composable query AST) /
+  `selection.resolve(trace)` -> `tl.ResolvedSelection` (frozen, trace-bound,
+  session-only). Operators `| & - ~` + reflected, no `__xor__`; two-level
+  denotation (family + elements, zero-mask entries retained); region
+  producers (BaseSelector, RF box/gradient, FacetSpec, Op, Layer) implement
+  `__selection__`; kinds ACT|PARAM|EDGE closed; refusals ride
+  `SelectionError` (`selection_*` codes). Producers `tl.units`/`tl.params`/
+  `tl.random_selection`.
 - Predicate runtime extension point (DOCUMENTED-UNSTABLE, S4 seam):
   `torchlens.ir.predicate_registry` — `PredicateProtocol` (one positional
   concrete `RecordContext`), `coerce_predicate(value, slot="save"|"halt"|"until")`

@@ -28,6 +28,7 @@ from ..ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
+from ..selection import _SelectionOperand
 from ..utils._callable_safety import FACET_RECIPE_MARKER_ATTR
 
 RecordScope = Literal["op", "module", "any"]
@@ -342,7 +343,7 @@ class TransformPrimitive:
 
 
 @dataclass(frozen=True)
-class FacetSpec:
+class FacetSpec(_SelectionOperand):
     """Portable ABI for one facet's home and transform chain.
 
     Parameters
@@ -580,6 +581,13 @@ class FacetSpec:
             )
         _copy_scatter_value(target, edited_slice, mode=mode)
         return updated
+
+    def __selection__(self) -> object:
+        """Lift this facet's write region as an ACT selection term."""
+
+        from ..selection import _selection_from_facet
+
+        return _selection_from_facet(self)
 
     def write_mask(self) -> torch.Tensor:
         """Return a boolean mask of home positions written by this facet.

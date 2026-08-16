@@ -111,6 +111,7 @@ from ..quantities import (
     as_flops,
     as_macs,
 )
+from ..selection import _SelectionOperand
 from ..utils._torch_compat import tensor_version_or_none
 from ..utils.arg_handling import copy_arg_tree
 from ..utils.display import tensor_stats_summary
@@ -1748,7 +1749,7 @@ if TYPE_CHECKING:
     from .trace import Trace
 
 
-class Op:
+class Op(_SelectionOperand):
     """Metadata for a single tensor operation (one pass of one layer).
 
     Constructed from a dict whose keys must exactly match
@@ -3829,6 +3830,13 @@ class Op:
             object.__delattr__(self, "_facets_cache")
         except AttributeError:
             pass
+
+    def __selection__(self) -> object:
+        """Lift this op's whole output as an ACT selection term (one pass)."""
+
+        from ..selection import _selection_from_op
+
+        return _selection_from_op(self)
 
     @property
     def receptive_field(self) -> "ReceptiveFieldView":

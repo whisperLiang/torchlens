@@ -471,6 +471,7 @@ BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
     "SaveBudgetExceededError": ("RuntimeError",),
     "ScalarEscapeWarning": ("Warning",),
     "SelectorCapabilityError": ("ValueError",),
+    "SelectionError": ("ValueError",),
     "SelectorCompositionError": ("ValueError",),
     "ShapeInferenceError": ("RuntimeError",),
     "SiteAmbiguityError": ("ValueError",),

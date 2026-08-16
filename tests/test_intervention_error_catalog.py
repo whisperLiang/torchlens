@@ -28,6 +28,7 @@ ERROR_NAMES: tuple[str, ...] = (
     "BundleRelationshipError",
     "BaselineUndeterminedError",
     "ReplayPreconditionError",
+    "SelectionError",
     "SiteResolutionError",
     "SiteAmbiguityError",
     "HookSignatureError",
@@ -66,6 +67,7 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "ModelMismatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
     "BundleMemberError": "tests/test_intervention_error_catalog.py::test_bundle_member_error_raised_for_missing_bundle_site",
     "BundleRelationshipError": "tests/test_intervention_phase9.py",
+    "SelectionError": "tests/test_intervention_error_catalog.py::test_selection_error_kind_matrix_refusal",
     "BaselineUndeterminedError": "tests/test_intervention_phase9.py",
     "ReplayPreconditionError": "tests/test_intervention_phase6.py::test_replay_rejects_non_intervention_ready_logs",
     "SiteResolutionError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
@@ -602,3 +604,18 @@ def _manifest_values() -> Iterable[str]:
     """
 
     return CATALOG_EXERCISE_MANIFEST.values()
+
+
+def test_selection_error_kind_matrix_refusal() -> None:
+    """SelectionError carries the closed selection_* codes (ACT x PARAM row).
+
+    The full algebra suite lives in tests/test_selection_algebra.py; this row
+    keeps the catalog manifest's exercise citation inside the intervention
+    test family.
+    """
+
+    act = tl.units("relu_1_2", [(0, 0, 1, 1)])
+    param = tl.params("weight")
+    with pytest.raises(terrors.SelectionError) as excinfo:
+        act & param
+    assert excinfo.value.fields["code"] == "selection_kind_incompatible"

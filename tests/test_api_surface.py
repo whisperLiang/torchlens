@@ -105,6 +105,11 @@ TARGET_ALL = [
     "grad_zero",
     "tap",
     "record_span",
+    "Selection",
+    "ResolvedSelection",
+    "units",
+    "params",
+    "random_selection",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -165,6 +170,9 @@ def test_all_matches_frozen_96_name_surface() -> None:
     top-level entry points; machinery lives in `torchlens.merged`) = 96.
     The grind R39 cache remedy exports `clear_capture_cache` (the agreed
     user-facing half of the capture-cache bounds fix) = 97.
+    The L6 selection algebra (feature megasprint, DOCUMENTED-UNSTABLE pending
+    naming-session ratification) adds `Selection`, `ResolvedSelection`,
+    `units`, `params`, and `random_selection` = 102.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

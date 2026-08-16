@@ -392,6 +392,29 @@ print(tl.compat.report(model, x).to_markdown())
   `device_map='meta'`) still refuse at the entry gate — admission is decision
   point D8, unruled. Human surfaces (summary/profile/explain) carry the
   structure-only hypothesis banner.
+- SELECTION ALGEBRA (L6 stage 1; Selection/ResolvedSelection/resolve/
+  `__selection__`/operators slate-ratified subject to D7, producer
+  constructors + members DOCUMENTED-UNSTABLE): `tl.Selection` is the
+  composable trace-independent query AST; `selection.resolve(trace)` returns
+  the frozen trace-bound `tl.ResolvedSelection` (ordered `SiteEntry(site_key,
+  mask, provenance)` tuple; SESSION-ONLY, never persisted). TWO-LEVEL
+  denotation: (touched-site family, selected-element set) — zero-mask entries
+  stay first-class, `.empty`/`__bool__` are element-level, and `bool()` on
+  the QUERY refuses typed. Operators `| & - ~` + reflected forms, NO
+  `__xor__`; `-` never un-touches, `~` is touched-site mask complement (never
+  predicate negation: `~lift(s) != lift(~s)`). Every region-shaped producer
+  implements `__selection__` (BaseSelector, ReceptiveFieldBox,
+  GradientReceptiveField, FacetSpec, Op, Layer) and carries the operator
+  mixin, so `u1.receptive_field.at(p) | u2.receptive_field.at(q)` IS a
+  Selection; `selector OP selector` keeps shipped CompositeSelector semantics
+  and `selector - selector` desugars to `and(a, not(b))`. Masks are exact AS
+  SETS with producer inexactness on the closed `provenance.relation` lattice
+  (`exact|upper_bound|lower_bound|unknown`; JOIN/FLIP/DIFFERENCE tables are
+  normative). Kinds `ACT|PARAM|EDGE` are closed; mixed kinds refuse
+  `selection_kind_incompatible`; resolution refusals ride
+  `SelectionError` with `selection_unresolvable` + a closed reason set.
+  Producers: `tl.units(site, indices)`, `tl.params(name, mask=None)`,
+  `tl.random_selection(like=, within=, seed=)` (seeded size-matched control).
 - PREDICATE RUNTIME EXTENSION POINT (S4 seam; every spelling
   DOCUMENTED-UNSTABLE pending naming-session ratification):
   `torchlens.ir.predicate_registry` is the ONE documented door through which
