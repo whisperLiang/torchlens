@@ -213,12 +213,6 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
             loaded = tl.load(str(artifact))
         except TorchLensIOError:
             continue
-        except UnicodeDecodeError:
-            # Ledgered escape, found by this sweep's first run (2026-08-15):
-            # the manifest-read wrapper types JSON parse failures but lets a
-            # non-UTF8 byte leak the raw decode error. Relayed to the IO
-            # lane; the strict-xfail pin below flips loudly when it lands.
-            continue
         except Exception as exc:  # noqa: BLE001 - adjudicating the full surface
             escapes.append(f"case {index} offset {offset}: {type(exc).__name__}: {exc}")
         else:
@@ -226,19 +220,14 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
     assert not escapes, f"manifest byte flips escaped the typed surface: {escapes}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=UnicodeDecodeError,
-    reason=(
-        "R73 fuzz find (2026-08-15, relayed to the IO lane): a non-UTF8 byte "
-        "in manifest.json leaks a raw UnicodeDecodeError instead of the typed "
-        "TorchLensIOError manifest-read refusal. When the wrapper fix lands "
-        "this strict xfail flips, and this marker plus the sweep's "
-        "UnicodeDecodeError allowance above must both be removed."
-    ),
-)
 def test_non_utf8_manifest_byte_is_typed_refusal(seed_artifact: Path, tmp_path: Path) -> None:
-    """Pin the ledgered decode-error escape so its fix is loud."""
+    """R73: a non-UTF8 manifest byte refuses typed, never a raw decode error.
+
+    Fail-before: ``_json.load_bounded``/``read_bounded`` decoded the bounded
+    bytes unguarded, so the raw ``UnicodeDecodeError`` leaked through every
+    JSON-boundary handler untyped (this pin was a strict xfail and the sweep
+    above carried a matching allowance until the chokepoint fix landed).
+    """
 
     artifact = _corrupt_copy(seed_artifact, tmp_path)
     corrupted = bytearray((seed_artifact / "manifest.json").read_bytes())
