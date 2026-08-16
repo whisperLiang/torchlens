@@ -169,7 +169,7 @@ def test_every_retained_op_has_prefixed_key() -> None:
 
 
 @pytest.mark.smoke
-def test_p1_uniqueness_per_key_and_call_instance() -> None:
+def test_uniqueness_per_key_and_call_instance() -> None:
     log = tl.trace(_Tied(), torch.randn(2, 8))
     seen: Counter = Counter()
     for label in log.op_labels:
@@ -180,7 +180,7 @@ def test_p1_uniqueness_per_key_and_call_instance() -> None:
 
 
 @pytest.mark.smoke
-def test_p4_degraded_path_key_parity() -> None:
+def test_degraded_path_key_parity() -> None:
     # recurrence_detection=False mints byte-identical key multisets: the key
     # is policy-independent (P4).
     for build in (lambda: (_Tied(), torch.randn(2, 8)), lambda: (_CellLoop(), torch.randn(2, 4))):

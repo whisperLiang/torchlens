@@ -201,7 +201,7 @@ def test_permuted_cardinality_weak_passes_strong_refuses() -> None:
 
 
 @pytest.mark.smoke
-def test_same_line_reorder_residual_r4_stays_disclosed() -> None:
+def test_same_line_reorder_residual_stays_disclosed() -> None:
     left = tl.trace(_SameLineLoop(), torch.randn(2, 4))
     right = tl.trace(_SameLineLoop(), torch.randn(2, 4))
     rows = join_site_profiles(site_profile(left), site_profile(right))
