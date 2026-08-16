@@ -60,3 +60,45 @@ def test_reentrant_trace_error_joins_the_taxonomy_and_keeps_runtime_error() -> N
         tl.trace(_NestedTraceModel(), torch.ones(1, 2))
     with pytest.raises(errors.CaptureError):
         tl.trace(_NestedTraceModel(), torch.ones(1, 2))
+
+
+def test_nested_trace_in_pre_admission_reserved_window_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """grind-r6 b7 R55 (sol HIGH): the pre-admission window is not a hole.
+
+    User code running between the outer capture's reservation claim and
+    ``active_logging`` (model prep, compiled-capture prep, input setup) used
+    to be able to start a nested public ``tl.trace()`` that COMPLETED both
+    captures (sol probe ``OUTER_OK``) -- the same-thread reservation
+    passthrough carried no owner token. The nested call must refuse typed
+    while the outer capture still completes cleanly.
+    """
+
+    import torchlens.capture.trace as capture_trace
+
+    real_prep = capture_trace.prepare_compiled_capture
+    probe: dict[str, object] = {}
+
+    def hostile_prep(model: nn.Module) -> object:
+        """Attempt a nested public capture from inside the reserved window."""
+
+        if "fired" not in probe:
+            probe["fired"] = True
+            try:
+                tl.trace(nn.Linear(2, 2), torch.ones(1, 2))
+                probe["nested"] = "OUTER_OK"
+            except tl.ReentrantTraceError:
+                probe["nested"] = "refused"
+        return real_prep(model)
+
+    monkeypatch.setattr(capture_trace, "prepare_compiled_capture", hostile_prep)
+    outer = tl.trace(nn.ReLU(), torch.ones(1, 2))
+    assert probe.get("nested") == "refused", f"nested capture outcome: {probe.get('nested')}"
+    assert any(op.func_name == "relu" for op in outer.compute_ops)
+
+    # The refused nested entry must not have poisoned admission: a fresh
+    # capture afterwards works.
+    monkeypatch.setattr(capture_trace, "prepare_compiled_capture", real_prep)
+    recovered = tl.trace(nn.ReLU(), torch.ones(1, 2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)

@@ -782,39 +782,67 @@ def _capture_conflict_is_live() -> bool:
     return _capture_reserved_by is not None and _capture_reserved_by != threading.get_ident()
 
 
+_capture_reservation_claim: object | None = None
+"""Opaque claim token minted with the live reservation, or ``None``.
+
+Same-thread re-entry into ``capture_reservation`` is sanctioned ONLY for the
+holder of this token (the recorder hands it to the inner orchestration). An
+unauthenticated same-thread passthrough let a nested public ``tl.trace()``
+issued from user code running inside the outer capture's reserved window
+(model prep, input setup) COMPLETE both captures instead of refusing typed
+(grind-r6 b7 R55, sol probe ``OUTER_OK``).
+"""
+
+
 @contextmanager
-def capture_reservation() -> Iterator[None]:
+def capture_reservation(resume: object | None = None) -> Iterator[object]:
     """Reserve the capture slot BEFORE any capture-global side effect runs.
 
     Entered at the top of a public capture (``tl.trace`` orchestration,
     ``tl.record``'s recorder pass) so a concurrent capture is refused typed
     BEFORE it can sweep the admitted capture's label session or overwrite the
     fastlog ``RecordingState`` (the refused-loser data-quality corruption).
-    Nested same-thread entry is a passthrough: the recorder reserves around
-    ``active_recording_state`` and the inner orchestration re-enters here
-    before ``active_logging`` without releasing the outer claim. A genuinely
-    nested capture (inside a live forward) refuses on the same predicate as
-    ``active_logging``.
+
+    Parameters
+    ----------
+    resume:
+        The claim object yielded by the OUTER live reservation. Same-thread
+        re-entry is sanctioned only when this is the live claim: the recorder
+        reserves around ``active_recording_state`` and hands its claim to the
+        inner orchestration, which re-enters here before ``active_logging``
+        without releasing the outer hold. Any same-thread entry WITHOUT the
+        live claim — a nested public ``tl.trace()`` from user code running
+        inside the reserved window — refuses typed (grind-r6 b7 R55). A
+        genuinely nested capture (inside a live forward) refuses on the same
+        predicate as ``active_logging``.
     """
 
-    global _capture_reserved_by
+    global _capture_reserved_by, _capture_reservation_claim
     ident = threading.get_ident()
     with _capture_admission_lock:
         if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
             raise _reentrant_refusal()
         if _capture_reserved_by is None:
+            claim: object = object()
             _capture_reserved_by = ident
+            _capture_reservation_claim = claim
             owns_reservation = True
-        elif _capture_reserved_by == ident:
+        elif (
+            _capture_reserved_by == ident
+            and resume is not None
+            and resume is _capture_reservation_claim
+        ):
+            claim = resume
             owns_reservation = False
         else:
             raise _reentrant_refusal()
     try:
-        yield
+        yield claim
     finally:
         if owns_reservation:
             with _capture_admission_lock:
                 _capture_reserved_by = None
+                _capture_reservation_claim = None
 
 
 @contextmanager

@@ -39,8 +39,11 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_capture_replay_templates"),
         # Pre-admission reservation: claimed before any capture-global side
         # effect, released in run_and_log's outermost finally (refused-loser
-        # data-quality fix, hunt-b2 R54).
+        # data-quality fix, hunt-b2 R54). The claim token authenticates
+        # same-thread re-entry (grind-r6 b7 R55) and shares the reservation's
+        # exact lifetime.
         ("torchlens/_state.py", "_capture_reserved_by"),
+        ("torchlens/_state.py", "_capture_reservation_claim"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
         ("torchlens/_state.py", "_func_call_id_iter"),
         ("torchlens/_state.py", "_function_call_counts"),
@@ -1547,8 +1550,9 @@ def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> 
 
     A capture failing anywhere between the reservation claim and teardown must
     release the slot, or every later capture refuses forever. Same-thread
-    nesting is a passthrough (the recorder reserves around the inner
-    orchestration's own reservation); a foreign thread's claim refuses typed.
+    nesting is sanctioned ONLY by presenting the live claim (the recorder
+    hands its claim to the inner orchestration; grind-r6 b7 R55 closed the
+    unauthenticated passthrough); a foreign thread's claim refuses typed.
     """
 
     with pytest.raises(RuntimeError, match="injected mid-capture failure"):
@@ -1557,11 +1561,21 @@ def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> 
     recovered = tl.trace(nn.ReLU(), torch.ones(2))
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
 
-    with _state.capture_reservation():
+    with _state.capture_reservation() as claim:
         assert _state._capture_reserved_by == threading.get_ident()
-        with _state.capture_reservation():  # nested same-thread passthrough
+        with _state.capture_reservation(resume=claim):  # authenticated re-entry
             assert _state._capture_reserved_by == threading.get_ident()
         # The inner exit must not release the outer claim.
+        assert _state._capture_reserved_by == threading.get_ident()
+        # Same-thread entry WITHOUT the live claim is the R55 nested-capture
+        # hole and must refuse typed, not pass through.
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation():
+                pass  # pragma: no cover - refused above
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation(resume=object()):
+                pass  # pragma: no cover - refused above
+        # The refused entries must not have released or reclaimed the slot.
         assert _state._capture_reserved_by == threading.get_ident()
 
         foreign_error: list[BaseException] = []
