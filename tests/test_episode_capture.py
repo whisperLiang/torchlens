@@ -278,6 +278,23 @@ def test_save_none_refuses_value_mode_episode():
     assert excinfo.value.fields["code"] == "episode_declaration_invalid"
 
 
+def test_structure_only_episode_refuses_typed():
+    """S2 combination table: episode x structure_only=True is TYPED REFUSE
+    this sprint (structure-only episodes have no value semantics to fold).
+    The entry refusal shares L7a's capability-table code so the combination
+    has ONE vocabulary across both chokepoints."""
+
+    model = TinyLM()
+    with pytest.raises(EpisodeDeclarationError) as excinfo:
+        tl.trace(
+            GreedyRunner(model, 2),
+            _prompt(),
+            structure_only=True,
+            episode=EpisodeSpec(stepped_module=model),
+        )
+    assert excinfo.value.fields["code"] == "structure_only_episode_unsupported"
+
+
 def test_chunked_episode_refuses():
     model = TinyLM()
     with pytest.raises(EpisodeDeclarationError) as excinfo:

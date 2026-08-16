@@ -3177,12 +3177,17 @@ def _trace_torch_model(
             )
         if getattr(capture_options, "structure_only", False):
             # S2 marker-combination table: episode x structure_only is TYPED
-            # REFUSE this sprint (no value semantics to fold).
+            # REFUSE this sprint (no value semantics to fold). The refusal
+            # code is L7a's capability-table constant — ONE vocabulary for
+            # the combination across the entry check and the post-capture
+            # capability gate (capture/structure_only.py owns the row).
+            from .capture.structure_only import STRUCTURE_ONLY_EPISODE_UNSUPPORTED
+
             raise EpisodeDeclarationError(
                 "structure-only episodes are out of scope this sprint: "
                 "capture_kind=episode with the structure-only marker refuses "
                 "typed per the ratified marker-combination table.",
-                code="episode_declaration_invalid",
+                code=STRUCTURE_ONLY_EPISODE_UNSUPPORTED,
             )
         if capture_options.layers_to_save in (None, "none", "None", "NONE") or (
             isinstance(capture_options.layers_to_save, list) and not capture_options.layers_to_save
