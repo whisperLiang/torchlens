@@ -60,7 +60,14 @@ _DOC_ROW_PATTERN = re.compile(r"^\| `([a-z0-9_]+)` \|")
 # assume (multi-rank process groups, CUDA devices, wall-clock nondeterminism).
 # Every entry carries the reason; an entry whose reason stops holding must be
 # moved to a provocation test, never silently kept.
-ENV_GATED_ALLOWLIST: dict[str, str] = {}
+ENV_GATED_ALLOWLIST: dict[str, str] = {
+    "tlspec_format_markers_incoherent": (
+        "TOCTOU defense-in-depth at the load dispatch (bundle.py): the r7 R73 root fix "
+        "moved the spec.json-existence check INTO detect_tlspec_format, so this raise "
+        "only fires if spec.json vanishes between detection and dispatch -- a race no "
+        "deterministic test can provoke without fs mocking; kept as a belt."
+    ),
+}
 
 # Historical provocation debt, frozen at FW2-ERRORS lane time. SHRINK-ONLY:
 # when a provoking test lands for a code, DELETE its row here in the same
