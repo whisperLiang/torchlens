@@ -263,6 +263,7 @@ def save(
     include_activations: bool = False,
     include_source: bool = True,
     include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
     strict: bool = True,
     overwrite: bool = False,
 ) -> None:
@@ -318,6 +319,21 @@ def save(
         the channel in ``manifest.json`` under ``custom_attributes_disclosure``
         (module count + top-level key names). Sparse runnable cores always drop
         the field regardless of this flag.
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted (default
+        ``True``, the historical behavior). When a forward pass overwrites a
+        registered buffer (BatchNorm running statistics, step counters,
+        caches), TorchLens records the value the buffer held BEFORE the
+        forward in ``Trace._buffer_initial_values``, and every save level —
+        audit included — shipped those tensors verbatim with no opt-out.
+        Buffer values are training-data-derived state, so set ``False`` to
+        drop the whole channel from the artifact; values are never rewritten
+        or partially scrubbed. Every save discloses the channel in
+        ``manifest.json`` under ``buffer_values_disclosure`` (buffer count +
+        buffer names). Sparse runnable cores always drop the field regardless
+        of this flag (used non-persistent buffers ship separately there as the
+        REQUIRED, independently disclosed ``runnable_nonpersistent_buffer_v1``
+        family).
     strict:
         Whether unsupported tensors should abort the save instead of being skipped.
     overwrite:
@@ -540,6 +556,7 @@ def save(
             include_rng_states=include_rng_states,
             include_source=include_source,
             include_custom_attributes=include_custom_attributes,
+            include_buffer_values=include_buffer_values,
             sparse_runnable=sparse_run_descriptor is not None,
         )
         if sparse_run_descriptor is not None:
@@ -634,8 +651,15 @@ def save(
                     included=include_custom_attributes and sparse_run_descriptor is None,
                 )
             ),
+            buffer_values_disclosure=(
+                buffer_values_disclosure := _buffer_values_disclosure(
+                    trace,
+                    included=include_buffer_values and sparse_run_descriptor is None,
+                )
+            ),
         )
         _warn_custom_attribute_embedding(custom_attributes_disclosure)
+        _warn_buffer_value_embedding(buffer_values_disclosure)
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
             trace=trace,
@@ -2729,6 +2753,7 @@ def _scrub_trace_for_bundle(
     include_rng_states: bool,
     include_source: bool = True,
     include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
     sparse_runnable: bool = False,
 ) -> tuple[dict[str, Any], list[BlobSpec], list[dict[str, str]]]:
     """Scrub a model log while excluding transient load-only private attrs.
@@ -2750,6 +2775,8 @@ def _scrub_trace_for_bundle(
         source paths are relativized to basenames regardless.
     include_custom_attributes:
         Whether harvested public module instance attributes are persisted.
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted.
     sparse_runnable:
         Whether all sparse-core tensor payload families must be dropped.
 
@@ -2773,6 +2800,7 @@ def _scrub_trace_for_bundle(
             include_rng_states=include_rng_states,
             include_source=include_source,
             include_custom_attributes=include_custom_attributes,
+            include_buffer_values=include_buffer_values,
             sparse_runnable=sparse_runnable,
             backend_name=str(getattr(trace, "backend", "torch")),
             payload_materialization=get_backend_spec(
@@ -3347,6 +3375,71 @@ def _custom_attributes_disclosure(trace: Trace, *, included: bool) -> dict[str, 
     }
 
 
+def _buffer_values_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:
+    """Summarize the captured pre-forward buffer-value channel for the manifest.
+
+    Save-time disclosure mirroring ``_custom_attributes_disclosure`` (R62
+    buffer extension): every save level embedded the pre-forward value of each
+    forward-overwritten registered buffer (``Trace._buffer_initial_values``)
+    verbatim, with no flag, no warning, and no manifest row — training-data-
+    derived state (running statistics, counters) shipped invisibly even at
+    ``level="audit"``. The manifest names the channel: whether it shipped, how
+    many buffers carry captured values, and the (bounded, sorted) buffer
+    names. Names only; values are never inspected or rewritten here.
+
+    Parameters
+    ----------
+    trace:
+        Source model log.
+    included:
+        Whether the save actually persisted the channel
+        (``include_buffer_values`` and not a sparse runnable core).
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready disclosure mapping.
+    """
+
+    captured = getattr(trace, "_buffer_initial_values", {}) or {}
+    buffer_names = sorted(str(name) for name in captured)
+    truncated = len(buffer_names) > _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP
+    return {
+        "included": bool(included),
+        "buffer_count": len(buffer_names),
+        "buffer_names": buffer_names[:_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP],
+        "buffer_names_truncated": truncated,
+    }
+
+
+def _warn_buffer_value_embedding(disclosure: Mapping[str, Any]) -> None:
+    """Tell the SAVER that pre-forward buffer values ship in the artifact.
+
+    Same rationale as ``_warn_custom_attribute_embedding``: the manifest
+    disclosure lands inside the file being handed out, so the saver is the one
+    reader guaranteed not to see it. Fires only when the forward actually
+    overwrote a registered buffer (the common eval-mode capture has an empty
+    channel and stays silent).
+    """
+
+    if not disclosure.get("included"):
+        return
+    buffer_names = list(disclosure.get("buffer_names", ()))
+    if not buffer_names:
+        return
+    preview = ", ".join(buffer_names[:_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW])
+    if len(buffer_names) > _CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW:
+        preview += ", ..."
+    warnings.warn(
+        f"This save embeds the pre-forward value(s) of {len(buffer_names)} "
+        f"forward-overwritten buffer(s) verbatim in the artifact ({preview}). "
+        "Buffer values are training-data-derived state; pass "
+        "include_buffer_values=False to withhold them.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
+    )
+
+
 def _build_manifest(
     *,
     trace: Trace,
@@ -3354,6 +3447,7 @@ def _build_manifest(
     unsupported_tensors: list[dict[str, str]],
     include_source: bool = True,
     custom_attributes_disclosure: dict[str, Any] | None = None,
+    buffer_values_disclosure: dict[str, Any] | None = None,
 ) -> Manifest:
     """Create a manifest instance for a finished bundle save.
 
@@ -3370,6 +3464,8 @@ def _build_manifest(
         ``include_source=False`` also drops the cwd repo's HEAD commit (B8-19).
     custom_attributes_disclosure:
         Save-time disclosure of the harvested module-attribute channel.
+    buffer_values_disclosure:
+        Save-time disclosure of the captured pre-forward buffer-value channel.
 
     Returns
     -------
@@ -3404,6 +3500,7 @@ def _build_manifest(
         unsupported_tensors=unsupported_tensors,
         provenance=_collect_provenance(trace, include_source=include_source),
         custom_attributes_disclosure=custom_attributes_disclosure,
+        buffer_values_disclosure=buffer_values_disclosure,
     )
 
 

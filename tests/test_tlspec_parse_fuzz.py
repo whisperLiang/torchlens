@@ -49,6 +49,7 @@ _OPTIONAL_KEYS = frozenset(
         "unsupported_tensors",
         "provenance",
         "custom_attributes_disclosure",
+        "buffer_values_disclosure",
         "kind",
     }
 )

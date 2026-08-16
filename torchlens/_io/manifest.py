@@ -476,6 +476,10 @@ class Manifest:
         Optional save-time disclosure of the harvested module-attribute channel
         (``included`` flag, ``module_count``, bounded ``top_level_keys``). Older
         manifests omit it.
+    buffer_values_disclosure:
+        Optional save-time disclosure of the captured pre-forward buffer-value
+        channel (``included`` flag, ``buffer_count``, bounded ``buffer_names``).
+        Older manifests omit it.
     """
 
     tlspec_version: int
@@ -493,6 +497,7 @@ class Manifest:
     unsupported_tensors: list[dict[str, str]]
     provenance: Provenance | None = None
     custom_attributes_disclosure: dict[str, Any] | None = None
+    buffer_values_disclosure: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Manifest:
@@ -623,6 +628,28 @@ class Manifest:
                     "Manifest custom_attributes_disclosure.top_level_keys must be a "
                     "list of strings."
                 )
+        raw_buffer_disclosure = data.get("buffer_values_disclosure")
+        if raw_buffer_disclosure is not None:
+            if not isinstance(raw_buffer_disclosure, dict):
+                raise _schema_refuse(
+                    "Manifest field 'buffer_values_disclosure' must be an object when present."
+                )
+            if not isinstance(raw_buffer_disclosure.get("included"), bool):
+                raise _schema_refuse(
+                    "Manifest buffer_values_disclosure.included must be a boolean."
+                )
+            raw_buffer_count = raw_buffer_disclosure.get("buffer_count")
+            if not isinstance(raw_buffer_count, int) or raw_buffer_count < 0:
+                raise _schema_refuse(
+                    "Manifest buffer_values_disclosure.buffer_count must be a non-negative integer."
+                )
+            raw_buffer_names = raw_buffer_disclosure.get("buffer_names")
+            if not isinstance(raw_buffer_names, list) or not all(
+                isinstance(name, str) for name in raw_buffer_names
+            ):
+                raise _schema_refuse(
+                    "Manifest buffer_values_disclosure.buffer_names must be a list of strings."
+                )
         manifest = cls(
             tlspec_version=data["tlspec_version"],
             torchlens_version=data["torchlens_version"],
@@ -639,6 +666,7 @@ class Manifest:
             unsupported_tensors=unsupported_tensors,
             provenance=provenance,
             custom_attributes_disclosure=raw_disclosure,
+            buffer_values_disclosure=raw_buffer_disclosure,
         )
         manifest._validate_counts()
         return manifest
@@ -756,6 +784,8 @@ class Manifest:
             data.pop("provenance")
         if self.custom_attributes_disclosure is None:
             data.pop("custom_attributes_disclosure")
+        if self.buffer_values_disclosure is None:
+            data.pop("buffer_values_disclosure")
         return data
 
     def _validate_counts(self) -> None:
