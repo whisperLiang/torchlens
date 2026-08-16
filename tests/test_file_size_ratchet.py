@@ -103,7 +103,12 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
     "torchlens/visualization/_render_edges.py": 2350,
-    "torchlens/options.py": 2400,
+    # Raised 2400 -> 2425 at the L5 channel-core merge (color_by + tri-state
+    # show_legend): options.py is the ONE serialized shared option surface
+    # every feature lane's grouped options must land on, so reviewed
+    # per-merge raises here are the ratchet working as intended (growth
+    # noticed, reason stated), not silent god-file regrowth.
+    "torchlens/options.py": 2425,
     "torchlens/intervention/save.py": 2350,
     "torchlens/_io/scrub.py": 2400,
     "torchlens/debug/_infer_input_shape.py": 2250,

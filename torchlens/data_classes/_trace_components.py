@@ -469,6 +469,10 @@ TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
     "_last_sibling_ordering_decision": (
         "viz: last sibling-ordering decision for diagnostics (scrub-declared runtime-only)"
     ),
+    "_last_encoding_state": (
+        "viz: last draw's encoding-channel state (L5 color_by) for diagnostics "
+        "(scrub-declared runtime-only)"
+    ),
     # --- __dict__-spelled transients surfaced by the r6 R45 gate widening --
     # Every row below is popped/consumed within its own window; none can
     # reach tl.save on the exhaustive path (the counter that COULD --

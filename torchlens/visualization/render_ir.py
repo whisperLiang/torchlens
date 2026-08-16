@@ -300,6 +300,14 @@ def build_render_ir(
         universe = build_node_universe(
             build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
         )
+    encoding = getattr(resolved_context, "encoding", None)
+    if encoding is not None:
+        # PHASE A of the encoding channel (L5): a data prepass over the
+        # already-chosen visible-node universe, before any per-node spec
+        # resolution -- collect values once, validate, compute the domain.
+        from ._encoding import populate_encoding_state
+
+        populate_encoding_state(encoding, trace, universe)
     from ._render_nodes import _atomic_module_sibling_counts
 
     sibling_counts = _atomic_module_sibling_counts(trace)
@@ -850,6 +858,7 @@ def _resolve_node_decision(
             context.show_input_transform_summary,
             resolved_specs,
             sibling_counts,
+            encoding=getattr(context, "encoding", None),
         )
     owned = tuple(
         (owner, dict(args))

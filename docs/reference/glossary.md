@@ -190,6 +190,29 @@ alignment is evidence, not semantic equivalence.
   `op.receptive_field` and `op.projective_field` pair with Trace-level
   `Trace.receptive_fields()` and `Trace.projective_fields()` tables.
 
+**Encoding channel** *(unstable — no deprecation shim owed)*
+: A declarative value source (record field name, scalar builtin, or callable `node -> value`)
+  mapped to a visual channel on `draw()`. v1 ships the color channel; size and rank channels
+  follow. Channels are presentation-only: they never change the Trace or the collapse plan, and
+  they require the Graphviz dot layout (`layout="auto"` forces dot when a channel is active;
+  explicit `layout="rank"` refuses with `encoding_requires_dot_layout`).
+
+**color_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(color_by=...)` fills eligible operation nodes from a colorblind-safe sequential ramp,
+  normalized linear min-max over the visible nodes (the legend states the transform). Missing,
+  non-finite, or rolled-ambiguous values leave nodes unencoded with a legend note. On rolled
+  multi-pass layers, field sources resolve through a name-keyed rolled-aggregate allowlist:
+  per-pass-varying and first-pass-only sources are never painted as if uniform, exact cross-pass
+  totals encode with a mandatory aggregation legend line, and unclassified sources refuse
+  (`encoding_source_invalid`). Wrong-typed values refuse (`encoding_value_invalid`); a raising
+  callable refuses with the original exception chained (`encoding_callable_error`).
+
+**show_legend tri-state**
+: `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
+  then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
+  active), and `False` (no legend, honored even with channels active — the encoding is then
+  undisclosed). The `None` value is *(unstable — no deprecation shim owed)* pending ratification.
+
 ## Backend-neutral identity
 
 **Backend**
@@ -386,3 +409,16 @@ S2-gated*
   `structure_only_{save,runnable,replay,validation,backward,episode}_unsupported`,
   `structure_only_refuted_hypothesis`, `structure_only_discharge_precondition`,
   `structure_only_type_invalid`.
+
+**color_by (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: The v1 encoding-channel value source on `Trace.draw` (L5 channel core). See
+  the "color_by" entry above for semantics.
+
+**show_legend=None AUTO value** — *unstable — no deprecation shim owed*
+: The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
+  an encoding channel is active, then a channel-only disclosure legend.
+  `True`/`False` keep their stable historical meanings.
+
+**Encoding refusal codes** — *unstable — no deprecation shim owed*
+: `encoding_source_invalid`, `encoding_value_invalid`,
+  `encoding_callable_error`, `encoding_requires_dot_layout`.

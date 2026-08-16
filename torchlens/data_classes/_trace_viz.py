@@ -127,7 +127,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         code_panel: "CodePanelOption" = False,
         node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None = None,
         node_label_fields: list[str] | None = None,
-        show_legend: bool = False,
+        show_legend: bool | None = None,
         font_size: int | None = None,
         dpi: int | None = None,
         for_paper: bool = False,
@@ -137,6 +137,8 @@ class TraceVisualizationMixin(_TraceMixinBase):
         container_max_inline: int = 12,
         show_input_transform_summary: bool = False,
         show_orphans: bool = False,  # Invariants support flipping this; owner visual review pending.
+        *,
+        color_by: str | Callable[[Any], Any] | None = None,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -172,6 +174,27 @@ class TraceVisualizationMixin(_TraceMixinBase):
             ``"auto"``/``"max"``. ``True`` folds every eligible repeated run,
             including standalone folding with ``collapse="none"``. ``False``
             disables run folding.
+        show_legend:
+            Tri-state legend visibility. ``None`` (default) is AUTO: no
+            legend unless an encoding channel is active, in which case a
+            channel-only disclosure legend is emitted. ``True`` renders the
+            full theme legend (plus channel rows when active); ``False``
+            disables the legend even with channels active — a deliberate
+            act that leaves the encoding undisclosed.
+        color_by:
+            UNSTABLE (keyword-only; no deprecation shim owed). Encoding
+            channel value source: a Layer/Op field name (``"flops_forward"``),
+            a scalar builtin (``"time"``, ``"flops"``, ``"bytes"``,
+            ``"magnitude"``, ``"grad_norm"``), or a callable ``node ->
+            value``. Encoded nodes are filled from a colorblind-safe
+            sequential ramp normalized linear min-max over visible nodes;
+            missing/non-finite values leave nodes unencoded (disclosed in
+            the legend). Requires the Graphviz dot layout: under
+            ``layout="auto"`` an active channel forces dot; explicit
+            ``layout="rank"`` refuses. On rolled multi-pass layers, field
+            sources resolve through the rolled-aggregate allowlist —
+            per-pass-varying and first-pass-only sources stay unencoded with
+            a legend note rather than painting an unprovable uniform value.
 
         Returns
         -------
@@ -253,6 +276,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             container_max_inline=container_max_inline,
             show_input_transform_summary=show_input_transform_summary,
             show_orphans=show_orphans,
+            color_by=color_by,
         )
 
     def add_node_overlay(

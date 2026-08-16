@@ -235,6 +235,24 @@ print(tl.compat.report(model, x).to_markdown())
   stale-label sidecar FAILS validation rather than silently passing.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
+- `Trace.draw(color_by=...)` (UNSTABLE spelling, keyword-only, no deprecation shim owed until
+  the naming session ratifies it) is the v1 encoding channel: a record field name, scalar
+  builtin (`time`/`flops`/`bytes`/`magnitude`/`grad_norm`), or callable `node -> value` fills
+  eligible op nodes from a colorblind-safe sequential ramp (linear min-max, legend-disclosed).
+  Channels are dot-layout-only (AUTO forces dot with a notice; explicit `layout="rank"` refuses
+  `encoding_requires_dot_layout`) and presentation-only (collapse plan and Trace untouched).
+  On rolled multi-pass layers, field sources resolve through the name-keyed rolled-aggregate
+  allowlist in `torchlens/visualization/_encoding.py`: marker-varying and mirrored
+  first-pass-only numerics (`raw_index`, `step_index`, `ordinal_index`, `grad_fn_object_id`,
+  `buffer_pass`, `transformed_gradient_memory`, `conditional_depth`) stay UNENCODED with a
+  legend note — an encoding must never imply uniformity it cannot prove (tripwire class);
+  exact cross-pass totals (`total_*`, the autograd trio) encode with a mandatory aggregation
+  legend line; unclassified sources refuse `encoding_source_invalid`. `show_legend` is now
+  tri-state: `None` (default, AUTO) draws a channel-only disclosure legend iff a channel is
+  active; `True`/`False` keep their historical meanings, and explicit `False` is honored even
+  with channels active. Typed refusals: `encoding_source_invalid`, `encoding_value_invalid`
+  (bools and non-scalar tensors refuse — a bool is not a magnitude), `encoding_callable_error`
+  (chains the user exception), `encoding_requires_dot_layout`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose

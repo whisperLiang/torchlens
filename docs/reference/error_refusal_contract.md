@@ -102,6 +102,10 @@ add names to the top-level `torchlens` namespace:
 | `diagnostic_severity_invalid` | Diagnostic severity is outside the closed vocabulary | Choose a documented severity |
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
+| `encoding_callable_error` | An encoding-channel user callable (`color_by=fn`) raised while resolving a node's value; the original exception is chained. UNSTABLE code (pre-ratification) | Fix the callable; read `Layer.ops` for per-pass truth instead of per-pass attributes on rolled aggregates |
+| `encoding_requires_dot_layout` | Explicit `layout="rank"` with an active encoding channel (`color_by`); v1 channels are dot-layout-only. UNSTABLE code (pre-ratification) | Pass `layout="dot"` or `layout="auto"`, or drop the channel |
+| `encoding_source_invalid` | An encoding-channel source names no known record field or scalar builtin, or (on a rolled multi-pass node) a field with no declared rolled-aggregate semantics row. UNSTABLE code (pre-ratification) | Pass a Layer/Op field name, a scalar builtin, or a callable; unroll the graph for per-pass sources |
+| `encoding_value_invalid` | An encoding-channel source produced a value the channel cannot encode (bool, non-scalar tensor, or other non-numeric). UNSTABLE code (pre-ratification) | Encode a numeric source, or convert the value inside a callable |
 | `env_flag_invalid` | A TorchLens boolean environment variable is set to an unrecognized value | Use `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, or unset the variable |
 | `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |

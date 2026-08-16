@@ -836,46 +836,13 @@ def _delta_color(value: float, max_delta: float) -> str:
 def _interpolate(start: str, end: str, fraction: float) -> str:
     """Linearly interpolate between two hex colors.
 
-    Parameters
-    ----------
-    start:
-        Start color.
-    end:
-        End color.
-    fraction:
-        Interpolation fraction in ``[0, 1]``.
-
-    Returns
-    -------
-    str
-        Interpolated hex color.
+    Thin alias of the ONE colormap interpolation home
+    (:func:`torchlens.visualization._encoding.interpolate_hex`).
     """
 
-    start_rgb = _hex_to_rgb(start)
-    end_rgb = _hex_to_rgb(end)
-    values = [
-        round(start_value + (end_value - start_value) * fraction)
-        for start_value, end_value in zip(start_rgb, end_rgb)
-    ]
-    return "#" + "".join(f"{value:02X}" for value in values)
+    from ._encoding import interpolate_hex
 
-
-def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-    """Convert a ``#RRGGBB`` color to RGB integers.
-
-    Parameters
-    ----------
-    value:
-        Hex color.
-
-    Returns
-    -------
-    tuple[int, int, int]
-        RGB values.
-    """
-
-    raw = value.lstrip("#")
-    return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    return interpolate_hex(start, end, fraction)
 
 
 def _add_svg_accessibility(path: str, aria_label: str) -> None:
