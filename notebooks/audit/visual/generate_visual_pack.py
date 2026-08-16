@@ -1722,7 +1722,7 @@ SECTIONS: list[Section] = [
                 title="node_label_fields: choosing the label rows",
                 caption=(
                     "node_label_fields replaces the default label rows with an explicit list. Supported "
-                    "fields: label/name, type/op, shape, memory/bytes, module, params, pass, flops, time.\n"
+                    "fields: label/name, type/op, shape, shape_summary (rolled across-pass summary, when set), memory/bytes, module, params, pass, flops, time.\n"
                     "CHECK: rows appear in the requested order and nothing else."
                 ),
                 panels=[

@@ -10,6 +10,10 @@ from ._render_common import *
 from ._render_edges import *
 from ._render_leaf import *
 
+# Home moved to node_spec (S5 territory) at the L5 wave-1 merge to keep this
+# file under its ratchet ceiling; re-exported here for existing importers.
+from .node_spec import _annotation_image_path_for_node
+
 _TOOLTIP_ADDRESS_PATTERN = _re.compile(r"0x[0-9a-fA-F]+")
 
 
@@ -1866,42 +1870,6 @@ def _apply_node_spec_fn(
     return mode_spec if result is None else result
 
 
-def _annotation_image_path_for_node(trace: "Trace", node: GraphNode) -> str | None:
-    """Return a user annotation image path for a rendered node.
-
-    Parameters
-    ----------
-    trace:
-        Owning Trace.
-    node:
-        Rendered Op or Layer.
-
-    Returns
-    -------
-    str | None
-        Image path stored in ``annotations["user"]["image"]``, if present.
-    """
-
-    if isinstance(node, BoundaryNode):
-        return None
-    candidates: list[Any] = [node]
-    try:
-        candidates.append(_layer_log_for_node(trace, node))
-    except ValueError:
-        pass
-    for candidate in candidates:
-        annotations = getattr(candidate, "annotations", None)
-        if not isinstance(annotations, dict):
-            continue
-        user_annotations = annotations.get("user")
-        if not isinstance(user_annotations, dict):
-            continue
-        image = user_annotations.get("image")
-        if isinstance(image, str) and image:
-            return image
-    return None
-
-
 def _layer_log_for_node(trace: "Trace", node: GraphNode) -> "Layer":
     """Return the aggregate Layer for ``node``.
 
@@ -1950,9 +1918,8 @@ def compute_default_node_lines(
     node_overlay:
         Optional overlay to append as an additional label row.
     suppressed_arg_keys:
-        Constructor-arg keys the checked-suppression prepass proved
-        redundant (default empty: every arg visible — the detached-record
-        degrade rule).
+        Checked-suppression keys (default empty: every arg visible — the
+        detached-record degrade rule).
 
     Returns
     -------
@@ -2010,6 +1977,11 @@ def compute_default_node_lines(
     if layer_log.is_terminal_bool:
         lines.append(str(layer_log.bool_value).upper())
     lines.append(title)
+    # L1's across-pass shape summary (rolled multi-pass Layers only; plain
+    # data, escaped like every row by the S5 choke point).
+    shape_summary = getattr(layer_log, "shape_summary", None)
+    if isinstance(shape_summary, str) and shape_summary:
+        lines.append(shape_summary)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
 
     module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
@@ -2067,6 +2039,12 @@ def _compute_selected_node_lines(
             rows.append(str(getattr(layer_log, "func_name", None) or layer_log.layer_type))
         elif field_name == "shape":
             rows.append(format_shape(layer_log.shape))
+        elif field_name == "shape_summary":
+            # L1's across-pass summary: row only when the field is set
+            # (same skip-when-absent semantics as "params").
+            summary = getattr(layer_log, "shape_summary", None)
+            if isinstance(summary, str) and summary:
+                rows.append(summary)
         elif field_name in {"memory", "bytes"}:
             rows.append(str(getattr(layer_log, "activation_memory", "")))
         elif field_name == "module":

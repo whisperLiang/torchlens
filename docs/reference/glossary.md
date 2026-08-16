@@ -682,6 +682,12 @@ shim owed*
 : Opt-out for the default-on checked suppression of redundant constructor-arg
   label rows (slate 8.7). See the "show_redundant_args" entry above.
 
+**"shape_summary" node_label_fields token** — *unstable — no deprecation shim owed*
+: Selector token rendering `Layer.shape_summary` (the L1 across-pass shape
+  summary) as a label row; skipped when the field is unset. The default label
+  renders the summary automatically on rolled varying multi-pass nodes,
+  directly after the title row.
+
 **show_legend=None AUTO value** — *unstable — no deprecation shim owed*
 : The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
   an encoding channel is active, then a channel-only disclosure legend.

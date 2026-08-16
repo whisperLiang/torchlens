@@ -312,7 +312,7 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
         deprecated_in="unrecorded",
         sites=(
             "torchlens/options.py::_validate_node_style",
-            "torchlens/visualization/_render_dot.py::_validate_draw_options",
+            "torchlens/visualization/_draw_validation.py::_validate_draw_options",
         ),
         members=("node_style='vision'", "node_style='attention'"),
         note=(

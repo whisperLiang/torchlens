@@ -107,6 +107,41 @@ class NodeSpec:
         return dataclass_replace(self, **kwargs)
 
 
+def _annotation_image_path_for_node(trace: Trace, node: Any) -> str | None:
+    """Return a user annotation image path for a rendered node.
+
+    One of the three record-derived image mechanisms in the closed 2.4(i)
+    image-origin predicate (``_encoding.is_record_derived_image_node``).
+    Moved here from ``_render_nodes`` (S5 territory; ratchet offload).
+
+    Returns
+    -------
+    str | None
+        Image path stored in ``annotations["user"]["image"]``, if present.
+    """
+
+    from ._render_nodes import BoundaryNode, _layer_log_for_node
+
+    if isinstance(node, BoundaryNode):
+        return None
+    candidates: list[Any] = [node]
+    try:
+        candidates.append(_layer_log_for_node(trace, node))
+    except ValueError:
+        pass
+    for candidate in candidates:
+        annotations = getattr(candidate, "annotations", None)
+        if not isinstance(annotations, dict):
+            continue
+        user_annotations = annotations.get("user")
+        if not isinstance(user_annotations, dict):
+            continue
+        image = user_annotations.get("image")
+        if isinstance(image, str) and image:
+            return image
+    return None
+
+
 # S5 contract (C4): the three node-callback aliases have ONE declaration home
 # (this module); ``_render_common`` re-exports them for internal consumers.
 NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
