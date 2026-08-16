@@ -132,7 +132,12 @@ def test_aggregate_unmatched_selector_raises_key_error() -> None:
     """A selector that matches no saved out fails with a clear KeyError."""
 
     model = nn.Linear(2, 1)
-    with pytest.raises(KeyError, match="no_such_layer"):
+    # The capture layer discloses the zero-match layers_to_save request with a
+    # UserWarning (cdcf7d89) before aggregate's lookup raises the KeyError.
+    with (
+        pytest.raises(KeyError, match="no_such_layer"),
+        pytest.warns(UserWarning, match="matched zero layers"),
+    ):
         tl.aggregate(model, [torch.ones(1, 2)], {"no_such_layer": tl.stats.Mean()})
 
 

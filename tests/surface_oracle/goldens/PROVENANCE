@@ -19,3 +19,51 @@ reason: backfill for the reasonless 2026-08-14T17:51 record above (written
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 recorded: 2026-08-15 (backfill entry)
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:12.949636+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:12.970699+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:17.698149+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:17.715047+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:17.732771+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: fw6settle: a51e9b65 (R57 RNG neutrality) moved random_seed=None auto-seed picks to a private OS-entropy stream, ending the incidental reproducibility the worker got from seeding global random; stages now pin random_seed=_SEED explicitly, changing trace.random_seed and the barcode stream (e84cad17/6c47dc32 private barcode RNG)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 930ed92e62004f11c69428a2603c79eb0ca80334 (dirty)
+recorded: 2026-08-16T05:52:17.749755+00:00

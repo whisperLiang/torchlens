@@ -195,7 +195,13 @@ def test_find_layers_and_suggest_on_three_architectures(
     prefix = base_label.split("_", 1)[0]
     assert base_label in log.find_layers(prefix)
     assert log.find_layers(prefix)
-    with pytest.raises(ValueError, match="Did you mean"):
+    # The capture layer discloses the zero-match layers_to_save request with a
+    # UserWarning (cdcf7d89) before pluck's own lookup raises the suggestion
+    # error; both signals are part of the contract here.
+    with (
+        pytest.raises(ValueError, match="Did you mean"),
+        pytest.warns(UserWarning, match="matched zero layers"),
+    ):
         tl.pluck(model, x, "definitely_missing_layer")
 
 

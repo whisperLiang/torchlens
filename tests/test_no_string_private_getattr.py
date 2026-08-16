@@ -108,7 +108,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # `_active_save_grads_policy` (tensor_tracking.py hasattr+getattr,
     # backward.py getattr); absent outside a managed backward window, so the
     # attribute-fallback default is the correct reading.
-    "backends/torch": 117,
+    # 117 -> 118 (2026-08-16 fw6settle reconcile, aa4e874a fix/bwgrad): the
+    # output-parent promotion charge reads the optional session-time
+    # `_save_budget_accountant` in backend.py, the same idiom as the
+    # pre-existing _ops_retention.py/tensor_tracking.py reads of that field.
+    "backends/torch": 118,
     "bridge": 1,
     "bundle": 1,
     "capture": 20,
@@ -120,7 +124,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # the optional session-time `_out_dedup_mode` / `_out_identity_cache`
     # knobs; absent on default captures, so the identity/None defaults are the
     # correct "dedup off" reading.
-    "data_classes": 29,
+    # 29 -> 30 (2026-08-16 fw6settle reconcile, aa4e874a fix/bwgrad): the
+    # reused charged-grad-payload path in op.py adds a third read of the
+    # optional session-time `_defer_streaming_bundle_finalization` flag, the
+    # same idiom as the two reads already ledgered for that file.
+    "data_classes": 30,
     "experimental": 1,
     "fastlog": 2,
     "intervention": 43,
@@ -323,6 +331,9 @@ class _Presenter:
 
     def __init__(self, trace: object) -> None:
         self.ranks = {0: trace}
+
+    def _require_members(self, surface: str) -> None:
+        """No-op release guard: join_ops() calls it (f96c67cc); the stub never releases."""
 
 
 @pytest.mark.smoke

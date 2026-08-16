@@ -501,8 +501,8 @@
    },
    "batchnorm_1_2": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -602,7 +602,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -4335,8 +4335,8 @@
     "_label_raw": "batchnorm_1_7_raw",
     "_layer_label_raw": "batchnorm_1_7_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -4445,7 +4445,7 @@
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -4733,8 +4733,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -7985,7 +7985,7 @@
      "bn"
     ],
     "backend_address": "bn.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "bn.weight"
     ],
@@ -8069,7 +8069,7 @@
      "bn"
     ],
     "backend_address": "bn.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "bn.bias"
     ],
@@ -9398,7 +9398,7 @@
       "\"add_1_1:1\""
      ]
     },
-    "\"batchnorm_8ZlxjLIn_EuWcY20S\"": {
+    "\"batchnorm_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"batchnorm_1_2:1\""
      ]
@@ -9477,7 +9477,7 @@
    },
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
@@ -10052,8 +10052,8 @@
    },
    "batchnorm_1_2": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -10153,7 +10153,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -13886,8 +13886,8 @@
     "_label_raw": "batchnorm_1_7_raw",
     "_layer_label_raw": "batchnorm_1_7_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -13996,7 +13996,7 @@
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -14284,8 +14284,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -17536,7 +17536,7 @@
      "bn"
     ],
     "backend_address": "bn.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "bn.weight"
     ],
@@ -17620,7 +17620,7 @@
      "bn"
     ],
     "backend_address": "bn.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "bn.bias"
     ],
@@ -18949,7 +18949,7 @@
       "\"add_1_1:1\""
      ]
     },
-    "\"batchnorm_8ZlxjLIn_EuWcY20S\"": {
+    "\"batchnorm_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"batchnorm_1_2:1\""
      ]
@@ -19036,7 +19036,7 @@
    "parent_trace": null,
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
@@ -19591,8 +19591,8 @@
    },
    "batchnorm_1_2": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -19692,7 +19692,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -23425,8 +23425,8 @@
     "_label_raw": "batchnorm_1_7_raw",
     "_layer_label_raw": "batchnorm_1_7_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -23535,7 +23535,7 @@
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "batchnorm_8ZlxjLIn_EuWcY20Sbn",
+    "equivalence_class": "batchnorm_dsU1LzZK_oDRCwlmsbn",
     "equivalent_ops": {
      "__set__": [
       "\"batchnorm_1_2:1\""
@@ -23823,8 +23823,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -27075,7 +27075,7 @@
      "bn"
     ],
     "backend_address": "bn.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "bn.weight"
     ],
@@ -27129,7 +27129,7 @@
      "bn"
     ],
     "backend_address": "bn.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "bn.bias"
     ],
@@ -28428,7 +28428,7 @@
       "\"add_1_1:1\""
      ]
     },
-    "\"batchnorm_8ZlxjLIn_EuWcY20S\"": {
+    "\"batchnorm_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"batchnorm_1_2:1\""
      ]
@@ -28504,7 +28504,7 @@
    "parent_trace": null,
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
