@@ -63,7 +63,7 @@ class PredicateError(CaptureError, RuntimeError):
         failures: list[PredicateFailure] | None = None,
         total_count: int | None = None,
         overflow: int = 0,
-        **payload: object,
+        **payload: Any,
     ) -> None:
         """Initialize a predicate error with optional event context.
 
