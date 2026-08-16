@@ -1871,3 +1871,132 @@ def test_collapse_optimizer_ops_ceiling_declines_disclosed(
         warnings_module.simplefilter("ignore")
         schedule = fresh.collapse_schedule()
     assert len(schedule.steps) == 1
+
+
+def test_collapse_ceiling_warning_category_and_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling-decline warning is a TorchLensWarning attributed to the caller.
+
+    R19 (hunt-6): the decline advisory was a bare ``UserWarning`` with
+    ``stacklevel=2``, which (a) could not be filtered/promoted via the
+    ``TorchLensWarning`` taxonomy and (b) blamed an internal torchlens frame
+    (``_trace_stats.py``) instead of the user's ``draw()`` call site.
+    """
+
+    import warnings as warnings_module
+
+    from torch import nn
+
+    from torchlens.errors import TorchLensWarning
+    from torchlens.visualization import collapse_optimizer as optimizer_module
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    monkeypatch.setattr(optimizer_module, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
+    fresh = tl.trace(model, torch.randn(2, 4))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        fresh.draw(
+            collapse="max",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            order_siblings=False,
+        )
+    declines = [w for w in caught if "skipping smart collapse" in str(w.message)]
+    assert len(declines) == 1
+    decline = declines[0]
+    # Selectable via the package taxonomy, not just blanket UserWarning.
+    assert issubclass(decline.category, TorchLensWarning)
+    # Names the governing constant so users can see the threshold they are on
+    # the wrong side of.
+    assert "COLLAPSE_OPTIMIZER_MAX_OPS" in str(decline.message)
+    # Attributed to the caller's frame (this file), not a torchlens internal.
+    assert decline.filename == __file__
+
+
+def test_collapse_ceiling_documented_lockstep() -> None:
+    """The compute ceiling must stay documented everywhere user-facing (R19).
+
+    The 0957027b ceiling changed the documented behaviour of
+    ``collapse="auto"|"max"``, ``Trace.collapse_plan()`` and
+    ``Trace.collapse_schedule()`` for large traces; per the LOCKED docs rule the
+    constant (and its current value) must appear in the user-facing collapse
+    docs, the limitations catalog, the glossary, and both agent guides.
+    """
+
+    from torchlens.visualization.collapse_optimizer import COLLAPSE_OPTIMIZER_MAX_OPS
+
+    repo_root = Path(__file__).resolve().parents[1]
+    doc_pages = [
+        repo_root / "docs" / "reference" / "collapse.md",
+        repo_root / "docs" / "reference" / "limitations.md",
+        repo_root / "docs" / "reference" / "glossary.md",
+        repo_root / "CLAUDE.md",
+        repo_root / "AGENTS.md",
+    ]
+    for page in doc_pages:
+        text = page.read_text(encoding="utf-8")
+        assert "COLLAPSE_OPTIMIZER_MAX_OPS" in text, f"{page.name} misses the ceiling constant"
+        assert str(COLLAPSE_OPTIMIZER_MAX_OPS) in text, (
+            f"{page.name} misses the ceiling value {COLLAPSE_OPTIMIZER_MAX_OPS}"
+        )
+
+
+def test_repeat_fold_discovery_scans_module_table_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Descendant-aware fold discovery must not rescan ``trace.modules`` per child.
+
+    Hunt-6 R29-3: ``_iter_collapsible_runs(allow_selected_descendant=True)``
+    called ``_selected_descendants`` once per child and
+    ``_iter_collapsible_child_path_runs`` once per sibling, and each call
+    iterated EVERY ``trace.modules`` facade -- Theta(S*M) module visits before
+    fold legality was even considered. Each discovery pass now builds one
+    shared sorted index, so the module table is iterated a constant number of
+    times per pass regardless of sibling count.
+    """
+
+    from torch import nn
+
+    from torchlens.data_classes._accessor_base import Accessor
+
+    model = nn.Sequential(*[nn.Sequential(nn.Linear(4, 4), nn.ReLU()) for _ in range(6)])
+    trace = tl.trace(model, torch.randn(2, 4))
+    children = [m.address for m in trace.modules if m.address.isdigit()]
+    assert len(children) == 6
+
+    def collapse_fn(module: Any) -> bool:
+        """Select Linear leaves so children are only descendant-selected."""
+
+        return str(getattr(module, "class_name", "")) == "Linear"
+
+    scans = {"n": 0}
+    original_iter = Accessor.__iter__
+
+    def counting_iter(self: Any) -> Any:
+        """Count full accessor iterations."""
+
+        if self is trace.modules:
+            scans["n"] += 1
+        return original_iter(self)
+
+    monkeypatch.setattr(Accessor, "__iter__", counting_iter)
+
+    scans["n"] = 0
+    list(
+        auto_collapse._iter_collapsible_runs(
+            trace, children, collapse_fn, allow_selected_descendant=True
+        )
+    )
+    assert scans["n"] <= 2, (
+        f"descendant-aware run discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} children -- the per-child full scan is back"
+    )
+
+    scans["n"] = 0
+    list(auto_collapse._iter_collapsible_child_path_runs(trace, children, collapse_fn))
+    assert scans["n"] <= 2, (
+        f"child-path discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} siblings -- the per-sibling full scan is back"
+    )

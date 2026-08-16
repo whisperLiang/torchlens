@@ -348,13 +348,16 @@ def _warn_if_render_exceeds_disclosure_ceiling(num_nodes: int, num_edges: int) -
         return
     import warnings
 
+    from ..errors._base import TorchLensWarning
+    from ..utils.display import user_stacklevel
+
     warnings.warn(
         f"TorchLens is rendering {num_nodes} nodes / {num_edges} edges; Graphviz "
         "layout beyond ~10k nodes can take minutes and gigabytes. Consider "
         "collapse='auto' / collapse='max', show_containers=False, or drawing a "
         "focused subgraph.",
-        UserWarning,
-        stacklevel=4,
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
     )
 
 

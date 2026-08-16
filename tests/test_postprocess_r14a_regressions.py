@@ -361,3 +361,72 @@ def test_conditional_invariant_rejects_ambiguous_fired_arm_summary(tmp_path: Pat
 
     with pytest.raises(MetadataInvariantError, match="conditional_invariants"):
         trace.check_metadata_invariants()
+
+
+def test_internal_sink_logging_never_rescans_the_sink_ledgers() -> None:
+    """Sink logging must use shadow sets, not per-node list scans (R52-2).
+
+    ``_log_internally_terminated_tensor`` guarded its appends with
+    ``label not in self.internal_sink_ops`` / ``... not in
+    self.internally_terminated_bool_ops`` -- list membership once per visited
+    childless node, O(k^2) in sink count across the reachability flood. The
+    guards now read the flood's persistent shadow sets; the lists stay the
+    portable source of truth and stay duplicate-free.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.postprocess.graph_traversal import _log_internally_terminated_tensor
+
+    class _CountingList(list):
+        """List that counts membership scans."""
+
+        contains_calls = 0
+
+        def __contains__(self, item: object) -> bool:
+            type(self).contains_calls += 1
+            return super().__contains__(item)
+
+    layers = {
+        f"op_{i}_raw": SimpleNamespace(
+            is_internal_sink=False,
+            is_scalar_bool=(i % 2 == 0),
+            is_terminal_bool=False,
+        )
+        for i in range(200)
+    }
+
+    class _TraceStub:
+        """Minimal trace surface for the sink logger."""
+
+        def __init__(self) -> None:
+            self.internal_sink_ops = _CountingList()
+            self.internally_terminated_bool_ops = _CountingList()
+
+        def __getitem__(self, label: str) -> SimpleNamespace:
+            return layers[label]
+
+    trace = _TraceStub()
+
+    seen_sinks: set[str] = set(trace.internal_sink_ops)
+    seen_bools: set[str] = set(trace.internally_terminated_bool_ops)
+    _CountingList.contains_calls = 0
+    for label in list(layers) + list(layers):  # revisits exercise the dedupe guard
+        _log_internally_terminated_tensor(
+            trace,
+            label,
+            seen_sink_labels=seen_sinks,
+            seen_terminated_bool_labels=seen_bools,
+        )
+
+    assert _CountingList.contains_calls == 0, (
+        f"sink logging scanned the list ledgers {_CountingList.contains_calls} "
+        "times -- the O(k^2) membership guard is back"
+    )
+    assert list(trace.internal_sink_ops) == list(layers)
+    assert list(trace.internally_terminated_bool_ops) == [
+        label for i, label in enumerate(layers) if i % 2 == 0
+    ]
+    for i, label in enumerate(layers):
+        assert layers[label].is_internal_sink is True
+        assert layers[label].is_terminal_bool is (i % 2 == 0)

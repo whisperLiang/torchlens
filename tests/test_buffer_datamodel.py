@@ -842,3 +842,63 @@ def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
         assert any(label.startswith("output") for label in op.output_descendants)
     finally:
         trace.cleanup()
+
+
+def test_buffer_dedup_avoids_pairwise_tensor_compares_on_distinct_values() -> None:
+    """Distinct-valued same-address buffers must not pay O(G^2) torch.equal.
+
+    Hunt-6 R52-1: step 6's dedup swept every new buffer against EVERY prior
+    unique in its hash group with ``torch.equal`` -- Theta(G^2) whole-tensor
+    compares for a training-mode recurrent BatchNorm whose running stats
+    differ every pass (~500k compares at x1000 passes). A cheap value
+    fingerprint now buckets the uniques, so an all-distinct group performs
+    zero merge-sweep tensor compares.
+    """
+
+    class _LoopBN(nn.Module):
+        """BatchNorm applied repeatedly so buffers update between passes."""
+
+        def __init__(self, num_passes: int) -> None:
+            super().__init__()
+            self.bn = nn.BatchNorm1d(4)
+            self.num_passes = num_passes
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply BN ``num_passes`` times (running stats change each pass)."""
+
+            for _ in range(self.num_passes):
+                x = self.bn(x)
+            return x
+
+    num_passes = 12
+    model = _LoopBN(num_passes).train()
+
+    import sys
+
+    calls = {"n": 0}
+    original_equal = torch.equal
+
+    def counting_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+        """Count tensor-equality comparisons issued by the step-6 dedup module."""
+
+        caller = sys._getframe(1).f_code.co_filename
+        if caller.endswith("control_flow.py"):
+            calls["n"] += 1
+        return original_equal(a, b)
+
+    torch.equal = counting_equal
+    try:
+        trace = tl.trace(model, torch.randn(8, 4))
+    finally:
+        torch.equal = original_equal
+
+    # Buffers stay distinct (running stats differ per pass), so nothing merges
+    # and the merge sweep needs no tensor compares at all; the linear bound
+    # covers step 6's per-buffer source-value checks.
+    linear_bound = 2 * num_passes
+    assert calls["n"] <= linear_bound, (
+        f"step-6 buffer dedup made {calls['n']} torch.equal calls for {num_passes} "
+        f"distinct-value passes (linear bound {linear_bound}) -- the pairwise "
+        "sweep is back"
+    )
+    assert len(trace.buffer_layers) >= num_passes

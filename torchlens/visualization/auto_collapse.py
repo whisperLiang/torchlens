@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import re
@@ -1288,6 +1289,12 @@ def _iter_collapsible_runs(
         structurally uniform members.
     """
 
+    # One shared sorted index instead of a full trace.modules scan per child:
+    # the per-child rescans made descendant-aware discovery Theta(S*M) in
+    # sibling count x module count (hunt-6 R29-3).
+    selected_index: tuple[str, ...] | None = (
+        _selected_address_index(trace, collapse_fn) if allow_selected_descendant else None
+    )
     current_key: tuple[str, str] | None = None
     current_descendant_only_num_layers: int | None = None
     current_has_direct_selection = False
@@ -1295,8 +1302,8 @@ def _iter_collapsible_runs(
     for address in child_addresses:
         module = cast("Module", trace.modules[address])
         directly_selected = collapse_fn(module)
-        descendant_selected = allow_selected_descendant and bool(
-            _selected_descendants(trace, address, collapse_fn)
+        descendant_selected = selected_index is not None and bool(
+            _selected_descendants_in_index(selected_index, address)
         )
         selected = directly_selected or descendant_selected
         if not selected:
@@ -1360,12 +1367,14 @@ def _iter_collapsible_child_path_runs(
         One run of selected descendant modules sharing the same relative path.
     """
 
+    # Shared index: the former per-sibling _selected_descendants call scanned
+    # the whole module table once per sibling (hunt-6 R29-3).
+    selected_index = _selected_address_index(trace, collapse_fn)
     relative_paths = sorted(
         {
             selected_address.removeprefix(f"{sibling}.")
             for sibling in sibling_addresses
-            for selected_address in _selected_descendants(trace, sibling, collapse_fn)
-            if selected_address.startswith(f"{sibling}.")
+            for selected_address in _selected_descendants_in_index(selected_index, sibling)
         }
     )
     for relative_path in relative_paths:
@@ -1696,21 +1705,44 @@ def _run_fold_is_parallel_fan(
     )
 
 
-def _selected_descendants(
+def _selected_address_index(
     trace: Trace,
-    address: str,
     collapse_fn: Callable[[Module], bool],
 ) -> tuple[str, ...]:
-    """Return selected descendant module addresses under ``address``.
+    """Return the sorted addresses of every module selected by ``collapse_fn``.
+
+    One pass over the module table shared by all descendant lookups in a
+    discovery sweep; the former per-child/per-sibling full scans made
+    repeat-fold discovery Theta(S*M) (hunt-6 R29-3).
 
     Parameters
     ----------
     trace:
         Trace owning the modules.
-    address:
-        Parent module address.
     collapse_fn:
         Active collapse predicate.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Selected module addresses in lexical order.
+    """
+
+    return tuple(sorted(module.address for module in trace.modules if collapse_fn(module)))
+
+
+def _selected_descendants_in_index(
+    selected_index: tuple[str, ...],
+    address: str,
+) -> tuple[str, ...]:
+    """Return the selected addresses strictly under ``address``.
+
+    Parameters
+    ----------
+    selected_index:
+        Sorted selected addresses from :func:`_selected_address_index`.
+    address:
+        Parent module address.
 
     Returns
     -------
@@ -1719,11 +1751,11 @@ def _selected_descendants(
     """
 
     prefix = f"{address}."
-    return tuple(
-        module.address
-        for module in trace.modules
-        if module.address.startswith(prefix) and collapse_fn(module)
-    )
+    start = bisect.bisect_left(selected_index, prefix)
+    end = start
+    while end < len(selected_index) and selected_index[end].startswith(prefix):
+        end += 1
+    return selected_index[start:end]
 
 
 def _make_run_fold(trace: Trace, addresses: tuple[str, ...]) -> ModuleRepeatFold:

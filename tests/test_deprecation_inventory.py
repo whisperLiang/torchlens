@@ -307,7 +307,7 @@ DEPRECATION_FAMILIES: tuple[DeprecationFamily, ...] = (
     DeprecationFamily(
         name="domain_node_styles",
         kind="kwarg_value",
-        replacement="examples/recipes/<style>.py, or the future torchlens.<style> plugin",
+        replacement="torchlens.experimental.node_styles.<style>_node_mode via node_spec_fn",
         remove_in="pending_maintainer_signoff",
         deprecated_in="unrecorded",
         sites=(

@@ -9,6 +9,7 @@ import re
 import textwrap
 import weakref
 from collections.abc import Callable
+from pathlib import PurePath
 from types import SimpleNamespace
 from typing import Any, Literal, TypeAlias, cast
 
@@ -667,7 +668,14 @@ def _source_text_to_html_rows(source_text: str, displayed_lines: list[str]) -> l
             else f"vscode://file/{file_path}",
             quote=True,
         )
-        tooltip = html.escape(file_line_text(str(file_path), line_number), quote=True)
+        # Tooltip shows the basename only: rendered SVGs are shareable, and the
+        # visible tooltip should not surface the absolute (username-bearing)
+        # host path (hunt-6 R62-2). The HREF keeps the absolute path -- local
+        # editor clickability is the feature -- and limitations.md discloses
+        # that code_panel output embeds local source paths.
+        tooltip = html.escape(
+            file_line_text(PurePath(str(file_path)).name, line_number), quote=True
+        )
         rows.append(
             f"<TR><TD ALIGN='LEFT' HREF='{href}' TOOLTIP='{tooltip}'>"
             f"<FONT FACE='Courier' COLOR='#0366D6'>{link_label}</FONT></TD></TR>"

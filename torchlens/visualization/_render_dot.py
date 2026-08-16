@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
+from ..errors._base import TorchLensWarning
 from ..utils.display import atomic_write_text, user_stacklevel
 from . import _render_utils
 from ._render_common import *
@@ -213,12 +214,18 @@ def _validate_draw_options(
             argument="node_style",
         )
     if node_mode in DOMAIN_NODE_MODES:
+        # The advice used to name examples/recipes/<style>.py and a
+        # torchlens.<style> plugin. NEITHER exists (grind b4, R48-b);
+        # torchlens.experimental.node_styles is the destination that actually
+        # resolves today -- same treatment as the options.py sibling.
+        from .._deprecations import TorchLensDeprecationWarning
+
         warnings.warn(
-            f"node_style={node_mode!r} is moving out of core; use the equivalent "
-            f"recipe at examples/recipes/{node_mode}.py or wait for the "
-            f"torchlens.{node_mode} plugin",
-            DeprecationWarning,
-            stacklevel=3,
+            f"node_style={node_mode!r} is moving out of core; use "
+            f"torchlens.experimental.node_styles.{node_mode}_node_mode "
+            f"(exported today) via node_spec_fn instead",
+            TorchLensDeprecationWarning,
+            stacklevel=user_stacklevel(),
         )
     if intervention_mode not in {"node_mark", "as_node"}:
         raise InvalidArgumentError(
@@ -1173,8 +1180,8 @@ def _add_orphan_island_nodes(
         if getattr(self, "_orphan_logs", ()):
             warnings.warn(
                 "orphans were dropped from this capture; re-trace with keep_orphans=True",
-                UserWarning,
-                stacklevel=2,
+                TorchLensWarning,
+                stacklevel=user_stacklevel(),
             )
         return
 

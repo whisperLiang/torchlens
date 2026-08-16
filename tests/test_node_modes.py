@@ -168,3 +168,42 @@ def test_invalid_mode_raises() -> None:
             vis_node_mode="bogus",  # type: ignore[arg-type]
             vis_save_only=True,
         )
+
+
+def test_domain_node_style_advice_resolves(tmp_path: Path) -> None:
+    """The draw-path domain-style warning names a destination that exists (R48-b).
+
+    ``_render_dot._validate_draw_options`` advertised ``examples/recipes/
+    <style>.py`` and a ``torchlens.<style>`` plugin -- NEITHER exists. Its
+    sibling validator (``options._validate_node_style``) was already fixed to
+    point at ``torchlens.experimental.node_styles`` with the typed category
+    and caller attribution; this pins the ported treatment.
+    """
+
+    import warnings as warnings_module
+
+    from torchlens._deprecations import TorchLensDeprecationWarning
+    from torchlens.experimental import node_styles
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    log = tl.trace(model, torch.randn(1, 4))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        log.draw(
+            node_mode="vision",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            vis_outpath=str(tmp_path / "graph"),
+        )
+    advisories = [w for w in caught if "moving out of core" in str(w.message)]
+    assert len(advisories) == 1
+    advisory = advisories[0]
+    assert issubclass(advisory.category, TorchLensDeprecationWarning)
+    message = str(advisory.message)
+    assert "torchlens.experimental.node_styles.vision_node_mode" in message
+    assert "examples/recipes" not in message
+    # The advertised destination actually resolves.
+    assert callable(node_styles.vision_node_mode)
+    # Attributed to the caller's frame, not a torchlens internal.
+    assert advisory.filename == __file__

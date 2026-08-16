@@ -2814,6 +2814,14 @@ class Trace(
         state.pop("_op_accessor_cache", None)
         state.pop("_layer_accessor_cache", None)
         state.pop("_module_call_accessor", None)
+        # Lazy influence-geometry caches (FieldPolicy.DROP) hold
+        # mappingproxy-bearing solution objects after any receptive-field
+        # access, so carrying them made pickle.dumps/copy.deepcopy crash with
+        # "cannot pickle 'mappingproxy' object" while tl.save succeeded on
+        # the same trace. They rebuild on first access after restore.
+        state.pop("_receptive_field_solution", None)
+        state.pop("_rf_source_solutions", None)
+        state.pop("_rf_target_solutions", None)
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
         # B1-02: the semantic-output scratch never serializes. Plain pickle

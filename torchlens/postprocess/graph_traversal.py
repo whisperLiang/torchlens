@@ -513,12 +513,22 @@ def _remove_orphan_nodes(self: "Trace") -> None:
         if getattr(self._raw_graph_ws.raw_layer_dict[label], "buffer_write_kind", None) is not None
     ]
     node_stack = self.input_layers + self.output_layers + written_buffer_layers
+    # Shadow sets over the two trace-level list[str] sink ledgers: the former
+    # per-node `label not in <list>` scans were O(k^2) in sink count
+    # (hunt-6 R52-2). The lists stay the portable source of truth.
+    seen_sink_labels = set(self.internal_sink_ops)
+    seen_terminated_bool_labels = set(self.internally_terminated_bool_ops)
     while len(node_stack) > 0:
         tensor_label = node_stack.pop()
         nodes_seen.add(tensor_label)
         layer_entry = self._raw_graph_ws.raw_layer_dict[tensor_label]
         if (len(layer_entry.children) == 0) and (not layer_entry.is_output):
-            _log_internally_terminated_tensor(self, tensor_label)
+            _log_internally_terminated_tensor(
+                self,
+                tensor_label,
+                seen_sink_labels=seen_sink_labels,
+                seen_terminated_bool_labels=seen_terminated_bool_labels,
+            )
         # Follow BOTH directions to ensure full bidirectional reachability.
         for next_label in layer_entry.children + layer_entry.parents:
             if next_label not in nodes_seen:
@@ -912,12 +922,27 @@ def _update_node_distance_vals(
         )
 
 
-def _log_internally_terminated_tensor(self: "Trace", tensor_label: str) -> None:
-    """Mark a tensor as terminated inside the model (no children reaching an output node)."""
+def _log_internally_terminated_tensor(
+    self: "Trace",
+    tensor_label: str,
+    *,
+    seen_sink_labels: set[str],
+    seen_terminated_bool_labels: set[str],
+) -> None:
+    """Mark a tensor as terminated inside the model (no children reaching an output node).
+
+    ``seen_sink_labels`` / ``seen_terminated_bool_labels`` are the caller's
+    persistent shadow sets over ``internal_sink_ops`` /
+    ``internally_terminated_bool_ops``; the membership guards read them
+    instead of rescanning the growing lists once per visited node
+    (hunt-6 R52-2).
+    """
     layer_entry = self[tensor_label]
     layer_entry.is_internal_sink = True
-    if tensor_label not in self.internal_sink_ops:
+    if tensor_label not in seen_sink_labels:
+        seen_sink_labels.add(tensor_label)
         self.internal_sink_ops.append(tensor_label)
-        if layer_entry.is_scalar_bool and (tensor_label not in self.internally_terminated_bool_ops):
+        if layer_entry.is_scalar_bool and (tensor_label not in seen_terminated_bool_labels):
+            seen_terminated_bool_labels.add(tensor_label)
             self.internally_terminated_bool_ops.append(tensor_label)
             layer_entry.is_terminal_bool = True

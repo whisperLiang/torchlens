@@ -110,6 +110,14 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | Two unrelated repeated subgraphs have the same loop fingerprint. | Recurrence detection can group them into a layer with more passes than expected. | Capture with `recurrence_detection=False` / the current recurrence-disable option and inspect the ungrouped Ops. |
 | An input-routed intervention targets an in-place or `out=` call. | Recognized in-place calls snapshot semantic inputs, but raw hooks may see live references; detected `out=` aliasing warns at hook fire time. | Prefer output interventions or non-mutating functional spellings when the original input value matters. |
 
+## Visualization and rendering
+
+| When it can occur | What you see | Remedy |
+| --- | --- | --- |
+| A trace has more ops than the smart-collapse compute ceiling `COLLAPSE_OPTIMIZER_MAX_OPS` (2000; `torchlens.visualization.collapse_optimizer`). Collapse selection cost grows superlinearly (~n^1.75), so the optimizer declines rather than burning CPU-hours. | A `TorchLensWarning` names the op count and the ceiling. `draw(collapse="auto"\|"max")` renders uncollapsed, `Trace.collapse_plan()` refuses typed (`collapse_plan_unavailable`), and `Trace.collapse_schedule()` degrades to its single full-graph step. | Reduce the rendered graph first: `module=` focus, `vis_call_depth`, or rolled mode. `fold_repeats` and manual `show_containers` styling still apply. |
+| The resolved visible graph exceeds ~10k nodes / 40k edges. | A `TorchLensWarning` discloses that Graphviz layout beyond this size can take minutes and gigabytes; rendering proceeds. | Use `collapse="auto"`/`"max"`, `show_containers=False`, or draw a focused subgraph. |
+| `draw(code_panel=True)` renders live-capture source panels. | The "Open source" link embeds the absolute local source path (an editor `vscode://file/...` URL, which can carry a username) so the panel is click-to-open on the capturing machine. The visible tooltip shows the file basename only. | Treat code-panel SVGs as local artifacts; strip or re-render before sharing. Saved `.tlspec` bundles are unaffected -- the artifact scrub stores basenames. |
+
 ## CI-attested platforms
 
 Continuous integration executes the full tiered suite on Linux/CPU only

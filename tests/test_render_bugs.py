@@ -1241,3 +1241,73 @@ def test_collapsed_module_boundary_edge_discloses_multiplicity(tmp_path: Path) -
     assert "x2" in edge_stanza, (
         "two distinct dataflow edges merged into one rendered edge with no multiplicity disclosure"
     )
+
+
+def test_downstream_intervening_inference_builds_reverse_edges_once() -> None:
+    """The reverse-edge map is built once per downstream inference (R52-3).
+
+    ``_infer_intervening_module_downstream`` built the O(E) reverse autograd
+    edge map to seed the BFS, then ``_infer_intervening_module_bfs`` rebuilt
+    the identical map -- two full ``trace.grad_fns`` sweeps per intervening
+    grad_fn. The prebuilt map is now passed through, so the grad_fn table is
+    swept exactly once.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.visualization._render_leaf import _infer_intervening_module_downstream
+
+    class _CountingGradFns(list):
+        """Grad-fn table that counts full sweeps."""
+
+        iter_calls = 0
+
+        def __iter__(self) -> Any:
+            type(self).iter_calls += 1
+            return super().__iter__()
+
+    grad_fns = _CountingGradFns(
+        SimpleNamespace(grad_fn_object_id=i, next_grad_fn_ids=[i + 1], op=None) for i in range(5)
+    )
+    trace = SimpleNamespace(
+        grad_fns=grad_fns,
+        grad_fn_logs={fn.grad_fn_object_id: fn for fn in grad_fns},
+    )
+    handle = SimpleNamespace(grad_fn_object_id=3, next_grad_fn_ids=[4], op=None)
+
+    _CountingGradFns.iter_calls = 0
+    result = _infer_intervening_module_downstream(trace, handle)  # type: ignore[arg-type]
+
+    assert result is None  # no module-anchored grad_fn in the stub chain
+    assert _CountingGradFns.iter_calls == 1, (
+        f"downstream inference swept trace.grad_fns {_CountingGradFns.iter_calls} "
+        "times -- the duplicate reverse-edge build is back"
+    )
+
+
+def test_code_panel_tooltip_shows_basename_not_absolute_path() -> None:
+    """The visible source-link tooltip must not leak the absolute host path.
+
+    Hunt-6 R62-2: ``draw(code_panel=True)`` embedded the absolute
+    (username-bearing) source path in BOTH the ``vscode://file`` HREF and the
+    visible tooltip. The HREF keeps the absolute path -- local editor
+    clickability is the deliberate feature, disclosed in limitations.md --
+    but the tooltip now shows the basename only.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.visualization.code_panel import _source_text_to_html_rows
+
+    source_text = SimpleNamespace(
+        file_path="/home/canary_user_zq81/models/canary_src.py",
+        line_number=21,
+    )
+    rows = _source_text_to_html_rows(source_text, ["def forward(self, x):"])  # type: ignore[arg-type]
+    link_row = rows[0]
+
+    assert "vscode://file//home/canary_user_zq81/models/canary_src.py:21" in link_row
+    tooltip = link_row.split("TOOLTIP='", 1)[1].split("'", 1)[0]
+    assert "canary_src.py" in tooltip
+    assert "canary_user_zq81" not in tooltip
+    assert "/home/" not in tooltip
