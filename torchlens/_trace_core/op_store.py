@@ -97,7 +97,7 @@ def _evict_payloads_in_cell(
         return value
     if isinstance(value, tuple):
         rebuilt = [_evict_payloads_in_cell(item, tensor_cls, depth + 1, seen) for item in value]
-        if all(new is old for new, old in zip(rebuilt, value)):
+        if all(new is old for new, old in zip(rebuilt, value, strict=True)):
             return value
         if type(value) is tuple:
             return tuple(rebuilt)
@@ -1449,7 +1449,7 @@ def cow_copy_value(value: Any, translate: Callable[[Any], Any] | None) -> Any:
         return {cow_copy_value(item, translate) for item in value}
     if cls is tuple or cls is frozenset:
         copied = [cow_copy_value(item, translate) for item in value]
-        for original, item_copy in zip(value, copied):
+        for original, item_copy in zip(value, copied, strict=True):
             if original is not item_copy:
                 return cls(copied)
         return value

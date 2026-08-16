@@ -73,7 +73,12 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # counts -- SIM108 88 -> 86, SIM105 99 -> 92 (90 .py + 2 ipynb),
     # SIM102 40 -> 39.
     "SIM108": 86,
-    "SIM105": 92,
+    # 2026-08-16 fixwave-7 settle: 92 -> 93. The one new deferral is the
+    # post-fork pre-exec PDEATHSIG guard in utils/_subprocess.py, where
+    # contextlib.suppress would ALLOCATE in the no-allocation fork window
+    # its own comment forbids; the wave's other new site (reaper test
+    # cleanup) was converted to suppress instead of ledgered.
+    "SIM105": 93,
     "SIM102": 39,
     "SIM117": 45,
     "SIM115": 7,
@@ -99,11 +104,18 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # above) -- these ceilings were frozen on the fix/infra-r7 lane while the
     # other fixwave-6 lanes merged their reviewed fix branches to main in
     # parallel. SHRINK-ONLY from here.
-    "C901": 450,
-    "PLR0911": 194,
-    "PLR0912": 258,
-    "PLR0913": 419,
-    "PLR0915": 148,
+    # 2026-08-16 fixwave-7 integration settle: re-frozen at the merged-tree
+    # tip (450->451, 194->195, 258->262, 419->422, 148->152) -- per-site
+    # diff against the fixwave-6 tip shows the growth is the wave's typed
+    # refusals, admission-ordering claims, and collapse-ceiling branches
+    # landing in already-hot functions (run_and_log_inputs_through_model,
+    # _merge_iso_groups_to_layers, from_dict, _check_graph_topology, ...),
+    # not new god-functions. SHRINK-ONLY from here.
+    "C901": 451,
+    "PLR0911": 195,
+    "PLR0912": 262,
+    "PLR0913": 422,
+    "PLR0915": 152,
     # The broad-catch / silent-swallow family (grind-r5 b1 R22-1, 4th round,
     # + b7 fable/opus corroboration): the population grew 369 -> 463 AST
     # handlers across the sprint with zero tripwire while every neighbour
@@ -118,8 +130,15 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # 72 ipynb), S110 41 (39 .py + 2 ipynb). These are pre-existing sites
     # made visible, not growth; the .py populations did not move. Relayed to
     # the docs lane for notebook-side cleanup; SHRINK-ONLY from here.
-    "BLE001": 523,
-    "S110": 41,
+    # 2026-08-16 fixwave-7 settle: BLE001 523 -> 528, S110 41 -> 43. The
+    # new sites are the wave's deliberate best-effort handlers: the
+    # subprocess group-reaper / PDEATHSIG guards (utils/_subprocess.py --
+    # post-fork and teardown paths that must never raise), the minted-helper
+    # rebuild gate (test_intervention_spec_pickle.py, name-resolution proof
+    # that tolerates constructor rejection by design), and belt/rescue
+    # teardown guards. Each reviewed; none swallows a capture verdict.
+    "BLE001": 528,
+    "S110": 43,
     # 35->36 (fixwave-5 settle): one new guarded-iteration continue landed
     # with the wave's defensive sweeps; re-frozen at the post-wave tip.
     "S112": 36,
@@ -138,7 +157,12 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # scope/exclude mode; test_ignored_codes_all_carry_ceilings keeps the
     # NEXT ignore entry from entering unmeasured.
     "B009": 120,
-    "B010": 100,
+    # 2026-08-16 fixwave-7 settle: 100 -> 102. The two new sites are the
+    # r8 live-view property overlays for input_ancestors/output_descendants
+    # installed with setattr on Op (backends/torch/ops.py), the exact idiom
+    # of the two pre-existing overlay rows; direct assignment would type-clash
+    # with the declared frozenset field annotations.
+    "B010": 102,
     # 2026-08-16 R70 r7 explicit re-ledger (instrument correction, header
     # note): the parser missed 5 SIM118 and 1 SIM401 notebook sites. True
     # corrected counts: SIM118 54 (49 .py + 5 ipynb), SIM401 2 (1 .py +

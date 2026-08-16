@@ -1322,6 +1322,9 @@ def _iter_collapsible_runs(
     allow_selected_descendant:
         Whether selected descendants allow a sibling ancestor to stand in as
         the folded member.
+    selected_index:
+        Optional precomputed selected-address index shared across sibling
+        groups (r8 R29); ``None`` rebuilds it for this group.
 
     Yields
     ------
@@ -1406,6 +1409,9 @@ def _iter_collapsible_child_path_runs(
         Ordered direct children for one parent module.
     collapse_fn:
         Active collapse predicate.
+    selected_index:
+        Optional precomputed selected-address index shared across sibling
+        groups (r8 R29); ``None`` rebuilds it for this group.
 
     Yields
     ------
