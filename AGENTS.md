@@ -7,8 +7,9 @@ capture: it lazily wraps PyTorch functions with toggle-gated wrappers on first t
 capture, runs forward passes with the logging toggle enabled, and records operations.
 
 ## Model Menagerie (`menagerie/`)
-`menagerie/` is a browsable catalog of 11,600+ entries across ~5,400 neural-net architecture
-families captured with TorchLens:
+`menagerie/` is a browsable catalog of 8,500+ entries across ~3,600 neural-net architecture
+families captured with TorchLens (8,533 rows / 3,637 families measured in this checkout,
+2026-08-16; the full corpus incl. locally-validated additions lives on the menagerie machine):
 a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 2,700+ trace-verified
 hand-built
 historical "classics" (`menagerie/classics/`), and a disk-safe renderer (`menagerie.generate_menagerie`).

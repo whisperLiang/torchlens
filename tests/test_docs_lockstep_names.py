@@ -271,3 +271,33 @@ def test_shipped_glossary_covers_the_public_surface() -> None:
         "shipped glossary is release surface; update it in the same change as "
         "the rename/addition (LOCKED lockstep rule)"
     )
+
+
+def test_tier_census_figures_agree_across_docs() -> None:
+    """r7 R41 (sol MED): the two documented tier censuses must be ONE census.
+
+    CLAUDE.md and tests/AGENTS.md carried contradictory totals (12,430 vs
+    12,651) with the SAME claimed measurement date, and the only live check
+    was slow-marked and CLAUDE-only. This half is a pure textual
+    consistency gate (no collection; lives here in the smoke-marked docs
+    lockstep module -- its old home tests/test_docs_tier_drift.py is
+    module-slow): the total in CLAUDE.md's
+    smoke sentence must equal the total in tests/AGENTS.md's unmarked row.
+    The live-count validation above stays slow (it pays a full collection).
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    agents = (root / "tests" / "AGENTS.md").read_text(encoding="utf-8")
+    claude_match = re.search(r"\((\d[\d,]*)/(\d[\d,]*) collect-only, measured ([0-9-]+)", claude)
+    assert claude_match, "CLAUDE.md lost its smoke census sentence"
+    agents_match = re.search(r"\((\d[\d,]*)/(\d[\d,]*), \d+%, measured ([0-9-]+)", agents)
+    assert agents_match, "tests/AGENTS.md lost its unmarked census row"
+    claude_total = int(claude_match.group(2).replace(",", ""))
+    agents_total = int(agents_match.group(2).replace(",", ""))
+    assert claude_total == agents_total, (
+        f"tier census totals contradict: CLAUDE.md says {claude_total} "
+        f"(measured {claude_match.group(3)}) but tests/AGENTS.md says "
+        f"{agents_total} (measured {agents_match.group(3)}) — remeasure ONCE "
+        "and update both docs in the same change"
+    )

@@ -15,6 +15,8 @@ this package mostly stateless and free of high-level TorchLens business logic.
 | `introspection.py` | Recursive object search and nested getattr/assign |
 | `rng.py` | Python, NumPy, torch, CUDA, and autocast state capture/restore |
 | `tensor_utils.py` | `safe_copy`, `safe_to`, `tensor_nanequal`, tensor memory helpers |
+| `alias_footprint.py` | THE absolute-byte three-valued alias/overlap engine (r37 INV-2), split out of `tensor_utils.py` |
+| `_subprocess.py` | The ONE bounded-subprocess spawn discipline (group teardown, no orphaned grandchildren); never hand-roll `subprocess.run` for children |
 | `_torch_compat.py` | LOCKED chokepoint for every fragile torch-private probe / cross-version signature; `HAS_*` capability flags (see root `CLAUDE.md`) |
 | `_callable_safety.py` | Security gate deciding which resolved callables are pure forward/tensor ops (untrusted `.tlspec` registry) |
 | `_multipass_access.py` | Multi-pass-safe attribute access for aggregate (recurrent) `Layer` objects |

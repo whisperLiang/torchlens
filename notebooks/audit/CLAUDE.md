@@ -67,7 +67,10 @@ strip. The HTML in `_exports/` keeps the executed outputs for review.
 
 Execution-time expectations: 00-06 and 08-10 run in ~20-30 s each; 07 (intervention),
 11 (visualization), 12 (debug), 13 (export sweep) run ~30-90 s; 14 (HF, guarded)
-~60-90 s when the tiny models are cached, seconds when skipped. A failing notebook
+~60-90 s when the tiny models are cached, seconds when skipped; 15 (attribution),
+16 (compat/bridges), and 17 (receptive/projective fields) are unmeasured — record a
+timing row here on their next full committed execution (r7 R88: rows stopped at 14
+while 15-17 already existed). A failing notebook
 stops `nbconvert`; add `--allow-errors` only when triaging, never for the committed run.
 
 ## Lockstep rule — MANDATORY
@@ -84,7 +87,7 @@ Concretely:
   `README.md` first (they are the rename targets), then the code cells; re-execute.
 - Removed a surface -> keep a GAP callout showing the removal so it stays visible.
 - New submodule family (a new `tl.xyz`) -> decide which USER WORKFLOW it belongs to;
-  only create a new notebook if it is genuinely a new workflow (15/16 are the pattern).
+  only create a new notebook if it is genuinely a new workflow (15-17 are the pattern).
 
 ## Coverage is derived, never asserted
 

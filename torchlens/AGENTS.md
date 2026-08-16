@@ -167,7 +167,9 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
 
 ## Critical Invariants
 1. `_state.py` has no outgoing torchlens imports except the sanctioned `errors._base`
-   typing-only leaf (cycle-safe by construction; documented in `_state.py`).
+   leaf — a RUNTIME import (its classes are base classes, e.g. `ReentrantTraceError`);
+   only the TYPE_CHECKING block below it is typing-only (cycle-safe by construction;
+   documented in `_state.py`).
 2. `_ensure_model_prepared()` is the lazy wrapping chokepoint; do not reintroduce import-time
    torch namespace mutation.
 3. RNG state capture/restore must happen before `active_logging()`.

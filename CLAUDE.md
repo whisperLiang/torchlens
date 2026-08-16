@@ -31,8 +31,10 @@ Every fragile torch-private-API probe or cross-version torch signature must rout
 
 ## Model Menagerie (`menagerie/`)
 
-`menagerie/` is a browsable atlas of 10,000+ neural-net architecture families captured with TorchLens:
-a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), ~300+ hand-built historical
+`menagerie/` is a browsable atlas of 8,500+ catalog entries across ~3,600 neural-net architecture
+families captured with TorchLens (8,533 rows / 3,637 families measured in this checkout,
+2026-08-16; the full corpus incl. locally-validated additions lives on the menagerie machine):
+a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 2,700+ hand-built historical
 "classics" with no prior PyTorch implementation (`menagerie/classics/`, each trace-verified), and a
 disk-safe graph renderer (`python -m menagerie.generate_menagerie`).
 
@@ -571,7 +573,7 @@ only** and must NEVER be committed.
   two whitelisted curated docs. The agent task tracker `.project-context/todos.md` and the
   agent-facing `.project-context/torchlens_glossary.md` (canonical lives in the vault) are private.
 - **Public (the only tracked `.project-context/` files):** `architecture.md`,
-  `state_of_torchlens.md`. The user-facing glossary, when it ships, is `docs/reference/glossary.md`
+  `state_of_torchlens.md`. The user-facing glossary is `docs/reference/glossary.md` (shipped)
   — a separate, curated artifact, NOT the agent copy.
 - **Enforcement:** `.gitignore` excludes them and a `no-internal-notes` pre-commit hook
   (`.pre-commit-config.yaml`) HARD-FAILS any commit that stages a private path. Never `git add -f`
@@ -589,7 +591,8 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost: `smoke` selects ~4.6k tests (4,644/12,430 collect-only, measured 2026-08-15).
+Tiers by cost: `smoke` selects ~4.9k tests (4,920/12,840 collect-only, measured 2026-08-16).
+The census tip was adb3d450 (the fixwave-5 settle; tri-lab b2 probe).
 The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
 devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
 (~500s on a quieter box earlier the same sprint); budget at least that at today's ~40%

@@ -12,7 +12,8 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 import torchlens
   |- exposes 97 top-level public names in __all__
   |- eagerly imports ONLY the light spine: options, errors/_state, ir.*,
-  |  captured_run, observers, quantities, _deprecations, _save_budget, utils,
+  |  captured_run, observers, quantities, _deprecations, _errors, _io,
+  |  _literals, _save_budget, utils,
   |  and visualization (hard-pinned by tests/test_import_hygiene.py
   |  _EAGER_TORCHLENS_MODULES). capture, intervention, fastlog, autoroute,
   |  bridge, compat, export, report, stats, validation, and viz-rendering
@@ -126,7 +127,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Top-level API, 97-name `__all__`, deprecation shims, `peek`/`extract` helpers |
-| `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports except the sanctioned `errors._base` leaf (typing-only, cycle-safe) |
+| `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports except the sanctioned `errors._base` leaf (a RUNTIME base-class import, cycle-safe; only its TYPE_CHECKING block is typing-only) |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |
 | `_io/`, `io/` | Portable `.tlspec` save/load, manifest, lazy tensor refs, public I/O helpers |
