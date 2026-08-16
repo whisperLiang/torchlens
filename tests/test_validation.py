@@ -6868,13 +6868,20 @@ def test_corruption_raw_label_in_elif_children_dict():
 
 
 def test_corruption_raw_label_in_parent_arg_positions_key():
-    """A raw label planted as a parent_arg_positions KEY trips the scan."""
+    """A raw label planted as a parent_arg_positions KEY trips a tripwire.
+
+    Two redundant tripwires cover this plant: graph_topology's closed-domain
+    check (top-level keys must be 'args'/'kwargs'; runs first in the
+    contract order) and graph_ordering's raw-label dict scan. The plant must
+    refuse either way — the test pins the refusal and the named field, not
+    which redundant layer wins the race.
+    """
 
     log = _make_clean_log()
     positions = dict(log.layer_list[1].parent_arg_positions or {})
     positions["linear_1_1_raw"] = 0
     log.layer_list[1].parent_arg_positions = positions
-    with pytest.raises(MetadataInvariantError, match="graph_ordering"):
+    with pytest.raises(MetadataInvariantError, match="parent_arg_positions"):
         check_metadata_invariants(log)
     log.cleanup()
 
