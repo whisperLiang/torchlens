@@ -507,9 +507,18 @@ def test_armed_arm_count_is_a_visible_growing_ratchet() -> None:
     )
     armed = len(set(re.findall(r"def (test_corruption_arm_\w+)", corpus)))
     floor = 13  # r7 baseline: the 12 r5-proven survivors + the reciprocity mirror
+    # r7 R74-F3 (opus): the ratchet published only the NUMERATOR, so a wave
+    # that enrolls new arms dilutes coverage with the gate green (13/223 ->
+    # 13/251 went unnoticed). Publish the denominator alongside the floor so
+    # the ratio is visible in every run's output.
+    driver = _load_driver_module()
+    registry = driver.derive_registry_mutants(sys.executable, _REPO_ROOT)
+    total_arms = len(driver.derive_arm_mutants(_REPO_ROOT, registry))
+    print(f"armed per-arm plants: {armed}/{total_arms} arms ({armed / max(total_arms, 1):.1%})")
     assert armed >= floor, (
-        f"armed per-arm plant count fell to {armed} (floor {floor}): "
-        "per-arm killers must never be deleted without a replacement"
+        f"armed per-arm plant count fell to {armed} (floor {floor}, "
+        f"{total_arms} arms enrolled): per-arm killers must never be deleted "
+        "without a replacement"
     )
 
 

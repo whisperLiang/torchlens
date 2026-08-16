@@ -238,3 +238,40 @@ def test_package_percentage_aggregation_is_red_capable() -> None:
     measured = script.package_percentages(payload)
     assert measured["torchlens/capture"] == 10.0
     assert measured["torchlens/capture"] < script.PACKAGE_FLOORS["torchlens/capture"]
+
+
+#: No-growth ceiling on `# pragma: no cover` sites in torchlens/ (r7 R72-F2:
+#: this was the ONE exemption channel with no bound while every sibling
+#: mechanism — ruff ceilings, blanket-noqa ceiling, grow-only mypy flags,
+#: docstring ledger, mutation-deselect expiry, size ledgers — carries one).
+#: Excluded lines leave the coverage denominator entirely, so unbounded
+#: growth is invisible to every floor above. Measured 2026-08-16: 57 sites,
+#: all guard-line scoped with inline reasons. SHRINK-ONLY.
+_PRAGMA_NO_COVER_CEILING = 57
+
+
+def test_pragma_no_cover_census_never_grows() -> None:
+    """The coverage-exemption channel stays bounded and never excludes a body."""
+
+    package_root = _PROJECT_ROOT / "torchlens"
+    sites: list[str] = []
+    body_exclusions: list[str] = []
+    for path in sorted(package_root.rglob("*.py")):
+        rel = path.relative_to(_PROJECT_ROOT).as_posix()
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "pragma: no cover" not in line:
+                continue
+            sites.append(f"{rel}:{lineno}")
+            stripped = line.lstrip()
+            if stripped.startswith(("def ", "class ", "async def ")):
+                body_exclusions.append(f"{rel}:{lineno}")
+    assert not body_exclusions, (
+        f"pragma: no cover on a def/class line excludes a WHOLE BODY from the "
+        f"denominator — scope it to the guard line instead: {body_exclusions}"
+    )
+    assert len(sites) <= _PRAGMA_NO_COVER_CEILING, (
+        f"pragma: no cover sites grew to {len(sites)} (ceiling "
+        f"{_PRAGMA_NO_COVER_CEILING}): coverage exemptions leave the "
+        "denominator invisibly; justify the new site and raise the ceiling "
+        "in the same reviewed change, or cover the path"
+    )
