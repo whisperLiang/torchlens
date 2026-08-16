@@ -41,7 +41,15 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 # same wrap-state-surgery class as validation/_pristine.py: there is no
 # capture handle to route through), +2 `_is_decorated` SKIP guards in the
 # doctor/compat probes (3a70a76c), -1 discharged in observers.py.
-_ACCESS_SITE_BASELINE = 296
+# 296 -> 300 (2026-08-16 fw7settle reconcile, net +4 from the fixwave-7
+# merges): a non-owner-thread peek in tensor_utils.py's defer-flush guard
+# (r43 class -- reads `_active_trace`/`_active_owner_thread_id` raw because
+# the flush may run on a thread with no capture handle), and
+# validation/_pristine.py's pristine window (iovalid-r8: the
+# `_decorated_to_orig` poisoned-ledger integrity refusal plus the
+# detector/witness mode re-arm reads -- wrap-state surgery that must NOT
+# route through the accessor it is auditing).
+_ACCESS_SITE_BASELINE = 300
 
 
 def _state_access_sites() -> list[tuple[str, int]]:
