@@ -2432,10 +2432,20 @@ class EpisodeSpec:
         as the ledger header's ``entry_seed``.
     escalated_from:
         Producer digest of the cheap-tier product this capture escalates
-        (present iff escalation; travels with ``reason`` — E-A2).
+        (present iff escalation; travels with ``reason`` — E-A2). Build the
+        whole escalation declaration with
+        ``torchlens.capture._episode_ledger.escalation_spec(producer, ...)``.
     reason:
         Escalation reason, closed vocabulary
         ``{"step_failed", "divergence", "requested"}``.
+    expected_tokens:
+        The cheap-tier product's per-step token column (one tuple per step),
+        carried so the escalated capture can discharge the E-A3 fidelity
+        obligation at write time: prefix-equal columns record
+        ``fidelity_basis="tokens"``; a mismatch records ``"diverged"`` — the
+        escalated product is still a valid capture of what it ran, it just
+        is not an escalation of the original episode, and says so. Never a
+        settlement input.
     """
 
     stepped_module: Any
@@ -2446,6 +2456,7 @@ class EpisodeSpec:
     rng: Literal["managed"] = "managed"
     escalated_from: str | None = None
     reason: str | None = None
+    expected_tokens: tuple[tuple[int, ...], ...] | None = None
 
 
 __all__ = [

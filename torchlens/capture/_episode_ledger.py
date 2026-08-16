@@ -910,6 +910,7 @@ class ResolvedEpisode:
     forced_tokens: tuple[int, ...] | None
     escalated_from: str | None
     reason: EscalationReason | None
+    expected_tokens: tuple[tuple[int, ...], ...] | None = None
 
 
 def _declaration_error(message: str, *, code: str | None = None) -> Exception:
@@ -1060,6 +1061,11 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
         forced_tokens=forced,
         escalated_from=spec.escalated_from,
         reason=cast("EscalationReason | None", reason),
+        expected_tokens=(
+            tuple(tuple(int(t) for t in step) for step in spec.expected_tokens)
+            if spec.expected_tokens is not None
+            else None
+        ),
     )
 
 
@@ -1082,7 +1088,41 @@ def attach_episode_header(trace: Any, resolved: ResolvedEpisode) -> None:
     }
 
 
-def _build_header(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedgerHeader:
+def _fidelity_basis(
+    resolved: ResolvedEpisode, tokens_by_row: list[tuple[int, ...]] | None
+) -> FidelityBasis | None:
+    """Derive the E-A3 fidelity disclosure for the ledger header.
+
+    A teacher-forced feed is ``forced`` (non-verifying by declaration). An
+    escalation with BOTH token columns available compares the escalated
+    column against the producer's up to the shorter prefix: equal records
+    ``tokens``, a mismatch records ``diverged`` (the escalation FAILED its
+    purpose — the product is still a valid capture of what it ran, it just
+    is not an escalation of the original episode, and says so). Escalations
+    without comparable columns record ``none``. Never a settlement input.
+    """
+
+    if resolved.forced_tokens is not None:
+        return "forced"
+    if resolved.escalated_from is None:
+        return None
+    if tokens_by_row is None or resolved.expected_tokens is None:
+        return "none"
+    prefix = min(len(tokens_by_row), len(resolved.expected_tokens))
+    if prefix == 0:
+        return "none"
+    for step in range(prefix):
+        if tokens_by_row[step] != resolved.expected_tokens[step]:
+            return "diverged"
+    return "tokens"
+
+
+def _build_header(
+    trace: Any,
+    resolved: ResolvedEpisode,
+    *,
+    fidelity: FidelityBasis | None = None,
+) -> EpisodeLedgerHeader:
     """Build the finalized ledger header from the settled trace."""
 
     entry_seed = getattr(trace, "random_seed", None)
@@ -1093,17 +1133,6 @@ def _build_header(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedgerHeader:
             code="episode_ledger_incoherent",
         )
     forced = resolved.forced_tokens is not None
-    fidelity: FidelityBasis | None
-    if forced:
-        fidelity = "forced"
-    elif resolved.escalated_from is not None:
-        # The escalation fidelity comparison (E-A3) is computed by the caller
-        # that holds BOTH products; the header starts at the non-claiming
-        # floor and tl.episode-side helpers may upgrade the DISCLOSURE (never
-        # a settlement input).
-        fidelity = "none"
-    else:
-        fidelity = None
     return EpisodeLedgerHeader(
         episode_id=resolved.episode_id,
         stepped_module=resolved.address,
@@ -1285,7 +1314,6 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
             for call in calls
         ]
 
-    header = _build_header(trace, resolved)
     prompt_len = _prompt_length(trace, resolved.token_axis)
 
     tokens_by_row: list[tuple[int, ...]] | None = None
@@ -1295,6 +1323,8 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
         and (started == n_total)
     ):
         tokens_by_row = _emitted_tokens(trace, resolved, started)
+
+    header = _build_header(trace, resolved, fidelity=_fidelity_basis(resolved, tokens_by_row))
 
     frontier: dict[str, str] | None = None
     halt_frontier = getattr(trace, "halt_frontier", None)
@@ -1373,7 +1403,7 @@ def attach_failed_episode_ledger(exc: BaseException, resolved: ResolvedEpisode) 
                         and entry[0] == resolved.address
                     ):
                         started = max(started, int(entry[1]))
-        header = _build_header(trace, resolved)
+        header = _build_header(trace, resolved, fidelity=_fidelity_basis(resolved, None))
         n_total = max(resolved.n_steps or started, started)
         complete_steps = returned if returned is not None else max(started - 1, 0)
         complete_steps = min(complete_steps, started)
@@ -1405,6 +1435,58 @@ def attach_failed_episode_ledger(exc: BaseException, resolved: ResolvedEpisode) 
             TorchLensWarning,
             stacklevel=2,
         )
+
+
+def escalation_spec(
+    producer: Any,
+    *,
+    stepped_module: Any,
+    reason: EscalationReason,
+    n_steps: int | None = None,
+    token_axis: int | None = None,
+) -> EpisodeSpec:
+    """Build the E-A escalation declaration FROM a cheap-tier episode product.
+
+    E-A1: the escalation product of an episode is a NEW whole-episode wrapped
+    session capture — same declaration, same inputs, same recorded entry
+    seed, re-run from t=0; there is no partial escalation product under the
+    session ruling. This helper derives the disclosure fields from the
+    producer: ``escalated_from`` (the producer digest over its persisted
+    outcome payload + ledger rows), the declared step count, and the
+    producer's token column so the write-time E-A3 fidelity comparison can
+    discharge (``tokens`` / ``diverged`` / ``none``).
+
+    Re-run the escalation with the producer's recorded entry seed
+    (``producer.random_seed``) to satisfy E-A1's same-seed requirement.
+
+    Raises
+    ------
+    EpisodeLedgerError
+        ``episode_ledger_without_declaration`` when the producer carries no
+        finalized episode ledger.
+    """
+
+    from ..options import EpisodeSpec as _EpisodeSpec
+
+    ledger = episode_ledger_for(producer)
+    if ledger is None:
+        raise _ledger_error(
+            "escalation requires a producer carrying a finalized episode "
+            "ledger; this product has none.",
+            code="episode_ledger_without_declaration",
+        )
+    outcome = producer.outcome
+    outcome_payload = outcome.to_payload() if outcome is not None else {}
+    digest = producer_digest(outcome_payload, ledger)
+    expected = tuple(row.tokens for row in ledger.rows if row.tokens is not None)
+    return _EpisodeSpec(
+        stepped_module=stepped_module,
+        n_steps=n_steps if n_steps is not None else ledger.header.n_steps_declared,
+        token_axis=token_axis if token_axis is not None else -1,
+        escalated_from=digest,
+        reason=reason,
+        expected_tokens=expected if expected else None,
+    )
 
 
 def episode_ledger_for(trace: Any) -> EpisodeLedger | None:
