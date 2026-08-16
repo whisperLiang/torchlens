@@ -177,6 +177,16 @@ class BeltReport:
     probe_failures: tuple[tuple[str, str], ...]
     unprobed_candidate_count: int
     unprobed_candidates: tuple[tuple[str, str], ...] = ()
+    probe_failure_details: tuple[tuple[str, str, str], ...] = ()
+    """``(namespace, func, exception repr)`` for each probe failure.
+
+    A failed probe is a COVERAGE GAP, not a benign skip: the candidate could
+    not be measured, so it is neither belt-patched nor proven mode-visible.
+    A stale pre-wrap reference to it would lose ops with zero signal while
+    the capture still reports ``capture_verified=True``. Consumers
+    (``torchlens.utils.doctor()`` and ``torchlens.compat.report()``) surface
+    these rows; the details make the failure actionable per build.
+    """
 
 
 _report: BeltReport | None = None
@@ -225,6 +235,7 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
     members: list[tuple[str, str]] = []
     probed_visible: list[tuple[str, str]] = []
     probe_failures: list[tuple[str, str]] = []
+    probe_failure_details: list[tuple[str, str, str]] = []
     member_map: dict[int, Any] = {}
     unprobed_candidates: list[tuple[str, str]] = []
     seen_original_ids: set[int] = set()
@@ -253,8 +264,9 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
                     cleanup_path = str(args[0])
                 with mode:
                     result = original(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
             probe_failures.append((namespace_name, func_name))
+            probe_failure_details.append((namespace_name, func_name, repr(exc)))
             continue
         finally:
             if cleanup_path is not None:
@@ -278,6 +290,7 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
         probe_failures=tuple(probe_failures),
         unprobed_candidate_count=len(unprobed_candidates),
         unprobed_candidates=tuple(unprobed_candidates),
+        probe_failure_details=tuple(probe_failure_details),
     )
     return report, member_map
 
