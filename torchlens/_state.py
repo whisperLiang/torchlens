@@ -499,6 +499,8 @@ _completeness_witness_mode: str = "off"
 """Dispatcher completeness witness mode: ``"off"`` or diagnostic ``"shadow"``."""
 
 _runnable_ledger_armed: bool = False
+# Private wave-0 ATen recorder edge-token arm. It is capture-scoped and never portable.
+_aten_recording_armed: bool = False
 """Whether the r35 event-lifecycle ledger requires wrapper ownership tokens.
 
 Armed only around a runnable-eligible (``intervention_ready``) capture forward so

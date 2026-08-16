@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+from .._io import FieldPolicy
 from .container import ContainerSpec
 
 if TYPE_CHECKING:
@@ -36,6 +37,118 @@ BackwardTrigger = Literal[
     "replay",
 ]
 BackwardStatus = Literal["ok", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenTensorFact:
+    """Value-free tensor metadata observed at one dispatcher boundary."""
+
+    container_path: tuple[object, ...]
+    tensor_impl_capability: str
+    logical_version: int | None
+    storage_alias_group: int | None
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: str
+    device: str
+    layout: str
+    requires_grad: bool
+
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "container_path": FieldPolicy.DROP,
+        "tensor_impl_capability": FieldPolicy.DROP,
+        "logical_version": FieldPolicy.DROP,
+        "storage_alias_group": FieldPolicy.DROP,
+        "shape": FieldPolicy.DROP,
+        "stride": FieldPolicy.DROP,
+        "dtype": FieldPolicy.DROP,
+        "device": FieldPolicy.DROP,
+        "layout": FieldPolicy.DROP,
+        "requires_grad": FieldPolicy.DROP,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenExecutionContext:
+    """Immutable execution-environment stamp for one dispatcher call."""
+
+    pytorch_version: str
+    backend: str
+    device_model: str | None
+    device_capability: tuple[int, int] | None
+    grad_mode: bool
+    inference_mode: bool
+    module_training_summary: tuple[tuple[str, bool], ...]
+    autocast: tuple[tuple[str, bool, str], ...]
+    deterministic_algorithms: bool
+    tf32_matmul_policy: bool | None
+    sdpa_policy: tuple[tuple[str, bool], ...]
+    compile_stance: str
+    owner_thread_coverage: tuple[int, ...]
+    completeness_witness_mode: str
+
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "pytorch_version": FieldPolicy.DROP,
+        "backend": FieldPolicy.DROP,
+        "device_model": FieldPolicy.DROP,
+        "device_capability": FieldPolicy.DROP,
+        "grad_mode": FieldPolicy.DROP,
+        "inference_mode": FieldPolicy.DROP,
+        "module_training_summary": FieldPolicy.DROP,
+        "autocast": FieldPolicy.DROP,
+        "deterministic_algorithms": FieldPolicy.DROP,
+        "tf32_matmul_policy": FieldPolicy.DROP,
+        "sdpa_policy": FieldPolicy.DROP,
+        "compile_stance": FieldPolicy.DROP,
+        "owner_thread_coverage": FieldPolicy.DROP,
+        "completeness_witness_mode": FieldPolicy.DROP,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenCallEvent:
+    """Value-free facts for one observed ATen dispatcher call."""
+
+    capture_phase: str
+    forward_pass_index: int | None
+    backward_epoch_index: int | None
+    owner_func_call_id: int | None
+    parent_grad_fn_call_ref: tuple[int, int, int] | None
+    namespace: str
+    operator: str
+    overload: str
+    schema: str | None
+    schema_fingerprint: str | None
+    module_call_stack: tuple[tuple[str, int], ...]
+    input_tensor_facts: tuple[_AtenTensorFact, ...]
+    output_tensor_facts: tuple[_AtenTensorFact, ...]
+    mutation_kind: str
+    view_copy_kind: str
+    autocast_context: tuple[tuple[str, bool, str], ...]
+    dispatch_key_context: str | None
+    grad_fn_ref: str | None
+    grad_fn_link_status: str
+    grad_fn_link_provenance: str | None
+    algorithmic_flops: int | None
+    flop_status: str
+    flop_formula_source: str | None
+    flop_formula_version: str | None
+    outcome: str
+    exception_type: str | None
+    execution_context: _AtenExecutionContext
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ModePausedInteriorEvent:
+    """Boundary-only disclosure for a strict constructor's unobserved interior."""
+
+    capture_phase: str
+    sequence_before: int
+    sequence_after: int
+    owner_func_call_id: int | None
+    reason: str = "strict_subclass_constructor"
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)

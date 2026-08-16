@@ -2,7 +2,7 @@
 
 One declared schema, generated artifacts (docs/reference/trace_core_design.md
 section 3.4): this tool derives one ``StorageBinding`` per declared field for
-all 11 record classes and writes ``torchlens/data_classes/_schema_bindings.py``
+all 12 record classes and writes ``torchlens/data_classes/_schema_bindings.py``
 as reviewable, deterministic source. A CI test regenerates and diffs, so the
 bindings can never drift from the classes silently.
 
@@ -101,6 +101,27 @@ _EDGE_FIELDS = {
     "buffers",
 }
 
+# Primitive-kind relations are deliberately scoped by schema key: ``module_call_stack``
+# is not an edge column on the existing Op schema, and adding it to the global set would
+# silently change an installed binding outside L3's fenced kind.
+_PRIMITIVE_EDGE_FIELDS = frozenset({"parent_op_refs", "module_call_stack"})
+
+# Intended post-bump intern pool for the primitive kind. The installed wave-0 policies
+# are all DROP, so the DROP-before-pool classifier keeps every checked-in binding RUNTIME.
+_PRIMITIVE_POOLED_SLOTS = frozenset(
+    {
+        "label",
+        "namespace",
+        "operator",
+        "overload",
+        "schema",
+        "schema_fingerprint",
+        "autocast_context",
+        "dispatch_key_context",
+        "execution_context",
+    }
+)
+
 
 def _annotation_for(cls: type, name: str) -> str | None:
     """Return the class-declared annotation string for a field, if any."""
@@ -123,6 +144,7 @@ def _is_property(cls: type, name: str) -> bool:
 
 
 def _classify(
+    schema_key: str,
     cls: type,
     name: str,
     policy: Any,
@@ -150,7 +172,7 @@ def _classify(
         return "PAYLOAD", "immutable"
     default = container_defaults.get(name)
     is_container = isinstance(default, (list, dict, set))
-    if name in _EDGE_FIELDS:
+    if name in _EDGE_FIELDS or (schema_key == "primitive_op" and name in _PRIMITIVE_EDGE_FIELDS):
         return "EDGE", "mutable_container" if is_container else "immutable"
     if is_container:
         return "SCALAR", "mutable_container"
@@ -163,6 +185,7 @@ def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
     """Build the schema-key -> [(field, kind, annotation, mutability)] map."""
 
     from torchlens.data_classes import op as op_module
+    from torchlens.data_classes.aten_op import AtenOp
     from torchlens.data_classes.backward_pass import BackwardPass
     from torchlens.data_classes.buffer import Buffer
     from torchlens.data_classes.func_call_location import FuncCallLocation
@@ -190,16 +213,48 @@ def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
         ("grad_fn_call", GradFnCall, {}, frozenset()),
         ("backward_pass", BackwardPass, {}, frozenset()),
         ("func_call_location", FuncCallLocation, {}, frozenset()),
+        ("primitive_op", AtenOp, {}, _PRIMITIVE_POOLED_SLOTS),
     ]
 
     schema: dict[str, list[tuple[str, str, str | None, str]]] = {}
     for key, cls, container_defaults, pooled in classes:
         rows: list[tuple[str, str, str | None, str]] = []
         for name, policy in cls.FIELD_POLICY.items():
-            kind, mutability = _classify(cls, name, policy, container_defaults, pooled)
+            kind, mutability = _classify(key, cls, name, policy, container_defaults, pooled)
             rows.append((name, kind, _annotation_for(cls, name), mutability))
         schema[key] = rows
     return schema
+
+
+def collect_primitive_candidate_bindings() -> dict[str, str]:
+    """Return isolated post-bump primitive storage kinds for S3 review.
+
+    Returns
+    -------
+    dict[str, str]
+        Primitive field name to intended ``StorageKind`` name with every
+        portable policy virtually promoted from DROP to KEEP. This does not
+        alter the installed generated bindings or the registrar switch.
+    """
+
+    from dataclasses import replace
+
+    from torchlens._io import FieldPolicy
+    from torchlens.data_classes.aten_op import AtenOp
+
+    candidate: dict[str, str] = {}
+    for name, policy in AtenOp.FIELD_POLICY.items():
+        promoted = replace(policy, portable_policy=FieldPolicy.KEEP)
+        kind, _ = _classify(
+            "primitive_op",
+            AtenOp,
+            name,
+            promoted,
+            {},
+            _PRIMITIVE_POOLED_SLOTS,
+        )
+        candidate[name] = kind
+    return candidate
 
 
 def _render(schema: dict[str, list[tuple[str, str, str | None, str]]]) -> str:

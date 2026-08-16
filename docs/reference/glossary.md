@@ -59,6 +59,54 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 **Facet**
 : A named semantic view into one captured value, such as an attention projection or an LSTM state.
 
+### Documented-unstable ATen profile INDEX
+
+The wave-0 ATen execution-profile core is gated off for ordinary callers and its fields remain
+`FieldPolicy.DROP`. Only the pytest prerelease switch can persist and reload these records; ordinary
+v7 artifacts contain no primitive profile. The public recorder, entity accessors, and absent-profile
+refusal remain unavailable until the S2-owned capability amendment lands. The names below are the
+exact surface already introduced by the gated core. Each is documented unstable and may be renamed
+or removed without a compatibility alias. No validation or honesty tripwire may be weakened.
+
+<!-- ATEN-UNSTABLE-INDEX:START -->
+
+| Surface | Exact spelling or token | Stability |
+| --- | --- | --- |
+| Facades, record kind, disclosure, and provenance | `AtenOp`, `OpRef`, `SuperAtenOp`, `primitive_op`, `mode_paused_interior`, `exact_via_aten`, `heuristic` | unstable -- no deprecation shim owed |
+| Field-order contract | `PRIMITIVE_OP_FIELD_ORDER` | unstable -- no deprecation shim owed |
+| Primitive fields | `label`, `sequence`, `capture_phase`, `forward_pass_index`, `backward_epoch_index`, `owner_func_call_id`, `parent_op_refs`, `parent_grad_fn_call_ref`, `owner_status`, `decomposition_slot`, `namespace`, `operator`, `overload`, `schema`, `schema_fingerprint`, `module_call_stack`, `input_tensor_facts`, `output_tensor_facts`, `mutation_kind`, `view_copy_kind`, `autocast_context`, `dispatch_key_context`, `grad_fn_ref`, `grad_fn_link_status`, `grad_fn_link_provenance`, `algorithmic_flops`, `flop_status`, `flop_formula_source`, `flop_formula_version`, `outcome`, `exception_type`, `execution_context` | unstable -- no deprecation shim owed |
+| Observer-gap fields | `kind`, `capture_phase`, `sequence_before`, `sequence_after`, `owner_func_call_id`, `parent_op_refs`, `reason` | unstable -- no deprecation shim owed |
+| Redundant Op-reference fields | `op_row_index`, `op_label`, `func_call_id` | unstable -- no deprecation shim owed |
+| Tensor-fact fields | `container_path`, `tensor_impl_capability`, `logical_version`, `storage_alias_group`, `shape`, `stride`, `dtype`, `device`, `layout`, `requires_grad` | unstable -- no deprecation shim owed |
+| Execution-context fields | `pytorch_version`, `backend`, `device_model`, `device_capability`, `grad_mode`, `inference_mode`, `module_training_summary`, `autocast`, `deterministic_algorithms`, `tf32_matmul_policy`, `sdpa_policy`, `compile_stance`, `owner_thread_coverage`, `completeness_witness_mode` | unstable -- no deprecation shim owed |
+| Super comparison fields | `comparison_status`, `has_observation_gap` | unstable -- no deprecation shim owed |
+| Invariant contracts | `primitive_op_invariants`, `non_torch_primitive_op_inert` | unstable -- no deprecation shim owed |
+| Switch-active load failures | `primitive_op_schema_invalid`, `primitive_op_fk_invalid` | unstable -- no deprecation shim owed |
+| Capture phases | `forward`, `backward`, `setup` | unstable -- no deprecation shim owed |
+| Mutation classes | `none`, `in_place`, `out_variant`, `metadata_only`, `unknown` | unstable -- no deprecation shim owed |
+| View/copy classes | `view`, `copy`, `alias`, `unknown` | unstable -- no deprecation shim owed |
+| Owner classes | `forward_op`, `backward_grad_fn_call`, `orphan`, `unresolved` | unstable -- no deprecation shim owed |
+| Grad-link classes | `linked`, `unlinked`, `conflict`, `not_applicable` | unstable -- no deprecation shim owed |
+| Dispatcher outcomes | `returned`, `raised` | unstable -- no deprecation shim owed |
+| FLOP evidence classes | `formula_exact`, `estimated`, `unsupported` | unstable -- no deprecation shim owed |
+| Super alignment classes | `all_present_same_schema`, `all_present_different_schema`, `sparse`, `coverage_indeterminate` | unstable -- no deprecation shim owed |
+| Execution and disclosure tokens | `forced_eager`, `strict_subclass_constructor` | unstable -- no deprecation shim owed |
+| Temporary label grammar | `aten_<sequence>` | unstable -- no deprecation shim owed |
+
+<!-- ATEN-UNSTABLE-INDEX:END -->
+
+`AtenOp` is one value-free dispatcher call measured during a concrete capture. Its label is opaque,
+capture-local, and intentionally excluded from universal Trace string lookup. `OpRef` is a redundant
+dense foreign key whose row index, Op label, and function-call witness must all agree. A
+`mode_paused_interior` entry says only that TorchLens paused its owned dispatch observer around a
+strict Tensor-subclass constructor; recorded rows and counts on that parent are lower bounds, and no
+synthetic primitive row is created for the unseen interior.
+
+`SuperAtenOp` aligns observed rows positionally by `decomposition_slot`. Its `comparison_status`
+distinguishes equal-schema coverage, different-schema coverage, proven sparse membership, and
+coverage that is indeterminate because at least one member has an observation gap. Positional
+alignment is evidence, not semantic equivalence.
+
 ## Selection and storage
 
 **Predicate**

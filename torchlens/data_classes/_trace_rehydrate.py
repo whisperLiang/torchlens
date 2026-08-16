@@ -152,8 +152,27 @@ def rehydrate_trace_core(trace: Trace) -> bool:
             records_by_kind.setdefault(kind, {}).setdefault(id(record), record)
         for record in _iter_op_cell_func_call_locations(store, _OP_STORE_LAYOUT):
             records_by_kind.setdefault("func_call_location", {}).setdefault(id(record), record)
+        primitive_profile = trace.__dict__.get("_primitive_op_profile")
+        if primitive_profile is not None:
+            forward_primitive_rows = [
+                row for row in primitive_profile.primitive_ops if row.capture_phase != "backward"
+            ]
+            if forward_primitive_rows:
+                records_by_kind["primitive_op"] = {
+                    id(record): record for record in forward_primitive_rows
+                }
         for kind, records in records_by_kind.items():
             adopt_records(core, kind, records.values())
+        if primitive_profile is not None:
+            backward_primitive_rows = [
+                row for row in primitive_profile.primitive_ops if row.capture_phase == "backward"
+            ]
+            if backward_primitive_rows:
+                from .._trace_core.record_rows import BackwardEpoch, adopt_rows
+
+                epoch = BackwardEpoch()
+                adopt_rows(epoch.stores, "primitive_op", backward_primitive_rows)
+                core.backward_epochs = [epoch]
 
         trace.__dict__["_trace_core"] = core
         freeze_trace_relation_views(trace)
@@ -167,6 +186,9 @@ def rehydrate_trace_core(trace: Trace) -> bool:
         store.adopt_payload_owner(core)
         for kind_store in core.kind_rows.values():
             kind_store.freeze()
+        for epoch in core.backward_epochs:
+            for kind_store in epoch.stores.values():
+                kind_store.freeze()
     except Exception:
         # Best-effort: restore the detached bindings and stay coreless.
         for op, bound, _row in adopted:

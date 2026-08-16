@@ -380,8 +380,14 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
     # by its producing op, keyed on the ESCAPE EVENT. This is a passive observer:
     # it records raw op labels only and never alters a captured op, so goldens are
     # unchanged. The default (non-runnable) capture path installs nothing.
+    from ._aten_capture import _aten_recording_requested
+
     record_escapes = bool(getattr(trace, "intervention_ready", False))
-    if mode == "off" and not record_escapes:
+    record_aten = _aten_recording_requested()
+    event_stream = getattr(trace, "capture_events", None)
+    if record_aten and event_stream is not None:
+        event_stream.aten_recording_enabled = True
+    if mode == "off" and not record_escapes and not record_aten:
         try:
             yield
         finally:
@@ -396,8 +402,13 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         census=(mode == "shadow"),
         record_escapes=record_escapes,
         ledger=record_escapes,
+        record_aten=record_aten,
+        aten_events=event_stream,
+        capture_phase="forward",
     )
     mode_context = _CompletenessDispatchMode(state)
+    prior_aten_armed = _state._aten_recording_armed
+    _state._aten_recording_armed = prior_aten_armed or record_aten
     # A runnable capture additionally observes census-INVISIBLE ``.tolist()`` /
     # ``.numpy()`` / ``__array__`` escapes via a scoped method patch so every escape
     # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
@@ -427,15 +438,19 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         finally:
             _ACTIVE_WITNESS_STATE = prior_active_state
             _state._runnable_ledger_armed = prior_ledger_armed
+            _state._aten_recording_armed = prior_aten_armed
         return
-    with mode_context:
-        try:
-            yield
-        finally:
-            if mode == "shadow":
-                _finalize_census(state)
-            else:
-                _finalize_input_semantics_without_census(trace)
+    try:
+        with mode_context:
+            try:
+                yield
+            finally:
+                if mode == "shadow":
+                    _finalize_census(state)
+                else:
+                    _finalize_input_semantics_without_census(trace)
+    finally:
+        _state._aten_recording_armed = prior_aten_armed
 
 
 def _collect_authorized_internal_caller_modules() -> None:

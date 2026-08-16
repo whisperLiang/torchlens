@@ -895,6 +895,13 @@ _SAFE_TORCHLENS_TYPES: frozenset[tuple[str, str]] = frozenset(
         # field-refill pattern Trace/Op use (default_fill_state); no side effects.
         ("torchlens.data_classes.backward_pass", "BackwardPass"),
         ("torchlens.data_classes.backward_pass", "BackwardPassAccessor"),
+        # DROP-gated primitive-profile records (pre-release switch only).
+        ("torchlens.data_classes.aten_op", "AtenOp"),
+        ("torchlens.data_classes.aten_op", "OpRef"),
+        ("torchlens.data_classes.aten_op", "_ModePausedInteriorGap"),
+        ("torchlens.data_classes.aten_op", "_PrimitiveOpProfile"),
+        ("torchlens.ir.events", "_AtenTensorFact"),
+        ("torchlens.ir.events", "_AtenExecutionContext"),
         # Trace + conditional-control-flow data classes.
         ("torchlens.data_classes.trace", "Conditional"),
         ("torchlens.data_classes.trace", "ConditionalAccessor"),

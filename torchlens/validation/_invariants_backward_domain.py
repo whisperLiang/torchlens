@@ -440,6 +440,7 @@ def _check_journal_seq_invariants(trace: Trace, name: str) -> None:
         "buffer_write_events",
         "intervention_events",
         "backward_events",
+        "aten_events",
     )
     seen_lane_by_seq: dict[int, str] = {}
     for lane_name in lane_names:

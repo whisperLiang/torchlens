@@ -1266,16 +1266,31 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
         started = time.perf_counter_ns()
         in_scope = False
         event: _DispatchEvent | None = None
+        aten_pending: Any = None
         pre_dispatch_receiver_numel: int | None = None
         try:
+            phase_visible = _state._logging_enabled or (
+                self.state.record_aten and self.state.capture_phase == "backward"
+            )
             in_scope = (
                 threading.get_ident() == self.state.owner_thread_id
-                and _state._logging_enabled
+                and phase_visible
                 and _state._active_trace is self.state.trace
                 and _is_aten_operator(func)
             )
+            owner = _active_token() if in_scope else None
+            if in_scope and self.state.record_aten:
+                from ._aten_capture import _prepare_aten_call
+
+                aten_pending = _prepare_aten_call(
+                    self.state,
+                    func,
+                    args,
+                    kwargs,
+                    None if owner is None else owner.func_call_id,
+                    mutates=_is_mutating_operator(func),
+                )
             if in_scope and (self.state.census or self.state.ledger):
-                owner = _active_token()
                 # The frame-walking callsite/replacement/state-view facts are census
                 # diagnostics; ledger-only events defer the replacement-hook probe to
                 # OUTCOME time (only raised / host-returning events need it).
@@ -1334,6 +1349,10 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
                 event.exception_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
                 if not event.in_replacement_hook:
                     event.in_replacement_hook = _in_replacement_hook_frame()
+            if aten_pending is not None:
+                from ._aten_capture import _finish_aten_call
+
+                _finish_aten_call(self.state, aten_pending, exception=exc)
             raise
         if event is not None:
             if _dispatch_result_holds_tensor(result):
@@ -1346,6 +1365,10 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
                 event.outcome = "returned_host_or_none"
                 if not event.in_replacement_hook:
                     event.in_replacement_hook = _in_replacement_hook_frame()
+        if aten_pending is not None:
+            from ._aten_capture import _finish_aten_call
+
+            _finish_aten_call(self.state, aten_pending, result=result)
         # Escape recording needs the OUTPUT: a tensor->host escape is any aten dispatch
         # returning a NON-TENSOR host value from a tensor operand (equal/allclose/
         # is_nonzero/_local_scalar_dense). Recorded after redispatch so the result is

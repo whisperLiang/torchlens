@@ -62,6 +62,7 @@ def _tiny_trace() -> Trace:
 
 
 def test_registration_requires_declared_drop_policy() -> None:
+    inventory_before = registered_prerelease_fields()
     keep_field = next(
         name for name, policy in Trace.PORTABLE_STATE_SPEC.items() if policy is FieldPolicy.KEEP
     )
@@ -71,13 +72,22 @@ def test_registration_requires_declared_drop_policy() -> None:
         register_prerelease_field(Trace, "_no_such_field_anywhere")
     with pytest.raises(ValueError, match="no-op"):
         register_prerelease_field(Trace, _PLANT_FIELD, persisted_policy=FieldPolicy.DROP)
-    assert registered_prerelease_fields() == {}
+    assert registered_prerelease_fields() == inventory_before
 
 
 def test_registry_inventory_and_unregister(planted_field: str) -> None:
-    assert registered_prerelease_fields() == {"Trace": (planted_field,)}
+    inventory_with_plant = registered_prerelease_fields()
+    assert planted_field in inventory_with_plant["Trace"]
     unregister_prerelease_field(Trace, planted_field)
-    assert registered_prerelease_fields() == {}
+    inventory_without_plant = dict(inventory_with_plant)
+    remaining_trace_fields = tuple(
+        name for name in inventory_without_plant["Trace"] if name != planted_field
+    )
+    if remaining_trace_fields:
+        inventory_without_plant["Trace"] = remaining_trace_fields
+    else:
+        del inventory_without_plant["Trace"]
+    assert registered_prerelease_fields() == inventory_without_plant
     # Fixture teardown unregisters again; must be idempotent.
 
 

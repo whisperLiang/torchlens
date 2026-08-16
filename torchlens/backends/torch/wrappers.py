@@ -127,6 +127,7 @@ def _diagnostic_edge_armed() -> bool:
         _state._escape_detector_mode == "shadow"
         or _state._completeness_witness_mode == "shadow"
         or _state._runnable_ledger_armed
+        or _state._aten_recording_armed
     )
 
 
@@ -1941,8 +1942,9 @@ def torch_func_decorator(
         # systematically overstates cheap ops in instrumented captures.
         func_exec_start = time.time()
         mode_pause = pause_own_dispatch_modes() if pauses_owned_modes else nullcontext(())
+        paused_modes: tuple[Any, ...] = ()
         try:
-            with mode_pause:
+            with mode_pause as paused_modes:
                 if _diagnostic_edge_armed():
                     with expected_original_call(
                         func,
@@ -1955,6 +1957,10 @@ def torch_func_decorator(
                 else:
                     out_orig = func(*args, **kwargs)
         finally:
+            if paused_modes:
+                from ._aten_capture import _record_mode_paused_interior
+
+                _record_mode_paused_interior(trace, owner_func_call_id=func_call_id)
             _nvtx_range_pop(nvtx_pushed)
         func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:

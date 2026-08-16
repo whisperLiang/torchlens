@@ -67,6 +67,37 @@ PRE_REFACTOR_NON_TORCH_SEQUENCE = (
     "lookup_key_consistency",
 )
 
+EXPECTED_TORCH_SEQUENCE = (
+    *PRE_REFACTOR_TORCH_SEQUENCE[:12],
+    "primitive_op_invariants",
+    *PRE_REFACTOR_TORCH_SEQUENCE[12:],
+)
+EXPECTED_NON_TORCH_SEQUENCE = (
+    *PRE_REFACTOR_NON_TORCH_SEQUENCE[:4],
+    "non_torch_primitive_op_inert",
+    *PRE_REFACTOR_NON_TORCH_SEQUENCE[4:],
+)
+
+
+def _is_ordered_subsequence(needle: tuple[str, ...], haystack: tuple[str, ...]) -> bool:
+    """Return whether ``needle`` appears in order within ``haystack``.
+
+    Parameters
+    ----------
+    needle
+        Historical invariant sequence.
+    haystack
+        Current invariant sequence.
+
+    Returns
+    -------
+    bool
+        Whether every historical entry survives in the same order.
+    """
+
+    cursor = iter(haystack)
+    return all(any(candidate == item for candidate in cursor) for item in needle)
+
 
 def test_metadata_invariant_dispatch_preserves_torch_sequence(
     monkeypatch: pytest.MonkeyPatch,
@@ -78,8 +109,8 @@ def test_metadata_invariant_dispatch_preserves_torch_sequence(
 
     assert invariants.check_metadata_invariants(trace)
 
-    assert tuple(executed) == PRE_REFACTOR_TORCH_SEQUENCE
-    assert set(executed) == set(PRE_REFACTOR_TORCH_SEQUENCE)
+    assert tuple(executed) == EXPECTED_TORCH_SEQUENCE
+    assert _is_ordered_subsequence(PRE_REFACTOR_TORCH_SEQUENCE, tuple(executed))
 
 
 def test_metadata_invariant_dispatch_preserves_non_torch_sequence(
@@ -92,8 +123,8 @@ def test_metadata_invariant_dispatch_preserves_non_torch_sequence(
 
     assert invariants.check_metadata_invariants(trace)
 
-    assert tuple(executed) == PRE_REFACTOR_NON_TORCH_SEQUENCE
-    assert set(executed) == set(PRE_REFACTOR_NON_TORCH_SEQUENCE)
+    assert tuple(executed) == EXPECTED_NON_TORCH_SEQUENCE
+    assert _is_ordered_subsequence(PRE_REFACTOR_NON_TORCH_SEQUENCE, tuple(executed))
 
 
 def _install_dispatch_spies(monkeypatch: pytest.MonkeyPatch) -> list[str]:
