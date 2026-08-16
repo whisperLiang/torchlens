@@ -283,6 +283,10 @@ class ContextFieldInvalidError(_ActionableErrorMixin, TorchLensError, ValueError
             code="context_field_invalid",
             field=field,
             detail=detail,
+            remedy=(
+                "treat the descriptor's execution-context record as corrupt or "
+                "tampered; re-save the runnable artifact from a live capture"
+            ),
         )
         self.field = field
         self.detail = detail

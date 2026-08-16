@@ -433,7 +433,12 @@ class MergedTrace:
                 # result.
                 continue
         if not hits:
-            raise KeyError(item)
+            raise KeyError(
+                f"{item!r} resolves on none of ranks {list(self.rank_ids)}; "
+                f"use a rank-qualified spelling (r{{rank}}/label, e.g. "
+                f"r{self.rank_ids[0] if self.rank_ids else 0}/{item}) or query "
+                "one rank core directly (merged.ranks[r][label])."
+            )
         if len(hits) > 1:
             from .._errors import AmbiguousOpLookupError
 
@@ -483,7 +488,10 @@ class MergedTrace:
                 # a defect in the rank core and must surface, not shrink the fan.
                 continue
         if not fan:
-            raise KeyError(label)
+            raise KeyError(
+                f"{label!r} resolves on none of ranks {list(self.rank_ids)}; "
+                "super_op takes an unqualified rank-core op/layer label."
+            )
         return fan
 
     def join_ops(self, join: CollectiveJoin) -> dict[int, tuple[Any, ...]]:
@@ -543,7 +551,11 @@ class MergedTrace:
 
         joins = {join.key: join for join in self.joins}
         if left not in joins or right not in joins:
-            raise KeyError("happens_before takes keys of existing joins")
+            missing = [key for key in (left, right) if key not in joins]
+            raise KeyError(
+                f"happens_before takes keys of existing joins; {missing!r} "
+                f"not among the {len(joins)} join key(s) (see merged.joins)."
+            )
         successors: dict[JoinKey, set[JoinKey]] = {key: set() for key in joins}
         per_rank_sequence: dict[int, list[tuple[int, JoinKey]]] = {}
         for key, join in joins.items():

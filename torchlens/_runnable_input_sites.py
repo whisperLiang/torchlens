@@ -193,10 +193,33 @@ def _require_loaded_sparse_provider(
     ):
         raise_analysis_run_unavailable(trace)
     if readiness.status is not ReadinessStatus.READY or not isinstance(callables, Mapping):
+        # R65-2: this is the main torch-drift refusal a loaded-sparse run()
+        # hits, and it used to carry no code, no summary, and no remedy while
+        # the per-callable causes sat unsummarized in fields["diagnostics"].
+        # Mirror _preflight_failure_message: fold the first diagnostic into
+        # the message and stamp ITS code (the true branchable cause).
+        diagnostics = readiness.diagnostics
+        first = diagnostics[0] if diagnostics else None
+        if first is not None:
+            detail = " ".join(first.message.split())
+            if len(detail) > 300:
+                detail = detail[:297] + "..."
+            summary = f": [{first.code.value}] {detail}"
+            remainder = len(diagnostics) - 1
+            if remainder:
+                summary += f" (+{remainder} more on exc.fields['diagnostics'])"
+            first_code = first.code.value
+        else:
+            summary = f" (readiness status {readiness.status.value!r}, no diagnostics)"
+            first_code = RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value
         raise ReattachError(
-            "Sparse callable reattachment did not produce a ready atomic attachment.",
+            "Sparse callable reattachment did not produce a ready atomic "
+            f"attachment{summary}. Remedy: inspect exc.fields['diagnostics'] "
+            "for the per-callable drift causes, or re-save the artifact from "
+            "a live capture on this torch runtime to rebind its callables.",
+            code=first_code,
             readiness=readiness,
-            diagnostics=readiness.diagnostics,
+            diagnostics=diagnostics,
         )
     return descriptor, readiness, cast(Mapping[str, Callable[..., Any]], callables)
 

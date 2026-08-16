@@ -101,11 +101,19 @@ class RankEvidence:
 
 
 def _refuse(detail: str, **payload: Any) -> MergeInputError:
-    """Build the typed parse refusal for malformed rank evidence."""
+    """Build the typed parse refusal for malformed rank evidence.
+
+    Carries a ``fields["remedy"]`` like every other merged refusal (R65-12:
+    this shared constructor was the one remedy-less family in the package).
+    """
 
     return MergeInputError(
         f"Rank-core evidence is not a valid collective_boundary_v1 journal: {detail}",
         code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+        remedy=(
+            "treat the rank core as tampered or corrupt; re-capture the rank "
+            "under the distributed opt-in rather than merging this evidence"
+        ),
         **payload,
     )
 
@@ -404,6 +412,8 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
             "captures taken under the distributed opt-in "
             "(torchlens.distributed.arm() or SPMD lazy arming) can be merged.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="not_a_rank_capture",
+            remedy="capture each rank under torchlens.distributed.arm() and merge those",
             source=source,
         )
     boundaries = record["boundaries"]
@@ -449,6 +459,8 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
             f"Merge input {source} claims multiple global ranks {sorted(ranks)}; "
             "a rank core is a single-rank capture.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="multiple_ranks_in_one_core",
+            remedy="re-capture the rank; one core must come from exactly one rank",
             source=source,
         )
     ledger_payload = record.get("group_lifecycle_ledger")
@@ -503,6 +515,8 @@ def resolve_rank_inputs(inputs: Sequence[Any]) -> dict[int, tuple[RankEvidence, 
         raise MergeInputError(
             "merge_ranks requires at least one rank capture or rank-core path.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="empty_inputs",
+            remedy="pass at least one rank capture or rank-core path",
         )
     resolved: dict[int, tuple[RankEvidence, Any]] = {}
     for position, item in enumerate(inputs):
@@ -516,6 +530,8 @@ def resolve_rank_inputs(inputs: Sequence[Any]) -> dict[int, tuple[RankEvidence, 
                 raise MergeInputError(
                     f"Merge input {source} failed to load as a rank core: {exc}",
                     code=MergedErrorCode.MERGE_INPUT_INVALID,
+                    reason="member_load_failed",
+                    remedy="inspect the chained cause; pass a loadable rank-core bundle",
                     source=source,
                 ) from exc
         else:
@@ -528,6 +544,8 @@ def resolve_rank_inputs(inputs: Sequence[Any]) -> dict[int, tuple[RankEvidence, 
                 f"({resolved[evidence.rank][0].source} and {source}); every rank "
                 "core must come from a distinct rank of one run.",
                 code=MergedErrorCode.MERGE_INPUT_INVALID,
+                reason="duplicate_rank",
+                remedy="pass one core per rank; drop the duplicate input",
             )
         resolved[evidence.rank] = (evidence, trace)
     return dict(sorted(resolved.items()))

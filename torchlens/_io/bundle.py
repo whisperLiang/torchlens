@@ -1945,6 +1945,11 @@ def _preflight_unified_trace_manifest(
     try:
         validate_tlspec(bundle_path, allow_unsupported_runnable_versions=True)
     except ValueError as exc:
+        # Never launder an already-typed refusal (R65-4): re-wrapping a
+        # ValueError-lineage TorchLens error here stripped its stable code and
+        # structured fields into one content-free message.
+        if isinstance(getattr(exc, "fields", None), dict) and exc.fields.get("code"):  # type: ignore[attr-defined]
+            raise
         raise TorchLensIOError(f"Invalid unified trace manifest: {exc}") from exc
 
     schema_version = manifest.get("schema_version", 1)

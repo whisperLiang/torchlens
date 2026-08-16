@@ -59,6 +59,26 @@ def _is_plain_nonnegative_int(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+_SCHEMA_REMEDY = "re-save the artifact with tl.save(); do not hand-edit manifest.json"
+
+
+def _schema_refuse(detail: str, **fields: Any) -> TorchLensIOError:
+    """Typed refusal for a manifest that parses as JSON but violates the schema.
+
+    One constructor for the whole malformed-manifest family (R65-1): every
+    site stamps ``code="manifest_schema_invalid"`` plus the re-save remedy so
+    callers branch on ``exc.fields["code"]``, never message text. ``read()``
+    adds the artifact path to refusals that bubble out of ``from_dict``.
+    """
+
+    return TorchLensIOError(
+        f"{detail} Remedy: {_SCHEMA_REMEDY}.",
+        code="manifest_schema_invalid",
+        remedy=_SCHEMA_REMEDY,
+        **fields,
+    )
+
+
 @dataclass(frozen=True)
 class TensorEntry:
     """One persisted tensor blob entry in ``manifest.json``.
@@ -159,26 +179,26 @@ class TensorEntry:
         for field_name in required_str_fields:
             field_value = data.get(field_name)
             if not isinstance(field_value, str) or field_value == "":
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     f"Manifest tensor entry must include non-empty string {field_name!r}."
                 )
 
         if not _is_sha256(data["sha256"]):
-            raise TorchLensIOError("Manifest tensor entry 'sha256' must be a SHA-256 hex digest.")
+            raise _schema_refuse("Manifest tensor entry 'sha256' must be a SHA-256 hex digest.")
 
         shape = data.get("shape")
         if not isinstance(shape, list) or any(not _is_plain_nonnegative_int(dim) for dim in shape):
-            raise TorchLensIOError(
+            raise _schema_refuse(
                 "Manifest tensor entry 'shape' must be a list of non-negative ints."
             )
         if len(shape) > _MAX_TENSOR_DIMS or any(dim > _MAX_TENSOR_DIM_VALUE for dim in shape):
-            raise TorchLensIOError(
+            raise _schema_refuse(
                 "Manifest tensor entry 'shape' exceeds the structural dimension ceiling."
             )
 
         num_bytes = data.get("bytes")
         if not _is_plain_nonnegative_int(num_bytes):
-            raise TorchLensIOError("Manifest tensor entry 'bytes' must be a non-negative int.")
+            raise _schema_refuse("Manifest tensor entry 'bytes' must be a non-negative int.")
 
         optional_strings = {
             field_name: _optional_str(data, field_name)
@@ -193,16 +213,16 @@ class TensorEntry:
         }
         codec_metadata = data.get("codec_metadata")
         if codec_metadata is not None and not isinstance(codec_metadata, dict):
-            raise TorchLensIOError("Manifest tensor entry 'codec_metadata' must be an object.")
+            raise _schema_refuse("Manifest tensor entry 'codec_metadata' must be an object.")
         if codec_metadata is not None:
             codec_metadata = _restore_codec_metadata_value(codec_metadata)
             if not isinstance(codec_metadata, dict):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest tensor entry 'codec_metadata' must decode to an object."
                 )
         requires_grad = data.get("requires_grad", False)
         if not isinstance(requires_grad, bool):
-            raise TorchLensIOError("Manifest tensor entry 'requires_grad' must be a boolean.")
+            raise _schema_refuse("Manifest tensor entry 'requires_grad' must be a boolean.")
 
         return cls(
             blob_id=data["blob_id"],
@@ -283,7 +303,7 @@ def _restore_codec_metadata_value(value: Any) -> Any:
         if set(value) == {_CODEC_METADATA_TUPLE_TAG}:
             items = value[_CODEC_METADATA_TUPLE_TAG]
             if not isinstance(items, list):
-                raise TorchLensIOError("Tagged codec metadata tuple must contain a list.")
+                raise _schema_refuse("Tagged codec metadata tuple must contain a list.")
             return tuple(_restore_codec_metadata_value(item) for item in items)
         return {key: _restore_codec_metadata_value(item) for key, item in value.items()}
     return value
@@ -344,22 +364,22 @@ class Provenance:
         """
 
         if data.get("provenance_version") != 1:
-            raise TorchLensIOError("Manifest provenance_version must be exactly 1.")
+            raise _schema_refuse("Manifest provenance_version must be exactly 1.")
         capture_devices = data.get("capture_devices")
         if not isinstance(capture_devices, list) or any(
             not isinstance(device, str) or not device for device in capture_devices
         ):
-            raise TorchLensIOError("Manifest provenance capture_devices must be strings.")
+            raise _schema_refuse("Manifest provenance capture_devices must be strings.")
         dtype_policy = data.get("dtype_policy")
         if not isinstance(dtype_policy, dict):
-            raise TorchLensIOError("Manifest provenance dtype_policy must be an object.")
+            raise _schema_refuse("Manifest provenance dtype_policy must be an object.")
         rng_state_digests = data.get("rng_state_digests")
         if not isinstance(rng_state_digests, dict) or any(
             not isinstance(engine, str)
             or not (_is_sha256(digest) or _is_unavailable_sentinel(digest))
             for engine, digest in rng_state_digests.items()
         ):
-            raise TorchLensIOError(
+            raise _schema_refuse(
                 "Manifest provenance rng_state_digests must map names to SHA-256 digests "
                 "or 'unavailable:<ExceptionName>' sentinels."
             )
@@ -371,7 +391,7 @@ class Provenance:
             or not 7 <= len(git_commit_hash) <= 64
             or any(character not in "0123456789abcdef" for character in git_commit_hash.lower())
         ):
-            raise TorchLensIOError("Manifest provenance git_commit_hash must be a Git hex hash.")
+            raise _schema_refuse("Manifest provenance git_commit_hash must be a Git hex hash.")
         return cls(
             provenance_version=1,
             capture_devices=list(capture_devices),
@@ -408,7 +428,7 @@ def _optional_str(data: dict[str, Any], field_name: str) -> str | None:
     if field_value is None:
         return None
     if not isinstance(field_value, str) or field_value == "":
-        raise TorchLensIOError(
+        raise _schema_refuse(
             f"Manifest tensor entry optional field {field_name!r} must be a non-empty string."
         )
     return field_value
@@ -532,26 +552,26 @@ class Manifest:
         for field_name in required_int_fields:
             field_value = data.get(field_name)
             if not _is_plain_nonnegative_int(field_value):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     f"Manifest field {field_name!r} must be a non-negative integer."
                 )
 
         for field_name in required_str_fields:
             field_value = data.get(field_name)
             if not isinstance(field_value, str) or field_value == "":
-                raise TorchLensIOError(f"Manifest field {field_name!r} must be a non-empty string.")
+                raise _schema_refuse(f"Manifest field {field_name!r} must be a non-empty string.")
 
         if data["bundle_format"] not in {"directory", "fastlog-directory"}:
-            raise TorchLensIOError(
+            raise _schema_refuse(
                 "Unsupported bundle_format="
                 f"{data['bundle_format']!r}; expected 'directory' or 'fastlog-directory'."
             )
 
         raw_tensors = data.get("tensors")
         if not isinstance(raw_tensors, list):
-            raise TorchLensIOError("Manifest field 'tensors' must be a list.")
+            raise _schema_refuse("Manifest field 'tensors' must be a list.")
         if len(raw_tensors) > _MAX_MANIFEST_TENSOR_ENTRIES:
-            raise TorchLensIOError(
+            raise _schema_refuse(
                 f"Manifest declares {len(raw_tensors)} tensor entries, above the "
                 f"{_MAX_MANIFEST_TENSOR_ENTRIES}-entry ceiling; refusing a "
                 "structurally implausible artifact."
@@ -565,11 +585,11 @@ class Manifest:
         seen_relative_paths: set[str] = set()
         for entry in tensors:
             if entry.blob_id in seen_blob_ids:
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     f"Manifest tensor entries duplicate blob_id {entry.blob_id!r}."
                 )
             if entry.relative_path in seen_relative_paths:
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     f"Manifest tensor entries duplicate relative_path {entry.relative_path!r}."
                 )
             seen_blob_ids.add(entry.blob_id)
@@ -578,27 +598,27 @@ class Manifest:
         unsupported_tensors = _validate_unsupported_tensors(data.get("unsupported_tensors"))
         raw_provenance = data.get("provenance")
         if raw_provenance is not None and not isinstance(raw_provenance, dict):
-            raise TorchLensIOError("Manifest field 'provenance' must be an object when present.")
+            raise _schema_refuse("Manifest field 'provenance' must be an object when present.")
         provenance = None if raw_provenance is None else Provenance.from_dict(raw_provenance)
         raw_disclosure = data.get("custom_attributes_disclosure")
         if raw_disclosure is not None:
             if not isinstance(raw_disclosure, dict):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest field 'custom_attributes_disclosure' must be an object when present."
                 )
             if not isinstance(raw_disclosure.get("included"), bool):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest custom_attributes_disclosure.included must be a boolean."
                 )
             raw_count = raw_disclosure.get("module_count")
             if not isinstance(raw_count, int) or raw_count < 0:
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest custom_attributes_disclosure.module_count must be a "
                     "non-negative integer."
                 )
             raw_keys = raw_disclosure.get("top_level_keys")
             if not isinstance(raw_keys, list) or not all(isinstance(key, str) for key in raw_keys):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest custom_attributes_disclosure.top_level_keys must be a "
                     "list of strings."
                 )
@@ -670,9 +690,18 @@ class Manifest:
             ) from exc
         if not isinstance(raw_data, dict):
             raise TorchLensIOError(
-                "Manifest root must be a JSON object.", code="manifest_not_json_object"
+                f"Manifest root at {manifest_path} must be a JSON object. Remedy: "
+                "the artifact is corrupt or hand-edited; re-save it with tl.save().",
+                code="manifest_not_json_object",
             )
-        return cls.from_dict(raw_data)
+        try:
+            return cls.from_dict(raw_data)
+        except TorchLensIOError as exc:
+            # Schema refusals from from_dict know the field, never the file;
+            # the read seam is where the artifact path is known (R65-1).
+            if exc.file_path is None:
+                exc.file_path = str(manifest_path)
+            raise
 
     def write(self, path: str | Path) -> None:
         """Write the manifest to disk using pretty-printed JSON.
@@ -703,7 +732,13 @@ class Manifest:
                 # not leave a zero-length/partial manifest behind it.
                 os.fsync(handle.fileno())
         except (OSError, ValueError) as exc:
-            raise TorchLensIOError(f"Failed to write manifest at {manifest_path}.") from exc
+            raise TorchLensIOError(
+                f"Failed to write manifest at {manifest_path}: {type(exc).__name__}: "
+                f"{exc}. Remedy: check disk space and directory permissions, then "
+                "re-save.",
+                code="manifest_write_failed",
+                remedy="check disk space and directory permissions, then re-save",
+            ) from exc
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the manifest into JSON-serializable data.
@@ -735,11 +770,11 @@ class Manifest:
         n_grad_blobs = sum(1 for entry in self.tensors if entry.kind == "grad")
         n_auxiliary_blobs = len(self.tensors) - n_out_blobs - n_grad_blobs
         if self.n_out_blobs != n_out_blobs:
-            raise TorchLensIOError("Manifest n_out_blobs does not match tensor entries.")
+            raise _schema_refuse("Manifest n_out_blobs does not match tensor entries.")
         if self.n_grad_blobs != n_grad_blobs:
-            raise TorchLensIOError("Manifest n_grad_blobs does not match tensor entries.")
+            raise _schema_refuse("Manifest n_grad_blobs does not match tensor entries.")
         if self.n_auxiliary_blobs != n_auxiliary_blobs:
-            raise TorchLensIOError("Manifest n_auxiliary_blobs does not match tensor entries.")
+            raise _schema_refuse("Manifest n_auxiliary_blobs does not match tensor entries.")
 
 
 def sha256_of_file(path: str | Path) -> str:
@@ -835,7 +870,7 @@ def _optional_sha256(data: dict[str, Any], field_name: str) -> str | None:
 
     value = data.get(field_name)
     if value is not None and not _is_sha256(value) and not _is_unavailable_sentinel(value):
-        raise TorchLensIOError(
+        raise _schema_refuse(
             f"Manifest provenance {field_name} must be a SHA-256 digest "
             "or an 'unavailable:<ExceptionName>' sentinel."
         )
@@ -870,7 +905,10 @@ def enforce_version_policy(manifest: Manifest) -> None:
         raise TorchLensIOError(
             "Bundle uses tlspec_version="
             f"{manifest.tlspec_version}, but this runtime only supports "
-            f"{TLSPEC_VERSION}."
+            f"{TLSPEC_VERSION}. Remedy: upgrade torchlens to the release that "
+            "wrote this artifact (or newer).",
+            code="artifact_version_above_runtime",
+            remedy=("upgrade torchlens to the release that wrote this artifact (or newer)"),
         )
     if manifest.tlspec_version < MIN_TLSPEC_VERSION:
         raise below_floor_error(
@@ -899,7 +937,10 @@ def enforce_version_policy(manifest: Manifest) -> None:
             raise TorchLensIOError(
                 "Bundle torch_version="
                 f"{manifest.torch_version} is incompatible with runtime torch_version="
-                f"{torch.__version__} (major version mismatch)."
+                f"{torch.__version__} (major version mismatch). Remedy: load the "
+                "bundle under a torch runtime with the recorded major version.",
+                code="bundle_torch_incompatible",
+                remedy="load the bundle under a torch runtime with the recorded major version",
             )
         if runtime_torch.minor != manifest_torch.minor:
             warnings.warn(
@@ -913,7 +954,10 @@ def enforce_version_policy(manifest: Manifest) -> None:
         raise TorchLensIOError(
             "Bundle torch_version="
             f"{manifest.torch_version} could not be parsed compatibly with runtime "
-            f"torch_version={torch.__version__}; refusing load."
+            f"torch_version={torch.__version__}; refusing load. Remedy: load the "
+            "bundle under a torch runtime with the recorded major version.",
+            code="bundle_torch_incompatible",
+            remedy="load the bundle under a torch runtime with the recorded major version",
         )
 
     runtime_torchlens = _parse_version(TORCHLENS_VERSION, label="runtime torchlens")
@@ -926,7 +970,10 @@ def enforce_version_policy(manifest: Manifest) -> None:
         raise TorchLensIOError(
             "Bundle torchlens_version="
             f"{manifest.torchlens_version!r} could not be parsed under PEP 440; "
-            "refusing a current-schema artifact with unverifiable producer provenance."
+            "refusing a current-schema artifact with unverifiable producer "
+            "provenance. Remedy: re-save the artifact with a released torchlens.",
+            code="bundle_producer_unverifiable",
+            remedy="re-save the artifact with a released torchlens",
         )
     # A parseable torchlens_version below the floor refuses even when the
     # manifest claims a current tlspec_version: a real 2.33+ save can never
@@ -1043,15 +1090,15 @@ def _validate_unsupported_tensors(raw_value: Any) -> list[dict[str, str]]:
     if raw_value is None:
         return []
     if not isinstance(raw_value, list):
-        raise TorchLensIOError("Manifest field 'unsupported_tensors' must be a list.")
+        raise _schema_refuse("Manifest field 'unsupported_tensors' must be a list.")
     validated: list[dict[str, str]] = []
     for entry in raw_value:
         if not isinstance(entry, dict):
-            raise TorchLensIOError("Manifest unsupported_tensors entries must be objects.")
+            raise _schema_refuse("Manifest unsupported_tensors entries must be objects.")
         validated_entry: dict[str, str] = {}
         for key, value in entry.items():
             if not isinstance(key, str) or not isinstance(value, str):
-                raise TorchLensIOError(
+                raise _schema_refuse(
                     "Manifest unsupported_tensors entries must use string keys and values."
                 )
             validated_entry[key] = value

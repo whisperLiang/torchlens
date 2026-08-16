@@ -244,6 +244,110 @@ def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
     assert generic_fail.value.fields.get("code") == "bundle_load_failed"
 
 
+def test_manifest_schema_violations_refuse_with_stable_code(tmp_path: Path) -> None:
+    """R65-1: the malformed-manifest family carries ``manifest_schema_invalid``.
+
+    Fail-before: ~36 schema refusals in ``_io/manifest.py`` raised bare
+    ``TorchLensIOError`` with no code, no remedy field, and no artifact path
+    at the load-a-possibly-tampered-artifact boundary.
+    """
+
+    bundle_path = _save_bundle(tmp_path)
+    manifest = _read_manifest(bundle_path)
+
+    # Mistyped required field.
+    tampered = dict(manifest)
+    tampered["n_out_blobs"] = "three"
+    _write_manifest(bundle_path, tampered)
+    with pytest.raises(TorchLensIOError) as excinfo:
+        load(bundle_path)
+    assert excinfo.value.fields.get("code") == "manifest_schema_invalid"
+    assert excinfo.value.fields.get("remedy")
+    assert str(excinfo.value).rstrip(".").endswith(excinfo.value.fields["remedy"])
+
+    # The Manifest.read seam stamps the artifact path onto schema refusals.
+    from torchlens._io.manifest import Manifest
+
+    with pytest.raises(TorchLensIOError) as via_read:
+        Manifest.read(bundle_path / "manifest.json")
+    assert via_read.value.fields.get("code") == "manifest_schema_invalid"
+    assert via_read.value.file_path == str(bundle_path / "manifest.json")
+
+    # Forged tensor entry (missing required string field).
+    tampered = _read_manifest(bundle_path)
+    tampered["n_out_blobs"] = manifest["n_out_blobs"]
+    entry = _first_tensor_entry(tampered)
+    del entry["sha256"]
+    _write_manifest(bundle_path, tampered)
+    with pytest.raises(TorchLensIOError) as forged:
+        load(bundle_path)
+    assert forged.value.fields.get("code") == "manifest_schema_invalid"
+
+
+def test_version_policy_refusals_carry_distinct_codes(tmp_path: Path) -> None:
+    """R65-1 version half: the three version-policy refusals are branchable.
+
+    Provoked at the policy chokepoint itself (``enforce_version_policy``): the
+    ``tl.load`` front door reaches a twin version check in
+    ``validation.validate_tlspec`` first for the too-new case, which is a
+    separate (relayed) duplication finding.
+    """
+
+    from torchlens._io import TLSPEC_VERSION
+    from torchlens._io.manifest import Manifest, enforce_version_policy
+
+    bundle_path = _save_bundle(tmp_path, "versions.tl")
+    base = _read_manifest(bundle_path)
+
+    # (1) artifact newer than the runtime.
+    with pytest.raises(TorchLensIOError) as newer:
+        enforce_version_policy(Manifest.from_dict({**base, "tlspec_version": TLSPEC_VERSION + 1}))
+    assert newer.value.fields.get("code") == "artifact_version_above_runtime"
+    assert newer.value.fields.get("remedy")
+
+    # (2) torch major mismatch.
+    with pytest.raises(TorchLensIOError) as drift:
+        enforce_version_policy(Manifest.from_dict({**base, "torch_version": "1.0.0"}))
+    assert drift.value.fields.get("code") == "bundle_torch_incompatible"
+
+    # (3) producer version unverifiable under PEP 440.
+    with pytest.raises(TorchLensIOError) as producer:
+        enforce_version_policy(Manifest.from_dict({**base, "torchlens_version": "not-a-version"}))
+    assert producer.value.fields.get("code") == "bundle_producer_unverifiable"
+
+
+def test_manifest_write_failure_refuses_typed(tmp_path: Path) -> None:
+    """R65-1 write half: a failed manifest write carries ``manifest_write_failed``."""
+
+    from torchlens._io.manifest import Manifest
+
+    bundle_path = _save_bundle(tmp_path, "writefail.tl")
+    manifest = Manifest.from_dict(_read_manifest(bundle_path))
+    target_dir = tmp_path / "is_a_directory"
+    target_dir.mkdir()
+    with pytest.raises(TorchLensIOError) as excinfo:
+        manifest.write(target_dir)
+    assert excinfo.value.fields.get("code") == "manifest_write_failed"
+    assert excinfo.value.fields.get("remedy")
+
+
+def test_remedy_field_derives_from_authored_message_tail() -> None:
+    """R65 remedy contract: fields['remedy'] exists whenever the message ends
+    with an authored "Remedy: ..." sentence; an explicit kwarg always wins."""
+
+    from torchlens.errors._base import TorchLensError
+
+    derived = TorchLensError("Thing failed. Remedy: do the fix.", code="x")
+    assert derived.fields["remedy"] == "do the fix"
+    assert str(derived).rstrip(".").endswith(derived.fields["remedy"])
+
+    explicit = TorchLensError("Thing failed. Remedy: prose text.", remedy="explicit wins")
+    assert explicit.fields["remedy"] == "explicit wins"
+
+    plain = TorchLensError("No remedy sentence here.")
+    assert "remedy" not in plain.fields
+
+
 def test_tampered_manifest_field_raises_with_field_name(tmp_path: Path) -> None:
     """Tampered manifest tensor metadata should fail load with the offending field."""
 
