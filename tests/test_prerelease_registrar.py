@@ -104,9 +104,8 @@ def test_gated_field_does_not_persist_by_default(planted_field: str) -> None:
 def test_switch_is_test_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not prerelease_fields_active()
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    with pytest.raises(RuntimeError, match="TEST-ONLY"):
-        with activate_prerelease_fields():
-            pass  # pragma: no cover - refused before entry
+    with pytest.raises(RuntimeError, match="TEST-ONLY"), activate_prerelease_fields():
+        pass  # pragma: no cover - refused before entry
     assert not prerelease_fields_active()
 
 
@@ -165,9 +164,8 @@ def test_unmarked_artifact_loads_clean_with_no_marker(planted_field: str, tmp_pa
 
 def test_malformed_marker_refuses_even_under_switch() -> None:
     tampered = {PRERELEASE_STATE_KEY: {"marker": "wrong-marker"}}
-    with activate_prerelease_fields():
-        with pytest.raises(PreReleaseArtifactError, match="malformed"):
-            validate_prerelease_state(dict(tampered), cls_name="Trace")
+    with activate_prerelease_fields(), pytest.raises(PreReleaseArtifactError, match="malformed"):
+        validate_prerelease_state(dict(tampered), cls_name="Trace")
     with pytest.raises(PreReleaseArtifactError, match="pre-release field marker"):
         validate_prerelease_state(dict(tampered), cls_name="Trace")
     # Absent marker is a no-op on the load chokepoint.

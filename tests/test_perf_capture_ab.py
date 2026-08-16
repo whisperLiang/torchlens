@@ -167,8 +167,8 @@ def capture_overhead_rows(n: int = 12) -> dict[str, dict[str, float]]:
             model = build().eval()
             x = torch.randn(*shape)
             with torch.no_grad():
-                native = measure_median_ms(lambda: model(x), n=n)
-            trace = measure_median_ms(lambda: tl.trace(model, x), n=n)
+                native = measure_median_ms(lambda m=model, inp=x: m(inp), n=n)
+            trace = measure_median_ms(lambda m=model, inp=x: tl.trace(m, inp), n=n)
             rows[name] = {
                 "native_ms": native["median_ms"],
                 "trace_ms": trace["median_ms"],
