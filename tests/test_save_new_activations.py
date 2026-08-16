@@ -223,8 +223,15 @@ def test_save_new_outs_alexnet_matches_fresh_log() -> None:
 
 @pytest.mark.slow
 def test_save_new_outs_resnet_rejects_buffer_sink_refresh() -> None:
-    """ResNet18 refresh stays on the documented graph-change refusal path."""
+    """ResNet18 buffer-sink refresh: eval refreshes (D18), train refuses typed.
+
+    Rewritten IN the D18 merge per the honesty rule: the historical eval-mode
+    refusal was the mode-BLIND condition (sink presence, not write evidence)
+    and is the capability D18 unlocks; the train-mode refusal is pinned forever.
+    """
     torchvision = pytest.importorskip("torchvision")
+    from torchlens.errors import BufferSinkRoutingError
+
     model = torchvision.models.resnet18(weights=None)
     model.eval()
     x = torch.randn(1, 3, 224, 224)
@@ -233,10 +240,32 @@ def test_save_new_outs_resnet_rejects_buffer_sink_refresh() -> None:
         assert any(
             log.layer_dict_all_keys[label].layer_type == "buffer" for label in log.internal_sink_ops
         )
-        with pytest.raises(ValueError, match="computational graph changed"):
-            log.save_new_outs(model, torch.randn(1, 3, 224, 224), random_seed=42)
+        x2 = torch.randn(1, 3, 224, 224)
+        log.save_new_outs(model, x2, random_seed=42)
+        fresh = trace_fn(model, x2, random_seed=42)
+        try:
+            fresh_by_label = {layer.layer_label: layer for layer in fresh.layer_list}
+            compared = 0
+            for layer in log.layer_list:
+                if layer.layer_type != "batchnorm" or layer.out is None:
+                    continue
+                fresh_out = fresh_by_label[layer.layer_label].out
+                assert torch.allclose(layer.out, fresh_out, rtol=1e-4, atol=1e-5)
+                compared += 1
+            assert compared > 0
+        finally:
+            fresh.cleanup()
     finally:
         log.cleanup()
+
+    train_model = torchvision.models.resnet18(weights=None)
+    train_model.train()
+    train_log = trace_fn(train_model, x, random_seed=42)
+    try:
+        with pytest.raises(BufferSinkRoutingError, match="computational graph changed"):
+            train_log.save_new_outs(train_model, torch.randn(1, 3, 224, 224), random_seed=42)
+    finally:
+        train_log.cleanup()
 
 
 # =============================================================================
@@ -513,3 +542,280 @@ class TestGraphConsistencyValidation:
             log.cleanup()
             if fresh_log is not None:
                 fresh_log.cleanup()
+
+
+# =============================================================================
+# D18: mode-aware buffer-sink projector (JMT-ruled capability narrowing)
+#
+# The refusal decision is CLOSED-FORM: refuse iff any buffer sink carries
+# ``buffer_value_changed is not False``, with the recorded mode claims as a
+# contradiction belt, the refreshed rerun's own journal as the O1 write
+# tripwire, and target-vs-refreshed evidence equality as the O2 widening.
+# Every refusal is the TYPED BufferSinkRoutingError carrying the frozen
+# ``buffer_sink_routing_mutable`` code and the pinned "computational graph
+# changed" message term.
+#
+# O3 (honesty rule): the train-mode refusal tests below are PINNED FOREVER --
+# the D18 narrowing is closed-vocabulary, not a beachhead. They must never be
+# deleted or weakened.
+# =============================================================================
+
+
+class _BatchNormModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(4)
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x):
+        return self.lin(self.bn(x))
+
+
+class _BufferCounterModel(nn.Module):
+    """Counter-only buffer writer: one inplace add_ on a registered buffer."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("step", torch.zeros(1))
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x):
+        self.step.add_(1)
+        return self.lin(x)
+
+
+def _buffer_sinks(log):
+    """Return the buffer-typed internal sink layers of one trace."""
+
+    return [
+        log.layer_dict_all_keys[label]
+        for label in log.internal_sink_ops
+        if log.layer_dict_all_keys[label].layer_type == "buffer"
+    ]
+
+
+def _assert_buffer_sink_refusal(exc_info):
+    """Assert one refusal is the typed D18 arm with the pinned term and code."""
+
+    from torchlens.runnable import RunnableErrorCode
+
+    assert "computational graph changed" in str(exc_info.value)
+    assert exc_info.value.fields["code"] == RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE.value
+
+
+def _tamper_recorded_training_literal(log, sink, value):
+    """Flip the recorded literal mode argument on one sink's producing op."""
+
+    source = log.layer_dict_all_keys[sink.buffer_source]
+    args = list(source.non_tensor_pos_args)
+    index = next(i for i, arg in enumerate(args) if isinstance(arg, bool))
+    args[index] = value
+    source.non_tensor_pos_args = args
+
+
+@pytest.mark.smoke
+def test_eval_mode_batchnorm_refresh_allowed_default_path():
+    """D18 NEW capability: eval-mode BatchNorm is refresh-eligible by default."""
+
+    model = _BatchNormModel()
+    model.eval()
+    x = torch.randn(3, 4)
+    log = trace_fn(model, x, random_seed=1)
+    try:
+        sinks = _buffer_sinks(log)
+        assert sinks and all(sink.buffer_value_changed is False for sink in sinks)
+        x2 = torch.randn(3, 4)
+        log.save_new_outs(model, x2, random_seed=1)
+        fresh = trace_fn(model, x2, random_seed=1)
+        try:
+            refreshed_bn = next(op for op in log.layer_list if op.layer_type == "batchnorm")
+            fresh_bn = next(op for op in fresh.layer_list if op.layer_type == "batchnorm")
+            assert torch.allclose(refreshed_bn.out, fresh_bn.out)
+        finally:
+            fresh.cleanup()
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_eval_mode_batchnorm_run_default_path_verified():
+    """D18 end-to-end: run() on an eval-BN model settles VERIFIED by default."""
+
+    from torchlens.runnable import PathFaithfulness
+
+    model = _BatchNormModel()
+    model.eval()
+    x = torch.randn(3, 4)
+    log = trace_fn(model, x)
+    try:
+        x2 = torch.randn(3, 4)
+        result = log.run(inputs=x2)
+        assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+        with torch.no_grad():
+            expected = model(x2)
+        assert torch.allclose(result.output, expected)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_train_mode_batchnorm_refresh_still_refuses():
+    """O3 PINNED FOREVER: train-mode BatchNorm refresh refuses, typed."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.train()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        assert any(sink.buffer_value_changed is True for sink in _buffer_sinks(log))
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_train_mode_counter_only_still_refuses():
+    """O3: a lone inplace buffer counter (num_batches_tracked shape) refuses."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BufferCounterModel()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        sinks = _buffer_sinks(log)
+        assert sinks and all(sink.buffer_write_kind == "inplace" for sink in sinks)
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_tampered_buffer_value_changed_claim_refuses_typed():
+    """Tamper: a stored write-evidence bit flipped to False cannot buy a pass.
+
+    The recorded mode claims (train) contradict the tampered evidence (False),
+    so the belt refuses typed even though the primary key alone would pass.
+    The model is switched to eval before the refresh so ONLY the belt (not the
+    O1 fresh-journal tripwire) can catch the tamper.
+    """
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.train()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        for sink in _buffer_sinks(log):
+            sink._internal_set("buffer_value_changed", False)
+        model.eval()
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+        assert "mode claim" in str(exc_info.value) or "claims" in str(exc_info.value)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_train_claim_with_unchanged_values_refuses():
+    """7.2 belt, other direction: a train claim over unchanged values refuses."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.eval()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        sinks = _buffer_sinks(log)
+        assert all(sink.buffer_value_changed is False for sink in sinks)
+        bn_sink = next(sink for sink in sinks if sink.buffer_source_func_name == "batch_norm")
+        _tamper_recorded_training_literal(log, bn_sink, True)
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_tampered_training_literal_claim_refuses_typed():
+    """Direct tamper of the recorded literal training argument refuses typed."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.train()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        bn_sink = next(
+            sink for sink in _buffer_sinks(log) if sink.buffer_source_func_name == "batch_norm"
+        )
+        _tamper_recorded_training_literal(log, bn_sink, False)
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_tampered_module_mode_record_refuses_typed():
+    """Direct tamper of the module_training_modes record refuses typed."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.train()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        modes = log._runnable.module_training_modes
+        assert modes.get("bn") is True
+        modes["bn"] = False
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_mode_flip_between_runs_refuses():
+    """O1 live tripwire: eval capture, model.train() before refresh, typed."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.eval()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        model.train()
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+@pytest.mark.smoke
+def test_buffer_value_changed_none_fails_closed():
+    """Unproven write evidence (None) refuses typed -- never widens past evidence."""
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.eval()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        for sink in _buffer_sinks(log):
+            sink._internal_set("buffer_value_changed", None)
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.save_new_outs(model, torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+        assert "unproven" in str(exc_info.value)
+    finally:
+        log.cleanup()

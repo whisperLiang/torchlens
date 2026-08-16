@@ -18,6 +18,20 @@ if TYPE_CHECKING:
 
 _REFRESH_SOURCES: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
+#: Pinned refresh graph-change message term. Public callers match on the
+#: literal phrase "computational graph changed", so every projector refusal --
+#: the untyped generic signature arm and the typed D18 buffer-sink arms alike
+#: -- carries this exact base message.
+_GRAPH_CHANGE_MESSAGE = (
+    "The computational graph changed for this forward pass compared to the original "
+    "call to trace (either due to different inputs or a different "
+    "random seed). Live-model state mutation across run() calls (for example "
+    "BatchNorm running stats, caches, or counters) is another likely cause. "
+    "For an explicitly static feature-extraction loop, use run(inputs=..., fast=True); "
+    "otherwise save_new_outs failed. Please "
+    "re-run trace with the desired inputs."
+)
+
 
 def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:
     """Return the distinct label keys that should index one activation record.
@@ -192,20 +206,19 @@ class RefreshProjector:
             If the refreshed computational graph differs from the target graph.
         """
 
+        # D18: the typed buffer-sink arms run BEFORE the generic signature arm so
+        # every buffer-sink-shaped refusal (train-mode writer, claim/evidence
+        # contradiction, refresh write tripwire, evidence asymmetry) raises the
+        # TYPED BufferSinkRoutingError -- a mode flip between runs changes the
+        # graph shape too, and routing it through the untyped generic arm would
+        # void the D-ruling's "fails typed" obligation.
+        self._check_buffer_sink_routing(refreshed)
         target_signature = self._graph_signature(self.target)
         refreshed_signature = self._graph_signature(refreshed)
         if target_signature != refreshed_signature:
             raise self._graph_change_error(
                 refreshed,
                 self._graph_signature_mismatch_detail(refreshed),
-            )
-        if any(
-            self.target.layer_dict_all_keys[label].layer_type == "buffer"
-            for label in getattr(self.target, "internal_sink_ops", ())
-        ):
-            raise self._graph_change_error(
-                refreshed,
-                "refresh target contains buffer sink ops whose live routing can change across reruns",
             )
         refreshed_by_raw = {layer._layer_label_raw: layer for layer in refreshed.layer_list}
         # B8-36: one aggregated warning per refresh. A per-layer warning with the
@@ -266,17 +279,181 @@ class RefreshProjector:
         from ..partial import PartialTrace
 
         detail_suffix = "" if detail is None else f" Detail: {detail}."
-        error = ValueError(
-            "The computational graph changed for this forward pass compared to the original "
-            "call to trace (either due to different inputs or a different "
-            "random seed). Live-model state mutation across run() calls (for example "
-            "BatchNorm running stats, caches, or counters) is another likely cause. "
-            "For an explicitly static feature-extraction loop, use run(inputs=..., fast=True); "
-            "otherwise save_new_outs failed. Please "
-            f"re-run trace with the desired inputs.{detail_suffix}"
+        error = ValueError(f"{_GRAPH_CHANGE_MESSAGE}{detail_suffix}")
+        error.partial_log = PartialTrace(refreshed, error)  # type: ignore[attr-defined]
+        return error
+
+    @staticmethod
+    def _buffer_sink_routing_error(refreshed: Any, detail: str) -> Exception:
+        """Build the typed D18 buffer-sink routing refusal.
+
+        All four D18 arms (train-mode writer, unproven evidence, mode-claim
+        contradiction, refresh write tripwire / evidence asymmetry) raise this
+        one typed class with the one frozen ``RunnableErrorCode`` member.
+        ``ValueError`` stays in the MRO and the message keeps the pinned
+        "computational graph changed" term, so historical callers survive.
+        """
+
+        from ..errors.runnable import BufferSinkRoutingError
+        from ..partial import PartialTrace
+        from ..runnable import RunnableErrorCode
+
+        error = BufferSinkRoutingError(
+            f"{_GRAPH_CHANGE_MESSAGE} Detail: {detail}. "
+            "Remedy: put the model in eval mode (or otherwise stop value-changing "
+            "buffer writes) and re-capture, then refresh",
+            code=RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE.value,
+            detection_stage="refresh_buffer_sink_routing",
         )
         error.partial_log = PartialTrace(refreshed, error)  # type: ignore[attr-defined]
         return error
+
+    @staticmethod
+    def _buffer_sink_evidence(trace: Any) -> tuple[tuple[str, Any, Any], ...]:
+        """Return the ordered buffer-sink write-evidence tuple for one Trace.
+
+        Each row is ``(raw_label, buffer_value_changed, buffer_write_kind)`` for
+        every buffer-typed internal sink op. ``buffer_value_changed`` is derived
+        write evidence (byte comparison in the buffer-write journal), never a
+        self-declared flag; ``None`` means unproven and fails closed downstream.
+        """
+
+        rows: list[tuple[str, Any, Any]] = []
+        for label in getattr(trace, "internal_sink_ops", ()):
+            layer = trace.layer_dict_all_keys[label]
+            if layer.layer_type != "buffer":
+                continue
+            rows.append(
+                (
+                    layer._layer_label_raw,
+                    layer.buffer_value_changed,
+                    layer.buffer_write_kind,
+                )
+            )
+        return tuple(rows)
+
+    @staticmethod
+    def _buffer_sink_mode_claims(trace: Any, sink_layer: Any) -> list[tuple[str, bool]]:
+        """Return the recorded mode claims for one buffer sink's producing op.
+
+        Two independent mode authorities are consulted where they exist: the
+        recorded literal mode argument (``training`` / ``use_input_stats``) on
+        the producing mode-sensitive call, and the capture-recorded
+        ``module_training_modes`` entry for the producing op's innermost
+        containing module. Each claim is cross-checked against the write
+        evidence by the caller; absent facts yield no claim (the primary
+        evidence key still governs).
+        """
+
+        from ..runnable import is_mode_sensitive_qualname
+
+        claims: list[tuple[str, bool]] = []
+        qualname = getattr(sink_layer, "buffer_source_func_name", None)
+        if not is_mode_sensitive_qualname(qualname):
+            return claims
+        source_label = getattr(sink_layer, "buffer_source", None)
+        if not source_label or source_label not in trace.layer_dict_all_keys:
+            return claims
+        source = trace.layer_dict_all_keys[source_label]
+        tail = (qualname or "").rsplit(".", 1)[-1].removesuffix("_")
+        mode_argument = "use_input_stats" if tail.endswith("instance_norm") else "training"
+        kwargs = getattr(source, "non_tensor_kwargs", None) or {}
+        literal = kwargs.get(mode_argument)
+        if not isinstance(literal, bool):
+            # The mode flag is the first boolean among the positional non-tensor
+            # arguments for every torch batch_norm/instance_norm signature
+            # (momentum/eps are floats; cudnn_enabled trails the mode flag).
+            literal = next(
+                (
+                    value
+                    for value in getattr(source, "non_tensor_pos_args", None) or ()
+                    if isinstance(value, bool)
+                ),
+                None,
+            )
+        if isinstance(literal, bool):
+            claims.append((f"recorded literal {mode_argument!r} argument", literal))
+        modules = tuple(getattr(source, "modules", ()) or ())
+        if modules:
+            address = str(modules[-1]).rsplit(":", 1)[0]
+            modes = getattr(getattr(trace, "_runnable", None), "module_training_modes", None) or {}
+            if address in modes:
+                claims.append((f"module_training_modes[{address!r}] record", bool(modes[address])))
+        return claims
+
+    def _check_buffer_sink_routing(self, refreshed: Any) -> None:
+        """Enforce the D18 mode-aware buffer-sink routing contract (typed).
+
+        Refuse iff any buffer sink carries ``buffer_value_changed is not False``
+        (``True`` = a write happened; ``None`` = unproven, fail closed), a
+        recorded mode claim contradicts the write evidence, the refreshed
+        rerun's own journal recorded a value-changing buffer write (O1), or the
+        target-vs-refreshed evidence tuples diverge (O2). Eval-mode BatchNorm
+        (all sinks ``False`` with agreeing eval claims) passes.
+        """
+
+        target_sinks = [
+            self.target.layer_dict_all_keys[label]
+            for label in getattr(self.target, "internal_sink_ops", ())
+            if self.target.layer_dict_all_keys[label].layer_type == "buffer"
+        ]
+        target_rows = tuple(
+            (layer._layer_label_raw, layer.buffer_value_changed, layer.buffer_write_kind)
+            for layer in target_sinks
+        )
+        # Belt: recorded mode claims must agree with the write evidence where
+        # both exist; a contradiction refuses typed, never resolved permissively.
+        for sink_layer, (raw_label, value_changed, _) in zip(target_sinks, target_rows):
+            if value_changed is None:
+                continue
+            for authority, claim in self._buffer_sink_mode_claims(self.target, sink_layer):
+                if claim is not bool(value_changed):
+                    raise self._buffer_sink_routing_error(
+                        refreshed,
+                        f"the {authority} for buffer sink {raw_label!r} claims "
+                        f"{'train' if claim else 'eval'}-mode behavior but the "
+                        f"capture-time write evidence records buffer_value_changed="
+                        f"{value_changed!r} -- a tampered or incoherent mode claim",
+                    )
+        # Primary key: capture-time write evidence. True = train-mode writer;
+        # None = unproven, fail closed. Eval-mode sinks (False) pass.
+        written = [row for row in target_rows if row[1] is not False]
+        if written:
+            names = ", ".join(repr(label) for label, _, _ in written)
+            unproven = all(value_changed is None for _, value_changed, _ in written)
+            reason = (
+                "carries unproven buffer write evidence (buffer_value_changed=None, fail closed)"
+                if unproven
+                else "recorded value-changing buffer writes (train-mode buffer writers)"
+            )
+            raise self._buffer_sink_routing_error(
+                refreshed,
+                f"refresh target {reason} on buffer sink op(s) {names}, "
+                "whose live routing can change across reruns",
+            )
+        # O1 refresh write tripwire: on the newly-allowed no-write path the
+        # refreshed rerun's OWN journal must also record no value-changing
+        # buffer write -- independent fresh evidence a tampered stored bit
+        # cannot buy a pass against.
+        refreshed_rows = self._buffer_sink_evidence(refreshed)
+        refreshed_written = [row for row in refreshed_rows if row[1] is not False]
+        if refreshed_written:
+            names = ", ".join(repr(label) for label, _, _ in refreshed_written)
+            raise self._buffer_sink_routing_error(
+                refreshed,
+                "the refreshed rerun's own buffer-write journal recorded a "
+                f"value-changing (or unproven) buffer write on sink op(s) {names} "
+                "-- the model's training mode changed between runs or a stored "
+                "write-evidence claim was tampered",
+            )
+        # O2 signature widening, evaluated in the typed arm: any
+        # target-vs-refreshed buffer-sink evidence asymmetry refuses typed.
+        if target_rows != refreshed_rows:
+            raise self._buffer_sink_routing_error(
+                refreshed,
+                "buffer-sink evidence diverged between the refresh target "
+                f"{target_rows!r} and the refreshed rerun {refreshed_rows!r}",
+            )
 
     def _graph_signature_mismatch_detail(self, refreshed: Any) -> str:
         """Describe the first graph-signature fact that changed across reruns.

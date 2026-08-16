@@ -1131,6 +1131,7 @@ poisoned_run_refused
 collective_boundary_runnable_unsupported
 halted_capture_not_runnable
 user_intervention_not_replayable
+buffer_sink_routing_mutable
 ```
 
 `halted_capture_not_runnable` (early-stopping unification, N4) is the SAVE-time runnable
@@ -1148,6 +1149,28 @@ provenance the artifact archives -- and would permanently ceiling `unverifiable`
 diagnostic names every replaced op label. An armed selector that fired on zero sites leaves
 the capture unreplaced and runnable; analysis-level saves of intervened captures remain
 allowed, and the intervention spec itself stays separately saveable.
+
+`buffer_sink_routing_mutable` (D18; PROVISIONAL SPELLING, documented-unstable pending
+naming ratification) is the LIVE refresh projector's mode-aware buffer-sink routing
+refusal (`BufferSinkRoutingError`, stage `refresh_buffer_sink_routing`), raised on the
+default `run()` / `save_new_outs` path by all four typed arms of one closed rule --
+refuse iff any buffer sink carries `buffer_value_changed is not False`: (1) a
+train-mode buffer WRITER (`True` = a capture-time value-changing write, e.g. BatchNorm
+running stats or a `num_batches_tracked` counter); (2) UNPROVEN write evidence
+(`None`, fail closed -- the narrowing never widens past the evidence); (3) a recorded
+mode claim (the literal `training`/`use_input_stats` argument, or the capture-recorded
+`module_training_modes` entry for the producing op's innermost module) CONTRADICTING
+the write evidence in either direction (a tampered or incoherent claim, never resolved
+permissively); (4) the refresh write tripwire -- on the newly-allowed no-write path the
+refreshed rerun's OWN buffer-write journal must also record no value-changing buffer
+write, and any target-vs-refreshed buffer-sink evidence asymmetry
+(`(raw_label, buffer_value_changed, buffer_write_kind)` tuples) refuses the same way,
+so a tampered stored bit cannot buy a pass. Eval-mode BatchNorm (all sinks `False`
+with agreeing eval claims) is refresh-eligible and runnable on the default path.
+`ValueError` stays in the error's MRO and the message keeps the pinned "computational
+graph changed" term. The generic (untyped) graph-signature arm is unchanged and
+carries no D18 obligation. The fast tier's mode-aware `fast_state_static_guard` and
+the loaded-sparse buffer-write attestation downgrade are untouched by this code.
 
 `collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
 refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal

@@ -60,9 +60,13 @@ def test_eval_mode_batchnorm_does_not_warn() -> None:
     captured = tl.trace(model, torch.randn(4, 3))
 
     with warnings.catch_warnings(record=True) as observed:
-        with pytest.raises(ValueError, match="fast=True"):
-            captured.run(inputs=torch.randn(4, 3))
+        # D18: eval-mode BatchNorm is runnable on the default path (the
+        # historical mode-blind buffer-sink refusal was the capability the
+        # D-ruling narrowed); the pinned property here is NO training-mode
+        # warning either way.
+        result = captured.run(inputs=torch.randn(4, 3))
 
+    assert result.output is not None
     assert not [
         warning for warning in observed if "training-mode BatchNorm" in str(warning.message)
     ]
