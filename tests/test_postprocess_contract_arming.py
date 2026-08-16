@@ -159,3 +159,71 @@ def test_step0_prologue_seam_checks_the_contract(monkeypatch: pytest.MonkeyPatch
     fake_trace.__dict__["_trace_core"] = None
     with pytest.raises(AssertionError, match="Unknown postprocess step contract"):
         postprocess._assert_postprocess_contract(fake_trace, "not-a-real-step")
+
+
+def test_step_13_clears_cuda_cache_exactly_once_when_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 13 empties the CUDA cache exactly once on an armed capture.
+
+    r7 R74 (sol HIGH): the ``executor#_run_step_13`` return-None mutant
+    survived the real bounded campaign with zero killers — no suite test
+    armed both gates (CUDA availability AND capture-touched-CUDA), so
+    neutering the step's body was invisible. This drives a REAL capture
+    with both predicates patched true and a recording ``empty_cache``, so
+    both the body-removed and predicate-false mutants die here.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    import torchlens.postprocess as pp
+    from torchlens.utils import tensor_utils
+
+    calls: list[bool] = []
+    monkeypatch.setattr(pp, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(tensor_utils, "capture_touched_cuda", lambda _trace: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(True))
+
+    trace = tl.trace(nn.Sequential(nn.Linear(3, 3), nn.ReLU()), torch.randn(2, 3))
+    try:
+        assert len(calls) == 1, (
+            f"armed step 13 must clear the CUDA cache exactly once, saw {len(calls)}"
+        )
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "touched_cuda"),
+    [(False, True), (True, False)],
+    ids=["cuda-unavailable", "cpu-only-capture"],
+)
+def test_step_13_never_flushes_the_allocator_ungated(
+    monkeypatch: pytest.MonkeyPatch, cuda_available: bool, touched_cuda: bool
+) -> None:
+    """Step 13 stays silent unless BOTH gates agree (pins the R36-3 gating).
+
+    The CPU negative case: a CPU-only trace inside a GPU training loop must
+    never flush the caller's allocator, and an unavailable CUDA runtime must
+    never be poked at all.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    import torchlens.postprocess as pp
+    from torchlens.utils import tensor_utils
+
+    calls: list[bool] = []
+    monkeypatch.setattr(pp, "_is_cuda_available", lambda: cuda_available)
+    monkeypatch.setattr(tensor_utils, "capture_touched_cuda", lambda _trace: touched_cuda)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(True))
+
+    trace = tl.trace(nn.Sequential(nn.Linear(3, 3), nn.ReLU()), torch.randn(2, 3))
+    try:
+        assert not calls, "step 13 flushed the allocator with a gate false"
+    finally:
+        trace.cleanup()

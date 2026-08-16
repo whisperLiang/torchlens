@@ -204,21 +204,34 @@ DURATION_BUDGET_GRACE_SECONDS = 2.0
 SMOKE_FAMILY_PER_CELL_SECONDS = 0.1
 
 
+#: Session-frozen load factor (r7 R41, fixwave-7): the factor was recomputed
+#: PER ITEM from instantaneous loadavg, so the same test passed or failed on
+#: momentary run-queue pressure and could raise its own budget by finishing
+#: during a load spike. One reading at first use now holds for the whole
+#: session — deterministic within a run, still load-aware across runs.
+_SESSION_LOAD_FACTOR: float | None = None
+
+
 def _smoke_budget_load_factor() -> float:
-    """Scale the wall-clock budget by CPU oversubscription at measurement time.
+    """Scale the wall-clock budget by CPU oversubscription, frozen per session.
 
     Wall-clock durations inflate roughly with run-queue pressure; a fixed
     budget false-trips whenever an orchestrator runs sibling lanes on the same
     box (measured 2026-08-13: the same four tests read 2.9-14.2s quiet but
     15.6-34.9s at loadavg ~5x nproc). Capped so a pathological load reading
-    can never disarm the lint entirely.
+    can never disarm the lint entirely, and frozen at its first reading so
+    per-item load wobble cannot flip verdicts mid-session.
     """
 
+    global _SESSION_LOAD_FACTOR
+    if _SESSION_LOAD_FACTOR is not None:
+        return _SESSION_LOAD_FACTOR
     try:
         load_per_cpu = os.getloadavg()[0] / max(os.cpu_count() or 1, 1)
     except OSError:  # pragma: no cover - getloadavg unsupported on the platform.
-        return 1.0
-    return min(max(load_per_cpu, 1.0), 4.0)
+        load_per_cpu = 1.0
+    _SESSION_LOAD_FACTOR = min(max(load_per_cpu, 1.0), 4.0)
+    return _SESSION_LOAD_FACTOR
 
 
 def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
