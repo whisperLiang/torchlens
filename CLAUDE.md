@@ -426,6 +426,29 @@ print(tl.compat.report(model, x).to_markdown())
   `SelectionError` with `selection_unresolvable` + a closed reason set.
   Producers: `tl.units(site, indices)`, `tl.params(name, mask=None)`,
   `tl.random_selection(like=, within=, seed=)` (seeded size-matched control).
+- EDGE SUBSTITUTION (L6 stage 3; DOCUMENTED-UNSTABLE): `trace.edges` is the
+  dataflow edge family (EdgeUseRecords; intervention_ready-gated, refusal
+  `edge_provenance_unavailable`); canonical occurrence address
+  `(child_func_call_id, arg_kind, arg_path)`. `do(edge_selection, edit)`
+  replaces the value CONSUMED on the edge on the replay/push engine ONLY
+  (rerun/set_only refuse `edge_intervention_engine_unsupported`; rerun-side
+  design is an escalated named future) — the child re-executes from the
+  substituted input (node-level `intervention_replaced` never fires for
+  edges), the substituted value rides the DROP-gated tier-(ii) store
+  `Op.edge_substitutions` (+ `edge_replacement_stamps`,
+  `FireRecord.edge_address`; all pre-release-registered), and capture truth
+  (saved_args / out_versions_by_child / parent.out) is retained unmodified
+  (parity-pinned). Validation: uncorroborated tier-(ii) entries FAIL;
+  corroborated children re-execute from the spliced value and must match
+  (distinct verdict `edge_intervention_boundary`). v7 SAVE BOUNDARY at the
+  `_io/bundle.py` save entry (two-conjunct key: entries present AND
+  pre-release switch inactive): ALL four levels refuse
+  `edge_intervention_save_unsupported`, PRECEDING
+  `artifact_save_level_unsupported`; save-entry refusal order is
+  MergedTrace -> N1 outcome -> L7a structure-only -> L6 edge boundary (do
+  not silently reorder another owner's refusal). `tap(resolved_selection)`
+  stores per-site masks on TapRecords; `values(masked=True)` returns fresh
+  masked copies.
 - PREDICATE RUNTIME EXTENSION POINT (S4 seam; every spelling
   DOCUMENTED-UNSTABLE pending naming-session ratification):
   `torchlens.ir.predicate_registry` is the ONE documented door through which

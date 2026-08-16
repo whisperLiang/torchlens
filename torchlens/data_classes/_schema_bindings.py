@@ -453,6 +453,8 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "parents": StorageBinding(StorageKind.EDGE),
         "parent_arg_positions": StorageBinding(StorageKind.SCALAR, mutability="mutable_container"),
         "_edge_uses": StorageBinding(StorageKind.SCALAR, mutability="mutable_container"),
+        "edge_substitutions": StorageBinding(StorageKind.RUNTIME),
+        "edge_replacement_stamps": StorageBinding(StorageKind.RUNTIME),
         "root_ancestors": StorageBinding(StorageKind.BITSET, mutability="mutable_container"),
         "children": StorageBinding(StorageKind.EDGE),
         "has_children": StorageBinding(StorageKind.INTERNED),

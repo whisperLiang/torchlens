@@ -69,6 +69,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._io.prerelease import register_prerelease_field
 from .._save_budget import SaveBudgetExceededError
 from .._state import pause_logging
 from .._trace_core.fact_blocks import OP_FACT_FIELDS
@@ -200,6 +201,8 @@ _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "args_template": None,
     "kwargs_template": None,
     "_edge_uses": [],
+    "edge_substitutions": {},
+    "edge_replacement_stamps": {},
     "var_names": [],
     "is_orphan": False,
     "_address_normalized": None,
@@ -1902,6 +1905,8 @@ class Op(_SelectionOperand):
         parents: Any
         parent_arg_positions: Any
         _edge_uses: Any
+        edge_substitutions: dict[Any, Any]
+        edge_replacement_stamps: dict[Any, Any]
         root_ancestors: Any
         children: Any
         has_children: Any
@@ -2090,6 +2095,12 @@ class Op(_SelectionOperand):
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
+        # L6 stage 3 (S3 registrar discipline): occurrence-granular edge-
+        # substitution store + save-time corroboration stamps. DROP under
+        # v7, pre-release-registered; the wave-3 bump flips them to
+        # BLOB_RECURSIVE / KEEP respectively. Never a silent v7 change.
+        "edge_substitutions": FieldPolicy.DROP,
+        "edge_replacement_stamps": FieldPolicy.DROP,
         "root_ancestors": FieldPolicy.KEEP,
         "children": FieldPolicy.KEEP,
         "has_children": FieldPolicy.KEEP,
@@ -5186,3 +5197,7 @@ def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
 # Backward-compatible alias: TensorLog was the original name for
 # Op before the Layer aggregate class was introduced in PR #92.
 TensorLog = Op
+
+
+register_prerelease_field(Op, "edge_substitutions", persisted_policy=FieldPolicy.BLOB_RECURSIVE)
+register_prerelease_field(Op, "edge_replacement_stamps", persisted_policy=FieldPolicy.KEEP)

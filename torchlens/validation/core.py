@@ -63,7 +63,9 @@ from .exemptions import (
 )
 from .status import ValidationReplayStatus
 
-ValidationDecisionKind = Literal["validated", "failed", "unverified", "exempted"]
+ValidationDecisionKind = Literal[
+    "validated", "failed", "unverified", "exempted", "edge_intervention_boundary"
+]
 ValidationDecisionPhase = Literal["ground_truth", "replay", "perturbation", "metadata"]
 
 
@@ -1455,6 +1457,19 @@ def validate_parents_of_saved_layer(
     if not skip_replay_after_arg_logging:
         # Forward replay: re-execute with correct parent values, expect same output.
         for target_op in ops_to_replay:
+            edge_result = _check_edge_intervention_boundary(self, target_op)
+            if edge_result is not None:
+                if decision_recorder is not None:
+                    decision_recorder.record(
+                        op_label=target_op.label,
+                        func_name=getattr(target_op, "func_name", None),
+                        phase="replay",
+                        decision=edge_result.decision,
+                        reason=edge_result.reason,
+                    )
+                if edge_result.failed:
+                    return edge_result
+                continue
             if _is_intentional_intervention_replacement(target_op):
                 if decision_recorder is not None:
                     decision_recorder.record(
@@ -1486,6 +1501,16 @@ def validate_parents_of_saved_layer(
 
         all_parent_edges = _all_data_parent_edges_for_replay(self, ops_to_replay)
         for target_op, perturb_layer in all_parent_edges:
+            if getattr(target_op, "edge_substitutions", None):
+                if decision_recorder is not None:
+                    decision_recorder.record(
+                        op_label=target_op.label,
+                        func_name=getattr(target_op, "func_name", None),
+                        phase="perturbation",
+                        decision="edge_intervention_boundary",
+                        reason="edge_boundary_reexecuted",
+                    )
+                continue
             if _is_intentional_intervention_replacement(target_op):
                 if decision_recorder is not None:
                     decision_recorder.record(
@@ -1555,6 +1580,113 @@ def validate_parents_of_saved_layer(
                 layers_to_validate_parents_for.append(parent_op_label)
 
     return ValidationCheckResult.validated("parent_edges_validated")
+
+
+def _check_edge_intervention_boundary(
+    trace: "Trace",
+    target_op: "Op",
+) -> ValidationCheckResult | None:
+    """Validate one edge-intervened child (L6 4.3 — a DIFFERENT check, never NO check).
+
+    Returns ``None`` when the op carries no tier-(ii) edge-substitution
+    entries (the generic tripwires run unchanged). Otherwise:
+
+    * POSITIVE INVARIANT: every tier-(ii) entry MUST be corroborated by (a) a
+      FireRecord carrying the exact occurrence address AND (b) the save-time
+      corroboration stamp. An uncorroborated entry FAILS validation.
+    * ACCEPT SIDE (re-execute-from-tier-(ii), NOT skip): the child is
+      RE-EXECUTED with the substituted values spliced in at exactly the
+      corroborated occurrence addresses (all other args from capture truth),
+      and the stored child output MUST match the re-execution. The verdict is
+      the DISTINCT closed term ``edge_intervention_boundary`` — never
+      "exempted". A wrong stored output under a corroborated entry FAILS
+      (skip-shaped acceptance is impossible by construction).
+
+    Node-level ``intervention_replaced`` corroboration never fires for edges:
+    edge substitution replaces no node's output.
+    """
+
+    entries = getattr(target_op, "edge_substitutions", None) or {}
+    if not entries:
+        return None
+    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+
+    stamps = getattr(target_op, "edge_replacement_stamps", None) or {}
+    fire_addresses = {
+        tuple(getattr(record, "edge_address", ()) or ())
+        for record in (getattr(target_op, "interventions", None) or ())
+        if getattr(record, "edge_address", None) is not None
+    }
+    for store_key in entries:
+        arg_kind, arg_path = store_key
+        address = (target_op.func_call_id, arg_kind, tuple(arg_path))
+        stamp = stamps.get(store_key)
+        if address not in fire_addresses or not stamp or not stamp.get("verdict"):
+            record_validation_failure(
+                trace,
+                ValidationFailure(
+                    check=CHECK_REPLAY,
+                    op_label=target_op.label,
+                    func_name=getattr(target_op, "func_name", None),
+                    message=(
+                        f"edge-substitution entry at {address!r} is UNCORROBORATED "
+                        "(missing edge FireRecord and/or corroboration stamp)"
+                    ),
+                ),
+            )
+            return ValidationCheckResult.failed_result("edge_substitution_uncorroborated")
+
+    input_args, unverified_reason = _prepare_input_args_for_validating_layer(trace, target_op, [])
+    if input_args is None:
+        return ValidationCheckResult.unverified(unverified_reason or "missing_saved_args")
+    args = list(input_args["args"])
+    kwargs = dict(input_args["kwargs"])
+    for store_key, payload in entries.items():
+        arg_kind, arg_path = store_key
+        value = payload.get("value") if isinstance(payload, dict) else None
+        if not isinstance(value, torch.Tensor):
+            record_validation_failure(
+                trace,
+                ValidationFailure(
+                    check=CHECK_REPLAY,
+                    op_label=target_op.label,
+                    func_name=getattr(target_op, "func_name", None),
+                    message=f"edge-substitution payload at {store_key!r} is not a tensor",
+                ),
+            )
+            return ValidationCheckResult.failed_result("edge_substitution_payload_invalid")
+        if arg_kind == "positional":
+            args[int(arg_path[0])] = value
+        else:
+            kwargs[arg_path[0]] = value
+    input_args = dict(input_args)
+    input_args["args"] = tuple(args)
+    input_args["kwargs"] = kwargs
+    recomputed = _execute_func_with_restored_state(
+        target_op, input_args, [], target_op.label, False
+    )
+    saved_output = _saved_out_payload(target_op)
+    if recomputed is None or saved_output is None:
+        return ValidationCheckResult.unverified("edge_boundary_replay_unavailable")
+    if isinstance(recomputed, (tuple, list)) and not isinstance(recomputed, torch.Tensor):
+        container_path = tuple(getattr(target_op, "container_path", ()) or ())
+        for component in container_path:
+            recomputed = recomputed[component]
+    if not tensor_nanequal(recomputed, saved_output, allow_tolerance=True):
+        record_validation_failure(
+            trace,
+            ValidationFailure(
+                check=CHECK_REPLAY,
+                op_label=target_op.label,
+                func_name=getattr(target_op, "func_name", None),
+                message=(
+                    "stored output does not match re-execution from the corroborated "
+                    "tier-(ii) edge substitution (divergence without provenance)"
+                ),
+            ),
+        )
+        return ValidationCheckResult.failed_result("edge_boundary_reexecution_mismatch")
+    return ValidationCheckResult("edge_intervention_boundary", "edge_boundary_reexecuted")
 
 
 def _is_intentional_intervention_replacement(layer: "Op") -> bool:

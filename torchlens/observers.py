@@ -48,6 +48,9 @@ class TapRecord:
     grad_kind: Literal["grad_input", "grad_output"] | None = None
     backward_call_index: int | None = None
     _raw_site_label: str | None = None
+    #: L6 stage 3: per-site selection mask stored when the tap was
+    #: created from a resolved selection (session-time disclosure).
+    selection_mask: torch.Tensor | None = None
     _trace_ref: Callable[[], Any] | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -113,9 +116,36 @@ class TapObserver:
                 direction="forward",
                 _raw_site_label=_hook_layer_label(hook.layer_log),
                 _trace_ref=_active_trace_ref(),
+                selection_mask=self._selection_mask_for(hook.layer_log, value),
             )
         )
         return out
+
+    def _selection_mask_for(self, layer_log: Any, value: torch.Tensor) -> torch.Tensor | None:
+        """Return the stored per-site mask when the tap site is a resolved selection.
+
+        The Selection contributes the SITE SET; each firing record stores the
+        matching site's mask (fresh materialization). Non-selection sites and
+        unmatched/mismatched shapes store no mask.
+        """
+
+        site = self.site
+        entries = getattr(site, "__selection__", None) and getattr(site, "_entries", None)
+        if not entries:
+            return None
+        layer_label = None
+        if layer_log is not None:
+            layer_label = (
+                layer_log.get("layer_label")
+                if hasattr(layer_log, "get")
+                else getattr(layer_log, "layer_label", None)
+            )
+        for entry in entries:
+            if entry.kind == "ACT" and entry.site_key[0] == layer_label:
+                mask = entry.mask
+                if tuple(mask.shape) == tuple(value.shape):
+                    return mask
+        return None
 
     def record_backward(
         self,
@@ -169,8 +199,17 @@ class TapObserver:
             )
         )
 
-    def values(self) -> list[torch.Tensor]:
+    def values(self, masked: bool = False) -> list[torch.Tensor]:
         """Return observed out values.
+
+        Parameters
+        ----------
+        masked:
+            ``False`` (default): the FULL snapshots, exactly the shipped
+            behavior. ``True``: each record's stored selection mask is applied
+            and fresh masked copies (the selected elements, flat) are
+            returned; records without a stored mask return the full snapshot
+            clone. Callers may not override the stored mask in v1.
 
         Returns
         -------
@@ -178,7 +217,15 @@ class TapObserver:
             Detached out snapshots in observation order.
         """
 
-        return [record.value for record in self.records]
+        if not masked:
+            return [record.value for record in self.records]
+        results: list[torch.Tensor] = []
+        for record in self.records:
+            if record.selection_mask is None:
+                results.append(record.value.clone())
+            else:
+                results.append(torch.masked_select(record.value, record.selection_mask))
+        return results
 
     def clear(self) -> None:
         """Clear previously observed records.

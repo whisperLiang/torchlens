@@ -2368,6 +2368,10 @@ def _blob_kind_for_field(owner: Any, field_name: str) -> str:
         return "annotation_blob"
     if field_name == "orphan_records":
         return "orphan_payload"
+    if field_name == "edge_substitutions":
+        # L6 stage 3: tier-(ii) occurrence-granular substituted-value payloads
+        # (BLOB_RECURSIVE under the pre-release switch / from the wave-3 bump).
+        return "edge_substitution"
     raise TorchLensIOError(f"No blob kind mapping defined for {type(owner).__name__}.{field_name}.")
 
 

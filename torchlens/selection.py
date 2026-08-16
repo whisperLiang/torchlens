@@ -482,9 +482,13 @@ class ResolvedSelection:
 
         The complement of a no-touched-sites selection is the no-touched-sites
         selection; the complement of an element-empty-but-touched selection is
-        full masks over the same family (the involution's other half).
+        full masks over the same family (the involution's other half). EDGE
+        selections complement within the trace's dataflow edge family (the
+        one well-defined universe).
         """
 
+        if self._kind == "EDGE":
+            return _edge_family_complement(self)
         entries = tuple(
             SiteEntry(
                 kind=entry.kind,
@@ -1023,6 +1027,8 @@ def _resolve_node(node: Any, trace: Any, kind: str) -> ResolvedSelection:
         return _resolve_whole_site_term(node, trace)
     if isinstance(node, _RandomTerm):
         return _resolve_random_term(node, trace)
+    if isinstance(node, _EdgeTerm):
+        return _resolve_edge_term(node, trace)
     raise TypeError(f"unknown selection AST node {type(node).__name__}")  # pragma: no cover
 
 
@@ -1707,3 +1713,113 @@ def build_selection_do_plan(
     if getattr(edit, "helper_name", None) == "patch_from" and source_identity:
         audit["patch_source"] = dict(source_identity)
     return resolved, plan, audit
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: EDGE selections (whole-edge granularity at introduction).
+# The canonical occurrence address is (child_func_call_id, arg_kind,
+# arg_path) — exactly EdgeUseRecord's discriminating fields. EdgeTable
+# edge ids stay in-session accelerators, never the address.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _EdgeTerm:
+    """Explicit edge-occurrence set (whole-edge granularity)."""
+
+    addresses: tuple[tuple[Any, ...], ...]
+    display: tuple[str, ...] = ()
+
+    def __repr__(self) -> str:
+        if self.display:
+            return f"edges({', '.join(self.display)})"
+        return f"edges(n={len(self.addresses)})"
+
+
+def edge_address_of(record: Any) -> tuple[Any, ...]:
+    """Return one EdgeUseRecord's canonical occurrence address."""
+
+    return (record.child_func_call_id, record.arg_kind, tuple(record.arg_path))
+
+
+def _require_edge_provenance(trace: Any) -> None:
+    """Refuse typed when edge provenance was not captured."""
+
+    if not bool(getattr(trace, "intervention_ready", False)):
+        raise SelectionError(
+            "edge provenance requires an intervention_ready capture "
+            "(EdgeUseRecords exist only under it). Re-capture with "
+            "capture=CaptureOptions(intervention_ready=True).",
+            code="edge_provenance_unavailable",
+        )
+
+
+def _trace_edge_records(trace: Any) -> tuple[Any, ...]:
+    """Return the trace's dataflow edge family (EdgeUseRecords, child-owned)."""
+
+    _require_edge_provenance(trace)
+    records: list[Any] = []
+    for op in _forward_ops(trace):
+        records.extend(getattr(op, "edge_uses", ()) or ())
+    return tuple(records)
+
+
+def _edge_entry(record: Any) -> SiteEntry:
+    """Build one EDGE site entry (whole-edge mask over a 1-element space)."""
+
+    return SiteEntry(
+        kind="EDGE",
+        site_key=edge_address_of(record),
+        provenance=SelectionProvenance(
+            relation="exact",
+            source=f"edge {record.parent_label!r} -> {record.child_label!r}",
+        ),
+        _mask=_mask_whole((1,)),
+    )
+
+
+def _selection_from_edge(record: Any) -> Selection:
+    """Lift one EdgeUseRecord as an EDGE selection term."""
+
+    return Selection(
+        _EdgeTerm(
+            addresses=(edge_address_of(record),),
+            display=(f"{record.parent_label}->{record.child_label}",),
+        ),
+        kind="EDGE",
+    )
+
+
+def _resolve_edge_term(node: _EdgeTerm, trace: Any) -> ResolvedSelection:
+    """Resolve an explicit edge-occurrence set against one trace."""
+
+    family = {edge_address_of(record): record for record in _trace_edge_records(trace)}
+    entries = []
+    for address in node.addresses:
+        record = family.get(address)
+        if record is None:
+            raise _unresolvable(
+                "site_not_in_trace",
+                f"edge occurrence {address!r} is not part of this trace's dataflow edge family.",
+                site=repr(address),
+            )
+        entries.append(_edge_entry(record))
+    return ResolvedSelection(trace, "EDGE", entries)
+
+
+def _edge_family_complement(resolved: ResolvedSelection) -> ResolvedSelection:
+    """Complement an EDGE selection within the trace's dataflow edge family.
+
+    The edge universe is well-defined (the trace's EdgeTable occurrences), so
+    ``~`` on a RESOLVED edge selection complements against it: edges outside
+    the selected set enter with whole masks; selected edges leave. (On a
+    QUERY, ``~`` defers to resolve time.)
+    """
+
+    selected = {entry.site_key for entry in resolved._entries if entry.selected_count > 0}
+    entries = [
+        _edge_entry(record)
+        for record in _trace_edge_records(resolved._trace)
+        if edge_address_of(record) not in selected
+    ]
+    return ResolvedSelection(resolved._trace, "EDGE", entries)

@@ -426,6 +426,36 @@ default-keep); mask-application semantics documented-unstable*
   args carry source-trace IDENTITY only (never the Trace, never tensors);
   values bind at do() time session-side; no executable-save path in v1.
 
+**trace.edges / edge substitution** — *unstable — no deprecation shim owed;
+S2/S3-gated*
+: `trace.edges` returns the dataflow edge family (one `EdgeUseRecord` per
+  parent→child occurrence; requires an `intervention_ready` capture, else
+  `edge_provenance_unavailable`). The canonical occurrence address is
+  `(child_func_call_id, arg_kind, arg_path)`. Edge records lift as EDGE-kind
+  selections (whole-edge granularity; `~` complements within the trace's
+  edge family). `do(edge_selection, edit)` replaces the value CONSUMED on
+  the edge — only the child's consumption changes; `parent.out` stays
+  producer truth. Ships on the replay/push engine ONLY
+  (`edge_intervention_engine_unsupported` otherwise; the rerun-engine design
+  is an escalated named future). Storage fork: the substituted value lives
+  in the DROP-gated `Op.edge_substitutions` store (+
+  `Op.edge_replacement_stamps`, `FireRecord.edge_address`); capture truth
+  (`saved_args`, `out_versions_by_child`, `parent.out`) is retained
+  unmodified — the pre-edit snapshot that makes divergence decidable.
+  Validation: every tier-(ii) entry must be corroborated (FireRecord +
+  stamp) else FAIL; corroborated children are RE-EXECUTED with the
+  substituted value spliced at the address and must match (verdict
+  `edge_intervention_boundary` — a different check, never no check).
+  v7 PERSISTENCE BOUNDARY: an edge-intervened trace refuses
+  `edge_intervention_save_unsupported` at ALL four save levels while the
+  pre-release switch is inactive (session-only in production until the
+  wave-3 bump); the refusal precedes `artifact_save_level_unsupported`.
+
+**TapObserver.values(masked=True)** — *unstable — no deprecation shim owed*
+: `tap(resolved_selection)` stores each firing site's mask on the
+  `TapRecord`; `values(masked=True)` returns fresh masked copies (selected
+  elements). `values()` stays exactly the shipped full-snapshot behavior.
+
 **register_predicate(name, \*, replace=False)** — *unstable — no deprecation
 shim owed*
 : Registers a plain predicate callable under a name for later

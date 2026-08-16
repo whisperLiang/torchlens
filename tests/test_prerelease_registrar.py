@@ -46,7 +46,12 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 #: are made RELATIVE to this ledger so each new writer lane lands here as a
 #: reviewed one-line diff (registrar keeps the live inventory).
 _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
+    "FireRecord": ("edge_address",),  # L6 edge-occurrence address on fire records
     "HelperSpec": ("selection_recipe",),  # L6 Query-Selection recipe family
+    "Op": (
+        "edge_replacement_stamps",  # L6 save-time edge corroboration verdicts
+        "edge_substitutions",  # L6 tier-(ii) occurrence-granular edge store
+    ),
     "Trace": (
         "intervention_audit",  # L6 resolved-intervention audit record
         "structure_only",  # L7a mode marker (wave 0)

@@ -432,6 +432,8 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "parents",
     "parent_arg_positions",
     "_edge_uses",
+    "edge_substitutions",
+    "edge_replacement_stamps",
     "root_ancestors",
     "children",
     "has_children",

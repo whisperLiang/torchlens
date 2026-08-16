@@ -483,6 +483,22 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._record_operation("clear_hooks")
         return self
 
+    @property
+    def edges(self: "Trace") -> tuple[Any, ...]:
+        """Return this trace's dataflow edge family (finalized edge views).
+
+        One ``EdgeUseRecord`` per parent->child occurrence (parallel edges
+        first-class), in execution order; rows are the identity-stable
+        provenance records themselves (immutable finalized views). Requires
+        an ``intervention_ready`` capture — otherwise refuses typed
+        (``edge_provenance_unavailable``). DOCUMENTED-UNSTABLE spelling
+        pending naming-session ratification.
+        """
+
+        from ..selection import _trace_edge_records
+
+        return _trace_edge_records(self)
+
     def do(
         self: "Trace",
         hooks_or_site: Any,
@@ -798,9 +814,45 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         from ..intervention.errors import EngineDispatchError
         from ..intervention.selectors import label as label_selector
-        from ..selection import build_selection_do_plan
+        from ..selection import (
+            ResolvedSelection,
+            SelectionError,
+            _lift,
+            build_selection_do_plan,
+        )
 
         self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
+        lifted = _lift(selection)
+        if lifted is not None and lifted.kind == "EDGE":
+            if edit is None:
+                raise ValueError(
+                    "do(selection, edit) requires an edit: pass an Edit/HelperSpec, "
+                    "a hook callable, or a replacement tensor."
+                )
+            if isinstance(lifted, ResolvedSelection):
+                if lifted._trace is not self:
+                    raise SelectionError(
+                        "the resolved edge selection is bound to a different trace.",
+                        code="selection_trace_mismatch",
+                    )
+                resolved_edges = lifted
+            else:
+                resolved_edges = lifted.resolve(self)
+            from ..intervention.edge_substitution import apply_edge_substitution_do
+
+            payload = apply_edge_substitution_do(
+                self, resolved_edges, edit, engine=engine, strict=strict
+            )
+            self.intervention_audit.append(
+                {
+                    "kind": "EDGE",
+                    "selection_repr": repr(selection),
+                    "resolve_digest": resolved_edges.resolve_digest,
+                    "edit": getattr(edit, "helper_name", getattr(edit, "__name__", "value")),
+                    **payload,
+                }
+            )
+            return "selection_replayed"
         resolved, plan, audit = build_selection_do_plan(self, selection, edit)
         leaf_items = [item for item in plan if item["is_leaf"]]
         hook_items = [item for item in plan if not item["is_leaf"]]
