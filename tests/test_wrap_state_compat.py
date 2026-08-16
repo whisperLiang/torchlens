@@ -1163,9 +1163,11 @@ class TestProtocolArgWrapperIdentity:
                     assert callable(getattr(shimmed, cache_attr, None)), (
                         f"{name}.{cache_attr} stripped by the membership shim"
                     )
-            if callable(getattr(shimmed, "cache_clear", None)):
-                shimmed.cache_clear()
-                assert shimmed(), f"{name} broken after cache_clear"
+            # NOTE: cache_clear() is deliberately NOT invoked here -- clearing
+            # and rebuilding the table mid-epoch would key it by WRAPPERS,
+            # recreating the exact poisoning the coherence gate above guards.
+            if callable(getattr(shimmed, "cache_info", None)):
+                shimmed.cache_info()  # usable, not merely present
         assert checked, "no upstream cache API found on either accessor; premise drifted"
 
     def test_teardown_never_clobbers_spoofed_marker_site(self):

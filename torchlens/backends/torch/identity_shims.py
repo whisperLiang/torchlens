@@ -271,9 +271,16 @@ def _is_our_live_shim(value: Any) -> bool:
 
 
 def identity_shims_installed() -> bool:
-    """Return whether the identity shims are currently installed."""
+    """Return whether the FULL identity-shim family is currently installed.
 
-    return bool(_installed)
+    Keyed on ``_family_installed``, never on ``_installed`` being non-empty
+    (grind-r6 b7 R47-A2, 3rd round): a raced import callback can append one
+    causal-bias record into a post-teardown empty list, and the non-empty
+    proxy would then report "installed" with the transformer/
+    expanded-weights shims absent.
+    """
+
+    return _family_installed
 
 
 def install_identity_shims() -> None:
