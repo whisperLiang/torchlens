@@ -894,6 +894,138 @@ def test_repo_unsatisfiable_skipif_scanner_is_red_capable(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# 2b. Device-gated skipifs (r7 R79-1): CUDA skips that fire on EVERY leg
+# ---------------------------------------------------------------------------
+
+#: Tests gated on ``torch.cuda.is_available()`` execute on NO CI leg (every
+#: workflow installs ``+cpu`` torch) and not on the owner's GPU box either
+#: (documented cu130-wheel / driver mismatch) — the exact "skip that fires
+#: everywhere" class the sibling ledgers govern, previously falling into
+#: none of them. Every row is DARK COVERAGE disclosed until a CUDA leg
+#: exists; deleting a row requires the site to gain an executing environment,
+#: never just deleting the test.
+_CUDA_DARK = (
+    "[2026-08-16] CUDA-gated: all CI legs install +cpu torch and the one GPU "
+    "box has the cu130-wheel/driver mismatch; dark until a device leg exists"
+)
+
+DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
+    "test_hash_determinism.py::test_graph_shape_hash_matches_between_cpu_and_cuda": _CUDA_DARK,
+    "test_param_as_input.py::test_cross_device_parameter_input_matches_plain_tensor_path_if_cuda_available": _CUDA_DARK,
+    "test_perf_bundle.py::test_cuda_path_still_runs_when_available": _CUDA_DARK,
+    "test_robustness_pr2.py::test_cuda_channels_last_safe_copy": _CUDA_DARK,
+    "test_robustness_pr2.py::test_cuda_forward_pass_still_logs": _CUDA_DARK,
+    "test_runnable_r36_regressions.py::TestCudaStagingAndReadiness": _CUDA_DARK,
+    "test_tlspec_runnable_r35_attestation_lattice.py::test_r35_device_diverged_run_is_never_attested": _CUDA_DARK,
+    "test_tlspec_runnable_r35_exact_semantics.py::test_r35_seeded_run_restores_produced_only_cuda_rng": _CUDA_DARK,
+    "test_tlspec_runnable_r65_state_metadata_parity.py::test_r65_cuda_is_shared_read_stays_verified": _CUDA_DARK,
+    "test_tlspec_runnable_r65_state_metadata_parity.py::test_r65_cuda_staged_state_satisfies_full_signature": _CUDA_DARK,
+    "test_tlspec_runnable_r65_state_metadata_parity.py::test_r65_pinned_read_refuses_when_pinned": _CUDA_DARK,
+    "test_tlspec_runnable_r65_torch_rng.py::test_cuda_default_get_offset_is_ceiled": _CUDA_DARK,
+    "test_tlspec_runnable_r65_torch_rng.py::test_r67_cuda_default_get_offset_ceilings_every_run": _CUDA_DARK,
+    "test_tlspec_runnable_r67_storage_metadata.py::test_r67_pinned_state_read_refuses_via_observation": _CUDA_DARK,
+    "test_transport_idiom.py::test_cross_device_channels_last_single_host_copy": _CUDA_DARK,
+}
+
+
+def collect_device_gated_skipifs(root: Path) -> dict[str, str]:
+    """Scan ``root`` for skipif sites gated on ``torch.cuda.is_available()``.
+
+    Matches the canonical decorator/pytestmark shape
+    ``pytest.mark.skipif(not torch.cuda.is_available(), ...)``. Returns
+    scanner keys (``relpath::qualname``) -> site description.
+    """
+
+    def _is_cuda_gate(condition: ast.expr) -> bool:
+        if not (isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not)):
+            return False
+        operand = condition.operand
+        return (
+            isinstance(operand, ast.Call)
+            and isinstance(operand.func, ast.Attribute)
+            and operand.func.attr == "is_available"
+            and isinstance(operand.func.value, ast.Attribute)
+            and operand.func.value.attr == "cuda"
+            and isinstance(operand.func.value.value, ast.Name)
+            and operand.func.value.value.id == "torch"
+        )
+
+    findings: dict[str, str] = {}
+    for path in _iter_test_files(root):
+        text = _read_text(str(path))
+        if "is_available" not in text:
+            continue
+        rel = path.relative_to(root).as_posix()
+        tree = ast.parse(text, filename=str(path))
+
+        def classify_mark(mark: ast.expr, key: str) -> None:
+            if (
+                isinstance(mark, ast.Call)
+                and isinstance(mark.func, ast.Attribute)
+                and mark.func.attr == "skipif"
+                and mark.args
+                and _is_cuda_gate(mark.args[0])
+            ):
+                findings[key] = f"line {mark.lineno}: gated on torch.cuda.is_available()"
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for dec in node.decorator_list:
+                    classify_mark(dec, f"{rel}::{node.name}")
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets
+            ):
+                marks = (
+                    node.value.elts
+                    if isinstance(node.value, (ast.List, ast.Tuple))
+                    else [node.value]
+                )
+                for mark in marks:
+                    classify_mark(mark, f"{rel}::<pytestmark>")
+    return findings
+
+
+@pytest.mark.smoke
+def test_no_unledgered_device_gated_skipifs() -> None:
+    """Every CUDA-gated skip is ledgered as dark coverage; no row is stale."""
+
+    findings = collect_device_gated_skipifs(TESTS_DIR)
+    unledgered = set(findings) - set(DEVICE_GATED_SKIPIF_LEDGER)
+    stale = set(DEVICE_GATED_SKIPIF_LEDGER) - set(findings)
+    assert not unledgered and not stale, (
+        "device-gated skipif drift (r7 R79-1: these fire on every CI leg and "
+        "the owner's GPU box alike, so each is dark coverage that must be "
+        "DISCLOSED). Ledger new sites with a dated justification in "
+        "DEVICE_GATED_SKIPIF_LEDGER; delete rows only when the site gains an "
+        "executing environment.\n"
+        f"  unledgered: {sorted(unledgered)}\n"
+        f"  stale: {sorted(stale)}"
+    )
+
+
+def test_device_gated_skipif_scanner_is_red_capable(tmp_path: Path) -> None:
+    """A planted CUDA gate is caught; a satisfiable device decoy is not."""
+
+    planted = tmp_path / "test_planted_cuda_skipifs.py"
+    planted.write_text(
+        "import pytest\n"
+        "import torch\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not torch.cuda.is_available(), reason='planted')\n"
+        "def test_cuda_gated():\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "@pytest.mark.skipif(not torch.backends.mkldnn.is_available(), reason='decoy')\n"
+        "def test_other_backend_decoy():\n"
+        "    pass\n"
+    )
+    findings = collect_device_gated_skipifs(tmp_path)
+    assert set(findings) == {"test_planted_cuda_skipifs.py::test_cuda_gated"}
+
+
+# ---------------------------------------------------------------------------
 # 3. requires_assertions / python -O leg self-verification
 # ---------------------------------------------------------------------------
 
