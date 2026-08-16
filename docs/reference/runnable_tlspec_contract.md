@@ -1463,7 +1463,37 @@ numeric_attestation: NumericAttestationStatus
 poisoned: bool
 nondeterministic_sources: tuple[str, ...]
 state_carried: bool = False
+truncation: RunTruncation | None = None
+truncated: bool = False
+stopped_at: str | None = None
 ```
+
+`truncation` / `truncated` / `stopped_at` (L4 `until=`; [S2-PROV] spellings, documented-unstable;
+`truncated` and `stopped_at` are the S2-ratified flat reading surface) disclose a truncated run.
+Truncation is a RUN-RESULT term, NEVER a capture outcome: `CaptureStatus` keeps its six members,
+the source trace's outcome is untouched by any run, and no N-gate row branches on `until=`.
+`RunTruncation` carries the regime (`closure` | `sequential_prefix` | `live_stop_after`), the
+requested sites, executed/skipped counts, a skipped-set digest, and -- for the
+`sequential_prefix` fallback -- the cause tag (`unprovable_independence` | `coverage_gap` |
+`ancestry_break`). THE POSITIVE-CLAIM BAR: a truncated run may NEVER settle VERIFIED
+`path_faithfulness` or ATTESTED `numeric_attestation` -- the fail-closed `run_truncated` ceiling
+is threaded into the verdict derivation UPSTREAM of attestation, so the settled pair is
+regime-specific: loaded-sparse `(unverifiable, not_applicable)` (the archive is never opened),
+live `(unverifiable, not_present)`. Contradictions the executed region evidences still settle
+DIVERGED (the cap is a ceiling, never a floor), and the report finalizer keeps a redundant
+tamper assert. The executed region runs EVERY check at full strength; the skipped region is a
+disclosed set -- semantically "not-run", never "passed". Skipped sites are retained
+structure-only (value payloads cleared, never a stale capture-time tensor); the truncated
+result is poisoned at the conservative floor (S2 row-0), refuses every save at the poison
+gate, and refuses re-run typed at the run door. The full recorded input tree remains REQUIRED
+under any `until=` (require-all inputs: the closure never shrinks the input contract). The
+live regime is STOP-AFTER (the forward runs natively and halts at the first boundary after
+the last requested site; `RunResult.output` is None -- read executed-prefix values off the
+result trace); the loaded-sparse regime executes the sequential prefix through the last
+requested call, labeled `closure` only when that prefix IS the widened dependency closure
+(C1 tensor deps, C3 declared-state deps, C5 control-witness deps leave no candidate skip;
+the C4 certified-fresh vocabulary is not yet shipped, so any candidate skip discloses the
+`sequential_prefix` regime with `unprovable_independence`).
 
 `state_carried` (L4; PROVISIONAL spelling, documented-unstable pending naming ratification) is
 `True` only when a LIVE run was invoked with `carry_state=True`, deliberately leaving

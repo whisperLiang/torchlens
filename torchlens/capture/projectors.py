@@ -272,6 +272,72 @@ class RefreshProjector:
                 if layer.raw_index not in selected:
                     self._clear_payload(layer)
 
+    def project_prefix(self, refreshed: Any, plan: Any) -> None:
+        """Prefix-scoped projection for a truncated (until=) live refresh (L4 2.3).
+
+        The refreshed argument is the HALTED internal capture covering the
+        executed prefix. All projector tripwires run at full strength on that
+        prefix -- the graph signature over executed non-output ops, and the
+        typed D18 buffer-sink arms scoped to in-prefix sinks -- and a prefix
+        mismatch refuses exactly like a full mismatch (the projector is never
+        loosened to make a truncated projection pass). Target ops beyond the
+        stop are retained STRUCTURE-ONLY: their value payloads are cleared so a
+        stale capture-time tensor can never read as a fresh value, and the
+        skipped set is recorded on the fork for the run-level disclosure.
+        Frontier-synthesized output nodes on the partial are excluded from the
+        comparison (the target's real output nodes are in the skipped set).
+        """
+
+        executed = frozenset(plan.executed_raw_labels)
+        self._check_buffer_sink_routing(refreshed, executed_raw_labels=executed)
+        target_prefix = [
+            layer
+            for layer in self.target.layer_list
+            if layer.layer_type != "output" and layer._layer_label_raw in executed
+        ]
+        refreshed_prefix = [layer for layer in refreshed.layer_list if layer.layer_type != "output"]
+
+        def _prefix_signature(layers: list[Any]) -> tuple[tuple[Any, ...], ...]:
+            return tuple(
+                (
+                    layer._layer_label_raw,
+                    layer.layer_type,
+                    tuple(layer.parents),
+                    _normalized_parent_arg_positions(layer.parent_arg_positions),
+                )
+                for layer in layers
+            )
+
+        target_signature = _prefix_signature(target_prefix)
+        refreshed_signature = _prefix_signature(refreshed_prefix)
+        if target_signature != refreshed_signature:
+            raise self._graph_change_error(
+                refreshed,
+                "the executed prefix of the truncated rerun does not match the "
+                f"recorded prefix (expected {len(target_signature)} prefix op(s), "
+                f"got {len(refreshed_signature)}; first divergence at "
+                f"{next((expected[0] for expected, actual in zip(target_signature, refreshed_signature) if expected != actual), 'op count')!r})",
+            )
+        from ..data_classes._state_adapter import state_items
+
+        preserved_states = [dict(state_items(layer)) for layer in target_prefix]
+        for layer, new_layer in zip(target_prefix, refreshed_prefix):
+            self.target._refresh_rerun_op_from(layer, new_layer)
+        for layer, preserved in zip(target_prefix, preserved_states):
+            for field_name, value in preserved.items():
+                if field_name not in self._DYNAMIC_OP_FIELDS:
+                    layer._internal_set(field_name, value)
+        # 3.3.3 sanitation: skipped records are retained structure-only; value
+        # payloads are cleared at fork-finalization so omission never reads as
+        # a fresh value.
+        for layer in self.target.layer_list:
+            if layer.layer_type == "output" or layer._layer_label_raw not in executed:
+                self._clear_payload(layer)
+        self.target.__dict__["_run_truncation_skipped_raw_labels"] = tuple(plan.skipped_raw_labels)
+        self.target._layer_nums_to_save = self.layer_nums_to_save
+        self.target._grad_op_nums_to_save = self.grad_layer_nums_to_save
+        self._rebind_backward_hooks(raw_labels=executed)
+
     @staticmethod
     def _graph_change_error(refreshed: Any, detail: str | None = None) -> ValueError:
         """Build the legacy graph-change exception with partial-capture metadata."""
@@ -381,7 +447,9 @@ class RefreshProjector:
                 claims.append((f"module_training_modes[{address!r}] record", bool(modes[address])))
         return claims
 
-    def _check_buffer_sink_routing(self, refreshed: Any) -> None:
+    def _check_buffer_sink_routing(
+        self, refreshed: Any, executed_raw_labels: frozenset[str] | None = None
+    ) -> None:
         """Enforce the D18 mode-aware buffer-sink routing contract (typed).
 
         Refuse iff any buffer sink carries ``buffer_value_changed is not False``
@@ -390,12 +458,21 @@ class RefreshProjector:
         rerun's own journal recorded a value-changing buffer write (O1), or the
         target-vs-refreshed evidence tuples diverge (O2). Eval-mode BatchNorm
         (all sinks ``False`` with agreeing eval claims) passes.
+
+        ``executed_raw_labels`` scopes the check to a truncated run's executed
+        prefix: in-prefix sinks are compared at FULL strength including the O2
+        evidence tuple, while sinks whose producing calls were cut are excluded
+        (disclosed via the truncation record, not compared).
         """
 
         target_sinks = [
             self.target.layer_dict_all_keys[label]
             for label in getattr(self.target, "internal_sink_ops", ())
             if self.target.layer_dict_all_keys[label].layer_type == "buffer"
+            and (
+                executed_raw_labels is None
+                or self.target.layer_dict_all_keys[label]._layer_label_raw in executed_raw_labels
+            )
         ]
         target_rows = tuple(
             (layer._layer_label_raw, layer.buffer_value_changed, layer.buffer_write_kind)
@@ -512,8 +589,13 @@ class RefreshProjector:
                 )
         return "graph signature changed"
 
-    def _rebind_backward_hooks(self) -> None:
-        """Bind refreshed live tensors and grad-fn registry entries to the target Trace."""
+    def _rebind_backward_hooks(self, raw_labels: frozenset[str] | None = None) -> None:
+        """Bind refreshed live tensors and grad-fn registry entries to the target Trace.
+
+        ``raw_labels`` restricts the rebind to a truncated run's executed prefix:
+        skipped ops carry only stale capture-time grad-fn handles and cleared
+        payloads, so registering them would bind dead autograd state.
+        """
 
         from ..backends.torch.backward import _register_forward_grad_fn
         from ..backends.torch.tensor_tracking import _add_tensor_backward_hook
@@ -521,6 +603,8 @@ class RefreshProjector:
         self.target.__dict__["_tl_backward_hooked_tensor_keys"] = set()
         self.target.__dict__["_tl_grad_hook_owner_by_label"] = {}
         for layer in self.target.layer_list:
+            if raw_labels is not None and layer._layer_label_raw not in raw_labels:
+                continue
             _register_forward_grad_fn(
                 self.target,
                 layer.grad_fn_handle,

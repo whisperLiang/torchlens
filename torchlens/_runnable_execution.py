@@ -395,6 +395,18 @@ run_live_trace = _rebind_function(_runnable_transaction.run_live_trace, globals(
 _restore_declared_state_or_mark = _rebind_function(
     _runnable_transaction._restore_declared_state_or_mark, globals()
 )
+# These names resolve in THIS module's globals at runtime inside rebound
+# functions (same mechanism as _INPUT_CHECK_UNAVAILABLE).
+_RunUntilPlan = _runnable_transaction._RunUntilPlan
+from .runnable import (  # noqa: E402
+    RUN_TRUNCATION_CAUSE_VOCABULARY,
+    RUN_TRUNCATION_REGIME_VOCABULARY,
+    RunTruncation,
+)
+
+_resolve_run_until_plan = _rebind_function(_runnable_transaction._resolve_run_until_plan, globals())
+_run_truncation_record = _rebind_function(_runnable_transaction._run_truncation_record, globals())
+_loaded_until_cut = _rebind_function(_runnable_transaction._loaded_until_cut, globals())
 _live_runtime_input_leaves = _rebind_function(
     _runnable_transaction._live_runtime_input_leaves, globals()
 )

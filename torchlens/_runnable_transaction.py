@@ -35,6 +35,7 @@ from .runnable import (
     SparseRunDescriptor,
     StateSource,
     TensorSlotRole,
+    _RunUntilPlan,
 )
 from .utils.rng import (
     restore_host_rng,
@@ -107,8 +108,21 @@ def _execute_loaded_sparse_transaction(
     input_alias_unresolved: bool,
     prepared_state: PreparedRunnableState,
     fork: Any,
+    until_plan: _RunUntilPlan | None = None,
 ) -> RunResult:
     """Execute one sparse transaction whose caller owns rollback on escape."""
+
+    # L4 2.1: the until= cut is computed BEFORE the transaction opens, applied
+    # where the transaction walks descriptor.calls, never by filtering results
+    # afterward. The executed set is the sequential prefix through the last
+    # requested call; the regime label is "closure" only when that prefix IS
+    # the dependency closure (no candidate skip exists), else the disclosed
+    # sequential_prefix fallback (a strict superset, always honest).
+    executed_calls: tuple[RunnableCallDescriptor, ...] = tuple(descriptor.calls)
+    until_regime: str | None = None
+    until_cause: str | None = None
+    if until_plan is not None:
+        executed_calls, until_regime, until_cause = _loaded_until_cut(descriptor, until_plan)
 
     # r59/r61: the ONE aggregate resource ceiling for this transaction -- constructed
     # by ``run_loaded_sparse_trace`` before input binding, threaded here -- bounds
@@ -299,7 +313,7 @@ def _execute_loaded_sparse_transaction(
                 contract_checks.extend(_call_witness_checks(descriptor, call, slot_values))
                 raise_first_divergence_incremental()
 
-            _walk_call_cone(descriptor.calls, execute_call)
+            _walk_call_cone(executed_calls, execute_call)
     except BaseException:
         # R36-7: an escaping call loop (typed divergence raise, signature
         # drift, native failure) pins this frame inside the exception
@@ -333,27 +347,46 @@ def _execute_loaded_sparse_transaction(
             "capture device summary is incomplete."
         )
 
-    output = _reconstruct_output(
-        descriptor, slot_values, fork, ceiling=ceiling, call_outputs=call_outputs
-    )
-    contract_checks.extend(
-        _post_execution_contract_checks(
-            descriptor,
-            inputs=inputs,
-            output=output,
-            slot_values=slot_values,
-            fork=fork,
+    if until_plan is not None:
+        # L4 2.2/2.4 truncated loaded-sparse settlement: the skipped region is a
+        # DISCLOSED set, semantically "not-run". There is no full-forward output
+        # to reconstruct (output is None; callers read executed values off the
+        # result trace), the output/post-execution checks concern the skipped
+        # region and are replaced by the truncation ceiling, and the
+        # slot-consuming stale classifiers are skipped (they derive UNVERIFIABLE
+        # ceilings the run_truncated cap already imposes; executed-region
+        # CONTRADICTIONS still settle DIVERGED through the in-loop checks).
+        output = None
+        # Mark the fork as a truncated run product: the run door refuses a
+        # re-run of it typed (3.3.2), and the disclosure names the skipped set.
+        fork.__dict__["_run_truncation_skipped_raw_labels"] = tuple(until_plan.skipped_raw_labels)
+        tensor_derived_scalar_stale = False
+        unbound_state_escape_stale = False
+        input_derived_layout_stale = False
+        container_reconstruction_lossy = False
+        output_not_reproduced = False
+    else:
+        output = _reconstruct_output(
+            descriptor, slot_values, fork, ceiling=ceiling, call_outputs=call_outputs
         )
-    )
-    raise_first_divergence_incremental()
+        contract_checks.extend(
+            _post_execution_contract_checks(
+                descriptor,
+                inputs=inputs,
+                output=output,
+                slot_values=slot_values,
+                fork=fork,
+            )
+        )
+        raise_first_divergence_incremental()
+        tensor_derived_scalar_stale = _tensor_derived_scalar_stale(
+            descriptor, slot_values, witness_source_snapshots
+        )
+        unbound_state_escape_stale = _unbound_state_escape_stale(descriptor, slot_values)
+        # r73 F1: compared against the RAW user input tree (pre-clone leaves; the run
+        # executed on defensive clones, so runtime strides are unchanged here).
+        input_derived_layout_stale = _input_derived_layout_stale(descriptor, inputs)
     mode_sensitive_op_unwitnessed = _mode_sensitive_op_unwitnessed(descriptor)
-    tensor_derived_scalar_stale = _tensor_derived_scalar_stale(
-        descriptor, slot_values, witness_source_snapshots
-    )
-    unbound_state_escape_stale = _unbound_state_escape_stale(descriptor, slot_values)
-    # r73 F1: compared against the RAW user input tree (pre-clone leaves; the run
-    # executed on defensive clones, so runtime strides are unchanged here).
-    input_derived_layout_stale = _input_derived_layout_stale(descriptor, inputs)
     # r53 hon_2: ONE load-side classifier settles declared nondeterministic value
     # sources; the branch ceiling, the attestation gate, and the report signal
     # all consult it (the r52 raise-vs-not_applicable inconsistency is
@@ -365,9 +398,10 @@ def _execute_loaded_sparse_transaction(
     declared_nondeterministic_sources = _declared_nondeterministic_sources(
         descriptor, value_source_taint
     )
-    output_container_spec = _output_container_spec(fork)
-    container_reconstruction_lossy = _container_spec_reconstruction_lossy(output_container_spec)
-    output_not_reproduced = _output_not_reproduced(descriptor, output_container_spec)
+    if until_plan is None:
+        output_container_spec = _output_container_spec(fork)
+        container_reconstruction_lossy = _container_spec_reconstruction_lossy(output_container_spec)
+        output_not_reproduced = _output_not_reproduced(descriptor, output_container_spec)
     # r35 I3 (corr2_7): settle the PROVISIONAL path verdict from ALL non-numeric
     # contract checks and static/dynamic ceilings FIRST; numeric attestation is
     # strictly downstream of it. A verdict that is not VERIFIED -- including one
@@ -388,6 +422,7 @@ def _execute_loaded_sparse_transaction(
         input_alias_unresolved=input_alias_unresolved,
         nondeterministic_control_source=nondeterministic_control_source,
         input_derived_layout_stale=input_derived_layout_stale,
+        run_truncated=until_plan is not None,
     )
     eligibility_verdict = provisional_verdict
     inherited_status = fork._runnable.path_faithfulness
@@ -426,6 +461,229 @@ def _execute_loaded_sparse_transaction(
         numeric_attestation=numeric_attestation,
         divergence_policy=divergence_policy,
         nondeterministic_sources=declared_nondeterministic_sources,
+        truncation=(
+            None
+            if until_plan is None
+            else _run_truncation_record(
+                until_plan, until_regime or "sequential_prefix", until_cause
+            )
+        ),
+    )
+
+
+def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
+    """Resolve one static-form ``until=`` selection against the source trace.
+
+    Accepts the static site-selection forms (final layer labels, module
+    addresses, the literal ``"saved"``, or a list of those); the selection is
+    INCLUSIVE (``until=x`` computes ``x`` and stops). Predicate/selector forms
+    refuse typed until the S4 contract merge; other non-string forms refuse
+    typed. Unknown labels surface the standard typed lookup refusal.
+    """
+
+    from ._errors import InvalidArgumentError
+
+    tokens = list(until) if isinstance(until, (list, tuple, set, frozenset)) else [until]
+    if not tokens:
+        raise InvalidArgumentError(
+            "until= received an empty selection; pass at least one layer label, "
+            "module address, or the literal 'saved'",
+            code="run_until_form_invalid",
+            remedy="pass a non-empty static site selection",
+            argument="until",
+        )
+    for token in tokens:
+        if callable(token) or hasattr(token, "__torchlens_predicate__"):
+            raise RunCapabilityUnavailableError(
+                "Predicate/selector forms of until= are gated on the S4 predicate "
+                "contract merge and refuse typed until it lands; the static forms "
+                "(layer labels, module addresses, 'saved') are available now.",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                detection_stage="predicate_surface_pending",
+                remedy="pass static layer labels, module addresses, or 'saved'",
+            )
+        if not isinstance(token, str):
+            raise InvalidArgumentError(
+                f"until= accepts layer-label/module-address strings or 'saved'; "
+                f"got {type(token).__name__!r}",
+                code="run_until_form_invalid",
+                remedy="pass static layer labels, module addresses, or 'saved'",
+                argument="until",
+            )
+    resolved: list[Any] = []
+    requested: list[str] = []
+    requested_layer_labels: list[str] = []
+    for token in tokens:
+        if token == "saved":
+            saved_layers = [
+                layer
+                for layer in trace.layer_list
+                if bool(getattr(layer, "has_saved_activation", False))
+                and layer.layer_type not in ("input", "output")
+            ]
+            if not saved_layers:
+                raise InvalidArgumentError(
+                    "until='saved' resolved to an empty site set: this capture "
+                    "retained no saved activations",
+                    code="run_until_form_invalid",
+                    remedy="capture with save= selection, or pass explicit labels",
+                    argument="until",
+                )
+            resolved.extend(saved_layers)
+            requested.extend(layer.layer_label for layer in saved_layers)
+            requested_layer_labels.extend(layer.layer_label for layer in saved_layers)
+            continue
+        keys = trace.layer_dict_all_keys
+        if token in keys:
+            layer = keys[token]
+            resolved.append(layer)
+            requested.append(layer.layer_label)
+            requested_layer_labels.append(layer.layer_label)
+            continue
+        module_accessor = getattr(trace, "modules", None)
+        module = None
+        if module_accessor is not None and token in module_accessor:
+            module = module_accessor[token]
+        if module is not None:
+            member_labels = tuple(getattr(module, "layer_labels", ()) or ())
+            members = [keys[label] for label in member_labels if label in keys]
+            if members:
+                resolved.extend(members)
+                requested.append(token)
+                requested_layer_labels.extend(member.layer_label for member in members)
+                continue
+        # Unknown site: surface the standard typed lookup refusal with fuzzy
+        # feedback (never a bespoke vocabulary row for a plain lookup miss).
+        trace[token]
+        raise InvalidArgumentError(  # pragma: no cover - the lookup above raises
+            f"until= site {token!r} did not resolve to layers",
+            code="run_until_form_invalid",
+            remedy="pass a resolvable layer label or module address",
+            argument="until",
+        )
+    stop_raw_index = -1
+    for layer in resolved:
+        for op in getattr(layer, "ops", None) or (layer,):
+            raw_index = getattr(op, "raw_index", None)
+            if raw_index is not None:
+                stop_raw_index = max(stop_raw_index, int(raw_index))
+    if stop_raw_index < 0:
+        raise InvalidArgumentError(
+            "until= selection resolved to sites without recorded operation "
+            "indexes; the stop frontier is undecidable",
+            code="run_until_form_invalid",
+            remedy="pass sites that resolve to captured operations",
+            argument="until",
+        )
+    executed: list[str] = []
+    skipped: list[str] = []
+    stopped_at: str | None = None
+    for layer in trace.layer_list:
+        raw_index = getattr(layer, "raw_index", None)
+        raw_label = layer._layer_label_raw
+        if layer.layer_type == "output" or raw_index is None or int(raw_index) > stop_raw_index:
+            skipped.append(raw_label)
+            continue
+        executed.append(raw_label)
+        if int(raw_index) == stop_raw_index:
+            stopped_at = layer.layer_label
+    return _RunUntilPlan(
+        requested_sites=tuple(dict.fromkeys(requested)),
+        stop_raw_index=stop_raw_index,
+        stopped_at=stopped_at,
+        executed_raw_labels=tuple(executed),
+        skipped_raw_labels=tuple(skipped),
+        requested_layer_labels=tuple(dict.fromkeys(requested_layer_labels)),
+    )
+
+
+def _loaded_until_cut(
+    descriptor: SparseRunDescriptor, plan: _RunUntilPlan
+) -> tuple[tuple[RunnableCallDescriptor, ...], str, str | None]:
+    """Compute the until= scheduler cut over one recorded call schedule (L4 2.1).
+
+    The EXECUTED set is always the sequential prefix of the recorded schedule
+    through the last call producing a requested site -- a strict superset of
+    any dependency closure, parent-closed by the schedule's topological order,
+    so the cut is sound by construction. The REGIME label is ``"closure"`` only
+    when that prefix IS the widened dependency closure (C1 tensor deps union C3
+    declared-state deps union C5 control-witness deps leave no candidate skip);
+    any candidate skip is unproven independent this release (the C4
+    certified-fresh vocabulary is not yet shipped) and the run discloses the
+    ``sequential_prefix`` regime with the ``unprovable_independence`` cause tag.
+    """
+
+    from ._errors import InvalidArgumentError
+
+    calls = tuple(descriptor.calls)
+    requested = set(plan.requested_layer_labels)
+
+    def _bases(call: RunnableCallDescriptor) -> set[str]:
+        return {op_label.rsplit(":", 1)[0] for op_label in call.op_labels}
+
+    target_indexes = [index for index, call in enumerate(calls) if _bases(call) & requested]
+    if not target_indexes:
+        raise InvalidArgumentError(
+            "until= selection resolved to sites with no producing recorded call "
+            "(input-only or synthetic sites cannot anchor a stop frontier)",
+            code="run_until_form_invalid",
+            remedy="pass sites produced by recorded operations",
+            argument="until",
+        )
+    stop_index = max(target_indexes)
+    prefix = calls[: stop_index + 1]
+    by_id = {call.call_id: call for call in prefix}
+    op_label_to_call = {op_label: call.call_id for call in prefix for op_label in call.op_labels}
+    state_slot_ids = {
+        slot.slot_id for slot in descriptor.tensor_slots if slot.state_binding is not None
+    }
+    closure: set[str] = set()
+    frontier = [calls[index].call_id for index in target_indexes]
+    while frontier:
+        call_id = frontier.pop()
+        if call_id in closure or call_id not in by_id:
+            continue
+        closure.add(call_id)
+        call = by_id[call_id]
+        frontier.extend(call.parent_call_ids)
+        for edge in call.control_dependencies:
+            parent_call_id = op_label_to_call.get(edge.parent_op_label)
+            if parent_call_id is not None:
+                frontier.append(parent_call_id)
+    closure_state_slots = {
+        argument.slot_id
+        for call_id in closure
+        for argument in by_id[call_id].tensor_arguments
+        if argument.slot_id in state_slot_ids
+    }
+    if closure_state_slots:
+        for call in prefix:
+            if call.call_id in closure:
+                continue
+            if any(argument.slot_id in closure_state_slots for argument in call.tensor_arguments):
+                closure.add(call.call_id)
+    candidate_skips = {call.call_id for call in prefix} - closure
+    if candidate_skips:
+        return prefix, "sequential_prefix", "unprovable_independence"
+    return prefix, "closure", None
+
+
+def _run_truncation_record(plan: _RunUntilPlan, regime: str, cause: str | None = None) -> Any:
+    """Build the RunTruncation disclosure for one truncated run."""
+
+    from hashlib import sha256
+
+    from .runnable import RunTruncation
+
+    digest = sha256("\n".join(plan.skipped_raw_labels).encode("utf-8")).hexdigest()[:16]
+    return RunTruncation(
+        regime=regime,
+        requested_sites=plan.requested_sites,
+        stopped_at=plan.stopped_at,
+        executed_count=len(plan.executed_raw_labels),
+        skipped_count=len(plan.skipped_raw_labels),
+        skipped_digest=digest,
+        cause=cause,
     )
 
 
@@ -436,6 +694,7 @@ def run_live_trace(
     seed: int | None,
     on_divergence: DivergencePolicy | str = DivergencePolicy.RAISE,
     carry_state: bool = False,
+    until: Any = None,
 ) -> RunResult:
     """Run the live-model refresh provider on a transactional fork.
 
@@ -481,6 +740,21 @@ def run_live_trace(
             code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
             provider=RunProvider.LIVE,
         )
+    # L4 2.3 live until=: resolve the static site selection against the SOURCE
+    # trace's settled final labels and install a run-scoped halt latch on the
+    # internal refresh capture (latch-once, fired at the first boundary after
+    # the last requested site is produced -- save-then-halt keeps it INCLUSIVE).
+    until_plan = None if until is None else _resolve_run_until_plan(trace, until)
+    if until_plan is not None:
+
+        def _until_latch(ctx: Any, _plan: _RunUntilPlan = until_plan) -> bool:
+            raw_index = getattr(ctx, "raw_index", None)
+            if raw_index is not None and int(raw_index) >= _plan.stop_raw_index:
+                _plan.fired = True
+                return True
+            return False
+
+        until_plan.halt_predicate = _until_latch
     # L4 5.2 snapshot-restore bracket: the default live run leaves the model
     # bit-identical. The snapshot is taken and VALIDATED before the fork and
     # before any forward (fail-before-execute, typed run_state_snapshot_unsupported);
@@ -518,7 +792,13 @@ def run_live_trace(
             # raw -- the old ``None`` behavior, now explicit (R22-2).
             first_failed = None
         try:
-            fork.save_new_outs(model, input_args, input_kwargs=input_kwargs, random_seed=seed)
+            fork.save_new_outs(
+                model,
+                input_args,
+                input_kwargs=input_kwargs,
+                random_seed=seed,
+                _run_until_plan=until_plan,
+            )
         except Exception as exc:  # not BaseException: KeyboardInterrupt/SystemExit stay raw
             if first_failed is not None:
                 # An admitted-but-inexecutable DIVERGENT input surfaces as the typed
@@ -528,6 +808,59 @@ def run_live_trace(
                 # genuinely failing model is not a divergence.
                 _raise_failed_contract_as_divergence(first_failed, fork=None, cause=exc)
             raise
+        if until_plan is not None:
+            if not until_plan.fired:
+                raise RuntimeError(
+                    "Internal invariant violation: the live until= latch never "
+                    "fired although the stop index derives from the target's own "
+                    "recorded operation indexes."
+                )
+            # Truncated success path (L4 3.2): the internal refresh capture
+            # settled HALTED -- honestly, on the throwaway -- and must never be
+            # enumerable through a public surface. Unregister every log minted
+            # by this run EXCEPT the result fork (the fork carve-out: a verbatim
+            # exception-bracket reuse would drop the result the caller is
+            # handed).
+            for log in _state.list_logs():
+                if id(log) not in prior_log_ids and log is not fork:
+                    _state._unregister_log(log)
+            runnable_seam = getattr(trace, "_runnable", None)
+            truncated_sources: tuple[str, ...] = (
+                (_HOST_RNG_SOURCE_KIND,)
+                if runnable_seam is not None and bool(runnable_seam.host_rng_consumed)
+                else ()
+            )
+            # RunResult.output is None under live truncation ([PROV]): there IS
+            # no full-forward return value; callers read executed-prefix values
+            # off the result trace. The live output-reconstruction contract
+            # check is REPLACED by the truncation ceiling (an
+            # OUTPUT_STRUCTURE_MISMATCH would misattribute a deliberate stop).
+            return _finalize_provider_run(
+                fork=fork,
+                output=None,
+                readiness=ReadinessReport(
+                    status=ReadinessStatus.READY,
+                    provider=RunProvider.LIVE,
+                    backend=str(getattr(trace, "backend", "torch")),
+                    capability="live_model_fast_capture",
+                    resolver_records=(),
+                    state_sources_available=(StateSource.LIVE_MODEL_STATE,),
+                    witness_completeness=None,
+                    diagnostics=(),
+                ),
+                state_source=StateSource.LIVE_MODEL_STATE,
+                initializer_policy_version=None,
+                seed=seed,
+                random_filled_slot_ids=(),
+                contract_checks=(),
+                provisional_path_faithfulness=PathFaithfulness.UNVERIFIABLE,
+                provisional_mismatch=None,
+                numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
+                divergence_policy=divergence_policy,
+                nondeterministic_sources=truncated_sources,
+                state_carried=carry_state,
+                truncation=_run_truncation_record(until_plan, "live_stop_after"),
+            )
         output, faithful = _reconstruct_live_output(fork)
         # A lossy output container (computed non-field/non-key state, __slots__, or a
         # data-descriptor field) cannot be faithfully rebuilt, so it is UNVERIFIABLE here
