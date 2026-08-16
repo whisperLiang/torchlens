@@ -143,6 +143,16 @@ def test_selector_sub_desugars_to_and_not(log):
     lifted_desugared = desugared.__selection__().resolve(log)
     assert lifted_difference == lifted_desugared
 
+
+def test_selector_subtraction_non_selector_operand_refuses_typed():
+    """`selector - <non-selector>` refuses with the documented code."""
+
+    from torchlens._errors import ArgumentTypeError
+
+    with pytest.raises(ArgumentTypeError) as excinfo:
+        _ = tl.func("relu") - 3
+    assert excinfo.value.fields["code"] == "selector_subtraction_operand_invalid"
+
     with pytest.raises(Exception, match="cannot subtract"):
         tl.func("relu") - 5
 
