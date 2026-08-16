@@ -452,14 +452,26 @@ def test_mutation_workflow_rotation_contract() -> None:
     # r7 R74 (sol MED): the two mutation legs must score against ONE
     # canonical interpreter env -- a torch release flipping a survivor on an
     # unrelated upstream event makes historical verdicts incomparable.
+    # Scoped to each leg's canonical-env install step (weekly.yml carries
+    # other, unrelated torch pins for its floor-matrix jobs).
     weekly = (_REPO_ROOT / ".github" / "workflows" / "weekly.yml").read_text(encoding="utf-8")
+
+    def _canonical_env_step(text: str, source: str) -> str:
+        match = re.search(
+            r"name: Install canonical CPU test environment.*?(?=\n\s*- name:)",
+            text,
+            flags=re.DOTALL,
+        )
+        assert match is not None, f"{source} lost its canonical CPU env install step"
+        return match.group(0)
+
     for package in ("torch", "torchvision"):
         pins = {
-            name: set(re.findall(rf'"{package}==([0-9][^"]*)"', text))
+            name: set(re.findall(rf'"{package}==([0-9][^"]*)"', _canonical_env_step(text, name)))
             for name, text in (("mutation.yml", workflow), ("weekly.yml", weekly))
         }
         assert all(len(v) == 1 for v in pins.values()), (
-            f"each mutation leg needs exactly one {package} pin: {pins}"
+            f"each mutation leg needs exactly one {package} pin in its canonical env step: {pins}"
         )
         assert pins["mutation.yml"] == pins["weekly.yml"], (
             f"the mutation legs disagree on {package}: {pins} -- both must "
