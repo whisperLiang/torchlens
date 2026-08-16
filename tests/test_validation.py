@@ -7476,17 +7476,24 @@ def test_corruption_module_depth():
 
 
 def test_corruption_module_nested_path_leaf():
-    """Last element of modules != module triggers error."""
+    """Last element of modules != module triggers error.
+
+    Two redundant tripwires cover this plant: op_log_fields'
+    module_call_stack<->modules coherence check (runs first in the contract
+    order) and module_containment_logic's leaf consistency check. The plant
+    must refuse either way — the test pins the refusal and the named field,
+    not which redundant layer wins the race.
+    """
     log = _make_nested_log()
     for lpl in log.layer_list:
         if len(lpl.modules) >= 2 and lpl.module:
             # Swap the last nested module to a different valid module so it
             # doesn't fail the module_layer_containment check but does fail
-            # the leaf consistency check in module_containment_logic.
+            # the leaf/stack consistency checks.
             # Use the first (parent) module as the last entry — valid module but wrong leaf
             lpl.modules = tuple(lpl.modules[:-1]) + (lpl.modules[0],)
             break
-    with pytest.raises(MetadataInvariantError, match="module_containment_logic"):
+    with pytest.raises(MetadataInvariantError, match="modules"):
         check_metadata_invariants(log)
     log.cleanup()
 
