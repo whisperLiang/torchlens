@@ -66,6 +66,13 @@ Key entry points:
   eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
   see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
   refuse typed.
+- Visualization encoding channel (UNSTABLE naming, keyword-only): `Trace.draw(color_by=...)`
+  fills op nodes from a sequential ramp (field name / scalar builtin / callable), dot-layout-only
+  (AUTO forces dot; explicit rank refuses `encoding_requires_dot_layout`), legend-disclosed via
+  the tri-state `show_legend` (`None`=AUTO channel-only legend, `True`/`False` historical; explicit
+  `False` honored). Rolled multi-pass field sources resolve through the name-keyed allowlist in
+  `torchlens/visualization/_encoding.py`; varying/first-pass-only sources stay unencoded with a
+  legend note (honest-visuals tripwire), and unclassified sources refuse `encoding_source_invalid`.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

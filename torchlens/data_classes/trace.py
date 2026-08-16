@@ -1167,6 +1167,7 @@ class Trace(
     _containers: dict[int, Any]
     _annotation_blobs: dict[str, Any] | None
     _last_sibling_ordering_decision: Any
+    _last_encoding_state: Any
     _module_call_accessor: Any
     _op_accessor_cache: Any
     _layer_accessor_cache: Any
@@ -2379,6 +2380,7 @@ class Trace(
         """
 
         self.__dict__.pop("_last_sibling_ordering_decision", None)
+        self.__dict__.pop("_last_encoding_state", None)
 
     def find_layers(self, query: str, *, limit: int = 10) -> list[str]:
         """Return layer labels matching a fuzzy query.

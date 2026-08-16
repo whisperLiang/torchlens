@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any, cast
 from ..utils._multipass_access import get_multipass_attr
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..data_classes.grad_fn import GradFn
     from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
 
@@ -91,7 +93,11 @@ class NodeSpec:
         return dataclass_replace(self, **kwargs)
 
 
+# S5 contract (C4): the three node-callback aliases have ONE declaration home
+# (this module); ``_render_common`` re-exports them for internal consumers.
 NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
+BackwardNodeSpecFn = Callable[["GradFn", NodeSpec], NodeSpec | None]
+CollapsedNodeSpecFn = Callable[["Module", NodeSpec], NodeSpec | None]
 
 
 def render_lines_to_html(lines: list[str]) -> str:

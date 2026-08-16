@@ -6496,6 +6496,14 @@
   "via_getattr": true
  },
  {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/visualization/_encoding.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
   "ambiguous": false,
   "field": "layer_type",
   "file": "torchlens/visualization/_label_format.py",

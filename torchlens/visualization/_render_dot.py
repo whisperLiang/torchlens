@@ -282,6 +282,10 @@ def _validate_draw_flag_options(
     """
 
     for name, value in bool_options.items():
+        if name == "show_legend" and value is None:
+            # Tri-state: None = AUTO (L5 channel core) is a legal value on
+            # this one flag; True/False keep their historical meanings.
+            continue
         if not isinstance(value, bool):
             raise InvalidArgumentError(
                 f"{name} must be a bool (True or False); received {value!r}",
@@ -532,6 +536,15 @@ def _resolve_forward_context(
     engine = get_node_placement_engine(request.engine, layout_cost)
     if request.show_containers:
         engine = "dot"
+    if request.encoding is not None:
+        # Engine-resolution fence (L5): explicit rank refuses typed; AUTO
+        # forces dot (show_containers precedent), noticed on cost override.
+        from ._encoding import resolve_encoding_engine
+
+        engine = resolve_encoding_engine(request.engine, engine, layout_cost)
+    # Session diagnostic (never persisted; scrub-declared like the sibling
+    # decision): the last draw's encoding state, for tests and debugging.
+    trace._last_encoding_state = request.encoding
     trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
     if request.engine == "auto" and engine == "rank":
         warnings.warn(
@@ -658,6 +671,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 else replace(node_record, node_calls=(), owned_node_args=()),
                 rolled_maps,
                 deduped_edge_registry,
+                encoding=request.encoding,
             )
     for node_args in pending_container_collapse_nodes:
         forward_ir_builder.node(**node_args)
@@ -832,7 +846,10 @@ def _emit_and_finish_forward(
                 context.graph_caption,
                 context.rankdir,
                 context.source_text,
-                show_legend=request.show_legend,
+                # Tri-state None = AUTO resolves to no legend on the rank
+                # backend (channels are never active here -- the 2.1 fence
+                # forces dot or refuses before this point).
+                show_legend=bool(request.show_legend),
                 theme=context.theme,
                 dpi=request.dpi,
                 graph_overrides=resolved_graph_overrides,
@@ -850,8 +867,13 @@ def _emit_and_finish_forward(
         )
     if request.show_orphans:
         _add_orphan_island_nodes(trace, dot, request.vis_mode, context.theme)
-    if request.show_legend:
+    # Legend visibility rule (L5 channel core): show_legend is tri-state
+    # (None = AUTO: channel-only disclosure legend iff a channel is active).
+    if request.show_legend is True:
         _add_legend_to_graphviz(dot, context.theme)
+    from ._encoding import maybe_add_channel_legend
+
+    maybe_add_channel_legend(dot, context.theme, request)
     compose_code_panel = context.source_text is not None and _code_panel_composition_available(
         target.fileformat, context.engine
     )
@@ -1015,7 +1037,7 @@ def draw(
     code_panel: CodePanelOption = False,
     node_overlay: "str | OverlayScores | Callable[[Any], Any] | None" = None,
     node_label_fields: list[str] | None = None,
-    show_legend: bool = False,
+    show_legend: bool | None = None,
     font_size: int | None = None,
     dpi: int | None = None,
     for_paper: bool = False,
@@ -1025,6 +1047,8 @@ def draw(
     container_max_inline: int = 12,
     show_input_transform_summary: bool = False,
     show_orphans: bool = False,
+    *,
+    color_by: "str | Callable[[Any], Any] | None" = None,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1050,6 +1074,11 @@ def draw(
         show_input_transform_summary=show_input_transform_summary,
         show_orphans=show_orphans,
     )
+    from ._encoding import resolve_color_by
+
+    # Option validation for the encoding channel: an unknown source refuses
+    # HERE, before any render work (encoding_source_invalid).
+    encoding_channel_spec = resolve_color_by(color_by)
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
         show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
@@ -1085,10 +1114,19 @@ def draw(
         show_input_transform_summary=show_input_transform_summary,
         show_orphans=show_orphans,
         direction=direction,
+        color_by=color_by,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
+    if encoding_channel_spec is not None:
+        from ._encoding import attach_encoding_state
+
+        request = attach_encoding_state(request, encoding_channel_spec, theme)
     show_buffer_layers = request.show_buffer_layers
 
+    if vis_renderer == "dagua" and request.encoding is not None:
+        from ._encoding import raise_encoding_dagua_refusal
+
+        raise_encoding_dagua_refusal()
     if vis_renderer == "dagua":
         opted_in_module = sys.modules.get("torchlens.experimental.dagua")
         if not getattr(opted_in_module, "__torchlens_dagua_opted_in__", False):

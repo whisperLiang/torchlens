@@ -150,6 +150,7 @@ _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "node_overlay",
     "node_label_fields",
     "show_legend",
+    "color_by",
     "font_size",
     "dpi",
     "for_paper",
@@ -619,11 +620,30 @@ def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
 _VISUALIZATION_BOOL_FIELDS = (
     "save_only",
     "show_cone",
-    "show_legend",
     "for_paper",
     "return_graph",
     "order_siblings",
 )
+
+# Tri-state (bool | None) flags: show_legend=None = AUTO (L5 channel core).
+_VISUALIZATION_TRI_STATE_BOOL_FIELDS = ("show_legend",)
+
+
+def _validate_visualization_flag_fields(values: Mapping[str, Any]) -> None:
+    """Validate the bool-only and tri-state visualization flag fields."""
+
+    for bool_field in _VISUALIZATION_BOOL_FIELDS:
+        _validate_bool_option(bool_field, values[bool_field])
+    for tri_state_field in _VISUALIZATION_TRI_STATE_BOOL_FIELDS:
+        value = values[tri_state_field]
+        if value is None or isinstance(value, bool):
+            continue
+        raise InvalidArgumentError(
+            f"{tri_state_field} must be True, False, or None (auto); received {value!r}",
+            code="visualization_bool_option_invalid",
+            remedy=f"pass {tri_state_field}=True, False, or None",
+            argument=tri_state_field,
+        )
 
 
 def _validate_bool_option(name: str, value: Any) -> None:
@@ -1509,7 +1529,10 @@ class VisualizationOptions:
     node_label_fields:
         Optional explicit label row fields.
     show_legend:
-        Whether to render the theme legend with the graph.
+        Tri-state legend visibility (``None`` = auto: legend only when an
+        encoding channel is active); see ``Trace.draw``.
+    color_by:
+        UNSTABLE encoding-channel value source; see ``Trace.draw``.
     font_size:
         Optional Graphviz font size.
     dpi:
@@ -1554,7 +1577,8 @@ class VisualizationOptions:
     show_cone: bool = True
     node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None = None
     node_label_fields: list[str] | None = None
-    show_legend: bool = False
+    show_legend: bool | None = None
+    color_by: str | Callable[[Any], Any] | None = None
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False
@@ -1591,7 +1615,8 @@ class VisualizationOptions:
         show_cone: bool | MissingType = MISSING,
         node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None | MissingType = MISSING,
         node_label_fields: list[str] | None | MissingType = MISSING,
-        show_legend: bool | MissingType = MISSING,
+        show_legend: bool | None | MissingType = MISSING,
+        color_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
         font_size: int | None | MissingType = MISSING,
         dpi: int | None | MissingType = MISSING,
         for_paper: bool | MissingType = MISSING,
@@ -1688,8 +1713,9 @@ class VisualizationOptions:
                 "node_label_fields", node_label_fields, None, specified_fields
             ),
             "show_legend": _resolve_option_value(
-                "show_legend", show_legend, False, specified_fields
+                "show_legend", show_legend, None, specified_fields
             ),
+            "color_by": _resolve_option_value("color_by", color_by, None, specified_fields),
             "font_size": _resolve_option_value("font_size", font_size, None, specified_fields),
             "dpi": _resolve_option_value("dpi", dpi, None, specified_fields),
             "for_paper": _resolve_option_value("for_paper", for_paper, False, specified_fields),
@@ -1705,8 +1731,7 @@ class VisualizationOptions:
         _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
-        for bool_field in _VISUALIZATION_BOOL_FIELDS:
-            _validate_bool_option(bool_field, values[bool_field])
+        _validate_visualization_flag_fields(values)
         _set_frozen_fields(self, _VISUALIZATION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
@@ -1776,8 +1801,7 @@ class VisualizationOptions:
         _validate_buffer_visibility(values["show_buffers"])
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
-        for bool_field in _VISUALIZATION_BOOL_FIELDS:
-            _validate_bool_option(bool_field, values[bool_field])
+        _validate_visualization_flag_fields(values)
         _set_frozen_fields(instance, _VISUALIZATION_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)
         return instance
@@ -2359,6 +2383,7 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
         "node_overlay": visualization.node_overlay,
         "node_label_fields": visualization.node_label_fields,
         "show_legend": visualization.show_legend,
+        "color_by": visualization.color_by,
         "font_size": visualization.font_size,
         "dpi": visualization.dpi,
         "for_paper": visualization.for_paper,
