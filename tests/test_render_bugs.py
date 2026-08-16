@@ -1283,3 +1283,31 @@ def test_downstream_intervening_inference_builds_reverse_edges_once() -> None:
         f"downstream inference swept trace.grad_fns {_CountingGradFns.iter_calls} "
         "times -- the duplicate reverse-edge build is back"
     )
+
+
+def test_code_panel_tooltip_shows_basename_not_absolute_path() -> None:
+    """The visible source-link tooltip must not leak the absolute host path.
+
+    Hunt-6 R62-2: ``draw(code_panel=True)`` embedded the absolute
+    (username-bearing) source path in BOTH the ``vscode://file`` HREF and the
+    visible tooltip. The HREF keeps the absolute path -- local editor
+    clickability is the deliberate feature, disclosed in limitations.md --
+    but the tooltip now shows the basename only.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.visualization.code_panel import _source_text_to_html_rows
+
+    source_text = SimpleNamespace(
+        file_path="/home/canary_user_zq81/models/canary_src.py",
+        line_number=21,
+    )
+    rows = _source_text_to_html_rows(source_text, ["def forward(self, x):"])  # type: ignore[arg-type]
+    link_row = rows[0]
+
+    assert "vscode://file//home/canary_user_zq81/models/canary_src.py:21" in link_row
+    tooltip = link_row.split("TOOLTIP='", 1)[1].split("'", 1)[0]
+    assert "canary_src.py" in tooltip
+    assert "canary_user_zq81" not in tooltip
+    assert "/home/" not in tooltip
