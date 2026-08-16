@@ -450,7 +450,10 @@ def _copy_lookback_payload(
         retain_in_ram=True,
         site="lookback_window",
     )
-    raw_out = safe_copy(tensor, detach)
+    # Single-transport retention (r8 b5 R35): the copy materializes directly
+    # on the retention device; the follow-up move is a safety net for
+    # transport-fallback results and stays a no-op on the common path.
+    raw_out = safe_copy(tensor, detach, target_device=fields_dict["output_device"])
     if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
         raw_out = safe_to(raw_out, fields_dict["output_device"])
     transformed_out = None

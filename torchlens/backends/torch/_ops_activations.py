@@ -483,10 +483,14 @@ def _save_activation_fields(
         if dedup_cached_out is not None:
             raw_out = dedup_cached_out
         else:
+            # Single-transport retention (r8 b5 R35): ``"copy"`` mode
+            # materializes directly on the retention device (one copy); the
+            # other save modes ignore the target and keep the follow-up move.
             raw_out = safe_copy(
                 t,
                 fields_dict["detach_saved_activations"],
                 save_mode=save_mode,
+                target_device=fields_dict["output_device"],
             )
             if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
                 if save_mode == "cpu_async":

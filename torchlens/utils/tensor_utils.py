@@ -1593,6 +1593,7 @@ def _copy_tensor_payload(
     *,
     detach_tensor: bool,
     save_mode: SaveMode,
+    target_device: str | None = None,
 ) -> torch.Tensor:
     """Return a tensor payload according to the requested save mode.
 
@@ -1607,6 +1608,16 @@ def _copy_tensor_payload(
         preserves the original value by relying on capture-time in-place handling;
         ``"view"`` stores a live alias that downstream in-place operations can mutate;
         and ``"cpu_async"`` clones to CPU with ``non_blocking=True``.
+    target_device:
+        Optional retention device for ``"copy"`` mode: the clone materializes
+        DIRECTLY on this device in one copy (r8 b5 R35: the serial
+        ``safe_copy(...)`` then ``safe_to(...)`` idiom paid a same-device
+        clone AND a cross-device move per saved activation -- a 2x transient
+        peak on the source device for ``output_device=``-offloading
+        captures). Ignored for the other save modes (the caller's move
+        handles those), and any transport failure falls back to the
+        same-device clone ladder so exotic tensors keep their historical
+        behavior (the caller's follow-up move still runs).
 
     Returns
     -------
@@ -1639,6 +1650,21 @@ def _copy_tensor_payload(
         return result
 
     mem_fmt = _safe_get_memory_format(x)
+    if target_device is not None:
+        # Single-transport clone: ``.to(device, copy=True)`` materializes the
+        # retained payload directly on the retention device (one allocation,
+        # one copy) with the same autograd semantics as clone-then-move (the
+        # move is differentiable when not detached).
+        source = x.detach() if detach_tensor else x
+        try:
+            return source.to(device=target_device, memory_format=mem_fmt, copy=True)
+        except (TypeError, RuntimeError):
+            try:
+                return source.to(device=target_device, copy=True)
+            except (TypeError, RuntimeError):
+                # Fall through to the same-device ladder; the caller's
+                # follow-up move preserves the historical behavior.
+                pass
     if not detach_tensor:
         try:
             return x.clone(memory_format=mem_fmt)
@@ -1674,6 +1700,7 @@ def _clone_tensor_payload(
     *,
     detach_tensor: bool,
     save_mode: SaveMode,
+    target_device: str | None = None,
 ) -> torch.Tensor | torch.nn.Parameter:
     """Clone or retain one tensor payload without triggering TorchLens logging.
 
@@ -1701,8 +1728,15 @@ def _clone_tensor_payload(
             raise ValueError(
                 "save_mode must be one of " + ", ".join(repr(m) for m in sorted(SAVE_MODES))
             )
+        move_target: str | None = None
+        if (
+            target_device is not None
+            and save_mode == "copy"
+            and target_device not in ("same", str(x.device))
+        ):
+            move_target = target_device
         vals_tensor = None
-        if _DEFER_WINDOW_DEPTH and save_mode == "copy":
+        if _DEFER_WINDOW_DEPTH and save_mode == "copy" and move_target is None:
             # A plain ``detach()`` alias carries NO autograd state, so it may
             # only stand in for a clone taken with ``detach_tensor=True``, from
             # a ``requires_grad=False`` source, or under disabled grad mode
@@ -1720,6 +1754,7 @@ def _clone_tensor_payload(
                 x,
                 detach_tensor=detach_tensor,
                 save_mode=save_mode,
+                target_device=move_target,
             )
         label = None if isinstance(x, torch.nn.Parameter) else get_tensor_label(x)
         if label is not None:
@@ -1738,6 +1773,7 @@ def copy_tensor_payload(
     *,
     save_mode: SaveMode = "copy",
     detach_tensor: bool = False,
+    target_device: str | None = None,
 ) -> Any:
     """Copy an output payload with tensor-clone and shallow non-tensor semantics.
 
@@ -1772,14 +1808,24 @@ def copy_tensor_payload(
     """
 
     if isinstance(x, (torch.Tensor, torch.nn.Parameter)):
-        return _clone_tensor_payload(x, detach_tensor=detach_tensor, save_mode=save_mode)
+        return _clone_tensor_payload(
+            x,
+            detach_tensor=detach_tensor,
+            save_mode=save_mode,
+            target_device=target_device,
+        )
     else:
         # Non-tensor: shallow copy is sufficient and avoids deepcopy's
         # circular-reference pitfalls.
         return copy.copy(x)
 
 
-def safe_copy(x: Any, detach_tensor: bool = False, save_mode: SaveMode = "copy") -> Any:
+def safe_copy(
+    x: Any,
+    detach_tensor: bool = False,
+    save_mode: SaveMode = "copy",
+    target_device: str | None = None,
+) -> Any:
     """Compatibility alias for :func:`copy_tensor_payload`.
 
     Parameters
@@ -1790,6 +1836,8 @@ def safe_copy(x: Any, detach_tensor: bool = False, save_mode: SaveMode = "copy")
         Whether tensor payloads should detach from autograd.
     save_mode
         Tensor retention mode.
+    target_device
+        Optional single-transport retention device for ``"copy"`` mode.
 
     Returns
     -------
@@ -1797,7 +1845,12 @@ def safe_copy(x: Any, detach_tensor: bool = False, save_mode: SaveMode = "copy")
         Output-payload copy result.
     """
 
-    return copy_tensor_payload(x, save_mode=save_mode, detach_tensor=detach_tensor)
+    return copy_tensor_payload(
+        x,
+        save_mode=save_mode,
+        detach_tensor=detach_tensor,
+        target_device=target_device,
+    )
 
 
 def print_override(t: torch.Tensor, func_name: str) -> str:
