@@ -555,7 +555,7 @@ def _resolve_run_until_plan(trace: Any, until: Any) -> _RunUntilPlan:
         # Unknown site: surface the standard typed lookup refusal with fuzzy
         # feedback (never a bespoke vocabulary row for a plain lookup miss).
         trace[token]
-        raise InvalidArgumentError(  # pragma: no cover - the lookup above raises
+        raise InvalidArgumentError(
             f"until= site {token!r} did not resolve to layers",
             code="run_until_form_invalid",
             remedy="pass a resolvable layer label or module address",

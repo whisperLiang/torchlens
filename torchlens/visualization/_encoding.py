@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._errors import InvalidArgumentError
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     import graphviz
 
     from ..data_classes.trace import Trace

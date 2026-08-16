@@ -350,6 +350,24 @@ def test_until_junk_form_refuses_typed():
     assert exc_info.value.fields["code"] == "run_until_form_invalid"
 
 
+def test_until_substring_token_refuses_typed():
+    """A substring token resolvable by ``trace[...]`` still refuses as an until= site.
+
+    ``until=`` accepts exact layer labels and module addresses only; a
+    substring like ``"relu"`` passes the flexible ``__getitem__`` lookup but
+    is not a resolvable site, so the resolver's own typed refusal (not the
+    fuzzy lookup error) must fire.
+    """
+
+    model = _Chain()
+    log = tl.trace(model, torch.randn(2, 4))
+    assert log["relu"] is not None  # the flexible lookup itself resolves
+    with pytest.raises(ValueError) as exc_info:
+        log.run(inputs=torch.randn(2, 4), until=["relu"])
+    assert exc_info.value.fields["code"] == "run_until_form_invalid"
+    assert "did not resolve to layers" in str(exc_info.value)
+
+
 def test_run_save_retention_reselects():
     """Run-time save= re-selects retention only; verification is untouched."""
 
