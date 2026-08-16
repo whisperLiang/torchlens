@@ -30,7 +30,7 @@ from ..constants import MODEL_LOG_FIELD_ORDER
 from ..data_classes._state_adapter import state_items, state_new, state_restore
 from ..data_classes.trace import Trace, _scrubbed_transform_repr
 from ..errors._base import TorchLensWarning
-from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError
+from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError, prerelease as _prerelease
 from .payload_codec import PayloadCodec, get_payload_codec
 
 # Replay-safe literals that must round-trip BYTE-EXACT through scrub/save/load.
@@ -1130,6 +1130,15 @@ def _scrub_value(
                 "reason": str(reason) if reason is not None else None,
             }
         scrubbed_state["tlspec_version"] = TLSPEC_VERSION
+        if _prerelease._ACTIVE:
+            # EVERY switch-on write is marked, whether or not a gated field
+            # actually persisted in this state -- no per-field accounting can
+            # omit the marker, so switched and real-version artifacts are
+            # never indistinguishable (loads refuse the marker typed unless
+            # the switch is active; see torchlens._io.prerelease).
+            scrubbed_state[_prerelease.PRERELEASE_STATE_KEY] = (
+                _prerelease.prerelease_marker_payload()
+            )
         _apply_source_metadata_policy(scrubbed_state, options)
         _apply_trace_blob_policy(scrubbed_state, options)
     # ``FuncCallLocation`` is matched by name rather than ``isinstance`` to avoid
@@ -1754,6 +1763,14 @@ def _effective_policy(
         return FieldPolicy.BLOB_RECURSIVE if options.include_saved_args else FieldPolicy.DROP
     if field_name == "func_rng_states":
         return FieldPolicy.BLOB_RECURSIVE if options.include_rng_states else FieldPolicy.DROP
+    if _prerelease._ACTIVE:
+        # Sprint-gated fields (declared DROP under the current tlspec version)
+        # persist with their intended policy ONLY beneath the test-only
+        # activation switch; the write then carries the pre-release marker
+        # stamped below, so it can never pass as a real artifact.
+        override = _prerelease.persisted_policy_override(type(owner), field_name)
+        if override is not None:
+            return override
     return base_policy
 
 
