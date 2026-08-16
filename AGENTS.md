@@ -78,6 +78,13 @@ Key entry points:
   eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
   see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
   refuse typed.
+- Visualization encoding channel (UNSTABLE naming, keyword-only): `Trace.draw(color_by=...)`
+  fills op nodes from a sequential ramp (field name / scalar builtin / callable), dot-layout-only
+  (AUTO forces dot; explicit rank refuses `encoding_requires_dot_layout`), legend-disclosed via
+  the tri-state `show_legend` (`None`=AUTO channel-only legend, `True`/`False` historical; explicit
+  `False` honored). Rolled multi-pass field sources resolve through the name-keyed allowlist in
+  `torchlens/visualization/_encoding.py`; varying/first-pass-only sources stay unencoded with a
+  legend note (honest-visuals tripwire), and unclassified sources refuse `encoding_source_invalid`.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
@@ -175,6 +182,15 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 - Line length: 100
 - `tl.receptive_field` is lazy; entity-level `receptive_field` / `projective_field` siblings
   pair with `Trace.receptive_fields()` / `Trace.projective_fields()` tables.
+- EPISODE CAPTURE (torch-only, spellings DOCUMENTED-UNSTABLE): `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` captures one wrapped
+  multi-step generation run as ONE product with a per-step status ledger at
+  `trace.annotations["episode"]` (disclosure, never a settlement authority; persistence
+  registrar-gated until the coordinated tlspec bump). DIAGNOSTIC-TIER: cost is superlinear
+  in step count — tens of steps, never hundreds. Bundles carry the optional S6
+  member-relation table (`member_relations=`, `Bundle.relate`,
+  `Bundle.derive_episode_status`). Doc of record: `docs/reference/episode_capture.md`;
+  refusal codes in `docs/reference/error_refusal_contract.md`.
 
 ## Quality Gates
 Every task must pass before completion unless the task explicitly narrows verification:

@@ -49,6 +49,13 @@ PRERELEASE_MARKER = "torchlens-prerelease-fields-v1"
 #: keyed (record classes are not subclassed across the persistence surface).
 _REGISTRY: dict[type, dict[str, FieldPolicy]] = {}
 
+#: Registered gated ANNOTATIONS keys: sub-keys of the (already-persisting)
+#: ``Trace.annotations`` mapping that constitute NEW persistence write paths
+#: under the frozen tlspec version. They are scrubbed OUT of every persisted
+#: state unless the test-only switch is active (the S7 episode-ledger home
+#: rides this row). Value = a short owner/reason string for the inventory.
+_ANNOTATIONS_KEY_REGISTRY: dict[str, str] = {}
+
 #: The test-only activation switch. Read directly (module attribute) on the
 #: scrub hot path; mutated only by :func:`activate_prerelease_fields`.
 _ACTIVE: bool = False
@@ -116,10 +123,51 @@ def unregister_prerelease_field(owner: type, field_name: str) -> None:
             del _REGISTRY[owner]
 
 
-def registered_prerelease_fields() -> dict[str, tuple[str, ...]]:
-    """Return the registrar inventory: owner class name -> sorted field names."""
+def register_prerelease_annotations_key(key: str, *, owner: str) -> None:
+    """Register one sprint-gated ``Trace.annotations`` sub-key.
 
-    return {owner.__name__: tuple(sorted(fields)) for owner, fields in _REGISTRY.items()}
+    ``Trace.annotations`` itself persists (``FieldPolicy.KEEP``), so a NEW
+    key inside it is a new persistence write path under the frozen tlspec
+    version and must not ride real artifacts. Registered keys are removed
+    from every persisted annotations payload unless the test-only switch is
+    active; switch-on writes carry the pre-release marker as usual.
+
+    Parameters
+    ----------
+    key:
+        The annotations sub-key (e.g. ``"episode"``).
+    owner:
+        Short owner/reason string kept in the registrar inventory.
+    """
+
+    if not key or not isinstance(key, str):
+        raise ValueError("pre-release annotations key must be a non-empty string")
+    _ANNOTATIONS_KEY_REGISTRY[key] = owner
+
+
+def unregister_prerelease_annotations_key(key: str) -> None:
+    """Remove one annotations-key registration (tests restore; bump retires)."""
+
+    _ANNOTATIONS_KEY_REGISTRY.pop(key, None)
+
+
+def gated_annotations_keys() -> frozenset[str]:
+    """Return the registered gated ``Trace.annotations`` sub-keys."""
+
+    return frozenset(_ANNOTATIONS_KEY_REGISTRY)
+
+
+def registered_prerelease_fields() -> dict[str, tuple[str, ...]]:
+    """Return the registrar inventory: owner class name -> sorted field names.
+
+    Gated annotations sub-keys appear under the synthetic owner name
+    ``"Trace.annotations"`` so the inventory stays one flat mapping.
+    """
+
+    inventory = {owner.__name__: tuple(sorted(fields)) for owner, fields in _REGISTRY.items()}
+    if _ANNOTATIONS_KEY_REGISTRY:
+        inventory["Trace.annotations"] = tuple(sorted(_ANNOTATIONS_KEY_REGISTRY))
+    return inventory
 
 
 def prerelease_fields_active() -> bool:
@@ -209,3 +257,16 @@ def validate_prerelease_state(state: dict[str, Any], *, cls_name: str) -> None:
         raise PreReleaseArtifactError(
             f"{cls_name} pre-release marker payload is malformed: {payload!r}."
         )
+
+
+# ---------------------------------------------------------------------------
+# Live sprint-gated registrations (S3 registrar inventory rows). Each row is
+# retired at the coordinated tlspec version bump that activates its family.
+# ---------------------------------------------------------------------------
+
+#: S7 episode ledger home (L2): ``trace.annotations["episode"]`` carries the
+#: capture_kind=episode marker + per-step status ledger; gated off under the
+#: frozen tlspec version, activated at the wave-3 coordinated bump.
+register_prerelease_annotations_key(
+    "episode", owner="L2 episode ledger (capture_kind=episode, S7 contract)"
+)

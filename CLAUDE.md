@@ -200,6 +200,26 @@ print(tl.compat.report(model, x).to_markdown())
   FAILED, never COMPLETE. Refresh re-arms `raise_on_nan`. Halted analysis
   `tl.save` works (the transient-leak refusal is fixed); halted `log_backward`
   and loaded-sparse `run()` remain allowed.
+- EPISODE CAPTURE (torch-only; every spelling DOCUMENTED-UNSTABLE): one wrapped multi-step
+  generation run is ONE product — `tl.trace(episode_root, x,
+  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` stamps
+  `capture_kind=episode` and lands the per-step status ledger (header + rows:
+  complete/interrupted/absent, emitted tokens from the root output, managed-RNG
+  entry_seed) at `trace.annotations["episode"]` after settlement. The ledger is a
+  DISCLOSURE, never a settlement authority (outcome vocabulary and N1-N5 unchanged);
+  loads validate fail-closed (illegal attachment refuses `episode_ledger_without_declaration`,
+  geometry violations quarantine `episode_ledger_incoherent`); persistence of the annotations
+  key AND the Bundle `member_relations` key is registrar-gated until the coordinated bump.
+  DIAGNOSTIC-TIER cost, superlinear (gpt2-124M CPU: N=20 79 s / N=100 657 s, 947 MB, 5.4 GB
+  RSS) — tens of steps, never hundreds; guarded-fast (`trace.run(fast=True)`) is the default
+  engine and must reproduce wrapped tokens bit-exactly (pinned). Teacher forcing
+  (`forced_tokens=`) is a disclosed NON-VERIFYING mode; escalation re-runs the WHOLE episode
+  wrapped with `escalated_from`/`reason`/`fidelity_basis` disclosed (E-A3: mismatch records
+  `diverged`, never a settlement input); declared unsnapshotable state refuses at declaration
+  time (`episode_state_unsnapshotable`). Bundles gain the optional S6 member-relation table
+  (`member_relations=`, `Bundle.relate`, `Bundle.derive_episode_status` — a derived fold,
+  never Bundle-level settlement; mutators cascade explicitly or refuse typed). Doc of record:
+  `docs/reference/episode_capture.md`.
 - `tl.trace(..., backend=None)` routes through `BackendSpec`; explicit backend mismatches,
   unknown names, unsupported capabilities, and audit-only payload reads raise typed backend
   errors. Public backend-neutral metadata lives on `Trace.backend`, `Trace.module_identity_mode`,
@@ -235,6 +255,24 @@ print(tl.compat.report(model, x).to_markdown())
   stale-label sidecar FAILS validation rather than silently passing.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
+- `Trace.draw(color_by=...)` (UNSTABLE spelling, keyword-only, no deprecation shim owed until
+  the naming session ratifies it) is the v1 encoding channel: a record field name, scalar
+  builtin (`time`/`flops`/`bytes`/`magnitude`/`grad_norm`), or callable `node -> value` fills
+  eligible op nodes from a colorblind-safe sequential ramp (linear min-max, legend-disclosed).
+  Channels are dot-layout-only (AUTO forces dot with a notice; explicit `layout="rank"` refuses
+  `encoding_requires_dot_layout`) and presentation-only (collapse plan and Trace untouched).
+  On rolled multi-pass layers, field sources resolve through the name-keyed rolled-aggregate
+  allowlist in `torchlens/visualization/_encoding.py`: marker-varying and mirrored
+  first-pass-only numerics (`raw_index`, `step_index`, `ordinal_index`, `grad_fn_object_id`,
+  `buffer_pass`, `transformed_gradient_memory`, `conditional_depth`) stay UNENCODED with a
+  legend note — an encoding must never imply uniformity it cannot prove (tripwire class);
+  exact cross-pass totals (`total_*`, the autograd trio) encode with a mandatory aggregation
+  legend line; unclassified sources refuse `encoding_source_invalid`. `show_legend` is now
+  tri-state: `None` (default, AUTO) draws a channel-only disclosure legend iff a channel is
+  active; `True`/`False` keep their historical meanings, and explicit `False` is honored even
+  with channels active. Typed refusals: `encoding_source_invalid`, `encoding_value_invalid`
+  (bools and non-scalar tensors refuse — a bool is not a magnitude), `encoding_callable_error`
+  (chains the user exception), `encoding_requires_dot_layout`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose

@@ -79,12 +79,15 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4450,
+    # 4450 -> 4550: pre-existing red inherited from main's L2 episode merge
+    # (bundle.py landed at 4497 without a ledger raise); re-keyed by L1.
+    "torchlens/_io/bundle.py": 4550,
     "torchlens/_io/runnable_load.py": 3850,
-    # 3900 -> 4100: pre-existing red inherited from main's wave-0 merges
-    # (L7a's structure_only entry contract landed user_funcs.py at 4071
-    # without a ledger raise); L1 adds ~20 lines (grouping= knob + docs).
-    "torchlens/user_funcs.py": 4100,
+    # 3900 -> 4200: pre-existing reds inherited from main's wave-0 merges
+    # (L7a's structure_only entry contract landed user_funcs.py at 4071 and
+    # L2's episode entry at 4153, each without a ledger raise); L1 adds ~20
+    # lines (grouping= knob + docs).
+    "torchlens/user_funcs.py": 4200,
     # 3800 -> 3900: pre-existing red inherited from main's wave-0 merges
     # (L4-run/L8/L7a landed backward.py at 3869 without a ledger raise);
     # re-keyed by the L1 lane, not L1 growth.
@@ -109,12 +112,23 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
     "torchlens/_capture_state_helpers.py": 2350,
-    "torchlens/bundle/__init__.py": 2450,
+    # 2450 -> 2750: pre-existing red inherited from main's L2 episode merge
+    # (S6 member-relation table landed bundle/__init__.py at 2719 without a
+    # ledger raise); re-keyed by L1.
+    "torchlens/bundle/__init__.py": 2750,
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
     "torchlens/visualization/_render_edges.py": 2350,
-    "torchlens/options.py": 2400,
+    # Raised 2400 -> 2425 at the L5 channel-core merge (color_by + tri-state
+    # show_legend): options.py is the ONE serialized shared option surface
+    # every feature lane's grouped options must land on, so reviewed
+    # per-merge raises here are the ratchet working as intended (growth
+    # noticed, reason stated), not silent god-file regrowth.
+    # 2425 -> 2550: pre-existing red inherited from main's L2 episode merge
+    # (episode declaration options landed options.py at 2504 without a
+    # ledger raise); re-keyed by L1.
+    "torchlens/options.py": 2550,
     "torchlens/intervention/save.py": 2350,
     "torchlens/_io/scrub.py": 2400,
     "torchlens/debug/_infer_input_shape.py": 2250,

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ._render_common import RenderedNodeEmission
     from ._render_edges import _SegmentLookup
     from .auto_collapse import ModuleRepeatFold
+    from .node_spec import NodeSpec
     from .node_universe import NodeUnit
     from .renderers.base import RendererCapabilities
 
@@ -56,7 +57,8 @@ class RenderIRNode:
     node_calls: tuple[Any, ...] = ()
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color: str = "black"
-    node_spec: Any | None = None
+    # S5 contract (C4): typed NodeSpec | None (was Any).
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
 
 
@@ -298,6 +300,14 @@ def build_render_ir(
         universe = build_node_universe(
             build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
         )
+    encoding = getattr(resolved_context, "encoding", None)
+    if encoding is not None:
+        # PHASE A of the encoding channel (L5): a data prepass over the
+        # already-chosen visible-node universe, before any per-node spec
+        # resolution -- collect values once, validate, compute the domain.
+        from ._encoding import populate_encoding_state
+
+        populate_encoding_state(encoding, trace, universe)
     from ._render_nodes import _atomic_module_sibling_counts
 
     sibling_counts = _atomic_module_sibling_counts(trace)
@@ -717,7 +727,7 @@ def _node_from_unit(
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color = "black"
     label_spans: tuple[str, ...] = ()
-    node_spec: Any | None = None
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
@@ -755,7 +765,11 @@ def _resolve_node_decision(
     segment_lookup: _SegmentLookup,
     sibling_counts: Mapping[str, int] | None = None,
 ) -> tuple[
-    tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
+    tuple[Any, ...],
+    tuple[tuple[str, dict[str, Any]], ...],
+    str,
+    NodeSpec | None,
+    tuple[str, ...],
 ]:
     """Resolve one visible node's complete presentation decision.
 
@@ -844,6 +858,7 @@ def _resolve_node_decision(
             context.show_input_transform_summary,
             resolved_specs,
             sibling_counts,
+            encoding=getattr(context, "encoding", None),
         )
     owned = tuple(
         (owner, dict(args))
